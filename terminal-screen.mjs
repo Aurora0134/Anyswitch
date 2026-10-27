@@ -174,8 +174,8 @@ const inRanges = (code, ranges) => {
 // ASCII 快路径：全部宽字符与其余零宽区间的下界都在 0x300 之上，0x300 以下只有
 // 控制区（C0/DEL/C1）是零宽（客户端表如此），其余一律一列。解析一段回放要过十万次
 // 这个判定，区间查找在那条路上是最大的一笔常数开销。
-export function terminalCharWidth(ch) {
-  const code = ch.codePointAt(0);
+// 按码点判宽：解析路径直接拿 codePointAt 的结果问，不必为每个字符建一次字符串。
+function terminalWidthOf(code) {
   if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return 0;
   if (code < 0x300) return 1;
   if (inRanges(code, ZERO_WIDTH_RANGES)) return 0;
@@ -183,10 +183,98 @@ export function terminalCharWidth(ch) {
   return 1;
 }
 
+export function terminalCharWidth(ch) {
+  return terminalWidthOf(ch.codePointAt(0));
+}
+
 const blankRow = (cols, attr = "") => ({
   chars: new Array(cols).fill(null),
   attrs: new Array(cols).fill(attr),
+  // 折行标记（xterm 的 isWrapped，语义是「本行由上一行软折行续来」）。resize 重排
+  // 的唯一依据就是它：客户端 xterm 按它把折行链重新接起来，镜像没有这个标记就只能
+  // 按列硬拷，改列数后两边同一行内容错开——应用再按行擦写就整片错位（135→120 列
+  // 实测 33/39 行不同的病灶）。
+  wrapped: false,
 });
+
+// 宽字符的头格判定：按字符本身的宽度（unicode11 同源表）判，不靠「下一格是不是续格」
+// 推断——DCH/ICH 会把续格搬走，推断式会把搬来的续格误判成邻格的头，擦错半边。
+const isWideHead = (line, c) => c >= 0 && c < line.chars.length
+  && line.chars[c] !== null && line.chars[c] !== "" && terminalCharWidth(line.chars[c]) === 2;
+
+// 有效长度（xterm 的 getTrimmedLength）：尾部空格不算，宽字头按 2 格算。
+function trimmedLength(line) {
+  for (let e = line.chars.length - 1; e >= 0; e -= 1) {
+    const ch = line.chars[e];
+    if (ch === null || ch === undefined || ch === "") continue;
+    return e + (isWideHead(line, e) ? 2 : 1);
+  }
+  return 0;
+}
+
+// xterm 的 getWrappedLineTrimmedLength：折行链里非末行按整列计，唯独末列是空格而
+// 下一行以宽字开头时少一列——宽字不能被切成两半（否则重排后出现半个字）。
+function wrappedTrimmedLength(chain, idx, cols) {
+  if (idx === chain.length - 1) return trimmedLength(chain[idx]);
+  const line = chain[idx];
+  const next = chain[idx + 1];
+  const boundaryBlank = line.chars[cols - 1] === null || line.chars[cols - 1] === undefined;
+  const nextWide = next.chars[0] !== null && next.chars[0] !== "" && next.chars[1] === "";
+  return boundaryBlank && nextWide ? cols - 1 : cols;
+}
+
+// 折行链 → 扁平格子流（含属性）。末行只取有效长度，非末行按 wrappedTrimmedLength
+// 取整列——续行本就是满宽来的，取有效长度会把本该保留的尾随空格丢掉。
+function chainCells(chain, cols) {
+  const cells = [];
+  for (let i = 0; i < chain.length; i += 1) {
+    const line = chain[i];
+    const len = wrappedTrimmedLength(chain, i, cols);
+    for (let c = 0; c < len; c += 1) {
+      cells.push({ ch: line.chars[c] ?? null, attr: line.attrs[c] ?? "" });
+    }
+  }
+  return cells;
+}
+
+// 按新列数重切格子流（xterm 的 reflowSmallerGetNewLineLengths）：每行 newCols 格，
+// 但宽字正好落在末列时退一格让它整字换行，本行末列补空格。
+function splitCells(cells, newCols) {
+  const rows = [];
+  let i = 0;
+  for (;;) {
+    let len = Math.min(newCols, cells.length - i);
+    if (len === 0) break;
+    if (len === newCols) {
+      const last = cells[i + newCols - 1];
+      if (last.ch !== null && last.ch !== "" && terminalCharWidth(last.ch) === 2) len = newCols - 1;
+    }
+    if (len === 0) { i += 1; continue; } // 单列终端放不下宽字：丢弃（与 xterm 的丢弃一致）
+    const row = blankRow(newCols);
+    for (let c = 0; c < len; c += 1) {
+      row.chars[c] = cells[i + c].ch;
+      row.attrs[c] = cells[i + c].attr;
+    }
+    rows.push(row);
+    i += len;
+  }
+  if (rows.length === 0) rows.push(blankRow(newCols));
+  return rows;
+}
+
+// 行按新列数截断/补空（xterm 的 BufferLine.resize）：宽字被截在半路也照截——
+// 客户端屏幕上出现的就是这个样子，镜像必须一样，否则两边对同一行的擦写对不上。
+function resizeRow(line, newCols) {
+  if (line.chars.length === newCols) return line;
+  const row = blankRow(newCols);
+  const keep = Math.min(newCols, line.chars.length);
+  for (let c = 0; c < keep; c += 1) {
+    row.chars[c] = line.chars[c];
+    row.attrs[c] = line.attrs[c];
+  }
+  row.wrapped = line.wrapped;
+  return row;
+}
 
 // A row of spaces is still a painted bar when those cells carry a background
 // or inverse. Treating it as blank drops the bar from the repaint. Covers every
@@ -226,6 +314,10 @@ const isBlankRow = (row) => row.chars.every((ch, index) => {
 // 应用实际使用的那只 API）；③在 setMode 的注释里写明不回放的理由（2026 是同帧批
 // 处理标记，回放只有单帧画面）。不得只追踪不回放。
 const REPLAYED_MODES = [7, 4, 20, 1000, 1002, 1003, 1006, 1015, 2004];
+// 上表里哪些属于私有模式（回放时要发 ? 形态）：4/20 是非私有模式（IRM/convertEol），
+// 必须发裸的 ESC[4h/ESC[20l——客户端 xterm 对 ?4h/?20l 不做任何动作，发私有形态会让
+// 重建后的 IRM/convertEol 状态丢失。
+const REPLAYED_PRIVATE_MODES = [7, 1000, 1002, 1003, 1006, 1015, 2004];
 
 export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMINAL_HISTORY_LINES, historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
   let width = Math.max(1, cols | 0);
@@ -237,8 +329,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 47/1047 不带——擅自换成 1049 会把客户端的保存/恢复语义换成另一套。
   let altApi = 1049;
   let row = 0;
+  // 光标列。合法值是 [0, width]，width 是「满行哨兵」——与 xterm 的 x === cols
+  // 同构：写满一行后光标停在最后一列之后，下一个可打印字符据此折行（autowrap 开）
+  // 或盖掉末列（autowrap 关）。所有移动光标/编辑格位的序列先把它夹回 width-1
+  // （clampCursor，对应 xterm 的 _restrictCursor），擦除类（J/K）以 cols 为上限夹、
+  // 哨兵保留——满行后发 ESC[K 因此一格不擦，与客户端一致。
   let col = 0;
-  let pendingWrap = false;
+  // 保存光标槽：xterm 的 savedX/savedY 是每个缓冲各一份（CSI s/u、ESC 7/8、1049 的
+  // 保存都在当前缓冲的槽里写）。进备屏后主屏的槽被存进 altSaved、备屏用一份新的——
+  // 否则备屏里的 ESC 8 会误读主屏的保存位置（实测：?1049h 后 ESC 8，xterm 落 (0,0)，
+  // 共享槽的镜像会落回主屏保存点）。
   let saved = { row: 0, col: 0, attrs: "" };
   let top = 0;
   let bottom = height - 1;
@@ -253,6 +353,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 应用态模式的记录表：只在被显式 set/reset 过后才入表；从未出现过的模式
   // 保持「未记录」，回放时不发任何模式序列，与旧行为一致。
   let appModes = {};
+  // 滚动区按行存（不再是序列化文本）：resize 重排要把它和屏幕当成一条缓冲处理——
+  // 客户端 xterm 的缓冲就是「滚动区 + 屏幕」一条，折行链会跨滚动区/屏幕边界，拉高
+  // 屏幕还要从滚动区往回拉行；存文本则链跨边界接不上、往回拉也拉不动。每行缓存
+  // _text（序列化）与 _bytes（其长度），回放与字节预算直接读，resize 重排后整体重算。
   let history = [];
   let historyTotal = 0;
   let consumedBytes = 0;
@@ -289,43 +393,111 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       })
       .join(";");
 
-  function rebuild(newCols, newRows) {
-    const next = Array.from({ length: newRows }, (_, r) => {
-      const source = grid[r];
-      const fresh = blankRow(newCols);
-      if (source) {
-        for (let c = 0; c < Math.min(newCols, width); c += 1) {
-          fresh.chars[c] = source.chars[c];
-          fresh.attrs[c] = source.attrs[c];
-        }
+  // resize 重排（xterm 的软折行语义）：把每条折行链的格子流按新列数重新切分，链首
+  // 行位置不变、其下各行整体让位；多出的行从屏顶进滚动区，少了在底部补空行。客户端
+  // xterm 的滚动区也是这么重排的——镜像原先只按 min(newCols,width) 拷格补空，改列数
+  // 后两边同一行内容错开，应用按行擦写就整片错位（135→120 列实测 33/39 行不同）。
+  // 重排一组行，返回重排后的行、调整后的光标行与滚出屏顶的行。供活动屏与「备屏期间
+  // 被 resize 的主屏」共用。allowReflow=false 只截断/补空——xterm 的备屏缓冲没有滚动区
+  // （Buffer 的 _hasScrollback=false），resize 因此不重排折行链，只按新列数裁/补。
+  function reflowGridRows(rowsArr, cursorRow, oldCols, newCols, newRows, allowReflow = true) {
+    const out = [];
+    let mappedCursorRow = cursorRow;
+    let i = 0;
+    while (i < rowsArr.length) {
+      let end = i;
+      if (allowReflow) {
+        while (end + 1 < rowsArr.length && rowsArr[end + 1].wrapped) end += 1;
       }
-      return fresh;
-    });
-    width = newCols;
-    height = newRows;
-    grid = next;
-    top = 0;
-    bottom = height - 1;
-    // 尺寸变了，旧的折行待定状态没有意义。
-    pendingWrap = false;
-    clampCursor();
+      const chain = rowsArr.slice(i, end + 1);
+      // xterm 对含光标的链不重排（reflowSmaller 的「光标绝对行落在链内就跳过」），
+      // 只按新列数截断——照做，保证两边同一帧同一种截断形态。
+      const containsCursor = cursorRow >= i && cursorRow <= end;
+      // 单行链只有超宽才需要重排；多行链必然要重接（xterm 以「末行是续行」为触发条件）。
+      const needReflow = allowReflow && (chain.length > 1 || trimmedLength(chain[0]) > newCols);
+      let laid;
+      if (containsCursor || !needReflow) {
+        laid = chain.map((line) => resizeRow(line, newCols));
+      } else {
+        laid = splitCells(chainCells(chain, oldCols), newCols);
+        for (let k = 0; k < laid.length; k += 1) laid[k].wrapped = k === 0 ? chain[0].wrapped : true;
+      }
+      // 光标跟着自己那一行走：它前面的链重排出多少行，它就平移多少行。
+      if (containsCursor) mappedCursorRow = cursorRow + (out.length - i);
+      out.push(...laid);
+      i = end + 1;
+    }
+    // xterm 的补偿：重排多出的行优先「弹掉底部、光标跟着内容下移」，光标要溢出屏底
+    // 才滚动（顶部行进滚动区）。多出的行不是从屏顶进史——否则一屏正好看得见的内容
+    // 会被挤进滚动区（用户侧形态：改列数后画面内容上移一截）。
+    let pushed = [];
+    let rows2;
+    if (mappedCursorRow > newRows - 1) {
+      const scrolled = mappedCursorRow - newRows + 1;
+      pushed = out.slice(0, scrolled);
+      rows2 = out.slice(scrolled, scrolled + newRows);
+      mappedCursorRow = newRows - 1;
+    } else {
+      rows2 = out.slice(0, newRows);
+    }
+    while (rows2.length < newRows) rows2.push(blankRow(newCols));
+    return { rows: rows2, cursorRow: mappedCursorRow, pushed };
   }
 
-  // 只把光标夹回屏内。刻意不动 pendingWrap：它表示「光标停在最后一列、下一个可打印
-  // 字符要折行」，是跨块仍然有效的状态。旧实现把清 pendingWrap 混在这里、并在每次
-  // write() 结束时调用一次，于是块边界正好落在满行时折行状态被吃掉——下一个字符
-  // 覆盖掉行尾那一格，整行少一个字（切片解析与整块解析的回放差一个字符即此形态）。
-  // 真正需要取消折行状态的是「光标被移动」，那些位置各自显式清（见 dispatchCsi）。
+  // resize 重排（xterm 的软折行语义）：把每条折行链的格子流按新列数重新切分，链首
+  // 行位置不变、其下各行整体让位；多出的行从屏顶进滚动区，少了在底部补空行。客户端
+  // xterm 的滚动区也是这么重排的——镜像原先只按 min(newCols,width) 拷格补空，改列数
+  // 后两边同一行内容错开，应用按行擦写就整片错位（135→120 列实测 33/39 行不同）。
+  function rebuild(newCols, newRows) {
+    const res = reflowGridRows(grid, row, width, newCols, newRows, !inAlt);
+    grid = res.rows;
+    row = res.cursorRow;
+    // 备屏没有滚动区（与实时滚动一致）：重排滚出的行直接丢弃。
+    if (!inAlt) for (const line of res.pushed) pushHistory(serializeRow(line));
+    if (inAlt && altSaved) {
+      // 备屏期间 resize：主屏那份网格也要重排到同尺寸——xterm 的 BufferSet.resize 两个
+      // 缓冲都 resize。不跟着做，退备屏时还原的是旧尺寸网格，光标越界、后续写入全错位。
+      const main = reflowGridRows(altSaved.grid, altSaved.row, width, newCols, newRows);
+      altSaved.grid = main.rows;
+      altSaved.row = main.cursorRow;
+      altSaved.col = Math.min(newCols - 1, altSaved.col);
+      for (const line of main.pushed) pushHistory(serializeRow(line));
+      altSaved.top = 0;
+      altSaved.bottom = newRows - 1;
+    }
+    width = newCols;
+    height = newRows;
+    top = 0;
+    bottom = height - 1;
+    // xterm 的 resize 末尾把 x 夹回 cols-1：满行哨兵到此为止。
+    col = Math.min(newCols - 1, Math.max(0, col));
+  }
+
+  // 只把光标夹回屏内。刻意不动满行哨兵（col === width）：它表示「光标停在最后一列
+  // 之后、下一个可打印字符要折行」，是跨块仍然有效的状态。会移动光标的序列在
+  // dispatchCsi 里各自先夹（见那里的注释）。
   function clampCursor() {
     row = Math.min(height - 1, Math.max(0, row));
     col = Math.min(width - 1, Math.max(0, col));
   }
 
-  function pushHistory(text) {
-    history.push(text);
-    historyTotal += text.length;
+  // 解析轮次末尾的宽松夹取：哨兵要活着，否则块边界正好落在满行时折行状态被吃掉，
+  // 下一个字符覆盖掉行尾那一格，整行少一个字（切片解析与整块解析的回放差一个字符
+  // 即此形态）。
+  function clampCursorLenient() {
+    row = Math.min(height - 1, Math.max(0, row));
+    col = Math.min(width, Math.max(0, col));
+  }
+
+  // 滚出屏顶的行进滚动区。快照是必须的：调用方（scrollRegionUp）会就地复用源行。
+  function pushHistory(row) {
+    const copy = { chars: row.chars.slice(), attrs: row.attrs.slice(), wrapped: row.wrapped };
+    copy._text = serializeRow(copy);
+    copy._bytes = copy._text.length;
+    history.push(copy);
+    historyTotal += copy._bytes;
     while (history.length > historyLines || historyTotal > historyBytes) {
-      historyTotal -= history.shift().length;
+      historyTotal -= history.shift()._bytes;
     }
   }
 
@@ -334,16 +506,20 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 滚出屏顶的那一行整行复用成新的底行（先序列化进 history，再就地清空），
   // 不重新分配两个数组。换行密集的输出（一段 resume、一次 `type` 大文件）会连续
   // 滚动几十万次，每次两次 181 元数组分配是这条路径上最大的一笔开销。
+  // 复用的行必须真的清空：字符、属性、折行标记都留不住——折行标记尤其致命，
+  // 新底行带着上一屏的「我是续行」会让下一次 resize 把它和上一行重接成一条链，
+  // 整块内容错位。
   function scrollRegionUp(n) {
     for (let k = 0; k < n; k += 1) {
       const whole = top === 0 && bottom === height - 1;
       const departed = grid[top];
-      if (whole && !inAlt) pushHistory(serializeRow(departed));
+      if (whole && !inAlt) pushHistory(departed);
       for (let r = top; r < bottom; r += 1) grid[r] = grid[r + 1];
       // 复用的行必须真的清空：它可能带着上一屏的字符与属性（背景色尤其不能留，
       // 否则新行会继承旧底色，回放里凭空多出一条色带）。
       departed.chars.fill(null);
       departed.attrs.fill("");
+      departed.wrapped = false;
       grid[bottom] = departed;
     }
   }
@@ -355,34 +531,73 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       // 与 scrollRegionUp 同理：滚出屏底的行复用成新的顶行。
       departed.chars.fill(null);
       departed.attrs.fill("");
+      departed.wrapped = false;
       grid[top] = departed;
     }
   }
 
-  // 换行同时取消折行待定：xterm 5.5 用「列号 === cols」当待折行哨兵，lineFeed 里
-  // 的 `x >= cols && x--` 把哨兵换成真实列号，等价于清掉它。我们照这个真值建模，
-  // 否则满行后一次换行会让下一个字符先多折一行。
+  // 换行同时把满行哨兵折回末列：xterm 5.5 用「列号 === cols」当哨兵，lineFeed 里的
+  // `x >= cols && x--` 把哨兵换成真实列号。convertEol 开着时列先归零（客户端行为），
+  // 否则哨兵折成 width-1。我们照这个真值建模，否则满行后一次换行会让下一个字符
+  // 覆盖末列而不是从下一行行首写。
   function lineFeed() {
-    pendingWrap = false;
-    if (row === bottom) scrollRegionUp(1);
-    else row = Math.min(height - 1, row + 1);
+    if (convertEol) col = 0;
+    if (row === bottom) {
+      scrollRegionUp(1);
+    } else if (row < height - 1) {
+      row += 1;
+      // xterm：换到一行已存在的行上时清掉目标行的折行标记——换行符本身就是「这条
+      // 软折行到此结束」的语义，不清的话下一次 resize 会把下一行重接回本行。
+      grid[row].wrapped = false;
+    }
+    if (col >= width) col = width - 1;
   }
 
   // 同理：xterm 的 reverseIndex 先 _restrictCursor()（夹掉哨兵）再移行。
   function reverseIndex() {
-    pendingWrap = false;
+    clampCursor();
     if (row === top) scrollRegionDown(1);
     else row = Math.max(0, row - 1);
   }
 
+  // 折行落地：满行哨兵 + autowrap 开着时，下一行打上折行标记再写。标记落在新行上
+  // （xterm 的 isWrapped 语义是「由上一行续来」），滚动腾出的新底行同样要打——
+  // xterm 的 scroll(eraseAttr, true) 就是干这个的。
+  function wrapLine() {
+    col = 0;
+    if (row === bottom) {
+      scrollRegionUp(1);
+      grid[row].wrapped = true;
+    } else if (row < height - 1) {
+      row += 1;
+      grid[row].wrapped = true;
+    }
+    // 光标已在屏底且滚动区不含屏底（应用把光标挪到了区外）：xterm 同样不折行、不设标记。
+  }
+
+  // 写入前的孤儿半格修复（xterm 的 print() 开头一刀）：光标落在宽字的续格上时，先把
+  // 头格清成空格——否则新字符盖住续格、头格变成一个悬空的半个字，用户看到的就是
+  // 「残留/变形字符」。便宜守卫：只有光标正踩在续格上才可能砍到头格（DCH/ICH 之后
+  // 可能出现孤儿续格，那时前一格是空格，宽度判一次即排除）。
+  function clearHeadBeforeCursor() {
+    if (col > 0 && col < width && grid[row].chars[col] === "" && isWideHead(grid[row], col - 1)) {
+      grid[row].chars[col - 1] = null;
+      grid[row].attrs[col - 1] = attrsString();
+    }
+  }
+
+  // 写入后的收尾（xterm 的 print() 结尾一刀）：光标停在一个空续格上时把它清成空格
+  // ——盖掉宽字头留下的孤儿尾格，同样表现为悬空碎片。
+  function clearOrphanContinuation() {
+    if (col < width && grid[row].chars[col] === "") {
+      grid[row].chars[col] = null;
+      grid[row].attrs[col] = attrsString();
+    }
+  }
+
   function putCell(targetCol, ch, chWidth) {
     if (targetCol >= width) return;
-    if (insertMode) {
-      for (let c = width - 1; c > targetCol; c -= 1) {
-        grid[row].chars[c] = grid[row].chars[c - 1];
-        grid[row].attrs[c] = grid[row].attrs[c - 1];
-      }
-    }
+    if (insertMode) insertCellsAt(targetCol, chWidth);
     grid[row].chars[targetCol] = ch;
     grid[row].attrs[targetCol] = attrsString();
     if (chWidth === 2 && targetCol + 1 < width) {
@@ -391,25 +606,94 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     }
   }
 
+  // 零宽字符（组合符、变体选择符）挂在光标前一格上：不占列，只拼到已有字符后面。
   function appendToPrevious(targetCol, ch) {
     const at = Math.max(0, Math.min(width - 1, targetCol - 1));
     const existing = grid[row].chars[at];
     if (typeof existing === "string" && existing !== "" && existing !== " ") grid[row].chars[at] = existing + ch;
   }
 
+  // IRM 插入（xterm 的 insertCells(pos, n)）：右侧整体右移，插在宽字头前不动整字、
+  // 插在尾格前先把头格清成空格，右移后落在末列的宽字头清成空格——不留半个字。
+  function insertCellsAt(pos, n) {
+    const line = grid[row];
+    if (pos > 0 && isWideHead(line, pos - 1)) {
+      line.chars[pos - 1] = null;
+      line.attrs[pos - 1] = bgString();
+    }
+    for (let c = width - 1; c >= pos; c -= 1) {
+      const src = c - n;
+      line.chars[c] = src >= pos ? line.chars[src] : null;
+      line.attrs[c] = src >= pos ? line.attrs[src] : bgString();
+    }
+    if (isWideHead(line, width - 1)) {
+      line.chars[width - 1] = null;
+      line.attrs[width - 1] = bgString();
+    }
+  }
+
+  // DCH（xterm 的 deleteCells(pos, n)）：从 pos 起删 n 格、右侧左移、尾部补空格；
+  // 两侧各补一刀——删到头格前的判定、删完若 pos 落在空续格上补空格。少任何一刀都会
+  // 留下半个字。
+  function deleteCellsAt(pos, n) {
+    const line = grid[row];
+    for (let c = pos; c < width; c += 1) {
+      const src = c + n;
+      line.chars[c] = src < width ? line.chars[src] : null;
+      line.attrs[c] = src < width ? line.attrs[src] : "";
+    }
+    if (pos > 0 && isWideHead(line, pos - 1)) {
+      line.chars[pos - 1] = null;
+      line.attrs[pos - 1] = "";
+    }
+    if (line.chars[pos] === "") {
+      line.chars[pos] = null;
+      line.attrs[pos] = "";
+    }
+  }
+
+  // xterm 的 replaceCells(start, end, blank)：擦 [start, end) 的空格；宽字规则是两刀
+  // ——前一刀清 start-1 的头格，后一刀清 end 上的续格（头的下一格），所以切到宽字的
+  // 擦除会把整字擦掉，不会留半个字悬在行尾（悬空碎片的另一种形态）。
+  function replaceCells(line, start, end, fill) {
+    if (start > 0 && isWideHead(line, start - 1)) {
+      line.chars[start - 1] = null;
+      line.attrs[start - 1] = fill;
+    }
+    if (end < line.chars.length && isWideHead(line, end - 1)) {
+      line.chars[end] = null;
+      line.attrs[end] = fill;
+    }
+    for (let c = start; c < end && c < line.chars.length; c += 1) {
+      line.chars[c] = null;
+      line.attrs[c] = fill;
+    }
+  }
+
   function eraseLine(mode) {
     const line = grid[row];
-    const from = mode === 1 ? 0 : mode === 2 ? 0 : col;
-    const to = mode === 0 ? width - 1 : mode === 1 ? col : width - 1;
     const fill = bgString();
-    // 整行擦除走原生 fill：TUI 几乎每行都以 ESC[2K 开头，逐格赋值在 181 列终端上
-    // 是每行 181 次 JS 写，一段回放就是上百万次。区间擦除仍走循环。
+    if (mode === 2) {
+      // 整行擦除走原生 fill：TUI 几乎每行都以 ESC[2K 开头，逐格赋值在 181 列终端上
+      // 是每行 181 次 JS 写，一段回放就是上百万次。区间擦除仍走 replaceCells。
+      line.chars.fill(null);
+      line.attrs.fill(fill);
+      line.wrapped = false;
+      return;
+    }
+    // 哨兵态（col === width）下 EL0 的区间是 [cols, cols)，一格都不擦——xterm 以 cols
+    // 为上限夹光标，哨兵保留；镜像若按 width-1 擦，满行后一次 ESC[K 就把末列擦了。
+    const from = mode === 1 ? 0 : col;
+    const to = mode === 0 ? width - 1 : col;
     if (from === 0 && to >= width - 1) {
       line.chars.fill(null);
       line.attrs.fill(fill);
+      // xterm：EL2 或「EL0 且光标在 0 列」等价整行擦除，会把本行的折行标记清掉。
+      if (mode === 0) line.wrapped = false;
       return;
     }
-    for (let c = from; c <= to; c += 1) { line.chars[c] = null; line.attrs[c] = fill; }
+    replaceCells(line, from, to + 1, fill);
+    if (mode === 0 && col === 0) line.wrapped = false;
   }
 
   function eraseDisplay(mode) {
@@ -424,8 +708,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       eraseLine(0);
       for (let r = row + 1; r < height; r += 1) grid[r] = blankRow(width, fill);
     } else if (mode === 1) {
-      eraseLine(1);
       for (let r = 0; r < row; r += 1) grid[r] = blankRow(width, fill);
+      // xterm：ED1 的光标行擦到光标（含）；光标就在末列时下一行的折行标记作废。
+      replaceCells(grid[row], 0, col + 1, fill);
+      if (col + 1 >= width && row + 1 < height) grid[row + 1].wrapped = false;
     } else {
       grid = grid.map(() => blankRow(width, fill));
     }
@@ -510,38 +796,75 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     }
   }
 
-  function setMode(raw, final, on) {
+  // 保存/恢复光标（CSI s/u、ESC 7/8、1049 共用这一槽，xterm 同构）。恢复末尾
+  // _restrictCursor——哨兵也随之折回末列。
+  function saveCursorNow() {
+    saved = { row, col, attrs: attrsString() };
+  }
+  function restoreSavedCursor() {
+    row = saved.row;
+    col = saved.col;
+    // 恢复串经 applySgr 重放：直接 split 会把 38;2;… 劈成裸数字碎片，
+    // 破坏 applySgr 里「同槽颜色 token 是原子、新色到达先摘旧色」的替换不变量。
+    setSgr([]);
+    applySgr(saved.attrs);
+    clampCursor();
+  }
+
+  function setMode(raw, final, on, priv) {
     const params = (raw === "" ? "0" : raw).split(";").map((x) => (x === "" ? 0 : Number(x) || 0));
     for (const p of params) {
-      if (final === "h" || final === "l") {
-        const value = on;
+      if (final !== "h" && final !== "l") continue;
+      const value = on;
+      // 私有/非私有 h/l 是两套互不相干的模式空间（xterm 的 setMode/setModePrivate）：
+      // IRM(4) 与 convertEol(20) 是非私有模式（ESC[4h / ESC[20l）；autowrap(7)、光标
+      // 可见(25)、备屏(47/1047/1049)、鼠标族、括号粘贴是私有模式（ESC[?7h 等）。客户端
+      // xterm 对 ?4h/?20l 不做任何动作——镜像若照收，两边对溢出行的排法就分叉，而且
+      // 回放里发 ?4h 客户端同样不认（重建后 IRM/convertEol 状态丢失）。
+      if (priv) {
         if (p === 25) cursorVisible = value;
         else if (p === 7) { autoWrap = value; appModes[p] = value; }
-        else if (p === 4) { insertMode = value; appModes[p] = value; }
-        else if (p === 20) { convertEol = value; appModes[p] = value; }
-        else if (p === 1049 || p === 1047 || p === 47) { if (value) altApi = p; setAlt(value); }
-        else if (REPLAYED_MODES.includes(p)) appModes[p] = value;
+        else if (p === 1049 || p === 1047 || p === 47) { if (value) altApi = p; setAlt(value, p); }
+        else if (REPLAYED_PRIVATE_MODES.includes(p)) appModes[p] = value;
         // 1 (cursor keys), 12 (blink), 6 (origin), 1004 (focus reporting):
         // consumed, no grid effect, not tracked — replaying them would need new
         // recording plus replay-ordering care (origin/scroll-region modes change
         // how the replay's own absolute positioning and history pushes behave;
         // see the REPLAYED_MODES rule comment). 2026 stays unreplayed per toReplay.
-      }
+      } else if (p === 4) { insertMode = value; appModes[p] = value; }
+      else if (p === 20) { convertEol = value; appModes[p] = value; }
     }
   }
 
-  function setAlt(on) {
-    if (on === inAlt) return;
-    // 切屏必然重定光标（进备屏归零、退备屏恢复保存位置），折行待定随之作废。
-    pendingWrap = false;
+  // 备屏光标语义按 xterm 的 BufferSet 建模，三条都别猜：
+  //   ?47h/?1047h 进：光标继承主屏位置、滚动区回到整屏（备屏是另一份缓冲）。
+  //   ?47l/?1047l 退：光标采用备屏停留的位置，不恢复主屏保存值（activateNormalBuffer
+  //     把 alt 的 x/y 抄给 normal）——擅自恢复会让 claude 的相对续画整体偏移。
+  //   ?1049h 进：附带存一次光标（与 CSI s 同一槽，xterm 的 saveCursor）。
+  //   ?1049l 退：activateNormalBuffer + DECRC，恢复当初保存的位置。
+  function setAlt(on, api) {
+    if (on === inAlt) {
+      // xterm 的 DECSET/DECRST 1049 与进没进过备屏无关：进恒带 saveCursor、退恒带
+      // restoreCursor。不在备屏时收到 1049l 同样要恢复保存的光标。
+      if (api === 1049) { if (on) saveCursorNow(); else restoreSavedCursor(); }
+      return;
+    }
     if (on) {
-      altSaved = { grid, row, col, top, bottom, inAlt };
+      // 1049 的保存光标写进当前缓冲（主屏）的槽：xterm 的 DECSET 1049 就是调
+      // saveCursor()，在切屏之前落在主屏那份槽里——所以先写、再把主屏槽存进 altSaved。
+      if (api === 1049) saveCursorNow();
+      altSaved = { grid, row, col, top, bottom, inAlt, mainSaved: saved };
       grid = Array.from({ length: height }, () => blankRow(width));
-      row = 0;
-      col = 0;
+      saved = { row: 0, col: 0, attrs: "" };
+      top = 0;
+      bottom = height - 1;
+      // 光标位置不动：备屏继承主屏光标（activateAltBuffer：alt.x = normal.x）。
     } else if (altSaved) {
-      ({ grid, row, col, top, bottom } = altSaved);
+      const altCursor = { row, col };
+      ({ grid, top, bottom, mainSaved: saved } = altSaved);
       altSaved = null;
+      if (api === 1049) restoreSavedCursor();
+      else { row = altCursor.row; col = altCursor.col; }
     }
     inAlt = on;
   }
@@ -563,12 +886,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       const value = param(index);
       return value === undefined || Number.isNaN(value) || value === 0 ? dflt : value;
     };
-    // 光标被移动或编辑格位的序列取消折行待定（真实终端语义）：xterm 5.5 用
-    // 「x === cols」当哨兵，A–H/f/G/`/d/r/u 与 P/@/X/L/M 各自走 _restrictCursor()
-    // 把哨兵夹成 cols-1，哨兵随之消失；不取消的话，移动后写的第一个字符会先多折
-    // 一行。J/K（擦除）在 xterm 里以 cols 为上限夹，哨兵保留，故不在此列；m/s/h/l
-    // 不动光标，同样保留。夹光标（clampCursor）不负责这件事，见那里的注释。
-    if ("ABCDEFG`dHfruP@XLM".includes(final)) pendingWrap = false;
+    // 会移动光标或编辑格位的序列先把满行哨兵夹回末列（xterm 的 _restrictCursor：
+    // A–H/f/G/`/d/r/u 与 P/@/X/L/M 都先夹，哨兵随之消失）。J/K（擦除）以 cols 为上限
+    // 夹、哨兵保留，故不在此列；m/s/h/l 不动光标，同样保留。
+    if ("ABCDEFG`dHfruP@XLM".includes(final)) clampCursor();
     switch (final) {
       case "A": row = Math.max(0, row - arg(0, 1)); break;
       case "B": row = Math.min(height - 1, row + arg(0, 1)); break;
@@ -591,60 +912,39 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       }
       case "K": eraseLine(param(0) || 0); break;
       // IL 插入行：光标行及以下整体下移 n 行，底部多出滚动区外的行丢弃。
-      case "L": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = bottom; r > row; r -= 1) grid[r] = grid[r - 1]; grid[row] = blankRow(width); } break;
-      case "M": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = row; r < bottom; r += 1) grid[r] = grid[r + 1]; grid[bottom] = blankRow(width); } break;
-      case "P": {
-        const n = arg(0, 1);
-        for (let c = col; c < width; c += 1) {
-          const src = c + n;
-          grid[row].chars[c] = src < width ? grid[row].chars[src] : null;
-          grid[row].attrs[c] = src < width ? grid[row].attrs[src] : "";
-        }
-        break;
-      }
-      case "X": {
-        // ECH 是擦除填充：从光标起擦 n 格（BCE 背景），右侧内容保持不动；不是 DCH 那样的左移删除。
-        const n = arg(0, 1);
-        const fill = bgString();
-        for (let c = col; c < Math.min(width, col + n); c += 1) { grid[row].chars[c] = null; grid[row].attrs[c] = fill; }
-        break;
-      }
-      case "@": {
-        const n = arg(0, 1);
-        for (let c = width - 1; c >= col; c -= 1) {
-          const src = c - n;
-          grid[row].chars[c] = src >= col ? grid[row].chars[src] : null;
-          grid[row].attrs[c] = src >= col ? grid[row].attrs[src] : "";
-        }
-        break;
-      }
+      case "L": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = bottom; r > row; r -= 1) grid[r] = grid[r - 1]; grid[row] = blankRow(width); } col = 0; break;
+      case "M": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = row; r < bottom; r += 1) grid[r] = grid[r + 1]; grid[bottom] = blankRow(width); } col = 0; break;
+      case "P": deleteCellsAt(col, arg(0, 1)); break;
+      case "X": replaceCells(grid[row], col, col + arg(0, 1), bgString()); break;
+      case "@": insertCellsAt(col, arg(0, 1)); break;
       case "S": scrollRegionUp(arg(0, 1)); break;
       case "T": scrollRegionDown(arg(0, 1)); break;
       case "r": {
-        const nextTop = arg(0, 1) - 1;
+        // xterm 的 setScrollRegion：只有 bottom > top 才生效（否则整条序列作废、旧滚动区
+        // 保持），且光标落到 (0,0) 而不是 (top,0)——claude 靠相对移动续画，光标错一行
+        // 会被放大成整片错位。
+        const nextTop = arg(0, 1);
         const second = param(1);
-        const nextBottom = (second === undefined || second === 0 ? height : second) - 1;
-        top = Math.max(0, Math.min(height - 1, nextTop));
-        bottom = Math.max(top, Math.min(height - 1, nextBottom));
-        row = top;
-        col = 0;
+        const nextBottom = second === undefined || second === 0 || second > height ? height : second;
+        if (nextBottom > nextTop) {
+          top = Math.max(0, Math.min(height - 1, nextTop - 1));
+          bottom = Math.max(top, Math.min(height - 1, nextBottom - 1));
+          row = 0;
+          col = 0;
+        }
         break;
       }
       case "m": if (!priv) applySgr(raw); break;
-      case "s": saved = { row, col, attrs: attrsString() }; break;
-      case "u":
-        row = saved.row;
-        col = saved.col;
-        // 恢复串经 applySgr 重放：直接 split 会把 38;2;… 劈成裸数字碎片，
-        // 破坏 applySgr 里「同槽颜色 token 是原子、新色到达先摘旧色」的替换不变量。
-        setSgr([]);
-        applySgr(saved.attrs);
-        break;
-      case "h": setMode(raw, "h", true); break;
-      case "l": setMode(raw, "l", false); break;
+      case "s": saveCursorNow(); break;
+      case "u": restoreSavedCursor(); break;
+      case "h": setMode(raw, "h", true, priv); break;
+      case "l": setMode(raw, "l", false, priv); break;
       default: break; // DSR/DA/window ops/scroll-area save/restore …: consumed
     }
-    clampCursor();
+    // 收尾夹取只对「定过光标的序列」做：CUP/CHA/VPA 的目标列可能越界，要夹回来。
+    // J/K 以 cols 为上限夹、哨兵保留；m/s/h/l 与未知序列根本不动光标，夹了就会把
+    // 「刚写满一行」的哨兵吃掉——下一个字符覆盖末列而不是折行，整行少一个字。
+    if ("ABCDEFG`dHfruLM".includes(final)) clampCursor();
   }
 
   // A CSI parameter string can carry private markers and intermediates
@@ -710,17 +1010,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       return INCOMPLETE;
     }
     if (next === 0x37) { saved = { row, col, attrs: attrsString() }; return start + 2; } // ESC 7
-    // ESC 8 恢复光标、ESC E 归零再换行、ESC c 整屏复位：三者都重新定光标，
-    // 折行待定随之作废（否则恢复位置后写的第一个字符会先多折一行）。
-    if (next === 0x38) { row = saved.row; col = saved.col; pendingWrap = false; return start + 2; } // ESC 8
-    // ESC D（IND）与 ESC M（RI）只移行不移列，与 LF 同口径：折行待定保留。
+    // ESC 8 恢复光标（xterm 走 restoreCursor：末尾 _restrictCursor，哨兵随之消失）、
+    // ESC E 归零再换行、ESC c 整屏复位：三者都重新定光标。
+    if (next === 0x38) { row = saved.row; col = saved.col; clampCursor(); return start + 2; } // ESC 8
+    // ESC D（IND）与 ESC M（RI）只移行不移列，与 LF 同口径：哨兵折回末列。
     if (next === 0x44) { lineFeed(); return start + 2; } // ESC D
-    if (next === 0x45) { col = 0; pendingWrap = false; lineFeed(); return start + 2; } // ESC E
+    if (next === 0x45) { col = 0; lineFeed(); return start + 2; } // ESC E
     if (next === 0x4d) { reverseIndex(); return start + 2; } // ESC M
     if (next === 0x63) { // ESC c
       grid = Array.from({ length: height }, () => blankRow(width));
       row = 0; col = 0; top = 0; bottom = height - 1;
-      pendingWrap = false;
       setSgr([]);
       return start + 2;
     }
@@ -733,17 +1032,6 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   }
 
   const nowMs = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
-
-  // 折行待定在这里落地：上一格写满一行且自动换行开着，就先折到下一行行首。
-  // 批写与逐字符两条路径共用（lineFeed 自己会清 pendingWrap，无需再清）。
-  function wrapIfPending() {
-    if (autoWrap && pendingWrap) { col = 0; lineFeed(); }
-  }
-
-  // 一段可打印字符写完后的收尾：写满一行就挂上折行待定，否则光标停在行尾。
-  function settleRunEnd() {
-    if (col >= width) { pendingWrap = autoWrap; col = width - 1; }
-  }
 
   // 解析核心：从 start 起消费到 deadlineMs（0 = 不设预算）。
   // 返回 { index, done, incomplete }：index 是下一个未消费字符的位置；done=false
@@ -766,7 +1054,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         i = next;
         continue;
       }
-      if (code === 0x0d) { col = 0; pendingWrap = false; i += 1; continue; }
+      if (code === 0x0d) { col = 0; i += 1; continue; }
       if (code === 0x0a || code === 0x0b || code === 0x0c) {
         // xterm 把 LF、VT、FF 一并交给 lineFeed()（换行是这三个字符共同的语义），
         // convertEol 打开时列一并归零。镜像少认一个换行，画面就比屏幕高一行，
@@ -777,14 +1065,24 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         i += 1;
         continue;
       }
-      if (code === 0x08) { col = Math.max(0, col - 1); pendingWrap = false; i += 1; continue; }
-      if (code === 0x09) { col = Math.min(width - 1, (Math.floor(col / 8) + 1) * 8); pendingWrap = false; i += 1; continue; }
+      // xterm 的 backspace 先 _restrictCursor() 再 x--：满行哨兵先夹回末列，
+      // 否则一次退格会把光标放到倒数第二列（差一格，续画就整体偏）。
+      if (code === 0x08) { clampCursor(); col = Math.max(0, col - 1); i += 1; continue; }
+      // xterm 的 tab()：满行哨兵下 TAB 是 no-op——待折行状态原样保留，下一个字符照常
+      // 折到下一行行首。旧实现把 TAB 当移动、把光标推到下一个制表位，满行后一次 TAB
+      // 就让下一个字符覆盖掉末列而不是折行。
+      if (code === 0x09) {
+        if (col < width) col = Math.min(width - 1, (Math.floor(col / 8) + 1) * 8);
+        i += 1;
+        continue;
+      }
       if (code < 0x20) { i += 1; continue; }
       // 可打印 ASCII 连续段批写：逐字符走宽度分类再调 putCell 是解析里最贵的常数
       // （一段回放要过十六万次），而普通文本几乎全是这种字符。插入模式下不能批写
       // （每格都要右移），落回逐字符路径。
       if (code <= 0x7e && !insertMode) {
-        wrapIfPending();
+        if (col >= width) { if (autoWrap) wrapLine(); else col = width - 1; }
+        clearHeadBeforeCursor();
         const line = grid[row];
         const attr = attrsString();
         let j = i;
@@ -797,20 +1095,34 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
           j += 1;
         }
         i = j;
-        settleRunEnd();
+        clearOrphanContinuation();
         continue;
       }
-      const w = terminalCharWidth(input[i]);
-      if (w === 0) { appendToPrevious(col, input[i]); i += 1; continue; }
-      wrapIfPending();
-      putCell(col, input[i], w);
-      if (col + w >= width) {
-        pendingWrap = autoWrap;
-        col = width - 1;
-      } else {
-        col += w;
+      // 非 ASCII：按码点取宽。代理对是两个字元、一个码点，按字元取宽会把代理对拆成
+      // 两个 1 列格——emoji 与 CJK 扩展区整片错位的来源。
+      const cp = input.codePointAt(i);
+      const w = terminalWidthOf(cp);
+      const step = cp > 0xffff ? 2 : 1;
+      // 零宽字符按码点拼到前一格：代理对不能拆开拼（否则留下一个高位代理的乱码格）。
+      if (w === 0) { appendToPrevious(col, input.slice(i, i + step)); i += step; continue; }
+      if (col + w > width) {
+        // 末列放不下：autowrap 开就整字折到下一行（末列补空格、新行打折行标记），
+        // 关就把光标钳到末列、宽字整字丢弃（xterm 的 continue）——都不许留下半格。
+        if (autoWrap) {
+          const fill = attrsString();
+          for (let c = col; c < width; c += 1) { grid[row].chars[c] = null; grid[row].attrs[c] = fill; }
+          wrapLine();
+        } else {
+          col = width - 1;
+          i += step;
+          continue;
+        }
       }
-      i += 1;
+      clearHeadBeforeCursor();
+      putCell(col, input.slice(i, i + step), w);
+      col += w;
+      i += step;
+      clearOrphanContinuation();
     }
     return { index: i, done: true, incomplete: false };
   }
@@ -846,8 +1158,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       pending = "";
       pendingOffset = 0;
       // 超限说明这是一个畸形且不会终结的序列：按旧行为丢掉，不让它占住内存。
-      // 这里不 clampCursor：序列只是没读完，光标本来就在合法位置；而 clamp 会
-      // 清掉 pendingWrap，把「刚写满一行」的待折行状态吃掉。
+      // 这里用宽松夹取：满行哨兵是跨块有效的状态，夹成 width-1 会把「刚写满一行、
+      // 下一个字符要折行」吃掉，块边界落在满行时整行少一个字。
       carry = rest.length <= TERMINAL_ESCAPE_HOLD_MAX ? rest : "";
       return { done: true, pendingChars: carry.length };
     }
@@ -855,7 +1167,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     if (result.done) {
       pending = "";
       pendingOffset = 0;
-      clampCursor();
+      clampCursorLenient();
       return { done: true, pendingChars: 0 };
     }
     return { done: false, pendingChars: backlog - (result.index - start) };
@@ -946,7 +1258,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // 丢掉刻意保留的滚屏历史。
     for (const p of REPLAYED_MODES) {
       if (!(p in appModes)) continue;
-      const seq = `\u001b[?${p}${appModes[p] ? "h" : "l"}`;
+      // 私有模式发 ? 形态，非私有（IRM/convertEol）发裸形态：客户端两套模式空间分开认。
+      const seq = `\u001b[${REPLAYED_PRIVATE_MODES.includes(p) ? "?" : ""}${p}${appModes[p] ? "h" : "l"}`;
       parts.push(seq);
       bytes += seq.length;
     }

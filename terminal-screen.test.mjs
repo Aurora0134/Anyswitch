@@ -2,6 +2,65 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { createScreenMirror, terminalCharWidth, TERMINAL_ESCAPE_HOLD_MAX } from "./terminal-screen.mjs";
 
+// ---- 真 xterm 双路对账夹具 ----
+// 本文件的旧校验全是「回放喂另一个镜像」：镜像被当成 xterm 的等价物，于是上面三族
+// 语义差（resize 不重排、宽字按码元取宽、光标五处偏移）在测试里全绿——盲区正是
+// 「回放自足，但屏幕已经和客户端不一致」。这里改成与真 xterm 对账：同一串字节（以及
+// 同一串 resize）喂两侧——客户端同款 @xterm/xterm 5.5 + @xterm/addon-unicode11
+// （activeVersion=11）与镜像——terminal.write 落地后取 buffer.active 视口逐格比。
+// 不需要 DOM：xterm 的内核在无渲染环境下照常解析与建缓冲。
+const xtermPkg = await import("@xterm/xterm");
+const { Terminal } = xtermPkg.default;
+const { Unicode11Addon } = await import("@xterm/addon-unicode11");
+
+// xterm 的 buffer 行按镜像口径拼串：宽字续格在两边都是空串（translateToString 会把
+// 续格印成空格，不能直接拿来比对）。
+const xtermViewport = (t) => {
+  const b = t.buffer.active;
+  const lines = [];
+  for (let i = 0; i < t.rows; i += 1) {
+    const l = b.getLine(b.baseY + i);
+    let out = "";
+    if (l) {
+      for (let x = 0; x < t.cols; x += 1) {
+        const c = l.getCell(x);
+        if (!c) break;
+        if (c.getWidth() === 0) continue; // 宽字续格：不占字符
+        out += c.getChars() || " ";
+      }
+    }
+    lines.push(out.replace(/\s+$/, ""));
+  }
+  return lines;
+};
+
+// steps 里字符串是「喂字节」，二元数组是 resize(cols, rows)。
+async function compareXterm(cols, rows, steps) {
+  const mirror = createScreenMirror({ cols, rows });
+  const t = new Terminal({ cols, rows, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+  t.loadAddon(new Unicode11Addon());
+  t.unicode.activeVersion = "11";
+  for (const step of steps) {
+    if (typeof step === "string") {
+      mirror.write(step);
+      await new Promise((resolve) => t.write(step, resolve));
+    } else {
+      mirror.resize(step[0], step[1]);
+      t.resize(step[0], step[1]);
+    }
+  }
+  return { mirror, term: t, lines: xtermViewport(t), cursor: [t.buffer.active.cursorY, t.buffer.active.cursorX] };
+}
+
+async function assertXtermParity(name, cols, rows, steps) {
+  const { mirror, lines, cursor } = await compareXterm(cols, rows, steps);
+  const mine = mirror.screenLines();
+  assert.deepEqual(mine, lines, `${name}：镜像画面必须与真 xterm 逐格一致`);
+  assert.equal(mirror.info().row, cursor[0], `${name}：光标行必须与真 xterm 一致`);
+  assert.equal(mirror.info().col, cursor[1], `${name}：光标列必须与真 xterm 一致`);
+}
+const CRLF = "\r\n";
+
 // 把镜像吐出的回放再喂给一个干净的镜像（就是浏览器 xterm 的等价物），
 // 用来断言「回放自足」：不依赖任何前序状态就能得到同一张画面。
 function repaint(replay, cols, rows) {
@@ -331,9 +390,11 @@ test("鼠标族与括号粘贴：显式设置过的模式进回放，未记录�
 });
 
 test("autowrap/IRM 显式设置进回放：重建后客户端与镜像对后续字节的排法一致", () => {
-  // ?7l（kimi code 进 TUI 即关 autowrap）与 ?4h（IRM）此前只被镜像追踪、不进回放：
+  // ?7l（kimi code 进 TUI 即关 autowrap）与 4h（IRM）此前只被镜像追踪、不进回放：
   // 重建后退回客户端默认（7 开 / 4 关），应用的溢出行与中段插入两边排法分叉——
   // 回放帧本身用绝对定位不受影响，分叉发生在其后的活字节上。
+  // 注意两套模式空间：autowrap 是私有模式（?7l），IRM 是非私有模式（4h）。
+  // 客户端 xterm 对 ?4h 不动作，回放因此必须发裸的 4h（见 toReplay 的私有性分支）。
   const nowrap = createScreenMirror({ cols: 10, rows: 6 });
   nowrap.write("\u001b[?7l");
   nowrap.write("A".repeat(25));
@@ -350,15 +411,15 @@ test("autowrap/IRM 显式设置进回放：重建后客户端与镜像对后续�
   assert.ok(rewrap.toReplay().includes("\u001b[?7h"), "重新显式打开的 autowrap 以 DECSET 回放");
 
   const irm = createScreenMirror({ cols: 10, rows: 4 });
-  irm.write("\u001b[?4hABCDEF\u001b[1;2HXY");
+  irm.write("\u001b[4hABCDEF\u001b[1;2HXY");
   assert.equal(irm.screenLines()[0], "AXYBCDEF", "IRM 开时按插入语义落字");
-  assert.ok(irm.toReplay().includes("\u001b[?4h"), "显式开着的 IRM 必须进回放");
+  assert.ok(irm.toReplay().includes("\u001b[4h"), "显式开着的 IRM 必须进回放（非私有形态，?4h 客户端不认）");
   const irmAgain = repaint(irm.toReplay(), 10, 4);
   irmAgain.write("\u001b[1;3HZ");
   irm.write("\u001b[1;3HZ");
   assert.deepEqual(irmAgain.screenLines(), irm.screenLines(), "重建后两边的插入语义必须一致");
-  irm.write("\u001b[?4l");
-  assert.ok(irm.toReplay().includes("\u001b[?4l"), "显式关掉的 IRM 以 DECRST 回放");
+  irm.write("\u001b[4l");
+  assert.ok(irm.toReplay().includes("\u001b[4l"), "显式关掉的 IRM 以 DECRST 回放");
 });
 
 test("备屏 API 保真：?47h 进的备屏以 47h 回放，退出 47l 照常弹回", () => {
@@ -393,18 +454,25 @@ test("换行语义与客户端一致：LF/VT/FF 都换行，convertEol 下连列
     assert.deepEqual(mirror.screenLines().slice(0, 2), ["one", "two"], `${name} 必须换行且列归零`);
   }
 
-  // ?20l 之后 LF 只下移、保留列位（xterm 允许应用运行时关掉 convertEol）
+  // 20l 之后 LF 只下移、保留列位（xterm 允许应用运行时关掉 convertEol；convertEol 是
+  // 非私有模式，客户端只认裸形态 20l，?20l 不动任何东西）
   const off = createScreenMirror({ cols: 20, rows: 4 });
-  off.write("\u001b[?20l");
+  off.write("\u001b[20l");
   off.write("one\ntwo");
   assert.deepEqual(off.screenLines().slice(0, 2), ["one", "   two"], "关掉 convertEol 后 LF 保留列位");
-  assert.ok(off.toReplay().includes("\u001b[?20l"), "显式关掉的 convertEol 必须进回放，否则重建后又退回默认值");
+  assert.ok(off.toReplay().includes("\u001b[20l"), "显式关掉的 convertEol 必须进回放，否则重建后又退回默认值");
   assert.deepEqual(repaint(off.toReplay(), 20, 4).screenLines(), off.screenLines(), "回放必须还原同一张画面");
 
   const on = createScreenMirror({ cols: 20, rows: 4 });
-  on.write("\u001b[?20l\u001b[?20h");
+  on.write("\u001b[20l\u001b[20h");
   on.write("one\ntwo");
-  assert.deepEqual(on.screenLines().slice(0, 2), ["one", "two"], "?20h 恢复列归零");
+  assert.deepEqual(on.screenLines().slice(0, 2), ["one", "two"], "20h 恢复列归零");
+
+  // ?20l 是私有模式，客户端忽略：镜像也忽略，否则两边对 LF 的排法分叉
+  const priv = createScreenMirror({ cols: 20, rows: 4 });
+  priv.write("\u001b[?20l");
+  priv.write("one\ntwo");
+  assert.deepEqual(priv.screenLines().slice(0, 2), ["one", "two"], "?20l 不得被当成 convertEol 开关");
 });
 
 test("NUL/STX 填充与 FF：填充字节不占列，FF 之后的内容落到下一行", () => {
@@ -763,17 +831,17 @@ describe("回放缓存", () => {
 });
 
 // ---- 折行待定的取消时机 ----
-// clampCursor 不再清 pendingWrap（它只在解析轮次末尾夹光标，块边界正好落在满行时
-// 清掉会让下一个字符覆盖行尾那一格）。取消折行待定改由「光标被移动」负责，这里把
-// 每条路径逐一对齐 xterm 5.5 的真值：它用 x === cols 当哨兵，所有移动类操作都会
-// _restrictCursor() 把哨兵夹掉，lineFeed 里的 x-- 同理。
+// 取消满行待定改由「光标被移动」负责，这里把每条路径逐一对齐 xterm 5.5 的真值：它用
+// x === cols 当哨兵，所有移动类操作都会 _restrictCursor() 把哨兵夹掉，lineFeed 里的
+// x-- 同理。唯独 1049h 不移动光标（备屏继承主屏光标位置，含哨兵），下一个字符照常
+// 折到备屏第二行——这是真实 xterm 的行为，镜像照做。
 describe("满行后光标被移动，折行待定必须取消", () => {
   const cols = 10;
   const cases = [
     // [说明, 前置, 操作, 期望 B 落在第几行第几列]
     ["ESC 8 恢复光标", "A".repeat(cols), "\u001b8", 1, 1],
     ["CSI u 恢复光标", "A".repeat(cols), "\u001b[u", 1, 1],
-    ["1049h 进备屏", "A".repeat(cols), "\u001b[?1049h", 1, 1],
+    ["1049h 进备屏（光标继承主屏含哨兵，B 折到备屏第二行）", "A".repeat(cols), "\u001b[?1049h", 2, 1],
     ["ESC c 整屏复位", "A".repeat(cols), "\u001bc", 1, 1],
     ["CUP 定位", "A".repeat(cols), "\u001b[3;1H", 3, 1],
     ["ESC E 归零换行", "A".repeat(cols), "\u001bE", 2, 1],
@@ -801,5 +869,167 @@ describe("满行后光标被移动，折行待定必须取消", () => {
     const lines = mirror.screenLines();
     assert.equal(lines[0], "A".repeat(cols), "第一行必须保持满行");
     assert.equal(lines[1], "B", "B 必须折到第二行");
+  });
+});
+
+// ---- S2 宽字符：与真 xterm 逐格对账 ----
+// 客户端开着 unicode11，宽字一律 2 列（头格 + 续格）。镜像旧实现按 UTF-16 码元取宽，
+// 代理对被拆成两个 1 列格；末列放不下宽字不折行、写在续格上不修复孤儿半格；DCH/ICH/ECH
+// 切到宽字只动一格留下半个字——用户看到的悬空/变形字符即此形态。
+describe("S2 宽字符语义与真 xterm 对账", () => {
+  test("宽字按码点取宽：代理对合成一格，末列放不下整字折行", async () => {
+    // 末列放不下：整字折到下一行、末列留空格。旧实现把宽字塞进末列、续格被丢弃，
+    // 该行之后的内容整体左移一格——应用用空格覆盖擦行时就少擦一格，留下擦不掉的碎片。
+    await assertXtermParity("emoji 占一格", 10, 3, ["😀X"]);
+    await assertXtermParity("末列宽字折行", 6, 3, ["12345中"]);
+    await assertXtermParity("满行后宽字折行", 6, 3, ["123456中"]);
+  });
+
+  test("autowrap 关时末列宽字整字丢弃、光标钳在末列", async () => {
+    await assertXtermParity("?7l 末列宽字", 6, 3, ["\u001b[?7l12345中"]);
+  });
+
+  test("写入前修复孤儿半格：写在宽字头格/尾格上都先清整字", async () => {
+    // 写在尾格上不清头格 = 头格变成悬空半个字；写在头格上不清尾格 = 尾格残留。
+    await assertXtermParity("写在宽字尾格", 10, 3, ["中X", "\u001b[1;2HZ"]);
+    await assertXtermParity("写在宽字头格", 10, 3, ["中X", "\u001b[1;1HZ"]);
+    await assertXtermParity("退格落到宽字续格后写入", 10, 3, ["中X", "\b\bY"]);
+  });
+
+  test("DCH/ICH/ECH 切到宽字按整字清，不残留半字", async () => {
+    await assertXtermParity("ECH 切宽字头", 10, 3, ["A中B", "\u001b[1;2H\u001b[1X"]);
+    await assertXtermParity("ECH 从行首覆盖宽字", 10, 3, ["A中B", "\u001b[1;1H\u001b[2X"]);
+    await assertXtermParity("DCH 删宽字头", 10, 3, ["A中B", "\u001b[1;2H\u001b[1P"]);
+    await assertXtermParity("DCH 删宽字尾格", 10, 3, ["A中B", "\u001b[1;3H\u001b[1P"]);
+    await assertXtermParity("ICH 插在宽字头前", 10, 3, ["A中B", "\u001b[1;2H\u001b[1@"]);
+    await assertXtermParity("ICH 插在宽字尾格前", 10, 3, ["A中B", "\u001b[1;3H\u001b[1@"]);
+  });
+
+  test("IRM 插入宽字：右移后末列不留半字", async () => {
+    await assertXtermParity("IRM 宽字右移", 8, 3, ["\u001b[?4h1234567中"]);
+  });
+});
+
+// ---- S5 光标：与真 xterm 对账 ----
+// claude code 靠相对移动续画（实测 1163 次 CHA），光标错一格会被放大成整行错位。
+describe("S5 光标语义与真 xterm 对账", () => {
+  test("IL/DL 落列归零、DECSTBM 落 (0,0)", async () => {
+    await assertXtermParity("IL 光标归零", 8, 4, ["AAAA\r\nBBBB\r\nCCCC", "\u001b[2;4H\u001b[1L"]);
+    await assertXtermParity("DL 光标归零", 8, 4, ["AAAA\r\nBBBB\r\nCCCC", "\u001b[2;4H\u001b[1M"]);
+    // 旧实现落在 (top,0)：滚动区不是从 0 行起时就整行偏移。
+    await assertXtermParity("DECSTBM 落原点", 8, 4, ["AAAA\r\nBBBB\r\nCCCC", "\u001b[3;5H\u001b[2;3r"]);
+    await assertXtermParity("DECSTBM 全屏", 8, 4, ["AAAA\r\nBBBB", "\u001b[3;5H\u001b[r"]);
+  });
+
+  test("末列 TAB 是 no-op：满行哨兵保留，下一个字符照常折行", async () => {
+    await assertXtermParity("末列 TAB 后写字符", 9, 3, ["123456789\tZ"]);
+    await assertXtermParity("行中 TAB", 9, 3, ["1234567\tZ"]);
+    await assertXtermParity("TAB 落在最后一个制表位", 9, 3, ["12345678\tZ"]);
+    await assertXtermParity("连续 TAB", 9, 3, ["\t\tZ"]);
+  });
+
+  test("退备屏光标语义：47/1047 采用备屏光标，1049 恢复保存值", async () => {
+    // 旧实现退备屏一律恢复主屏保存的光标：47/1047 语义被换成 1049，claude 退全屏
+    // 后第一笔相对移动就整体偏移。
+    await assertXtermParity("47l 不恢复光标", 8, 4, ["A", "\u001b[2;3H", "\u001b[?47hXYZ", "\u001b[?47l", "Q"]);
+    await assertXtermParity("1047l 不恢复光标", 8, 4, ["A", "\u001b[2;3H", "\u001b[?1047hXYZ", "\u001b[?1047l", "Q"]);
+    await assertXtermParity("1049l 恢复光标", 8, 4, ["A", "\u001b[2;3H", "\u001b[?1049hXYZ", "\u001b[?1049l", "Q"]);
+    // 进备屏继承主屏光标（含满行哨兵），不是归零
+    await assertXtermParity("进备屏继承光标", 10, 4, ["A".repeat(10), "\u001b[?1049h", "B"]);
+  });
+
+  test("满行哨兵：col 与 xterm 一致（差一整格），EL0 在哨兵态一格不擦", async () => {
+    // ?7l 满行后 xterm 的 x 停在 cols（哨兵）。镜像旧实现报 width-1，一次 CUB/退格
+    // 就差一格；EL0 还会把末列擦掉（xterm 以 cols 为上限夹，哨兵保留、一格不擦）。
+    await assertXtermParity("?7l 满行哨兵", 6, 3, ["\u001b[?7l", "123456"]);
+    await assertXtermParity("?7l 满行后继续写覆盖末列", 6, 3, ["\u001b[?7l", "1234567"]);
+    await assertXtermParity("autowrap 满行哨兵", 6, 3, ["123456"]);
+    await assertXtermParity("满行后 EL0 不擦末列", 6, 3, ["123456", "\u001b[K", "Z"]);
+    await assertXtermParity("满行后 TAB 保留哨兵", 9, 3, ["123456789", "\t", "Z"]);
+    await assertXtermParity("满行后退格", 6, 3, ["123456", "\bZ"]);
+  });
+});
+
+// ---- S1 resize 重排：与真 xterm 对账 ----
+// 旧 rebuild 只按 min(newCols,width) 拷格补空，不按软折行重接：135→120 列实测
+// 33/39 行不同，客户端重排后镜像与屏幕对同一行内容错开，应用再按行擦写就整片错位。
+describe("S1 resize 按软折行重排与真 xterm 对账", () => {
+  test("收窄：满行按软折行分裂，折行标记落在续行上", async () => {
+    await assertXtermParity("135→120", 135, 10, ["A".repeat(135) + CRLF + "B".repeat(135) + CRLF + "C".repeat(40), [120, 10]]);
+    await assertXtermParity("折行链收窄", 40, 8, ["0123456789".repeat(9), [20, 8]]);
+    await assertXtermParity("多行收窄", 60, 8, ["alpha ".repeat(12) + CRLF + "beta ".repeat(12), [30, 8]]);
+  });
+
+  test("放宽：续行重接回父行", async () => {
+    await assertXtermParity("120→135", 120, 10, ["A".repeat(120) + "B".repeat(15) + CRLF + "x".repeat(30), [135, 10]]);
+    await assertXtermParity("放宽带滚动史", 10, 4, ["L1" + CRLF + "L2" + CRLF + "L3" + CRLF + "L4" + CRLF + "L5" + CRLF + "L6", [20, 4]]);
+  });
+
+  test("宽字不被切成两半：收窄/放宽都整字换行", async () => {
+    await assertXtermParity("宽字收窄", 20, 6, ["中文字符串测试中文字符串测试", [10, 6]]);
+    await assertXtermParity("宽字放宽", 10, 6, ["中文字符串测试", [24, 6]]);
+  });
+
+  test("重排出界时按 xterm 补偿：先弹底部，光标溢出屏底才进滚动区", async () => {
+    await assertXtermParity("收窄溢出", 12, 6, ["line1" + CRLF + "line2" + CRLF + "line3" + CRLF + "line4" + CRLF + "01234567890123", [6, 6]]);
+    await assertXtermParity("光标所在链跳过重排", 20, 6, ["AAAA" + CRLF + "BBBB" + CRLF + "CCCC" + "\u001b[1;1H", [10, 6]]);
+    await assertXtermParity("多次 resize 链", 40, 8, ["word ".repeat(30), [20, 8], [40, 8]]);
+  });
+
+  test("滚动区在 resize 后回到整屏", async () => {
+    await assertXtermParity("resize 后滚动区复位", 20, 6, ["\u001b[2;4r", "AAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE", [24, 6], "ZZZ\r\nYYY"]);
+  });
+});
+
+// ---- 回放链：镜像回放喂新 xterm，视口仍与镜像一致 ----
+// 对账只覆盖「实时字节」还不够：客户端 attach 时收到的是 toReplay。resize 之后重排过的
+// 画面必须照样能自足重建（且与同一份回放喂新镜像等价）。
+describe("回放链与真 xterm 对账", () => {
+  const replaySteps = (cols, rows) => ([
+    "历史行 ".repeat(1) + CRLF,
+    "段落文字".repeat(20) + CRLF,
+    "\u001b[38;2;79;168;255m帧 0\u001b[0m " + "z".repeat(30) + CRLF,
+    "A".repeat(135) + CRLF + "中文字符串".repeat(6) + CRLF,
+    [80, 12],
+    "\u001b[?47h备屏内容\r\n\u001b[?47l",
+    "tail line",
+  ]);
+
+  test("resize 过的会话：回放喂新 xterm 与镜像逐格一致", async () => {
+    const cols = 100; const rows = 12;
+    const mirror = createScreenMirror({ cols, rows });
+    const t = new Terminal({ cols, rows, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+    t.loadAddon(new Unicode11Addon());
+    t.unicode.activeVersion = "11";
+    for (const step of replaySteps(cols, rows)) {
+      if (typeof step === "string") {
+        mirror.write(step);
+        await new Promise((resolve) => t.write(step, resolve));
+      } else {
+        mirror.resize(step[0], step[1]);
+        t.resize(step[0], step[1]);
+      }
+    }
+    // 实时侧一致
+    assert.deepEqual(mirror.screenLines(), xtermViewport(t), "实时字节：镜像必须与真 xterm 逐格一致");
+    // 回放喂真 xterm：attach 后客户端屏幕必须与镜像一致
+    const replay = mirror.toReplay();
+    const fresh = new Terminal({ cols: 80, rows: 12, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+    fresh.loadAddon(new Unicode11Addon());
+    fresh.unicode.activeVersion = "11";
+    await new Promise((resolve) => fresh.write(replay, resolve));
+    assert.deepEqual(mirror.screenLines(), xtermViewport(fresh), "回放喂真 xterm 必须还原同一张画面");
+    // 回放喂镜像：自足性不变
+    assert.deepEqual(repaint(replay, 80, 12).screenLines(), mirror.screenLines(), "回放喂镜像必须还原同一张画面");
+  });
+
+  test("回放不得把宽字截碎：宽字行的回放在新 xterm 里不错位", async () => {
+    const mirror = createScreenMirror({ cols: 20, rows: 4 });
+    mirror.write("中文宽字符与組合字元 e\u0301 测试");
+    const fresh = new Terminal({ cols: 20, rows: 4, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+    fresh.loadAddon(new Unicode11Addon());
+    fresh.unicode.activeVersion = "11";
+    await new Promise((resolve) => fresh.write(mirror.toReplay(), resolve));
+    assert.deepEqual(mirror.screenLines(), xtermViewport(fresh), "宽字回放后列位必须一致");
   });
 });
