@@ -5764,6 +5764,9 @@ async function api(method, path, body) {
   // 同步 fit 照旧把尺寸 POST 进 PTY；垫片不参与布局，也不改变任何测量结果。
   const TERMINAL_STALE_SCREEN_MAX_MS = 2000;
   let terminalStaleScreen = null;
+  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：垫片观察者拿停放时的值与
+  // 当前值比较，变了就是新画面已经交代过一屏。见 connectTerminalStream 的 data 处理器。
+  let terminalReplayEpoch = 0;
 
   function dropTerminalStaleScreen() {
     const stale = terminalStaleScreen;
@@ -5800,9 +5803,15 @@ async function api(method, path, body) {
     try { term.options.disableStdin = true; } catch {}
     const originalDispose = term.dispose;
     term.dispose = () => {}; // 只在这一拍的拆流里让 dispose 空转
-    try { closeTerminalStream(); } finally { term.dispose = originalDispose; }
-    el.classList.add("terminal-stale-frame");
-    const stale = { term, el, timer: null, frame: null, done: false, sawReplayPending: false };
+    try {
+      closeTerminalStream();
+      // 加类也放进 try：它若抛，finally 必须照样把真身 dispose 还回去，否则这个实例
+      // 永久没有销毁路径（拆流已经跑完，全局引用已经清空）。
+      el.classList.add("terminal-stale-frame");
+    } finally {
+      term.dispose = originalDispose;
+    }
+    const stale = { term, el, timer: null, frame: null, done: false, epochAtPark: terminalReplayEpoch };
     terminalStaleScreen = stale;
     // 兜底撤垫片：新画面迟迟不来（握手失败、宿主在飞）时不能把旧画面永久留在屏上
     // ——那是一屏别的会话的内容，看久了就是错的信息。到点撤走，退回既有三态覆盖层，
@@ -5824,12 +5833,17 @@ async function api(method, path, body) {
 
   // 就绪判据（两条任一）：
   //  a) 新实例的缓冲区里真的**有字**——首帧回放的字节被解析了（空屏会话走 b）；
-  //  b) 「等首帧」标志翻回过一次：absorbTerminalSnapshot 置真、首帧 data 落地置假，
-  //     翻回就说明这一屏已经交代过了（哪怕回放帧是空的，也是它自己的空屏）。
+  //  b) **首帧回放那一拍已经发生过**：拿「停放时的计数」与当前值比，变了即成立。
   //
   // 判「有字」不能看 buffer.active.length：xterm 一开屏就有 rows 行空行，length 恒
   // ≥ rows，拿它当判据等于「实例一建出来就算就绪」——CDP 实测（M4 T6）这条错判据会
   // 让垫片在新画面写入前约 340ms 就被撤走，空白照旧。必须逐行看有没有非空白字符。
+  //
+  // b 为什么是「计数」而不是「逐帧看 terminalReplayFramePending」：snapshot 与首帧 data
+  // 实测只隔 0.6ms、同帧到达，rAF 逐帧采样永远采不到那个中间态——判据于是恒假，空屏
+  // 会话只能等 2s 兜底（评审实测 2009ms，那 2 秒里用户看的是上一个会话的画面）。改成
+  // 在 data 处理器消费标志的那一拍自增计数（见 connectTerminalStream），观察循环只做
+  // 「变了没有」的比较，同帧发生也照样算数。
   function terminalScreenHasContent(term) {
     const buf = term && term.buffer ? term.buffer.active : null;
     if (!buf || typeof buf.getLine !== "function") return false;
@@ -5842,16 +5856,23 @@ async function api(method, path, body) {
     return false;
   }
 
+  // 垫片就绪判据（唯一一处判定，观察循环与单测都调它）：
+  //   有字（首帧回放的字节被解析了）或「首帧回放那一拍已经发生过」（计数变了）。
+  // 抽成纯函数是为了它能被直接钉住——判据写死在观察循环里时，测试只能整条链路跑，
+  // 而「删掉计数比较」这种变异会被兜底计时器掩盖掉，测不出来。
+  function terminalStaleScreenReady(stale) {
+    if (!stale) return false;
+    if (terminalReplayEpoch !== stale.epochAtPark) return true;
+    return terminalScreenHasContent(terminalXterm);
+  }
+
   // 逐帧观察新画面何时就绪，就绪后再等两帧（一帧给渲染器排程、一帧给合成器上屏）
   // 才撤垫片。视图被藏起来时当即收掉：垫片只服务可见的重建。
   function watchTerminalStaleScreen(stale) {
     if (stale.done) return;
     if (terminalStaleScreen !== stale) return;
     if ($("terminalView")?.hidden) { dropTerminalStaleScreen(); return; }
-    if (terminalReplayFramePending) stale.sawReplayPending = true;
-    const ready = (stale.sawReplayPending && !terminalReplayFramePending)
-      || terminalScreenHasContent(terminalXterm);
-    if (ready) { revealTerminalStaleScreen(stale); return; }
+    if (terminalStaleScreenReady(stale)) { revealTerminalStaleScreen(stale); return; }
     if (typeof requestAnimationFrame !== "function") return;
     stale.frame = requestAnimationFrame(() => {
       stale.frame = null;
@@ -6780,6 +6801,12 @@ async function api(method, path, body) {
         // 它自带完整画面，进合并器只会平白多等一个静默窗口。
         if (terminalReplayFramePending) {
           terminalReplayFramePending = false;
+          // 首帧回放落地即记一拍（垫片观察者的就绪判据 b，见 watchTerminalStaleScreen）。
+          // 必须在这里记而不是让观察循环逐帧看 terminalReplayFramePending：snapshot 与
+          // 首帧 data 实测只隔 0.6ms、同帧到达，rAF 采样永远看不见那个中间态。
+          // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，
+          // 没有这条计数设施。
+          if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
           term.write(text);
           return;
         }
@@ -8832,6 +8859,9 @@ async function api(method, path, body) {
   // 取值与服务端对齐：比它更短只会多打无谓的请求，比它更长则会让别处新建的会话
   // 在左栏里更晚出现——左栏是粗粒度清单，30s 是两边都无感的窗口。
   const TERMINAL_RAIL_HISTORY_TTL_MS = 30 * 1000;
+  // 失败后的短退避：下次自然触发点（进页/换身份）只要过了这么久就允许重取。取值远小于
+  // TTL（失败不该让左栏空半分钟）、远大于 1s（不跟每秒轮询绑在一起变成重试风暴）。
+  const TERMINAL_RAIL_HISTORY_RETRY_MS = 5 * 1000;
   // 补拉只排一次：进页、换身份、轮询都经同一个门，重复排队没有意义。
   let terminalRailFetchQueued = false;
   // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
@@ -9923,12 +9953,12 @@ async function api(method, path, body) {
   // 里也是空的（S2 场景②③④的共同来源）。「身份换人」那条仍是同步重拉（既有契约，
   // 见 syncTerminalRailHistory 尾部注释），它命中的是换 agent，不是每次进页。
   function terminalRailHistoryFresh(endpoint) {
-    // 判据只认 TTL，不认 error：失败也记 fetchedAt，于是 TTL 内不再重试——否则
-    // 每秒一次的 renderTerminalRail 会变成每秒一次的重试风暴（旧写法靠「身份没变
-    // 就早退」隐式免掉重试，这里必须显式钉住）。
-    return !!endpoint
-      && terminalRailHistory.endpoint === endpoint
-      && (Date.now() - (terminalRailHistory.fetchedAt || 0)) < TERMINAL_RAIL_HISTORY_TTL_MS;
+    // 判据只认时间窗，不认 error：失败也记时间戳，于是不会退化成每秒重试（旧写法靠
+    // 「身份没变就早退」隐式免掉重试，这里必须显式钉住）。成功走 TTL，失败走短退避。
+    if (!endpoint || terminalRailHistory.endpoint !== endpoint) return false;
+    const now = Date.now();
+    if (terminalRailHistory.retryAt) return now < terminalRailHistory.retryAt;
+    return (now - (terminalRailHistory.fetchedAt || 0)) < TERMINAL_RAIL_HISTORY_TTL_MS;
   }
 
   // 补拉的唯一排队点：rAF 让出进页这一拍渲染，setTimeout(0) 再把请求排到其后一个
@@ -9992,9 +10022,23 @@ async function api(method, path, body) {
     try {
       const data = await api("GET", "/api/sessions/list");
       const rows = (Array.isArray(data && data.sessions) ? data.sessions : []).filter((row) => row && row.endpoint === endpoint);
-      terminalRailHistory = { endpoint, sessions: rows, fetchedAt: Date.now(), error: null };
+      terminalRailHistory = { endpoint, sessions: rows, fetchedAt: Date.now(), error: null, retryAt: 0 };
     } catch (error) {
-      terminalRailHistory = { endpoint, sessions: [], fetchedAt: Date.now(), error };
+      // 失败不清行：同身份复取本来只是把粗粒度清单对齐一拍，失败就把屏上已有的行清掉
+      // 等于自己制造一次空栏——而这正是这条路径要避免的观感。有行就照常挂着（错误只
+      // 进控制台与下面的重试闸）；一行都没有（首拉失败）才记 error，让上层按失败处置。
+      const kept = terminalRailHistory.endpoint === endpoint && Array.isArray(terminalRailHistory.sessions)
+        ? terminalRailHistory.sessions
+        : [];
+      terminalRailHistory = {
+        endpoint,
+        sessions: kept,
+        fetchedAt: Date.now(),
+        error: kept.length ? null : error,
+        // 短退避：失败不能死等 TTL（左栏没有手动刷新入口，半个空栏只能靠下次进页），
+        // 也不能按秒重试（那是另一种骚扰）。
+        retryAt: Date.now() + TERMINAL_RAIL_HISTORY_RETRY_MS,
+      };
       if (manual) toast(panelError(error, "会话列表加载失败"), true);
     } finally {
       terminalRailFetchInFlight = false;

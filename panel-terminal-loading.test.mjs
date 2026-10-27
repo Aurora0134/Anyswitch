@@ -33,7 +33,9 @@ function makeClock() {
   let seq = 0;
   const frames = [];
   const timers = [];
+  const stats = { framesFlushed: 0, timersFired: 0 };
   return {
+    stats,
     requestAnimationFrame(fn) { const id = ++seq; frames.push({ id, fn }); return id; },
     cancelAnimationFrame(id) {
       const at = frames.findIndex((f) => f.id === id);
@@ -48,7 +50,7 @@ function makeClock() {
     flushFrames() {
       for (let i = 0; i < 20 && frames.length; i += 1) {
         const batch = frames.splice(0, frames.length);
-        for (const f of batch) f.fn(0);
+        for (const f of batch) { stats.framesFlushed += 1; f.fn(0); }
       }
     },
     // 冲到静默：帧与定时器交替推进，直到两边都空
@@ -57,7 +59,7 @@ function makeClock() {
         if (!frames.length && !timers.length) return;
         this.flushFrames();
         const batch = timers.splice(0, timers.length);
-        for (const t of batch) t.fn();
+        for (const t of batch) { stats.timersFired += 1; t.fn(); }
       }
     },
     pendingFrames: () => frames.length,
@@ -76,12 +78,22 @@ function railTtl() {
   return new Function(`${decl}\nreturn TERMINAL_RAIL_HISTORY_TTL_MS;`)();
 }
 
+// 失败后的短退避同样从真身取值——测试不另抄常数。
+function retryMs() {
+  const decl = panelJs.match(/const TERMINAL_RAIL_HISTORY_RETRY_MS = [^;]+;/)?.[0];
+  assert.ok(decl, "TERMINAL_RAIL_HISTORY_RETRY_MS 在 panel.js 里");
+  return new Function(`${decl}\nreturn TERMINAL_RAIL_HISTORY_RETRY_MS;`)();
+}
+
 // 真跑 enterTerminalRail / scheduleTerminalRailHistoryFetch / terminalRailHistoryFresh /
 // syncTerminalRailHistory / refreshTerminalRailHistory 五个真身，只把网络面（api）与
 // 渲染面替成桩：断言落在「发了几条请求、什么时候发」而不是任何墙钟。
 function makeRailEnv({ history, agentId = "ep-1", view = "terminal", apiImpl } = {}) {
   const clock = makeClock();
   const seen = { api: [], rail: 0, historyRender: [], toast: [] };
+  // 可注入的「现在」：退避与 TTL 都是时间闸，测试要么等墙钟（禁止）要么把时钟捏在手里。
+  let virtualNow = Date.now();
+  const DateStub = { now: () => virtualNow };
   // renderTerminalRail 在真身里会调 syncTerminalRailHistory（9325-9326），桩照此接线，
   // 否则「进页 → 渲一帧 → 判身份」这条链在测试里是断的。工厂建好后再把 sync 填进来。
   const railHook = { sync: null };
@@ -91,7 +103,7 @@ function makeRailEnv({ history, agentId = "ep-1", view = "terminal", apiImpl } =
     "terminalRailSessionMap", "renderTerminalRail", "renderTerminalRailHistory",
     "closeTerminalRailSearch", "loadTerminalRailRemovedAt", "loadTerminalRailPrefs",
     "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout",
-    "TERMINAL_RAIL_HISTORY_TTL_MS",
+    "TERMINAL_RAIL_HISTORY_TTL_MS", "TERMINAL_RAIL_HISTORY_RETRY_MS", "Date",
     `
     let terminalRailHistory = ${JSON.stringify({ endpoint: "", sessions: [], fetchedAt: 0, error: null, ...history })};
     let terminalRailFetchQueued = false;
@@ -131,10 +143,12 @@ function makeRailEnv({ history, agentId = "ep-1", view = "terminal", apiImpl } =
     () => {},
     () => Promise.resolve(),
     clock.requestAnimationFrame, clock.cancelAnimationFrame, clock.setTimeout, clock.clearTimeout,
-    railTtl(),
+    railTtl(), retryMs(), DateStub,
   );
   env.seen = seen;
   env.clock = clock;
+  env.now = () => virtualNow;
+  env.setNow = (t) => { virtualNow = t; };
   railHook.sync = env.sync;
   return env;
 }
@@ -218,9 +232,9 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
     assert.deepEqual(env.seen.api, [], "不在终端页就不发请求");
   });
 
-  it("真跑：补拉失败不阻断画面、不弹提示（静默留在 TTL 内）", async () => {
+  it("真跑：补拉失败不清行、不弹提示，并按短退避（不是 TTL、不是每秒）允许重试", async () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-1", sessions: [{ id: "a" }], fetchedAt: Date.now() - railTtl() - 1000, error: null },
+      history: { endpoint: "ep-1", sessions: [{ id: "a" }, { id: "b" }], fetchedAt: Date.now() - railTtl() - 1000, error: null },
       apiImpl: () => Promise.reject(new Error("HTTP 500")),
     });
     env.enterTerminalRail();
@@ -229,13 +243,35 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
     assert.deepEqual(env.seen.toast, [], "背景补拉失败不弹任何提示");
     assert.equal(env.seen.rail >= 2, true, "失败也补渲一帧，画面不被阻断");
     const after = env.snapshot();
-    assert.ok(after.error, "失败态记在缓存上");
-    assert.ok(after.fetchedAt > 0, "失败也记时间戳——避免每秒轮询变成每秒重试");
-    // TTL 内再进一次页：不再发请求（失败不会变成重试风暴）
+    assert.equal(after.sessions.length, 2, "失败不清屏上已有的行");
+    assert.equal(after.error, null, "有行在手就不落失败态（那份行仍是事实，只是旧）");
+    assert.ok(after.retryAt > Date.now(), "失败记下重试闸");
+    // 重试闸立到：立刻再进页也不发（不是每秒重试）
     env.enterTerminalRail();
     env.clock.flushAll();
     await Promise.resolve();
-    assert.equal(env.seen.api.length, 1, "TTL 内不重试");
+    assert.equal(env.seen.api.length, 1, "退避窗内不重试");
+    // 退避到期：下一个自然触发点（进页）照常重取——不是死等 30s TTL
+    env.setNow(env.now() + retryMs() + 50);
+    env.enterTerminalRail();
+    env.clock.flushAll();
+    await Promise.resolve();
+    assert.equal(env.seen.api.length, 2, "退避到期后重取一次");
+    assert.ok(retryMs() < railTtl(), "短退避必须远小于 TTL");
+  });
+
+  it("真跑：首拉失败（一行都没有）才落失败态，且仍不弹提示", async () => {
+    const env = makeRailEnv({
+      history: { endpoint: "", sessions: [], fetchedAt: 0, error: null },
+      apiImpl: () => Promise.reject(new Error("HTTP 500")),
+    });
+    env.enterTerminalRail();
+    env.clock.flushAll();
+    await Promise.resolve();
+    const after = env.snapshot();
+    assert.equal(after.sessions.length, 0);
+    assert.ok(after.error, "没有旧行可留时如实记失败态");
+    assert.deepEqual(env.seen.toast, [], "仍然不弹提示");
   });
 });
 
@@ -283,10 +319,12 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
     let terminalStreamWrite = null;
     let terminalReplayFramePending = false;
     let terminalStaleScreen = null;
+    let terminalReplayEpoch = 0;
     ${staleConst}
     ${extractFn("closeTerminalStream")}
     ${extractFn("dropTerminalStaleScreen")}
     ${extractFn("terminalScreenHasContent")}
+    ${extractFn("terminalStaleScreenReady")}
     ${extractFn("watchTerminalStaleScreen")}
     ${extractFn("revealTerminalStaleScreen")}
     ${extractFn("parkTerminalScreen")}
@@ -301,6 +339,7 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
       instance: () => terminalXterm,
       bound: () => terminalBoundSessionId,
       pending: () => terminalReplayFramePending,
+      epoch: () => terminalReplayEpoch,
       openNext() {
         const term = nextTerminal();
         terminalXterm = term;
@@ -522,16 +561,60 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     w.clock.flushAll();
   });
 
-  it("真跑：回放帧是空的（空屏会话）也照样揭幕——不等兜底计时器", async () => {
+  it("真跑：空屏会话在「首帧回放那一拍」就揭幕——不是靠 2s 兜底", async () => {
     const w = makeTerminalWorld();
     const { term: termA } = await primeSession(w, terminalSession("A"));
+    const epochAtPark = w.world.epoch();
     w.world.parkTerminalScreen();
     await w.world.connectTerminalStream(terminalSession("B"));
+    assert.equal(w.world.epoch(), epochAtPark, "还没收到首帧：计数没动");
     w.sources[1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
+    // 空屏会话：回放帧是空串，缓冲区里永远没有字，判据 a 不成立
     w.sources[1].emit("data", JSON.stringify(""));
+    assert.equal(w.world.epoch(), epochAtPark + 1, "首帧回放那一拍记了数（同帧也算）");
     assert.equal(w.created[1].screenText, "", "新实例缓冲区里一个字都没有");
-    w.clock.flushAll();
-    assert.equal(termA.disposed, true, "空回放也算交代过了，垫片照撤");
+    // 关键：只推进「帧」，一个定时器都不跑。兜底计时器仍在册 ⇒ 揭幕不可能来自兜底。
+    assert.ok(w.clock.pendingTimers() >= 1, "兜底计时器在册");
+    assert.equal(termA.disposed, false, "帧推进之前垫片还在");
+    w.clock.flushFrames();
+    assert.equal(w.clock.stats.timersFired, 0, "全程没有跑过任何定时器（兜底从未参与）");
+    assert.equal(termA.disposed, true, "帧一到就揭幕");
+  });
+
+  it("判据本身：只有计数变了或真有字才算就绪（删掉计数比较这条必红）", () => {
+    const factory = new Function(
+      "requestAnimationFrame",
+      `
+      let terminalReplayEpoch = 0;
+      let terminalXterm = null;
+      ${extractFn("terminalScreenHasContent")}
+      ${extractFn("terminalStaleScreenReady")}
+      return {
+        ready: terminalStaleScreenReady,
+        setEpoch: (v) => { terminalReplayEpoch = v; },
+        setTerm: (t) => { terminalXterm = t; },
+      };
+      `
+    );
+    const api = factory(() => 0);
+    const blankTerm = {
+      rows: 4,
+      buffer: { active: { length: 4, viewportY: 0, getLine: () => ({ translateToString: () => "" }) } },
+    };
+    const filledTerm = {
+      rows: 4,
+      buffer: { active: { length: 4, viewportY: 0, getLine: (y) => ({ translateToString: () => (y === 0 ? "hello" : "") }) } },
+    };
+    const stale = { epochAtPark: 7 };
+    api.setTerm(blankTerm);
+    api.setEpoch(7);
+    assert.equal(api.ready(stale), false, "计数没动、屏上没字 → 未就绪");
+    assert.equal(api.ready(null), false, "没有垫片就不谈就绪");
+    api.setEpoch(8);
+    assert.equal(api.ready(stale), true, "首帧回放那一拍发生过 → 就绪（空屏会话的全部依据）");
+    api.setEpoch(7);
+    api.setTerm(filledTerm);
+    assert.equal(api.ready(stale), true, "计数没变但屏上有字 → 也就绪");
   });
 
   it("真跑：新画面迟迟不来时兜底撤垫片（不把旧画面永久留在屏上）", async () => {
