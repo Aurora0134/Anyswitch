@@ -1090,7 +1090,7 @@ test("⑨ 新码读得回旧格式（v1 整份文件）：逐字段恢复、尾�
     const index = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
     assert.equal(index.version, 2, "索引升到 v2");
     assert.deepEqual(index.sessions, ["legacy-session-1"], "索引只点名 id");
-    assert.deepEqual(index.theme, { dark: false, background: "#101010" }, "主题随索引保留");
+    assert.deepEqual(index.theme, { dark: false, background: "#101010", foreground: "", palette: null }, "主题随索引保留（v1 无前景/调色板，按未上报落档）");
     const record = JSON.parse(readFileSync(restored.sessionStatePath("legacy-session-1"), "utf8"));
     assert.deepEqual(record.buffer, legacyBuffer, "记录文件里的尾部与旧文件逐位相同");
   } finally {
@@ -2837,6 +2837,183 @@ test("主题状态随状态文件跨宿主重启保留：重启后第一问就�
     assert.deepEqual(spawned[0].writeLog, ["\x1b]11;rgb:f8f8/fafa/fcfc\x07"], "重启后底色不回落默认暗色");
     spawned[0].dataListener("\x1b[?996n");
     assert.deepEqual(spawned[0].writeLog.slice(-1), ["\x1b[?997;2n"], "重启后亮暗不回落默认暗色");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---- 完整颜色契约：宿主是 OSC 10 / 11 / 4 颜色询问的唯一应答者 ----
+// Pi 的 TUI 启动即发 OSC 10 + OSC 11 + 16×OSC 4 + DA1，并以「DA1 收齐、缺一即
+// 弃」消费应答：旧实现只认 OSC 11 与 DA1，前景色/调色板询问被转发给渲染器——
+// 后台页签没有挂 xterm 就永远无答，挂着的也要等一轮网络往返，而宿主的 DA1
+// 应答先到，询问方按「不完整」收场。宿主必须对全部颜色询问按序即答、DA1
+// 收尾，查询字节一个都不进转发流。
+const colorHex = (hex) => {
+  const [r, g, b] = [hex.slice(1, 3), hex.slice(3, 5), hex.slice(5, 7)].map((c) => c.repeat(2));
+  return `rgb:${r}/${g}/${b}`;
+};
+
+test("颜色询问扫描：OSC 10/OSC 4 查询认领并摘除，设色与其他 OSC 号原样放行", () => {
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b]10;?\x07").probes, ["foreground"], "OSC 10 BEL 形");
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b]10;?\x1b\\").probes, ["foreground"], "OSC 10 ST 形");
+  assert.equal(createTerminalQueryScanner().push("\x1b]10;?\x07").text, "", "询问字节不转发");
+
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b]4;7;?\x07").probes, [{ palette: 7 }], "OSC 4 带索引");
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b]4;12;?\x1b\\").probes, [{ palette: 12 }], "OSC 4 ST 形");
+  assert.equal(createTerminalQueryScanner().push("\x1b]4;7;?\x07").text, "", "询问字节不转发");
+
+  // 跨块：OSC 号、索引、终止符各拆一段都悬而不认领，拼齐即认领一次
+  const split = createTerminalQueryScanner();
+  const head = split.push("x\x1b]4;1");
+  assert.deepEqual(head.probes, [], "前半段悬而不认领");
+  assert.equal(head.text, "x", "可见字节照常转发");
+  const joined = split.push("2;?\x07");
+  assert.deepEqual(joined.probes, [{ palette: 12 }], "拼齐认领一次");
+  assert.equal(joined.text, "", "询问字节不转发");
+
+  const splitFg = createTerminalQueryScanner();
+  assert.deepEqual(splitFg.push("\x1b]1").probes, [], "OSC 号没拼齐先悬着");
+  assert.deepEqual(splitFg.push("0;?\x07").probes, ["foreground"], "拼齐认领");
+
+  // OSC 4 设色（agent 改调色板）不是询问：字节必须原样交给渲染器应用
+  const set = createTerminalQueryScanner();
+  const passed = set.push("\x1b]4;1;#ff5500\x07");
+  assert.deepEqual(passed.probes, [], "设色不认领");
+  assert.equal(passed.text, "\x1b]4;1;#ff5500\x07", "设色字节必须转发");
+
+  // 其他 OSC 号（8 超链接、12 光标色）照旧放行
+  const other = createTerminalQueryScanner();
+  const untouched = other.push("\x1b]8;;http://x\x07link\x1b]8;;\x07\x1b]12;?\x07");
+  assert.deepEqual(untouched.probes, [], "非颜色询问零认领");
+  assert.equal(untouched.text, "\x1b]8;;http://x\x07link\x1b]8;;\x07\x1b]12;?\x07", "非颜色 OSC 原样放行");
+
+  // 老回放里的 OSC 10/4 询问同样要摘掉：宿主换代重挂渲染器时不得让它再答一遍
+  // （设色字节是内容，保留）
+  assert.equal(
+    stripTerminalReplyProbes("a\x1b]10;?\x07b\x1b]4;3;?\x1b\\c\x1b]4;3;#00ff00\x07"),
+    "abc\x1b]4;3;#00ff00\x07",
+    "回放剥离问询、保留设色",
+  );
+});
+
+test("完整颜色契约：Pi 形整串（OSC10+OSC11+16×OSC4+DA1）逐条按序应答，DA1 收尾且零转发", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-color-full-`);
+  const spawned = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => { const pty = new FakePty(); spawned.push(pty); return pty; } },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    // 面板先上报真值：亮色 + 前景 + 全 16 色调色板
+    const palette = ["#1f2937", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#d1d5db",
+      "#6b7280", "#ef4444", "#22c55e", "#d97706", "#3b82f6", "#a855f7", "#0891b2", "#111827"];
+    const reported = await fetch(url("/terminal/theme"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ dark: false, background: "#f8fafc", foreground: "#1e293b", palette }),
+    });
+    assert.equal(reported.status, 200, "前景+调色板随亮暗一起入档");
+
+    const created = await (await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ label: "pi 形", cwd: root, shell: "powershell" }),
+    })).json();
+    const pty = spawned[0];
+    pty.dataListener("\x1b]10;?\x07\x1b]11;?\x07" + palette.map((_, i) => `\x1b]4;${i};?\x07`).join("") + "\x1b[c");
+    assert.deepEqual(pty.writeLog, [
+      `\x1b]10;${colorHex("#1e293b")}\x07`,
+      `\x1b]11;${colorHex("#f8fafc")}\x07`,
+      ...palette.map((hex, i) => `\x1b]4;${i};${colorHex(hex)}\x07`),
+      "\x1b[?1;2c",
+    ], "逐条按序应答，DA1 收尾");
+    const replayed = host.sessions.get(created.id).buffer.join("");
+    assert.ok(!replayed.includes("\x1b]10;?") && !replayed.includes("\x1b]11;?")
+      && !replayed.includes("\x1b]4;0;?") && !replayed.includes("\x1b]4;15;?") && !replayed.includes("\x1b[c"),
+      "询问字节零转发——渲染器不可能再答出第二份");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("颜色兜底与扩展色：未上报按模式兜底，16-255 按确定性表答，设色照常转发", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-color-fallback-`);
+  const spawned = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => { const pty = new FakePty(); spawned.push(pty); return pty; } },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await (await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ label: "兜底", cwd: root, shell: "powershell" }),
+    })).json();
+    const pty = spawned[0];
+    const last = () => pty.writeLog[pty.writeLog.length - 1];
+    // 未上报过：暗色默认——前景取面板暗态兜底，调色板取 xterm 内核默认
+    pty.dataListener("\x1b]10;?\x07");
+    assert.equal(last(), `\x1b]10;${colorHex("#d5e2f4")}\x07`, "前景按暗色兜底");
+    pty.dataListener("\x1b]4;0;?\x07");
+    assert.equal(last(), `\x1b]4;0;${colorHex("#2e3436")}\x07`, "调色板按暗色兜底");
+    pty.dataListener("\x1b]4;15;?\x07");
+    assert.equal(last(), `\x1b]4;15;${colorHex("#eeeeec")}\x07`, "亮白兜底");
+    // 扩展位按 xterm 确定性表：196＝纯红、232/255＝灰阶两端
+    pty.dataListener("\x1b]4;196;?\x07");
+    assert.equal(last(), `\x1b]4;196;${colorHex("#ff0000")}\x07`, "216 立方");
+    pty.dataListener("\x1b]4;232;?\x07");
+    assert.equal(last(), `\x1b]4;232;${colorHex("#080808")}\x07`, "灰阶起点");
+    pty.dataListener("\x1b]4;255;?\x07");
+    assert.equal(last(), `\x1b]4;255;${colorHex("#eeeeee")}\x07`, "灰阶终点");
+    // 设色不是询问：字节进转发流交给渲染器
+    pty.dataListener("\x1b]4;1;#ff5500\x07");
+    assert.ok(host.sessions.get(created.id).buffer.join("").includes("\x1b]4;1;#ff5500\x07"), "设色字节必须转发");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("主题上报扩展：foreground/palette 非法值 400，入档值跨宿主重启后第一问即答", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-color-restore-`);
+  const spawned = [];
+  const boot = () => createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => { const pty = new FakePty(); spawned.push(pty); return pty; } },
+    logger: { warn() {} },
+  });
+  const setTheme = async (host, port, body) => (await fetch(`http://127.0.0.1:${port}/terminal/theme`, {
+    method: "POST", headers: headers(host), body: JSON.stringify(body),
+  })).status;
+  let host = boot();
+  let port = await listen(host);
+  try {
+    assert.equal(await setTheme(host, port, { dark: false, foreground: "teal" }), 400, "非法前景色拒收");
+    assert.equal(await setTheme(host, port, { dark: false, palette: ["#12345"] }), 400, "非六位十六进制拒收");
+    assert.equal(await setTheme(host, port, { dark: false, palette: "nope" }), 400, "调色板必须是数组");
+    assert.equal(await setTheme(host, port, {
+      dark: false, background: "#f8fafc", foreground: "#1e293b",
+      palette: ["#1f2937", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#d1d5db",
+        "#6b7280", "#ef4444", "#22c55e", "#d97706", "#3b82f6", "#a855f7", "#0891b2", "#111827"],
+    }), 200, "全字段落档");
+    await host.close();
+
+    // 新一代宿主：面板还没补报，agent 的第一问就要拿到上一代记下的真值
+    host = boot();
+    port = await listen(host);
+    const created = await (await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+      method: "POST", headers: headers(host), body: JSON.stringify({ label: "重启后", cwd: root, shell: "powershell" }),
+    })).json();
+    const pty = spawned[spawned.length - 1];
+    pty.dataListener("\x1b]10;?\x07");
+    assert.equal(pty.writeLog[0], `\x1b]10;${colorHex("#1e293b")}\x07`, "重启后前景不回落兜底");
+    pty.dataListener("\x1b]4;6;?\x07");
+    assert.equal(pty.writeLog[1], `\x1b]4;6;${colorHex("#0e7490")}\x07`, "重启后调色板不回落兜底");
+    pty.dataListener("\x1b]11;?\x07");
+    assert.equal(pty.writeLog[2], `\x1b]11;${colorHex("#f8fafc")}\x07`, "重启后底色不回落兜底");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });

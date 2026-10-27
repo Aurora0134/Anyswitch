@@ -215,7 +215,9 @@ const REPLY_PROBE_PATTERN = new RegExp([
   String.raw`\x1b\[0?c`, // DA1: ESC[c / ESC[0c
   String.raw`\x1b\[>0?c`, // DA2: ESC[>c / ESC[>0c
   String.raw`\x1b\[=0?c`, // DA3: ESC[=c
+  String.raw`\x1b\]10;\?(?:\x07|\x1b\\)`, // OSC 10 foreground query
   String.raw`\x1b\]11;\?(?:\x07|\x1b\\)`, // OSC 11 background query
+  String.raw`\x1b\]4;\d+;\?(?:\x07|\x1b\\)`, // OSC 4 palette query（设色形不含 ;? 尾，不受影响）
   String.raw`\x1b\[\?\d+(?:;\d+)*\$p`, // DECRQM private: ESC[?N$p
   String.raw`\x1b\[\d+(?:;\d+)*\$p`, // DECRQM ANSI: ESC[N$p
   String.raw`\x1b\[(?:5|6)n`, // DSR / cursor position report: ESC[5n / ESC[6n
@@ -231,45 +233,94 @@ export function stripTerminalReplyProbes(text) {
   return String(text).replace(REPLY_PROBE_PATTERN, "");
 }
 
-// ---- Terminal interrogation: color scheme, background, device attributes ----
-// A TUI asks the terminal two things before it can paint: "are you dark or
-// light?" (kimi-code's "Auto (match terminal)") and "what is your background
-// color?" (kimi-code and claude code both turn an incoming theme report into a
-// fresh background query). xterm.js answers OSC 11 and DA1 on its own, but only
-// for the session a browser column is attached to — a session in a background
-// tab, or one that asks before its column attaches, waits forever. Every PTY
-// byte passes through this host whatever is on screen, so the host answers and
-// drops the query from the forwarded stream: exactly one answer must exist,
-// because a second unmatched reply lands in the CLI as unhandled input.
+// ---- Terminal interrogation: color scheme, colors, device attributes ----
+// A TUI asks the terminal before it can paint: "are you dark or light?"
+// (kimi-code's "Auto (match terminal)") and the full color set — foreground
+// (OSC 10), background (OSC 11), palette entries (OSC 4). kimi-code and
+// claude-code turn an incoming theme report into a fresh background query;
+// pi's TUI sends OSC 10 + OSC 11 + sixteen OSC 4 queries and consumes the
+// replies in DA1 order, keeping the palette only when all sixteen answers
+// arrived before DA1. xterm.js answers these on its own, but only for the
+// session a browser column is attached to — a session in a background tab, or
+// one that asks before its column attaches, waits forever, and an answer that
+// lands after the host's DA1 is worse than none. Every PTY byte passes through
+// this host whatever is on screen, so the host answers every interrogation in
+// query order (DA1 last when it is asked last) and drops the query from the
+// forwarded stream: exactly one answer must exist, because a second unmatched
+// reply lands in the CLI as unhandled input.
 //
-//   CSI ? 996 n        -> CSI ? 997 ; 1 n / ; 2 n   dark / light report
-//   CSI ? 2031 h | l   -> subscribe / unsubscribe  theme-change pushes (997)
-//   OSC 11 ; ? BEL/ST  -> OSC 11 ; rgb:RRRR/GGGG/BBBB BEL
-//   CSI c / CSI 0 c    -> CSI ? 1 ; 2 c            primary device attributes
+//   CSI ? 996 n          -> CSI ? 997 ; 1 n / ; 2 n  dark / light report
+//   CSI ? 2031 h | l     -> subscribe / unsubscribe  theme-change pushes (997)
+//   OSC 10 ; ? BEL/ST    -> OSC 10 ; rgb:RRRR/GGGG/BBBB BEL
+//   OSC 11 ; ? BEL/ST    -> OSC 11 ; rgb:RRRR/GGGG/BBBB BEL
+//   OSC 4 ; n ; ? BEL/ST -> OSC 4 ; n ; rgb:RRRR/GGGG/BBBB BEL  (n = 0..255)
+//   CSI c / CSI 0 c      -> CSI ? 1 ; 2 c             primary device attributes
 //
 // DA1 looks unrelated but is not: claude code parks its background query behind
 // a DA1 sentinel and keeps a single in-flight guard, so one unanswered sentinel
-// wedges its theme watcher for the rest of the process lifetime.
+// wedges its theme watcher for the rest of the process lifetime; pi completes
+// its whole color interrogation on DA1, so every color query seen before that
+// sentinel must already have its answer in the PTY.
 const THEME_QUERY = "\x1b[?996n";
 const THEME_NOTIFY_ON = "\x1b[?2031h";
 const THEME_NOTIFY_OFF = "\x1b[?2031l";
-const THEME_BACKGROUND_QUERY = "\x1b]11;?";
 const DA1_QUERY_ZERO = "\x1b[0c";
 const DA1_QUERY = "\x1b[c";
 const DA1_REPORT = "\x1b[?1;2c";
 const themeReport = (dark) => `\x1b[?997;${dark ? 1 : 2}n`;
-// 底色由面板上报（--terminal-bg 的现值）。未上报时按亮暗取兜底色：应答永远
-// 存在，agent 不会因为宿主还没收到上报就卡在超时里。
+// 颜色真值（底色/前景/0-15 调色板）由面板上报，与渲染器实际生效值同源；未上
+// 报时按亮暗取兜底色——应答永远存在，agent 不会因为宿主还没收到上报就卡在超
+// 时里。兜底取各模式「默认皮肤」现值：底色＝panel.js --terminal-bg 的兜底、
+// 暗色前景＝pick("--terminal-fg") 的兜底、亮色前景＝aurora 亮肤现值、暗色
+// 调色板＝xterm 内核默认（面板暗态不覆写 ANSI）、亮色调色板＝panel.js
+// TERMINAL_ANSI_LIGHT（亮态 xterm 同款）。16-255 号不由面板管，恒为 xterm 的
+// 确定性生成表（216 立方 + 24 灰阶）。
 const BACKGROUND_FALLBACK_DARK = "#0b1220";
 const BACKGROUND_FALLBACK_LIGHT = "#f8fafc";
+const FOREGROUND_FALLBACK_DARK = "#d5e2f4";
+const FOREGROUND_FALLBACK_LIGHT = "#1e293b";
+const PALETTE_FALLBACK_DARK = [
+  "#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf",
+  "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec",
+];
+const PALETTE_FALLBACK_LIGHT = [
+  "#1f2937", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#d1d5db",
+  "#6b7280", "#ef4444", "#22c55e", "#d97706", "#3b82f6", "#a855f7", "#0891b2", "#111827",
+];
 const BACKGROUND_HEX_PATTERN = /^#[0-9a-f]{6}$/;
 function effectiveBackground(dark, background) {
   if (typeof background === "string" && BACKGROUND_HEX_PATTERN.test(background)) return background;
   return dark ? BACKGROUND_FALLBACK_DARK : BACKGROUND_FALLBACK_LIGHT;
 }
-function themeBackgroundReport(hex) {
+function effectiveForeground(dark, foreground) {
+  if (typeof foreground === "string" && BACKGROUND_HEX_PATTERN.test(foreground)) return foreground;
+  return dark ? FOREGROUND_FALLBACK_DARK : FOREGROUND_FALLBACK_LIGHT;
+}
+// 槽位 0-15 走上报值（缺格按兜底补齐），16-255 恒走 xterm 确定性表。
+function effectivePaletteColor(dark, palette, slot) {
+  if (slot >= 16) return extendedAnsiColor(slot);
+  const reported = Array.isArray(palette) ? palette[slot] : undefined;
+  if (typeof reported === "string" && BACKGROUND_HEX_PATTERN.test(reported)) return reported;
+  return (dark ? PALETTE_FALLBACK_DARK : PALETTE_FALLBACK_LIGHT)[slot];
+}
+// xterm 内核 DEFAULT_ANSI_COLORS 的 16-255 生成规则：216 色（6×6×6 立方）＋
+// 24 级灰。面板的 theme 只覆写 0-15，扩展位恒是这张表，宿主照表应答即与渲
+// 染器同色。
+function extendedAnsiColor(slot) {
+  const toHex = (value) => value.toString(16).padStart(2, "0");
+  if (slot >= 232) {
+    const gray = 8 + (slot - 232) * 10;
+    return `#${toHex(gray)}${toHex(gray)}${toHex(gray)}`;
+  }
+  const level = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+  const cube = slot - 16;
+  return `#${toHex(level[Math.floor(cube / 36)])}${toHex(level[Math.floor(cube / 6) % 6])}${toHex(level[cube % 6])}`;
+}
+// OSC 颜色应答共用一形：OSC <kind> ; rgb:RRRR/GGGG/BBBB BEL，通道字节重复一
+// 次（xterm 的 16bit/通道应答形）。
+function themeColorReport(kind, hex) {
   const channel = (start) => hex.slice(start, start + 2).repeat(2);
-  return `\x1b]11;rgb:${channel(1)}/${channel(3)}/${channel(5)}\x07`;
+  return `\x1b]${kind};rgb:${channel(1)}/${channel(3)}/${channel(5)}\x07`;
 }
 
 // Stream-safe scanner: every form above is short and can straddle PTY chunks,
@@ -286,23 +337,68 @@ export function createTerminalQueryScanner() {
     { text: DA1_QUERY_ZERO, probe: "deviceAttributes" },
     { text: DA1_QUERY, probe: "deviceAttributes" },
   ];
+  // OSC 颜色询问（10 / 11 / 4;idx 的查询形）与设色（4;idx;spec）同前缀不同身：
+  // 只有 `;?` 收尾 + BEL/ST 的查询形归宿主应答，设色字节必须放行给渲染器应
+  // 用。解析按序推进：走到块尾仍无矛盾按 "pending" 悬住（下一块拼齐再认领），
+  // 撞上别的字符立即作废放行。
+  function terminatorAt(hay, p, index, probe) {
+    if (p >= hay.length) return "pending";
+    if (hay[p] === "\x07") return { length: p + 1 - index, probe };
+    if (hay[p] === "\x1b") {
+      if (p + 1 >= hay.length) return "pending";
+      if (hay[p + 1] !== "\\") return null;
+      return { length: p + 2 - index, probe };
+    }
+    return null;
+  }
+  function matchColorQuery(hay, index) {
+    if (hay[index + 1] !== "]") return null;
+    let p = index + 2;
+    const digitsStart = p;
+    while (p < hay.length && hay[p] >= "0" && hay[p] <= "9") p += 1;
+    const digits = hay.slice(digitsStart, p);
+    if (p === digitsStart) return p === hay.length ? "pending" : null;
+    let kind;
+    if (digits === "10") kind = "foreground";
+    else if (digits === "11") kind = "background";
+    else if (digits === "4") kind = "palette";
+    else if (p === hay.length && ("10".startsWith(digits) || "11".startsWith(digits))) return "pending";
+    else return null;
+    const step = (ch) => {
+      if (p >= hay.length) return "pending";
+      if (hay[p] !== ch) return null;
+      p += 1;
+      return true;
+    };
+    if (kind !== "palette") {
+      let ok = step(";");
+      if (ok !== true) return ok;
+      ok = step("?");
+      if (ok !== true) return ok;
+      return terminatorAt(hay, p, index, kind);
+    }
+    // OSC 4：`;` <索引> `;?` —— 索引 0-255，越界（数字只增不缩）不是询问形
+    let ok = step(";");
+    if (ok !== true) return ok;
+    const slotStart = p;
+    while (p < hay.length && hay[p] >= "0" && hay[p] <= "9") p += 1;
+    if (p === slotStart) return p === hay.length ? "pending" : null;
+    const slot = Number(hay.slice(slotStart, p));
+    if (slot > 255) return null;
+    if (p === hay.length) return "pending";
+    ok = step(";");
+    if (ok !== true) return ok;
+    ok = step("?");
+    if (ok !== true) return ok;
+    return terminatorAt(hay, p, index, { palette: slot });
+  }
   const HOLD_MAX = 9;
   // 只在 ESC 处试探，其余字符一路跳过——大块输出（一次 resume 六七十 KB）里
   // 逐字符 slice 会退化成二次拷贝，这里必须按索引走。
   function matchAt(hay, index) {
-    if (hay.startsWith(THEME_BACKGROUND_QUERY, index)) {
-      const prefixLength = THEME_BACKGROUND_QUERY.length;
-      const rest = hay.length - index;
-      const after = index + prefixLength;
-      if (rest <= prefixLength) return "pending";
-      const terminator = hay[after];
-      if (terminator === "\x07") return { length: prefixLength + 1, probe: "background" };
-      if (terminator === "\x1b") {
-        if (rest <= prefixLength + 1) return "pending";
-        return hay[after + 1] === "\\" ? { length: prefixLength + 2, probe: "background" } : null;
-      }
-      return null;
-    }
+    const color = matchColorQuery(hay, index);
+    if (color === "pending") return "pending";
+    if (color) return color;
     for (const form of QUERY_FORMS) {
       if (hay.startsWith(form.text, index)) return { length: form.text.length, probe: form.probe };
     }
@@ -311,7 +407,6 @@ export function createTerminalQueryScanner() {
   function heldPrefixAt(hay, index) {
     if (hay.length - index >= HOLD_MAX) return false;
     const rest = hay.slice(index);
-    if (THEME_BACKGROUND_QUERY.startsWith(rest)) return true;
     return QUERY_FORMS.some((form) => form.text.startsWith(rest));
   }
   let tail = "";
@@ -570,12 +665,15 @@ export function createTerminalHost({
   const token = loadOrGenerateToken(dataRoot);
   let persistTimer = null;
   const coalesceWindowMs = Math.max(0, sseCoalesceWindowMs);
-  // 终端当前亮暗与底色：996n / OSC 11 的即问即答、997 扇出都按这里的值走。
-  // 面板 POST /terminal/theme 上报生效值；两者随状态文件落盘，宿主重启后接着
-  // 用（面板首连/重连也会补报一次，两条路互为兜底）。底色为空表示还没上报过，
-  // 应答时按亮暗取兜底色——见 effectiveBackground。
+  // 终端当前亮暗与颜色（底色/前景/0-15 调色板）：996n 与 OSC 10 / 11 / 4 的即
+  // 问即答、997 扇出都按这里的值走。面板 POST /terminal/theme 上报生效值，全
+  // 部随状态文件落盘，宿主重启后接着用（面板首连/重连也会补报一次，两条路互
+  // 为兜底）。颜色字段为空/null 表示还没上报过，应答时按亮暗取兜底色——见
+  // effectiveBackground / effectiveForeground / effectivePaletteColor。
   let terminalThemeDark = true;
   let terminalThemeBackground = "";
+  let terminalThemeForeground = "";
+  let terminalThemePalette = null;
   // 关停闸：close() 一进来就置真，之后 emit 不再置脏（见 emit 里的注释）。
   // 它保证「close() 返回时盘上是整份状态」这句话在 PTY 仍在出字时也成立。
   let shuttingDown = false;
@@ -687,9 +785,14 @@ export function createTerminalHost({
   function indexRecord() {
     return {
       version: 2,
-      // 亮暗/底色随索引落盘：宿主重启后 agent 立刻发问也能得到真值，不必等面板
-      // 补报那一拍。
-      theme: { dark: terminalThemeDark, background: terminalThemeBackground },
+      // 亮暗/颜色随索引落盘：宿主重启后 agent 立刻发问也能得到真值，不必等面
+      // 板补报那一拍。
+      theme: {
+        dark: terminalThemeDark,
+        background: terminalThemeBackground,
+        foreground: terminalThemeForeground,
+        palette: terminalThemePalette,
+      },
       sessions: [...sessions.keys()],
     };
   }
@@ -1083,6 +1186,14 @@ export function createTerminalHost({
         if (typeof raw.theme.background === "string" && BACKGROUND_HEX_PATTERN.test(raw.theme.background)) {
           terminalThemeBackground = raw.theme.background;
         }
+        if (typeof raw.theme.foreground === "string" && BACKGROUND_HEX_PATTERN.test(raw.theme.foreground)) {
+          terminalThemeForeground = raw.theme.foreground;
+        }
+        if (Array.isArray(raw.theme.palette)) {
+          // 逐格校验、按位保留（null 格应答时按兜底补）：数组过滤会挪位。
+          terminalThemePalette = raw.theme.palette.map((color) =>
+            typeof color === "string" && BACKGROUND_HEX_PATTERN.test(color) ? color : null);
+        }
       }
       const { records, indexIds } = readPersistedRecords(raw);
       for (const item of records) {
@@ -1227,8 +1338,8 @@ export function createTerminalHost({
   }
 
   // 终端询问的应答侧（清单见文件头）：宿主是唯一应答者，浏览器渲染器只会看到
-  // 摘掉询问之后的字节流。任何一条主题询问都算「这条会话在意亮暗」，不只
-  // 2031h——claude code 从不订阅，它把收到的 997 当作「变了，我重问一次」，
+  // 摘掉询问之后的字节流。任何一条主题/颜色询问都算「这条会话在意亮暗」，不
+  // 只 2031h——claude code 从不订阅，它把收到的 997 当作「变了，我重问一次」，
   // 只按订阅扇出就永远通知不到它。2031l 是显式退订，仍然说话算数。
   function answerTerminalQuery(session, probe) {
     if (probe === "deviceAttributes") {
@@ -1242,7 +1353,12 @@ export function createTerminalHost({
     session.themeNotify = true;
     if (probe === "theme") writePty(session, themeReport(terminalThemeDark));
     else if (probe === "background") {
-      writePty(session, themeBackgroundReport(effectiveBackground(terminalThemeDark, terminalThemeBackground)));
+      writePty(session, themeColorReport("11", effectiveBackground(terminalThemeDark, terminalThemeBackground)));
+    } else if (probe === "foreground") {
+      writePty(session, themeColorReport("10", effectiveForeground(terminalThemeDark, terminalThemeForeground)));
+    } else if (probe && typeof probe === "object" && Number.isInteger(probe.palette)) {
+      writePty(session, themeColorReport(`4;${probe.palette}`,
+        effectivePaletteColor(terminalThemeDark, terminalThemePalette, probe.palette)));
     }
   }
 
@@ -1642,9 +1758,10 @@ export function createTerminalHost({
         await persistSession(session);
         return json(res, 201, snapshot(session));
       }
-      // 面板亮暗/底色上报：存下生效值（996n 与 OSC 11 的应答来源），深浅变化即
-      // 向所有在意主题的活会话扇出 997 报告。同值重报幂等不扇出。底色只换颜色
-      // 不改深浅时（换肤）静默更新——agent 的调色板按深浅走，重绘没有意义。
+      // 面板亮暗/颜色上报：存下生效值（996n 与 OSC 10 / 11 / 4 的应答来源），
+      // 深浅变化即向所有在意主题的活会话扇出 997 报告。同值重报幂等不扇出。
+      // 底色/前景/调色板只换值不改深浅时（换肤）静默更新——agent 的调色板按
+      // 深浅走，重绘没有意义；询问方下次来问自然拿到新值。
       if (url.pathname === "/terminal/theme" && req.method === "POST") {
         const body = await readBody(req);
         if (body.dark !== true && body.dark !== false) return json(res, 400, { error: "invalid_theme" });
@@ -1655,17 +1772,36 @@ export function createTerminalHost({
           }
           background = body.background;
         }
+        let foreground = terminalThemeForeground;
+        if (body.foreground !== undefined) {
+          if (typeof body.foreground !== "string" || !BACKGROUND_HEX_PATTERN.test(body.foreground)) {
+            return json(res, 400, { error: "invalid_foreground" });
+          }
+          foreground = body.foreground;
+        }
+        let palette = terminalThemePalette;
+        if (body.palette !== undefined) {
+          if (!Array.isArray(body.palette) || body.palette.length === 0 || body.palette.length > 16
+            || body.palette.some((color) => typeof color !== "string" || !BACKGROUND_HEX_PATTERN.test(color))) {
+            return json(res, 400, { error: "invalid_palette" });
+          }
+          palette = body.palette;
+        }
         const darkChanged = body.dark !== terminalThemeDark;
         const backgroundChanged = background !== terminalThemeBackground;
+        const foregroundChanged = foreground !== terminalThemeForeground;
+        const paletteChanged = JSON.stringify(palette) !== JSON.stringify(terminalThemePalette);
         terminalThemeDark = body.dark;
         terminalThemeBackground = background;
+        terminalThemeForeground = foreground;
+        terminalThemePalette = palette;
         if (darkChanged) {
           const report = themeReport(terminalThemeDark);
           for (const session of sessions.values()) {
             if (session.themeNotify) writePty(session, report);
           }
         }
-        if (darkChanged || backgroundChanged) {
+        if (darkChanged || backgroundChanged || foregroundChanged || paletteChanged) {
           // 主题住在索引里（几百字节），不牵动任何会话记录。
           markIndexDirty();
           schedulePersist();

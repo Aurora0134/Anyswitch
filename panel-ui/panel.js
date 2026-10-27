@@ -6053,6 +6053,17 @@ async function api(method, path, body) {
     brightBlack: "#6b7280", brightRed: "#ef4444", brightGreen: "#22c55e", brightYellow: "#d97706",
     brightBlue: "#3b82f6", brightMagenta: "#a855f7", brightCyan: "#0891b2", brightWhite: "#111827",
   };
+  // 暗态 0-15 调色板＝xterm 内核默认色（暗态不覆写 ANSI，沿用内核值）。上报给
+  // 宿主的调色板必须与渲染器实际生效色逐格一致，因此暗态就是这份默认表；xterm
+  // 升级换默认色时这里要同步。
+  const TERMINAL_ANSI_DARK = {
+    black: "#2e3436", red: "#cc0000", green: "#4e9a06", yellow: "#c4a000",
+    blue: "#3465a4", magenta: "#75507b", cyan: "#06989a", white: "#d3d7cf",
+    brightBlack: "#555753", brightRed: "#ef2929", brightGreen: "#8ae234", brightYellow: "#fce94f",
+    brightBlue: "#729fcf", brightMagenta: "#ad7fa8", brightCyan: "#34e2e2", brightWhite: "#eeeeec",
+  };
+  const TERMINAL_ANSI_KEYS = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
   function terminalXtermTheme() {
     const cs = getComputedStyle(document.documentElement);
     const pick = (name, fallback) => {
@@ -6068,28 +6079,37 @@ async function api(method, path, body) {
     if (cs.colorScheme !== "dark") Object.assign(theme, TERMINAL_ANSI_LIGHT);
     return theme;
   }
-  // 终端亮暗/底色上报（match terminal 契约的面板半边）：虚拟终端里的 agent
-  //（kimi 的 Auto (match terminal)、claude code 的同一档）靠宿主的 997 报告
-  // 感知亮暗变化，靠宿主回答「背景色是什么」决定用哪套调色板——两样的事实源
-  // 都在面板。setTheme/系统亮暗/皮肤重刷都会走到这里，值变了才上报，失败视同
-  // 未上报等下次重试。底色与终端屏/xterm 同源取 --terminal-bg，深浅没变只换肤
-  // 时也要重报：宿主按这个值回答背景色询问，答旧色等于答错。
+  // 终端亮暗/颜色上报（match terminal 契约的面板半边）：虚拟终端里的 agent
+  //（kimi 的 Auto (match terminal)、claude code 的同一档、pi 的整套颜色询问）靠
+  // 宿主的 997 报告感知亮暗变化，靠宿主回答「背景/前景/调色板是什么」决定用哪
+  // 套配色——事实源都在面板。setTheme/系统亮暗/皮肤重刷都会走到这里，值变了才
+  // 上报，失败视同未上报等下次重试。颜色与终端屏/xterm 同源（--terminal-* 与
+  // TERMINAL_ANSI_*），深浅没变只换肤时也要重报：宿主按这个值回答颜色询问，
+  // 答旧色等于答错。
   let terminalThemeReported = "";
-  function terminalBackgroundHex(dark) {
-    const raw = getComputedStyle(document.documentElement).getPropertyValue("--terminal-bg").trim().toLowerCase();
+  function terminalCssHex(name, fallback) {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim().toLowerCase();
     const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(raw);
-    if (!hex) return dark ? "#0b1220" : "#f8fafc";
+    if (!hex) return fallback;
     const value = hex[1];
     if (value.length === 6) return `#${value}`;
     return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`;
   }
+  function terminalBackgroundHex(dark) {
+    return terminalCssHex("--terminal-bg", dark ? "#0b1220" : "#f8fafc");
+  }
+  function terminalForegroundHex(dark) {
+    return terminalCssHex("--terminal-fg", dark ? "#d5e2f4" : "#1e293b");
+  }
   function reportTerminalThemeToBackend(force = false) {
     const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
     const background = terminalBackgroundHex(dark);
-    const key = `${dark ? "dark" : "light"}|${background}`;
+    const foreground = terminalForegroundHex(dark);
+    const palette = TERMINAL_ANSI_KEYS.map((key) => (dark ? TERMINAL_ANSI_DARK : TERMINAL_ANSI_LIGHT)[key]);
+    const key = `${dark ? "dark" : "light"}|${background}|${foreground}|${palette.join(",")}`;
     if (!force && terminalThemeReported === key) return;
     terminalThemeReported = key;
-    api("POST", "/api/terminal/theme", { dark, background }).catch(() => {
+    api("POST", "/api/terminal/theme", { dark, background, foreground, palette }).catch(() => {
       terminalThemeReported = "";
     });
   }

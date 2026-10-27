@@ -14303,23 +14303,34 @@ describe("panel v2 栏收展：终端纵向抖动 + 收展钮图标反转 + 收�
   });
 });
 
-// 终端亮暗/底色上报是 agent「match terminal」的面板半边：宿主按这个值回答
-// 996n / OSC 11，agent 靠它选调色板。深浅变了要报，深浅不变只换肤（底色变）
-// 也要报——宿主按上报值回答背景色，答旧色等于答错。
-describe("终端亮暗/底色上报（agent match terminal 的面板半边）", () => {
+// 终端亮暗/颜色上报是 agent「match terminal」的面板半边：宿主按这个值回答
+// 996n / OSC 10 / 11 / 4，agent 靠它选配色。深浅变了要报，深浅不变只换肤（底
+// 色变）也要报——宿主按上报值回答颜色询问，答旧色等于答错。调色板必须与
+// xterm 渲染实际生效值同源：亮态 TERMINAL_ANSI_LIGHT、暗态内核默认表。
+describe("终端亮暗/颜色上报（agent match terminal 的面板半边）", () => {
+  const DARK_PALETTE = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf",
+    "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
+  const LIGHT_PALETTE = ["#1f2937", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#d1d5db",
+    "#6b7280", "#ef4444", "#22c55e", "#d97706", "#3b82f6", "#a855f7", "#0891b2", "#111827"];
   function extractFn(name) {
     const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
     assert.ok(src, `${name} found in panel.js`);
     return src;
   }
+  function extractConst(name) {
+    const src = panelJs.match(new RegExp(`const ${name} = (?:\\{[\\s\\S]*?\\}|\\[[\\s\\S]*?\\]);`))?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  }
   function sandbox() {
     const posts = [];
-    const style = { colorScheme: "dark", background: "#0b1220" };
+    const style = { colorScheme: "dark", background: "#0b1220", foreground: "#d5e2f4" };
     const context = {
       document: { documentElement: {} },
       getComputedStyle: () => ({
         colorScheme: style.colorScheme,
-        getPropertyValue: (name) => (name === "--terminal-bg" ? style.background : ""),
+        getPropertyValue: (name) => (name === "--terminal-bg" ? style.background
+          : name === "--terminal-fg" ? style.foreground : ""),
       }),
       // body 从 vm 域出来，JSON 往返一次回到本域再比对（跨原型 deepEqual 会假红）
       api: (method, path, body) => {
@@ -14329,7 +14340,12 @@ describe("终端亮暗/底色上报（agent match terminal 的面板半边）", 
     };
     const run = vm.runInNewContext(
       `(() => { let terminalThemeReported = "";
+        ${extractConst("TERMINAL_ANSI_LIGHT")}
+        ${extractConst("TERMINAL_ANSI_DARK")}
+        ${extractConst("TERMINAL_ANSI_KEYS")}
+        ${extractFn("terminalCssHex")}
         ${extractFn("terminalBackgroundHex")}
+        ${extractFn("terminalForegroundHex")}
         ${extractFn("reportTerminalThemeToBackend")}
         return reportTerminalThemeToBackend; })()`,
       context,
@@ -14337,25 +14353,27 @@ describe("终端亮暗/底色上报（agent match terminal 的面板半边）", 
     return { run, posts, style };
   }
 
-  it("首次上报带亮暗与真实底色，同值重复调用不重复上报", () => {
+  it("首次上报带亮暗与全套颜色（底色/前景/调色板），同值重复调用不重复上报", () => {
     const { run, posts } = sandbox();
     run();
-    assert.deepEqual(posts, [{ method: "POST", path: "/api/terminal/theme", body: { dark: true, background: "#0b1220" } }]);
+    assert.deepEqual(posts, [{ method: "POST", path: "/api/terminal/theme",
+      body: { dark: true, background: "#0b1220", foreground: "#d5e2f4", palette: DARK_PALETTE } }]);
     run();
     assert.equal(posts.length, 1, "同值不重复上报");
   });
 
-  it("深浅不变只换肤（底色变）也要重报：宿主按上报值回答背景色询问", () => {
+  it("深浅不变只换肤（底色变）也要重报：宿主按上报值回答颜色询问", () => {
     const { run, posts, style } = sandbox();
     run();
     style.background = "#050e1a";
     run();
     assert.equal(posts.length, 2, "底色变化必须重报");
-    assert.deepEqual(posts[1].body, { dark: true, background: "#050e1a" });
+    assert.deepEqual(posts[1].body, { dark: true, background: "#050e1a", foreground: "#d5e2f4", palette: DARK_PALETTE });
     style.colorScheme = "light";
     style.background = "#eef7fb";
+    style.foreground = "#14313d";
     run();
-    assert.deepEqual(posts[2].body, { dark: false, background: "#eef7fb" });
+    assert.deepEqual(posts[2].body, { dark: false, background: "#eef7fb", foreground: "#14313d", palette: LIGHT_PALETTE });
   });
 
   it("force 口径无视去重（宿主重启后补报真值）", () => {
@@ -14365,14 +14383,18 @@ describe("终端亮暗/底色上报（agent match terminal 的面板半边）", 
     assert.equal(posts.length, 2);
   });
 
-  it("底色取三缩减写与非法值时都给出可解析的六位十六进制", () => {
+  it("底色/前景取三缩减写与非法值时都给出可解析的六位十六进制", () => {
     const { run, posts, style } = sandbox();
     style.background = "#abc";
+    style.foreground = "#246";
     run();
-    assert.equal(posts[0].body.background, "#aabbcc", "三位简写展开");
+    assert.equal(posts[0].body.background, "#aabbcc", "底色三位简写展开");
+    assert.equal(posts[0].body.foreground, "#224466", "前景三位简写展开");
     style.background = "oklch(0.7 0.1 200)";
+    style.foreground = "oklch(0.2 0.05 260)";
     style.colorScheme = "light";
     run(true);
-    assert.equal(posts[1].body.background, "#f8fafc", "不可解析时按亮暗取兜底色");
+    assert.equal(posts[1].body.background, "#f8fafc", "底色不可解析时按亮暗取兜底色");
+    assert.equal(posts[1].body.foreground, "#1e293b", "前景同样按亮暗兜底");
   });
 });
