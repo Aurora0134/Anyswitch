@@ -18712,6 +18712,21 @@ async function api(method, path, body) {
     if (key) logsExpanded.add(key);
   }
 
+  // 页码序列：≤9 页全列；更多则头 3 + 尾 3 + 当前±1，中间省并为 …（日志与会话两处同款）
+  function pagerPageNums(pages, cur) {
+    if (pages <= 9) return Array.from({ length: pages }, (_, i) => i + 1);
+    const keep = new Set([1, 2, 3, pages - 2, pages - 1, pages, cur - 1, cur, cur + 1]);
+    const nums = [];
+    let prevNum = 0;
+    for (let i = 1; i <= pages; i += 1) {
+      if (!keep.has(i)) continue;
+      if (prevNum && i - prevNum > 1) nums.push("…");
+      nums.push(i);
+      prevNum = i;
+    }
+    return nums;
+  }
+
   // 分页条：total=0 整条隐藏；页码 >9 页时头 3 + 尾 3 + 当前±1，中间 …
   function renderLogsPager(res) {
     const pager = $("logsPager");
@@ -18722,32 +18737,20 @@ async function api(method, path, body) {
     $("logsTotal").textContent = `共 ${total} 条`;
     const pages = Math.max(1, Math.ceil(total / logsState.pageSize));
     const cur = res.page;
-    const nums = [];
-    if (pages <= 9) {
-      for (let i = 1; i <= pages; i += 1) nums.push(i);
-    } else {
-      const keep = new Set([1, 2, 3, pages - 2, pages - 1, pages, cur - 1, cur, cur + 1]);
-      let prevNum = 0;
-      for (let i = 1; i <= pages; i += 1) {
-        if (!keep.has(i)) continue;
-        if (prevNum && i - prevNum > 1) nums.push("…");
-        nums.push(i);
-        prevNum = i;
-      }
-    }
+    const nums = pagerPageNums(pages, cur);
     const host = $("logsPages");
     host.textContent = "";
     for (const n of nums) {
       if (n === "…") {
         const dots = document.createElement("span");
-        dots.className = "logs-pages-ellipsis";
+        dots.className = "list-pages-ellipsis";
         dots.textContent = "…";
         host.appendChild(dots);
         continue;
       }
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "logs-page-btn" + (n === cur ? " active" : "");
+      btn.className = "list-page-btn" + (n === cur ? " active" : "");
       btn.textContent = String(n);
       btn.onclick = () => { if (logsState.page !== n) { logsState.page = n; loadLogs(); } };
       host.appendChild(btn);
@@ -18890,6 +18893,8 @@ async function api(method, path, body) {
     checked: new Set(),                // 批量已选会话 id
     deleting: false,                   // 删除进行中（遮罩 + 禁止再触发）
     listScrollTop: 0,                  // 离开视图时记下的列表滚动位，回页首铺兑现后清零
+    page: 1,                           // 当前页码（内存态，不持久化——与日志 tab 同口径）
+    pageSize: 20,                      // 每页行数（含组头）；档位与日志 tab 一致
   };
   let sessTimer = null;                // 60s 相对时间刷新定时器（enter/leave 管理）
   let sessMsgObserver = null;          // TOC 高亮用的 IntersectionObserver
@@ -18901,9 +18906,11 @@ async function api(method, path, body) {
   let sessDataRev = 0;                 // 会话数据版本：取数回来内容真有变化才自增
   let sessDataSig = "";                // 上一次取数的内容摘要，用来判断「真有变化」
   let sessRenderCursor = 0;            // 消息流分帧：下一条待建的下标
+  let sessPageCount = 1;               // 最近一次渲染的总页数（跳页输入框钳制用）
   const SESS_FOLD_LIMIT = 3000, SESS_FOLD_HEAD = 1500; // 超长消息折叠阈值与预览长度
   const SESS_RENDER_CHUNK = 120;       // 消息流每帧条数
   const SESS_LIST_CHUNK = 200;         // 列表每帧铺的行数
+  const SESS_PAGE_SIZES = [20, 50, 100]; // 每页行数档位（与日志 tab 的 LOG_PAGE_SIZES 同档）
   const SESS_TOC_MIN_TURNS = 2;        // 目录起显门槛：一两轮的会话不占栏
 
   /* ============================================================
@@ -18944,9 +18951,10 @@ async function api(method, path, body) {
       if (sessState.selectedId && !ids.has(sessState.selectedId)) sessState.selectedId = null;
     } catch (err) {
       if (seq !== sessListReqSeq) return;
+      // 失败不清手上已有的列表：点刷新重播骨架期间若清空，用户看到的是「骨架 → 空态」——
+      // 明明有旧数据却被抹掉，得等下一次刷新成功才回来。冷启动失败时手上本来就没有
+      // 列表（sessions 还是空的），空态照旧出现，行为与从前一致。
       toast(panelError(err, "会话列表加载失败"), true);
-      setSessSessions([]);
-      sessState.endpointErrors = [];
     } finally {
       if (seq === sessListReqSeq) sessState.loading = false;
     }
@@ -18987,6 +18995,25 @@ async function api(method, path, body) {
   /* ============================================================
      左栏渲染
      ============================================================ */
+  /* 列表 DOM 簿记清零：作废在飞的分帧、清内容指纹、清半份标记。离开视图收节点与铺
+     骨架共用——铺完必须让下一次 renderSessList 重建，而不是早退复用空容器。 */
+  function resetSessListDom() {
+    sessListRenderSeq++;
+    sessListLastKey = "";
+    sessListPumping = false;
+  }
+
+  /* 骨架屏：冷启动首屏与「点刷新重播」共用同一枚 shimmer、同一份 markup（单源）。 */
+  function renderSessSkeleton() {
+    const scrollEl = $("sessScroll");
+    if (!scrollEl) return;
+    hideSessContextMenu(); // 旧菜单的目标行即将消失
+    resetSessListDom();
+    scrollEl.innerHTML = Array.from({ length: 6 }, () =>
+      `<div style="padding:10px 12px;"><div class="sessions-skel" style="height:14px;width:75%;margin-bottom:6px;"></div><div class="sessions-skel" style="height:11px;width:45%;"></div></div>`
+    ).join("");
+  }
+
   function renderSessList({ keepScroll = false } = {}) {
     const scrollEl = $("sessScroll");
     if (!scrollEl) return;
@@ -19003,36 +19030,42 @@ async function api(method, path, body) {
     if (!keepScroll) sessState.listScrollTop = 0;
 
     // 加载态骨架屏只在冷启动演：切走再切回时 sessions 里还留着上一次的数据，
-    // 整树换成骨架屏会把「静默重取」显形成为重载。
+    // 整树换成骨架屏会把「静默重取」显形成为重载。（点刷新主动重播骨架是另一条路，
+    // 见刷新按钮的 renderSessSkeleton——那条先清零簿记再铺，分页条原样留着。）
     if (sessState.loading && sessState.sessions.length === 0) {
-      sessListLastKey = "";
-      sessListPumping = false;
-      scrollEl.innerHTML = Array.from({ length: 6 }, () =>
-        `<div style="padding:10px 12px;"><div class="sessions-skel" style="height:14px;width:75%;margin-bottom:6px;"></div><div class="sessions-skel" style="height:11px;width:45%;"></div></div>`
-      ).join("");
+      renderSessSkeleton();
+      hideSessPager();
       return;
     }
     // 空态 / 搜索无结果
     if (sessState.sessions.length === 0) {
-      sessListLastKey = "";
-      sessListPumping = false;
+      resetSessListDom();
+      hideSessPager();
       scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🗂️</div>还没有可浏览的会话<br><span style="font-size:11.5px;">在任意 Agent 里开始一段对话后，会出现在这里。</span></div>`;
       return;
     }
     if (list.length === 0) {
-      sessListLastKey = "";
-      sessListPumping = false;
+      resetSessListDom();
+      hideSessPager();
       scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🔍</div>没有匹配的会话<br><span style="font-size:11.5px;">换个关键词试试，或清空搜索查看全部。</span></div>`;
       return;
     }
 
+    // 分页开窗：先把整条行序列数一遍（钳页码、算总页数），再只取当前页的行。
+    // 越界的请求页（数据变少、删到末页、全部收起后行数塌掉）在这里落回末页并写回。
+    const win = sessWindowRows(() => sessRowSeq(list), sessState.page, sessState.pageSize);
+    sessState.page = win.page;
+    sessPageCount = win.pages;
+
     // 铺出来的内容与上一次完全相同（典型场景：切回会话页先拿缓存铺一遍，随后的静默
     // 重取带回来同一份数据）就沿用现成的行，不白清一次再重铺。选中态不进指纹：它只是
     // 行上的一个类，校正一下即可；还在铺的那一轮同理，它铺的就是这份内容，让它铺完。
+    // 分页状态进指纹：翻页或换每页条数就是换一份内容，必须重建而不是早退复用。
     const key = [
       sessDataRev, sessState.view, sessState.search, sessState.endpoint,
       sessState.batch ? "cb:" + [...sessState.checked].sort().join(",") : "nobatch",
       JSON.stringify(sessState.collapsed), list.length,
+      sessState.page, sessState.pageSize,
     ].join("\u0001");
     if (key === sessListLastKey && scrollEl.childElementCount) {
       syncSessSelection();
@@ -19045,25 +19078,32 @@ async function api(method, path, body) {
       return;
     }
 
+    renderSessPager();
+
     // 行是逐帧铺的：整树一次性重建在三千行的真实数据上实测 0.85s，全程占着主线程；
-    // 分帧后第一帧只生成并解析两百行，剩下的在后续帧补齐，期间页面照常响应。
+    // 分帧后第一帧只生成并解析两百行，剩下的在后续帧补齐，期间页面照常响应。分页后
+    // 每页最多 100+2 行（含页首续接的两个组头）、一帧即铺完，这套机制留作每页数
+    // 调大时的护栏。
     const renderSeq = ++sessListRenderSeq; // 作废上一轮没铺完的帧
     sessListLastKey = key;
     sessListPumping = true;
-    const rows = sessRowSeq(list);
+    const kw = sessState.search.trim();
+    const rowHtml = (row) => row.kind === "head"
+      ? sessGroupHeadHtml(row.key, row.label, row.count, row.collapsed, row.lvl, row.color, row.arrOrMap, row.fullPath, row.ringed)
+      : sessItemHtml(row.s, kw, row.lvl);
     scrollEl.innerHTML = "";
     let bakedSel = sessState.selectedId; // 已铺行里烘着的选中态
-    let exhausted = false;
     let restored = !restoreTop;
+    let cursor = 0; // 下一页待铺的行下标
     const pump = () => {
       if (renderSeq !== sessListRenderSeq) return; // 已被新一轮渲染或离开视图作废
       const before = scrollEl.childElementCount;
       const parts = [];
-      while (parts.length < SESS_LIST_CHUNK) {
-        const next = rows.next();
-        if (next.done) { exhausted = true; break; }
-        parts.push(next.value);
+      while (parts.length < SESS_LIST_CHUNK && cursor < win.rows.length) {
+        parts.push(rowHtml(win.rows[cursor]));
+        cursor += 1;
       }
+      const exhausted = cursor >= win.rows.length; // 本帧铺完即当前页耗尽
       if (parts.length) {
         scrollEl.insertAdjacentHTML("beforeend", parts.join(""));
         bindSessRows(Array.from(scrollEl.children).slice(before));
@@ -19077,17 +19117,18 @@ async function api(method, path, body) {
         restored = true;
         sessState.listScrollTop = 0; // 已落位，这份存档消费掉
       }
-      if (!exhausted) requestAnimationFrame(pump);
+      if (cursor < win.rows.length) requestAnimationFrame(pump);
       else sessListPumping = false;
     };
     pump();
   }
 
-  /* 行内容：一条字符串一层，组头与会话项同序排列；用生成器交出，分帧逐段取用 */
+  /* 行描述子：一条一层，组头与会话项同序排列；用生成器交出，开窗与分帧逐段取用。
+     描述子不拼 HTML——开窗要先把整条序列数一遍才能钳页码，HTML 只拼落在当前页的
+     那些行；页首续接时组头描述子原样复用（计数、勾选态、折叠态与原页一致）。 */
   function* sessRowSeq(list) {
-    const kw = sessState.search.trim();
     if (sessState.view !== "group") {
-      for (const s of list) yield sessItemHtml(s, kw, 1);
+      for (const s of list) yield { kind: "item", s, lvl: 1 };
       return;
     }
     /* 分组视图：端点 → 项目目录 */
@@ -19096,17 +19137,83 @@ async function api(method, path, body) {
       const epCount = [...byProj.values()].reduce((n, arr) => n + arr.length, 0);
       const epKey = "ep:" + epId;
       const epCollapsed = !!sessState.collapsed[epKey];
-      yield sessGroupHeadHtml(epKey, sessEpName(epId), epCount, epCollapsed, 1, sessEpColor(epId), byProj, null, SESS_EP_RINGED.has(epId));
+      yield { kind: "head", key: epKey, label: sessEpName(epId), count: epCount, collapsed: epCollapsed, lvl: 1, color: sessEpColor(epId), arrOrMap: byProj, fullPath: null, ringed: SESS_EP_RINGED.has(epId) };
       if (epCollapsed) continue;
       for (const [proj, arr] of byProj) {
         const pKey = "proj:" + epId + "|" + String(proj || "").replace(/\\/g, "/").toLowerCase();
         const pCollapsed = !!sessState.collapsed[pKey];
-        yield sessGroupHeadHtml(pKey, sessDirName(proj), arr.length, pCollapsed, 2, null, arr, proj);
+        yield { kind: "head", key: pKey, label: sessDirName(proj), count: arr.length, collapsed: pCollapsed, lvl: 2, color: null, arrOrMap: arr, fullPath: proj, ringed: false };
         if (pCollapsed) continue;
-        for (const s of arr) yield sessItemHtml(s, kw, 2);
+        for (const s of arr) yield { kind: "item", s, lvl: 2 };
       }
     }
   }
+
+  /* 行序列开窗：整条序列过一遍，只收集当前页的行；越页部分只计数。跳过区记住最近的
+     一级/二级组头——页首落在组中段时把它们补回页顶，否则那一页的行失去归属上下文
+     （页首是会话行 → 补一级+二级；页首是二级组头 → 补一级；页首是一级组头 → 不补）。
+     续接的组头不占每页行数：一页最多 pageSize+2 行。返回的 page 已按总数钳回合法域
+     （请求页越界时用钳后的页重开一次），调用方把它写回状态。 */
+  function sessWindowRows(makeRows, page, pageSize) {
+    const collect = (from, to) => {
+      const out = [];
+      let total = 0;
+      let head1 = null, head2 = null; // 跳过区的最近组头（页首续接用）
+      for (const row of makeRows()) {
+        const i = total;
+        total += 1;
+        if (i < from) {
+          if (row.kind === "head") {
+            if (row.lvl === 1) { head1 = row; head2 = null; } // 换端点：二级组头复位
+            else head2 = row;
+          }
+          continue;
+        }
+        if (i >= to) continue; // 越页部分只计数，不收集
+        if (i === from) {
+          if (row.kind !== "head" || row.lvl !== 1) { if (head1) out.push(head1); }
+          if (row.kind === "item" && head2) out.push(head2);
+        }
+        out.push(row);
+      }
+      return { total, rows: out };
+    };
+    const first = collect((page - 1) * pageSize, page * pageSize);
+    const pages = Math.max(1, Math.ceil(first.total / pageSize));
+    const clamped = Math.min(pages, Math.max(1, page));
+    if (clamped === page) return { total: first.total, page, pages, rows: first.rows };
+    const redo = collect((clamped - 1) * pageSize, clamped * pageSize);
+    return { total: redo.total, page: clamped, pages, rows: redo.rows };
+  }
+
+  /* 分页条：总页数 ≤1 整条隐藏（一页装得下的列表不摆一排禁用钮）；口径与日志 tab 一致 */
+  function renderSessPager() {
+    const pager = $("sessPager");
+    if (!pager) return;
+    if (sessPageCount <= 1) { pager.hidden = true; return; }
+    pager.hidden = false;
+    const host = $("sessPages");
+    host.textContent = "";
+    for (const n of pagerPageNums(sessPageCount, sessState.page)) {
+      if (n === "…") {
+        const dots = document.createElement("span");
+        dots.className = "list-pages-ellipsis";
+        dots.textContent = "…";
+        host.appendChild(dots);
+        continue;
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "list-page-btn" + (n === sessState.page ? " active" : "");
+      btn.textContent = String(n);
+      btn.onclick = () => { if (sessState.page !== n) { sessState.page = n; renderSessList(); } };
+      host.appendChild(btn);
+    }
+    $("sessPrevBtn").disabled = sessState.page <= 1;
+    $("sessNextBtn").disabled = sessState.page >= sessPageCount;
+  }
+
+  function hideSessPager() { const pager = $("sessPager"); if (pager) pager.hidden = true; }
 
   /* 组头：含折叠箭头、（批量模式下）组复选框、组内计数 */
   function sessGroupHeadHtml(key, label, count, collapsed, lvl, color, arrOrMap, fullPath, ringed) {
@@ -19559,7 +19666,7 @@ async function api(method, path, body) {
      工具栏：视图切换 / 收起全部 / 端点筛选 / 搜索
      ============================================================ */
   function clearSessSearch() {
-    $("sessSearchInput").value = ""; sessState.search = "";
+    $("sessSearchInput").value = ""; sessState.search = ""; sessState.page = 1;
     $("sessSearchClear").hidden = true; $("sessKbdHint").hidden = false;
     renderSessList();
     if (sessState.selectedId) renderSessDetail();
@@ -19596,9 +19703,7 @@ async function api(method, path, body) {
     const scrollEl = $("sessScroll");
     if (!scrollEl) return;
     sessState.listScrollTop = scrollEl.scrollTop;
-    sessListRenderSeq++; // 作废还在排队的分帧
-    sessListLastKey = "";
-    sessListPumping = false;
+    resetSessListDom();
     scrollEl.innerHTML = "";
   }
 
@@ -19613,6 +19718,7 @@ async function api(method, path, body) {
       b.setAttribute("aria-checked", b.getAttribute("data-v") === sessState.view ? "true" : "false");
       b.addEventListener("click", () => {
         sessState.view = b.getAttribute("data-v");
+        sessState.page = 1; // 行序列结构随视图切换而变，旧页码没有意义
         SESS_LS.set("view", sessState.view);
         $("sessViewSeg").querySelectorAll(".seg-btn").forEach((x) =>
           x.setAttribute("aria-checked", x === b ? "true" : "false"));
@@ -19641,12 +19747,13 @@ async function api(method, path, body) {
     // 端点筛选下拉：选项由 refreshSessEndpointOptions 按可见集维护（首建也走它）
     const sel = $("sessEndpointFilter");
     refreshSessEndpointOptions();
-    sel.addEventListener("change", () => { sessState.endpoint = sel.value; renderSessList(); });
+    sel.addEventListener("change", () => { sessState.endpoint = sel.value; sessState.page = 1; renderSessList(); });
 
     // 搜索框：输入即搜；Esc 清空；/ 聚焦
     const searchInput = $("sessSearchInput");
     searchInput.addEventListener("input", () => {
       sessState.search = searchInput.value;
+      sessState.page = 1; // 筛选面变了，旧页码没有意义
       $("sessSearchClear").hidden = !sessState.search;
       $("sessKbdHint").hidden = !!sessState.search;
       renderSessList();
@@ -19702,12 +19809,34 @@ async function api(method, path, body) {
       if (sessState.checked.size) openSessDeleteDlg([...sessState.checked]);
     });
 
+    // 分页条（口径对齐日志 tab：越界钳制见 sessWindowRows，≤1 页隐藏见 renderSessPager）
+    $("sessPrevBtn").onclick = () => { if (sessState.page > 1) { sessState.page -= 1; renderSessList(); } };
+    $("sessNextBtn").onclick = () => { sessState.page += 1; renderSessList(); }; // 越界由开窗钳制兜底
+    const sessJump = $("sessJump");
+    sessJump.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const v = Number.parseInt(sessJump.value, 10);
+      if (!Number.isFinite(v)) { sessJump.value = ""; return; }
+      sessState.page = Math.min(sessPageCount, Math.max(1, v)); // 越界钳制
+      sessJump.value = "";
+      renderSessList();
+    });
+    $("sessPageSize").onchange = () => {
+      const v = Number($("sessPageSize").value);
+      sessState.pageSize = SESS_PAGE_SIZES.includes(v) ? v : 20; // 不信 DOM：非法值回落默认档
+      sessState.page = 1;
+      renderSessList();
+    };
+
     // 刷新：带 force 走 ?refresh=1 等一次真扫描落地——不带它，服务端 TTL 快照会把
-    // 旧值原样返回，按钮就只剩一句「已刷新」的空响。
+    // 旧值原样返回，按钮就只剩一句「已刷新」的空响。真扫描最长约 8s：点下即在列表区
+    // 重播骨架（与冷启动同款 shimmer），取数落地时由 refreshSessionsList 收尾的
+    // renderSessList 自然换成新列表；期间按钮禁用防连点重复扫描。
     $("sessRefreshBtn").addEventListener("click", async () => {
       const btn = $("sessRefreshBtn");
       if (btn.disabled) return;
       btn.disabled = true;
+      renderSessSkeleton();
       try { await refreshSessionsList({ force: true }); toast("会话列表已刷新"); }
       finally { btn.disabled = false; }
     });

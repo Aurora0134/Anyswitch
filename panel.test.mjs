@@ -1722,8 +1722,14 @@ describe("panel.html sessions tab", () => {
     const leave = panelJs.match(/function leaveSessionsView\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(leave, "leaveSessionsView found in panel.js");
     assert.ok(leave[1].includes("sessState.listScrollTop = scrollEl.scrollTop"), "离开时记下滚动位");
-    assert.ok(leave[1].includes("sessListRenderSeq++"), "离开时作废还在排队的帧");
+    assert.ok(leave[1].includes("resetSessListDom()"), "簿记清零走共用 helper（离开与铺骨架同源）");
     assert.ok(leave[1].includes('scrollEl.innerHTML = ""'), "离开时释放列表节点");
+    // helper 本体：作废在飞帧、清指纹、清半份标记（三件套从 leaveSessionsView 内联上收）
+    const helper = panelJs.match(/function resetSessListDom\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(helper, "resetSessListDom found in panel.js");
+    assert.ok(helper[1].includes("sessListRenderSeq++;"), "作废还在排队的帧");
+    assert.ok(helper[1].includes('sessListLastKey = "";'), "清内容指纹");
+    assert.ok(helper[1].includes("sessListPumping = false;"), "清半份标记");
     const r = panelJs.match(/function renderSessList\(\{ keepScroll = false \} = \{\}\) \{([\s\S]*?)\n  \}/);
     assert.ok(r[1].includes("sessState.listScrollTop || scrollEl.scrollTop"),
       "重铺时优先兑现存档（空容器的 scrollTop 恒为 0）");
@@ -1793,6 +1799,190 @@ describe("panel.html sessions tab", () => {
     assert.ok(m, ".sess-item 带 content-visibility: auto");
     assert.ok(m[0].includes("contain-intrinsic-size: auto 55.4px"),
       "占位高度用实测行高，auto 让浏览器记住真实尺寸");
+  });
+
+  // ── 会话列表分页（2026-10-27，方案 sessions-list-pagination-design.md）───
+  // 约 2,900 条会话一次铺满时滚动条滑块只占轨道 0.4%，观感诉求是把列表区改成
+  // 日志 tab 那种翻页形态：开窗取当前页的行 + 卡底分页条。以下钉子分三类：
+  // 页码/开窗两个纯函数的算法、分页状态与接入点的源钉、分页条 markup 与通用类名。
+
+  it("分页条：六个元素声明在列表卡内、每页档位与日志 tab 一致", () => {
+    for (const id of [
+      "sessPager",       // 分页条容器（总页数 ≤1 时隐藏）
+      "sessPrevBtn",     // 上一页
+      "sessNextBtn",     // 下一页
+      "sessPages",       // 页码钮挂载点
+      "sessJump",        // 跳页输入框
+      "sessPageSize",    // 每页条数下拉
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+    const card = panelHtml.match(/<aside class="sessions-list-card" id="sessListCard">([\s\S]*?)<\/aside>/);
+    assert.ok(card, "sessions-list-card found");
+    assert.ok(card[1].includes('id="sessScroll"'), "列表容器在列表卡内");
+    assert.ok(card[1].includes('id="sessPager"'), "分页条挂在列表卡内（flex 列布局钉底）");
+    assert.ok(card[1].indexOf('id="sessScroll"') < card[1].indexOf('id="sessPager"'),
+      "分页条排在列表容器之后");
+    assert.ok(panelHtml.includes('<option value="20" selected>20</option>'), "默认每页 20 行");
+    const seg = panelHtml.match(/<select class="sessions-sel" id="sessPageSize">([\s\S]*?)<\/select>/);
+    assert.ok(seg, "每页条数下拉存在");
+    for (const v of ["20", "50", "100"]) {
+      assert.ok(seg[1].includes(`value="${v}"`), `每页档位含 ${v}`);
+    }
+  });
+
+  it("页码序列：≤9 页全列、>9 页头3+尾3+当前±1（日志与会话共用）", () => {
+    const m = panelJs.match(/function pagerPageNums\(pages, cur\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "pagerPageNums found in panel.js");
+    const fn = new Function(`return function pagerPageNums(pages, cur) {${m[1]}\n  }`)();
+    assert.deepEqual(fn(1, 1), [1]);
+    assert.deepEqual(fn(9, 5), [1, 2, 3, 4, 5, 6, 7, 8, 9], "9 页全列");
+    assert.deepEqual(fn(10, 5), [1, 2, 3, 4, 5, 6, "…", 8, 9, 10], "10 页起出省略号");
+    assert.deepEqual(fn(145, 1), [1, 2, 3, "…", 143, 144, 145], "首页：头3+尾3");
+    assert.deepEqual(fn(145, 72), [1, 2, 3, "…", 71, 72, 73, "…", 143, 144, 145], "中段：当前±1");
+    assert.deepEqual(fn(145, 145), [1, 2, 3, "…", 143, 144, 145], "末页贴边");
+  });
+
+  it("开窗：按页切片、越界钳末页、页首补组头续接", () => {
+    const m = panelJs.match(/function sessWindowRows\(makeRows, page, pageSize\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "sessWindowRows found in panel.js");
+    const fn = new Function(`return function sessWindowRows(makeRows, page, pageSize) {${m[1]}\n  }`)();
+    // 合成行序列：一级组头 → 二级组头 → 会话行×2 → 一级组头 → 二级组头（共 6 行）
+    const seq = () => [
+      { kind: "head", key: "ep:a", lvl: 1 },
+      { kind: "head", key: "proj:a|x", lvl: 2 },
+      { kind: "item", s: { id: "1" }, lvl: 2 },
+      { kind: "item", s: { id: "2" }, lvl: 2 },
+      { kind: "head", key: "ep:b", lvl: 1 },
+      { kind: "head", key: "proj:b|y", lvl: 2 },
+    ];
+    const show = (rows) => rows.map((r) => (r.kind === "item" ? r.s.id : r.key));
+    const p1 = fn(seq, 1, 2);
+    assert.equal(p1.total, 6, "total 数全量（越页部分只计数）");
+    assert.equal(p1.pages, 3);
+    assert.equal(p1.page, 1);
+    assert.deepEqual(show(p1.rows), ["ep:a", "proj:a|x"], "第 1 页两个组头");
+    // 第 2 页首行是会话行：补一级+二级组头（不占每页行数，共 4 行）
+    const p2 = fn(seq, 2, 2);
+    assert.deepEqual(show(p2.rows), ["ep:a", "proj:a|x", "1", "2"], "页首会话行 → 补两级组头");
+    // 第 3 页首行是一级组头：不补
+    const p3 = fn(seq, 3, 2);
+    assert.deepEqual(show(p3.rows), ["ep:b", "proj:b|y"], "页首一级组头 → 不补");
+    // 请求页越界（数据变少/删到末页）：钳到末页并回写
+    const p9 = fn(seq, 9, 2);
+    assert.equal(p9.page, 3, "越界页钳到末页");
+    assert.equal(p9.pages, 3);
+    assert.deepEqual(show(p9.rows), ["ep:b", "proj:b|y"], "钳后铺的是末页");
+    // 空序列：一页、零行
+    const p0 = fn(() => [], 1, 2);
+    assert.equal(p0.total, 0);
+    assert.equal(p0.pages, 1);
+    assert.deepEqual(p0.rows, []);
+  });
+
+  it("开窗：页首落在二级组头前只补一级组头；换端点后二级组头复位", () => {
+    const m = panelJs.match(/function sessWindowRows\(makeRows, page, pageSize\) \{([\s\S]*?)\n  \}/);
+    const fn = new Function(`return function sessWindowRows(makeRows, page, pageSize) {${m[1]}\n  }`)();
+    const seq = () => [
+      { kind: "head", key: "ep:a", lvl: 1 },
+      { kind: "head", key: "proj:a|x", lvl: 2 },
+      { kind: "item", s: { id: "1" }, lvl: 2 },
+      { kind: "item", s: { id: "2" }, lvl: 2 },
+      { kind: "head", key: "proj:a|z", lvl: 2 }, // 同端点第二个项目
+      { kind: "item", s: { id: "3" }, lvl: 2 },
+      { kind: "head", key: "ep:b", lvl: 1 },
+      { kind: "head", key: "proj:b|y", lvl: 2 },
+      { kind: "item", s: { id: "4" }, lvl: 2 },
+      { kind: "item", s: { id: "5" }, lvl: 2 },
+    ];
+    const show = (rows) => rows.map((r) => (r.kind === "item" ? r.s.id : r.key));
+    // 每页 2 行、共 10 行 → 5 页。第 3 页 = [proj:a|z, item 3]：首行是二级组头，只补一级
+    assert.deepEqual(show(fn(seq, 3, 2).rows), ["ep:a", "proj:a|z", "3"], "页首二级组头 → 只补一级");
+    // 第 4 页 = [ep:b, proj:b|y]：首行是一级组头，不补
+    assert.deepEqual(show(fn(seq, 4, 2).rows), ["ep:b", "proj:b|y"], "页首一级组头 → 不补");
+    // 第 5 页 = [item 4, item 5]：跳过区换过端点，二级组头必须复位成 proj:b|y，
+    // 不许把上个端点的 proj:a|z 串到这里
+    assert.deepEqual(show(fn(seq, 5, 2).rows), ["ep:b", "proj:b|y", "4", "5"], "换端点后二级组头复位");
+  });
+
+  it("分页接入：状态/档位、开窗钳制、指纹含分页、空态收起分页条", () => {
+    const state = panelJs.match(/const sessState = \{([\s\S]*?)\n  \};/);
+    assert.ok(state, "sessState found");
+    assert.ok(/page: 1,/.test(state[1]), "页码初始为第 1 页");
+    assert.ok(/pageSize: 20,/.test(state[1]), "每页默认 20 行");
+    assert.ok(panelJs.includes("const SESS_PAGE_SIZES = [20, 50, 100];"),
+      "每页档位与日志 tab 一致");
+    assert.ok(panelJs.includes("let sessPageCount = 1;"), "总页数有模块级存档（跳页钳制用）");
+
+    const render = panelJs.match(/function renderSessList\(\{ keepScroll = false \} = \{\}\) \{([\s\S]*?)\n  \}/);
+    assert.ok(render, "renderSessList found in panel.js");
+    assert.ok(render[1].includes("sessWindowRows(() => sessRowSeq(list), sessState.page, sessState.pageSize)"),
+      "先开窗再铺行");
+    assert.ok(render[1].includes("sessState.page = win.page;"), "钳制后的页码写回状态");
+    assert.ok(render[1].includes("sessState.page, sessState.pageSize,"),
+      "内容指纹含分页状态：翻页/换条数必须重建");
+    assert.ok(render[1].includes("renderSessPager();"), "重建时同步分页条");
+    assert.equal((render[1].match(/hideSessPager\(\)/g) || []).length, 3,
+      "骨架/空态/无结果三个分支收起分页条");
+
+    // 回第 1 页恰五处：搜索输入、清空搜索、端点筛选、切分组/列表、改每页条数
+    assert.equal((panelJs.match(/sessState\.page = 1;/g) || []).length, 5,
+      "回第 1 页恰五处");
+    const sizeChange = panelJs.match(/\$\("sessPageSize"\)\.onchange = \(\) => \{([\s\S]*?)\n    \};/);
+    assert.ok(sizeChange, "每页条数 onchange 存在");
+    assert.ok(sizeChange[1].includes("sessState.page = 1;"), "改每页条数回第 1 页");
+    assert.ok(sizeChange[1].includes("SESS_PAGE_SIZES.includes(v) ? v : 20"),
+      "非法档位回落默认值（不信 DOM）");
+  });
+
+  it("刷新按钮重播骨架：先铺骨架再等真扫描，失败保留旧列表", () => {
+    // 点刷新到真扫描落地最长约 8s，原来这段时间屏幕毫无变化；现在点下即铺骨架
+    // （与冷启动同款 shimmer），落地时由 refreshSessionsList 收尾的 renderSessList 换掉。
+    const refresh = panelJs.match(/\$\("sessRefreshBtn"\)\.addEventListener\("click", async \(\) => \{([\s\S]*?)\n    \}\);/);
+    assert.ok(refresh, "刷新按钮 handler found");
+    assert.ok(refresh[1].includes("renderSessSkeleton();"), "点刷新先铺骨架");
+    assert.ok(refresh[1].indexOf("renderSessSkeleton();") < refresh[1].indexOf("refreshSessionsList("),
+      "骨架先于取数铺");
+    assert.ok(refresh[1].includes('await refreshSessionsList({ force: true });'), "仍走强制刷新（真扫描）");
+    assert.ok(refresh[1].includes("btn.disabled = false;"), "落地后恢复按钮（防连点）");
+
+    const skel = panelJs.match(/function renderSessSkeleton\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(skel, "renderSessSkeleton found in panel.js");
+    assert.ok(skel[1].includes('class="sessions-skel"'), "骨架复用冷启动同款 shimmer markup");
+    assert.ok(skel[1].includes("resetSessListDom();"), "铺骨架先清零簿记（防在飞帧插进骨架）");
+
+    // 失败路径不再清列表：骨架在飞期间清空会演出「骨架 → 空态」，明明有旧数据
+    const list = panelJs.match(/async function refreshSessionsList\(\{ force = false \} = \{\}\) \{([\s\S]*?)\n  \}/);
+    assert.ok(list, "refreshSessionsList found in panel.js");
+    const catchBody = list[1].match(/\} catch \(err\) \{([\s\S]*?)\n    \}/);
+    assert.ok(catchBody, "catch 分支存在");
+    assert.ok(!catchBody[1].includes("setSessSessions([])"), "失败不清列表：保留旧数据铺回");
+    assert.ok(catchBody[1].includes('toast(panelError(err, "会话列表加载失败"), true)'),
+      "失败仍出错误 toast（文案不动）");
+  });
+
+  it("分页条组件通用化：日志 tab 切到 list-* 类名，页码算法共用", () => {
+    // 会话页分页条复用日志 tab 那套组件（含省略号页码算法），类名改中性、id 不动。
+    assert.ok(panelHtml.includes('<div class="list-pager" id="logsPager"'), "日志分页条容器切通用类名");
+    assert.ok(panelHtml.includes('<span class="list-total" id="logsTotal">'), "总数文案元素切通用类名");
+    assert.ok(panelHtml.includes('<div class="list-pager-right">'), "分页条右组切通用类名");
+    assert.ok(panelHtml.includes('<span class="list-pages" id="logsPages">'), "页码挂载点切通用类名");
+    assert.ok(panelHtml.includes('class="list-jump" id="logsJump"'), "跳页框切通用类名");
+    assert.ok(panelJs.includes('btn.className = "list-page-btn"'), "页码钮用通用类名");
+    assert.ok(panelJs.includes('dots.className = "list-pages-ellipsis"'), "省略号用通用类名");
+    assert.ok(panelJs.includes("const nums = pagerPageNums(pages, cur);"),
+      "日志分页条改用共用页码算法");
+    const stripped = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.ok(!stripped.includes(".logs-pager") && !stripped.includes(".logs-page-btn")
+      && !stripped.includes(".logs-jump") && !stripped.includes(".logs-total")
+      && !stripped.includes(".logs-pages"), "旧 logs-* 分页条类名零残留");
+    assert.ok(/\.list-pager \{/.test(stripped), "通用分页条组件规则存在");
+    assert.ok(/\.sessions-list-card \.list-pager \{/.test(stripped), "会话卡内分页条放置规则");
+    assert.ok(/\.sessions-list-card \.list-pager \.sessions-sel \{ width: auto/.test(stripped),
+      "每页条数下拉窄化（.sessions-sel 默认通栏宽）");
+    // 320px 窄卡内十个控件一行会自然折成三行（实测 112px 高），按行分组给确定性两行
+    assert.ok(/\.sessions-list-card \.list-pager \{[^}]*flex-direction: column/.test(stripped),
+      "会话卡内分页条分两行（导航行＋工具行）");
   });
 });
 

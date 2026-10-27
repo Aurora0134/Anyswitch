@@ -3421,17 +3421,18 @@
   .logs-detail-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 14px; row-gap: 6px; font-size: 12px; }
   .logs-detail-grid dt { color: var(--text-3); white-space: nowrap; }
   .logs-detail-grid dd { margin: 0; color: var(--text-2); word-break: break-all; font-family: var(--font-mono); font-size: 11.5px; }
-  /* 分页条：左「共 N 条」，右 上一页/页码/下一页 + 跳页 + 页大小 */
-  .logs-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
-  .logs-total { font-size: 12px; color: var(--text-3); }
-  .logs-pager-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .logs-pages { display: inline-flex; align-items: center; gap: 4px; }
-  .logs-page-btn { min-width: 26px; height: 26px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); background: var(--surface); color: var(--text-3); font-size: 11.5px; font-family: var(--font-mono); cursor: pointer; box-sizing: border-box; }
-  .logs-page-btn:hover { color: var(--text); background: var(--surface-hover); }
-  .logs-page-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .logs-pages-ellipsis { color: var(--text-4); padding: 0 2px; font-size: 11.5px; }
-  .logs-jump { width: 52px; background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12px; padding: 5px 6px; outline: none; font-family: var(--font-mono); text-align: center; box-sizing: border-box; }
-  .logs-jump:focus { border-color: var(--accent); }
+  /* 分页条（通用组件，list- 前缀）：左「共 N 条」（可省），右 上一页/页码/下一页 + 跳页 + 页大小。
+     日志子页与会话管理列表卡两处共用；会话卡内的放置规则见 .sessions-list-card .list-pager。 */
+  .list-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .list-total { font-size: 12px; color: var(--text-3); }
+  .list-pager-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .list-pages { display: inline-flex; align-items: center; gap: 4px; }
+  .list-page-btn { min-width: 26px; height: 26px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); background: var(--surface); color: var(--text-3); font-size: 11.5px; font-family: var(--font-mono); cursor: pointer; box-sizing: border-box; }
+  .list-page-btn:hover { color: var(--text); background: var(--surface-hover); }
+  .list-page-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .list-pages-ellipsis { color: var(--text-4); padding: 0 2px; font-size: 11.5px; }
+  .list-jump { width: 52px; background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12px; padding: 5px 6px; outline: none; font-family: var(--font-mono); text-align: center; box-sizing: border-box; }
+  .list-jump:focus { border-color: var(--accent); }
 
   /* 整页固定布局（日志子页激活时 .stats-view 挂 logs-fixed）：页面本身不滚，
      筛选行钉顶、表体在卡内滚轮下拉、分页条钉屏底（对齐 new-api）。
@@ -3444,7 +3445,7 @@
   .stats-view.logs-fixed #statsLogsPane .logs-card-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .stats-view.logs-fixed #statsLogsPane .stats-table-wrap { flex: 1; min-height: 0; overflow-y: auto; }
   .stats-view.logs-fixed .logs-table thead th { position: sticky; top: 0; z-index: 1; }
-  .stats-view.logs-fixed .logs-pager { flex-shrink: 0; }
+  .stats-view.logs-fixed .list-pager { flex-shrink: 0; }
 
   /* ═══════════════════════════════════════════════
      会话管理视图（sessions- 前缀为布局/容器作用域类；
@@ -3485,6 +3486,17 @@
   /* 会话列表滚动区（删除进行中加遮罩禁交互） */
   .sessions-scroll { overflow-y: auto; flex: 1; min-height: 120px; position: relative; }
   .sessions-scroll.deleting { pointer-events: none; opacity: 0.55; }
+  /* 卡内分页条：钉在卡底（卡片是 flex 列布局、列表区 flex:1 自滚），分两行——
+     页码行＋动作行（上一页/下一页/跳页/每页条数），两行都右对齐。320px 窄卡里
+     11 个页码钮（中段页满额）与翻页钮同排必然溢出（实测折成三行、142px 高），
+     故按行分组给确定性两行，并把页码钮/按钮/组距略收紧守住页码行不内折。
+     每页条数下拉窄化——.sessions-sel 默认 width:100% 是给通栏筛选下拉的，这里只占一格。 */
+  .sessions-list-card .list-pager { margin-top: 0; flex-shrink: 0; border-top: 1px solid var(--border); padding: 8px 10px; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .sessions-list-card .list-pager .list-pager-right { justify-content: flex-end; gap: 5px; }
+  .sessions-list-card .list-pager .list-page-btn { min-width: 24px; padding: 0 4px; }
+  .sessions-list-card .list-pager .list-pages { gap: 3px; }
+  .sessions-list-card .list-pager .btn-mini { padding: 4px 8px; }
+  .sessions-list-card .list-pager .sessions-sel { width: auto; }
   .sess-group-head { display: flex; align-items: center; gap: 7px; padding: 8px 12px 6px; font-size: 11.5px; font-weight: 700; color: var(--text-3); cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--surface); z-index: 2; }
   .sess-group-head:hover { color: var(--text); }
   .sess-group-head .caret { transition: transform 150ms var(--ease-out); font-size: 10px; flex: none; }
