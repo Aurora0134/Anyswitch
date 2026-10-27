@@ -257,7 +257,7 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
   assert.ok(staleConst, "TERMINAL_STALE_SCREEN_MAX_MS 在 panel.js 里");
   const factory = new Function(
     "$", "EventSource", "API_BASE", "setTimeout", "clearTimeout",
-    "requestAnimationFrame", "cancelAnimationFrame",
+    "requestAnimationFrame", "cancelAnimationFrame", "document",
     "ensureTerminalXterm", "fitTerminalXterm", "sendTerminalInput", "reviveTerminalSession",
     "flushTerminalBurst", "discardTerminalBurst", "queueTerminalChunk",
     "disarmTerminalDprWatch", "nextTerminal",
@@ -309,7 +309,7 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
     };
     `
   );
-  const ctx = { hidden: hiddenView };
+  const ctx = { hidden: hiddenView, docHidden: false };
   // 宿主桩：xterm 的 open 就是把 element 挂进宿主，dispose 再摘走——垫片断言靠它。
   const host = {
     children: [],
@@ -335,6 +335,7 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
     },
     "/panel",
     clock.setTimeout, clock.clearTimeout, clock.requestAnimationFrame, clock.cancelAnimationFrame,
+    { get hidden() { return ctx.docHidden; } },
     () => openTerm(),
     () => { log.push("fit"); },
     (id, data) => { inputPosts.push(`${id}:${data}`); },
@@ -358,8 +359,9 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
   return { world, clock, log, sources, inputPosts, created, ctx, host };
 }
 
-// 桩实例：buffer.active.length 模拟「解析出内容」；write 带内容时累加（首帧回放落屏），
-// 空串写入不动长度（空屏会话）。
+// 桩实例：buffer 忠实复刻 xterm 的两条实测事实——①一开屏就有 rows 行空行，所以
+// buffer.active.length 恒 ≥ rows，拿它当「有内容」的判据必然误判（CDP 实测里这条
+// 错判据会让垫片提前约 340ms 撤走）；②真有字要逐行看 translateToString。
 function makeStubTerm(log, n) {
   const id = `t${n}`;
   const listeners = [];
@@ -372,22 +374,22 @@ function makeStubTerm(log, n) {
       contains: (c) => classes.has(c),
     },
   };
-  return {
+  const term = {
     id,
     cols: 120,
     rows: 34,
     options: { disableStdin: false },
     element,
     classes,
-    buffer: { active: { length: 1 } },
+    screenText: "",
     written: [],
     disposed: false,
     refreshCalls: 0,
-    reset() { log.push(`${id}.reset`); },
+    reset() { term.screenText = ""; log.push(`${id}.reset`); },
     focus() { log.push(`${id}.focus`); },
-    refresh() { this.refreshCalls += 1; log.push(`${id}.refresh`); },
+    refresh() { term.refreshCalls += 1; log.push(`${id}.refresh`); },
     dispose() {
-      this.disposed = true;
+      term.disposed = true;
       log.push(`${id}.dispose`);
       if (element.parentNode) { element.parentNode.removeChild(element); element.parentNode = null; }
     },
@@ -404,16 +406,24 @@ function makeStubTerm(log, n) {
     // 模拟「内核解析旧积压后产生的自动应答」：只在监听器还在时才派发（与 xterm
     // 的 _onData 表一致）。disableStdin 为真时真内核根本不会走到派发。
     fireAutoReply(payload) {
-      if (this.options.disableStdin) { log.push(`${id}.reply_blocked`); return; }
+      if (term.options.disableStdin) { log.push(`${id}.reply_blocked`); return; }
       for (const fn of [...listeners]) fn(payload);
     },
     write(data, cb) {
-      this.written.push(data);
+      term.written.push(data);
       log.push(`${id}.write`);
-      if (data) this.buffer.active.length = Math.max(this.buffer.active.length, 1 + String(data).split("\n").length);
+      if (data) term.screenText += String(data);
       if (cb) cb();
     },
   };
+  term.buffer = {
+    active: {
+      length: 34, // ← 空屏也是 rows 行（真 xterm 就这样）
+      viewportY: 0,
+      getLine: (y) => ({ translateToString: () => (y === 0 ? term.screenText : "") }),
+    },
+  };
+  return term;
 }
 
 const terminalSession = (id, extra = {}) => ({
@@ -462,7 +472,7 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
   it("真跑：销毁旧实例排在新画面画出内容之后（调用序列可判红）", async () => {
     const w = makeTerminalWorld();
     const { term: termA } = await primeSession(w, terminalSession("A"));
-    assert.ok(termA.buffer.active.length > 1, "旧画面确实有内容");
+    assert.ok(termA.screenText.length > 0, "旧画面确实有内容");
 
     // 切签：完全照 renderTerminalPreviewSession 的顺序——先停放，再建流
     w.world.parkTerminalScreen();
@@ -519,7 +529,7 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     await w.world.connectTerminalStream(terminalSession("B"));
     w.sources[1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
     w.sources[1].emit("data", JSON.stringify(""));
-    assert.equal(w.created[1].buffer.active.length, 1, "新实例缓冲区仍是空的");
+    assert.equal(w.created[1].screenText, "", "新实例缓冲区里一个字都没有");
     w.clock.flushAll();
     assert.equal(termA.disposed, true, "空回放也算交代过了，垫片照撤");
   });
@@ -547,6 +557,27 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     assert.equal(termA.classes.has("terminal-stale-frame"), false, "不打垫片类");
     await w.world.connectTerminalStream(terminalSession("B"));
     assert.equal(w.created.length, 1, "视图隐藏时一个新实例都不建");
+  });
+
+  it("真跑：后台期间兜底计时器不撤垫片，切回后新画面一有字就揭幕", async () => {
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    // visibilitychange 里拆流前的那一停
+    w.world.parkTerminalScreen();
+    assert.ok(termA.classes.has("terminal-stale-frame"), "垫片就位");
+    w.ctx.docHidden = true;
+    w.clock.flushAll();
+    assert.notEqual(w.world.stale(), null, "窗口在后台：兜底计时器不撤垫片");
+    // 切回前台：先按 renderTerminalPreviewSession 的顺序建流（停放发现无可停的画面）
+    w.ctx.docHidden = false;
+    w.world.parkTerminalScreen();
+    assert.notEqual(w.world.stale(), null, "无可停的画面时不撤已有垫片");
+    await w.world.connectTerminalStream(terminalSession("B"));
+    w.sources[w.sources.length - 1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
+    w.sources[w.sources.length - 1].emit("data", JSON.stringify("B-screen\n"));
+    w.clock.flushAll();
+    assert.equal(termA.disposed, true, "新画面画出内容后揭幕");
+    assert.equal(w.world.stale(), null);
   });
 });
 

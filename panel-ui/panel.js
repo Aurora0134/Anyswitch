@@ -447,6 +447,10 @@ async function api(method, path, body) {
     terminalVisibilityWasHidden = document.hidden;
     // 进后台第一件事是拆掉会话字节流（理由见 syncTerminalDataStream）；回前台由下面
     // 各视图分支重建。这条转折漏发也不要紧：1s 轮询拍里同一个函数再核一次。
+    //
+    // 拆之前先把画面停成垫片（M4，见 parkTerminalScreen）：拆流之后唯一还能留在屏上
+    // 的只有垫片，切回时它就是「新画面画好之前的内容」。typeof 闸护单测桩环境。
+    if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     syncTerminalDataStream();
     if (document.hidden) return;
     refreshStatus();
@@ -5783,13 +5787,15 @@ async function api(method, path, body) {
     // 隐藏期不停放也不拆流：与 connectTerminalStream 的隐藏闸同一条口径——离开终端页
     // 后活着的那条流，不能被隐藏期的重渲染路径关掉。
     if ($("terminalView")?.hidden) return null;
-    dropTerminalStaleScreen();
     const term = terminalXterm;
     const el = term && term.element ? term.element : null;
     if (!term || !el) {
+      // 没有可停的画面（首连；或后台切回时实例已在隐藏期拆掉）：**不撤**已有的垫片
+      // ——它正是此刻屏上唯一的内容，撤了就是一块底色。照旧整条拆流。
       closeTerminalStream();
       return null;
     }
+    dropTerminalStaleScreen();
     // 先掐输入面再拆流：顺序反了会有「监听还在、实例已脱离全局」的窗口。
     try { term.options.disableStdin = true; } catch {}
     const originalDispose = term.dispose;
@@ -5801,21 +5807,39 @@ async function api(method, path, body) {
     // 兜底撤垫片：新画面迟迟不来（握手失败、宿主在飞）时不能把旧画面永久留在屏上
     // ——那是一屏别的会话的内容，看久了就是错的信息。到点撤走，退回既有三态覆盖层，
     // 也就是今天的行为，不是新增的中间态。
-    stale.timer = setTimeout(() => {
-      stale.timer = null;
-      dropTerminalStaleScreen();
-    }, TERMINAL_STALE_SCREEN_MAX_MS);
+    //
+    // 窗口在后台时不撤：隐藏期 rAF 停摆，观察循环叫不醒，撤了就等于把「切回时的那一
+    // 屏」也撤了。此时重新起一次计时，回前台由观察循环（按「新画面有内容」揭幕）接手。
+    const armCap = () => {
+      stale.timer = setTimeout(() => {
+        stale.timer = null;
+        if (typeof document !== "undefined" && document.hidden) { armCap(); return; }
+        dropTerminalStaleScreen();
+      }, TERMINAL_STALE_SCREEN_MAX_MS);
+    };
+    armCap();
     watchTerminalStaleScreen(stale);
     return stale;
   }
 
   // 就绪判据（两条任一）：
-  //  a) 新实例的缓冲区里已经有内容——首帧回放的字节被解析了（空屏会话走 b）；
+  //  a) 新实例的缓冲区里真的**有字**——首帧回放的字节被解析了（空屏会话走 b）；
   //  b) 「等首帧」标志翻回过一次：absorbTerminalSnapshot 置真、首帧 data 落地置假，
   //     翻回就说明这一屏已经交代过了（哪怕回放帧是空的，也是它自己的空屏）。
+  //
+  // 判「有字」不能看 buffer.active.length：xterm 一开屏就有 rows 行空行，length 恒
+  // ≥ rows，拿它当判据等于「实例一建出来就算就绪」——CDP 实测（M4 T6）这条错判据会
+  // 让垫片在新画面写入前约 340ms 就被撤走，空白照旧。必须逐行看有没有非空白字符。
   function terminalScreenHasContent(term) {
-    const length = term && term.buffer && term.buffer.active ? term.buffer.active.length : 0;
-    return Number.isFinite(length) && length > 1;
+    const buf = term && term.buffer ? term.buffer.active : null;
+    if (!buf || typeof buf.getLine !== "function") return false;
+    const top = buf.viewportY || 0;
+    const rows = term.rows || 0;
+    for (let y = top; y < top + rows; y += 1) {
+      const line = buf.getLine(y);
+      if (line && String(line.translateToString(true)).trim()) return true;
+    }
+    return false;
   }
 
   // 逐帧观察新画面何时就绪，就绪后再等两帧（一帧给渲染器排程、一帧给合成器上屏）
