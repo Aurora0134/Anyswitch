@@ -18,7 +18,7 @@
 //     session's shell pid does not exist yet at assembly time, so the launcher
 //     pid in that scheme becomes a per-session random tag.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -221,8 +221,13 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
       return buildKimiLauncherEnv({ port, token, base: {}, instanceId });
     case "codex":
       return buildCodexLauncherEnv({ instanceId, base: {} });
-    case "grok":
-      return buildGrokLauncherEnv({ instanceId, base: {} });
+    case "grok": {
+      // 主题选择归用户：只透传显式给的 GROK_THEME（默认值也一律不注入——
+      // 主题跟随由终端自身的查询/通知契约负责），其余键仍与终端宿主的
+      // 继承环境隔离。
+      const theme = "GROK_THEME" in base ? { GROK_THEME: base.GROK_THEME } : {};
+      return buildGrokLauncherEnv({ instanceId, base: theme });
+    }
     case "pi":
       return buildPiLauncherEnv({ port, token, instanceId, base: {} });
     case "dsh":
@@ -246,28 +251,10 @@ function claudeBypassArg(agentId, enabled) {
   return agentId === "claude" && enabled === true ? [CLAUDE_BYPASS_PERMISSIONS_ARG] : [];
 }
 
-// Claude Code 的终端主题契约：虚拟终端是亮暗的事实源，agent 必须跟着它走。
-// 用户存档里的 theme 是固定值（light/dark）时，面板切亮暗后 agent 不重绘，
-// diff 的红绿底这类自绘底色会停在旧主题；自动主题则会通过 OSC 11 / 997 重新
-// 取色。这里用会话级 --settings 覆盖成 auto —— 只影响由虚拟终端启动的会话，
-// 不改写 ~/.claude/settings.json，也不把任何凭据写进文件。
-const CLAUDE_TERMINAL_THEME_SETTINGS = '{\n  "theme": "auto"\n}\n';
-function claudeThemeArgs(agentId, base) {
-  if (agentId !== "claude") return [];
-  const root = base.LOCALAPPDATA;
-  if (!root) return [];
-  const settingsPath = join(root, "Anyswitch", "terminal", "claude-theme.json");
-  try {
-    mkdirSync(dirname(settingsPath), { recursive: true });
-    if (!existsSync(settingsPath) || readFileSync(settingsPath, "utf8") !== CLAUDE_TERMINAL_THEME_SETTINGS) {
-      writeFileSync(settingsPath, CLAUDE_TERMINAL_THEME_SETTINGS, "utf8");
-    }
-  } catch {
-    // 落盘失败不硬塞参数：启动本身优先，用户仍可在 agent 内用 /theme 切换。
-    return [];
-  }
-  return ["--settings", settingsPath];
-}
+// Theme selection belongs to the agent. The terminal supplies appearance
+// queries and notifications; launch arguments must not replace the user's
+// chosen theme as a workaround for an incomplete terminal implementation.
+
 
 // ---------------------------------------------------------------------------
 // 续接历史会话：把「哪一条对话」换成续接参数
@@ -400,7 +387,6 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
   // 参数对，逐位不变。
   const fixedArgs = [
     ...(target.launchArgs ?? []),
-    ...claudeThemeArgs(agentId, base),
     ...claudeBypassArg(agentId, claudeBypassPermissions),
   ];
   const mergedResumeArgs = dropDuplicateFlagPairs(fixedArgs, resumeArgs);
@@ -420,9 +406,7 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
       // dsh 是唯一还要带参数的：它的 CLI 不接裸调用（bin.js 要求显式
       // --profile），终端形态固定为 dsh-tui，与 dsh-cli 快捷命令同一口径。
       // claude 的 bypassPermissions 是设置页开关驱动的附加参数：开 = 跳过工具
-      // 权限确认（用户显式打开才带），关 = 一个参数都不加。claude 另带一份会话级
-      // 主题设置（theme=auto），让面板的亮暗切换能通过终端的 OSC 11 / 997 契约
-      // 传到 agent 的自绘底色（见 claudeThemeArgs）。
+      // 权限确认（用户显式打开才带），关 = 一个参数都不加。
       // 续接参数排在最后：执行体与端点自带的固定参数不变，只是这条命令接着
       // 走历史对话（模板见 session-scan.mjs 的 RESUME_COMMAND）。
       file: base.ComSpec || "cmd.exe",

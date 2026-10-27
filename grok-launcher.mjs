@@ -106,10 +106,6 @@ export function buildGrokLauncherEnv({ instanceId = buildInstanceId(), base = {}
   if (instanceId) env.ANYSWITCH_INSTANCE_ID = instanceId;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
-  // 终端亮暗跟随：grok 的默认主题是固定的 GrokNight（不读系统亮暗），面板
-  // 切亮暗时它的自绘底色会停在旧主题。GROK_THEME=auto 让 grok 按系统外观
-  // 切换并在运行中轮询；只在用户没有显式指定主题时设，显式选择仍然优先。
-  if (!env.GROK_THEME) env.GROK_THEME = "auto";
   // Strip the real upstream credentials so grok's built-in xAI path cannot
   // bypass the relay with a direct api.x.ai connection (the kimi launcher
   // strips ANTHROPIC_API_KEY for the same reason). The managed tables are

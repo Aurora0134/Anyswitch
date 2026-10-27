@@ -97,7 +97,7 @@ test("buildGrokLauncherEnv injects ANYSWITCH_INSTANCE_ID and NO_PROXY, never the
   assert.equal(env.ANYSWITCH_INSTANCE_ID, "ws-1");
   assert.equal(env.NO_PROXY, "127.0.0.1,localhost");
   assert.equal(env.no_proxy, "127.0.0.1,localhost");
-  assert.equal(env.GROK_THEME, "auto", "终端跟随系统亮暗：默认主题是固定 GrokNight，必须显式 auto");
+  assert.equal("GROK_THEME" in env, false, "启动器不把面板亮暗误接到操作系统主题");
   assert.equal(env.PATH, "/usr/bin");
   // GROK_HOME only moves grok's config/state root — it must survive untouched.
   assert.equal(env.GROK_HOME, "C:\\grok-home");
@@ -127,8 +127,8 @@ test("buildGrokLauncherEnv generates an instance id when none is passed", () => 
 });
 
 test("buildGrokLauncherEnv keeps an explicit GROK_THEME instead of forcing auto", () => {
-  const env = buildGrokLauncherEnv({ base: { GROK_THEME: "tokyonight" } });
-  assert.equal(env.GROK_THEME, "tokyonight", "用户显式选的主题不被终端默认覆盖");
+  const env = buildGrokLauncherEnv({ base: { GROK_THEME: "auto" } });
+  assert.equal(env.GROK_THEME, "auto", "用户显式选择系统主题时原样保留");
 });
 
 test("buildInstanceId follows the shared '<cwd basename>-<pid>' scheme", () => {

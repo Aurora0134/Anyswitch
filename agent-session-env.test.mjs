@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,7 @@ const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 // A machine-like environment: every agent's executable resolves to a real file
 // under one temp root (agent-discovery's overrides all accept absolute paths)
 // and ComSpec points at a fake cmd.exe.
-function fakeBase(root, { claudePackageVersion = undefined } = {}) {
+function fakeBase(root, { claudePackageVersion = undefined, ...overrides } = {}) {
   const exe = (name) => {
     const path = join(root, "bin", name);
     mkdirSync(join(root, "bin"), { recursive: true });
@@ -43,6 +43,7 @@ function fakeBase(root, { claudePackageVersion = undefined } = {}) {
     // （resolveQoderCliExecutable 不收覆盖变量），fakeBase 直接摆出这份目录。
     LOCALAPPDATA: join(root, "local"),
     USERPROFILE: join(root, "user"),
+    ...overrides,
   };
   // claude 版本文件就在 exe 的上一级（npm-global 布局
   // <npm>/node_modules/@anthropic-ai/claude-code/bin/claude.exe 旁的
@@ -139,7 +140,7 @@ test("kimi 与 claude 同协议，x-agent-id 随自定义头出站", () => {
   }
 });
 
-test("codex 补实例 id 与 NO_PROXY，grok 补 NO_PROXY/主题跟随且双真键标删", () => {
+test("codex 补实例 id 与 NO_PROXY，grok 保留用户主题且双真键标删", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const codex = buildAgentSessionEnv({ agentId: "codex", token: TOKEN, base: fakeBase(root) });
@@ -147,11 +148,13 @@ test("codex 补实例 id 与 NO_PROXY，grok 补 NO_PROXY/主题跟随且双真�
     assert.match(codex.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]+$/);
     assert.equal("ANYSWITCH_RELAY_TOKEN" in codex, false, "codex 的 relay 令牌在托管 config.toml 里，不走 env");
 
-    const grok = buildAgentSessionEnv({ agentId: "grok", token: TOKEN, base: fakeBase(root) });
+    const grok = buildAgentSessionEnv({ agentId: "grok", token: TOKEN, base: fakeBase(root, { GROK_THEME: "tokyonight" }) });
     assert.deepEqual(Object.keys(grok).sort(), ["GROK_CODE_XAI_API_KEY", "GROK_THEME", "NO_PROXY", "XAI_API_KEY", "no_proxy"]);
     assert.equal(grok.XAI_API_KEY, null, "xAI 真钥标删：内置直连不得绕过 relay");
     assert.equal(grok.GROK_CODE_XAI_API_KEY, null);
-    assert.equal(grok.GROK_THEME, "auto", "grok 默认固定夜间主题，终端启动显式跟随系统亮暗");
+    assert.equal(grok.GROK_THEME, "tokyonight", "终端会话不得用系统主题覆盖用户显式选择");
+    const noTheme = buildAgentSessionEnv({ agentId: "grok", token: TOKEN, base: fakeBase(root) });
+    assert.equal("GROK_THEME" in noTheme, false, "未设置主题时也不补一个与面板不同源的系统 auto");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -310,9 +313,8 @@ test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动
       if (agentId === "dsh") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
       // zcode 固定 8 段：/d /c chcp 65001 >nul & + node.exe + launcher 路径
-      //（launcher 形态见专项测试）。claude 多一对会话级主题设置参数
-      //（--settings <path>），其余端点维持零附加参数。
-      assert.equal(launch.launch.args.length, agentId === "zcode" ? 8 : agentId === "claude" ? 9 : 7, `${agentId} 的附加参数清单`);
+      //（launcher 形态见专项测试）。其他端点不追加主题覆盖参数。
+      assert.equal(launch.launch.args.length, agentId === "zcode" ? 8 : 7, `${agentId} 的附加参数清单`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -324,10 +326,9 @@ test("claude bypassPermissions 开关：开 = 追加 --dangerously-skip-permissi
   try {
     const base = fakeBase(root);
     const off = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base });
-    assert.equal(off.launch.args.length, 9, "开关关着（默认）只多出主题设置的一对参数");
-    assert.deepEqual(off.launch.args.slice(7), ["--settings", join(base.LOCALAPPDATA, "Anyswitch", "terminal", "claude-theme.json")]);
+    assert.equal(off.launch.args.length, 7, "开关关着（默认）不多出参数");
     const on = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
-    assert.deepEqual(on.launch.args.slice(9), ["--dangerously-skip-permissions"]);
+    assert.deepEqual(on.launch.args.slice(7), ["--dangerously-skip-permissions"]);
     // 开关只属于 claude：其余端点不该因它多出任何参数。
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "claude") continue;
@@ -339,29 +340,17 @@ test("claude bypassPermissions 开关：开 = 追加 --dangerously-skip-permissi
   }
 });
 
-test("claude 终端会话带会话级 theme=auto 设置：只影响虚拟终端启动，不改用户存档", () => {
+test("终端启动不接管 Agent 主题：不写主题覆盖文件、不塞 --settings", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
     const launch = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base });
-    const settingsAt = launch.launch.args.indexOf("--settings");
-    assert.ok(settingsAt > 0, "claude 的启动参数里带 --settings");
-    const settingsPath = join(base.LOCALAPPDATA, "Anyswitch", "terminal", "claude-theme.json");
-    assert.equal(launch.launch.args[settingsAt + 1], settingsPath, "设置文件落在 Anyswitch 数据根而不是用户 ~/.claude");
-    assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), { theme: "auto" }, "会话级设置只覆盖主题为 auto");
-    // 重复组装不换路径、不写坏内容：同一次启动多条通路拿到同一份文件。
-    const again = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base, resume: { endpoint: "claude", id: "11111111-1111-4111-8111-111111111111" } });
-    assert.deepEqual(again.launch.args.slice(settingsAt, settingsAt + 2), ["--settings", settingsPath]);
-    assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")), { theme: "auto" });
-    // 其余端点不塞 --settings，避免给不认这个参数的 CLI 多出未知选项。
+    assert.equal(launch.launch.args.includes("--settings"), false, "主题跟随由终端契约负责，不覆盖 Agent 自己的主题设置");
+    assert.equal(existsSync(join(base.LOCALAPPDATA, "Anyswitch", "terminal", "claude-theme.json")), false, "启动组装不生成主题覆盖文件");
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
-      if (agentId === "claude") continue;
       const other = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
-      assert.equal(other.launch.args.includes("--settings"), false, `${agentId} 不带 claude 专属设置参数`);
+      assert.equal(other.launch.args.includes("--settings"), false, `${agentId} 不带主题覆盖参数`);
     }
-    // 数据根缺失时不硬塞参数：启动本身优先于主题跟随。
-    const noRoot = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base: { ...base, LOCALAPPDATA: "" } });
-    assert.equal(noRoot.launch.args.includes("--settings"), false, "没有数据根就不引用不存在的设置文件");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -743,7 +732,7 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
     pi: { label: "Pi", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
     dsh: { label: "DeepSeek Harness", tail: ["--profile", "dsh-tui"], envKeys: ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
     opencode: { label: "OpenCode", tail: [], envKeys: ["ANYSWITCH_AGENT_INSTANCE", "ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
-    grok: { label: "Grok Build", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "GROK_CODE_XAI_API_KEY", "GROK_THEME", "NO_PROXY", "XAI_API_KEY", "no_proxy"] },
+    grok: { label: "Grok Build", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "GROK_CODE_XAI_API_KEY", "NO_PROXY", "XAI_API_KEY", "no_proxy"] },
     qoder: { label: "Qoder", tail: [], envKeys: ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
     zcode: { label: "ZCode", tail: [], envKeys: [] },
   };
@@ -755,11 +744,7 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, instanceId: "pinned" });
       // 执行体按端点各自的解析结果落位：zcode 是 node.exe + launcher 路径。
       const executable = agentId === "zcode" ? process.execPath : launch.launch.args[6];
-      // claude 的主题跟随是唯一有意新增的固定参数段，其余端的 tail 仍是冻结字面量。
-      const tail = agentId === "claude"
-        ? ["--settings", join(base.LOCALAPPDATA, "Anyswitch", "terminal", "claude-theme.json")]
-        : frozen.tail;
-      const expected = ["/d", "/c", "chcp", "65001", ">nul", "&", executable, ...tail];
+      const expected = ["/d", "/c", "chcp", "65001", ">nul", "&", executable, ...frozen.tail];
       if (agentId === "zcode") expected.push(launch.launch.args[7]);
       assert.deepEqual(launch.launch.args, expected, `${agentId} 的 argv 与改造前逐位一致`);
       assert.equal(launch.label, frozen.label, `${agentId} 的页签名不变`);
