@@ -5767,6 +5767,10 @@ async function api(method, path, body) {
   // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：垫片观察者拿停放时的值与
   // 当前值比较，变了就是新画面已经交代过一屏。见 connectTerminalStream 的 data 处理器。
   let terminalReplayEpoch = 0;
+  // 延后重建流的帧令牌（M5 live 行快路径）：renderTerminalPreviewSession 的
+  // deferScreen 把停放＋建流＋fit 整组推到双 rAF 之后，连点两条会话时旧帧
+  // 醒来发现令牌已变即整组退场——不拿旧会话的流覆盖新会话。
+  let terminalScreenSeq = 0;
 
   function dropTerminalStaleScreen() {
     const stale = terminalStaleScreen;
@@ -7676,6 +7680,10 @@ async function api(method, path, body) {
         renderTerminalPreviewSession();
       })
       .catch((error) => {
+        // 失败清点（M5）：续接新建失败即撤乐观高亮——点亮的那行没换成，继续说它
+        // 选中就是说谎。不带 resume 的新建（⊕/新建终端）不碰 pending：没有哪一次
+        // 点击预测过它，别误伤别人在飞的选中。
+        if (resume) terminalRailEndSelect(null);
         // 续接类失败（M3 契约的 resume-unsupported，以及同族的 resume-invalid 等）
         // 一律落批准句：后端原文是给开发者看的短码/细节，不能上屏。
         const code = error && (error.serverCode || error.code);
@@ -7748,7 +7756,9 @@ async function api(method, path, body) {
 
   // revive:false —— 被动重挂（切回前台、回终端页补挂）专用口径：进程已退的会话只
   // 回放最后一屏，不替用户重开空壳。点页签、新建、降级重试等主动通路照旧走默认。
-  function renderTerminalPreviewSession({ revive = true } = {}) {
+  // deferScreen:true —— live 行快路径（terminalRailActivateSession）专用口径：
+  // 停放/建流/fit 整组延后双 rAF，让栏体高亮当拍先渲（见下方分支内注释）。
+  function renderTerminalPreviewSession({ revive = true, deferScreen = false } = {}) {
     // 左栏终端会话栏先渲：它与终端屏的就绪三态无关（降级/零会话时栏体照常可用——
     // 「新建终端」自带就绪闸，历史会话按当前 agent 取）。切页签 / 新建 / 关闭 /
     // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境；try 护连接
@@ -7783,6 +7793,28 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
+    if (deferScreen) {
+      // live 行快路径让帧（M5）：左栏点已开着的会话行时，这一帧先让栏体当拍重渲
+      // （高亮即刻点亮），停放＋建流＋fit 三步整组延后到双 rAF 之后——同步任务里
+      // 先跑完栏渲染，xterm 重建的耗时不再挡首绘。三步必须成对延后：次序即
+      // 「旧画面停放成像素垫片、新画面就绪再揭幕」（92f6ced/b285e3d 立下的机制），
+      // 拆开就会有一帧没有垫片的空屏。令牌保连点：醒来发现已不是自己这一帧
+      // （用户又点了别的），旧帧整组退场不执行。
+      terminalScreenSeq += 1;
+      const screenSeq = terminalScreenSeq;
+      const runDeferredScreen = () => {
+        if (terminalScreenSeq !== screenSeq) return;
+        if (typeof parkTerminalScreen === "function") parkTerminalScreen();
+        connectTerminalStream(session, { revive });
+        if (currentView === "terminal") scheduleTerminalFit();
+      };
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => requestAnimationFrame(runDeferredScreen));
+      } else {
+        runDeferredScreen();
+      }
+      return;
+    }
     // 切签/切回都经这里重建流：先把旧画面停成垫片（见 parkTerminalScreen），新画面
     // 首帧落绘后由观察循环撤走——切换期间屏上始终有内容，不再是纯底色。停放与建流
     // 之间没有 await，旧画面不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
@@ -8871,6 +8903,21 @@ async function api(method, path, body) {
   let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
   // 树的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
   let terminalRailRendered = { history: null };
+  // 乐观选中态（M5）：点会话行当拍点亮的高亮。is-active 的 live 派生判据要等
+  // POST /switch（或 /agent-sessions）成功才成立，而宿主侧一次切换是进程探测＋
+  // PTY 重启的 1~2s——那段时间栏上没有选中行，点击像丢了。pending 让高亮在
+  // 点击当拍成立，切换落定后由 live/active 派生自然接管（成功路径不清：两条
+  // 判据点亮的是同一行）。
+  // pending 必须进渲染消费的状态而不是 DOM-only 切类名：pollTerminalSessions
+  // 每 1s 全树重铺栏（renderTerminalRailHistory 整块 innerHTML），DOM-only 的
+  // 类名切换会被下一拍轮询冲掉——这是选状态位的决定性理由。
+  let terminalRailSelectPending = null; // { endpoint, id, token, timer }
+  let terminalRailSelectSeq = 0;
+  // TTL 兜底：api() 没有超时，切换请求万一长年挂起（宿主卡死）时假高亮不能
+  // 常驻——到点撤 pending 重回 live 派生（那一行没换成，点亮它就是说谎）。
+  // 取值 10~15s 档：远大于一次正常切换（1~2s），远小于用户对「亮点着却什么
+  // 都没发生」的忍耐。
+  const TERMINAL_RAIL_SELECT_TTL_MS = 12 * 1000;
   let terminalRailFetchInFlight = false;
   // 历史会话快照的复用窗口。服务端把这份列表缓存成短 TTL 快照（panel.mjs
   // createSessionsListSnapshot，同为 30s），过期先交旧值、后台补一拍——也就是说
@@ -9555,7 +9602,13 @@ async function api(method, path, body) {
     if (result) cls.push("rail-term-row-result");
     if (live) cls.push("is-live");
     if (archived) cls.push("is-archived");
-    if (live && live.id === activeId) cls.push("is-active");
+    // 选中判据（M5）：pending 存在时只看 pending 是否命中本行——点下一条的瞬间
+    // 旧活跃行立刻失亮（pending 优先于 live 派生，一屏至多一条选中）；无 pending
+    // 维持原 live 派生。读模块状态位而非 DOM-only 切类名：1s 轮询全树重铺会冲掉
+    // 类名（见 terminalRailSelectPending 处注释）。
+    if (terminalRailSelectPending
+      ? session.id === terminalRailSelectPending.id && session.endpoint === terminalRailSelectPending.endpoint
+      : live && live.id === activeId) cls.push("is-active");
     // 行首常驻槽（dsh sessionRow 同构）：所有会话行（历史/pending/搜索结果）都渲染
     // 16×20 前导槽——槽内容取 terminalRailStateSlotHtml（与页签指示位同一判定）：
     // working 行填转圈（14×14 SVG，读屏文本「进行中」）、非聚焦的 done（跑完未读）
@@ -9593,7 +9646,9 @@ async function api(method, path, body) {
   function terminalRailPendingRowHtml(entry, activeId) {
     const session = terminalRailSessionMap()[entry.id];
     const working = !!session && session.status === "working";
-    const active = entry.id === activeId;
+    // 同 terminalRailRowHtml 的选中判据（M5）：pending 存在时兜底行不亮——它没有
+    // 历史身份，pending 命中的永远是历史行；点它的会话走 activate（作废令牌）。
+    const active = terminalRailSelectPending ? false : entry.id === activeId;
     return `
       <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
         <span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER : ""}</span>
@@ -10068,14 +10123,62 @@ async function api(method, path, body) {
   }
 
   // ---- 交互 ----
+  // 在飞闸提为谓词（原 terminalSwitchInFlight 的静默吞击判断）：一次内切
+  // （含补读）期间栏内其他会话点击被判定门忽略——此刻点亮乐观高亮，点击会被
+  // 静默吞掉，高亮说谎比慢更糟。
+  function terminalRailSwitchBusy() {
+    return terminalSwitchInFlight;
+  }
+
+  // 乐观选中起点（M5）：领令牌、写 pending、起 TTL 兜底，然后只重渲栏——
+  // 高亮当拍成立，不等宿主侧 1~2s 的进程探测与 PTY 重启。在飞闸前置：在飞时
+  // 点亮了也兑现不了（点击会被判定门吞掉），直接返回不亮。
+  function terminalRailBeginSelect(session) {
+    if (!session || !session.id) return;
+    if (terminalRailSwitchBusy()) return;
+    terminalRailSelectSeq += 1;
+    const token = terminalRailSelectSeq;
+    if (terminalRailSelectPending && terminalRailSelectPending.timer !== null) {
+      clearTimeout(terminalRailSelectPending.timer);
+    }
+    const timer = setTimeout(() => {
+      // TTL 兜底：切换请求没有超时机制，挂死了不能让假高亮常驻。
+      if (terminalRailSelectPending && terminalRailSelectPending.token === token) {
+        terminalRailSelectPending = null;
+        renderTerminalRail();
+      }
+    }, TERMINAL_RAIL_SELECT_TTL_MS);
+    // 兜底定时器不拖住单测进程退出（浏览器无此 API，条件调用不改变行为——
+    // 与全文件「typeof 闸护桩环境」同一条惯例）。
+    if (timer && typeof timer.unref === "function") timer.unref();
+    terminalRailSelectPending = { endpoint: session.endpoint || "", id: session.id, token, timer };
+    renderTerminalRail();
+  }
+
+  // 乐观选中收尾：令牌不匹配 no-op（迟到的旧切换清不掉新点击的高亮）；匹配则
+  // 清 pending、清定时器、重渲栏。传 null＝无条件作废并推进 seq（用户改主意
+  // 点了别的，在飞旧令牌同时失效）。
+  function terminalRailEndSelect(token) {
+    const pending = terminalRailSelectPending;
+    const unconditional = token === null || token === undefined;
+    if (!unconditional && (!pending || pending.token !== token)) return;
+    if (pending && pending.timer !== null) clearTimeout(pending.timer);
+    terminalRailSelectPending = null;
+    if (unconditional) terminalRailSelectSeq += 1;
+    renderTerminalRail();
+  }
+
   function terminalRailActivateSession(id) {
     // 点它的会话栏行即读：done（跑完未读）标记当场清（聚焦清是每拍兜底，这里
     // 是点行这一拍的即时清——两路同一语义）。
     terminalDoneUnread.delete(id);
+    // 改主意清点（M5）：无条件作废旧选中令牌再置活跃——activate 是 live 行快
+    // 路径，置活跃即由 live 派生接管高亮；旧 pending 继续压着会把别的行说成选中。
+    terminalRailEndSelect(null);
     if (!id || !terminalSessionFor(id) || id === activeTerminalPreviewId) return;
     activeTerminalPreviewId = id;
     rememberTerminalSessionId(id);
-    renderTerminalPreviewSession();
+    renderTerminalPreviewSession({ deferScreen: true });
   }
 
   // 关闭走页签同一条处理：找到页签条里那颗 × 真点一下——运行中确认、POST、空壳计数、
@@ -10153,6 +10256,10 @@ async function api(method, path, body) {
     }
     const resume = { endpoint: session.endpoint, id: session.id };
     if (typeof session.file === "string" && session.file) resume.file = session.file;
+    // 乐观选中（M5）：过完全部拦截（去重命中/归档/不可续接/无 project）之后、
+    // 调判定门之前点亮——点击当拍高亮成立，不等宿主侧 1~2s 的进程探测与 PTY 重启。
+    // 在飞闸在 BeginSelect 内前置：在飞时不亮（亮也会被判定门吞掉，说谎比慢更糟）。
+    terminalRailBeginSelect(session);
     return terminalRailSwitchOrCreate({ session, resume, cwd });
   }
 
@@ -10210,8 +10317,14 @@ async function api(method, path, body) {
         // 服务端杀前复核拒换（会话树里有活着的命令进程）：静默转新开保护。新开
         // 本就是点击历史会话的合法落点之一，这里再提示反而是噪声；原页签不动，
         // 在跑的命令继续。
+        // 失败清点不含这条（M5）：点击仍在兑现途中，乐观高亮留着——新开失败由
+        // createAgentTerminal 的 catch 清。此处清会让高亮先弹回旧行再亮新行。
         return createAgentTerminal({ agentId, cwd, resume });
       }
+      // 失败清点（M5）：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
+      // 继续说它选中就是说谎。不放 finally 清：working 转新开等落点经 finally
+      // 会让高亮弹回旧行。
+      terminalRailEndSelect(null);
       if (typeof code === "string" && code.startsWith("resume-")) {
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
         return;
