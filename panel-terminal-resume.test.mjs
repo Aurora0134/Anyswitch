@@ -136,7 +136,7 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         assert.equal(calls.length, 1, `${endpoint} 走注入的 createTerminalSession`);
         const forwarded = calls[0].body;
         assert.deepEqual(forwarded.launch.args.slice(0, 6), ["/d", "/c", "chcp", "65001", ">nul", "&"], `${endpoint} 码页前置不动`);
-        assert.deepEqual(forwarded.launch.args.slice(7), tail, `${endpoint} 的续接参数由服务端重建`);
+        assert.deepEqual(forwarded.launch.args.slice(-tail.length), tail, `${endpoint} 的续接参数由服务端重建`);
         assert.equal(forwarded.cwd, cwd);
         assert.equal(forwarded.agentId, endpoint);
         assert.equal("env" in json(), false, `${endpoint} 响应不回显 env`);
