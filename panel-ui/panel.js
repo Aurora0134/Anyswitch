@@ -17095,6 +17095,17 @@ async function api(method, path, body) {
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";
 
   let statsData = null; // 最近一次成功响应（ok:false / 网络失败时保持旧值，首次失败则渲染空态）
+  // 空态文案的前提（2026-10-28 加载态误导收口）：数据未落地 ≠ 没有数据。
+  //   idle/pending：还没出结果，不画空态（维持空白）
+  //   loading：首载超过展示闸仍未落地，或点「刷新」重试 —— 「正在加载…」
+  //   ready：最近一次成功响应落地，确实为空才说「暂无数据」
+  //   error：首次加载失败且无旧数据 —— 「加载失败」
+  let statsPhase = "idle";
+  let statsLoadingTimer = null;
+  // 首载加载文案的展示闸：热链路 20ms 级落地（不闪一帧文案），冷折叠 ~1s（闸内必现）。
+  const STATS_LOADING_HINT_DELAY_MS = 200;
+  const STATS_LOADING_COPY = "正在加载…";
+  const STATS_LOAD_FAILED_COPY = "加载失败";
   let statsTimer = null;
   const statsPrefs = { scope: "channel", days: 7, usageDim: "channel", usageDays: 7 };
   // 图例显隐（localStorage 持久化，按粒度分桶；数据里已消失的 key 由渲染前 prune 清掉）
@@ -17316,6 +17327,7 @@ async function api(method, path, body) {
 
   function leaveStatsView() {
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    clearStatsLoadingTimer(); // 首载加载文案的展示闸：离开即撤，回页由新一轮取数重挂
     leaveLogsPane(); // 请求日志子 tab 的 5s 轮询随统计页离开即停
     // 统一取消在飞动画 rAF：趋势 morph/reveal 与环形图揭示，离开 tab 后不再
     // 对着已隐藏的容器提交帧；进 tab 重播由 enterStatsView 重置标记负责。
@@ -17337,11 +17349,19 @@ async function api(method, path, body) {
     loadStatsPrefs(); // 兜底：restoreView 可能在 initStatsTab 之前触发首次取数
     const seq = ++statsReqSeq;
     const reqDays = statsPrefs.days; // 发起时刻的窗口；响应落地前用户可能又切了 seg
+    // 只有「手上无数据」才谈加载态：热路径 20ms 内落地不闪文案，超过展示闸才画；
+    // 手动重试当拍给反馈；静默轮询不动屏上状态（失败态不闪回加载态）。
+    if (!statsData) {
+      if (replay) showStatsLoadingNow();
+      else if (!silent) armStatsLoadingHint(seq);
+    }
     try {
       const res = await api("GET", "/api/stats/state?days=" + reqDays);
       // 竞态守卫：非最新请求，或响应窗口已不是当前选择 → 丢弃（慢的旧响应
       // 后到会覆盖新选择的窗口数据）。days 由后端回显（clampStatDays）。
       if (seq !== statsReqSeq || res.days !== statsPrefs.days) return;
+      clearStatsLoadingTimer();
+      statsPhase = "ready";
       statsData = res;
       // 重播标记必须在 renderStatsAll 之前重置：趋势图据此走 reveal 清屏生长
       // （否则沿用上一帧走 morph 形变），用量环据此重播一笔画揭示
@@ -17349,9 +17369,47 @@ async function api(method, path, body) {
       renderStatsAll();
     } catch (err) {
       if (seq !== statsReqSeq) return; // 已有更新请求在飞：旧失败不弹 toast
+      clearStatsLoadingTimer();
       if (!silent) toast(panelError(err, "使用统计加载失败"), true);
-      if (!statsData) renderStatsAll(); // 首次失败：各卡渲染「暂无数据」空态
+      // 首次失败且无旧数据：落「加载失败」，不再冒充「暂无数据」；有旧数据保持现状
+      if (!statsData) { statsPhase = "error"; renderStatsAll(); }
     }
+  }
+
+  function clearStatsLoadingTimer() {
+    if (statsLoadingTimer) { clearTimeout(statsLoadingTimer); statsLoadingTimer = null; }
+  }
+
+  // 首载加载文案挂闸：200ms 内落地就不画（热链路不闪一帧），仍未落地才转 loading
+  function armStatsLoadingHint(seq) {
+    clearStatsLoadingTimer();
+    statsPhase = "pending";
+    statsLoadingTimer = setTimeout(() => {
+      statsLoadingTimer = null;
+      if (seq !== statsReqSeq || statsData) return; // 旧请求/已落地：不掀当前状态
+      statsPhase = "loading";
+      renderStatsAll();
+    }, STATS_LOADING_HINT_DELAY_MS);
+  }
+
+  // 手动重试：当拍给反馈，不等展示闸（按钮此刻已变暗）
+  function showStatsLoadingNow() {
+    clearStatsLoadingTimer();
+    statsPhase = "loading";
+    renderStatsAll();
+  }
+
+  // 空态位文案：按数据生命周期取值；null = 此刻不画空态（数据未落地且未到展示时刻）
+  function statsHintText(emptyText) {
+    if (statsPhase === "loading") return STATS_LOADING_COPY;
+    if (statsPhase === "error") return STATS_LOAD_FAILED_COPY;
+    return statsPhase === "ready" ? emptyText : null;
+  }
+
+  // 六个空态位的统一落笔：pending/idle 不写 DOM（维持空白），其余按三态取值
+  function writeStatsHint(el, emptyText) {
+    const hint = statsHintText(emptyText);
+    if (hint !== null) el.innerHTML = `<div class="empty-hint">${hint}</div>`;
   }
 
   function renderStatsAll() {
@@ -17410,7 +17468,7 @@ async function api(method, path, body) {
     const el = $("statsHeatmap");
     if (!el) return;
     const days = statsData && Array.isArray(statsData.heatmap) ? statsData.heatmap : [];
-    if (!days.length) { el.innerHTML = '<div class="empty-hint">暂无数据</div>'; return; }
+    if (!days.length) { writeStatsHint(el, "暂无数据"); return; }
 
     const cell = 14, gap = 4, step = cell + gap;
     const monthGap = 10;   // 月与月之间的额外分隔
@@ -17929,7 +17987,7 @@ async function api(method, path, body) {
     if (!has) {
       if (chartEl._statsAnim) { cancelAnimationFrame(chartEl._statsAnim.raf); chartEl._statsAnim = null; }
       chartEl._statsCommit = null;
-      chartEl.innerHTML = '<div class="empty-hint">暂无数据</div>';
+      writeStatsHint(chartEl, "暂无数据");
       legendEl.textContent = "";
       statsTrendPrev = null; // 空态后首张图重新走揭示动画
       return;
@@ -18108,7 +18166,7 @@ async function api(method, path, body) {
     legendEl.textContent = "";
     barsEl.textContent = "";
     if (!nodes.length || total <= 0) {
-      donutEl.innerHTML = '<div class="empty-hint">暂无用量数据</div>';
+      writeStatsHint(donutEl, "暂无用量数据");
       statsUsageRevealed = false;
       return; // 空态：右半柱状图区域同样不渲染（上面已清空）
     }
@@ -18343,7 +18401,7 @@ async function api(method, path, body) {
         ariaLabel: "首字响应 TTFT 趋势图",
       });
     } else {
-      chartEl.innerHTML = '<div class="empty-hint">暂无数据</div>';
+      writeStatsHint(chartEl, "暂无数据");
     }
     const rows = statsTtftRankedAll().slice(0, STATS_TTFT_TOP_N);
     if (rows.length) {
@@ -18363,7 +18421,7 @@ async function api(method, path, body) {
     const el = $("statsTpsBars");
     if (!el) return;
     const valid = statsTpsRankedAll();
-    if (!valid.length) { el.innerHTML = '<div class="empty-hint">暂无数据</div>'; return; }
+    if (!valid.length) { writeStatsHint(el, "暂无数据"); return; }
     const top = valid.slice(0, STATS_TPS_TOP_N);
     statsRenderBars(el, top.map((r, i) => ({
       rank: i + 1,
@@ -18432,7 +18490,7 @@ async function api(method, path, body) {
     const el = $("statsEndpoints");
     if (!el) return;
     const rows = statsData && Array.isArray(statsData.endpoints) ? statsData.endpoints : [];
-    if (!rows.length) { el.innerHTML = '<div class="empty-hint">暂无数据</div>'; return; }
+    if (!rows.length) { writeStatsHint(el, "暂无数据"); return; }
     const body = rows.map((r) =>
       `<tr>` +
       `<td class="stats-cell-name" title="${r.agentId || ""}">${statsEndpointLabel(r.agentId)}</td>` +

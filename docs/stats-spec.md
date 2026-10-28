@@ -22,7 +22,7 @@
 | TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**卡内榜单 Top10**（avgTps 降序，并列按 key 字母序，见 R-27）。**非流式流量因 ttft 代理恒被排除**（见 R-14）。**样本 <10 的模型整行不显示**（小样本均值被单请求噪声主导，见 R-17）。 |
 | 端点工时表 | 按 agentId：requests / tokens / sessions(30min 空档切段数 + sessionEnds) / workMs(busy 区间并集)。**legacy session 行 tokens 计入本卡但不进热力图/趋势**——两口径对不上是设计使然。 |
 
-布局：页头为「使用统计」标题 + 双子 tab（总览 | 请求日志，localStorage `panel-stats-subtab` 存档，默认总览）；总览即原有全部卡片。总览内：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。**双卡等高**（以 TTFT 卡为准，网格 stretch + 卡片纵向撑满，见 R-28）；卡内榜单不足固定行数（TTFT 5 / TPS 10）时尾部补虚线占位行；**空态（暂无数据）为例外**，不等高、不补占位。**不可见不取数不渲染**（R-25）。
+布局：页头为「使用统计」标题 + 双子 tab（总览 | 请求日志，localStorage `panel-stats-subtab` 存档，默认总览）；总览即原有全部卡片。总览内：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。**双卡等高**（以 TTFT 卡为准，网格 stretch + 卡片纵向撑满，见 R-28）；卡内榜单不足固定行数（TTFT 5 / TPS 10）时尾部补虚线占位行；**就绪空态（数据已落地且该卡为空，见 R-29）为例外**，不等高、不补占位。**不可见不取数不渲染**（R-25）。
 
 子 tab：统计页分「总览 | 请求日志」（页头标题右侧，localStorage `panel-stats-subtab` 记忆，默认总览）。总览=本节上述全部卡片，原样保留。请求日志=journal 行级透传列表：`GET /panel/api/stats/logs` → usage-journal `readRequestsLog`，范围 today/7d/30d/all（含当天往前推 0/6/29/89 天，日历运算防 DST），筛选=来源/渠道/模型/状态，排序=时间/用时双向（表头点击），服务端分页 20/50/100，子 tab 激活且页面可见时 5s 轮询。渠道名读取时解析（R-16 同一解析器），模型显示名剥 wire 前缀（`stripWirePrefix`，与聚合层同一实现）。失败行整行淡红底，点击就地展开详情（错误信息/接口格式/流式/实例/请求模型/渠道 ID/精确时间）。
 
@@ -156,9 +156,14 @@ TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字�
 - 钉住：panel.test.mjs「TTFT 榜按 avg 升序 + Top5」「TPS 卡内榜 Top10」「排名序号复用 .ms-rank/.top」
 
 ### R-28 TTFT/TPS 双卡等高 + 全量排名弹窗
-双卡等高以 TTFT 卡为准：`.skills-grid.stats-quad` 切 stretch + 卡片纵向撑满 + 卡体纵列吃满，榜容器 `flex:1` 顶满；榜单不足固定行数时尾部补虚线占位行（`.stats-bar-placeholder`，TTFT 补足 5 行、TPS 补足 10 行）。**空态为例外**：任一卡无数据时走现有 `empty-hint`，不等高、不补占位。榜区双击出一卡一窗的全量弹窗（`#statsRankModal`，720px 档复用差异弹窗规格，内容区 `max-height:52vh` 内部滚动）：窗内分两列纵向连续（偶均分、奇左多一），序号 1..N 延续与卡片同构，行用紧凑文本（序号+模型名+数值，复用卡内 `valText` 格式，无横条）；两列共用一根纵向滚动条、窗高固定；关闭走 ✕/按钮/遮罩/Esc；空态（全量为零）不开窗。窗标题即发起卡片名（TTFT 窗「首字响应 TTFT」、TPS 窗「TPS 生成速度」），不挂「· 全部模型」类后缀——窗本身即全量，后缀是重复信息；markup 里静态留空，标题由 `openStatsRankModal` 在开窗前按 kind 现写（弹窗只能经该函数显示，故空标题不会被看到）。
+双卡等高以 TTFT 卡为准：`.skills-grid.stats-quad` 切 stretch + 卡片纵向撑满 + 卡体纵列吃满，榜容器 `flex:1` 顶满；榜单不足固定行数时尾部补虚线占位行（`.stats-bar-placeholder`，TTFT 补足 5 行、TPS 补足 10 行）。**空态为例外**（仅数据已落地且为空；加载/失败态见 R-29）：任一卡无数据时走现有 `empty-hint`，不等高、不补占位。榜区双击出一卡一窗的全量弹窗（`#statsRankModal`，720px 档复用差异弹窗规格，内容区 `max-height:52vh` 内部滚动）：窗内分两列纵向连续（偶均分、奇左多一），序号 1..N 延续与卡片同构，行用紧凑文本（序号+模型名+数值，复用卡内 `valText` 格式，无横条）；两列共用一根纵向滚动条、窗高固定；关闭走 ✕/按钮/遮罩/Esc；空态（全量为零）不开窗。窗标题即发起卡片名（TTFT 窗「首字响应 TTFT」、TPS 窗「TPS 生成速度」），不挂「· 全部模型」类后缀——窗本身即全量，后缀是重复信息；markup 里静态留空，标题由 `openStatsRankModal` 在开窗前按 kind 现写（弹窗只能经该函数显示，故空标题不会被看到）。
 - 锚点：panel.js `openStatsRankModal(kind)` / `hideStatsRankModal` + `initStatsTab` 双击接线；panel.html `#statsRankModal`；panel.css `.skills-grid.stats-quad` 等高块 + `.stats-rank-modal-overlay` + `.stats-rank-cols`
 - 钉住：panel.test.mjs「双卡等高：stretch + 占位行」「全量弹窗一卡一窗 + 两列均分 + 空态不开窗」
+
+### R-29 总览三态：加载 / 空 / 失败（加载态不得落「暂无数据」）
+「暂无数据 / 暂无用量数据」只属于 `ready` 态：请求成功落地且该卡确实为空。数据未落地时按 `statsPhase` 分档——首载 200ms 内不画（热链路 20ms 级落地，不闪一帧文案），超过 200ms 仍未落地画「正在加载…」；手动「刷新」重试当拍画加载态；首次加载失败且无旧数据画「加载失败」（重试入口＝页头「刷新」，不逐卡加按钮）；30s 静默轮询不改屏上状态（失败态不闪回加载态），已有旧数据的失败维持旧数据 + toast。今日概览五个数值位不参与空态文案，维持「—」占位。六个空态位（热力/趋势/用量/TTFT/TPS/端点）共用 `statsHintText`，`idle`/`pending` 返回 null（不写 DOM）。
+- 锚点：panel.js `statsPhase`（idle/pending/loading/ready/error）/ `statsHintText` / `writeStatsHint` / `armStatsLoadingHint` / `showStatsLoadingNow` / `clearStatsLoadingTimer` / `STATS_LOADING_HINT_DELAY_MS = 200` / `STATS_LOADING_COPY` / `STATS_LOAD_FAILED_COPY` / `refreshStatsState` / `leaveStatsView`
+- 钉住：panel.test.mjs「五态真值表：只有 ready 才落暂无数据」「六个空态位全部经 statsHintText 收口」「refreshStatsState：仅无缓存时挂加载态…」「展示闸：200ms 内落地不画…」
 
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
@@ -170,6 +175,7 @@ TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字�
 | TPS 卡内 Top10（avgTps 降序） | panel.js `STATS_TPS_TOP_N` + `statsTpsRankedAll` | panel.test.mjs（R-27） |
 | 排名序号复用 .ms-rank/.top（仅第 1 名 accent 色） | panel.js `statsRankEl`（复用看板状态检测卡类） | panel.test.mjs（R-27） |
 | 双卡等高 + 占位行（空态例外） | panel.css `.skills-grid.stats-quad` 等高块 + `.stats-bar-placeholder` | panel.test.mjs（R-28） |
+| 首载加载文案展示闸 200ms | panel.js `STATS_LOADING_HINT_DELAY_MS` | panel.test.mjs（R-29） |
 | 全量弹窗 720px / 内容区 52vh 内部滚动 | panel.js `openStatsRankModal` + panel.css `.stats-rank-modal-overlay` | panel.test.mjs（R-28） |
 | TPS 生成段下限 0.2s | usage-rollup.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
 | 日汇总明细保留 9 天（更早只留当日总量） | usage-rollup.mjs `DETAIL_DAYS` | — |

@@ -2705,8 +2705,9 @@ describe("panel.html stats TTFT/TPS 排名序号 + 双卡等高 + 全量弹窗�
     assert.ok(panelCss.includes("border-bottom: 1px dashed"), "占位行为虚线行");
     assert.ok(panelJs.includes("placeholders: STATS_TTFT_TOP_N - rows.length"), "TTFT 缺位补足 5 行");
     assert.ok(panelJs.includes("placeholders: STATS_TPS_TOP_N - top.length"), "TPS 缺位补足 10 行");
-    // 空态例外：无数据走 empty-hint，不补占位
-    assert.ok(panelJs.includes('<div class="empty-hint">暂无数据</div>'), "空态仍走 empty-hint");
+    // 空态例外：无数据走 empty-hint，不补占位（文案经 statsHintText 三态判定）
+    assert.ok(panelJs.includes('writeStatsHint(el, "暂无数据")'), "空态仍走 empty-hint");
+    assert.ok(panelJs.includes('`<div class="empty-hint">${hint}</div>`'), "空态仍走 empty-hint 容器");
   });
 
   it("全量弹窗一卡一窗 + 窗内两列均分 + 空态不开窗（R-28）", () => {
@@ -4504,7 +4505,7 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(fn.includes("barsEl.textContent = \"\""), "bars cleared on every render (空态不渲染)");
     const callIdx = fn.indexOf("appendStatsUsageBars(barsEl, nodes, allNodes, reveal");
     assert.ok(callIdx !== -1, "bars built from same visible nodes + allNodes (同源同排序)");
-    const emptyIdx = fn.indexOf("empty-hint\">暂无用量数据");
+    const emptyIdx = fn.indexOf('writeStatsHint(donutEl, "暂无用量数据")');
     assert.ok(emptyIdx !== -1 && emptyIdx < callIdx, "empty state returns before bars render");
 
     // 生长动画：复用 USAGE_REVEAL_MS + easeOutCubic，挂在环的同一 draw 循环里
@@ -4704,6 +4705,80 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(!panelHtml.includes('<section class="skills-view stats-view"'),
       "statsView 不得挂未引用的 .skills-view 类");
     assert.ok(panelHtml.includes('<span class="badge badge-neutral">近 90 天</span>'), "heatmap 90-day badge kept as its annotation");
+  });
+});
+
+// 2026-10-28 加载态误导收口：空态文案按数据生命周期三态分家——数据未落地时说
+// 「正在加载…」，首次失败说「加载失败」，只有成功落地且确实为空才说「暂无数据」。
+describe("panel.html stats 三态：加载 / 空 / 失败（加载态不再落「暂无数据」）", () => {
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+
+  function statsHintFn() {
+    const m = panelJs.match(/function statsHintText\(emptyText\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "statsHintText found in panel.js");
+    const loadingCopy = panelJs.match(/const STATS_LOADING_COPY = "([^"]+)"/)?.[1];
+    const failedCopy = panelJs.match(/const STATS_LOAD_FAILED_COPY = "([^"]+)"/)?.[1];
+    assert.ok(loadingCopy && failedCopy, "加载/失败文案常量存在");
+    return {
+      loadingCopy,
+      failedCopy,
+      make: new Function(
+        "statsPhase", "STATS_LOADING_COPY", "STATS_LOAD_FAILED_COPY",
+        `return function statsHintText(emptyText) {${m[1]}\n  }`,
+      ),
+    };
+  }
+
+  it("五态真值表：只有 ready 才落「暂无数据」", () => {
+    const { loadingCopy, failedCopy, make } = statsHintFn();
+    assert.equal(make("idle", loadingCopy, failedCopy)("暂无数据"), null, "idle 不画空态");
+    assert.equal(make("pending", loadingCopy, failedCopy)("暂无数据"), null, "pending 不画空态");
+    assert.equal(make("loading", loadingCopy, failedCopy)("暂无数据"), loadingCopy, "加载态说正在加载");
+    assert.equal(make("error", loadingCopy, failedCopy)("暂无数据"), failedCopy, "失败态说加载失败");
+    assert.equal(make("ready", loadingCopy, failedCopy)("暂无数据"), "暂无数据", "就绪空态沿用原文案");
+    assert.equal(make("ready", loadingCopy, failedCopy)("暂无用量数据"), "暂无用量数据", "用量卡文案不变");
+  });
+
+  it("六个空态位全部经 statsHintText 收口（热力/趋势/用量/TTFT/TPS/端点）", () => {
+    for (const [fnName, call] of [
+      ["renderStatsHeatmap", 'writeStatsHint(el, "暂无数据")'],
+      ["renderStatsTrend", 'writeStatsHint(chartEl, "暂无数据")'],
+      ["renderStatsUsage", 'writeStatsHint(donutEl, "暂无用量数据")'],
+      ["renderStatsTtft", 'writeStatsHint(chartEl, "暂无数据")'],
+      ["renderStatsTps", 'writeStatsHint(el, "暂无数据")'],
+      ["renderStatsEndpoints", 'writeStatsHint(el, "暂无数据")'],
+    ]) {
+      const m = panelJs.match(new RegExp(`function ${fnName}\\([^)]*\\) \\{([\\s\\S]*?)\\n  \\}`));
+      assert.ok(m, fnName + " found in panel.js");
+      assert.ok(m[1].includes(call), fnName + " 的空态位走三态文案");
+      assert.ok(!m[1].includes('<div class="empty-hint">暂无'), fnName + " 不得直写死空态文案");
+    }
+  });
+
+  it("refreshStatsState：仅无缓存时挂加载态，成功置 ready，首次失败才落 error", () => {
+    const m = panelJs.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshStatsState found in panel.js");
+    const body = m[1];
+    assert.ok(body.includes("if (!statsData) {"), "只有手上无数据才谈加载态");
+    assert.ok(body.includes("showStatsLoadingNow()"), "手动重试当拍给反馈");
+    assert.ok(body.includes("armStatsLoadingHint(seq)"), "首载走展示闸");
+    assert.ok(body.indexOf('statsPhase = "ready"') < body.indexOf("renderStatsAll()"), "成功先置 ready 再渲染");
+    assert.ok(body.includes('if (!statsData) { statsPhase = "error"; renderStatsAll(); }'),
+      "首次失败且无旧数据才落失败态");
+    assert.match(panelJs, /STATS_LOADING_HINT_DELAY_MS = 200/);
+  });
+
+  it("展示闸：200ms 内落地不画、旧请求不得掀新状态、离开统计页即清", () => {
+    const arm = panelJs.match(/function armStatsLoadingHint\(seq\) \{([\s\S]*?)\n  \}/);
+    assert.ok(arm, "armStatsLoadingHint found in panel.js");
+    assert.ok(arm[1].includes('statsPhase = "pending"'), "挂闸期不画空态");
+    assert.ok(arm[1].includes("seq !== statsReqSeq || statsData"), "旧请求/已落地不掀当前状态");
+    const leave = panelJs.match(/function leaveStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(leave, "leaveStatsView found in panel.js");
+    assert.ok(leave[1].includes("clearStatsLoadingTimer()"), "离开统计页清展示闸");
   });
 });
 
