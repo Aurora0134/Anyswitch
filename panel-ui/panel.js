@@ -5415,12 +5415,22 @@ async function api(method, path, body) {
   // 只有新的请求能重新入回合，界面自绘不再点亮。无归属的普通终端没有回合概念，
   // 维持原输出窗口径（用户在 shell 里跑命令照样看得到进行中）。
   //
-  // 已知窄化（知情取舍，用户 2026-10-26 验收口径）：回合的入场券只能由「看到在途
-  // 请求」签发，而两个写点都只在终端页可见时运行。所以「回合在面板刷新/停在看板页
-  // 期间开跑、此刻已进工具执行段」的会话会显示空闲——直到下一次请求。要消掉它需要
-  // relay 下发实例级「回合在跑」布尔位（本架构目前拿不到，见上面输出窗注释）。这段
-  // 窗口里误杀风险仍由服务端杀前进程树探测兜住（/switch 会探到活命令并拒换），
-  // 只是显示面不保证。
+  // 第四个输入：进程树忙判据（agent.busy，relay 随归属数据下发，见
+  // terminal-attribution.mjs 头部）。请求／输出／回合闸三个替代信号全都够不着
+  // 「回合已结束、agent 留下的子进程还在跑」——2026-10-28 实机复现：后台进程活
+  // 着、面板判空闲、/switch 被守卫探到活子进程后 409 拒换、前端静默新开页签，
+  // 用户观感即「内切失效」。这一位把守卫同源判据补进面板视野：树里有活命令就
+  // 点亮，忙判据不猜（降级轮读不出命令行时为 null，回落既有信号）。
+  // 它**不救**已退出的会话：进程没了就没有任务可保护——与 terminalBusyByOutput
+  // 对 exited 的排除同一条（迟到的活跃信号不能把 exited 判忙）。
+  function terminalCommandRunning(session) {
+    const agent = session && session.agent ? session.agent : null;
+    if (!agent || agent.busy !== true) return false;
+    const state = session && session.backendState ? session.backendState : null;
+    if (state && state.status === "exited") return false;
+    return true;
+  }
+
   function terminalSessionBusyFromSignals(session, count, now = Date.now()) {
     const id = session && typeof session.id === "string" ? session.id : null;
     if (count > 0) {
@@ -5430,10 +5440,12 @@ async function api(method, path, body) {
     const output = terminalBusyByOutput(session, undefined, now);
     if (!output) {
       if (id) terminalTurnArmed.delete(id);
-      return false;
+      // 输出窗过期不等于没事干：agent 跑的命令可能完全不吐字节（构建、测试套件、
+      // 后台服务）。这一位由守卫同源判据签发，是这三个信号里唯一能看见它的。
+      return terminalCommandRunning(session);
     }
     if (!session || !session.agent) return true;
-    return !!(id && terminalTurnArmed.has(id));
+    return !!(id && terminalTurnArmed.has(id)) || terminalCommandRunning(session);
   }
 
   function terminalActivityApplyToSession(session, activeRequests) {

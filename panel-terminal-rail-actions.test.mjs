@@ -2989,6 +2989,7 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
     ${extractFn("terminalMetricsFromInstance")}
     ${extractFn("terminalRouteForEndpoint")}
     ${extractFn("terminalBusyByOutput")}
+    ${extractFn("terminalCommandRunning")}
     ${extractFn("terminalSessionBusyFromSignals")}
     ${extractFn("noteTerminalWorkingStatus")}
     ${extractFn("enrichTerminalSessions")}
@@ -3063,6 +3064,99 @@ const BLANK = { id: "t-a", backend: true, agentId: null, agentName: null, agent:
 const IDLE = { id: "t-a", backend: true, agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle", label: "旧会话", cwd: "C:\\dev\\alpha" };
 const WORKING = { ...IDLE, status: "working" };
 const PREVIEW = { id: "t-a", backend: false, agentId: null, agent: null, resume: null, status: "idle", label: "设计稿" };
+
+// ── 进程树忙判据（agent.busy）：面板 working 的第四个输入 ──
+// 面板的 working 原本只有「在途请求＋5s 输出窗＋回合闸」。三者都够不着「回合已
+// 结束、agent 留下的子进程还在跑」——那一刻面板显示空闲，而内切杀前探测探到活
+// 子进程就拒换（409），前端静默新开页签，用户观感即「内切失效」（2026-10-28 实机
+// 复现：后台 node 进程活着，/switch 回 409）。relay 侧把守卫同源判据随 detected
+// feed 下发为 agent.busy，这里钉它进 working 口径与判定门。
+describe("进程树忙判据（agent.busy）进 working 口径与内切判定门", () => {
+  // 一条「树里有活命令」的会话：零在途请求、输出窗早过期（lastActiveAt 很久以前），
+  // 即面板旧口径下的纯空闲。唯有 agent.busy 为 true。
+  const BUSY_SESSION = {
+    ...IDLE, status: "idle",
+    agent: { endpointId: "kimi", instanceId: "inst-1", busy: true },
+    backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 60_000 },
+  };
+  const BUSY_NULL_SESSION = {
+    ...IDLE, status: "idle",
+    agent: { endpointId: "kimi", instanceId: "inst-1", busy: null },
+    backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 60_000 },
+  };
+  const BUSY_FALSE_SESSION = {
+    ...IDLE, status: "idle",
+    agent: { endpointId: "kimi", instanceId: "inst-1", busy: false },
+    backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 60_000 },
+  };
+
+  it("树里有活命令：判 working 并保护性新开（不再让守卫单打独斗后静默转新开）", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": BUSY_SESSION }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => SWITCH_OK, realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(fn.sessions["t-a"].status, "working", "忙判据把状态点亮");
+    assert.equal(log.creates.length, 1, "保护性新开");
+    assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "前端自己就判得出忙，不再等守卫 409");
+  });
+
+  it("busy 为 false / null：都不点亮，照旧就地内切（判据不猜、不常亮）", async () => {
+    for (const [name, session] of [["false", BUSY_FALSE_SESSION], ["null", BUSY_NULL_SESSION]]) {
+      // switch 用一个可挂起的 Promise：在 POST 落定之前读页面状态，才读得到富化
+      // 那一拍算出来的显示口径（落定后记录会被宿主快照整份换掉，status 是快照
+      // 的 running，不是显示位）。
+      let release;
+      const { fn, log } = runSwitch({
+        sessions: { "t-a": session }, activeId: "t-a",
+        agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+        switchImpl: () => new Promise((resolve) => { release = resolve; }),
+        realEnrich: true,
+      });
+      fn.go(HISTORY_ROW);
+      await flush();
+      assert.equal(fn.sessions["t-a"].status, "idle", `${name} 不点亮`);
+      assert.equal(log.creates.length, 0, `${name} 不转新开`);
+      assert.ok(log.gets.some((g) => g.path.endsWith("/switch")), `${name} 照旧走内切`);
+      release(SWITCH_OK);
+      await flush();
+    }
+  });
+
+  it("忙判据不救已退出的会话：进程没了就没有任务可保护", async () => {
+    // enabled/忙判据为 true，但宿主现态 exited：exited 先排（与「迟到的活跃信号不能
+    // 把 exited 判忙」同一条），照样就地内切。
+    let release;
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...BUSY_SESSION, backendState: { status: "exited" } } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_EXITED,
+      switchImpl: () => new Promise((resolve) => { release = resolve; }),
+      realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(fn.sessions["t-a"].status, "idle", "exited 优先于忙判据");
+    assert.equal(log.creates.length, 0, "内切");
+    assert.ok(log.gets.some((g) => g.path.endsWith("/switch")), "走 /switch");
+    release(SWITCH_OK);
+    await flush();
+  });
+
+  it("忙判据只认自己这条会话的归属：未归属会话不因别人的 busy 点亮", async () => {
+    // busy 挂在 agent 上；无归属（agent 为 null）的普通终端没有这一位。
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE, agent: null, status: "idle", backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 60_000 } } },
+      activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => SWITCH_OK, realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 0, "无归属终端维持原输出窗口径");
+  });
+});
 
 // ── 全新内切（2026-10-25 用户拍板：「新建会话」/组头 ⊕ 与点历史行同门）──
 // body 带 agentId＋cwd、不带 resume 键＝把当前页签就地换成一个全新 agent

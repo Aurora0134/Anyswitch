@@ -14,10 +14,32 @@
 //      跑的兜底）；交互式 shell（用户手开的普通终端）没有「本体层」，直接子进
 //      程就是用户跑的命令，算证据。
 //
-// 豁免形态：dsh 0.2.0 宿主会常驻派生「同命令行」引擎子进程，光杆形态的例外。
-// 命中「命令行与某祖先相同」的派生对不作为在跑证据，但派生进程自己的子树照
-// 常走——引擎底下挂着的命令进程仍算在跑。
+// 豁免形态：agent 本体常驻派生的自家人——dsh 0.2.0 宿主派生的「同命令行」引擎
+// 子进程、qoder 的 `--internal-sites-mcp` 助手、opencode 的 `serve --service`
+// 助手。它们不是用户命令，却活在锚之下：按「在跑命令」判会把这三个端点的终端
+// 永久钉死在拒换上（探针恒 true → 409，前端静默新开页签，用户观感即「内切失
+// 效」——2026-10-28 实测确认 qoder/opencode 两条夹具都命中）。判据是「命令行
+// 以某祖先的命令行为前缀」（见 isDerivedProcess）。派生进程自己的子树照常走
+// ——引擎底下挂着的命令进程仍算在跑。
 import { execFile } from "node:child_process";
+
+// 派生进程判据：命令行以某祖先的命令行为前缀。
+// 2026-10-28 从「与某祖先相同」放宽到前缀：qoder / opencode 的常驻助手与本体
+// 只差一段参数，按「相同」判它们全成了在跑证据，这两个端点的终端从此永远换不了
+// 内容。助手们的形状统一是「同一个可执行、多带一段参数」，前缀判据一律认成本体
+// 派生；真命令换的是可执行文件（ping.exe / npm / python…），永远不是任何祖先的
+// 前缀。dsh 的「逐字相同」是前缀判据的特例，行为不变。
+function isDerivedProcess(cmd, ancestorCmds) {
+  if (cmd === null) return false;
+  for (const ancestorCmd of ancestorCmds) {
+    if (cmd === ancestorCmd) return true;
+    if (!cmd.startsWith(ancestorCmd)) continue;
+    // 边界必须是参数分隔或行尾：否则 `foo.exe` 会把 `foo.exe.bak` 也认成本体。
+    const boundary = cmd.charAt(ancestorCmd.length);
+    if (boundary === "" || boundary === " " || boundary === "\t") return true;
+  }
+  return false;
+}
 
 // 单次枚举的**查询**预算（不含 PowerShell 冷启动，见 SWITCH_GUARD_STARTUP_ALLOWANCE_MS）。
 //
@@ -53,6 +75,11 @@ const SWITCH_GUARD_PS_QUERY =
   "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.Name)`t$($_.CommandLine)\" }";
 
 const SHELL_IMAGES = new Set(["cmd.exe", "powershell.exe", "pwsh.exe"]);
+// 控制台宿主：进程自己开一个新控制台时由系统挂在它名下（`conhost.exe 0x<hwnd>`，
+// 命令行带伪句柄尾巴）。它是控制台基础设施而不是用户命令——按「在跑命令」判会让
+// 这类终端永久判忙，2026-10-28 实测定案的假阳性源之一（自建 conhost 的引擎底下
+// 挂一条 conhost，判据恒 true，从此换不了内容）。它自己没有子进程，跳过即止。
+const CONSOLE_HOST_IMAGES = new Set(["conhost.exe"]);
 // 一次性包装形态的命令行特征（cmd /c /k、powershell/pwsh -Command/-c）：命中即
 // 「这个 shell 是拉起器，子进程是受拉程序」；不命中则是交互 shell，用户在提示
 // 符下跑的命令就是它的直接子进程。
@@ -98,7 +125,9 @@ function evidenceMinDepth(cmdByPid, imageByPid, rootPid, anchorPid) {
 }
 
 // 从起点（锚或根）向下走：每个节点携带「到它为止的祖先命令行集合」与深度。
-//   - 命令行命中祖先集合＝派生引擎（dsh 形态）：不算证据，子树照走；
+//   - 命令行以某祖先的命令行为前缀＝派生进程（dsh 宿主派生引擎、qoder 的
+//     sites-mcp 助手、opencode 的 serve 助手，见 isDerivedProcess）：不算证据，
+//     子树照走；
 //   - 新命令行或拿不到命令行（null，保守）落在证据层（evidenceMinDepth 起）：
 //     在跑证据，立即返回；
 //   - 本体层（锚/包装壳的直接子进程，未达证据层）的进程不是证据，子树照走——
@@ -122,7 +151,16 @@ export function hasRunningCommand(table, { rootPid, anchorPid = null }) {
       if (parent !== pid || seen.has(child)) continue;
       seen.add(child);
       const cmd = cmdByPid.get(child) ?? null;
-      if (depth + 1 >= minDepth && (cmd === null || !ancestorCmds.has(cmd))) return true;
+      const image = imageByPid.get(child) ?? null;
+      // 控制台宿主是基础设施，不是命令：不算证据，但子树照走（与派生进程同口径，
+      // 理论上它没有子进程，走一遍只为不留下「跳过即止」的语义差）。
+      if (image !== null && CONSOLE_HOST_IMAGES.has(image)) {
+        const infra = new Set(ancestorCmds);
+        if (cmd) infra.add(cmd);
+        queue.push({ pid: child, ancestorCmds: infra, depth: depth + 1 });
+        continue;
+      }
+      if (depth + 1 >= minDepth && (cmd === null || !isDerivedProcess(cmd, ancestorCmds))) return true;
       const inherited = new Set(ancestorCmds);
       if (cmd) inherited.add(cmd);
       queue.push({ pid: child, ancestorCmds: inherited, depth: depth + 1 });

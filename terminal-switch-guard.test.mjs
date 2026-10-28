@@ -113,6 +113,78 @@ describe("hasRunningCommand：锚优先＋根形态定证据层＋dsh 派生豁�
     assert.equal(hasRunningCommand(dshRunningAnchored, { rootPid: 30 }), true, "无锚 dsh 跑命令照常识别");
   });
 
+  it("常驻助手（同可执行＋多一段参数）不作为在跑证据，助手子树照走", () => {
+    // qoder 的 --internal-sites-mcp 与 opencode 的 serve --service 都是「本体
+    // 可执行＋一段参数」的常驻助手：它们不是用户命令，却活在锚之下。按「与祖先
+    // 逐字相同」判它们全成了在跑证据，这两个端点的终端从此永远换不了内容（探针
+    // 恒 true → 409 → 静默新开页签）。前缀判据把它们认成本体派生。
+    const QODER_TREE = [
+      [80, 1, "cmd.exe", "cmd /c qodercli"],
+      [81, 80, "qodercli.exe", "C:\\qoder\\bin\\qodercli\\qodercli.exe"],
+      [82, 81, "qodercli.exe", "C:\\qoder\\bin\\qodercli\\qodercli.exe --internal-sites-mcp C:\\qoder\\plugins\\cache"],
+    ];
+    assert.equal(hasRunningCommand(table(QODER_TREE), { rootPid: 80, anchorPid: 81 }), false,
+      "常驻助手豁免＝等输入语义");
+    const qoderRunning = table([
+      ...QODER_TREE,
+      [83, 81, "node.exe", "npm-cli.js install"], // 本体直接跑的用户命令
+    ]);
+    assert.equal(hasRunningCommand(qoderRunning, { rootPid: 80, anchorPid: 81 }), true,
+      "助手不遮蔽真命令");
+
+    const OPENCODE_TREE = [
+      [90, 1, "cmd.exe", "cmd /c opencode"],
+      [91, 90, "opencode.exe", "C:\\opencode\\opencode.exe"],
+      [92, 91, "opencode.exe", "C:\\opencode\\opencode.exe serve --service"],
+    ];
+    assert.equal(hasRunningCommand(table(OPENCODE_TREE), { rootPid: 90, anchorPid: 91 }), false,
+      "serve 助手同样豁免");
+    const opencodeRunning = table([
+      ...OPENCODE_TREE,
+      [93, 92, "ping.exe", "ping -n 45 127.0.0.1 > nul"], // 助手自己跑的命令仍算
+    ]);
+    assert.equal(hasRunningCommand(opencodeRunning, { rootPid: 90, anchorPid: 91 }), true,
+      "助手子树照走");
+  });
+
+  it("前缀判据不吃掉同名不同程序：边界必须落在参数分隔或行尾", () => {
+    // `foo.exe` 不能把 `foo.exe.bak` 认成本体派生——那是另一个可执行。
+    const rows = table([
+      [100, 1, "cmd.exe", "cmd /c tool"],
+      [101, 100, "tool.exe", "C:\\bin\\tool.exe"],
+      [102, 101, "tool.exe.bak", "C:\\bin\\tool.exe.bak --run"],
+    ]);
+    assert.equal(hasRunningCommand(rows, { rootPid: 100, anchorPid: 101 }), true,
+      "同名不同可执行仍是在跑命令");
+    // 行尾边界：命令行逐字相同就是派生（dsh 形态）。
+    const same = table([
+      [110, 1, "cmd.exe", "cmd /c dsh"],
+      [111, 110, "dsh.exe", "dsh --profile dsh-tui"],
+      [112, 111, "dsh.exe", "dsh --profile dsh-tui"],
+    ]);
+    assert.equal(hasRunningCommand(same, { rootPid: 110, anchorPid: 111 }), false, "逐字相同照旧豁免");
+  });
+
+  it("控制台宿主不算在跑命令：conhost 是基础设施，不是用户命令", () => {
+    // 进程自开新控制台时系统给它挂一条 conhost.exe（命令行带 `0x<句柄>` 尾巴）。
+    // 按「在跑命令」判它，这类终端会永久判忙、从此换不了内容——2026-10-28 实机
+    // 定案的假阳性源。
+    const CONSOLE_TREE = [
+      [120, 1, "cmd.exe", "cmd /c dsh"],
+      [121, 120, "node.exe", "node C:\\dsh\\lib\\bin.js --profile dsh-tui"],
+      [122, 121, "conhost.exe", "\\??\\c:\\windows\\system32\\conhost.exe 0x4"],
+    ];
+    assert.equal(hasRunningCommand(table(CONSOLE_TREE), { rootPid: 120, anchorPid: 121 }), false,
+      "conhost 不点亮忙判据");
+    // conhost 自己底下若真挂着东西（理论上没有），照旧识别。
+    const underConhost = table([
+      ...CONSOLE_TREE,
+      [123, 122, "ping.exe", "ping -n 45 127.0.0.1"],
+    ]);
+    assert.equal(hasRunningCommand(underConhost, { rootPid: 120, anchorPid: 121 }), true,
+      "conhost 底下的真命令仍算证据");
+  });
+
   it("命令行为 null：证据层保守按在跑，本体层不误伤（子树照走）", () => {
     const deep = table([
       [40, 1, "cmd.exe", "cmd /c claude"],

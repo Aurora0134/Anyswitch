@@ -7568,7 +7568,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(res.statusCode, 200);
     const body = json();
     assert.equal(body.sessions.length, 1);
-    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321" });
+    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null });
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
@@ -7726,7 +7726,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json().sessions[0].agent,
-      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284" });
+      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null });
   });
 
   it("检测喂给中断（relay 挂）时列表照常返回纯外壳会话", async () => {
@@ -11534,8 +11534,9 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
   const VM_DONE_STATE = "const terminalDoneUnread = new Map(); const terminalPrevWorking = new Map(); const terminalTurnArmed = new Set(); let activeTerminalPreviewId = null;";
   async function vmFn(name, args, deps = []) {
     // 回合闸是 working 口径的必经中间层（terminalActivityApplyToSession / enrich 都
-    // 经它落 status），统一随源抽出，调用点不必逐个补依赖。
-    const all = ["terminalSessionBusyFromSignals", "terminalBusyByOutput"]
+    // 经它落 status），统一随源抽出，调用点不必逐个补依赖。terminalCommandRunning
+    // 是第四个输入（进程树忙判据），同样必经。
+    const all = ["terminalSessionBusyFromSignals", "terminalCommandRunning", "terminalBusyByOutput"]
       .reduce((acc, dep) => (acc.includes(dep) ? acc : [...acc, dep]), [...deps]);
     const source = [name, ...all].map((fnName) => {
       const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
@@ -11729,7 +11730,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     // 回合闸是跨拍状态（Set），必须落在同一个 VM 上下文里连续调用：vmFn 每次新建
     // 上下文，逐次调用会把闸位丢掉，这里自己建一个复用上下文。
     const apply = await (async () => {
-      const source = ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalSessionBusyFromSignals"]
+      const source = ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalCommandRunning", "terminalSessionBusyFromSignals"]
         .map((fnName) => panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0])
         .join("\n");
       return vm.runInNewContext(`(() => { ${VM_DONE_STATE}\n${source}; return terminalActivityApplyToSession; })()`, {});
@@ -11769,6 +11770,45 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     };
     apply(shell, 0);
     assert.equal(shell.status, "working", "普通终端维持输出活跃窗口径");
+  });
+
+  it("前端：进程树忙判据——静默超窗后 agent 留下的活子进程仍点亮", async () => {
+    // 请求／输出／回合闸三个替代信号全都够不着「回合已结束、agent 留下的子进程还
+    // 在跑」：那一拍面板判空闲，而内切杀前探测探到活子进程就 409 拒换、前端静默
+    // 新开页签（2026-10-28 实机复现）。agent.busy（relay 随归属下发、与守卫同源）
+    // 补这一位。
+    const now = Date.now();
+    const apply = await (async () => {
+      const source = ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalCommandRunning", "terminalSessionBusyFromSignals"]
+        .map((fnName) => panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0])
+        .join("\n");
+      return vm.runInNewContext(`(() => { ${VM_DONE_STATE}\n${source}; return terminalActivityApplyToSession; })()`, {});
+    })();
+    // 静默超窗：无请求、输出窗早过期、也没进过回合——旧口径下纯空闲。
+    const quiet = {
+      id: "t-quiet", status: "idle", metrics: null,
+      agent: { endpointId: "dsh", instanceId: "dsh-1", busy: true },
+      backendState: { status: "running", lastActiveAt: now - 60_000, createdAt: now - 600_000, spawnedAt: now - 600_000 },
+    };
+    apply(quiet, 0);
+    assert.equal(quiet.status, "working", "树里有活命令：点亮（不再等守卫 409 后静默新开）");
+
+    // busy 为 false / null（含老 relay 没有这一位）都不点亮，也不常亮。
+    for (const verdict of [false, null]) {
+      const s = { ...quiet, id: `t-q-${verdict}`, agent: { endpointId: "dsh", instanceId: "dsh-1", busy: verdict } };
+      apply(s, 0);
+      assert.equal(s.status, "idle", `busy=${verdict} 不点亮`);
+    }
+
+    // 已退出的会话不救：进程没了就没有任务可保护。
+    const dead = { ...quiet, id: "t-dead", backendState: { ...quiet.backendState, status: "exited" } };
+    apply(dead, 0);
+    assert.equal(dead.status, "idle", "exited 优先于忙判据");
+
+    // 与在途请求是 OR：两者都在时仍只亮一次（没有 double-count 语义）。
+    const both = { ...quiet, id: "t-both" };
+    apply(both, 1);
+    assert.equal(both.status, "working", "请求在途与忙判据并存仍是一个 working");
   });
 
   it("前端：端点级活跃帧不落到单个会话（未绑定新会话不再被别人的请求点亮）", async () => {

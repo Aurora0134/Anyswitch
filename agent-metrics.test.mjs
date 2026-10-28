@@ -27,6 +27,7 @@ import {
   PS_PROBE_OPTIONAL_TIMEOUT_MS,
 } from "./agent-metrics.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
+import { hasRunningCommand } from "./terminal-switch-guard.mjs";
 
 describe("getTtftColor", () => {
   it("returns green for ttft under 5s", () => {
@@ -1461,7 +1462,12 @@ describe("createAgentMetricsCollector", () => {
       const feed = collector.getDetectedClientProcesses();
       const qoderEntries = feed.filter((proc) => proc.agentId === "qoder");
       assert.equal(qoderEntries.length, 1);
-      assert.deepEqual(qoderEntries[0], { agentId: "qoder", pid: 10284, ancestors: [19560, 23828] });
+      const { busy, ...qoderRest } = qoderEntries[0];
+      assert.deepEqual(qoderRest, { agentId: "qoder", pid: 10284, ancestors: [19560, 23828] });
+      // 底下的 --internal-sites-mcp 助手是本体常驻派生的自家人（前缀豁免），
+      // 不是用户命令：判无活命令。修前按「逐字相同」判它是在跑证据，qoder 终端
+      // 会永远换不了内容。
+      assert.equal(busy, false, "常驻助手不算在跑命令");
     });
 
     it("materializes a qoder-<pid> instance row from a socket-fallback-shaped request", async () => {
@@ -1547,7 +1553,12 @@ describe("createAgentMetricsCollector", () => {
       const feed = collector.getDetectedClientProcesses();
       const entries = feed.filter((proc) => proc.agentId === "opencode");
       assert.equal(entries.length, 1, "serve 子进程不进 detected feed");
-      assert.deepEqual(entries[0], { agentId: "opencode", pid: 14788, ancestors: [18868, 18580] });
+      const { busy, ...ocRest } = entries[0];
+      assert.deepEqual(ocRest, { agentId: "opencode", pid: 14788, ancestors: [18868, 18580] });
+      // serve --service 是本体可执行＋一段参数的常驻助手（前缀豁免），不是用户
+      // 命令：判无活命令。修前按「逐字相同」判它是在跑证据，opencode 终端会永远
+      // 换不了内容。
+      assert.equal(busy, false, "常驻助手不算在跑命令");
     });
 
     it("spawns no placeholder row from the process alone; rows are session-born", async () => {
@@ -4342,8 +4353,10 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.equal(dsh.instances[0].surface, "TUI");
 
     const dshFeed = collector.getDetectedClientProcesses().filter((p) => p.agentId === "dsh");
-    assert.deepEqual(dshFeed, [{ agentId: "dsh", pid: 5101, ancestors: [5100, 99] }],
-      "终端归属面只报引擎子进程");
+    assert.equal(dshFeed.length, 1, "终端归属面只报引擎子进程");
+    const { busy, ...dshRest } = dshFeed[0];
+    assert.deepEqual(dshRest, { agentId: "dsh", pid: 5101, ancestors: [5100, 99] });
+    assert.equal(busy, false, "这张夹具里引擎底下没有活命令");
   });
 
   it("collapses a delegation chain of any depth and carries the host's profile down", async () => {
@@ -4768,9 +4781,11 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.equal(dsh.instances[0].tokens.prompt, 30);
   });
 
-  it("asks the resident probe for the desktop image by name", async () => {
-    // 行的第一道门是探针的 WHERE 名单：查询里没有桌面端镜像名，后面所有谓词
-    // 都拿不到这一行。这条把查询文本本身钉住。
+  it("asks the resident probe for the whole process table, not a name-filtered one", async () => {
+    // 行的第一道门是探针的查询范围：2026-10-28 起查询不带镜像名白名单，因为
+    // 「锚 pid 之下有没有活命令」要的全表——白名单一滤，agent 跑的命令子进程
+    // （ping.exe / npm / python…）就全消失了，只剩一串没有命令行的空壳。
+    // 这条把「无白名单」钉住，防止谁为了省几行把 name= 条件加回来。
     const seen = [];
     const spawnFn = () => {
       const child = new EventEmitter();
@@ -4794,7 +4809,8 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     const collector = testCollector({ nowFn: () => 3000, spawnFn, execFn: (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\n") });
     await collector.getAgentsStatus();
     assert.ok(seen.length > 0, "探针被问过");
-    assert.ok(seen[0].includes("name='DeepSeek Harness.exe'"), `常驻查询要含桌面端镜像名，实际：${seen[0].slice(0, 200)}`);
+    assert.ok(seen[0].includes("Get-CimInstance Win32_Process"), `常驻查询要枚举全表，实际：${seen[0].slice(0, 200)}`);
+    assert.ok(!seen[0].includes("-Filter"), "查询不再带镜像名白名单：桌面端与命令子进程都靠全表");
   });
 
   it("keeps the fire-and-forget desktop shell out of the process count", async () => {
@@ -5254,9 +5270,11 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
   });
 
-  it("asks the resident probe for the desktop image by name", async () => {
-    // 行的第一道门是探针的 WHERE 名单：查询里没有 `Kimi Code.exe`，后面所有
-    // 谓词都拿不到这一行。这条把查询文本本身钉住，防止改名/漏加只表现为"桌面端不见了"。
+  it("asks the resident probe for the whole process table, not a name-filtered one", async () => {
+    // 行的第一道门是探针的查询范围：2026-10-28 起查询不带镜像名白名单，因为
+    // 「锚 pid 之下有没有活命令」要的全表——白名单一滤，agent 跑的命令子进程
+    // （ping.exe / npm / python…）就全消失了，只剩一串没有命令行的空壳。
+    // 这条把「无白名单」钉住，防止谁为了省几行把 name= 条件加回来。
     const seen = [];
     const spawnFn = () => {
       const child = new EventEmitter();
@@ -5280,7 +5298,8 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     const collector = testCollector({ nowFn: () => 3000, spawnFn, execFn: (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\n"), kimiRegistryLookup: registry([]) });
     await collector.getAgentsStatus();
     assert.ok(seen.length > 0, "探针被问过");
-    assert.ok(seen[0].includes("name='Kimi Code.exe'"), `常驻查询要含桌面端镜像名，实际：${seen[0].slice(0, 160)}`);
+    assert.ok(seen[0].includes("Get-CimInstance Win32_Process"), `常驻查询要枚举全表，实际：${seen[0].slice(0, 160)}`);
+    assert.ok(!seen[0].includes("-Filter"), "查询不再带镜像名白名单：命令子进程必须在表里");
   });
 
   it("promotes the terminal row that owns a server registration to Web and leaves the desktop row alone", async () => {
@@ -6839,15 +6858,124 @@ describe("terminal attribution feed (getDetectedClientProcesses)", () => {
     const feed = collector.getDetectedClientProcesses();
     assert.equal(feed.length, 2, "ChatGPT 桌面壳不是引擎，不进检测面");
     const codexEntry = feed.find((p) => p.agentId === "codex");
-    assert.deepEqual(codexEntry, { agentId: "codex", pid: 6100, ancestors: [8888, 9000] });
+    // busy 是「锚 pid 之下有没有活命令」判据：这张夹具里两条引擎都是光杆。
+    const { busy: codexBusy, ...codexRest } = codexEntry;
+    assert.deepEqual(codexRest, { agentId: "codex", pid: 6100, ancestors: [8888, 9000] });
+    assert.equal(codexBusy, false, "光杆引擎判无活命令");
     const kimiEntry = feed.find((p) => p.agentId === "kimi");
-    assert.deepEqual(kimiEntry, { agentId: "kimi", pid: 4321, ancestors: [8888, 9000] });
+    const { busy: kimiBusy, ...kimiRest } = kimiEntry;
+    assert.deepEqual(kimiRest, { agentId: "kimi", pid: 4321, ancestors: [8888, 9000] });
+    assert.equal(kimiBusy, false);
     assert.equal(feed.some((p) => p.pid === 6200), false);
   });
 
   it("before any scan lands the feed is empty (no phantom clients)", () => {
     const collector = testCollector({ execFn: () => {}, nowFn: () => 10000 });
     assert.deepEqual(collector.getDetectedClientProcesses(), []);
+  });
+
+  // 「树里有活命令」判据：面板的 working 只有「在途请求＋5s 输出窗＋回合闸」三个
+  // 替代信号，对「回合已结束、agent 留下的子进程还在跑」完全失明——此时面板显示
+  // 空闲，而内切杀前探测探到活子进程就拒换（409），前端静默新开页签，用户观感即
+  // 「内切失效」（2026-10-28 实测定案）。守卫的全表探测是真值但只跑一次，所以
+  // 这里把同源判据搬进常驻进程扫描：扫描查询改成不带镜像名白名单的全表（本机实测
+  // 中位 250→371ms，TTL 2.5s 档可承受；按 pid 逐个子查询 219ms，并不更便宜），
+  // 每轮用 switch-guard 的同一个 hasRunningCommand 谓词算出「锚 pid 之下有没有
+  // 活命令」，随 detected feed 下发。判定与守卫同源，面板与守卫不再各说各话。
+  describe("command-running verdict on the detected feed", () => {
+    // 一棵 dsh 终端进程树：宿主(6200)派生同命令行引擎(6300)，引擎底下挂一条
+    // ping；另一条 dsh 引擎(6400)光杆等输入；外加一个与端点无关的 svchost 行
+    // 与一个只喂谱系的 powershell 壳。
+    const BUSY_SCAN = [
+      String.raw`9000,8000,powershell.exe,C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile`,
+      String.raw`6200,9000,node.exe,C:\Users\u\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js --profile dsh-tui`,
+      String.raw`6300,6200,node.exe,C:\Users\u\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js --profile dsh-tui`,
+      String.raw`6310,6300,ping.exe,ping -n 45 127.0.0.1 > nul`,
+      String.raw`6400,9000,node.exe,C:\Users\u\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js --profile dsh-tui`,
+      String.raw`7000,6000,svchost.exe,C:\Windows\System32\svchost.exe -k netsvcs`,
+    ].join("\r\n") + "\r\n";
+    const busyExec = (cmd, opts, cb) => cb(null, BUSY_SCAN);
+
+    it("engine with a live command child reports busy; the clean engine does not", async () => {
+      const collector = testCollector({ execFn: busyExec, nowFn: () => 10000, kimiRegistryLookup: async () => new Map() });
+      await collector.scanProcesses();
+      const feed = collector.getDetectedClientProcesses();
+      const byPid = new Map(feed.map((p) => [p.pid, p]));
+      // 宿主 6200 被折出引擎集（同命令行派生），检测面只剩两条引擎
+      assert.deepEqual([...byPid.keys()].sort((a, b) => a - b), [6300, 6400], "检测面只列引擎");
+      assert.equal(byPid.get(6300).busy, true, "引擎底下挂着 ping：判有活命令");
+      assert.equal(byPid.get(6400).busy, false, "光杆引擎：判无活命令");
+    });
+
+    it("verdict is computed by the switch-guard predicate on the same table", async () => {
+      // 同源是这套判据的全部意义：不能出现「面板说忙、守卫放行」或反向。
+      // 这里直接拿 switch-guard 的 hasRunningCommand 复算一遍同一张表。
+      const collector = testCollector({ execFn: busyExec, nowFn: () => 10000, kimiRegistryLookup: async () => new Map() });
+      const counts = await collector.scanProcesses();
+      const feed = collector.getDetectedClientProcesses();
+      const table = collector.getProcessTableForGuard?.() ?? null;
+      assert.ok(table, "扫描保留守卫形状的全表（pid/ppid/name/命令行）");
+      for (const entry of feed) {
+        const expected = hasRunningCommand(table, { rootPid: entry.pid, anchorPid: entry.pid });
+        assert.equal(entry.busy, expected, `pid ${entry.pid} 的判据与守卫同源`);
+      }
+      assert.ok(counts.ppidByPid.has(6310), "无关进程行进谱系表");
+    });
+
+    it("a derived same-command-line engine child is exempt, but its own subtree still counts", async () => {
+      // dsh 0.2.0 宿主派生同命令行引擎（豁免形态），引擎底下新挂的命令照算。
+      const scan = [
+        String.raw`6200,9000,node.exe,C:\u\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js --profile dsh-tui`,
+        String.raw`6300,6200,node.exe,C:\u\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js --profile dsh-tui`,
+        String.raw`6310,6300,ping.exe,ping -n 45 127.0.0.1 > nul`,
+        String.raw`6320,6310,findstr.exe,findstr x`,
+      ].join("\r\n") + "\r\n";
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, scan), nowFn: () => 10000, kimiRegistryLookup: async () => new Map() });
+      await collector.scanProcesses();
+      const feed = collector.getDetectedClientProcesses();
+      const engine = feed.find((p) => p.pid === 6300);
+      assert.equal(engine.busy, true, "豁免的子进程自己的子树仍算证据");
+    });
+
+    it("degraded round with no command lines yields no verdict (null), never a guess", async () => {
+      // tasklist 兜底没有命令行列：树里每个进程都读不出命令行，按守卫语义那正是
+      // 「保守拒」。但那是点击内切那一刻的一次性语义；显示面常亮会把它放大成
+      // 「永远在转圈」。所以读不出就不判（null），面板回落既有信号。引擎 pid 靠
+      // 形态延续活过降级轮（kimiEnginePids 在 CARRIED_FORM_KEYS 里），判据留空。
+      const KIMI_BUSY = [
+        String.raw`9000,8000,powershell.exe,C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile`,
+        String.raw`4321,9000,node.exe,C:\app\node_modules\@moonshot-ai\kimi-code\dist\main.mjs`,
+        String.raw`4390,4321,ping.exe,ping -n 45 127.0.0.1 > nul`,
+      ].join("\r\n") + "\r\n";
+      const KIMI_DEGRADED = [
+        String.raw`"node.exe","4321","Console","1","120,000 K"`,
+        String.raw`"ping.exe","4390","Console","1","20,000 K"`,
+      ].join("\r\n") + "\r\n";
+      let trusted = true;
+      let t = 10000;
+      const collector = testCollector({
+        nowFn: () => t,
+        execFn: (cmd, opts, cb) => {
+          if (cmd.includes("tasklist")) return cb(null, trusted ? "" : KIMI_DEGRADED);
+          return cb(null, trusted ? KIMI_BUSY : "");
+        },
+        kimiRegistryLookup: async () => new Map(),
+      });
+      await collector.scanProcesses();
+      assert.equal(collector.getDetectedClientProcesses().find((p) => p.pid === 4321).busy, true, "可信轮判据在手");
+      trusted = false;
+      // 5s：够越过扫描 TTL（2.5s）触发重扫，又必须在形态延续的 30s 窗口内——
+      // 跳 20 分钟会让延续失效，引擎集整批消失，那就不是「降级轮」而是「进程没了」。
+      t += 5000;
+      // 扫描是 stale-while-revalidate：首拍返回旧快照，新轮在后台落地。与其余降
+      // 级轮用例同款等法——连赶两拍让新轮落定。
+      await collector.scanProcesses();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await collector.scanProcesses();
+      const degraded = collector.getDetectedClientProcesses().find((p) => p.pid === 4321);
+      assert.ok(degraded, "形态延续让引擎活过降级轮");
+      assert.equal(degraded.busy, null, "读不出命令行不判忙");
+    });
   });
 });
 

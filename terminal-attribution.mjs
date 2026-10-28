@@ -5,6 +5,14 @@
 // attributed when its shell pid appears in a client process's ancestor chain.
 // Ownership is process-and-instance only (virtual-terminal-preview-notes.md
 // 「会话归属模型」): nothing here parses terminal output text.
+//
+// Each detected entry may also carry `busy` — the relay's verdict on whether
+// that client's process tree holds a running command, computed with the same
+// predicate the switch guard probes with (see terminal-switch-guard.mjs). It
+// rides through to `agent.busy` so the panel's working determination can see
+// the phase the relay metrics are blind to: the agent has finished its turn
+// but a process it spawned is still running. true / false when the scan could
+// read command lines, null when it could not (degraded round) — never a guess.
 
 // Endpoints whose instance rows are session-granular (see sessionRowInstanceIdFor).
 const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode"]);
@@ -124,7 +132,7 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
       const ancestorPid = ancestors[index];
       if (!Number.isFinite(ancestorPid)) continue;
       const list = byAncestor.get(ancestorPid);
-      const entry = { agentId: proc.agentId, pid: proc.pid, distance: index + 1 };
+      const entry = { agentId: proc.agentId, pid: proc.pid, distance: index + 1, busy: proc.busy ?? null };
       if (list) list.push(entry);
       else byAncestor.set(ancestorPid, [entry]);
     }
@@ -184,6 +192,12 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
         name: agentName.get(best.agentId) ?? best.agentId,
         pid: best.pid,
         instanceId,
+        // 「这个 agent 的进程树里有没有正在执行的命令」。面板的 working 判定原本
+        // 只有「在途请求＋PTY 输出窗＋回合闸」，对「回合已结束、agent 留下的子进
+        // 程还在跑」完全失明——那一刻面板显示空闲，而内切杀前探测探到活子进程就
+        // 拒换（409），前端静默新开页签。这一位把守卫同源判据补进面板的视野。
+        // null（降级轮读不出命令行）时不猜，面板回落既有信号。
+        busy: best.busy ?? null,
       },
     };
   });

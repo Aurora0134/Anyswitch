@@ -1118,6 +1118,26 @@ describe("terminal attribution feed endpoint (/api/internal/detected-processes)"
     });
   });
 
+  it("passes the command-running verdict through to the panel", async () => {
+    // 面板 working 口径的第四个输入：relay 用切换守卫同一个谓词算「这个 agent 的
+    // 进程树里有没有正在执行的命令」。这一位必须原样过路由——面板与守卫对「忙」
+    // 的判定要同源，否则又是「面板说空闲、守卫拒换、前端静默新开」那一套。
+    const feed = [
+      { agentId: "dsh", pid: 6300, ancestors: [6200, 8888], busy: true },
+      { agentId: "dsh", pid: 6400, ancestors: [8888], busy: false },
+      { agentId: "kimi", pid: 4321, ancestors: [8888], busy: null },
+    ];
+    const { upstreamFetch } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+    deps.metricsCollector = { getDetectedClientProcesses: () => feed };
+    await withServer(deps, async (port) => {
+      const res = await getProcesses(port);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(body.processes, feed, "忙判据原样下发，路由不改写");
+    });
+  });
+
   it("shapes codex session metas into row ids with the request-path shaper", async () => {
     const feed = [{ agentId: "kimi", pid: 4321, ancestors: [8888] }];
     const metas = [

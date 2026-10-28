@@ -5,6 +5,10 @@ import { atomicWriteFile } from "./atomic-write.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
 import { readKimiServerInstances } from "./kimi-server-registry.mjs";
+// 内切换杀的杀前判据。这里只借它的谓词（hasRunningCommand）与表形状——判定
+// 「锚 pid 之下有没有活命令」与切换守卫同一个函数、同一份数据，面板的忙显示与
+// 守卫的拒换因此同源，不会各说各话。
+import { hasRunningCommand } from "./terminal-switch-guard.mjs";
 // AUTO_MODEL is the virtual chain model ("auto"): routing glue, never a real
 // model on any channel. The reporters must never publish it as a model name.
 import { AUTO_MODEL } from "./chain-routing.mjs";
@@ -996,7 +1000,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -1093,6 +1097,15 @@ function parseTasklistCsv(stdout, priorCounted = null) {
     // them. tasklist rows yield ppid null and simply never enter the map.
     const ppid = extractParentPid(trimmed);
     if (pid !== null && ppid !== null) result.ppidByPid.set(pid, ppid);
+    // 全表留存（cmdByPid / imageByPid）：扫描查询不带镜像名白名单，每一行都带
+    // pid 与（ PowerShell 探针形状下）命令行。「树里有活命令」判据要的正是这张
+    // 表——只留谱系表的话，锚 pid 之下的命令子进程多半不在任何端点的 pid 集里，
+    // 判据无从算起。读不出命令行的行照常只进谱系（tasklist 兜底那一路）。
+    const { image, commandLine } = resolveProbeRow(lower);
+    if (pid !== null) {
+      if (commandLine !== null && commandLine.length > 0) result.cmdByPid.set(pid, commandLine);
+      if (image !== null) result.imageByPid.set(pid, image);
+    }
     // 本轮报上来的全部 pid，含下面所有分支都不认领的行（node.exe 启动器、cmd
     // 垫片、无关进程）：不完整轮只能靠它回答「这个 pid 还在不在」。
     if (pid !== null) result.seenPids.add(pid);
@@ -1103,7 +1116,8 @@ function parseTasklistCsv(stdout, priorCounted = null) {
     // ghost card), so command lines are consulted only AFTER the
     // name has claimed the row, and cmd.exe-named rows feed nothing but the
     // lineage table above.
-    const { image, commandLine } = resolveProbeRow(lower);
+    // resolveProbeRow 上面已为全表留存算过一次，这里复用同一份解析：两次调用
+    // 返回的是同一个对象的字段，重复解析只是白烧 CPU。
     const bucket = image !== null
       ? (AGENT_IMAGE_BUCKETS.find(([img]) => img === image)?.[1] ?? null)
       : null;
@@ -2327,8 +2341,19 @@ const PS_REPL_COMMAND =
 // virtual terminal's shell IS a powershell.exe process, so attributing a
 // terminal session to an agent client (shell pid → client pid) walks the
 // lineage table through the shell row. They too feed only the lineage table.
+//
+// **不带镜像名白名单**（2026-10-28 改）。此前那一串 name= 条件把查询结果压到二
+// 十几行，代价是「锚 pid 之下有没有活命令」答不出来：agent 跑的命令子进程
+// （ping.exe / npm / python…）不在任何端点的镜像名里，白名单一滤就全消失，
+// 只剩谱系表里一串没有命令行的空壳。本机实测摘掉白名单的增量代价：中位
+// 250→371ms（+121ms），扫描 TTL 2.5s 档可承受；而按 pid 逐个子查询
+// （ParentProcessId=<pid>）中位 219ms，并不比全表便宜，却要为每个锚点各跑一
+// 次。计数语义不变——行仍按镜像名认领进桶（resolveProbeRow），白名单外的行
+// （svchost / explorer / 第三方 node.exe…）继续只进谱系表与全表留存。顺带修
+// 掉两个既有盲区：ppidByPid 与 seenPids 从此覆盖全机进程，launcher → 垫片 →
+// 客户端链上的非 agent 中间跳不再断，pid 生死判定也不再只认 agent 行。
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='qodercli.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='DeepSeek Harness.exe' or name='cmd.exe' or name='powershell.exe' or name='pwsh.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
@@ -2832,6 +2857,36 @@ export function createAgentMetricsCollector(options = {}) {
     return pendingScanPromise;
   }
 
+  // 守卫形状的全表（pid → ppid / 命令行 / 镜像名）。切换守卫的那张表是点击内切
+  // 那一刻现探的，这里给的是同一形状、来自常驻扫描的版本——判定谓词是同一个
+  // hasRunningCommand，所以两侧答案同源。读不出命令行的轮次（tasklist 兜底）
+  // cmdByPid 为空，此时判据返回 null（不猜），面板回落既有信号。
+  function getProcessTableForGuard() {
+    const counts = cachedProcessCounts ?? createEmptyProcessScan();
+    if (!(counts.ppidByPid instanceof Map) || !(counts.cmdByPid instanceof Map)) return null;
+    if (counts.cmdByPid.size === 0) return null;
+    return {
+      ppidByPid: counts.ppidByPid,
+      cmdByPid: counts.cmdByPid,
+      imageByPid: counts.imageByPid instanceof Map ? counts.imageByPid : new Map(),
+    };
+  }
+
+  // 「这个锚 pid 之下有没有正在执行的命令」。用切换守卫的同一个谓词算，锚即
+  // 检测面上的 agent 引擎 pid（与守卫在归属成功时用的锚是同一个 pid）。
+  //   true  树里有活命令（面板该显示忙，守卫也会拒换）
+  //   false 光杆（等输入／交互提示符）
+  //   null  这一轮答不出（命令行读不出、锚不在表里）——不猜
+  function commandRunningFor(pid) {
+    const table = getProcessTableForGuard();
+    if (table === null || !Number.isInteger(pid) || pid <= 0) return null;
+    try {
+      return hasRunningCommand(table, { rootPid: pid, anchorPid: pid });
+    } catch {
+      return null;
+    }
+  }
+
   // Terminal-session attribution surface: the live agent client processes the
   // latest scan enumerated, each carrying its ancestor chain walked up the
   // lineage table. The panel joins this list against terminal-host sessions
@@ -2862,7 +2917,10 @@ export function createAgentMetricsCollector(options = {}) {
           seen.add(parent);
           current = parent;
         }
-        out.push({ agentId, pid, ancestors });
+        // 忙判据只对「这一轮真读得到命令行」的扫描算：降级轮不猜（见
+        // commandRunningFor）。每个引擎 pid 各算一次，用的是同一张表——BFS 每步
+        // 都扫全表，锚点个数量级在十个以内，代价可忽略。
+        out.push({ agentId, pid, ancestors, busy: commandRunningFor(pid) });
       }
     }
     return out;
@@ -4762,6 +4820,9 @@ export function createAgentMetricsCollector(options = {}) {
     // Terminal-session attribution: live agent client pids + ancestor chains
     // from the cached scan (see the function's note above).
     getDetectedClientProcesses,
+    // 守卫形状的全表（pid → ppid / 命令行 / 镜像名），与切换守卫现探的那张同形。
+    // 只给测试与运维核对用：判定本身已经随 detected feed 下发，消费侧不需要表。
+    getProcessTableForGuard,
     // Session metas (raw ids) for the terminal join's session-granular bridge,
     // one getter per endpoint that mints session rows — shaped into row-id form
     // by the exposure layer.
