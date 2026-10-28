@@ -7002,6 +7002,13 @@ async function api(method, path, body) {
       } catch (error) {
         console.warn("[terminal] rail render failed:", error);
       }
+      // 会话栏追赶：栏里若有「已键入却还压在组顶」的新会话兜底行，补一发强制对齐
+      // （见 maybeCatchUpTerminalRailHistory：20s 闸＋在飞去重，不会连排扫盘）。
+      try {
+        if (typeof maybeCatchUpTerminalRailHistory === "function") maybeCatchUpTerminalRailHistory();
+      } catch (error) {
+        console.warn("[terminal] rail history catch-up failed:", error);
+      }
       if (Object.keys(terminalBackendSessions).length === 0) {
         // 会话在别处被关光（另一个面板窗口、服务端重建后的空列表）：与关最后
         // 一个标签同路落空态，不挂上一会话的残留数据。
@@ -10179,6 +10186,45 @@ async function api(method, path, body) {
     else setTimeout(run, 0);
   }
 
+  // 会话栏追赶（终端页内新建会话那条路径的收口）：
+  // 历史列表只在进终端页时拉（全盘扫 2.7–9.8s，禁挂轮询），而「在终端页里新建会话」
+  // 不刷新它——真行不回来，组顶的「新会话」兜底行就一直压着它（用户看到的就是
+  // 「真正的新会话被压到一个（或多个）假『新会话』之下」）。判据只看一件事：栏里
+  // 正为某条**已经键入**的新会话显示兜底行——有键入说明它的会话存档已经/正在落盘，
+  // 这份列表却还看不见，那就是旧了。此时补一发强制对齐（?refresh=1，扫盘由面板侧
+  // worker 线程承担，页面不等它；屏上旧行留着，新值落地即替换）。
+  // 不挂渲染路径：挂在 1s 归属轮询收尾（数据路径）。两道闸兜住「别把全盘扫挂成
+  // 轮询」：20s 最小间隔（连点几次新建会话只补一发），以及无进展收敛——兜底行集
+  // 合连续几发都不变（agent 不落存档的怪形态）就停手，剩下的交给用户下次进终端页
+  // 那次自然重取。
+  const TERMINAL_RAIL_CATCHUP_MIN_MS = 20 * 1000;
+  const TERMINAL_RAIL_CATCHUP_MAX_MISSES = 5;
+  let terminalRailCatchUpAt = 0;
+  let terminalRailCatchUpSeen = -1;
+  let terminalRailCatchUpMisses = 0;
+  function maybeCatchUpTerminalRailHistory() {
+    if (terminalRailFetchInFlight || !terminalBackendReady) return;
+    if (Date.now() - terminalRailCatchUpAt < TERMINAL_RAIL_CATCHUP_MIN_MS) return;
+    if (terminalRailCatchUpMisses >= TERMINAL_RAIL_CATCHUP_MAX_MISSES) return;
+    const endpoint = terminalRailAgentId();
+    if (!endpoint) return;
+    const pending = terminalRailPendingNewTerminals();
+    const stale = pending.some((entry) => {
+      const state = terminalSessionFor(entry.id)?.backendState;
+      return !!state && Number.isFinite(state.lastInputAt) && state.lastInputAt > 0;
+    });
+    if (!stale) return;
+    // 兜底行集合变了（真行回来、或又新建了会话）＝这一发有用，清零重来；
+    // 一动不动＝没进展，累计到上限就收敛。
+    if (pending.length === terminalRailCatchUpSeen) terminalRailCatchUpMisses += 1;
+    else {
+      terminalRailCatchUpMisses = 0;
+      terminalRailCatchUpSeen = pending.length;
+    }
+    terminalRailCatchUpAt = Date.now();
+    refreshTerminalRailHistory({ endpoint, force: true });
+  }
+
   function syncTerminalRailHistory(agentId) {
     if (agentId === terminalRailHistory.endpoint) return;
     if (!agentId) {
@@ -10204,7 +10250,7 @@ async function api(method, path, body) {
     refreshTerminalRailHistory({ endpoint: agentId });
   }
 
-  async function refreshTerminalRailHistory({ endpoint = terminalRailAgentId(), manual = false } = {}) {
+  async function refreshTerminalRailHistory({ endpoint = terminalRailAgentId(), manual = false, force = false } = {}) {
     if (!endpoint || terminalRailFetchInFlight) return;
     terminalRailFetchInFlight = true;
     // 在飞期间就把 endpoint 认下来：全量扫盘一次实测 6.7s，这段时间里每次归属轮询都会
@@ -10218,7 +10264,10 @@ async function api(method, path, body) {
       terminalRailHistory = { endpoint, sessions: [], fetchedAt: 0, error: null };
     }
     try {
-      const data = await api("GET", "/api/sessions/list");
+      // force＝与会话管理页刷新钮同一条逃生口（?refresh=1）：等真扫描落地再回新值。
+      // 只有「终端页里新建了会话、兜底行正压着组顶」这条追赶路径用得上——普通复取
+      // 仍旧吃 30s 快照，请求绝不等扫描。
+      const data = await api("GET", force ? "/api/sessions/list?refresh=1" : "/api/sessions/list");
       const rows = (Array.isArray(data && data.sessions) ? data.sessions : []).filter((row) => row && row.endpoint === endpoint);
       terminalRailHistory = { endpoint, sessions: rows, fetchedAt: Date.now(), error: null, retryAt: 0 };
     } catch (error) {
@@ -10475,6 +10524,11 @@ async function api(method, path, body) {
       // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
+      // 成功即收武装：兜底行的真实身份已经由宿主快照接手（spawnedAt 刷新、resume
+      // 按目标身份换写），12s 的武装窗只会让它在真行已经回来的情况下继续压在组顶
+      // （armed 会整段跳过「已被接替」判据）。高亮不丢：活跃终端没换，兜底行的选中
+      // 判据回落到「这条终端就是活跃终端」；续接内切的新页签同样由 live 行接任。
+      terminalRailEndSelect(null);
       renderTerminalPreviewSession();
     } catch (error) {
       // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：

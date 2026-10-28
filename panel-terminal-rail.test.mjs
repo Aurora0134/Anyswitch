@@ -1372,10 +1372,16 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(branchBody.includes("enterTerminalRail()"), "进终端视图即挂一次终端会话栏");
       const fetchSrc = panelJs.match(/async function refreshTerminalRailHistory\([\s\S]*?\n  \}/)?.[0];
       assert.ok(fetchSrc, "refreshTerminalRailHistory 在册");
-      assert.ok(fetchSrc.includes('api("GET", "/api/sessions/list")'), "历史会话数据源是会话列表接口");
+      assert.ok(fetchSrc.includes('api("GET", force ? "/api/sessions/list?refresh=1" : "/api/sessions/list")'),
+        "历史会话数据源是会话列表接口（追赶路径带 ?refresh=1：等真扫描落地）");
       const poll = panelJs.match(/async function pollTerminalSessions\([\s\S]*?\n  \}/)?.[0];
       assert.ok(poll, "pollTerminalSessions 在册");
-      assert.ok(!poll.includes("/api/sessions/list"), "1s 轮询不碰全量扫盘（6.7s 无缓存，禁挂轮询）");
+      assert.ok(!poll.includes('api("GET", "/api/sessions/list'), "1s 轮询自己不抓全量扫盘");
+      // 追赶是唯一的在页内刷新路径，且自带闸：20s 最小间隔＋在飞去重，扫盘不连排。
+      const catchUp = extractFn("maybeCatchUpTerminalRailHistory");
+      assert.ok(catchUp.includes("TERMINAL_RAIL_CATCHUP_MIN_MS") && catchUp.includes("terminalRailFetchInFlight"),
+        "追赶路径有最小间隔闸与在飞去重（不能把 6.7s 扫盘挂成轮询）");
+      assert.ok(poll.includes("maybeCatchUpTerminalRailHistory()"), "轮询收尾问一次「有没有可疑兜底行要补」");
       assert.ok(extractFn("enterTerminalRail").includes("renderTerminalRail()"), "进页即渲一帧（不必等轮询）");
       // D4：段头刷新钮已砍（用户拍板只留搜索/视图选项）——手动重取入口随之消失，
       // 列表拉取只剩「进终端视图一次 + 换 agent 补拉」两条自动路径。
