@@ -99,12 +99,13 @@ const RUN_ANCHOR_SCOPE = {
   grok: "grokPids",
 };
 
-// Sliding window of recent successful requests. TPS and cache-hit rate are
-// computed from this window, NOT from process-lifetime totals. A lifetime
-// average is dominated by the first few requests: one early high-throughput
-// or heavily-cached request permanently inflates the displayed number, and
-// later requests only drag it down glacially as they dilute the accumulated
-// denominator. The window is a last-N request count, never a wall-clock TTL.
+// Sliding window of recent successful requests. TPS is computed from this
+// window, NOT from process-lifetime totals. A lifetime average is dominated by
+// the first few requests: one early high-throughput request permanently
+// inflates the displayed number, and later requests only drag it down
+// glacially as they dilute the accumulated denominator. The window is a last-N
+// request count, never a wall-clock TTL. The cache-hit rate does not aggregate
+// this window — it reads the newest sample's own ratio (sampleCacheHitRate).
 const RECENT_SAMPLE_WINDOW = 18;
 
 // Minimum generation window for a request to count as a speed measurement.
@@ -154,18 +155,15 @@ export function windowTps(samples, window = RECENT_SAMPLE_WINDOW) {
   return Number((completion / (genMs / 1000)).toFixed(1));
 }
 
-// Cache-hit rate over the same window: cached prompt tokens over total prompt
-// tokens. A per-request mean of hit rates would let a 200-token request outvote
-// a 200k-token one.
-export function windowCacheHitRate(samples, window = RECENT_SAMPLE_WINDOW) {
-  if (!Array.isArray(samples) || samples.length === 0) return null;
-  let prompt = 0;
-  let cached = 0;
-  for (const sample of samples.slice(-window)) {
-    prompt += Number(sample?.prompt) || 0;
-    cached += Number(sample?.cached) || 0;
-  }
+// One request's own cache-hit rate: its cached prompt tokens over its prompt
+// tokens. The card reads the newest sample through this, never a window
+// aggregate — a long-context request's ratio should be readable as itself, not
+// blended with shorter neighbours. The sparkline's last point is this same
+// quotient, so the printed number and the curve's tip can never disagree.
+export function sampleCacheHitRate(sample) {
+  const prompt = Number(sample?.prompt) || 0;
   if (prompt <= 0) return null;
+  const cached = Number(sample?.cached) || 0;
   return Number(((cached / prompt) * 100).toFixed(1));
 }
 
@@ -2184,12 +2182,12 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
   const tpsSamples = state.recentSamples.slice(-tpsWindow);
   const ttftForAvg = state.ttftHistory.slice(-tpsWindow);
 
-  // One statistic for the card and the statistics page: token-weighted speed
-  // over the samples that carry a real generation window (windowTps), and cached
-  // tokens over prompt tokens for the hit rate. Both are windowed — never
-  // process-lifetime, and never a mean of per-request quotients.
+  // Speed stays token-weighted over the samples that carry a real generation
+  // window (windowTps); the cache-hit rate is the newest request's own ratio
+  // (sampleCacheHitRate) — never lifetime totals, never a mean of quotients,
+  // never an average over the window.
   const tps = windowTps(tpsSamples, tpsWindow);
-  const cacheHitRate = windowCacheHitRate(tpsSamples, tpsWindow);
+  const cacheHitRate = sampleCacheHitRate(tpsSamples[tpsSamples.length - 1]);
 
   let avgTtft = null;
   if (ttftForAvg.length > 0) {
@@ -4533,18 +4531,23 @@ export function createAgentMetricsCollector(options = {}) {
     const claudeIsRunning = claudeRawSessions.length > 0 || claudeProcessCount > 0;
 
     const claudeSessionsFormatted = claudeRawSessions.map((s, idx) => {
-      // Speed and cache rate come from the reporter's per-request window — the
-      // same statistic every other card publishes. The cumulative form this
-      // replaced (total output tokens over total busy wall-clock) booked each
-      // request's first-token wait as generation time, which on Claude Code
-      // (6-7s TTFT against a ~2s generation) reported about a fifth of the real
-      // speed, and drifted further the longer the session ran. A launcher that
-      // predates the window field falls back to the reporter's recent
-      // per-request mean, in the right order of magnitude either way.
+      // Speed comes from the reporter's per-request window — the same statistic
+      // every other card publishes. The cumulative form this replaced (total
+      // output tokens over total busy wall-clock) booked each request's
+      // first-token wait as generation time, which on Claude Code (6-7s TTFT
+      // against a ~2s generation) reported about a fifth of the real speed, and
+      // drifted further the longer the session ran. A launcher that predates
+      // the window field falls back to the reporter's recent per-request mean,
+      // in the right order of magnitude either way. Cache rate reads the newest
+      // sample's own ratio; only a launcher without the sample field has
+      // nothing else to fall back to but its cumulative totals.
       const tps = windowTps(s.samples) ?? meanRecentTps(s.sparkHistory?.tps);
-      const cacheHitRate = windowCacheHitRate(s.samples) ?? (
-        s.promptTokens > 0 ? Number(((s.cachedTokens / s.promptTokens) * 100).toFixed(1)) : null
-      );
+      const latestSample = Array.isArray(s.samples) && s.samples.length > 0
+        ? s.samples[s.samples.length - 1]
+        : null;
+      const cacheHitRate = latestSample
+        ? sampleCacheHitRate(latestSample)
+        : (s.promptTokens > 0 ? Number(((s.cachedTokens / s.promptTokens) * 100).toFixed(1)) : null);
       return {
         id: s.id,
         title: `实例 #${idx + 1}`,
@@ -5097,9 +5100,10 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         tps: sessionSamples.map(sampleTps).filter((v) => v !== null),
         cache: sessionSamples.map((s) => (s.prompt > 0 ? Number(((s.cached / s.prompt) * 100).toFixed(1)) : 0)),
       },
-      // Recent raw samples: the panel turns these into this session's speed and
-      // cache rate with the shared window rule (windowTps / windowCacheHitRate),
-      // so a Claude session card and an endpoint card are the same measurement.
+      // Recent raw samples: the panel turns these into this session's speed
+      // with the shared window rule (windowTps) and its cache rate off the
+      // newest sample (sampleCacheHitRate), so a Claude session card and an
+      // endpoint card are the same measurement.
       samples: sessionSamples.slice(-RECENT_SAMPLE_WINDOW).map((s) => ({
         completion: s.completion,
         genDurationMs: s.genDurationMs,

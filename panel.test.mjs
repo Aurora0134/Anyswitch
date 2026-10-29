@@ -4196,9 +4196,10 @@ describe("panel.html 结构完整性（超长行原样保留）", () => {
 });
 
 describe("panel.html 实例四宫格陈旧语义（lastSeen 超阈值速率类置 —）", () => {
-  // 背景：速率类指标（tok/s、TTFT、缓存命中率、sparkline）是 last-N 计数窗口而非
-  // 时间窗，PID 形态实例靠进程扫描续命绕过 10min TTL，聚合桶更是无 TTL——数小时前
-  // 的数值会原样上屏冒充实时数据。渲染层按 lastSeen 判定陈旧并隐藏速率类数值。
+  // 背景：速率类指标（tok/s、TTFT、缓存命中率、sparkline）都不是时间窗（tok/s 为
+  // last-N 计数窗，缓存命中率为最近一次成功请求），PID 形态实例靠进程扫描续命绕过
+  // 10min TTL，聚合桶更是无 TTL——数小时前的数值会原样上屏冒充实时数据。渲染层按
+  // lastSeen 判定陈旧并隐藏速率类数值。
   const panelJs = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
