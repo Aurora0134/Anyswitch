@@ -286,10 +286,10 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
 // M12-A 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
 // 换绑），页签不新增。working 判定在面板侧，本路由只接「已决定内切」的请求。
 describe("内切切换会话（terminal sessions switch）", () => {
-  function switchRouter({ root, hostSession, restarted, probe, scanAgentConversations, terminalSessions } = {}) {
+  function switchRouter({ root, hostSession, restarted, probe, scanAgentConversations, terminalSessions, scanAll, binding } = {}) {
     const calls = { restart: [], fetch: [], probe: [] };
     const terminalBindingStore = createBindingStore({ file: join(root, "terminal-conversation-bindings.json") });
-    terminalBindingStore.set(SESSION_ID, {
+    terminalBindingStore.set(SESSION_ID, binding ?? {
       agentId: "kimi", cwd: "C:\\old", conversationId: "conv-old", file: null, boundAt: 1, source: "bound",
     });
     const router = createPanelRouter({
@@ -322,6 +322,10 @@ describe("内切切换会话（terminal sessions switch）", () => {
       bindingRefreshScheduleFn: () => { calls.bindingRefresh = (calls.bindingRefresh || 0) + 1; },
       bindingCaptureDebounceMs: 0,
       terminalBindingStore,
+      // 目标存在性旁证（G3 收口）用会话列表快照：注入假 scanAll 让用例能给盘面。
+      ...(scanAll
+        ? { sessionScanService: { scanAll, loadMessages: async () => ({ messages: [] }), deleteSessions: async () => ({ ok: [], fail: [] }) } }
+        : {}),
     });
     return { router, calls, terminalBindingStore };
   }
@@ -513,5 +517,103 @@ describe("内切切换会话（terminal sessions switch）", () => {
         assert.equal(calls.restart.length, 0, "不转发给 terminal-host");
       }
     });
+  });
+
+  // M12 行为报告 G3 的收口：目标会话在盘上不存在时，换绑照做会让 agent 落一行
+  // 英文报错、HTTP 还是 200、无提示也不降级——用户停在不可用页签上。判据只在
+  // 「快照已经知道盘面」时生效：冷缓存放行，快照说没有才强制刷一拍再定。
+  it("目标会话不存在：不换绑、不起终端，回机器可判的 resume-invalid（G3 收口）", async () => {
+    await withFakeAgents(async (cwd) => {
+      const { router, calls } = switchRouter({
+        root: mkTestDir("anyswitch-switch-target-missing-"),
+        scanAll: async () => ({
+          sessions: [{ endpoint: "kimi", id: "conv-other", file: join(cwd, "other.jsonl"), project: cwd, createdAt: 1, lastActive: 2 }],
+          endpointErrors: [],
+        }),
+      });
+      // 预热列表快照：冷缓存不判存在性（首次请求不该为旁证等全盘扫）
+      const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+      await router.handle(warm.req, warm.res);
+      const missing = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: "conv-missing" }, cwd,
+      });
+      await router.handle(missing.req, missing.res);
+      assert.equal(missing.res.statusCode, 404, "目标不存在不落到 200");
+      assert.equal(missing.json().code, "resume-invalid", "机器可判的码（前端落已批准的续接失败句）");
+      assert.equal(calls.restart.length, 0, "不 terminate 当前终端、不换绑到死路");
+      assert.equal(calls.probe.length, 0, "连杀前探测都不用跑");
+    });
+  });
+
+  it("目标会话在快照里存在：照常换绑（不误伤合法内切）", async () => {
+    await withFakeAgents(async (cwd) => {
+      const { router, calls } = switchRouter({
+        root: mkTestDir("anyswitch-switch-target-present-"),
+        scanAll: async () => ({
+          sessions: [{ endpoint: "kimi", id: SESSION_ID, file: join(cwd, "target.jsonl"), project: cwd, createdAt: 1, lastActive: 2 }],
+          endpointErrors: [],
+        }),
+      });
+      const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+      await router.handle(warm.req, warm.res);
+      const call = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+      });
+      await router.handle(call.req, call.res);
+      assert.equal(call.res.statusCode, 200, "存在即放行");
+      assert.equal(calls.restart.length, 1, "照常换绑");
+    });
+  });
+
+  it("快照冷缓存（还没扫过）：不判存在性、直接放行", async () => {
+    await withFakeAgents(async (cwd) => {
+      const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-target-cold-") });
+      const call = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+      });
+      await router.handle(call.req, call.res);
+      assert.equal(call.res.statusCode, 200, "判不出不等于不存在");
+      assert.equal(calls.restart.length, 1, "照常换绑");
+    });
+  });
+
+  // 页签＝视口之后：★全新会话★的终端在宿主记录里永远没有 resume（它不是续接起的），
+// 真实对话身份只在绑定库里。列表路由把它当作 boundConversation 下发，前端才认得出
+// 「左栏那行就是这条在跑的终端」——认不出就会按 resume 再起一条同对话的进程。
+// 纪律：agentId 与 cwd 必须都对得上才下发；判不出就不猜（undefined）。
+describe("终端列表下发绑定对话（boundConversation）", () => {
+  it("绑定与 session 的 agentId/cwd 都对得上：下发 endpoint＋id 两键", async () => {
+    const cwd = "C:\\proj-live";
+    const { router } = switchRouter({
+      root: mkTestDir("anyswitch-list-bound-"),
+      binding: { agentId: "kimi", cwd, conversationId: "conv-live", file: null, boundAt: 1, source: "bound" },
+      terminalSessions: [{ id: SESSION_ID, label: "Kimi Code", cwd, shell: "cmd", pid: 7, status: "running", agentId: "kimi" }],
+    });
+    const call = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(call.req, call.res);
+    assert.equal(call.res.statusCode, 200);
+    assert.deepEqual(call.json().sessions[0].boundConversation, { endpoint: "kimi", id: "conv-live" });
+  });
+
+  it("agentId 或 cwd 对不上：不下发（判不出身份就不猜）", async () => {
+    const cwd = "C:\\proj-live";
+    const agentMismatch = switchRouter({
+      root: mkTestDir("anyswitch-list-bound-agent-"),
+      binding: { agentId: "dsh", cwd, conversationId: "conv-x", file: null, boundAt: 1, source: "bound" },
+      terminalSessions: [{ id: SESSION_ID, label: "Kimi Code", cwd, shell: "cmd", pid: 7, status: "running", agentId: "kimi" }],
+    });
+    const a = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await agentMismatch.router.handle(a.req, a.res);
+    assert.equal(a.json().sessions[0].boundConversation, undefined, "agentId 不配不下发");
+
+    const cwdMismatch = switchRouter({
+      root: mkTestDir("anyswitch-list-bound-cwd-"),
+      binding: { agentId: "kimi", cwd: "C:\\other", conversationId: "conv-live", file: null, boundAt: 1, source: "bound" },
+      terminalSessions: [{ id: SESSION_ID, label: "Kimi Code", cwd, shell: "cmd", pid: 7, status: "running", agentId: "kimi" }],
+    });
+    const b = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await cwdMismatch.router.handle(b.req, b.res);
+    assert.equal(b.json().sessions[0].boundConversation, undefined, "cwd 不配不下发");
+  });
   });
 });

@@ -339,6 +339,12 @@ function createSessionsListSnapshot(load, ttlMs) {
       refresh().catch(() => {});
       return snap.value;
     },
+    // 只读当前快照、绝不触发扫描：调用方要的是「本进程此刻已经知道什么」。冷缓存
+    // （还没扫过）返回 null，由调用方自己决定是等真扫描还是放行——用于「目标会话
+    // 是否存在」这类只该在已有盘面时判的旁证（M12 报告 G3 的收口，见 /switch 路由）。
+    peek() {
+      return snap ? snap.value : null;
+    },
     // 强制刷新：等真扫描落地再返回新值（在飞的扫描直接搭车，不重复扫）。
     // 只给用户显式动作（刷新按钮）用，轮询路径不许走这里。
     refresh,
@@ -1294,6 +1300,23 @@ export function createPanelRouter({
     // 这个轮询，这里把「实际」钉成「制度」）。
     // 捕获是旁路：先让列表响应落地，扫描调度排在当前 turn 之后（见
     // scheduleBindingCapture）。修前这里是同步调用，扫描把这一拍整段按住。
+    // 绑定身份随列表下发（boundConversation）：页签＝视口之后，★全新会话★的终端
+    // 在宿主记录里永远没有 resume（它不是续接起的），真实对话身份只在绑定库里。
+    // 不把它交给前端，左栏那行会话不会亮成 live，点下去会按 resume 再起一条同对话
+    // 的进程——同一个对话被两个进程同时写。与 resume 分开命名：resume 是「创建时
+    // 要求续接的身份」（去重/换绑读它），boundConversation 是「这条终端现在实际在
+    // 跑的对话」（live 匹配读它）。同样只认控制面，同样要求 agentId＋cwd 对得上。
+    if (hostKind === "panel-host") {
+      const store = terminalBindings();
+      for (const session of sessions) {
+        if (!session || typeof session.id !== "string") continue;
+        const binding = store.get(session.id);
+        if (!binding || typeof binding.conversationId !== "string" || !binding.conversationId) continue;
+        if (typeof binding.agentId === "string" && binding.agentId !== session.agentId) continue;
+        if (typeof binding.cwd === "string" && typeof session.cwd === "string" && !sameCwd(binding.cwd, session.cwd)) continue;
+        session.boundConversation = { endpoint: binding.agentId, id: binding.conversationId };
+      }
+    }
     if (hostKind === "panel-host") scheduleBindingCapture(sessions);
     const feed = await pulledDetectedProcesses(terminalPullToken());
     const detected = feed ? feed.processes : null;
@@ -1594,6 +1617,30 @@ export function createPanelRouter({
         return sendJson(res, 400, { ok: false, code: "resume-unsupported", error: "resume-unsupported" });
       }
       if (typeof resume.file === "string" && resume.file.trim()) resumeFile = resume.file.trim();
+      // 目标存在性（M12 行为报告 G3 的收口）：换绑落点是「整树 terminate + 按目标
+      // 身份重组装」。目标会话若在盘上根本不存在，宿主照样换绑，agent 落一行英文
+      // 报错——HTTP 200、前端无提示、也不降级新开，用户停在一条不可用的页签上。
+      // 这里拿会话列表快照当旁证，三条纪律：
+      //  · 冷缓存（本进程还没扫过）不判、放行——首切不该为一次旁证去等全盘扫；
+      //  · 快照说没有 → 强制刷一拍再定，仍没有才回 resume-invalid（前端对 resume-*
+      //    族落的是已批准的续接失败句，零新增文案）；
+      //  · 扫描失败/替身抛错一律放行——把合法切换挡成失败，比多给一次英文报错更糟。
+      try {
+        const svc = ensureSessionScanService();
+        const snapshot = sessionsListSnapshotFor(svc);
+        const knownHasTarget = (value) => Array.isArray(value?.sessions) && value.sessions.some(
+          (row) => row && row.endpoint === endpoint && String(row.id) === conversationId,
+        );
+        const warm = snapshot.peek();
+        if (warm && !knownHasTarget(warm)) {
+          const refreshed = await snapshot.refresh();
+          if (refreshed && !knownHasTarget(refreshed)) {
+            return sendJson(res, 404, { ok: false, code: "resume-invalid", error: "resume-invalid" });
+          }
+        }
+      } catch {
+        /* 判不出目标是否存在：放行，换绑失败面仍由宿主/agent 兜底 */
+      }
     } else {
       endpoint = typeof body?.agentId === "string" ? body.agentId.trim() : "";
       if (!endpoint || endpoint.length > 64 || !Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {

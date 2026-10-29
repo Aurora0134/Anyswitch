@@ -26,6 +26,26 @@ function extractFn(name) {
   return src;
 }
 
+// ── 视口表（M12：页签＝视口）的桩前置 ──
+// 函数按名抽进 vm 后，模块级状态量不会跟着来；视口纯函数直接用生产实现，只补状态量。
+const VIEWPORT_FNS = [
+  "terminalViewportNextId", "terminalViewportActive", "terminalViewportById",
+  "terminalViewportForTerminal", "terminalViewportAttach", "terminalViewportCreate",
+  "terminalViewportDestroy", "terminalViewportActivate", "terminalSessionRunning",
+  "terminalViewportRetire", "terminalViewportPlaceTerminal", "terminalCloseTerminal",
+  "terminalRailKeepAliveSwitch", "loadTerminalViewports", "saveTerminalViewports",
+];
+const viewportPrelude = (names = VIEWPORT_FNS) => `
+  let terminalViewports = [];
+  let terminalViewportActiveId = null;
+  const terminalBackgroundIds = new Set();
+  let terminalViewportSeq = 0;
+  let terminalViewportsLoaded = false;
+  let terminalViewportsSavedJson = "";
+  const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
+  ${names.map(extractFn).join("\n")}
+`;
+
 const cssRule = (selector) => {
   const at = panelCss.indexOf(selector);
   assert.ok(at >= 0, `样式规则 ${selector} 在册`);
@@ -585,6 +605,10 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalBackendReady = true;
         const terminalBackendSessions = {};
         let activeTerminalPreviewId = null;
+        ${viewportPrelude()}
+        const terminalPreviewSessions = {};
+        const terminalHollowStreak = new Map();
+        function terminalCloseTerminal() { return true; }
         function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
         function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
         function panelError(err, fallback) { return fallback; }
@@ -782,18 +806,28 @@ describe("终端视图左栏换血（M4）", () => {
   });
 
   describe("打开的终端行交互（vm 真跑）", () => {
-    const runRail = ({ sessions, activeId = "t1", tabs = null }) => {
-      const log = { renders: 0, remembered: [] };
+    const runRail = ({ sessions, activeId = "t1", tabs = null, viewports = [], background = [], apiImpl = async () => ({}) } = {}) => {
+      const log = { renders: 0, remembered: [], posts: [] };
       const els = { terminalTabs: tabs };
-      const sandbox = new Function("sessions", "activeId", "log", "els", `
+      const sandbox = new Function("sessions", "activeId", "log", "els", "viewports", "background", "apiImpl", `
         const terminalBackendSessions = sessions;
         let activeTerminalPreviewId = activeId;
         const terminalDoneUnread = new Map();
+        const terminalPrevWorking = new Map();
+        const terminalTurnArmed = new Set();
+        ${viewportPrelude()}
+        const terminalPreviewSessions = {};
+        const terminalHollowStreak = new Map();
+        ${extractFn("terminalCloseTerminal")}
+        terminalViewports = (viewports || []).map((row) => ({ ...row }));
+        for (const id of background || []) terminalBackgroundIds.add(id);
+        function api(method, path) { log.posts.push({ method, path }); return apiImpl(method, path); }
         let terminalRailSelectPending = null;
         let terminalRailSelectSeq = 0;
         let terminalSwitchInFlight = false;
         const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
+        function renderTerminalPreviewTabs() { log.tabsRenders = (log.tabsRenders || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
         ${extractFn("terminalRailArmSelect")}
@@ -808,6 +842,8 @@ describe("终端视图左栏换血（M4）", () => {
           activate: terminalRailActivateSession,
           close: terminalRailCloseSession,
           activeId: () => activeTerminalPreviewId,
+          viewports: () => terminalViewports,
+          background: () => Array.from(terminalBackgroundIds),
           markDone: (id) => terminalDoneUnread.set(id, true),
           done: (id) => terminalDoneUnread.has(id),
           begin: (session) => terminalRailBeginSelect(session),
@@ -815,11 +851,11 @@ describe("终端视图左栏换血（M4）", () => {
           pending: () => terminalRailSelectPending,
           seq: () => terminalRailSelectSeq,
         };
-      `)(sessions, activeId, log, els);
+      `)(sessions, activeId, log, els, viewports, background, apiImpl);
       return { sandbox, log };
     };
 
-    it("点击行切换活跃终端：置活跃、写存档、重渲一次", () => {
+    it("点击行切换活跃终端：置活跃、写存档、重渲一次（无视口则建视口承接）", () => {
       const { sandbox, log } = runRail({
         sessions: { t1: { id: "t1" }, t2: { id: "t2" } },
       });
@@ -827,10 +863,24 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(sandbox.activeId(), "t2", "活跃指针切到点中的终端");
       assert.deepEqual(log.remembered, ["t2"], "存档同步写回（刷新恢复才认得这条）");
       assert.equal(log.renders, 1, "重渲一次（会话屏与页签、左栏同拍）");
+      assert.equal(sandbox.viewports().length, 1, "没有视口时建一个承接（不凭空多出终端）");
+    });
+
+    it("点击行聚焦已有视口里的终端：只切活跃视口，不新建视口、不重判归属", () => {
+      const { sandbox, log } = runRail({
+        sessions: { t1: { id: "t1" }, t2: { id: "t2" } },
+        activeId: "t1",
+        viewports: [{ id: "viewport-1", terminalId: "t1" }, { id: "viewport-2", terminalId: "t2" }],
+      });
+      sandbox.activate("t2");
+      assert.equal(sandbox.activeId(), "t2", "当前显示终端切到 t2");
+      assert.equal(sandbox.viewports().length, 2, "页签数不变（命中已有视口）");
+      assert.equal(sandbox.viewports()[1].terminalId, "t2", "t2 仍由自己的视口承载");
+      assert.equal(log.renders, 1, "重渲一次");
     });
 
     it("点当前活跃终端 / 不存在的 id / 空 id：一律不动手，不重渲", () => {
-      const { sandbox, log } = runRail({ sessions: { t1: { id: "t1" } } });
+      const { sandbox, log } = runRail({ sessions: { t1: { id: "t1" } }, activeId: "t1" });
       sandbox.activate("t1");
       sandbox.activate("ghost");
       sandbox.activate("");
@@ -874,32 +924,58 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(sandbox.pending(), null, "匹配即清");
     });
 
-    it("关闭叉走页签同一条处理：点到对应页签里那颗 ×，不复制第二份关闭逻辑", () => {
+    it("关闭叉走页签同一条处理：按 data-terminal-terminal 找到对应页签里那颗 ×，不复制第二份关闭逻辑", () => {
       const clicked = [];
-      const makeTab = (id, closeEl) => ({
-        getAttribute: (name) => (name === "data-terminal-tab" ? id : null),
+      const makeTab = (viewportId, terminalId, closeEl) => ({
+        getAttribute: (name) => (name === "data-terminal-tab" ? viewportId
+          : (name === "data-terminal-terminal" ? terminalId : null)),
         querySelector: (sel) => (sel === ".terminal-tab-close" ? closeEl : null),
       });
       const other = { click: () => clicked.push("other") };
       const target = { click: () => clicked.push("t2") };
-      const tabs = { querySelectorAll: () => [makeTab("t1", other), makeTab("t2", target)] };
-      const { sandbox, log } = runRail({ sessions: { t1: {}, t2: {} }, tabs });
+      const tabs = { querySelectorAll: () => [makeTab("viewport-1", "t1", other), makeTab("viewport-2", "t2", target)] };
+      const { sandbox, log } = runRail({
+        sessions: { t1: {}, t2: {} }, tabs,
+        viewports: [{ id: "viewport-1", terminalId: "t1" }, { id: "viewport-2", terminalId: "t2" }],
+      });
       sandbox.close("t2");
       assert.deepEqual(clicked, ["t2"], "只点目标页签的关闭叉（运行中确认/POST/空态计数全由那一处承担）");
       assert.equal(log.renders, 0, "关闭逻辑不在本函数里重写——不自己删会话、不自己重渲");
+      assert.deepEqual(log.posts, [], "也不直接发 /close");
+    });
+
+    it("后台保活的终端（不在任何视口）：行内 × 就地结束它，不碰任何页签", () => {
+      const clicks = [];
+      const tabs = { querySelectorAll: () => { clicks.push("scanned"); return []; } };
+      const { sandbox, log } = runRail({
+        sessions: { t1: { id: "t1", backend: true }, t9: { id: "t9", backend: true } }, tabs,
+        viewports: [{ id: "viewport-1", terminalId: "t1" }],
+        background: ["t9"],
+      });
+      sandbox.close("t9");
+      assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/sessions/t9/close" }],
+        "显式关闭＝结束这条终端（树杀）；后台保活语义只挡「关页签顺带杀」");
+      assert.deepEqual(clicks, [], "不扫页签条：它不占任何视口");
+      assert.deepEqual(sandbox.background(), [], "退出后台保活集合");
     });
 
     it("页签条缺席或找不到对应页签：静默返回，不炸", () => {
-      const absent = runRail({ sessions: { t1: {} }, tabs: null });
+      const absent = runRail({
+        sessions: { t1: {} }, tabs: null,
+        viewports: [{ id: "viewport-1", terminalId: "t1" }],
+      });
       absent.sandbox.close("t1");
       assert.equal(absent.log.renders, 0, "页签条不存在时不动手");
 
       const clicked = [];
       const tabs = { querySelectorAll: () => [{
-        getAttribute: () => "t1",
+        getAttribute: (name) => (name === "data-terminal-terminal" ? "t1" : "viewport-1"),
         querySelector: () => ({ click: () => clicked.push("t1") }),
       }] };
-      const missing = runRail({ sessions: { t1: {}, t2: {} }, tabs });
+      const missing = runRail({
+        sessions: { t1: {}, t2: {} }, tabs,
+        viewports: [{ id: "viewport-1", terminalId: "t1" }],
+      });
       missing.sandbox.close("t9");
       assert.deepEqual(clicked, [], "id 对不上时什么都不点");
     });

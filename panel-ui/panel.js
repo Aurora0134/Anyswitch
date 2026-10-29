@@ -5101,6 +5101,303 @@ async function api(method, path, body) {
   // 改写为真实会话 id。
   let activeTerminalPreviewId = "checkout";
   let terminalBackendSessions = {};
+  // ── 页签＝视口（M12 复原） ──
+  // 页签不再等于终端进程：一个视口同一时刻只显示一个终端（terminalId）；换下来的终端
+  // 若还在跑就进 terminalBackgroundIds 继续作为后台会话活着（仍是左栏的一行），空闲或
+  // 已退出的才结束（用户口径「在跑的不杀、没在跑的杀」）。页签数因此只由视口数决定
+  // ——内切、点左栏会话都不会让它变多。
+  // 渲染源只有这张视口表；terminalBackendSessions 降级为宿主快照库（1s 轮询整表换血），
+  // 活着的终端可以由「宿主快照同步」补成视口（别的窗口新建/宿主重启恢复的既有行为），
+  // 也可以被左栏认领进当前视口（后台保活会话切回来）。
+  let terminalViewports = [];
+  let terminalViewportActiveId = null;
+  // 后台保活集合：宿主里仍活着、但不属于任何视口的终端。两条约束——(a) 宿主快照同步
+  // 不会把它自动补成新页签；(b) 关页签只结束该视口显示的终端，绝不顺着这里杀。
+  const terminalBackgroundIds = new Set();
+  let terminalViewportSeq = 0;
+  let terminalViewportsLoaded = false;
+  let terminalViewportsSavedJson = "";
+  // 存档键：新键存整份布局（活跃视口＋各视口当前终端＋后台保活集合）。旧键
+  // panel-terminal-session 只存过一个「看着的终端」，仅作一次性迁移输入。
+  const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
+
+  function terminalViewportNextId() {
+    terminalViewportSeq += 1;
+    return `viewport-${terminalViewportSeq}`;
+  }
+
+  // 读取布局存档（整页加载一次）。旧单 id 键做迁移：升级前用户看着的那个终端先立成
+  // 视口并置活跃；它若已不在宿主里，宿主快照同步会把空视口摘掉，宿主其余会话按
+  // 「宿主出现即建视口」补齐。这里绝不造终端、绝不补建会话（零会话遗规）。
+  function loadTerminalViewports() {
+    if (terminalViewportsLoaded) return;
+    terminalViewportsLoaded = true;
+    let raw = null;
+    try { raw = localStorage.getItem(TERMINAL_VIEWPORTS_KEY); } catch { raw = null; }
+    if (raw) {
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { parsed = null; }
+      if (parsed && Array.isArray(parsed.viewports)) {
+        terminalViewports = [];
+        for (const row of parsed.viewports) {
+          if (!row || typeof row.id !== "string" || !row.id) continue;
+          const numbered = /^viewport-(\d+)$/.exec(row.id);
+          if (numbered) terminalViewportSeq = Math.max(terminalViewportSeq, Number(numbered[1]));
+          terminalViewports.push({
+            id: row.id,
+            terminalId: typeof row.terminalId === "string" && row.terminalId ? row.terminalId : null,
+          });
+        }
+        if (Array.isArray(parsed.background)) {
+          for (const id of parsed.background) if (typeof id === "string" && id) terminalBackgroundIds.add(id);
+        }
+        terminalViewportActiveId = typeof parsed.active === "string" && parsed.active ? parsed.active : null;
+        terminalViewportsSavedJson = raw;
+        return;
+      }
+    }
+    const legacy = storedTerminalSessionId();
+    if (legacy) {
+      const viewport = terminalViewportCreate(legacy);
+      terminalViewportActiveId = viewport.id;
+    }
+  }
+
+  // 存档整份布局。1s 轮询每拍都会走到这里，逐字比对后零变化不落盘。
+  function saveTerminalViewports() {
+    const payload = JSON.stringify({
+      active: terminalViewportActiveId || null,
+      viewports: terminalViewports.map((viewport) => ({ id: viewport.id, terminalId: viewport.terminalId || null })),
+      background: Array.from(terminalBackgroundIds),
+    });
+    if (payload === terminalViewportsSavedJson) return;
+    terminalViewportsSavedJson = payload;
+    try { localStorage.setItem(TERMINAL_VIEWPORTS_KEY, payload); } catch {}
+  }
+
+  function terminalViewportActive() {
+    if (!terminalViewportActiveId) return null;
+    return terminalViewports.find((viewport) => viewport.id === terminalViewportActiveId) || null;
+  }
+
+  function terminalViewportById(viewportId) {
+    return terminalViewports.find((viewport) => viewport.id === viewportId) || null;
+  }
+
+  function terminalViewportForTerminal(terminalId) {
+    if (!terminalId) return null;
+    return terminalViewports.find((viewport) => viewport.terminalId === terminalId) || null;
+  }
+
+  function terminalViewportAttach(viewportId, terminalId) {
+    const viewport = terminalViewportById(viewportId);
+    if (!viewport) return null;
+    viewport.terminalId = terminalId || null;
+    if (viewport.terminalId) terminalBackgroundIds.delete(viewport.terminalId);
+    saveTerminalViewports();
+    return viewport;
+  }
+
+  function terminalViewportCreate(terminalId) {
+    const viewport = { id: terminalViewportNextId(), terminalId: terminalId || null };
+    terminalViewports.push(viewport);
+    if (viewport.terminalId) terminalBackgroundIds.delete(viewport.terminalId);
+    saveTerminalViewports();
+    return viewport;
+  }
+
+  function terminalViewportDestroy(viewportId) {
+    const index = terminalViewports.findIndex((viewport) => viewport.id === viewportId);
+    if (index < 0) return null;
+    const [viewport] = terminalViewports.splice(index, 1);
+    if (terminalViewportActiveId === viewport.id) terminalViewportActiveId = null;
+    saveTerminalViewports();
+    return viewport;
+  }
+
+  // 切视口的唯一动作：置活跃视口并同步「当前显示终端」指针（页签点击 / 左栏聚焦两条
+  // 入口都走它）。只换显示、不重启进程、不走 /switch——identityChanged 会作废宿主镜像，
+  // 切回旧终端只看重建 SSE 流。
+  function terminalViewportActivate(viewportId) {
+    const viewport = terminalViewportById(viewportId);
+    if (!viewport) return null;
+    terminalViewportActiveId = viewport.id;
+    activeTerminalPreviewId = viewport.terminalId || null;
+    rememberTerminalSessionId(activeTerminalPreviewId);
+    saveTerminalViewports();
+    return viewport;
+  }
+
+  // 「在跑」判定（旧终端处置用）：exited 优先——迟到的活跃信号不能把已退出的进程重新
+  // 判忙。与内切判定门的 working 口径同源（status 已由轮询/SSE 按
+  // terminalSessionBusyFromSignals 算好）。
+  function terminalSessionRunning(session) {
+    if (!session) return false;
+    const state = session.backendState;
+    if (state && state.status === "exited") return false;
+    return session.status === "working" || !!(session.metrics && Number(session.metrics.activeRequests) > 0);
+  }
+
+  // 旧终端处置（用户口径「在跑的不杀、没在跑的杀」）：在跑 → 进后台保活集合继续活着，
+  // 仍被左栏列出；空闲/已退出 → 结束它（树杀）。判不出（无会话记录）按不可杀处置。
+  function terminalViewportRetire(terminalId) {
+    if (!terminalId) return false;
+    if (terminalBackgroundIds.has(terminalId)) return true;
+    const session = terminalSessionFor(terminalId);
+    if (!session) return false;
+    if (terminalSessionRunning(session)) {
+      terminalBackgroundIds.add(terminalId);
+      saveTerminalViewports();
+      return true;
+    }
+    terminalCloseTerminal(terminalId);
+    return false;
+  }
+
+  // 新终端落点：placement＝"viewport"（默认，进当前视口：左栏新建会话 / 内切）或
+  // "new"（页签条「+」/ 续接新建一个视口＝加一个页签）。进当前视口时旧终端按上面的
+  // 杀/留处置——这是「页签数不因内切增加」的唯一落点约定。keepPrevious＝旧终端已由
+  // 调用方判定「在跑/判不出」，直接保活，不再复判（switch_busy 与补读失败两条）。
+  function terminalViewportPlaceTerminal(terminalId, placement = "viewport", { keepPrevious = false } = {}) {
+    if (!terminalId) return null;
+    let viewport = null;
+    if (placement === "new") {
+      viewport = terminalViewportCreate(terminalId);
+    } else {
+      viewport = terminalViewportActive();
+      if (!viewport) {
+        viewport = terminalViewportCreate(terminalId);
+      } else {
+        const previous = viewport.terminalId;
+        if (previous && previous !== terminalId) {
+          if (keepPrevious) {
+            terminalBackgroundIds.add(previous);
+            saveTerminalViewports();
+          } else {
+            terminalViewportRetire(previous);
+          }
+        }
+        terminalViewportAttach(viewport.id, terminalId);
+      }
+    }
+    terminalViewportActiveId = viewport.id;
+    activeTerminalPreviewId = terminalId;
+    rememberTerminalSessionId(terminalId);
+    saveTerminalViewports();
+    return viewport;
+  }
+
+  // 结束一条终端：进程树用既有 /close，本地登记一并摘掉。只给「用户明确要关它」的
+  // 入口（页签 × / 左栏 live 行 ×）用——页签关闭只针对该视口显示的终端，后台保活的
+  // 终端不会被顺手带走。返回 false＝运行中确认框里用户取消了。
+  function terminalCloseTerminal(terminalId) {
+    if (!terminalId) return true;
+    const session = terminalSessionFor(terminalId);
+    if (session && session.status === "working"
+      && typeof window !== "undefined" && typeof window.confirm === "function"
+      && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return false;
+    if (session && session.backend) {
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalId)}/close`).catch(() => {});
+      delete terminalBackendSessions[terminalId];
+    } else if (session) {
+      delete terminalPreviewSessions[terminalId];
+    }
+    terminalBackgroundIds.delete(terminalId);
+    terminalHollowStreak.delete(terminalId);
+    terminalDoneUnread.delete(terminalId);
+    terminalPrevWorking.delete(terminalId);
+    terminalTurnArmed.delete(terminalId);
+    saveTerminalViewports();
+    return true;
+  }
+
+  // 关页签的完整语义（点击委托只负责认出是哪颗页签）：结束该视口当前显示的终端 →
+  // 销毁视口 → 活跃视口按相邻回退 → 零视口落空态。后台保活的终端不在候选里，一概
+  // 不动（用户口径：在跑的不杀；它们退出视口后仍可从左栏回到）。
+  function terminalCloseViewportTab(viewportId) {
+    const viewport = terminalViewportById(viewportId);
+    if (!viewport) return;
+    const terminalId = viewport.terminalId || null;
+    if (terminalId && !terminalCloseTerminal(terminalId)) return;
+    const closingIndex = terminalViewports.findIndex((row) => row.id === viewport.id);
+    const wasActive = terminalViewportActiveId === viewport.id;
+    terminalViewportDestroy(viewport.id);
+    // 活跃视口被关：回退到相邻视口（先右后左，同浏览器标签页语感），指针同步过去。
+    if (wasActive) {
+      const next = closingIndex >= 0
+        ? terminalViewports[Math.min(closingIndex, terminalViewports.length - 1)] || null
+        : terminalViewports[0] || null;
+      terminalViewportActiveId = next ? next.id : null;
+      activeTerminalPreviewId = next && next.terminalId ? next.terminalId : null;
+      rememberTerminalSessionId(activeTerminalPreviewId);
+    }
+    saveTerminalViewports();
+    if (terminalViewports.length === 0) {
+      // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个标签照常可关，
+      // 但关掉后不退出终端页——退出再回归只会挂一个没有会话的空页。留在页内落空态
+      //（空背景 + 文字提示），「+」留在原处直接新建。判定看视口数而非会话数：后台
+      // 保活会话仍在宿主里，不能拿它谎报「还有页签」。
+      closeAllTerminalStreams();
+      renderTerminalPreviewTabs();
+      renderTerminalEmptyState();
+      // 会话栏同拍回落中性空树（不等 1s 轮询）：终端都没了，栏不该再挂已关 agent 的
+      // 会话表——空态保持终端页的正常形态（用户 2026-10-24 裁决）。
+      renderTerminalRail();
+      return;
+    }
+    renderTerminalPreviewSession();
+  }
+
+  // 宿主快照 → 视口表的对齐。本函数是视口增删的唯一来源（渲染只读视口表）：
+  //   · 视口的终端在宿主里消失 → 摘视口（活跃视口摘掉时按相邻回退）；
+  //   · 后台保活集合里宿主已不存在的 id → 清掉；
+  //   · 宿主里出现、既不属于任何视口也不在后台集合的会话 → 建视口（保住「别的窗口
+  //     新建 / 宿主恢复时页签会自己出现」的既有行为）；
+  //   · 活跃视口校正后把「当前显示终端」指针与两份存档同步写回。
+  // 零会话不补建（见 fetchTerminalSessions 的注释）：没有任何宿主会话时这里一无所获。
+  function terminalViewportSyncFromHost() {
+    loadTerminalViewports();
+    let removedActiveIndex = -1;
+    const kept = [];
+    for (let index = 0; index < terminalViewports.length; index += 1) {
+      const viewport = terminalViewports[index];
+      // terminalId 为空的视口保留：它在等落点，渲染出禁用占位，不当天折掉。
+      if (viewport.terminalId && !terminalBackendSessions[viewport.terminalId]) {
+        if (viewport.id === terminalViewportActiveId) removedActiveIndex = index;
+        continue;
+      }
+      kept.push(viewport);
+    }
+    terminalViewports = kept;
+    for (const id of Array.from(terminalBackgroundIds)) {
+      if (!terminalBackendSessions[id]) terminalBackgroundIds.delete(id);
+    }
+    for (const id of Object.keys(terminalBackendSessions)) {
+      if (terminalViewportForTerminal(id)) continue;
+      if (terminalBackgroundIds.has(id)) continue;
+      terminalViewportCreate(id);
+    }
+    if (!terminalViewportActive()) {
+      // 优先回读存档里「刷新前看着的终端」——它可能刚被宿主快照同步补成视口；
+      // 认不到才按相邻回退（关掉活跃视口那一支），最后才取第一个。
+      const remembered = storedTerminalSessionId();
+      const rememberedViewport = remembered ? terminalViewportForTerminal(remembered) : null;
+      if (rememberedViewport) {
+        terminalViewportActiveId = rememberedViewport.id;
+      } else if (removedActiveIndex >= 0 && terminalViewports.length > 0) {
+        terminalViewportActiveId = terminalViewports[Math.min(removedActiveIndex, terminalViewports.length - 1)].id;
+      } else {
+        terminalViewportActiveId = terminalViewports.length > 0 ? terminalViewports[0].id : null;
+      }
+    }
+    const activeViewport = terminalViewportActive();
+    const showing = activeViewport && activeViewport.terminalId ? activeViewport.terminalId : null;
+    if (showing !== activeTerminalPreviewId) activeTerminalPreviewId = showing;
+    // 旧单 id 键继续跟着写（迁移与降级兼容），但只在真变了才落盘——这条同步每 1s 跑一回。
+    if (storedTerminalSessionId() !== activeTerminalPreviewId) rememberTerminalSessionId(activeTerminalPreviewId);
+    saveTerminalViewports();
+  }
+
   // 上一次看到的窗口可见性，只为"漏掉的转折"服务（见轮询兜底拍与 syncTerminalDataStream）。
   let terminalVisibilityWasHidden = false;
   // 活跃真值流：panel 转发的 relay 工作/空闲绝对态 SSE。轮询（1s）仍是校准
@@ -5368,6 +5665,16 @@ async function api(method, path, body) {
       resume: item.resume && typeof item.resume === "object"
         && typeof item.resume.endpoint === "string" && typeof item.resume.id === "string"
         ? { endpoint: item.resume.endpoint, id: item.resume.id }
+        : null,
+      // 绑定库身份（A4）：这条终端**现在实际在跑**的那条对话（宿主绑定库随列表下发），
+      // 与 resume 分开命名——resume 是「创建时要求续接的身份」（去重/换绑读它），
+      // boundConversation 是「此刻跑的是哪条对话」（左栏 live 匹配读它）。全新会话的
+      // 终端在宿主记录里没有 resume（它不是续接起的），真实对话身份只落在绑定库里；
+      // 左栏判「这条会话是不是已经有终端开着」时两个身份都要认，缺一个就会把后台那条
+      // 当成没开过，点一下把同一个对话再起一个进程。
+      boundConversation: item.boundConversation && typeof item.boundConversation === "object"
+        && typeof item.boundConversation.endpoint === "string" && typeof item.boundConversation.id === "string"
+        ? { endpoint: item.boundConversation.endpoint, id: item.boundConversation.id }
         : null,
       status: item.status === "running" ? "idle" : "idle",
       metrics: null,
@@ -5878,17 +6185,9 @@ async function api(method, path, body) {
       if (session.agent) terminalHollowStreak.delete(session.id);
       else terminalHollowStreak.set(session.id, (terminalHollowStreak.get(session.id) || 0) + 1);
     }
-    if (!terminalBackendSessions[activeTerminalPreviewId]) {
-      // 刷新后「看着哪个标签」从存档回读：整页加载把内存里的活动 id 打回预览稿遗留的
-      // 初值，直接取会话表第一个键等于永远落回最早创建的那个终端——多标签时这就是
-      // 「历史丢了」。认不到（别的窗口关了它、宿主换过）才回落第一个，并把落定的
-      // id 写回存档，不留着失效值让下一次恢复再踩。
-      const remembered = storedTerminalSessionId();
-      activeTerminalPreviewId = (remembered && terminalBackendSessions[remembered])
-        ? remembered
-        : (Object.keys(terminalBackendSessions)[0] || null);
-      rememberTerminalSessionId(activeTerminalPreviewId);
-    }
+    // 会话表降级为「宿主快照库」：它不再等于页签表，也不决定活跃指针——视口表的增删
+    // 与活跃校正统一由 terminalViewportSyncFromHost 按宿主快照对齐。
+    terminalViewportSyncFromHost();
   }
 
   // 新会话的初始行列数取当前实测值：PTY 若以固定猜测值（120×34）起步，而
@@ -7130,12 +7429,33 @@ async function api(method, path, body) {
   let terminalTabsRenderedHtml = "";
   let terminalRequestListRenderedHtml = "";
 
+  // 页签渲染源＝视口表（一视口一页签），不再遍历会话表——否则任何不属于视口的终端
+  // 都会在下一次 1s 轮询后复活成页签（后台保活会话首当其冲）。页签键是视口 id，当前
+  // 显示的终端 id 另挂在 data-terminal-terminal 上：点击/关闭委托据此把「切视口」与
+  // 「结束终端」两类动作分开。
   function renderTerminalPreviewTabs() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
     const sessions = terminalSessionMap();
-    const activeId = activeTerminalPreviewId;
-    const html = Object.entries(sessions).map(([id, session]) => {
+    const activeTerminalId = activeTerminalPreviewId;
+    const activeViewportId = terminalViewportActiveId;
+    const html = terminalViewports.map((viewport) => {
+      const viewportId = viewport.id;
+      const isActive = viewportId === activeViewportId;
+      const terminalId = viewport.terminalId || "";
+      const session = terminalId ? sessions[terminalId] || null : null;
+      if (!session) {
+        // 视口暂时没有终端（新建落点未落定的一拍）：禁用占位，沿用既有 .terminal-tab
+        // 结构、不新增任何可见文案（标签位留空）。它不可点、不可关，同时也不参与
+        // 视觉态判定——等落点到了自然换成真页签。
+        return `
+      <button type="button" class="terminal-tab" role="tab" aria-selected="false" disabled
+        data-terminal-tab="${escapeHtml(viewportId)}" data-terminal-terminal="">
+        <span class="terminal-tab-copy"><strong></strong><small></small></span>
+        <span class="terminal-tab-state"></span>
+      </button>
+    `;
+      }
       // 标签副行：一键启动的会话优先显示 agent 名（快照自带，不等归属轮询），
       // 其后才是归属注入的 agent.name，最后回落外壳名。
       const tabAgent = session.agentName || (session.agent ? session.agent.name : session.shell.name);
@@ -7151,11 +7471,13 @@ async function api(method, path, body) {
       // （terminalRailStateSlotHtml——working 转圈／非聚焦的 done 绿点／空，勿写
       // 两份口径）；idle 不画任何图标（灰点退役）。指示位是常驻定宽槽（沿用会话
       // 栏行首槽原则），转圈出现/消失不推挤页签文字；title 只在工作态挂「进行中」
-      //（绿点自带 title「已完成」），idle 无悬停提示。
-      const tabState = terminalRailStateSlotHtml(session, activeId);
+      //（绿点自带 title「已完成」），idle 无悬停提示。判定入参是「当前显示的终端」
+      // ——一个视口只显示一个终端，页签上的转圈/绿点也只说那一个。
+      const tabState = terminalRailStateSlotHtml(session, activeTerminalId);
       return `
-      <button type="button" class="terminal-tab${id === activeId ? " active" : ""}" role="tab"
-        aria-selected="${id === activeId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
+      <button type="button" class="terminal-tab${isActive ? " active" : ""}" role="tab"
+        aria-selected="${isActive ? "true" : "false"}" data-terminal-tab="${escapeHtml(viewportId)}"
+        data-terminal-terminal="${escapeHtml(terminalId)}">
         ${tabIcon}
         <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(tabAgent)}</small></span>
         <span class="terminal-tab-state"${session.status === "working" ? ' title="进行中"' : ""}>${tabState}</span>
@@ -7244,9 +7566,9 @@ async function api(method, path, body) {
       } catch (error) {
         console.warn("[terminal] rail history catch-up failed:", error);
       }
-      if (Object.keys(terminalBackendSessions).length === 0) {
-        // 会话在别处被关光（另一个面板窗口、服务端重建后的空列表）：与关最后
-        // 一个标签同路落空态，不挂上一会话的残留数据。
+      if (terminalViewports.length === 0) {
+        // 页签（视口）在别处被关光，或服务端重建后本就零会话：与关最后一个标签
+        // 同路落空态。判定看视口数——后台保活会话还在宿主里时不能拿它谎报「还有页签」。
         renderTerminalEmptyState();
         return;
       }
@@ -7592,14 +7914,21 @@ async function api(method, path, body) {
     return terminalBottomAutoAlign;
   }
 
-  // 关停后清空本地会话状态：页签、流、活动 id 一并走，下次启动从服务端清单重建。
-  // 页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时它读的是预览稿种子会话。
+  // 关停后清空本地会话状态：页签、流、活动 id、视口布局与后台保活集合一并走，下次
+  // 启动从服务端清单重建。页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时
+  // 它读的是预览稿种子会话。
   function clearTerminalLocalSessions() {
     closeAllTerminalStreams();
     terminalBackendReady = false;
     terminalBackendSessions = {};
+    // 视口表与后台保活集合是本地的页面布局，后端会话全数失效后一并清；存档同步改写
+    // 成空布局，避免下次启动拿旧视口去认领不存在的终端（A11）。
+    terminalViewports = [];
+    terminalViewportActiveId = null;
+    terminalBackgroundIds.clear();
     activeTerminalPreviewId = null;
     rememberTerminalSessionId(null);
+    saveTerminalViewports();
     const tabs = $("terminalTabs");
     if (tabs) {
       tabs.innerHTML = "";
@@ -7982,14 +8311,16 @@ async function api(method, path, body) {
   // 一键启动：凭证只走环境变量注入（服务端组装），这里只递 agentId 与工作目录。
   // resume 可选（M3 契约）：历史会话续接把 { endpoint, id, file } 原样带上，服务端判
   // 不可续接时回 400 resume-unsupported——前端落同一句提示，不暴露短码。
-  function createAgentTerminal({ agentId, cwd, resume }) {
+  // 落点（M12 视口化）：placement＝"viewport" 进当前视口（左栏新建会话 / 内切 / 空视口
+  // 补建），"new" 新建一个视口（页签条「+」）。新建终端本身不再等于新页签。
+  function createAgentTerminal({ agentId, cwd, resume }, { placement = "viewport", keepPrevious = false } = {}) {
     const body = { agentId, cwd, ...terminalCreateSize() };
     if (resume) body.resume = resume;
     return api("POST", "/api/terminal/agent-sessions", body)
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
-        activeTerminalPreviewId = created.id;
-        rememberTerminalSessionId(created.id);
+        // 挂进视口＝决定页签数：进当前视口时旧终端在这里按「在跑不杀、空闲才杀」处置。
+        terminalViewportPlaceTerminal(created.id, placement, { keepPrevious });
         // 新建成功即武装「正在加载」占位（先于渲染：sync 按武装认领会话）。
         armTerminalBootingOverlay(created.id);
         renderTerminalPreviewSession();
@@ -8010,6 +8341,8 @@ async function api(method, path, body) {
       });
   }
 
+  // 页签条「+」＝新建一个视口（唯一加页签入口）。空白终端与一键启动同一落点语义：
+  // 都新开一个页签，而不是挤进当前页签。
   function confirmTerminalAddMenu() {
     const cwdInput = $("terminalAddMenuCwd");
     const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || terminalCwdInitial();
@@ -8019,15 +8352,14 @@ async function api(method, path, body) {
       api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", ...terminalCreateSize() })
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
-          activeTerminalPreviewId = created.id;
-          rememberTerminalSessionId(created.id);
+          terminalViewportPlaceTerminal(created.id, "new");
           armTerminalBootingOverlay(created.id);
           renderTerminalPreviewSession();
         })
         .catch((error) => toast(panelError(error, "无法新建终端"), true));
       return;
     }
-    createAgentTerminal({ agentId: terminalAddMenuSelection, cwd });
+    createAgentTerminal({ agentId: terminalAddMenuSelection, cwd }, { placement: "new" });
   }
 
   // 连接 terminal-host 的成功链路：就绪后重渲会话、立即补拍归属轮询、同步活跃
@@ -8255,44 +8587,21 @@ async function api(method, path, body) {
       }, 1000);
     }
     syncTerminalActivityStream();
+    // 页签点击/关闭委托（M12 视口语义）：页签键是视口 id。点击＝激活该视口（只换显示、
+    // 重建 SSE 流，不走 /switch——identityChanged 会作废宿主镜像）；关闭＝结束该视口
+    // 当前显示的终端（沿用 /close 树杀）再销毁视口，后台保活的终端一概不动。
+    // 两段语义各自成函数（terminalCloseViewportTab / terminalViewportActivate），
+    // 委托只负责认出点的是哪颗页签。
     tabs.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-terminal-tab]");
       if (!tab) return;
-      const id = tab.dataset.terminalTab;
-      if (!terminalSessionFor(id)) return;
+      const viewportId = tab.dataset.terminalTab;
       if (event.target.closest(".terminal-tab-close")) {
-        const session = terminalSessionFor(id);
-        if (session.status === "working" && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return;
-        if (session.backend) {
-          api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`).catch(() => {});
-          delete terminalBackendSessions[id];
-        } else delete terminalPreviewSessions[id];
-        // 关标签即会话关闭：空壳防抖计数同步清零，不留陈旧计数
-        terminalHollowStreak.delete(id);
-        // done（跑完未读）标记与上一拍状态一并清：会话没了，未读态随之失效
-        terminalDoneUnread.delete(id);
-        terminalPrevWorking.delete(id);
-        terminalTurnArmed.delete(id);
-        const remaining = Object.keys(terminalSessionMap());
-        if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
-        rememberTerminalSessionId(activeTerminalPreviewId);
-        if (remaining.length === 0) {
-          // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
-          // 标签照常可关，但关掉后不退出终端页——退出再回归只会挂一个没有会话
-          // 的空页。留在页内落空态（空背景 + 文字提示），「+」留在原处直接新建。
-          closeAllTerminalStreams();
-          renderTerminalPreviewTabs();
-          renderTerminalEmptyState();
-          // 会话栏同拍回落中性空树（不等 1s 轮询）：终端都没了，栏不该再挂已关
-          // agent 的会话表——空态保持终端页的正常形态（用户 2026-10-24 裁决）。
-          renderTerminalRail();
-          return;
-        }
-        renderTerminalPreviewSession();
+        terminalCloseViewportTab(viewportId);
         return;
       }
-      activeTerminalPreviewId = id;
-      rememberTerminalSessionId(id);
+      // 点击＝激活视口：活跃视口与「当前显示终端」指针一起换，然后重建流。
+      if (!terminalViewportActivate(viewportId)) return;
       renderTerminalPreviewSession();
     });
     $("terminalReturnBtn").onclick = () => closeTerminalPreview();
@@ -8402,7 +8711,8 @@ async function api(method, path, body) {
         status: "idle", metrics: null,
         requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
       };
-      activeTerminalPreviewId = id;
+      // 预览稿也要有视口才渲得出页签（渲染源是视口表）；「+」= 新视口。
+      terminalViewportPlaceTerminal(id, "new");
       renderTerminalPreviewSession();
     };
     $("terminalAddMenuCancel").onclick = () => closeTerminalAddMenu();
@@ -9530,7 +9840,8 @@ async function api(method, path, body) {
   // 被真行接替（dsh 的「新会话」行正是这个形态）。**渲染时从后端真值表现推导**，
   // 不另记 pending 状态：终端关了（不在会话表里）行即消失，同目录出现建终端之后
   // 活跃的会话即算被接替。判据＝该终端带 agent、无 resume 记录（续接创建的真行
-  // 已在列表里，不需要兜底）、同目录没有比它更晚活跃的会话。
+  // 已在列表里，不需要兜底）、绑定库身份（boundConversation）也没在列表里（全新会话
+  // 终端聊出来的真行正是这一条，见 A4）、同目录没有比它更晚活跃的会话。
   function terminalRailPendingNewTerminals() {
     const agentId = terminalRailAgentId();
     if (!agentId) return [];
@@ -9544,6 +9855,17 @@ async function api(method, path, body) {
       // 情况不用豁免，等列表回来按既有推导走（此时 POST 通常已落定）。
       const armed = terminalRailPendingFreshArmed(session);
       if (!armed && session.resume) continue;
+      // 绑定库身份（A4）：这条终端此刻实际在跑的对话已经在历史列表里——真行由 live
+      // 身份接任（terminalRailFindOpenSession 认 boundConversation），再出一条兜底行
+      // 就是把同一个终端出成两行（假「新会话」压在真会话行之上，用户报的那一态）。
+      // 按 endpoint＋会话 id 精确匹配，不做目录/时间近似。武装窗同上豁免：正在内切时
+      // 绑定库还指着换下来的旧会话，拿它扣行就等于扣掉用户此刻要的那条「新会话」。
+      if (!armed && session.boundConversation) {
+        const bound = session.boundConversation;
+        const listed = terminalRailHistory.sessions.some((row) =>
+          row && row.endpoint === bound.endpoint && row.id === bound.id);
+        if (listed) continue;
+      }
       // 锚＝最近进程出生（spawnedAt 优先，回退 createdAt；与闲置判定同款）：
       // 内切/复活换进程时 createdAt 不动，拿它当锚会让同目录旧会话
       // （lastActive ≥ createdAt）把换新进程的兜底行误判成「已被接替」——
@@ -10613,6 +10935,9 @@ async function api(method, path, body) {
     renderTerminalRail();
   }
 
+  // 左栏点一条「已开着终端」的会话行（live 行 / 兜底行）：把视口切到它显示的终端。
+  // 页签数不变、进程不重启——已在某个视口里的只激活那个视口；后台保活的不在视口里，
+  // 就挂进当前视口显示，被换下来的旧终端按「在跑不杀、空闲才杀」处置。
   function terminalRailActivateSession(id) {
     // 点它的会话栏行即读：done（跑完未读）标记当场清（聚焦清是每拍兜底，这里
     // 是点行这一拍的即时清——两路同一语义）。
@@ -10621,18 +10946,33 @@ async function api(method, path, body) {
     // 路径，置活跃即由 live 派生接管高亮；旧 pending 继续压着会把别的行说成选中。
     terminalRailEndSelect(null);
     if (!id || !terminalSessionFor(id) || id === activeTerminalPreviewId) return;
-    activeTerminalPreviewId = id;
-    rememberTerminalSessionId(id);
+    const viewport = terminalViewportForTerminal(id);
+    if (viewport) {
+      // 已显示在某个视口（页签）里：只切活跃视口，不动任何进程（切回不复启）。
+      terminalViewportActivate(viewport.id);
+    } else {
+      // 后台保活 / 尚无视口的终端：挂进当前视口（无视口则新建视口）显示它，被换下来的
+      // 旧终端按「在跑不杀、空闲才杀」处置。
+      terminalViewportPlaceTerminal(id, "viewport");
+    }
     renderTerminalPreviewSession({ deferScreen: true });
   }
 
-  // 关闭走页签同一条处理：找到页签条里那颗 × 真点一下——运行中确认、POST、空壳计数、
-  // 活跃 id 回落全部由那一处承担，不复制第二份。
+  // 左栏 live 行「×」：用户明确要结束这条终端。它若正被某个视口显示，走页签同一条
+  // 关闭链（运行中确认、/close、视口销毁与活跃回退全由那一处承担，不复制第二份）；
+  // 后台保活的终端不占视口，就地结束它，不连带动任何页签。
   function terminalRailCloseSession(id) {
+    if (!id) return;
+    if (!terminalViewportForTerminal(id)) {
+      if (!terminalCloseTerminal(id)) return;
+      renderTerminalPreviewTabs();
+      if (typeof renderTerminalRail === "function") renderTerminalRail();
+      return;
+    }
     const tabs = $("terminalTabs");
     if (!tabs || typeof tabs.querySelectorAll !== "function") return;
     for (const tab of tabs.querySelectorAll("[data-terminal-tab]")) {
-      if (tab.getAttribute("data-terminal-tab") !== id) continue;
+      if (tab.getAttribute("data-terminal-terminal") !== id) continue;
       const closeEl = typeof tab.querySelector === "function" ? tab.querySelector(".terminal-tab-close") : null;
       if (closeEl && typeof closeEl.click === "function") closeEl.click();
       return;
@@ -10641,9 +10981,9 @@ async function api(method, path, body) {
 
   // 新建终端：一键对当前 agent 建终端（cwd 沿用既有「记住上次」），无 agent 时建空白
   // 终端；就绪闸与页签栏加号同拍。有 agent 走与点历史行同一道内切判定门
-  // （2026-10-25 用户拍板对齐超实例）：当前页签 idle/空白壳/exited 就地换新会话、
-  // working/无从内切新开页签；一键启动同一通路（createAgentTerminal）仍是全部新开
-  // 落点。空白终端不在矩阵内（不是 agent 会话），维持新开。
+  // （2026-10-25 用户拍板对齐超实例）：当前视口 idle/空白壳/exited 就地换新会话、
+  // 在跑则旧终端留后台保活；两条落点都不加页签。空白终端（不是 agent 会话）也进
+  // 当前视口——「新的页签」只有页签条「+」一个入口。
   function terminalRailCreateTerminal() {
     if (!terminalBackendReady) return;
     const cwd = terminalCwdInitial();
@@ -10656,8 +10996,7 @@ async function api(method, path, body) {
     return api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", cols: size.cols, rows: size.rows })
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
-        activeTerminalPreviewId = created.id;
-        rememberTerminalSessionId(created.id);
+        terminalViewportPlaceTerminal(created.id, "viewport");
         renderTerminalPreviewSession();
       })
       .catch((error) => toast(panelError(error, "无法新建终端"), true));
@@ -10675,9 +11014,11 @@ async function api(method, path, body) {
     // 去重聚焦（M7 S5，用户选甲）：先查打开中的终端有没有同 endpoint＋同会话 id
     // 的——有就直接聚焦（terminalRailActivateSession 同路：置活跃、写存档、重渲），
     // 不再带 resume 新建。点已续接开的会话不该再开一条一模一样的新终端。
-    // 覆盖率只保「续接创建的终端」：全新终端里聊出来的会话，宿主没记过它的对话
-    // id（面板的绑定库在后端，没往前端曝），不在去重范围——要扩得先给绑定库开
-    // 口子，那是另一条 mission 的事，不勉强。
+    // 去重范围＝两种身份都算：续接创建的终端（宿主记录的 resume），以及全新终端里
+    // 聊出来的会话（宿主绑定库下发、随列表进 terminalBackendSession 的
+    // boundConversation）。绑定库已经往前端开了口子，所以「这条会话是不是已经有
+    // 终端开着」不再只有续接终端才认得出；认不出就会给同一个对话再起一个进程，
+    // 两个进程同时写同一份会话存档。
     const open = terminalRailFindOpenSession(session.endpoint, session.id);
     if (open) {
       terminalRailActivateSession(open.id);
@@ -10708,55 +11049,79 @@ async function api(method, path, body) {
     return terminalRailSwitchOrCreate({ session, resume, cwd });
   }
 
-  // M12-A 内切判定（规格矩阵）：点栏内历史会话、去重未命中后，对当前聚焦页签的
-  // 会话 A 做判定——空白壳/idle/exited 就地换内容（宿主同记录 terminate+spawn+
-  // 身份换绑，页签不新增，dsh 单槽 replaceMain 的我们侧同构）；working/补读失败
-  // 走现状新开页签（保护在跑任务——dsh 被切走继续跑的我们侧等价物；宁多开勿错杀）。
+  // M12-A 内切判定（视口化后的矩阵）：点栏内历史会话、去重未命中后，对当前活跃视口
+  // 显示的终端 A 做判定。视口是唯一可换内容的槽——页签数只由视口数决定：
+  //   · 目标会话已有活终端（既有去重口径）→ 直接切视口；
+  //   · 无视口 / 视口没有终端 → 建目标终端挂进视口（无视口才新开视口）；
+  //   · 旧终端在跑（exited 优先）→ 旧终端留后台保活、不杀；目标终端挂进当前视口；
+  //   · 旧终端空闲/已退出 → 既有 POST /switch（同记录 terminate+spawn，页签不增）；
+  //   · switch_busy 与补读失败 = 判不出/判定为在跑（A12）→ 同样走保活分支，不开新页签。
   // 在飞闸（规格「偏离声明」）：dsh 是 last-wins 因换视图免费；我们要杀起进程、
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
+  // 保活分支：旧终端进后台集合（不杀），目标终端新建后挂进当前视口——页签数不变。
+  // keepPrevious 让挂接跳过「旧终端」的杀/留复判：/switch 的 switch_busy 与补读失败
+  // 都是「服务端可能探到活进程」的判定，此时绝不能回头把旧终端当空闲杀掉。
+  function terminalRailKeepAliveSwitch({ agentId, cwd, resume }) {
+    return createAgentTerminal({ agentId, cwd, resume }, { placement: "viewport", keepPrevious: true });
+  }
   // 判定门通用核：目标可以是某条历史会话（带 resume 身份）或一个全新会话
   // （resume 缺省＝全新目标，agentId 仍必须传给服务端）。「新建会话」与组头 ⊕
-  // 两个入口同门（2026-10-25 用户拍板对齐）：
-  // idle/空白壳/exited 就地换新会话、working 新开页签，与点历史行共用同一矩阵、
-  // 同一在飞闸与降级路径）。新开的落点都是 createAgentTerminal（全新路径带
-  // agentId＋cwd、不带 resume 键，服务端 /switch 据此走全新分支）。
+  // 两个入口同门（2026-10-25 用户拍板对齐），与点历史行共用同一矩阵与在飞闸。
   async function terminalRailSwitchOrCreateCore({ agentId, cwd, resume = null }) {
     if (terminalSwitchInFlight) return;
-    const active = terminalSessionFor(activeTerminalPreviewId);
-    // 无从内切：没有活跃页签、或活跃是设计稿预览会话（没有宿主记录可换）。
+    // 目标会话已有活终端（既有去重口径：resume 的 endpoint＋会话 id 两键）→ 直接
+    // 切视口，不再建第二条终端。续接入口已先去重，这里兜其余入口。
+    if (resume && resume.endpoint && resume.id) {
+      const open = terminalRailFindOpenSession(resume.endpoint, resume.id);
+      if (open) {
+        terminalRailActivateSession(open.id);
+        return;
+      }
+    }
+    const activeViewport = terminalViewportActive();
+    const active = terminalSessionFor(activeViewport ? activeViewport.terminalId : activeTerminalPreviewId);
+    // 无视口 / 视口没有终端 / 活跃是设计稿预览会话（没有宿主记录可换）：内切无处可
+    // 换，就建目标终端——无视口才新开一个视口，有视口就挂进它，都不额外加页签。
     if (!active || !active.backend) {
-      return createAgentTerminal({ agentId, cwd, resume });
+      return createAgentTerminal({ agentId, cwd, resume }, { placement: activeViewport ? "viewport" : "new" });
     }
     terminalSwitchInFlight = true;
     try {
       // 补读两拍（规格时序防线）：活跃面即时取（防 SSE 活跃流一拍延迟误杀在跑
-      // 任务）＋宿主单读（PTY 现态，顺带确认记录还在）。任一失败降级新开。
+      // 任务）＋宿主单读（PTY 现态，顺带确认记录还在）。判不出就按「在跑」处置：
+      // 旧终端保活、目标挂进当前视口——宁可多留一个进程，不误杀（A12）。
       let agents = null;
       let hostRead = null;
       try {
         agents = await api("GET", "/api/agents");
         hostRead = await api("GET", `/api/terminal/sessions/${encodeURIComponent(active.id)}`);
       } catch {
-        return createAgentTerminal({ agentId, cwd, resume });
+        return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       if (!agents || !Array.isArray(agents.agents) || !hostRead || !hostRead.id) {
-        return createAgentTerminal({ agentId, cwd, resume });
+        return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       enrichTerminalSessions(agents.agents);
-      // 已退出不是 working：迟到的请求/输出信号不能把它重新判忙，否则切走会
-      // 错走保护性新开（原页签的新会话行也随之残留）。宿主现态优先于缓存信号。
+      // 已退出不是 working：迟到的请求/输出信号不能把它重新判忙。宿主现态优先于缓存信号。
       const exited = hostRead.status === "exited" || active.backendState?.status === "exited";
       const working = !exited && (active.status === "working" || (active.metrics && active.metrics.activeRequests > 0));
-      if (working) return createAgentTerminal({ agentId, cwd, resume });
+      // 旧终端在跑：留后台保活、不杀；目标终端挂进当前视口，页签数不变。
+      if (working) return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       // 全新内切乐观选中（M5 补口）：没有历史身份可亮，activeTerminalPreviewId 又不
       // 换（同记录换内容）——不武装的话，高亮要等 POST 返回、spawnedAt 刷新、兜底行
       // 出现才挪过去（实测小半秒）。确定要内切（过了 working 门）后、POST 之前点亮：
       // 兜底行当拍出现在目标目录组顶。working/无从内切落点都是别的页签，不许亮本页
       // 签——武装点必须在这两个 return 之后。
       if (!resume) terminalRailArmSelect({ endpoint: agentId, terminalId: active.id, cwd });
-      // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
+      // 切换期进行态（A6）：/switch 在家主侧是 terminate+spawn，实测 6~12s，屏上不能停在
+      // 旧画面无反馈——复用「正在加载」占位（零新增文案），首帧数据落地即撤。/switch 在飞
+      // 期间没有别的渲染通路会调 sync，武装后立刻挂一层。
+      armTerminalBootingOverlay(active.id);
+      if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(active.id);
+      // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本视口的记录（终端 id
+      // 不变，视口/页签都不变）。
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
       // 成功即收武装：兜底行的真实身份已经由宿主快照接手（spawnedAt 刷新、resume
@@ -10770,15 +11135,15 @@ async function api(method, path, body) {
       // 本地记录原样，页签还是原来那条，只给一句提示。
       const code = error && (error.serverCode || error.code);
       if (code === "switch_busy") {
-        // 服务端杀前复核拒换（会话树里有活着的命令进程）：静默转新开保护。新开
-        // 本就是点击历史会话的合法落点之一，这里再提示反而是噪声；原页签不动，
-        // 在跑的命令继续。
-        // 失败清点不含这条（M5 原口径）：续接内切点亮的是历史行，转新开后那枚
-        // 高亮仍兑现（新页签会亮），此处清会让高亮先弹回旧行再亮新行。全新内切
-        // 不同——兜底行锚在**本页签**上，转新开后本页签没换内容，留着它就是说
-        // 这条页签换了会话，必须显式撤；新页签自己的兜底行由新建链路自然带出。
+        // 服务端杀前复核拒换（会话树里有活着的命令进程）：这就是「旧终端在跑」的
+        // 服务端判据。改走保活分支——旧终端不杀、目标终端挂进当前视口，页签数不变
+        // （旧实现这里静默新开页签，正是「页签自动变多」的直接来源）。不提示：目标
+        // 会话照旧换成内容，没有需要用户处理的失败。
+        // 失败清点（M5 原口径）：续接内切点亮的是历史行，新终端挂上后那枚高亮仍兑现
+        // （live 行接任），此处清会让高亮先弹回旧行；全新内切不同——兜底行锚在本次
+        // 点击换上的终端上，照旧撤掉旧瞄准。
         if (!resume) terminalRailEndSelect(null);
-        return createAgentTerminal({ agentId, cwd, resume });
+        return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       // 失败清点（M5）：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
       // 继续说它选中就是说谎。不放 finally 清：working 转新开等落点经 finally
@@ -10803,13 +11168,18 @@ async function api(method, path, body) {
     if (session) terminalRailResumeSession(session);
   }
 
-  // 打开中的终端里找「替这条会话续接建的那个」：resume 身份两键（endpoint＋会话
-  // id）都对上才算。同会话 id 在不同端点的存档里是不同对话，单键会误聚焦。
+  // 打开中的终端里找「已经在跑这条会话的那个」：两个身份任一命中即算——
+  // resume（创建时要求续接的身份）与 boundConversation（这条终端此刻实际在跑的
+  // 对话，宿主绑定库下发；全新会话的终端没有 resume，身份只在这里）。两个身份都要
+  // 求 endpoint＋会话 id 两键对上：同会话 id 在不同端点的存档里是不同对话，单键会误聚焦。
   function terminalRailFindOpenSession(endpoint, id) {
     if (!endpoint || !id) return null;
     for (const session of Object.values(terminalRailSessionMap())) {
-      if (!session || !session.resume) continue;
-      if (session.resume.endpoint === endpoint && session.resume.id === id) return session;
+      if (!session) continue;
+      const resume = session.resume;
+      if (resume && resume.endpoint === endpoint && resume.id === id) return session;
+      const bound = session.boundConversation;
+      if (bound && bound.endpoint === endpoint && bound.id === id) return session;
     }
     return null;
   }

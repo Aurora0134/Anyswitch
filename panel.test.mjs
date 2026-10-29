@@ -84,6 +84,32 @@ const panelJs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
   "utf8",
 );
+// ── M12 视口表（页签＝视口）的 vm 沙盒前置 ──
+// 单测按函数名切源码进 new Function，模块级符号不会跟着来。视口纯函数用生产实现，
+// 这里只补状态量与存档键；外部依赖（api / terminalSessionFor / renderer…）各沙盒自备。
+const panelFnSrc = (name) => {
+  const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+  assert.ok(src, `${name} found in panel.js`);
+  return src;
+};
+const VIEWPORT_FNS = [
+  "terminalViewportNextId", "loadTerminalViewports", "saveTerminalViewports",
+  "terminalViewportActive", "terminalViewportById", "terminalViewportForTerminal",
+  "terminalViewportAttach", "terminalViewportCreate", "terminalViewportDestroy",
+  "terminalViewportActivate", "terminalSessionRunning", "terminalViewportRetire",
+  "terminalViewportPlaceTerminal", "terminalCloseTerminal", "terminalCloseViewportTab",
+  "terminalViewportSyncFromHost",
+];
+const viewportPrelude = (names = VIEWPORT_FNS) => `
+  let terminalViewports = [];
+  let terminalViewportActiveId = null;
+  const terminalBackgroundIds = new Set();
+  let terminalViewportSeq = 0;
+  let terminalViewportsLoaded = false;
+  let terminalViewportsSavedJson = "";
+  const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
+  ${names.map(panelFnSrc).join("\n")}
+`;
 // 回放突发合并器的阈值常量：沙箱按函数名切源码，常量不在其中，单独取出注入——
 // 测试不抄数字，改阈值时行为钉跟着变。
 const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET_MS", "TERMINAL_BURST_MAX_HOLD_MS", "TERMINAL_BURST_MAX_BYTES"]
@@ -3807,7 +3833,8 @@ describe("panel.html 设置全页视图", () => {
     };
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
       "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak", "pruneTerminalDoneState"].map(srcOf).join("\n");
-    // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
+    // M12 视口化：会话表重建后由宿主快照同步视口表，恢复语义（存档在册优先）也搬到
+    // terminalViewportSyncFromHost。沙盒补视口的模块级符号（纯函数用生产实现）。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
       let activeTerminalPreviewId = initialId;
       let terminalBackendSessions = {};
@@ -3824,19 +3851,27 @@ describe("panel.html 设置全页视图", () => {
       const terminalPrevWorking = new Map();
       const terminalTurnArmed = new Set();
       const terminalPreviewSessions = {};
+      ${viewportPrelude()}
       ${bodies}
       rebuildTerminalBackendSessions(items);
-      return { active: activeTerminalPreviewId, ids: Object.keys(terminalBackendSessions) };
+      return {
+        active: activeTerminalPreviewId,
+        ids: Object.keys(terminalBackendSessions),
+        viewports: terminalViewports.map((viewport) => ({ ...viewport })),
+      };
     `)(store, items, initialId);
     const three = [{ id: "t-old" }, { id: "t-mid" }, { id: "t-new" }];
 
     const remembered = run({ "panel-terminal-session": "t-mid" }, three);
     assert.strictEqual(remembered.active, "t-mid", "刷新后回到刷新前看着的那个标签，而不是最早创建的");
+    assert.strictEqual(remembered.viewports.length, 3, "宿主里有几条会话就有几个视口（页签＝视口，首次升级按会话补齐）");
+    assert.strictEqual(remembered.viewports[0].terminalId, "t-mid", "旧单 id 键迁移出的视口承载着刷新前看着的终端");
 
     const staleStore = { "panel-terminal-session": "t-gone" };
     const stale = run(staleStore, three);
     assert.strictEqual(stale.active, "t-old", "存档里的会话已被别处关掉 → 回落第一个");
     assert.strictEqual(staleStore["panel-terminal-session"], "t-old", "回落即改写存档，不留失效值再踩一次");
+    assert.ok(!stale.viewports.some((vp) => vp.terminalId === "t-gone"), "失效终端不占视口（不残留空页签）");
 
     const freshStore = {};
     run(freshStore, three);
@@ -3845,6 +3880,7 @@ describe("panel.html 设置全页视图", () => {
     const goneStore = { "panel-terminal-session": "t-gone" };
     const none = run(goneStore, []);
     assert.strictEqual(none.active, null, "零会话不硬造活跃标签");
+    assert.strictEqual(none.viewports.length, 0, "零会话不自动补建视口（遗规原样：刷新不蹦空白页签）");
     assert.ok(!("panel-terminal-session" in goneStore), "零会话即摘存档，下次恢复不认领不存在的会话");
 
     // 预览稿假 id 不进存档：降级下点「+」产的 "preview-N" 服务端根本不认
@@ -8091,20 +8127,29 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.equal(unbound, null, "未绑定实例不出行（codex 流量前状态）");
   });
 
-  it("接线结构：渲染拆成数据层与结构层、最后一标签可关", () => {
+  it("接线结构：渲染拆成数据层与结构层、最后一页签可关（空态判据＝视口数）", () => {
     assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
     const renderBody = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
     assert.ok(renderBody.includes("renderTerminalSessionData();"), "结构层渲染复用数据层");
     assert.ok(renderBody.includes("connectTerminalStream(session, { revive });"), "SSE 只在结构层重连，且把复活口径透传下去");
     assert.ok(!panelJs.includes("预览至少保留一个终端标签"), "「至少保留一个终端标签」预览遗规已移除");
     assert.ok(!panelJs.includes("ids.length <= 1"), "关闭守卫不再按数量拦截");
-    assert.ok(panelJs.includes("remaining.length === 0"), "最后一个标签照常可关");
-    const zeroBranch = panelJs.match(/if \(remaining\.length === 0\) \{[\s\S]*?\n        \}/)?.[0];
-    assert.ok(zeroBranch, "零会话分支可取样");
-    assert.ok(zeroBranch.includes("closeAllTerminalStreams()"), "零会话分支先收流（全部列）");
-    assert.ok(zeroBranch.includes("renderTerminalPreviewTabs()"), "零会话分支重渲页签，关掉的标签即时退场");
+    // M12 视口化：「还有没有页签」的判据从会话数换成视口数——后台保活会话仍在宿主
+    // 会话表里，拿会话数判空会让关掉最后一个页签后留在「有页签」的假态。
+    // 取样限定在关页签的语义函数里（pollTerminalSessions 也有同款判据，取第一个会取错）。
+    const tabsWire = panelJs.match(/tabs\.addEventListener\("click"[\s\S]*?\n    \}\);/)?.[0];
+    assert.ok(tabsWire, "页签点击/关闭委托可取样");
+    assert.ok(tabsWire.includes("terminalCloseViewportTab(viewportId)"), "关闭分支委托给视口关闭语义");
+    assert.ok(tabsWire.includes("terminalViewportActivate(viewportId)"), "点击分支＝激活视口（不走 /switch）");
+    const closeTab = panelFnSrc("terminalCloseViewportTab");
+    const zeroBranch = closeTab.match(/if \(terminalViewports\.length === 0\) \{[\s\S]*?\n    \}/)?.[0];
+    assert.ok(zeroBranch, "零视口分支可取样");
+    assert.ok(panelJs.includes("terminalViewports.length === 0"), "最后一个页签照常可关（判据看视口数）");
+    assert.ok(!panelJs.includes("remaining.length === 0"), "旧「剩余会话数」判据退役（会话多≠页签多）");
+    assert.ok(zeroBranch.includes("closeAllTerminalStreams()"), "零视口分支先收流（全部列）");
+    assert.ok(zeroBranch.includes("renderTerminalPreviewTabs()"), "零视口分支重渲页签，关掉的标签即时退场");
     assert.ok(zeroBranch.includes("renderTerminalEmptyState()"), "关完最后一个标签留在页内落空态，不退出终端页");
-    assert.ok(!zeroBranch.includes("closeTerminalPreview"), "零会话不再退出终端页（退出再回归只会挂一个没有会话的空页）");
+    assert.ok(!zeroBranch.includes("closeTerminalPreview"), "零视口不再退出终端页（退出再回归只会挂一个没有会话的空页）");
     assert.ok(panelJs.includes("pollTerminalSessions()"), "归属数据轮询存在");
   });
 });
@@ -11302,8 +11347,16 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     const init = extractFn("initTerminalPreview");
     const closeAt = init.indexOf('event.target.closest(".terminal-tab-close")');
     assert.ok(closeAt > 0, "关标签分支可取样");
-    const closeBranch = init.slice(closeAt, init.indexOf("remaining.length === 0"));
-    assert.ok(closeBranch.includes("terminalHollowStreak.delete(id)"), "关标签同步清该会话计数");
+    // M12 视口化：关页签＝结束该视口显示的终端再销毁视口，结束动作收敛在
+    // terminalCloseViewportTab / terminalCloseTerminal 里（页签 × 与左栏 live 行 ×
+    // 共用，一处清计数）。
+    const closeCall = "terminalCloseViewportTab(viewportId)";
+    const closeBranch = init.slice(closeAt, init.indexOf(closeCall) + closeCall.length);
+    assert.ok(closeBranch.includes(closeCall), "关页签委托给共用的视口关闭语义");
+    const closeFn = extractFn("terminalCloseTerminal");
+    assert.ok(closeFn.includes("terminalHollowStreak.delete(terminalId)"), "结束终端同步清该会话计数");
+    assert.ok(closeFn.includes("terminalDoneUnread.delete(terminalId)") && closeFn.includes("terminalPrevWorking.delete(terminalId)"),
+      "done 未读标记与上一拍状态一并清（会话没了，未读态随之失效）");
     assert.ok(rebuild.includes("pruneTerminalHollowStreak()"), "轮询整表换血后清掉已消失会话的计数");
     assert.ok(extractFn("clearTerminalLocalSessions").includes("pruneTerminalHollowStreak()"),
       "关停清场同样清计数（后端会话全数失效）");
@@ -11329,6 +11382,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
         setItem: (k, v) => { store[k] = v; },
         removeItem: (k) => { delete store[k]; },
       };
+      ${viewportPrelude()}
       ${bodies}
       return {
         beat: (items) => rebuildTerminalBackendSessions(items),
@@ -11423,6 +11477,9 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     };
     const tabsApi = new Function("$", "escapeHtml", "sessions", `
       let activeTerminalPreviewId = "t1";
+      // M12：页签渲染源＝视口表（tab 键＝视口 id，当前终端另挂 data-terminal-terminal）
+      let terminalViewports = [{ id: "viewport-1", terminalId: "t1" }];
+      let terminalViewportActiveId = "viewport-1";
       let terminalTabsRenderedHtml = "";
       const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
       const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
@@ -11430,7 +11487,10 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       ${extractFn("terminalRailStateSlotHtml")}
       function terminalSessionMap() { return sessions; }
       ${extractFn("renderTerminalPreviewTabs")}
-      return { render: renderTerminalPreviewTabs, setActive: (id) => { activeTerminalPreviewId = id; } };
+      return {
+        render: renderTerminalPreviewTabs,
+        setActive: (id) => { activeTerminalPreviewId = id; terminalViewportActiveId = id === "t1" ? "viewport-1" : "viewport-2"; },
+      };
     `)((id) => (id === "terminalTabs" ? tabsEl : null), escapeHtml, sessions);
     tabsApi.render();
     tabsApi.render();
@@ -11513,6 +11573,9 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     };
     const api = new Function("$", "escapeHtml", "sessions", `
       let activeTerminalPreviewId = "t1";
+      // M12：一视口一页签；tab 键是视口 id，当前终端挂在 data-terminal-terminal 上。
+      let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
+      let terminalViewportActiveId = "viewport-1";
       let terminalTabsRenderedHtml = "";
       const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
       const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
@@ -11522,7 +11585,11 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       ${extractFn("renderTerminalPreviewTabs")}
       return {
         render: renderTerminalPreviewTabs,
-        setActive: (id) => { activeTerminalPreviewId = id; },
+        setActive: (id) => {
+          activeTerminalPreviewId = id;
+          const viewport = terminalViewports.find((row) => row.terminalId === id);
+          terminalViewportActiveId = viewport ? viewport.id : terminalViewportActiveId;
+        },
         markDone: (id) => terminalDoneUnread.set(id, true),
       };
     `)((id) => (id === "terminalTabs" ? tabsEl : null), esc, sessions);
@@ -11530,13 +11597,14 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     api.render();
     const doneHtml = writes[writes.length - 1];
     assert.equal((doneHtml.match(/DONE-STUB/g) || []).length, 1, "只有被标的后台页签带绿点");
-    assert.ok(/data-terminal-tab="t2"[\s\S]*DONE-STUB[\s\S]*data-terminal-tab/.test(doneHtml + 'data-terminal-tab'), "绿点落在 t2 自己的页签里");
+    assert.ok(/data-terminal-terminal="t2"[\s\S]*DONE-STUB[\s\S]*data-terminal-tab/.test(doneHtml + 'data-terminal-tab'), "绿点落在 t2 自己的页签里");
+    assert.ok(doneHtml.includes('data-terminal-tab="viewport-2"'), "页签键是视口 id（内切/点会话不会改变它）");
     assert.ok(doneHtml.includes('title="已完成"'), "绿点自带「已完成」提示（唯一新增文案）");
     sessions.t2.status = "working";
     api.render();
     const workingHtml = writes[writes.length - 1];
     assert.ok(workingHtml.includes("SPINNER-STUB") && !workingHtml.includes("DONE-STUB"), "working 转圈优先于绿点");
-    assert.ok(/data-terminal-tab="t2"[\s\S]*title="进行中"/.test(workingHtml), "工作态页签挂「进行中」");
+    assert.ok(/data-terminal-terminal="t2"[\s\S]*title="进行中"/.test(workingHtml), "工作态页签挂「进行中」");
     sessions.t2.status = "idle";
     api.markDone("t2");
     api.setActive("t2");
@@ -12386,6 +12454,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const terminalBackendReady = true;
       let terminalPollInFlight = false;
       const terminalBackendSessions = {};
+      // M12：页签＝视口。零视口才落空态（后台保活会话不算页签）。
+      let terminalViewports = [];
       async function api() { state.data += 1; return { sessions: [] }; }
       function rebuildTerminalBackendSessions() {}
       async function refreshRouteRuntimeCache() {}
@@ -13565,6 +13635,10 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let terminalAddMenuAgentsAt = 0;
       let terminalAddMenuSelection = "";
       let terminalBooting = null;
+      // M12 落点：createAgentTerminal / 空白终端都经 terminalViewportPlaceTerminal 决定
+      // 页签数（「+」＝新视口）。沙盒补视口状态与纯函数，旧终端处置打桩（这里不走重挂）。
+      ${viewportPrelude(["terminalViewportNextId", "terminalViewportCreate", "terminalViewportAttach", "terminalViewportPlaceTerminal", "saveTerminalViewports"])}
+      function terminalViewportRetire() { return false; }
       ${bodies}
       return {
         load: loadInstalledTerminalAgents,
@@ -13576,6 +13650,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         agents: () => terminalAddMenuAgents,
         booting: () => terminalBooting,
         activeId: () => activeTerminalPreviewId,
+        viewports: () => terminalViewports.map((viewport) => ({ ...viewport })),
         sessions: terminalBackendSessions,
       };
     `)((id) => els[id] ?? null, api,
@@ -13722,6 +13797,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     }], "只递 agentId 与工作目录，凭证在服务端组装");
     assert.ok(sandbox.sessions["t-new"], "成功分支登记终端会话");
     assert.equal(sandbox.activeId(), "t-new", "新终端置为活跃");
+    assert.deepEqual(sandbox.viewports(), [{ id: "viewport-1", terminalId: "t-new" }],
+      "「+」菜单＝新建一个视口（唯一加页签入口）：一条页签承载新终端");
     assert.equal(log.renders, 1, "成功分支重渲会话");
     assert.equal(log.toasts.length, 0);
   });
@@ -13734,6 +13811,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       method: "POST", path: "/api/terminal/sessions",
       body: { label: "Anyswitch", cwd: "D:\\work", shell: "powershell", cols: 120, rows: 34 },
     }], "空白终端用菜单里填的工作目录，不再写死 D:\\dev");
+    assert.deepEqual(blank.sandbox.viewports(), [{ id: "viewport-1", terminalId: "t-new" }],
+      "空白终端同样落在新视口（页签条「+」的语义不变）");
 
     // 启动失败：服务端 4xx/5xx（英文短码）→ toast 落中文兜底，不登记会话。
     const toasts = [];
@@ -13802,6 +13881,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
       const fn = new Function("$", "escapeHtml", "sessions", `
+        // M12：页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
+        let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
+        let terminalViewportActiveId = "viewport-1";
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
@@ -13862,6 +13944,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     globalThis.document = docStub;
     try {
       new Function("$", "escapeHtml", "sessions", `
+        // M12：页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
+        let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
+        let terminalViewportActiveId = "viewport-1";
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
         const TERMINAL_RAIL_SPINNER = "";
@@ -13886,6 +13971,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
       new Function("$", "escapeHtml", "sessions", `
+        // M12：页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
+        let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
+        let terminalViewportActiveId = "viewport-1";
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
