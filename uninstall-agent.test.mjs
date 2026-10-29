@@ -501,11 +501,21 @@ const DSH_CREDENTIAL_LINES = {
   ],
 };
 
-const dshPatchSeed = (credential) => [
+const dshPatchSeed = (credential, pseudo = false) => [
   "- id: llm-pi-ai",
   "  name: '@deepseek-ai/dsh-llm-pi-ai'",
   "  config:",
   "    providers:",
+  ...(pseudo
+    ? [
+      "      Anyswitch:",
+      "        displayName: Anyswitch",
+      "        api: openai-completions",
+      "        baseURL: 'http://127.0.0.1:47821/openai/chan1/v1'",
+      ...DSH_CREDENTIAL_LINES[credential],
+      "        models: []",
+    ]
+    : []),
   "      _chan1:",
   "        displayName: chan1",
   "        api: openai-completions",
@@ -521,11 +531,11 @@ const dshPatchSeed = (credential) => [
   "",
 ].join("\n");
 
-function seedDsh(home, sidecarRoot, { sidecar = true, credential = "legacy" } = {}) {
+function seedDsh(home, sidecarRoot, { sidecar = true, credential = "legacy", pseudo = false } = {}) {
   const dshHome = join(home, ".dsh");
   const patchPath = join(dshHome, "profiles", "p1", "cordis.patch.yml");
   mkdirSync(dirname(patchPath), { recursive: true });
-  writeFileSync(patchPath, dshPatchSeed(credential));
+  writeFileSync(patchPath, dshPatchSeed(credential, pseudo));
   mkdirSync(join(dshHome, "profiles", "p2"), { recursive: true }); // no patch file
   if (sidecar) seedSidecar(sidecarRoot, "dsh-sidecar.json", ["chan1"]);
   return { dshHome, patchPath, p2PatchPath: join(dshHome, "profiles", "p2", "cordis.patch.yml") };
@@ -555,6 +565,18 @@ for (const withSidecar of [true, false]) {
     });
   }
 }
+
+test("dsh: sidecar-lost sweep also recognizes the Anyswitch pseudo-channel key", async () => {
+  const home = mkTestDir("uninstall-dsh-pseudo-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const { patchPath } = seedDsh(home, sidecarRoot, { sidecar: false, pseudo: true });
+  const result = await driver.uninstallEndpoint("dsh");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  const text = readFileSync(patchPath, "utf8");
+  assert.ok(!text.includes("Anyswitch:"), text);
+  assert.ok(!text.includes("_chan1"), text);
+  assert.ok(text.includes("userp:"), text);
+});
 
 // ─────────────────────────────────────────────────────────────
 // claude

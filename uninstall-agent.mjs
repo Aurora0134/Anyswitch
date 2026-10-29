@@ -451,9 +451,10 @@ async function stripPi(ctx) {
   return steps;
 }
 
-// dsh managed providers inside a profile's llm row: "_" prefixed id, relay
-// baseURL, endpoint header, and a relay credential — either the legacy
-// token-by-env reference or the token-by-header the writer now emits
+// dsh managed providers inside a profile's llm row: a managed key (the "_"
+// prefix for real channels, the channel display name for the Anyswitch
+// pseudo-channel), relay baseURL, endpoint header, and a relay credential —
+// either the legacy token-by-env reference or the token-by-header the writer now emits
 // (dsh-merge-config.mjs buildDshProviderEntry). Both shapes are accepted so an
 // uninstall still cleans a profile written before the credential moved into
 // the headers. Together they are the fingerprint — the merge module documents
@@ -492,7 +493,11 @@ async function collectDshResidueIds(dshHome) {
     const providers = row?.config?.providers;
     if (!providers || typeof providers !== "object" || Array.isArray(providers)) continue;
     for (const [key, entry] of Object.entries(providers)) {
-      if (key.startsWith("_") && isDshManagedEntry(entry)) ids.add(key.slice(1));
+      if (!isDshManagedEntry(entry)) continue;
+      // The sweep seeds the sidecar with logical ids, which the writer's own
+      // removal path maps back onto on-disk keys.
+      if (key.startsWith("_")) ids.add(key.slice(1));
+      else if (key === dshMerge.ANYSWITCH_CHANNEL_NAME) ids.add(dshMerge.AUTO_CHANNEL_KEY);
     }
   }
   return [...ids].sort();

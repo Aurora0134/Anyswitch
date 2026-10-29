@@ -690,7 +690,7 @@ const DSH_CHAIN_STORE = {
   },
 };
 
-test("mergeDshSettings injects the _auto channel when the endpoint has a route chain", () => {
+test("mergeDshSettings injects the pseudo channel under the Anyswitch key", () => {
   const auto = deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh");
   const { config, managed } = mergeDshSettings(
     {},
@@ -701,8 +701,9 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
     null,
     auto,
   );
-  const entry = config["llm-pi-ai"].providers._auto;
-  assert.ok(entry, "_auto channel must be injected");
+  const entry = config["llm-pi-ai"].providers.Anyswitch;
+  assert.ok(entry, "the pseudo channel must be injected under the display-name key");
+  assert.equal(config["llm-pi-ai"].providers._auto, undefined, "the pre-rename key is not written");
   assert.equal(entry.displayName, "Anyswitch");
   assert.equal(entry.api, "openai-completions");
   // The base URL points at the chain HEAD node, not at a literal "auto" segment.
@@ -714,11 +715,11 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
   });
   assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
   assert.ok(!entry.models[0].reasoningEfforts, "the virtual model carries no reasoning levels");
-  assert.ok(managed.includes("auto"), "sidecar tracks the _auto channel as managed");
+  assert.ok(managed.includes("auto"), "sidecar records the logical id, not the display-name key");
   assert.equal(validateDshSettings(config).valid, true);
 });
 
-test("mergeDshSettings does not inject _auto without a route chain", () => {
+test("mergeDshSettings does not inject the pseudo channel without a route chain", () => {
   const { config, managed } = mergeDshSettings(
     {},
     extractManagedProviders(DSH_CHAIN_STORE),
@@ -728,11 +729,12 @@ test("mergeDshSettings does not inject _auto without a route chain", () => {
     null,
     deriveAutoRouteChannel({ providers: DSH_CHAIN_STORE.providers }, "dsh"),
   );
+  assert.equal(config["llm-pi-ai"].providers.Anyswitch, undefined);
   assert.equal(config["llm-pi-ai"].providers._auto, undefined);
   assert.ok(!managed.includes("auto"));
 });
 
-test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted", () => {
+test("mergeDshSettings cleans up the pseudo channel on the re-sync after the chain is deleted", () => {
   const first = mergeDshSettings(
     {},
     extractManagedProviders(DSH_CHAIN_STORE),
@@ -742,7 +744,7 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
     null,
     deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
   );
-  assert.ok(first.config["llm-pi-ai"].providers._auto);
+  assert.ok(first.config["llm-pi-ai"].providers.Anyswitch);
   const second = mergeDshSettings(
     first.config,
     extractManagedProviders(DSH_CHAIN_STORE),
@@ -753,12 +755,107 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
     deriveAutoRouteChannel({ providers: DSH_CHAIN_STORE.providers }, "dsh"),
   );
   assert.equal(
-    second.config["llm-pi-ai"].providers._auto,
+    second.config["llm-pi-ai"].providers.Anyswitch,
     undefined,
-    "stale _auto removed once the chain is gone",
+    "stale pseudo channel removed once the chain is gone",
   );
   assert.ok(second.config["llm-pi-ai"].providers["_poke-api"], "real channels survive the cleanup");
   assert.ok(!second.managed.includes("auto"));
+});
+
+test("mergeDshSettings retires the legacy _auto managed entry on the first sync after the rename", () => {
+  const legacy = {
+    "llm-pi-ai": {
+      providers: {
+        _auto: {
+          displayName: "Anyswitch",
+          api: "openai-completions",
+          baseURL: "http://127.0.0.1:47821/openai/poke-api/v1",
+          headers: { "x-agent-id": "dsh", Authorization: `Bearer ${TOKEN}` },
+          models: [{ id: "auto", name: "auto", contextWindow: 1000000 }],
+        },
+        "_poke-api": { displayName: "poke-api", api: "openai-completions", baseURL: "http://127.0.0.1:47821/openai/poke-api/v1" },
+      },
+    },
+  };
+  const { config } = mergeDshSettings(
+    legacy,
+    extractManagedProviders(DSH_CHAIN_STORE),
+    47821,
+    TOKEN,
+    ["auto"],
+    null,
+    deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
+  );
+  const providers = config["llm-pi-ai"].providers;
+  assert.equal(providers._auto, undefined, "the legacy key is retired");
+  assert.ok(providers.Anyswitch, "the pseudo channel lives under its new key");
+  assert.ok(providers["_poke-api"], "real channels are untouched");
+});
+
+test("mergeDshSettings leaves a user-written _auto provider without the dsh header alone", () => {
+  const own = {
+    "llm-pi-ai": {
+      providers: {
+        _auto: { displayName: "my own", api: "openai-completions", baseURL: "https://mine.example/v1" },
+      },
+    },
+  };
+  const { config } = mergeDshSettings(
+    own,
+    extractManagedProviders(DSH_CHAIN_STORE),
+    47821,
+    TOKEN,
+    [],
+    null,
+    deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
+  );
+  assert.equal(config["llm-pi-ai"].providers._auto.displayName, "my own", "a user provider is never excised");
+});
+
+test("writeDshProfilePatches retires the legacy _auto key on the write path", async () => {
+  const yaml = await getYamlModule();
+  const dir = mkTestDir("dsh-patch-auto-rename-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    writeFileSync(patchPath, [
+      "- id: llm-pi-ai",
+      "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+      "  config:",
+      "    providers:",
+      "      _auto:",
+      "        displayName: Anyswitch",
+      "        api: openai-completions",
+      "        baseURL: 'http://127.0.0.1:47821/openai/poke-api/v1'",
+      "        headers:",
+      "          x-agent-id: dsh",
+      "          Authorization: 'Bearer stale-token'",
+      "        models:",
+      "          - id: auto",
+      "            name: auto",
+      "      _poke-api:",
+      "        displayName: poke-api",
+      "        api: openai-completions",
+      "        baseURL: 'http://127.0.0.1:47821/openai/poke-api/v1'",
+      "        models:",
+      "          - id: old-model",
+      "            name: old-model",
+      "",
+    ].join("\n"), "utf8");
+
+    const result = await writeDshProfilePatches(DSH_CHAIN_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    const entries = yaml.load(readFileSync(patchPath, "utf8"), { schema: dshYamlSchema(yaml) });
+    const providers = entries.find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(providers._auto, undefined, "the legacy managed key is retired");
+    assert.ok(providers.Anyswitch, "the pseudo channel lives under its new key");
+    assert.deepEqual(providers.Anyswitch.models.map((m) => m.id), ["auto"]);
+    assert.ok(providers["_poke-api"], "real channels survive");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("library tier: no catalog keeps today's shape for an unknown model", () => {
