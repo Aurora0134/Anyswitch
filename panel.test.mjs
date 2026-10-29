@@ -11875,14 +11875,23 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
         .join("\n");
       return vm.runInNewContext(`(() => { ${VM_DONE_STATE}\n${source}; return terminalActivityApplyToSession; })()`, {});
     })();
-    // 静默超窗：无请求、输出窗早过期、也没进过回合——旧口径下纯空闲。
+    // 静默超窗：输出窗早过期、请求也回落到 0——本回合入过闸，agent 留下的命令还在
+    // 跑，仍要点亮（不再等守卫 409 后静默新开）。
     const quiet = {
       id: "t-quiet", status: "idle", metrics: null,
       agent: { endpointId: "dsh", instanceId: "dsh-1", busy: true },
       backendState: { status: "running", lastActiveAt: now - 60_000, createdAt: now - 600_000, spawnedAt: now - 600_000 },
     };
-    apply(quiet, 0);
-    assert.equal(quiet.status, "working", "树里有活命令：点亮（不再等守卫 409 后静默新开）");
+    apply(quiet, 1); // 回合起点：请求在途 → 入闸
+    apply(quiet, 0); // 请求答完、命令还在跑 → 保闸点亮
+    assert.equal(quiet.status, "working", "回合内树里有活命令：点亮（不再等守卫 409 后静默新开）");
+
+    // 回合外（从未入闸）：同样的进程树不点亮。dsh / dsh-tui 打开会话时会自己跑
+    // 一轮环境自查（where / codex / git 探测），进程树与 agent 命令同像，唯一分得
+    // 开的是「有没有回合」——没有请求就是没人让它跑（2026-10-29 新建会话闪转圈）。
+    const unarmed = { ...quiet, id: "t-unarmed" };
+    apply(unarmed, 0);
+    assert.equal(unarmed.status, "idle", "没进过回合的 busy=true 不点亮（新会话打开不闪转圈）");
 
     // busy 为 false / null（含老 relay 没有这一位）都不点亮，也不常亮。
     for (const verdict of [false, null]) {

@@ -3099,6 +3099,10 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
       pendingFresh: () => terminalRailPendingNewTerminals(),
       switchBusy: terminalRailSwitchBusy,
       endSelect: (token) => terminalRailEndSelect(token),
+      // 回合闸：进程树忙判据只在回合内算数（见 panel 的
+      // terminalSessionBusyFromSignals），用例要模拟「回合已结束、命令还在跑」
+      // 就得先把会话塞进闸里。
+      armed: terminalTurnArmed,
     };
   `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })), realEnrich);
   return { fn, log };
@@ -3144,17 +3148,38 @@ describe("进程树忙判据（agent.busy）进 working 口径与内切判定门
     backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 60_000 },
   };
 
-  it("树里有活命令：判 working 并保护性新开（不再让守卫单打独斗后静默转新开）", async () => {
+  it("回合内树里有活命令：判 working 并保护性新开（不再让守卫单打独斗后静默转新开）", async () => {
     const { fn, log } = runSwitch({
       sessions: { "t-a": BUSY_SESSION }, activeId: "t-a",
       agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
       switchImpl: async () => SWITCH_OK, realEnrich: true,
     });
+    // 这一位只在回合内算数：先把会话塞进回合闸（请求出现过、回合已收尾、命令还没
+    // 跑完），否则同形状的进程树在会话刚打开时只是 runtime 自查。
+    fn.armed.add("t-a");
     fn.go(HISTORY_ROW);
     await flush();
     assert.equal(fn.sessions["t-a"].status, "working", "忙判据把状态点亮");
     assert.equal(log.creates.length, 1, "保护性新开");
     assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "前端自己就判得出忙，不再等守卫 409");
+  });
+
+  it("回合外 busy=true 不点亮：会话打开时的 runtime 自查不算 agent 在跑", async () => {
+    // 同一条 BUSY_SESSION，唯一差别是这条页面生命周期里没有出现过在途请求（没入
+    // 闸）。dsh / dsh-tui 在会话打开时会自己跑环境自查（where / codex / git），进程
+    // 树与 agent 命令同像，旧口径在这一下闪转圈（2026-10-29 用户回报）。
+    let release;
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...BUSY_SESSION } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: () => new Promise((resolve) => { release = resolve; }), realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(fn.sessions["t-a"].status, "idle", "回合外的树忙不点亮");
+    assert.equal(log.creates.length, 0, "不转新开，照旧就地内切");
+    release(SWITCH_OK);
+    await flush();
   });
 
   it("busy 为 false / null：都不点亮，照旧就地内切（判据不猜、不常亮）", async () => {

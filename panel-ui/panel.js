@@ -5934,7 +5934,7 @@ async function api(method, path, body) {
     return true;
   }
 
-  // 口径：请求在途，或输出在活跃窗内 → working，两者都无 → idle。「N 个请求进行中」
+  // 口径：请求在途，或回合内的输出/命令活跃 → working，两者都无 → idle。「N 个请求进行中」
   // 明细取自真值；metrics 还没被轮询富化出来时（活了一辈子但还没等满一拍）只落
   // 状态位，不为了一行明细编造空指标。
   //
@@ -5949,8 +5949,8 @@ async function api(method, path, body) {
   // terminal-attribution.mjs 头部）。请求／输出／回合闸三个替代信号全都够不着
   // 「回合已结束、agent 留下的子进程还在跑」——2026-10-28 实机复现：后台进程活
   // 着、面板判空闲、/switch 被守卫探到活子进程后 409 拒换、前端静默新开页签，
-  // 用户观感即「内切失效」。这一位把守卫同源判据补进面板视野：树里有活命令就
-  // 点亮，忙判据不猜（降级轮读不出命令行时为 null，回落既有信号）。
+  // 用户观感即「内切失效」。这一位把守卫同源判据补进面板视野，忙判据不猜（降级
+  // 轮读不出命令行时为 null，回落既有信号），但**只在回合内算数**（合成见下）。
   // 它**不救**已退出的会话：进程没了就没有任务可保护——与 terminalBusyByOutput
   // 对 exited 的排除同一条（迟到的活跃信号不能把 exited 判忙）。
   function terminalCommandRunning(session) {
@@ -5961,6 +5961,18 @@ async function api(method, path, body) {
     return true;
   }
 
+  // 合成：请求在途 → working 并「入回合」（terminalTurnArmed）；否则
+  //   · 回合内且进程树有活命令 → working，且命令在跑时不清闸——这就是 1289587
+  //     要保的那一屏（回合已结束、后台命令还没收尾，输出静默也不能判回空闲）；
+  //   · 其余回到输出窗口径，输出仍只在回合内算数。
+  // 命令忙为什么要过回合闸（2026-10-29 修订）：dsh / dsh-tui 在「会话打开」时会自
+  // 己跑一轮环境自查——实测新会话 boot 完成那一下起 where.exe、codex.exe，以及
+  // subprocess 宿主内一条 git 探测，进程树的形状与「模型让 agent 跑的命令」同像
+  // （同一个宿主、同一个 shell），单看进程树分不开。唯一分得开的是回合：没有请求
+  // 就没有人让它跑。旧口径让这一位在回合外也点亮，于是新建会话一打开就闪一下转圈
+  // （用户回报的症状），而这恰是 runtime 自查，不是 agent 在干活。
+  // 已知代价：面板刷新/新开页丢掉内存里的回合闸后，正在静默跑的命令会显示空闲——
+  // 显示层降级；服务端杀前守卫自带按需探测，不受这一位影响，不会因此误杀。
   function terminalSessionBusyFromSignals(session, count, now = Date.now()) {
     const id = session && typeof session.id === "string" ? session.id : null;
     if (count > 0) {
@@ -5968,14 +5980,15 @@ async function api(method, path, body) {
       return true;
     }
     const output = terminalBusyByOutput(session, undefined, now);
+    // 无归属的普通终端没有回合概念：输出窗即真值（用户在 shell 里跑命令照样看得到）。
+    if (!session || !session.agent) return output;
+    const armed = !!(id && terminalTurnArmed.has(id));
+    if (armed && terminalCommandRunning(session)) return true;
     if (!output) {
       if (id) terminalTurnArmed.delete(id);
-      // 输出窗过期不等于没事干：agent 跑的命令可能完全不吐字节（构建、测试套件、
-      // 后台服务）。这一位由守卫同源判据签发，是这三个信号里唯一能看见它的。
-      return terminalCommandRunning(session);
+      return false;
     }
-    if (!session || !session.agent) return true;
-    return !!(id && terminalTurnArmed.has(id)) || terminalCommandRunning(session);
+    return armed;
   }
 
   function terminalActivityApplyToSession(session, activeRequests) {
