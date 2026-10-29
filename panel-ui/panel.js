@@ -2737,6 +2737,10 @@ async function api(method, path, body) {
     let appInfo = null, local = null, localAt = 0, update = null, updateAt = 0;
     let bleedingMode = false; // 先行轨道开关（进页从设置现读；渲染层只读它）
     let environmentTask = null, updateTask = null, localFailed = false;
+    // 强制重检的单调序号：结果时间戳在同毫秒内会分不出先后，用序号判「这次重检
+    // 的发起是否晚于结果落地」。只有晚于结果的那次才读得到安装后的版本。
+    let environmentStartSeq = 0;
+    let lastRefreshStartSeq = 0;
     const products = {
       claude: ["anthropics/claude-code", "@anthropic-ai/claude-code"],
       codex: ["openai/codex", "@openai/codex"],
@@ -2818,7 +2822,15 @@ async function api(method, path, body) {
     // 服务端会自己跑完，结果由重新检测兜底呈现。
     const lifecycleRuns = new Map(); // clientId -> { clientId, action, runId, poll }，每客户端至多一条
     let lifecycleGen = 0; // leave() 时 +1，丢弃迟到的轮询回调
-    let lifecycleBatch = null; // { results }，批量更新进行中非 null；批量与单行整段时间互斥
+    let lifecycleBatch = null; // { results, done, total }，批量更新进行中非 null；批量与单行整段时间互斥
+    // 本次操作结果（每个客户端至多一条）：行内结论与动作位先读它，直到一次晚于它的
+    // 重新检测确认安装后的版本。没有它，行只能回落到「更新」按钮，刚跑完的端点会
+    // 被画成「还能再更新一次」；批量里先完成的那些行尤其明显。
+    const lastAttempts = new Map();
+    let confirming = false, confirmRequested = false, confirmLoop = null, confirmToken = null;
+    // 离开关于页时还有在跑的任务，回来要强制重检一次：否则 60s 环境缓存会让刚更新
+    // 完的行又出现「更新」按钮。
+    let refreshOnReenter = false;
     let lifecycleModalResolve = null;
     const lifecycleModalQueue = []; // 弹层是单例，同时到来的确认请求排队逐个弹
     // 该安装项当前能做什么：可更新 > 未安装可装；桌面应用、状态不明与不给装包的客户端不给动作。
@@ -2834,13 +2846,80 @@ async function api(method, path, body) {
       return null;
     }
     function clientName(id) { return local?.clients.find((client) => client.id === id)?.name || id; }
+    // 刚跑完、还没被重新检测确认的「已更新」行：从批量计数与目标里排除，
+    // 也挡住行内再出「更新」——在服务端确认装好之后、面板重读之前，这个按钮
+    // 一旦可点就是把同一次更新再装一遍。
+    function pendingSuccess(clientId) {
+      const attempt = lastAttempts.get(clientId);
+      return Boolean(attempt && attempt.outcome === "updated" && !attempt.confirmed);
+    }
+    function hasPendingUpdate(client) {
+      return client.installations.some((installation) => installationAction(client, installation)?.kind === "update");
+    }
+    // 「确认已无需更新」的严格口径：每个有官方版本源的形态都拿到了 ok 数据、
+    // 且结论不再是 update_available。查询失败不算证据，失败结果就继续留在行内。
+    function hasFreshNoUpdate(client) {
+      const remotes = client.installations.filter((installation) => installation.remoteId);
+      if (!remotes.length) return true;
+      return remotes.every((installation) => {
+        const remote = remoteCache.get(cacheKey(installation))?.data;
+        return remote?.state === "ok" && remote.comparison !== "update_available";
+      });
+    }
+    function attemptText(attempt) {
+      const install = attempt.action === "install";
+      if (attempt.outcome === "updated") return install ? "已安装" : "已更新";
+      return install ? "安装未完成" : "更新未完成";
+    }
+    function attemptTone(attempt) {
+      if (attempt.outcome === "updated") return "ok";
+      return attempt.outcome === "unchanged" ? "warn" : "danger";
+    }
+    function recordAttempt(id, action, status) {
+      const legs = Array.isArray(status?.legs) ? status.legs : [];
+      lastAttempts.set(id, {
+        action,
+        outcome: status?.outcome ?? "failed",
+        message: typeof status?.message === "string" ? status.message : "",
+        detail: typeof status?.detail === "string" ? status.detail : "",
+        beforeVersion: status?.beforeVersion ?? null,
+        afterVersion: status?.afterVersion ?? null,
+        byForm: Object.fromEntries(legs.filter((leg) => leg?.form && leg.versionAfter).map((leg) => [leg.form, leg.versionAfter])),
+        refreshSeq: environmentStartSeq,
+        confirmed: false,
+      });
+    }
+    function attemptResolved(attempt, client) {
+      if (!client) return true;
+      if (attempt.action === "install") {
+        const primary = client.installations[0];
+        return Boolean(primary && primary.status === "found");
+      }
+      return hasFreshNoUpdate(client);
+    }
+    function syncEnvironmentRefreshButton() {
+      const button = get("aboutEnvironmentRefresh");
+      if (!button) return;
+      const detecting = Boolean(environmentTask);
+      const updating = lifecycleRuns.size > 0 || Boolean(lifecycleBatch);
+      button.disabled = detecting || updating;
+      button.textContent = detecting ? "检测中…" : "重新检测";
+      button.setAttribute("aria-busy", String(detecting));
+      button.title = updating && !detecting ? "更新任务进行中，结束后会自动重新检测" : "";
+    }
     function updateBatchButton() {
       const button = get("aboutUpdateAll");
       if (!button) return;
       const count = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
-        .filter((client) => client.installations.some((installation) => installationAction(client, installation)?.kind === "update")).length;
-      button.disabled = count === 0 || lifecycleRuns.size > 0 || Boolean(lifecycleBatch);
-      button.textContent = lifecycleBatch ? "批量更新中…" : count > 0 ? `全部更新 (${count})` : "全部更新";
+        .filter((client) => !lifecycleRuns.has(client.id) && !pendingSuccess(client.id))
+        .filter((client) => hasPendingUpdate(client)).length;
+      const updating = lifecycleRuns.size > 0 || Boolean(lifecycleBatch);
+      button.disabled = count === 0 || updating || confirming;
+      button.textContent = lifecycleBatch
+        ? `批量更新中… (${lifecycleBatch.done}/${lifecycleBatch.total})`
+        : count > 0 ? `全部更新 (${count})` : "全部更新";
+      button.title = updating && !confirming ? "有更新任务正在进行" : "";
+      syncEnvironmentRefreshButton();
     }
     function clientUpdateModalPayload(names, many) {
       return {
@@ -2916,10 +2995,71 @@ async function api(method, path, body) {
       if (detail) text += `（${detail}）`;
       notify(text, true);
     }
-    async function performLifecycleRun({ id, action }) {
+    // 一次运行结束后，行内先按结果落状态；再由这里补一次「晚于结果」的重新检测。
+    // 检测有去重：并行的两个单点更新若共用先完成者触发的那次重检，后者会扫不到
+    // 自己的安装结果。这里等当前检测落地，再按「发起时刻晚于结果落地时刻」补一轮。
+    function newestUnconfirmedAttemptSeq() {
+      let newest = null;
+      for (const attempt of lastAttempts.values()) {
+        if (attempt.confirmed) continue;
+        if (newest === null || attempt.refreshSeq > newest) newest = attempt.refreshSeq;
+      }
+      return newest;
+    }
+    function applyConfirmation() {
+      for (const [id, attempt] of lastAttempts) {
+        if (!attempt.confirmed && lastRefreshStartSeq <= attempt.refreshSeq) continue;
+        if (attempt.outcome === "updated") { lastAttempts.delete(id); continue; }
+        const client = local?.clients.find((item) => item.id === id);
+        if (!client || attemptResolved(attempt, client)) lastAttempts.delete(id);
+        else attempt.confirmed = true;
+      }
+    }
+    async function runConfirmationPass(gen) {
+      const inflight = environmentTask;
+      if (inflight) await inflight.catch(() => {});
+      if (!active || gen !== lifecycleGen) return;
+      for (let round = 0; round < 3; round += 1) {
+        const newest = newestUnconfirmedAttemptSeq();
+        if (newest === null || lastRefreshStartSeq > newest) break;
+        const ok = await loadEnvironment(true);
+        if (!active || gen !== lifecycleGen) return;
+        if (!ok) break;
+      }
+      applyConfirmation();
+    }
+    function requestConfirmation() {
+      if (!active) return Promise.resolve();
+      confirmRequested = true;
+      if (confirmLoop) return confirmLoop;
+      const gen = lifecycleGen;
+      const token = {};
+      confirmToken = token;
+      const loop = (async () => {
+        confirming = true;
+        updateBatchButton();
+        try {
+          while (active && gen === lifecycleGen && confirmRequested) {
+            confirmRequested = false;
+            await runConfirmationPass(gen);
+          }
+        } finally {
+          if (confirmToken === token) {
+            confirming = false;
+            confirmLoop = null;
+            confirmToken = null;
+            if (active && gen === lifecycleGen) { renderLocal(); updateBatchButton(); }
+          }
+        }
+      })();
+      confirmLoop = loop;
+      return loop;
+    }
+    async function performLifecycleRun({ id, action }, batch = null) {
       if (lifecycleRuns.has(id)) return { id, outcome: "skipped" };
       const run = { clientId: id, action, runId: null, poll: null };
       lifecycleRuns.set(id, run);
+      lastAttempts.delete(id);
       renderLocal();
       updateBatchButton();
       try {
@@ -2927,16 +3067,21 @@ async function api(method, path, body) {
         run.runId = started.runId;
         const status = await pollLifecycle(run, started.runId);
         reportLifecycleOutcome(status, id);
+        recordAttempt(id, action, status);
         return { id, outcome: status?.outcome ?? "unknown" };
       } catch (error) {
         if (!error?.abandoned) {
           if (error?.code === "busy") notify("已有更新任务在进行中，请等待完成后重试", true);
-          else notify("更新失败，请重新检测确认结果", true);
+          else {
+            notify("更新失败，请重新检测确认结果", true);
+            recordAttempt(id, action, { outcome: "failed", message: "更新失败，请重新检测确认结果" });
+          }
         }
         return { id, outcome: "failed" };
       } finally {
         lifecycleRuns.delete(id);
         if (run.poll !== null) { cancelSchedule(run.poll); run.poll = null; }
+        if (batch && lifecycleBatch === batch) batch.done += 1;
         if (active) { renderLocal(); updateBatchButton(); }
       }
     }
@@ -2948,7 +3093,7 @@ async function api(method, path, body) {
       // 确认期间状态可能已变（等待排队弹层时别人先跑起来了），动手前再核一次
       if (lifecycleRuns.has(id) || lifecycleBatch) return;
       await performLifecycleRun({ id, action });
-      if (active) await loadEnvironment(true);
+      if (active) await requestConfirmation();
     }
     // 批量：只挑「有新版本」的，不给未安装的客户端静默装机；一次确认后全部并行派出。
     // 服务端锁按客户端分（同客户端并发 409），不同客户端互不触碰对方的 npm 目录，
@@ -2957,18 +3102,19 @@ async function api(method, path, body) {
     async function startUpdateAll() {
       if (lifecycleRuns.size > 0 || lifecycleBatch) return;
       const targets = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
-        .filter((client) => client.installations.some((installation) => installationAction(client, installation)?.kind === "update"))
+        .filter((client) => !pendingSuccess(client.id))
+        .filter((client) => hasPendingUpdate(client))
         .map((client) => ({ id: client.id, action: "update" }));
       if (!targets.length) return;
       const running = await runningClients(targets.map((target) => target.id));
       if (running.length && !(await confirmClientUpdate(running.map(clientName), true))) return;
       if (lifecycleRuns.size > 0 || lifecycleBatch) return;
-      lifecycleBatch = { results: [] };
+      lifecycleBatch = { results: [], done: 0, total: targets.length };
       const batch = lifecycleBatch;
       updateBatchButton();
       // 各目标一任务直发并发跑；中途离开（lifecycleBatch 已置空）就不弹汇总，
       // 各任务自身的轮询、提示与解锁由 performLifecycleRun 自理，服务端照样跑完。
-      const settled = await Promise.all(targets.map((target) => performLifecycleRun(target)));
+      const settled = await Promise.all(targets.map((target) => performLifecycleRun(target, batch)));
       if (lifecycleBatch !== batch) return; // 中途离开关于页，批量收尾交给服务端与下次检测
       batch.results = settled;
       lifecycleBatch = null;
@@ -2976,9 +3122,12 @@ async function api(method, path, body) {
       if (active) {
         const updated = ran.filter((result) => result.outcome === "updated").length;
         const failed = ran.length - updated;
-        notify(failed ? `批量更新完成：${updated} 个成功，${failed} 个未生效` : `批量更新完成：${updated} 个客户端已更新`, failed > 0);
+        const names = ran.filter((result) => result.outcome !== "updated").map((result) => clientName(result.id)).filter(Boolean);
+        notify(failed
+          ? `批量更新完成：${updated} 个成功，${failed} 个未生效${names.length ? `（${names.join("、")}）` : ""}`
+          : `批量更新完成：${updated} 个客户端已更新`, failed > 0);
         updateBatchButton();
-        await loadEnvironment(true);
+        await requestConfirmation();
       } else {
         updateBatchButton();
       }
@@ -3364,6 +3513,19 @@ async function api(method, path, body) {
         ? client.installations.find((installation) => installation.kind === "tui") ?? null
         : null;
       const displayPrimary = tuiInstallation ?? primary;
+      // 行内先读「本次操作结果」：服务端在装完后会强制重读一次环境，结果里的
+      // 安装后版本就是这次真正落地的版本。用它先把本地版本与结论画对，避免
+      // 刚更新完的行还挂着更新前的版本和「有新版本」。失败类结果在后续任一次
+      // 检测已显示出「无需更新」后就不再占位。
+      const storedAttempt = lastAttempts.get(client.id);
+      const attempt = storedAttempt && storedAttempt.confirmed && attemptResolved(storedAttempt, client) ? null : storedAttempt;
+      const shownVersion = (installation) => {
+        if (!attempt || !installation) return installation?.version;
+        const byForm = attempt.byForm?.[installation.kind];
+        if (byForm) return byForm;
+        if (installation.kind === "cli" && attempt.afterVersion) return attempt.afterVersion;
+        return installation.version;
+      };
       const localStatus = (installation) => installation.status === "not_found" ? "未找到"
         : installation.status !== "found" ? "检测失败"
         : installation.issue === "not_runnable" ? "已安装但无法运行"
@@ -3378,16 +3540,18 @@ async function api(method, path, body) {
       if (tuiInstallation) {
         const shown = [tuiInstallation, ...client.installations.filter((installation) => installation.kind === "desktop")];
         for (const installation of shown) {
-          if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
+          const version = shownVersion(installation);
+          if (installation.status === "found" && version) localParts.push(`${formTag(installation)} ${version}`);
           else if (installation.status !== "not_found") localParts.push(localStatus(installation));
         }
       } else if (client.id === "codex" || client.id === "kimi") {
         for (const installation of client.installations) {
-          if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
+          const version = shownVersion(installation);
+          if (installation.status === "found" && version) localParts.push(`${formTag(installation)} ${version}`);
           else if (installation.status !== "not_found") localParts.push(localStatus(installation));
         }
-      } else if (primary && primary.status === "found" && primary.version) {
-        localParts.push(primary.version);
+      } else if (primary && primary.status === "found" && shownVersion(primary)) {
+        localParts.push(shownVersion(primary));
       }
       const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : displayPrimary ? localStatus(displayPrimary) : "未找到"}`);
       if (displayPrimary && (displayPrimary.status === "error" || displayPrimary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
@@ -3426,33 +3590,66 @@ async function api(method, path, body) {
       // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿（CLI 腿 +
       // 桌面腿），前端不拼逐形态消息。dsh 的结论跟着终端插件比对，harness 的
       // 比对只留详情区。
+      // 结论位同一时间只归一个状态所有：本次操作结果 > 查询中 > 检测结论。
+      // 之前「查询中…」是追加在结论后面的独立小字，重检时会读成「有新版本查询中…」，
+      // 同一位上同时出现两个状态；现在它接管这一位，不再追加。
       const comparison = primaryRemote && validLocal(displayPrimary) ? primaryRemote.comparison : "unknown";
       const compared = { update_available: "有新版本", current: tuiInstallation ? "与最新版本一致" : "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
-      // 结果列只说比对结论：没有结论时不重复「本地」列已经显示过的状态词
-      const resultText = compared || (primaryRemote ? "无法比较版本" : "");
-      if (resultText) {
-        const result = element("span", "about-result", resultText);
-        result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "";
+      const querying = loading && Boolean(remoteOf(displayPrimary));
+      let resultView = null;
+      if (attempt) {
+        resultView = {
+          text: attemptText(attempt),
+          tone: attemptTone(attempt),
+          title: [attempt.message, attempt.detail].filter(Boolean).join("\n"),
+        };
+      } else if (querying) {
+        resultView = { text: "查询中…", tone: "", title: "" };
+      } else if (compared || primaryRemote) {
+        resultView = {
+          text: compared || "无法比较版本",
+          tone: comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "",
+          title: "",
+        };
+      }
+      if (resultView) {
+        const result = element("span", "about-result", resultView.text);
+        result.dataset.tone = resultView.tone;
+        if (resultView.title) result.title = resultView.title;
         line.appendChild(result);
       }
-      if (loading && remoteOf(displayPrimary)) line.appendChild(element("span", "about-meta", "查询中…"));
-      // 动作位端点级一颗：本端点任务在跑 > 可更新/可安装；锁按客户端分，别人在跑不影响本行。
-      // 可更新按任一安装项判定——dsh 只有终端插件过期时按钮也要出现。
+      // 动作位端点级一颗：本端点任务在跑 > 本次结果 > 可更新/可安装；锁按客户端分，
+      // 别人在跑不影响本行。刚更新完待确认的行不再出「更新」——那等于把同一次更新
+      // 再装一遍；失败行给「重试」，批量或确认期间先不出现，等整段结束。
       if (primary && updatableClients.has(client.id)) {
-        let intent = null;
-        const act = client.installations
-          .map((installation) => installationAction(client, installation))
-          .find((action) => action?.kind === "update") ?? installationAction(client, primary);
         const ownRun = lifecycleRuns.get(client.id);
-        if (act) {
-          intent = ownRun
-            ? { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true }
-            : { label: act.kind === "update" ? "更新" : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
+        const retryable = attempt && attempt.outcome !== "updated";
+        let intent = null;
+        if (ownRun) {
+          intent = { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true, busy: true };
+        } else if (pendingSuccess(client.id)) {
+          intent = null;
+        } else if (retryable) {
+          if (!lifecycleBatch && !confirming) intent = { label: "重试", action: attempt.action, disabled: false };
+        } else {
+          const act = client.installations
+            .map((installation) => installationAction(client, installation))
+            .find((action) => action?.kind === "update") ?? installationAction(client, primary);
+          if (act) {
+            intent = {
+              label: act.kind === "update" ? "更新" : "安装",
+              action: act.kind,
+              disabled: Boolean(lifecycleBatch),
+              reason: Boolean(lifecycleBatch) ? "有更新任务正在进行" : "",
+            };
+          }
         }
         if (intent) {
           const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
           actionButton.type = "button";
           actionButton.disabled = intent.disabled;
+          if (intent.reason) actionButton.title = intent.reason;
+          if (intent.busy) actionButton.setAttribute("aria-busy", "true");
           if (!intent.disabled) actionButton.onclick = () => updateClient(client.id, intent.action);
           line.appendChild(actionButton);
         }
@@ -3506,22 +3703,24 @@ async function api(method, path, body) {
       renderApp();
     }
     function loadEnvironment(refresh = false) {
-      if (!active) return Promise.resolve();
+      if (!active) return Promise.resolve(false);
       if (environmentTask) return environmentTask;
       const gen = ++environmentGen;
       const current = () => active && gen === environmentGen;
-      busy("aboutEnvironmentRefresh", true, "重新检测", "检测中…");
+      const refreshSeq = refresh ? ++environmentStartSeq : 0;
       get("aboutEnvironmentStatus").textContent = local ? "正在重新检测…" : "正在检测…";
       get("aboutEnvironmentStatus").dataset.tone = "";
       const appTask = loadApp(gen);
       const task = (async () => {
+        let refreshed = false;
         try {
           if (refresh || !local || localFailed || now() - localAt >= 60_000) {
             const data = await fetchOnce(`/api/environment${refresh ? "?refresh=1" : ""}`);
-            if (!current()) return;
+            if (!current()) return false;
             local = data; localAt = now(); localFailed = false;
+            if (refresh) { refreshed = true; lastRefreshStartSeq = refreshSeq; }
           }
-          if (!current()) return;
+          if (!current()) return false;
           renderLocal(true);
           get("aboutEnvironmentStatus").textContent = "正在查询官方版本…";
           const jobs = local.clients.flatMap((client) => client.installations.filter((installation) => installation.remoteId).map((installation) => ({ client, installation })));
@@ -3548,26 +3747,32 @@ async function api(method, path, body) {
             }
           }
           await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, () => worker()));
-          if (!current()) return;
+          if (!current()) return false;
+          // 手动「重新检测」也能把待确认的结果收掉：只要这次检测晚于结果落地，
+          // 就该按刚读到的事实决定结果态的去留，不必等下一轮更新触发。
+          if (refresh) applyConfirmation();
           renderLocal();
           const failed = jobs.some(({ installation }) => remoteCache.get(cacheKey(installation))?.data.state !== "ok");
           get("aboutEnvironmentStatus").textContent = failed ? "部分官方版本查询失败，可重新检测" : `检测完成 · ${timeText(local.checkedAt)}`;
           get("aboutEnvironmentStatus").dataset.tone = failed ? "warn" : "";
+          return refreshed;
         } catch {
-          if (!current()) return;
+          if (!current()) return false;
           localFailed = true;
           get("aboutEnvironmentStatus").textContent = local ? "检测失败，保留上次结果，请重试" : "检测失败，请重试";
           get("aboutEnvironmentStatus").dataset.tone = "danger";
           renderLocal();
+          return false;
         } finally {
           await appTask;
           if (current()) {
             environmentTask = null;
-            busy("aboutEnvironmentRefresh", false, "重新检测", "检测中…");
+            syncEnvironmentRefreshButton();
           }
         }
       })();
       environmentTask = task;
+      syncEnvironmentRefreshButton();
       return task;
     }
     function checkUpdates(force = true) {
@@ -3597,12 +3802,16 @@ async function api(method, path, body) {
           const tracked = { clientId: run.clientId, action: run.action, runId: run.runId, poll: null };
           lifecycleRuns.set(run.clientId, tracked);
           void pollLifecycle(tracked, run.runId).then(
-            (status) => { if (active) reportLifecycleOutcome(status, run.clientId); },
+            (status) => {
+              if (!active) return;
+              reportLifecycleOutcome(status, run.clientId);
+              recordAttempt(run.clientId, tracked.action, status);
+            },
             () => {},
           ).finally(() => {
             lifecycleRuns.delete(run.clientId);
             if (tracked.poll !== null) { cancelSchedule(tracked.poll); tracked.poll = null; }
-            if (active) { renderLocal(); updateBatchButton(); loadEnvironment(true); }
+            if (active) { renderLocal(); updateBatchButton(); void requestConfirmation(); }
           });
         }
         renderLocal();
@@ -3633,9 +3842,15 @@ async function api(method, path, body) {
       // 否则按钮会重新变成可点，同一个客户端会被再开一次。
       const resumed = adoptRunningUpdates();
       const selfResumed = adoptSelfUpdate();
-      return Promise.all([loadEnvironment(), resumed, selfResumed]);
+      // 离开期间在跑的更新可能已经落地；回来强制重检一次，别让 60 秒环境缓存
+      // 把刚更新完的行又画成「更新」。
+      const forceRefresh = refreshOnReenter;
+      refreshOnReenter = false;
+      return Promise.all([loadEnvironment(forceRefresh), resumed, selfResumed]);
     }
     function leave() {
+      // 离开时还有在跑的任务、或还有没被重检确认的结果：回来必须强制重检。
+      refreshOnReenter = lifecycleRuns.size > 0 || Boolean(lifecycleBatch) || confirming || lastAttempts.size > 0;
       active = false;
       environmentGen++; updateGen++; lifecycleGen++; selfUpdateGen++;
       environmentTask = null; updateTask = null;
@@ -3645,6 +3860,12 @@ async function api(method, path, body) {
       }
       lifecycleRuns.clear();
       lifecycleBatch = null;
+      // 结果态是本次进页的一次性回执：离开即复位；没被确认的更新由回页强制重检兜底。
+      lastAttempts.clear();
+      confirmRequested = false;
+      confirming = false;
+      confirmLoop = null;
+      confirmToken = null;
       // 自更新同理：任务在后台照跑，下次进页由 adoptSelfUpdate 接回或按结果呈现。
       if (selfUpdateRun?.poll) { cancelSchedule(selfUpdateRun.poll); selfUpdateRun.poll = null; }
       selfUpdateRun = null;
@@ -3654,7 +3875,7 @@ async function api(method, path, body) {
       // 队列里的下一个弹出来，落在一个已经离开的页面上。
       drainLifecycleModalQueue(false);
       closeLifecycleModal(false);
-      busy("aboutEnvironmentRefresh", false, "重新检测", "检测中…");
+      syncEnvironmentRefreshButton();
       busy("aboutCheckUpdates", false, "检查更新", "检查中…");
     }
     get("aboutCheckUpdates").onclick = () => checkUpdates(true);

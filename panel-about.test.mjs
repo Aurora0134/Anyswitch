@@ -690,6 +690,58 @@ const doneRun = (runId, clientId, extra = {}) => ({
   outcome: "updated", message: "已更新到 1.1.0", beforeVersion: "1.0.0", afterVersion: "1.1.0",
   latestVersion: "1.1.0", comparison: "current", ...extra,
 });
+// 关于页更新状态的夹具：本地版本与官方版本都可控，更新任务停在轮询里由用例放行，
+// 强制重检先挂起——用来断言「运行结束、确认还没落地」这段窗口。
+const REMOTE_BASE = (() => {
+  const map = new Map();
+  for (const client of environment().clients) {
+    for (const installation of client.installations) if (installation.remoteId) map.set(installation.remoteId, installation.version);
+  }
+  return map;
+})();
+function updateScenario({ versions = {}, latest = {} } = {}) {
+  const localVersions = { ...versions };
+  const remoteVersions = new Map(REMOTE_BASE);
+  for (const [id, version] of Object.entries(latest)) remoteVersions.set(id, version);
+  const pendingStatus = new Map();
+  const pendingRefresh = [];
+  const posts = [];
+  const envNow = () => {
+    const data = environment();
+    for (const [id, version] of Object.entries(localVersions)) {
+      const client = data.clients.find((item) => item.id === id);
+      if (client?.installations[0]) client.installations[0].version = version;
+    }
+    return data;
+  };
+  const respond = (path) => {
+    if (path === "/api/app-info") return appInfo;
+    if (path === "/api/updates" || path.startsWith("/api/updates?")) return { state: "current" };
+    if (path === "/api/settings") return { settings: {} };
+    if (path === "/api/environment/updates/active") return { runs: [] };
+    if (path === "/api/self-update/active" || path === "/api/self-update/last") return {};
+    if (path === "/api/agents") return { agents: [] };
+    if (path === "/api/environment" || path.startsWith("/api/environment?")) {
+      if (path.includes("refresh=1")) return new Promise((resolve) => pendingRefresh.push(() => resolve(envNow())));
+      return envNow();
+    }
+    if (path.startsWith("/api/environment/update/")) {
+      const runId = decodeURIComponent(path.slice("/api/environment/update/".length));
+      return new Promise((resolve) => pendingStatus.set(runId, resolve));
+    }
+    if (path.startsWith("/api/environment/latest/")) {
+      const url = new URL("http://x" + path);
+      const id = decodeURIComponent(url.pathname.split("/").pop());
+      const localVersion = url.searchParams.get("localVersion");
+      const remote = remoteVersions.get(id);
+      return { state: "ok", version: remote ?? localVersion, comparison: localVersion === remote ? "current" : "update_available" };
+    }
+    return {};
+  };
+  const h = harness(respond, { respondPost: ({ body }) => { posts.push(body); return { ok: true, runId: `run-${body.id}` }; } });
+  return { h, localVersions, pendingStatus, pendingRefresh, posts };
+}
+const versionLine = (h, id) => descendants(h.row(id), (node) => node.className === "about-version-line")[0];
 
 test("本地环境卡为可更新客户端出更新按钮，桌面应用只留官方入口", async () => {
   const h = harness(normal);
@@ -893,6 +945,178 @@ test("codex 单行卡片：更新中按钮显「更新中…」并禁点，桌�
   assert.equal(doneLines.length, 1, "收尾重检后仍每端点一行");
   assert.equal(actionButtons(doneLines[0]).length, 1);
   assert.equal(actionButtons(doneLines[0])[0].textContent, "更新");
+});
+
+test("批量中先完成的端点立即显示「已更新」：不再回落暗态更新、顶部给进度、确认期禁点", async () => {
+  const { h, localVersions, pendingStatus, pendingRefresh } = updateScenario({ latest: { claude: "1.1.0", codex: "1.2.0" } });
+  await h.controller.enter();
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(2\)/);
+  const batch = h.get("aboutUpdateAll").click();
+  await flush();
+  assert.equal(h.get("aboutEnvironmentRefresh").disabled, true, "更新进行中不许重新检测");
+  assert.equal(h.get("aboutEnvironmentRefresh").title, "更新任务进行中，结束后会自动重新检测");
+
+  pendingStatus.get("run-claude")(doneRun("run-claude", "claude"));
+  await flush();
+  localVersions.claude = "1.1.0";
+  const claudeLine = versionLine(h, "claude");
+  assert.match(claudeLine.textContent, /已更新/, "先完成的行立刻给出结果");
+  assert.doesNotMatch(claudeLine.textContent, /有新版本/, "结论位不再挂着更新前的结论");
+  assert.match(claudeLine.textContent, /本地 1\.1\.0/, "本地版本先按更新后的版本显示");
+  assert.equal(actionButtons(h.row("claude")).length, 0, "已更新待确认的行不再出更新按钮");
+  assert.match(h.get("aboutUpdateAll").textContent, /批量更新中… \(1\/2\)/, "顶部件数带进度");
+  assert.match(versionLine(h, "codex").textContent, /更新中…/, "没跑完的行照常是更新中");
+
+  pendingStatus.get("run-codex")(doneRun("run-codex", "codex", { message: "已更新到 1.2.0", afterVersion: "1.2.0" }));
+  await flush();
+  localVersions.codex = "1.2.0";
+  assert.equal(h.get("aboutUpdateAll").disabled, true, "确认期间批量入口禁点");
+  const before = h.mutations.length;
+  h.get("aboutUpdateAll").click();
+  await flush();
+  assert.equal(h.mutations.length, before, "确认期间点批量入口不会再发起一轮更新");
+  assert.equal(actionButtons(h.row("claude")).length, 0);
+  assert.equal(actionButtons(h.row("codex")).length, 0);
+  assert.ok(pendingRefresh.length >= 1, "批量收尾后补一次重检");
+  pendingRefresh.shift()();
+  await batch;
+  await flush();
+  assert.match(versionLine(h, "claude").textContent, /与官方最新版本一致/);
+  assert.match(versionLine(h, "codex").textContent, /与官方最新版本一致/);
+  assert.equal(actionButtons(h.row("claude")).length, 0);
+  assert.equal(h.get("aboutUpdateAll").disabled, true, "已无更新项时批量入口禁用");
+});
+
+test("单点更新完成到确认前不露出可点的更新按钮，也不发第二次更新", async () => {
+  const { h, localVersions, pendingStatus, pendingRefresh } = updateScenario({ latest: { claude: "1.1.0" } });
+  await h.controller.enter();
+  const run = actionButton(h, "claude").click();
+  await flush();
+  pendingStatus.get("run-claude")(doneRun("run-claude", "claude"));
+  await flush();
+  localVersions.claude = "1.1.0";
+  assert.match(versionLine(h, "claude").textContent, /已更新/);
+  assert.equal(actionButtons(h.row("claude")).length, 0, "确认前不再出现可点的更新");
+  assert.equal(h.get("aboutEnvironmentRefresh").disabled, true, "确认重检进行中，重检钮禁用");
+  const before = h.mutations.length;
+  pendingRefresh.shift()();
+  await run;
+  await flush();
+  assert.match(versionLine(h, "claude").textContent, /与官方最新版本一致/);
+  assert.equal(actionButtons(h.row("claude")).length, 0);
+  assert.equal(h.mutations.length, before, "确认前后都没有第二次更新请求");
+});
+
+test("并行单点更新不共用过期重检：后完成者保持「已更新」，自动补一轮晚于它的重检", async () => {
+  const { h, localVersions, pendingStatus, pendingRefresh } = updateScenario({ latest: { claude: "1.1.0", codex: "1.2.0" } });
+  await h.controller.enter();
+  const first = actionButton(h, "claude").click();
+  await flush();
+  const second = actionButton(h, "codex").click();
+  await flush();
+
+  pendingStatus.get("run-claude")(doneRun("run-claude", "claude"));
+  await flush();
+  localVersions.claude = "1.1.0";
+  assert.ok(pendingRefresh.length >= 1, "先完成的端点触发了重检");
+  // 第二个端点在第一次重检还在飞时完成：结果必须先落在行内
+  pendingStatus.get("run-codex")(doneRun("run-codex", "codex", { message: "已更新到 1.2.0", afterVersion: "1.2.0" }));
+  await flush();
+  assert.match(versionLine(h, "codex").textContent, /已更新/);
+  assert.equal(actionButtons(h.row("codex")).length, 0, "结果待确认期间不给更新按钮");
+
+  // 第一次重检扫的是 codex 完成前的环境：落地后应自动再补一轮
+  pendingRefresh.shift()();
+  await flush();
+  assert.ok(pendingRefresh.length >= 1, "发现重检早于结果，自动补一轮");
+  assert.equal(actionButtons(h.row("codex")).length, 0, "第二轮落地前依旧不可再点");
+  localVersions.codex = "1.2.0";
+  pendingRefresh.shift()();
+  await first; await second;
+  await flush();
+  assert.match(versionLine(h, "codex").textContent, /与官方最新版本一致/);
+  assert.equal(actionButtons(h.row("codex")).length, 0);
+});
+
+test("批量里的失败行保留「更新未完成」并可重试，汇总点名未生效客户端", async () => {
+  const { h, localVersions, pendingStatus, pendingRefresh } = updateScenario({ latest: { claude: "1.1.0", codex: "1.2.0" } });
+  await h.controller.enter();
+  const batch = h.get("aboutUpdateAll").click();
+  await flush();
+  pendingStatus.get("run-claude")(doneRun("run-claude", "claude"));
+  pendingStatus.get("run-codex")(doneRun("run-codex", "codex", { outcome: "failed", message: "更新命令执行失败，请稍后重试" }));
+  await flush();
+  localVersions.claude = "1.1.0";
+  pendingRefresh.shift()();
+  await batch;
+  await flush();
+  assert.match(versionLine(h, "codex").textContent, /更新未完成/);
+  assert.doesNotMatch(versionLine(h, "codex").textContent, /有新版本/);
+  const retry = actionButton(h, "codex");
+  assert.equal(retry.textContent, "重试");
+  assert.equal(retry.disabled, false);
+  assert.match(h.toasts.map((toast) => toast.message).join("\n"), /批量更新完成：1 个成功，1 个未生效（codex）/);
+
+  const retryRun = retry.click();
+  await flush();
+  assert.deepEqual(h.mutations.map((mutation) => mutation.body.id).slice(-1), ["codex"], "重试只更新失败的那一行");
+  pendingStatus.get("run-codex")(doneRun("run-codex", "codex", { message: "已更新到 1.2.0", afterVersion: "1.2.0" }));
+  await flush();
+  localVersions.codex = "1.2.0";
+  assert.ok(pendingRefresh.length >= 1);
+  pendingRefresh.shift()();
+  await retryRun;
+  await flush();
+  assert.match(versionLine(h, "codex").textContent, /与官方最新版本一致/);
+  assert.equal(actionButtons(h.row("codex")).length, 0);
+});
+
+test("重新检测时「查询中…」占用结论位、不叠加在旧结论后面", async () => {
+  const pending = [];
+  const h = harness((path) => {
+    if (path.startsWith("/api/environment/latest/")) return new Promise((resolve) => pending.push(() => resolve(latest())));
+    return normal(path);
+  });
+  const settleLatest = async () => {
+    let empty = 0;
+    for (let round = 0; round < 200; round += 1) {
+      await tick();
+      if (pending.length === 0) { empty += 1; if (empty >= 2) return; continue; }
+      empty = 0;
+      for (const resolve of pending.splice(0)) resolve();
+    }
+  };
+  const entering = h.controller.enter();
+  await settleLatest();
+  await entering;
+  assert.match(versionLine(h, "claude").textContent, /有新版本/);
+
+  const refreshing = h.controller.refresh();
+  await flush();
+  const during = versionLine(h, "claude").textContent;
+  assert.match(during, /查询中…/);
+  assert.doesNotMatch(during, /有新版本查询中/, "两个状态不再叠在同一个结论位");
+  assert.equal((during.match(/查询中…/g) || []).length, 1, "查询中只出现一次");
+  assert.equal(actionButtons(h.row("claude")).length, 1, "查询中不藏动作位");
+
+  await settleLatest();
+  await refreshing;
+  await flush();
+  assert.match(versionLine(h, "claude").textContent, /有新版本/);
+});
+
+test("更新期间离开关于页，回来强制重检一次，不吃旧环境快照", async () => {
+  const { h, pendingRefresh } = updateScenario({ latest: { claude: "1.1.0" } });
+  await h.controller.enter();
+  actionButton(h, "claude").click();
+  await flush();
+  h.controller.leave();
+  const before = h.calls.length;
+  const entering = h.controller.enter();
+  await flush();
+  assert.ok(h.calls.slice(before).includes("/api/environment?refresh=1"), "回页强制重检");
+  pendingRefresh.shift()();
+  await entering;
 });
 
 test("重新打开关于页时，面板重启前没跑完的更新继续显示为更新中", async () => {
