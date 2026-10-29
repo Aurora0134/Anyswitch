@@ -40,17 +40,18 @@ const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 // full-screen TUI's byte stream is a run of relative repaints, so a head-truncated
 // slice of it repaints the wrong rows (measured on a live kimi session: 512KB, 1400
 // frames, 0 scrolls, ~20 blank rows below the frame). The replay now comes from the
-// session's rendered mirror. The raw window stays because it is what survives in the
-// state file, and the mirror is rebuilt from it after a host restart — that restart
-// path inherits the trim, which is why the durable format is the next thing to move
-// to rendered lines.
+// session's rendered mirror — and so does the state file: the durable record carries
+// the mirror's rendered snapshot (grid + scrollback + cursor + modes), which a host
+// restart loads back directly. The raw window stays in memory for the on-demand
+// session read, and the byte-tail reader survives only for state files written
+// before the snapshot existed.
 const TERMINAL_BUFFER_MAX_BYTES = 512 * 1024;
 const TERMINAL_BUFFER_MAX_CHUNKS = 4000;
-// The durable tail is budgeted tighter than the live one: enough to repaint after a
-// host restart without making every debounce tick a half-megabyte write per session.
-// It is the per-session record's budget now (see the persist section), so a session's
-// cost on disk no longer depends on how many other sessions exist.
-const TERMINAL_BUFFER_PERSIST_MAX_BYTES = 128 * 1024;
+// The durable snapshot is budgeted tighter than the live one: enough to repaint
+// after a host restart without making every debounce tick a half-megabyte write
+// per session. The budget counts serialized rows (screen rows always kept — they
+// are the minimum viable picture; scrollback rows are dropped oldest-first).
+const TERMINAL_SNAPSHOT_PERSIST_MAX_BYTES = 128 * 1024;
 // SSE data 帧合帧的冲刷阈值：单连接待发缓冲累计超过这个字节数立即冲，不等窗口
 // 定时器。窗口是给「TUI 把一帧拆成好几个小块」省帧数用的，不是给一次粘贴一大
 // 屏白添延迟用的——大块输出攒在缓冲里只会推迟它到达浏览器的时间。
@@ -468,23 +469,6 @@ function trimReplayBuffer(session, maxBytes, maxChunks) {
   }
 }
 
-// Tail slice for the state file: walk back from the newest chunk while the
-// running total fits the durable budget. The newest chunk is kept unconditionally
-// (same rule as the live window) — a single repaint over budget must still come
-// back as a painted screen after a host restart, not as a blank terminal.
-function persistedBufferTail(buffer) {
-  if (buffer.length === 0) return [];
-  let bytes = chunkBytes(buffer[buffer.length - 1]);
-  let start = buffer.length - 1;
-  while (start > 0) {
-    const size = chunkBytes(buffer[start - 1]);
-    if (bytes + size > TERMINAL_BUFFER_PERSIST_MAX_BYTES) break;
-    bytes += size;
-    start -= 1;
-  }
-  return buffer.slice(start);
-}
-
 // Non-secret session metadata for agent-launched sessions: what runs here and
 // how it was started. The env delta is deliberately absent — credentials stay
 // in memory, never in a snapshot, never on disk.
@@ -758,11 +742,25 @@ export function createTerminalHost({
     indexDirty = true;
   }
 
-  // 会话记录的正文。字段与旧版整份文件里的 sessions[i] 逐位相同——老文件按「一
-  // 个会话一个对象」直接读回，迁移没有字段映射，也没有丢字段的风险。
+  // 会话记录的正文（v2）。恢复原料从「字节尾」换成「渲染快照」：字节尾的头是任意
+  // 块边界，全屏 TUI 的帧靠相对移动＋原地覆盖定位，头一裁锚点就没了，恢复画面必然
+  // 是中间态（2026-10-29 取证：dsh 尾巴 130,703 字节里换行 0 个、擦除 0 个，重建出
+  // 的画面顶部截断、滚动区 0 行、残影成片）。快照是镜像的渲染结果，恢复即重建镜像，
+  // 与在线回放同一条正确性来源；同一份画面的落盘体积也从重绘指令降到了内容行
+  // （实测 130KB 字节尾 ≈ 5.5KB 快照）。字节尾不再落盘——内存字节窗原样保留，
+  // 供「单会话按需读」与渲染回放不可用时的兜底；v1 记录（buffer）的读取路径保留。
   function sessionRecord(session) {
+    let screen = null;
+    try {
+      screen = session.screen
+        ? session.screen.serializeSnapshot({ historyBytes: TERMINAL_SNAPSHOT_PERSIST_MAX_BYTES })
+        : null;
+    } catch (error) {
+      // 快照失败不拦落盘：恢复侧对缺 screen 的记录回落字节重放（老格式同款）。
+      logger.warn?.(`[terminal-host] screen snapshot failed (${session.id}): ${error.message}`);
+    }
     return {
-      version: 1,
+      version: 2,
       id: session.id,
       label: session.label,
       cwd: session.cwd,
@@ -773,7 +771,7 @@ export function createTerminalHost({
       spawnedAt: session.spawnedAt,
       cols: session.cols,
       rows: session.rows,
-      buffer: persistedBufferTail(session.buffer),
+      screen,
       status: session.pty ? "running" : "exited",
       exitCode: session.exitCode,
       ...agentMetadata(session),
@@ -1224,14 +1222,20 @@ export function createTerminalHost({
         if (item.agentId && Number.isInteger(item.pid) && item.pid > 0 && isAliveFn(item.pid)) {
           sweeps.push(verifyAndSweep(session, item.pid));
         }
-        // Rebuild the rendered picture from the durable tail. The tail is trimmed,
-        // so a restored session repaints approximately — no worse than replaying
-        // those same bytes raw, and it gets exact again on the next output chunk.
-        // 恢复走同步 write 而不是切片：这是一次性启动成本（盘上每会话上限 128KB，
-        // 实测 10–14ms；512KB 的极端尾巴 29–52ms），而恢复完就要立刻能被 attach，
-        // 引入跨轮次续排状态只会让建连路径更难推理。同步 write 与切片共用同一
-        // 解析内核，跨块转义暂留一并生效。
-        for (const chunk of buffer) feedMirrorSync(session, String(chunk));
+        // 恢复分派：v2 记录带渲染快照——loadSnapshot 直接重建镜像，画面与上一代
+        // 宿主死掉那一刻逐格一致（在线回放同一条正确性来源）。老记录（v1 字节尾、
+        // 或 v2 快照字段缺失/损坏）回落字节重放：头被裁过的字节尾对全屏 TUI 只能
+        // 重建出近似画面（顶部截断、滚动区为空），这是旧格式的已知上界，首次落盘
+        // 自然升级成快照。快照恢复失败不拦启动：镜像留空白屏，会话照常在册。
+        if (item.screen && typeof item.screen === "object") {
+          try {
+            session.screen.loadSnapshot(item.screen);
+          } catch (error) {
+            logger.warn?.(`[terminal-host] snapshot restore failed (${item.id}): ${error.message}`);
+          }
+        } else {
+          for (const chunk of buffer) feedMirrorSync(session, String(chunk));
+        }
         sessions.set(item.id, session);
         // 盘上还没有这条会话的记录文件（v1 旧格式、或 v2 索引点名但文件被外部删
         // 掉）：进待落盘集合并置脏。索引里出现某个 id 就等于宣称那份文件已写过，
@@ -1399,10 +1403,18 @@ export function createTerminalHost({
     schedulePersist();
   }
 
-  // 重开衔接卫生（回滚归页签的另一半）：旧进程死在备屏时，新进程的输出会被画
-  // 进备屏、等应用退屏时整段丢掉——先弹回主画面；光标停在半行时补一个换行，
-  // 防新进程首行拼进旧行尾。合成字节走 emit 单咽喉：镜像、在线 SSE 客户端、
-  // 盘上回放三方同拍一致（入了 journal，宿主重启的 restore 重喂复现同一衔接）。
+  // 重开衔接卫生。两件事，合成字节走 emit 单咽喉：镜像、在线 SSE 客户端、
+  // 盘上快照三方同拍一致。
+  //   ① 旧进程死在备屏时先弹回主画面——否则新进程的输出画进备屏、退屏时整段丢。
+  //   ② 旧屏归档进滚动区，新进程画在干净屏上。dsh/kimi 这类全屏 TUI 不发擦除序列
+  //     （2026-10-29 取证：dsh 尾巴 130,703 字节里 EL/2K/2J 全零），只做弹屏的话新帧
+  //     原地覆盖，旧画面从「新帧没写到的行」和「更短行的行尾」漏出来，混层就此落进
+  //     镜像、刷什么都不会干净。归档而不是清屏：当前屏整屏滚进滚动区（\r 满屏滚动
+  //     会把滚出屏顶的行送进历史，镜像与客户端同语义），旧画面一行不丢、可回翻，
+  //     与「历史归页签」同向；新进程无论是 TUI 整帧还是 shell 提示符都起笔于干净屏。
+  //     滚前先重置滚动区——旧进程可能留着部分屏 DECSTBM，那样 LF 只滚区内行、归档
+  //     不完整；\u001b[r 顺带把光标送回行首。全程空白屏的会话不滚（不把一排空行推进
+  //     历史），光标停半行时仍按老规矩补一个换行。
   function restartHygiene(session) {
     try {
       // 这里读的是「镜像当前画面」的 inAlt / col，必须先排空切片留下的积压，
@@ -1410,7 +1422,12 @@ export function createTerminalHost({
       // 代价可以接受（info() 本身刻意不排空，见 terminal-screen.mjs）。
       session.screen.flush();
       if (session.screen.info().inAlt) emit(session, "\u001b[?1049l");
-      if (session.screen.info().col !== 0) emit(session, "\r\n");
+      const rows = session.screen.info().rows;
+      if (session.screen.screenLines().some((line) => line !== "")) {
+        emit(session, `\u001b[r\u001b[${rows};1H${"\n".repeat(rows)}\u001b[H`);
+      } else if (session.screen.info().col !== 0) {
+        emit(session, "\r\n");
+      }
     } catch (error) {
       // 卫生失败不拦重开：镜像解析面坏了时照常 respawn（feedMirror 同款容错）。
       logger.warn?.(`[terminal-host] restart hygiene skipped (${session.id}): ${error.message}`);

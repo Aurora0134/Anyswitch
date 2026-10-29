@@ -20,6 +20,15 @@
 // positioned repaint, so correctness no longer depends on where the window head
 // fell, and history is budgeted in rendered lines rather than in repaint bytes.
 //
+// The same rendered result is what crosses a host restart: serializeSnapshot hands
+// the durable state file a snapshot of grid + scrollback + cursor + modes, and
+// loadSnapshot rebuilds the mirror from it directly. The raw byte window is no
+// longer the restore source — a head-cut byte tail rebuilt a mid-frame picture by
+// construction (2026-10-29: a dsh tail with 130,703 bytes, zero line feeds, zero
+// erase sequences reproduced a top-truncated screen with 0 scrollback rows) — so
+// the snapshot is the restore truth and the byte path survives only as the reader
+// for state files written before the snapshot existed.
+//
 // Scope, on purpose: the sequence set that terminal output actually produces here
 // (CR/LF/VT/FF/BS/TAB, CUU/CUD/CUF/CUB/CNL/CPL/CHA/VPA/CUP, ED/EL/IL/DL/DCH/ICH/ECH,
 // SU/SD, DECSTBM, SGR incl. 256/truecolor, DECSC/DECRC, cursor visibility, alt screen
@@ -196,6 +205,57 @@ const blankRow = (cols, attr = "") => ({
   // 实测 33/39 行不同的病灶）。
   wrapped: false,
 });
+
+// 快照行解码（serializeRow 的逆）：只认自家格式——ESC[0m 与 ESC[<attrs>m 的 run 头
+// （attrs 只含数字、分号、冒号）加字面文本。格子内容不可能含 ESC：打印路径从不把
+// 控制字符存进格子，所以文本里的 ESC 一定属于 run 头。逐格重建时宽字补续格（空串
+// ＋同属性）：DCH/ICH 与孤儿半格修复都靠「续格是空串」这条不变量，重建少了它，
+// 恢复后第一次原地擦写就会留下半个宽字。截断点之后的格子一律 null＋空属性——
+// serializeRow 只在「非空白或带底色」处截断，丢掉的只有不可见的行尾属性。
+// 见 createScreenMirror 内的 snapshotRow/serializeSnapshot。
+function deserializeSnapshotRow(entry, cols) {
+  const row = blankRow(cols);
+  const text = entry && typeof entry.t === "string" ? entry.t : "";
+  row.wrapped = entry?.w === 1;
+  let col = 0;
+  let attr = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\u001b") {
+      if (!text.startsWith("\u001b[", i)) break; // 非自家格式：到此为止，宁可少画
+      const close = text.indexOf("m", i + 2);
+      if (close < 0) break;
+      attr = text.slice(i + 2, close);
+      if (attr === "0") attr = "";
+      i = close + 1;
+      continue;
+    }
+    const cp = text.codePointAt(i);
+    const step = cp > 0xffff ? 2 : 1;
+    let cluster = text.slice(i, i + step);
+    i += step;
+    // 零宽字符挂在基字符上（serializeRow 的格子串本来就带着它们），整簇写回一格。
+    // 控制字符必须停下——ESC 的宽度也是 0，不拦就会把下一个 run 头吞进本格。
+    while (i < text.length) {
+      const next = text.codePointAt(i);
+      if (next < 0x20 || next === 0x7f || terminalWidthOf(next) !== 0) break;
+      const nstep = next > 0xffff ? 2 : 1;
+      cluster += text.slice(i, i + nstep);
+      i += nstep;
+    }
+    const w = terminalWidthOf(cp);
+    if (w === 0) continue; // 悬挂的零宽字符无处可挂：丢弃
+    if (col + w > cols) break;
+    row.chars[col] = cluster;
+    row.attrs[col] = attr;
+    if (w === 2 && col + 1 < cols) {
+      row.chars[col + 1] = "";
+      row.attrs[col + 1] = attr;
+    }
+    col += w;
+  }
+  return row;
+}
 
 // 宽字符的头格判定：按字符本身的宽度（unicode11 同源表）判，不靠「下一格是不是续格」
 // 推断——DCH/ICH 会把续格搬走，推断式会把搬来的续格误判成邻格的头，擦错半边。
@@ -1383,6 +1443,140 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     return `${code}${text}`;
   }
 
+  // 渲染快照（跨宿主重启的恢复原料）。落盘原料从「128KB 字节尾」换成「渲染结果」：
+  // 字节尾的头是任意块边界，全屏 TUI 的帧靠相对移动＋原地覆盖定位，头一裁锚点就没了，
+  // 恢复画面必然是中间态（2026-10-29 取证：dsh 尾巴 130,703 字节里换行 0 个、擦除 0 个，
+  // 重建出的画面顶部截断、滚动区 0 行、残影成片）。渲染结果是自足真值：恢复＝直接重建
+  // 镜像，与在线回放共用同一条正确性来源。行格式复用 serializeRow 的 SGR 标注串
+  // （历史行的 _text 缓存直接复用），重建走模块级 deserializeSnapshotRow。
+  function snapshotRow(line) {
+    return { t: serializeRow(line), w: line.wrapped ? 1 : 0 };
+  }
+
+  // historyBytes 是快照的落盘字节预算（含屏幕行）：滚动区从最新往回收，先到先停；
+  // 屏幕行是最低交付物，不参与裁剪。预算按 UTF-8 字节计（与旧字节尾落盘同一口径）
+  // ——JS 字符数会低估 CJK 与 ESC 密集内容的落盘体积 2–6 倍。裁掉的行数要把保存
+  // 光标的绝对行同步上提——saved.abs 的语义是「缓冲绝对行」，恢复侧历史变短，
+  // 不减就会把 ESC 8 / CSI u 的落点放低（与 pushHistory/rebuild 的 trim 同一口径）。
+  // 备屏语态下 saved.abs 是备屏内行、不随主屏历史走；随裁剪走的是 altSaved.mainSaved.abs。
+  // 调用前 flush()：切片解析停半路的字节先落进画面，快照对应字节流末端。
+  function serializeSnapshot({ historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
+    flush();
+    const screen = grid.map(snapshotRow);
+    let bytes = 0;
+    for (const entry of screen) bytes += Buffer.byteLength(entry.t) + 6;
+    const keep = [];
+    for (let k = history.length - 1; k >= 0; k -= 1) {
+      const size = Buffer.byteLength(history[k]._text) + 8;
+      if (bytes + size > historyBytes) break;
+      bytes += size;
+      keep.push({ t: history[k]._text, w: history[k].wrapped ? 1 : 0 });
+    }
+    keep.reverse();
+    const dropped = history.length - keep.length;
+    const savedSnap = { ...saved };
+    if (!inAlt) savedSnap.abs = Math.max(0, savedSnap.abs - dropped);
+    let alt = null;
+    if (inAlt && altSaved) {
+      alt = {
+        grid: altSaved.grid.map(snapshotRow),
+        row: altSaved.row,
+        col: altSaved.col,
+        mainSaved: { ...altSaved.mainSaved, abs: Math.max(0, altSaved.mainSaved.abs - dropped) },
+      };
+    }
+    return {
+      v: 1,
+      cols: width,
+      rows: height,
+      cursor: { r: row, c: col },
+      saved: savedSnap,
+      region: { top, bottom },
+      sgr: [...sgr],
+      flags: { autoWrap, insertMode, convertEol, cursorVisible },
+      appModes: { ...appModes },
+      altApi,
+      inAlt,
+      alt,
+      screen,
+      history: keep,
+      consumedBytes,
+    };
+  }
+
+  // 快照重建：几何、模式、光标、两份缓冲全部按快照落地，解析积压清零。
+  // consumedBytes 照搬快照值——stream() 用它判「有没有可回放的画面」，恢复出的
+  // 会话必须走渲染回放而不是空字节窗。畸形输入（字段缺失/类型不对）逐项兜底成
+  // 出厂默认：宁可少画，不许抛错打断 restore。
+  function loadSnapshot(snap) {
+    if (!snap || typeof snap !== "object") return false;
+    // 几何只在快照给出正整数时才采信：畸形快照不许把会话压成 1×1，
+    // 保留构造尺寸（宿主按记录的 cols/rows 建镜像，那才是会话真值）。
+    if (Number.isInteger(snap.cols) && snap.cols >= 1) width = snap.cols;
+    if (Number.isInteger(snap.rows) && snap.rows >= 1) height = snap.rows;
+    const flags = snap.flags && typeof snap.flags === "object" ? snap.flags : {};
+    autoWrap = flags.autoWrap !== false;
+    insertMode = flags.insertMode === true;
+    convertEol = flags.convertEol !== false;
+    cursorVisible = flags.cursorVisible !== false;
+    appModes = snap.appModes && typeof snap.appModes === "object" ? { ...snap.appModes } : {};
+    setSgr(Array.isArray(snap.sgr) ? snap.sgr.map(String) : []);
+    const region = snap.region && typeof snap.region === "object" ? snap.region : {};
+    top = Math.min(Math.max(0, region.top | 0), height - 1);
+    bottom = Math.min(Math.max(0, region.bottom | 0), height - 1);
+    if (bottom < top) { top = 0; bottom = height - 1; }
+    altApi = Number.isInteger(snap.altApi) ? snap.altApi : 1049;
+    const cursor = snap.cursor && typeof snap.cursor === "object" ? snap.cursor : {};
+    row = Math.min(height - 1, Math.max(0, cursor.r | 0));
+    col = Math.min(width, Math.max(0, cursor.c | 0)); // 满行哨兵（col === width）是合法态
+    const sv = snap.saved && typeof snap.saved === "object" ? snap.saved : {};
+    saved = {
+      abs: Math.max(0, sv.abs | 0),
+      col: Math.min(width - 1, Math.max(0, sv.col | 0)),
+      attrs: typeof sv.attrs === "string" ? sv.attrs : "",
+    };
+    history = (Array.isArray(snap.history) ? snap.history : []).map((entry) => {
+      const line = deserializeSnapshotRow(entry, width);
+      const text = entry && typeof entry.t === "string" ? entry.t : "";
+      line._text = text;
+      line._bytes = text.length;
+      return line;
+    });
+    historyTotal = 0;
+    for (const line of history) historyTotal += line._bytes;
+    grid = (Array.isArray(snap.screen) ? snap.screen : []).map((entry) => deserializeSnapshotRow(entry, width));
+    while (grid.length < height) grid.push(blankRow(width));
+    if (grid.length > height) grid = grid.slice(0, height);
+    if (snap.inAlt === true && snap.alt && typeof snap.alt === "object") {
+      const altGrid = (Array.isArray(snap.alt.grid) ? snap.alt.grid : []).map((entry) => deserializeSnapshotRow(entry, width));
+      while (altGrid.length < height) altGrid.push(blankRow(width));
+      const ms = snap.alt.mainSaved && typeof snap.alt.mainSaved === "object" ? snap.alt.mainSaved : {};
+      altSaved = {
+        grid: altGrid,
+        row: Math.min(height - 1, Math.max(0, snap.alt.row | 0)),
+        col: Math.min(width - 1, Math.max(0, snap.alt.col | 0)),
+        top: 0,
+        bottom: height - 1,
+        inAlt: false,
+        mainSaved: {
+          abs: Math.max(0, ms.abs | 0),
+          col: Math.min(width - 1, Math.max(0, ms.col | 0)),
+          attrs: typeof ms.attrs === "string" ? ms.attrs : "",
+        },
+      };
+    } else {
+      inAlt = false;
+      altSaved = null;
+    }
+    if (snap.inAlt === true && altSaved) inAlt = true;
+    consumedBytes = Number(snap.consumedBytes) || 0;
+    pending = "";
+    pendingOffset = 0;
+    carry = "";
+    replayCache = null;
+    return true;
+  }
+
   // Self-contained repaint of "history that scrolled away, then the current screen
   // pinned at the bottom". Written into a fresh terminal it reproduces what the user
   // was looking at, including a scrollable scrollback, with no reliance on where a
@@ -1466,6 +1660,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     flush,
     discardPending,
     toReplay,
+    serializeSnapshot,
+    loadSnapshot,
     resize(nextCols, nextRows) {
       const cols = Math.max(1, nextCols | 0);
       const rows = Math.max(1, nextRows | 0);

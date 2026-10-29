@@ -283,7 +283,7 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
 // parkTerminalScreen / dropTerminalStaleScreen / watchTerminalStaleScreen /
 // revealTerminalStaleScreen 七个真身，只把 xterm 构造、EventSource、post 面替成桩。
 // 断言只锚调用序列与 DOM/属性状态，不锚任何墙钟。
-function makeTerminalWorld({ hiddenView = false } = {}) {
+function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
   const clock = makeClock();
   const log = [];            // 全局调用序列（跨实例）
   const sources = [];
@@ -376,7 +376,7 @@ function makeTerminalWorld({ hiddenView = false } = {}) {
     clock.setTimeout, clock.clearTimeout, clock.requestAnimationFrame, clock.cancelAnimationFrame,
     { get hidden() { return ctx.docHidden; } },
     () => openTerm(),
-    () => { log.push("fit"); },
+    fitImpl ?? (() => { log.push("fit"); }),
     (id, data) => { inputPosts.push(`${id}:${data}`); },
     () => Promise.resolve(null),
     () => { log.push("flush_burst"); },
@@ -853,5 +853,36 @@ describe("T8 列宽变化：残行靠镜像整屏自绘抹掉", () => {
     assert.equal(w.api.pending(), null, "拆流撤销待办");
     w.clock.flushAll();
     assert.equal(w.calls.length, 0, "撤销后不再重建");
+  });
+});
+
+/* ============================================================
+   T10 · 建连：fit 发出的 resize POST 落定后才开流
+   ============================================================ */
+// SSE 首帧回放按宿主镜像的「当前尺寸」算。建连路径里 fit 的 resize POST 是异步
+// 落地的：不等它就开流，POST 与 GET 竞速——回放可能按旧尺寸算、客户端按新尺寸
+// 渲染，两边尺寸一旧一新，画面整体错位。这里用可控 deferred 钉住时序：
+// POST 在飞 → EventSource 不得创建；落定 → 才创建。返回 null（同尺寸没发 POST）
+// 则零等待直开——正常路径不因这条等待多付一个来回。
+describe("T10 建连：fit 的 resize POST 落定后再开流", () => {
+  it("fit 在飞时不开 EventSource，落定后才开", async () => {
+    let releaseFit;
+    const fitInFlight = new Promise((resolve) => { releaseFit = resolve; });
+    let fitCalls = 0;
+    const w = makeTerminalWorld({ fitImpl: () => { fitCalls += 1; return fitInFlight; } });
+    const connectPromise = w.world.connectTerminalStream(terminalSession("S"));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(fitCalls, 1, "前置：fit 已发出（POST 在飞）");
+    assert.equal(w.sources.length, 0, "resize POST 在飞：SSE 还没开流");
+    releaseFit();
+    await connectPromise;
+    assert.equal(w.sources.length, 1, "POST 落定后才开流");
+  });
+
+  it("fit 返回 null（同尺寸没发 POST）：不等待，当拍开流", async () => {
+    const w = makeTerminalWorld({ fitImpl: () => null });
+    await w.world.connectTerminalStream(terminalSession("S"));
+    assert.equal(w.sources.length, 1, "无 POST 可等：直开");
   });
 });

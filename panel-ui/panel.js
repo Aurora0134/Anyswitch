@@ -6577,16 +6577,22 @@ async function api(method, path, body) {
     const backendSize = session.backendState;
     if (backendSize
       && Number.isFinite(backendSize.cols) && Number.isFinite(backendSize.rows)
-      && backendSize.cols === terminalXterm.cols && backendSize.rows === terminalXterm.rows) return;
-    postTerminalResize(session, terminalXterm.cols, terminalXterm.rows);
+      && backendSize.cols === terminalXterm.cols && backendSize.rows === terminalXterm.rows) return null;
+    // 返回这轮 POST 的落定 promise：建连路径（connectTerminalStream）拿它等 resize
+    // 落地再开流——SSE 首帧回放按宿主镜像的当前尺寸算，POST 不落定就开流，两边
+    // 尺寸可能一个旧一个新，回放按旧尺寸算、客户端按新尺寸渲染，画面整体错位。
+    // 其余调用方（窗口 resize 防抖、1s 兜底 fit 等）不接返回值，行为不变。
+    return postTerminalResize(session, terminalXterm.cols, terminalXterm.rows);
   }
 
   // resize POST 失败不再静默吞掉——PTY 停在旧列宽而 xterm 已按新宽度渲染，TUI 按
   // 旧列宽排版时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。失败短重试
   // 一次；安排与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的
   // 更新测量优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
+  // 返回 promise 落定（成功或失败已处置），不覆盖 250ms 后的第二次尝试——那只兜
+  // 极端失败，建连不必等它。
   function postTerminalResize(session, cols, rows, attempt = 0) {
-    api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
+    return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
           session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
@@ -7327,8 +7333,10 @@ async function api(method, path, body) {
     terminalBoundSessionId = boundSessionId;
     // 建流前先同步 fit：SSE 首帧回放与 rAF 谁先到达是竞速，回放若按 xterm 出厂
     // 默认列宽（80）落进缓冲区，之后加大列宽不会重排已折行内容——先量准列宽、
-    // 把真实尺寸 POST 进 PTY，再开流收首帧。
-    fitTerminalXterm();
+    // 把真实尺寸 POST 进 PTY，再开流收首帧。POST 真发出时等它落定再开流（返回
+    // null＝尺寸已对齐没发 POST，零等待）：宿主按收到的尺寸重排镜像，回放按镜像
+    // 当前尺寸算，不等就会两边尺寸一旧一新、回放整体错位。
+    const resizeInFlight = fitTerminalXterm();
     term.reset();
     // 回放闩：reset() 把 ydisp/ybase 归零，回放逐块写入也会改写视口——两者都
     // 不是用户滚动，闩住到写入静默后再锚定（见 installTerminalFollowBottomGuard）。
@@ -7443,6 +7451,10 @@ async function api(method, path, body) {
     // burst 冲刷与小帧都经这里进合帧层（见 queueTerminalChunk 层次注释）：
     // 本连接存续期间有效，closeTerminalStream 摘除。
     terminalStreamWrite = writeStreamChunk;
+    // 建连时 fit 若真发了 resize POST，等它落定再开流（失败已处置，不拦建连）。
+    if (resizeInFlight && typeof resizeInFlight.then === "function") {
+      try { await resizeInFlight; } catch { /* 已有失败处置，照常建流 */ }
+    }
     terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     terminalEventSource.addEventListener("snapshot", (event) => {
       terminalStreamSyncCancel?.();
