@@ -19,7 +19,7 @@ import {
   formatDuration,
   normalizeInstanceId,
   sampleTps,
-  windowCacheHitRate,
+  sampleCacheHitRate,
   windowTps,
   TTFT_THRESHOLDS,
   METRICS_SNAPSHOT_FILENAME,
@@ -132,12 +132,25 @@ describe("generation-speed window (the statistic the card and the stats page sha
     assert.equal(windowTps(samples), 285);
     assert.equal(sampleTps(samples[1]), null);
     assert.equal(sampleTps(samples[2]), null);
-    // The cache rate counts every sample in the window: it needs prompt tokens,
-    // not a generation window.
-    assert.equal(windowCacheHitRate(samples), 25);
+    // The cache rate reads the newest sample alone: it needs prompt tokens,
+    // not a generation window, and it never aggregates across the window.
+    assert.equal(sampleCacheHitRate(samples[samples.length - 1]), 0);
+    assert.equal(sampleCacheHitRate(samples[0]), 50);
     assert.equal(windowTps([]), null);
     assert.equal(windowTps(undefined), null);
-    assert.equal(windowCacheHitRate([]), null);
+    assert.equal(sampleCacheHitRate(undefined), null);
+    assert.equal(sampleCacheHitRate({ completion: 5, prompt: 0, cached: 0 }), null);
+  });
+
+  it("cache-hit rate reads the newest request alone, never a window aggregate", () => {
+    const samples = [
+      { completion: 100, genDurationMs: 1000, prompt: 100000, cached: 90000 }, // 90%
+      { completion: 100, genDurationMs: 1000, prompt: 200, cached: 0 }, // 0%
+    ];
+    // A token-weighted window would report 89.9% and a per-request mean 45%;
+    // the card shows the request that just finished.
+    assert.equal(sampleCacheHitRate(samples[samples.length - 1]), 0);
+    assert.equal(sampleCacheHitRate(samples[0]), 90);
   });
 
   it("weights by tokens, not one vote per request", () => {
@@ -690,7 +703,8 @@ describe("createAgentMetricsCollector", () => {
     // Window = req2 + req3 only: 100 tok / 20s = 5.0 tps. The lifetime average
     // (all three) would be 600 tok / 20.1s ≈ 29.9 — req 1 would still own it.
     assert.equal(zcode.metrics.tps, 5);
-    // Window: 0 cached / 2000 prompt = 0%. Lifetime would be 10000/12000 ≈ 83.3%.
+    // Latest request: 0 cached / 1000 prompt = 0%. Lifetime would be
+    // 10000/12000 ≈ 83.3%.
     assert.equal(zcode.metrics.cacheHitRate, 0);
     // Lifetime token totals are untouched by the window — still shown as-is.
     assert.equal(zcode.metrics.tokens.prompt, 12000);
@@ -3877,7 +3891,7 @@ describe("createSessionReporter", () => {
     // The row's speed comes from the window samples, not from dividing the
     // session's cumulative tokens by its cumulative busy time.
     assert.equal(sessionRow.tps, 25, "50 tokens over the 2s generation window");
-    assert.equal(sessionRow.cacheHitRate, 22.2, "40 cached / 180 prompt over the window");
+    assert.equal(sessionRow.cacheHitRate, 0, "the newest request's own ratio: 0 / 80");
   });
 
   it("trims sparkHistory to a last-N request window, not a time TTL", async () => {

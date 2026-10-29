@@ -748,8 +748,9 @@ async function api(method, path, body) {
     for (const k of Object.keys(agentRenderFp)) delete agentRenderFp[k];
   }
 
-  // 速率类指标是 last-N 计数窗口而非时间窗，闲置再久数值也不失效；
-  // lastSeen 超阈值即陈旧：速率类置 —，累计类（工时/tokens/请求数）不动。
+  // 速率类指标都不是时间窗（tok/s 取 last-N 计数窗口，缓存命中率取最近一次
+  // 成功请求），闲置再久数值也不失效；lastSeen 超阈值即陈旧：速率类置 —，
+  // 累计类（工时/tokens/请求数）不动。
   const INSTANCE_STALE_MS = 2 * 60 * 1000;
 
   function formatRelativeAge(ts) {
@@ -1044,7 +1045,8 @@ async function api(method, path, body) {
 
   // claude 无端点级聚合桶（per-launch 会话流量只落各会话行，不进常驻 relay 聚合桶），
   // 「全局汇总」由各会话行求和派生：tokens/请求数/工时累加，tps 为各会话之和，
-  // 缓存命中率按 prompt 加权，TTFT 与 lastSeen 取最近有活动的会话。会话行消亡
+  // 缓存命中率按累计 prompt 加权（会话行则是最近一次成功请求口径），TTFT 与
+  // lastSeen 取最近有活动的会话。会话行消亡
   // 后其累计并入后端下发的退役账（retiredMetrics）——汇总 = 活行 + 退役账。
   function claudeAggregateMetrics(sessions, retired) {
     const tokens = { prompt: 0, completion: 0, cached: 0 };
@@ -7346,7 +7348,7 @@ async function api(method, path, body) {
       updateSparkline("terminalSparkCache", metrics.sparkCache, undefined, undefined, TERMINAL_SPARK_SIZE);
     }
     // 「最近请求」标题行右侧的缓存命中率：与监测区四宫格同源（metrics.cache，
-    // prompt 加权口径），无指标或零请求时隐藏——普通终端没有命中率可说。
+    // 最近一次成功请求口径），无指标或零请求时隐藏——普通终端没有命中率可说。
     $("terminalRequestCount").hidden = !metrics || metrics.requestCount === 0;
     $("terminalRequestCount").textContent = metrics ? `缓存命中 ${metrics.cache}%` : "";
     // 来源显示名走 routeNodeName 口径（未命中回落原始 id）；失败行展开态按行键
