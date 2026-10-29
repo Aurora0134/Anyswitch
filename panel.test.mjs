@@ -5337,10 +5337,11 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
     assert.ok(fn.includes("failed: uFail > 0"), "快照记录失败标记");
   });
 
-  it("「查看差异」小字仅完成态且确有增减/失败时挂出", () => {
+  it("「查看差异」小字仅完成态且本轮确有增减时挂出", () => {
     const fnStart = panelJs.indexOf("async function storeRefresh(");
     const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
-    assert.ok(fn.includes('const hasDiff = refreshDiffUnits.some('), "计算本轮是否有 diff");
+    assert.ok(fn.includes("const hasDiff = storeDiffHasContent(refreshDiffUnits);"),
+      "计算本轮是否有 diff");
     assert.ok(fn.includes('setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff)'),
       "done 路径把 hasDiff 传给状态小字");
     // setStoreRefreshStatus 第四参数控制 diff 小字显隐
@@ -5348,6 +5349,27 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
     const set = panelJs.slice(setStart, panelJs.indexOf("// 10s 淡出计时", setStart));
     assert.ok(set.includes("showDiff"), "setStoreRefreshStatus 接收 showDiff 参数");
     assert.ok(set.includes("diff.hidden = !showDiff"), "按 showDiff 切换小字显隐");
+  });
+
+  // 真跑 storeDiffHasContent：判据必须只看增减。全部失败时弹窗里两栏都是「无」，
+  // 挂链接等于把用户带进一屏空内容
+  it("diff 判据只认增减：整轮全部失败不再挂「查看差异」", () => {
+    const src = panelJs.match(/(?:async )?function storeDiffHasContent\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "storeDiffHasContent found in panel.js");
+    const hasContent = new Function(`${src}\n return storeDiffHasContent;`)();
+    assert.equal(hasContent([{ label: "A", added: [], pruned: [], failed: true, reason: "timeout" }]), false,
+      "全部失败且无增减：没有可看内容");
+    assert.equal(hasContent([
+      { label: "A", added: [], pruned: [], failed: true, reason: "timeout" },
+      { label: "B", added: [], pruned: [], failed: true, reason: "timeout" },
+    ]), false, "多单元全部失败同样不挂");
+    assert.equal(hasContent([{ label: "A", added: [], pruned: [], failed: false, reason: "" }]), false,
+      "全部无变化不挂（与全部失败同一条判据）");
+    assert.equal(hasContent([
+      { label: "A", added: ["m-1"], pruned: [], failed: true, reason: "timeout" },
+    ]), true, "部分成功部分失败：确有新增，链接照挂");
+    assert.equal(hasContent([{ label: "A", added: [], pruned: ["m-2"], failed: false, reason: "" }]), true,
+      "只减不增也算可看内容");
   });
 
   it("弹窗打开期间暂停状态小字淡出计时，关闭时重新武装", () => {
@@ -14062,7 +14084,7 @@ describe("面板失败文案：折叠时留痕 + 数据搬迁给下一步", () =
     const { helpers, warns, posts } = loadHelpers();
     const err = Object.assign(new Error("HTTP 404：not found"), { code: "not found" });
     assert.equal(helpers.panelFailure(err, "导出未完成"),
-      "导出未完成（请刷新页面后重试；详情见面板日志）");
+      "导出未完成（请刷新页面后重试）");
     assert.equal(warns.length, 1, "原文仍留一份到控制台");
     assert.equal(posts.length, 1, "原文要进面板日志");
     assert.equal(posts[0].url, "http://127.0.0.1:47820/panel/api/logs/ingest");
@@ -14094,7 +14116,7 @@ describe("面板失败文案：折叠时留痕 + 数据搬迁给下一步", () =
     );
     const err = Object.assign(new Error("HTTP 404：not found"), { code: "not found" });
     assert.equal(helpers.panelFailure(err, "导出未完成"),
-      "导出未完成（请刷新页面后重试；详情见面板日志）",
+      "导出未完成（请刷新页面后重试）",
       "上报是顺带的事，不能把原错误盖掉");
   });
 });
@@ -14509,15 +14531,15 @@ describe("BYOK 导入本地配置（面板前端）", () => {
     assert.equal(receipt({ imported: 2, failed: [], removeFailed: [] }, false),
       "已导入 2 条渠道，本地配置原样保留");
     assert.equal(receipt({ imported: 2, failed: [{ key: "a", error: "x" }], removeFailed: [] }, false),
-      "已导入 2 条渠道，本地配置原样保留，1 条失败（详情见面板日志）");
+      "已导入 2 条渠道，本地配置原样保留，1 条失败");
     assert.equal(receipt({ imported: 1, failed: [], removeFailed: [{ key: "b", error: "y" }] }, true),
-      "已导入 1 条渠道，本地原始配置已移除（原文件已备份），1 处本地配置移除失败（详情见面板日志）");
+      "已导入 1 条渠道，本地原始配置已移除（原文件已备份），1 处本地配置移除失败");
     assert.equal(receipt({
       imported: 1,
       failed: [{ key: "a", error: "x" }, { key: "b", error: "z" }],
       removeFailed: [{ key: "c", error: "y" }],
     }, true),
-      "已导入 1 条渠道，本地原始配置已移除（原文件已备份），2 条失败（详情见面板日志），1 处本地配置移除失败（详情见面板日志）");
+      "已导入 1 条渠道，本地原始配置已移除（原文件已备份），2 条失败，1 处本地配置移除失败");
   });
 
   it("回执落点：状态小字 + toast，人不在渠道 tab 置「等切回」", () => {

@@ -109,7 +109,7 @@
 
   // 数据搬迁卡专用：服务端给了中文说明就照原样上屏（那是业务原因，刷新无用）；只有
   // 被折叠时才是「这次请求没送达或服务端出错」，刷新页面重试才是有意义的下一步。
-  const PANEL_FAILURE_HINT = "（请刷新页面后重试；详情见面板日志）";
+  const PANEL_FAILURE_HINT = "（请刷新页面后重试）";
   function panelFailure(err, fallback) {
     const text = panelError(err, fallback);
     return text === fallback ? text + PANEL_FAILURE_HINT : text;
@@ -15040,7 +15040,7 @@ async function api(method, path, body) {
   }
 
   // 刷新终态远离通报：人不在渠道 tab 时弹结果 toast（8s 驻留，比常规 3s 长——
-  // 要留点击窗口；持久载体是暂停的小字，toast 只是即时报信），本轮确有增减/失败
+  // 要留点击窗口；持久载体是暂停的小字，toast 只是即时报信），本轮确有增减
   // 时附可点「查看差异」，点中原地开差异弹窗、不切 tab；同时置「等切回」标记并
   // 停掉小字淡出计时，让结果留到用户切回。人在渠道 tab 时一切照旧
   function notifyStoreRefreshAway(text, isErr, hasDiff) {
@@ -15079,6 +15079,11 @@ async function api(method, path, body) {
   // refreshDiffUnits 由 storeRefresh 每轮重填；弹窗打开期间暂停状态小字的 10s
   // 淡出计时，关闭时若状态小字仍可见则重新武装一个完整 10s
   let refreshDiffUnits = [];
+  // 本轮有没有可看的内容：弹窗正文列的是模型 id，只有增减才看得见。失败不进来——
+  // 失败原因已经在结果小字里直接写着，整轮全部失败时弹窗打开只会是一屏「无」
+  function storeDiffHasContent(units) {
+    return units.some((u) => (u.added || []).length > 0 || (u.pruned || []).length > 0);
+  }
   function storeDiffGroupHtml(units, key, rowClass) {
     const parts = [];
     for (const u of units) {
@@ -15219,8 +15224,9 @@ async function api(method, path, body) {
       // 收尾：先撤在途标记，这次全量重渲负责消费本轮新增高光，并让列表行/路由链归位
       storeRefreshInFlight = false;
       await refreshStoreState();
-      // 本轮确有增减或失败时才挂「查看差异」小字；全零无变化不显示（没东西可看）
-      const hasDiff = refreshDiffUnits.some((u) => u.failed || u.added.length > 0 || u.pruned.length > 0);
+      // 本轮确有增减才挂「查看差异」小字：联动两个出口（状态小字与离页 toast）。失败
+      // 不算可看内容，整轮全部失败时不再挂链接。全零无变化同样不显示（没东西可看）
+      const hasDiff = storeDiffHasContent(refreshDiffUnits);
       setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff);
       // 人不在渠道 tab：弹结果 toast 并暂停小字淡出等切回。toast 用聚合口径
       // （小字 tail 只摆最后一个单元，toast 报全轮合计才完整）
@@ -15524,9 +15530,9 @@ async function api(method, path, body) {
         : `已导入 ${result.imported} 条渠道，本地配置原样保留`,
     ];
     const failedCount = (result.failed || []).length;
-    if (failedCount) parts.push(`${failedCount} 条失败（详情见面板日志）`);
+    if (failedCount) parts.push(`${failedCount} 条失败`);
     const removeFailedCount = (result.removeFailed || []).length;
-    if (removeFailedCount) parts.push(`${removeFailedCount} 处本地配置移除失败（详情见面板日志）`);
+    if (removeFailedCount) parts.push(`${removeFailedCount} 处本地配置移除失败`);
     return parts.join("，");
   }
 
