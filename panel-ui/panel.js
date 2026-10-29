@@ -6223,6 +6223,10 @@ async function api(method, path, body) {
     terminalInputDisposable?.dispose();
     terminalInputDisposable = null;
     terminalBoundSessionId = null;
+    // 列宽重对齐的待办随流销毁：定时器再来时实例已经没了，重建只会空转。typeof 闸
+    // 护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，没有
+    // 这套列宽设施。
+    if (typeof resetTerminalReflowRepaint === "function") resetTerminalReflowRepaint();
     terminalXterm?.dispose();
     terminalXterm = null;
     terminalFitAddon = null;
@@ -6452,6 +6456,70 @@ async function api(method, path, body) {
       && host.clientHeight >= TERMINAL_FIT_MIN_HOST_HEIGHT_PX;
   }
 
+  // 列宽变化后的整屏重对齐。xterm 不重排已经画下的行，而 TUI 收到尺寸变化后只重画
+  // 它自己认为变了的格子——它全程只做「定位光标 + 写字符」，从不发擦除序列（本机
+  // 实测 12 万字符的实时字节里 EL/ED 计数为 0）。两侧列宽一错开，旧列宽的行就原地
+  // 留成残行，读起来像「一行里前半是新内容、后半挂着上一帧的尾巴」。
+  //
+  // 治法是让它走一次已知正确的通路：把流重建一遍，客户端拿到的是宿主镜像的整屏
+  // 自绘帧（每行先擦后写），残行一次清干净——与「重画终端画面」按钮、切页签同一个
+  // 动作。只在列变化时触发：行数变化不改变每列的位置，不会产生横向残字。
+  const TERMINAL_REFLOW_REPAINT_DELAY_MS = 260;
+  let terminalReflowRepaintTimer = null;
+  // 上一次稳定下来的列数；0 表示还没量过（新实例刚建、首连尚未 fit）。
+  let terminalSettledCols = 0;
+  // 手动重画与字号调整自己就会重建一次画面，别再叠一次（两次重建=闪两下）。
+  let terminalReflowRepaintMuteUntil = 0;
+
+  function muteTerminalReflowRepaint(ms) {
+    terminalReflowRepaintMuteUntil = Math.max(terminalReflowRepaintMuteUntil, Date.now() + ms);
+  }
+
+  // 拆流时清账：定时器再来时实例已经没了，重建只会空转；稳定列宽归零，下一个实例
+  // 出厂是 80 列，不归零会把首次 fit 误判成「用户改了列宽」。
+  function resetTerminalReflowRepaint() {
+    if (terminalReflowRepaintTimer !== null) clearTimeout(terminalReflowRepaintTimer);
+    terminalReflowRepaintTimer = null;
+    terminalSettledCols = 0;
+  }
+
+  // fit 之后的列宽记账：只有「上一拍量过、这一拍变了」才算列宽变化——新实例从出厂
+  // 80 列 fit 到真实宽度属于建流，不是变化，不该触发重对齐。
+  function noteTerminalFittedCols(cols) {
+    if (!Number.isFinite(cols) || cols <= 0) return;
+    const changed = terminalSettledCols > 0 && cols !== terminalSettledCols;
+    terminalSettledCols = cols;
+    if (changed) armTerminalReflowRepaint();
+  }
+
+  function armTerminalReflowRepaint() {
+    if (Date.now() < terminalReflowRepaintMuteUntil) return;
+    if (terminalReflowRepaintTimer !== null) clearTimeout(terminalReflowRepaintTimer);
+    terminalReflowRepaintTimer = setTimeout(() => {
+      terminalReflowRepaintTimer = null;
+      runTerminalReflowRepaint();
+    }, TERMINAL_REFLOW_REPAINT_DELAY_MS);
+  }
+
+  function runTerminalReflowRepaint() {
+    if ($("terminalView")?.hidden) return;
+    // 没有活流就没有残行可言（首连、隐藏期拆流、已关停都从这里退出）。
+    if (!terminalEventSource || !terminalXterm) return;
+    const session = terminalBoundSessionId ? terminalSessionFor(terminalBoundSessionId) : null;
+    if (!session?.backend) return;
+    // 还在拖窗口时不要抢跑：resize POST 没回来就重建，镜像会按旧列宽出自绘帧，
+    // 等于把残行原样重画一遍。等下一拍静默再判。
+    const backendSize = session.backendState;
+    if (backendSize
+      && Number.isFinite(backendSize.cols) && Number.isFinite(backendSize.rows)
+      && (backendSize.cols !== terminalXterm.cols || backendSize.rows !== terminalXterm.rows)) {
+      armTerminalReflowRepaint();
+      return;
+    }
+    // revive:false——这是被动重对齐，不是用户点了这条会话：进程已退就只回放最后一屏。
+    connectTerminalStream(session, { revive: false });
+  }
+
   function fitTerminalXterm() {
     // 终端页隐藏期不测量：FitAddon 从 display:none 的宿主只能量到百分比兜底值
     // （实测把 xterm 压成 12×6），按这个宽度折行的回放会把整行提示符碎成几段，
@@ -6471,6 +6539,10 @@ async function api(method, path, body) {
       return;
     }
     terminalFitAddon?.fit();
+    // 列宽记账必须排在下面几处「尺寸已对齐」的早退之前：残行恰好在「客户端已经
+    // 变宽、PTY 侧还是旧值」的这一拍最容易留下，而那一拍正好被同值闸早退掉。
+    // typeof 闸护单测桩环境（同 renderTerminalRail）。
+    if (terminalXterm && typeof noteTerminalFittedCols === "function") noteTerminalFittedCols(terminalXterm.cols);
     // fit 后 POST 的目标是建连时固化的定投会话，不读页级活跃指针：避免
     // 「别窗关掉当前会话、活跃指针已回落而流未拆」的窗口期向未在观看
     // 的新会话误投 resize。
@@ -6532,6 +6604,12 @@ async function api(method, path, body) {
     }
     const cols = term.cols;
     const rows = term.rows;
+    // 这次挤宽度本身会让列宽变一次，列宽自动重对齐必须让路：它要等一拍再重建，
+    // 正好和下面的恢复挨着，叠起来就是连着闪两下。typeof 闸护单测桩环境（同
+    // renderTerminalRail）：那些沙箱把本函数整段切出真跑，没有这套列宽设施。
+    if (typeof muteTerminalReflowRepaint === "function") {
+      muteTerminalReflowRepaint(TERMINAL_REDRAW_NUDGE_MS + TERMINAL_REFLOW_REPAINT_DELAY_MS + 200);
+    }
     term.resize(cols - 1, rows);
     postTerminalResize(session, cols - 1, rows);
     setTimeout(() => {

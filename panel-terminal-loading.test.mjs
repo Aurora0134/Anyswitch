@@ -729,3 +729,129 @@ describe("T7 刷新会话列表：显式刷新带 ?refresh=1", () => {
     assert.deepEqual(second.seen.api, ["GET /api/sessions/list"]);
   });
 });
+
+/* ============================================================
+   T8 · 列宽变化后的整屏重对齐
+   ============================================================ */
+// 病灶：TUI 全程只做「定位光标 + 写字符」，从不发擦除序列（本机实测 12 万字符的
+// 实时字节里 EL/ED 计数为 0）。列宽一变，它只重画自己认为变了的格子，旧列宽的行
+// 就原地留成残行。客户端不重排已折行的内容，所以只能靠重建流拿一次镜像整屏自绘帧
+// 来抹。本组钉四件事：首连不误判、变化只重建一次、被动重对齐不重开进程、拆流清账。
+describe("T8 列宽变化：残行靠镜像整屏自绘抹掉", () => {
+  const reflowConst = panelJs.match(/const TERMINAL_REFLOW_REPAINT_DELAY_MS = \d+;/)?.[0];
+  assert.ok(reflowConst, "TERMINAL_REFLOW_REPAINT_DELAY_MS 在 panel.js 里");
+
+  function makeReflowWorld({ hiddenView = false, es = {}, term = { cols: 120, rows: 30 }, session = { id: "s1", backend: true, backendState: { cols: 120, rows: 30 } } } = {}) {
+    const clock = makeClock();
+    const calls = [];
+    const st = { session };
+    const factory = new Function(
+      "$", "setTimeout", "clearTimeout", "connectTerminalStream", "terminalSessionFor", "initial",
+      `
+      let terminalEventSource = initial.es;
+      let terminalXterm = initial.term;
+      let terminalBoundSessionId = "s1";
+      let terminalReflowRepaintTimer = null;
+      let terminalSettledCols = 0;
+      let terminalReflowRepaintMuteUntil = 0;
+      ${reflowConst}
+      ${extractFn("resetTerminalReflowRepaint")}
+      ${extractFn("noteTerminalFittedCols")}
+      ${extractFn("armTerminalReflowRepaint")}
+      ${extractFn("runTerminalReflowRepaint")}
+      return {
+        noteTerminalFittedCols, resetTerminalReflowRepaint,
+        pending: () => terminalReflowRepaintTimer,
+      };
+      `
+    );
+    const api = factory(
+      (id) => (id === "terminalView" ? { hidden: hiddenView } : null),
+      clock.setTimeout, clock.clearTimeout,
+      (s, opts) => { calls.push({ id: s?.id, opts }); },
+      () => st.session,
+      { es, term },
+    );
+    return { api, clock, calls, st, term };
+  }
+
+  it("首连 fit 不算列宽变化：建流那次 fit 之后不重建", () => {
+    const w = makeReflowWorld();
+    w.api.noteTerminalFittedCols(135);
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 0, "新实例从出厂 80 列 fit 到真实宽度属于建流");
+  });
+
+  it("列宽变化后重建一次，且是被动重对齐（revive:false）", () => {
+    const w = makeReflowWorld();
+    w.api.noteTerminalFittedCols(135);
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 0, "先建立基准");
+    w.api.noteTerminalFittedCols(120);
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 1, "列宽变了就重建一次");
+    assert.equal(w.calls[0].id, "s1");
+    assert.deepEqual(w.calls[0].opts, { revive: false }, "被动重对齐不许替用户重开已退的进程");
+  });
+
+  it("连续变化只重建一次（防抖合并）", () => {
+    const w = makeReflowWorld();
+    w.api.noteTerminalFittedCols(135);
+    w.clock.flushAll();
+    w.api.noteTerminalFittedCols(130);
+    w.api.noteTerminalFittedCols(125);
+    w.api.noteTerminalFittedCols(120);
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 1, "拖动窗口逐帧来，合并到静默期一次");
+  });
+
+  it("PTY 侧还没跟上就继续等，不让镜像按旧列宽自绘", () => {
+    const w = makeReflowWorld({ session: { id: "s1", backend: true, backendState: { cols: 135, rows: 30 } } });
+    w.api.noteTerminalFittedCols(135);
+    w.clock.flushAll();
+    w.api.noteTerminalFittedCols(120);
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 0, "两边尺寸不一致时重建只会把残行原样画一遍");
+    w.st.session.backendState = { cols: 120, rows: 30 };
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 1, "对齐之后才重建");
+  });
+
+  it("终端页隐藏 / 没有活流时不重建", () => {
+    const hidden = makeReflowWorld({ hiddenView: true });
+    hidden.api.noteTerminalFittedCols(135);
+    hidden.clock.flushAll();
+    hidden.api.noteTerminalFittedCols(120);
+    hidden.clock.flushAll();
+    assert.equal(hidden.calls.length, 0, "隐藏期没有可看的画面");
+
+    const idle = makeReflowWorld({ es: null });
+    idle.api.noteTerminalFittedCols(135);
+    idle.clock.flushAll();
+    idle.api.noteTerminalFittedCols(120);
+    idle.clock.flushAll();
+    assert.equal(idle.calls.length, 0, "没有活流就没有残行可言");
+  });
+
+  it("接线：fit 里的列宽记账排在「尺寸已对齐」早退之前，拆流时会清账", () => {
+    const fit = extractFn("fitTerminalXterm");
+    const noteAt = fit.indexOf("noteTerminalFittedCols");
+    const earlyAt = fit.indexOf("backendSize.cols === terminalXterm.cols");
+    assert.ok(noteAt > 0, "fit 里接线了列宽记账");
+    assert.ok(earlyAt > noteAt, "记账必须先于同值闸早退——残行最容易留在「客户端已变、PTY 还没跟上」那一拍");
+    const close = extractFn("closeTerminalStream");
+    assert.ok(close.includes("resetTerminalReflowRepaint"), "拆流时撤销待办并把基准归零");
+  });
+
+  it("拆流时清账：待办定时器撤销，且基准归零", () => {
+    const w = makeReflowWorld();
+    w.api.noteTerminalFittedCols(135);
+    w.clock.flushAll();
+    w.api.noteTerminalFittedCols(120);
+    assert.ok(w.api.pending() !== null, "变化后有待办");
+    w.api.resetTerminalReflowRepaint();
+    assert.equal(w.api.pending(), null, "拆流撤销待办");
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 0, "撤销后不再重建");
+  });
+});
