@@ -6926,13 +6926,38 @@ describe("设置项「运行日志」", () => {
     assert.ok(toggleAt > 0 && rowsAt > toggleAt && selectAt > rowsAt, "级别行紧跟在总开关之后");
     assert.ok(rowsAt < panelEnd, "整段仍在「通用」子页内，没有漏到别的 tab");
     assert.ok(panelHtml.slice(rowsAt, selectAt + 40).includes("日志级别"), "行标题是「日志级别」");
-    assert.ok(panelHtml.includes('<option value="info">信息</option>')
-      && panelHtml.includes('<option value="warn">警告</option>')
-      && panelHtml.includes('<option value="error">错误</option>'), "三档选项齐备");
+    assert.ok(panelHtml.includes('<option value="info">INFO</option>')
+      && panelHtml.includes('<option value="warn">WARN</option>')
+      && panelHtml.includes('<option value="error">ERROR</option>'), "三档选项齐备");
     assert.ok(panelHtml.slice(rowsAt, panelEnd).includes("级别说明："), "图例在段内");
     for (const tag of ["ERROR", "WARN", "INFO"]) {
       assert.ok(panelHtml.slice(rowsAt, panelEnd).includes(tag), `图例覆盖 ${tag}`);
     }
+  });
+
+  it("选项文案与实时输出行打出来的级别标签同形，不再各说一套词", () => {
+    // 左侧窗里每行是 appendLog 写的 <span class="lvl">LEVEL.toUpperCase()</span>；
+    // 下拉里若仍写中文，同一件事就成两套词——这条把两边钉在同一份 token 上。
+    const selectBlock = panelHtml.match(/<select class="logs-sel" id="logLevelSelect">([\s\S]*?)<\/select>/);
+    assert.ok(selectBlock, "级别下拉在 panel.html 里");
+    const optionText = [...selectBlock[1].matchAll(/<option value="(\w+)">([^<]+)<\/option>/g)]
+      .map((m) => ({ value: m[1], text: m[2] }));
+    assert.deepEqual(optionText, [
+      { value: "info", text: "INFO" },
+      { value: "warn", text: "WARN" },
+      { value: "error", text: "ERROR" },
+    ], "三档都是大写英文 token，与 .lvl 里 toUpperCase() 的结果逐字相同");
+    const levels = ["info", "warn", "error"];
+    assert.deepEqual(levels.map((l) => l.toUpperCase()), optionText.map((o) => o.text),
+      "value 大写后即选项文字：改一边不改另一边会在这里红");
+    assert.ok(!/option[^>]*>[^<]*[一-龥]/.test(selectBlock[1]), "选项里不留中文");
+    // 语义色随当前档走：收起态由 data-level 驱动，落点在 applyLogLevel 里与值一同写。
+    const applySource = panelJs.match(/function applyLogLevel\(level\) \{[\s\S]*?\n  \}/);
+    assert.ok(applySource, "applyLogLevel 在 panel.js 里");
+    assert.ok(/dataset\.level\s*=\s*level/.test(applySource[0]), "换档时值与语义色一起落");
+    assert.ok(/data-level="info"|data-level="warn"|data-level="error"/.test(panelCss)
+      && /option\[value="(info|warn|error)"\]\s*\{[^}]*--console-/.test(panelCss),
+      "CSS 按 data-level / option value 取 --console-* 语义色");
   });
 
   it("从属段说明只讲用户看得懂的行为，不出现字段名", () => {
@@ -6968,7 +6993,7 @@ describe("设置项「运行日志」", () => {
   it("只有已经建着流时换档才重连；同值与开屏定态都不动", () => {
     const source = panelJs.match(/function applyLogLevel\(level\) \{[\s\S]*?\n  \}/);
     assert.ok(source, "applyLogLevel 在 panel.js 里");
-    const sel = { value: "" };
+    const sel = { value: "", dataset: {} };
     let restarts = 0;
     const run = new Function(
       "sel", "onRestart", "stream",
@@ -6984,6 +7009,7 @@ describe("设置项「运行日志」", () => {
     const cold = run(sel, () => { restarts += 1; }, { es: null });
     cold.apply("info");
     assert.equal(sel.value, "info", "首次定态把选框对齐");
+    assert.equal(sel.dataset.level, "info", "收起态的语义色跟着值一起落");
     assert.equal(restarts, 0, "流还没建，谈不上重连");
 
     // 已建流：进设置页重读设置回灌同一档，不许把流拆了重建（屏幕会闪一下）。
@@ -7009,7 +7035,8 @@ describe("设置项「运行日志」", () => {
       const settingsSaving = { logLevel: false };
       const select = {
         value,
-        selectedOptions: [{ textContent: value === "warn" ? "警告" : "错误" }],
+        dataset: {},
+        selectedOptions: [{ textContent: value.toUpperCase() }],
         setAttribute() {},
         removeAttribute() {},
       };
@@ -7036,12 +7063,13 @@ describe("设置项「运行日志」", () => {
     await ok.done;
     assert.deepEqual(ok.calls, [{ method: "POST", path: "/api/settings", body: { logLevel: "warn" } }]);
     assert.deepEqual(ok.applied, ["warn"], "界面跟着服务端回读值走");
-    assert.deepEqual(ok.toasts, ["日志级别已设为警告"], "toast 说结果＋新值，措辞抄选项文字");
+    assert.deepEqual(ok.toasts, ["日志级别已设为 WARN"], "toast 说结果＋新值，措辞抄选项文字");
     assert.equal(ok.savingAfter(), false, "保存中标记已释放");
 
     const failed = runHandler("error", { ok: false }, { knownLevel: "warn" });
     await failed.done;
     assert.equal(failed.select.value, "warn", "回滚到上一档");
+    assert.equal(failed.select.dataset.level, "warn", "回滚时语义色跟着弹回旧档，不停在刚选的那一档");
     assert.deepEqual(failed.applied, [], "失败不落地界面、不重连");
     assert.deepEqual(failed.toasts, ["设置保存失败"]);
 

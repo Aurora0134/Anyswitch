@@ -1486,6 +1486,19 @@
   .log-line.warn .lvl, .log-level-legend .lvl.warn { color: var(--console-warn); }
   .log-line.error .lvl, .log-level-legend .lvl.error { color: var(--console-error); }
 
+  /* ── 「日志级别」下拉（设置 → 通用 → 实时输出卡）────────────────────────────
+     与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色
+     也取自同一组 --console-*（亮暗两套皮肤各自取值）。收起态显示的是当前值，颜色
+     跟着档位变，由 panel.js#applyLogLevel 落的 data-level 驱动——展开态认不认
+     option 的 color 取决于浏览器，收起态这一档由 select 自身 color 决定，不吃
+     这个变数。中文释义交给卡内那张「级别说明」图例承担。 */
+  #logLevelSelect option[value="info"] { color: var(--console-info); font-weight: 600; }
+  #logLevelSelect option[value="warn"] { color: var(--console-warn); font-weight: 600; }
+  #logLevelSelect option[value="error"] { color: var(--console-error); font-weight: 600; }
+  #logLevelSelect[data-level="info"] { color: var(--console-info); font-weight: 600; }
+  #logLevelSelect[data-level="warn"] { color: var(--console-warn); font-weight: 600; }
+  #logLevelSelect[data-level="error"] { color: var(--console-error); font-weight: 600; }
+
   /* ── 看板加载态（<html data-board="pending">）───────────────────────────────
      看板九张卡的静态默认是「数据态」：八张写着「未检测到运行中的 X 客户端」，ZCode
      那张甚至是「运行中」徽标加四宫格 0 读数。主脚本是 defer 外链，首绘必然早于第一拍

@@ -2275,7 +2275,9 @@ async function api(method, path, body) {
   // 建着流时才重连——开屏那一次定态发生在建流之前，服务端按这一档重放即可。
   function applyLogLevel(level) {
     const sel = $("logLevelSelect");
-    if (sel) sel.value = level;
+    // 选项与实时输出行是同一组大写 token，语义色由 CSS 按 data-level 取（见 panel.css
+    // 的 #logLevelSelect 段）——值与颜色在这里一起落，换档时颜色不会落在旧档上。
+    if (sel) { sel.value = level; sel.dataset.level = level; }
     if (logLevel === level) return;
     logLevel = level;
     if (es) restartLogStream();
@@ -4854,7 +4856,7 @@ async function api(method, path, body) {
 
     // 日志级别：即改即存，保存成功后按新门槛重连日志流（在 applyLogLevel 里）。
     // 选项文字只写在 panel.html 一处，toast 从选中的那个 option 现取，不在脚本里
-    // 另立一份中文级别名。
+    // 另立一份级别名。选项与左侧实时输出行同为大写英文 token（INFO/WARN/ERROR）。
     if (logLevelSelect) {
       logLevelSelect.onchange = async () => {
         if (settingsSaving.logLevel) return;
@@ -4866,15 +4868,21 @@ async function api(method, path, body) {
         try {
           const d = await api("POST", "/api/settings", { logLevel: next });
           if (!d.ok) {
-            logLevelSelect.value = logLevel ?? "info";
+            // 弹回旧档时语义色也要跟着弹回：data-level 跟着 value 走，不在脚本里
+            // 另存一份「当前档位」。
+            const back = logLevel ?? "info";
+            logLevelSelect.value = back;
+            logLevelSelect.dataset.level = back;
             toast("设置保存失败", true);
           } else {
             const saved = d.settings?.logLevel;
             applyLogLevel(typeof saved === "string" ? saved : next);
-            toast(`日志级别已设为${nextLabel}`);
+            toast(`日志级别已设为 ${nextLabel}`);
           }
         } catch (e) {
-          logLevelSelect.value = logLevel ?? "info";
+          const back = logLevel ?? "info";
+          logLevelSelect.value = back;
+          logLevelSelect.dataset.level = back;
           toast(panelError(e, "请求失败"), true);
         } finally {
           settingsSaving.logLevel = false;
