@@ -5,12 +5,13 @@ import {
   readSidecar as readSidecarFile,
   writeSidecar as writeSidecarFile,
   AUTO_CHANNEL_KEY,
+  ANYSWITCH_CHANNEL_NAME,
   deriveAutoRouteChannel,
   deriveAnyswitchChannel,
 } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
-export { deriveAutoRouteChannel, deriveAnyswitchChannel, AUTO_CHANNEL_KEY };
+export { deriveAutoRouteChannel, deriveAnyswitchChannel, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME };
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { loadPiAiReasoningIndex, resolveKnowledgeReasoning } from "./reasoning-fallback.mjs";
 import { resolveModelEfforts, effortWireValue, intersectEffortVocabulary } from "./effort-catalog.mjs";
@@ -163,8 +164,36 @@ export function buildReasoningEffortsMap(levels, wireValues) {
   return map;
 }
 
+// The on-disk provider key of one channel. DSH's picker prints the raw key in
+// its "recently used" rows, the /model completion tree and the status detail
+// (only the provider tab strip honours displayName), so the pseudo channel's
+// key IS the channel name users see — it carries no "_" prefix. Real channels
+// keep the managed-id prefix.
+export function dshProviderKey(providerId) {
+  return providerId === AUTO_CHANNEL_KEY ? ANYSWITCH_CHANNEL_NAME : `_${providerId}`;
+}
+
+// Every on-disk key a managed id may be stored under: the current key plus the
+// pre-rename "_auto" of the pseudo channel. A sidecar written by the old
+// writer still names "auto", and the first sync after the rename has to retire
+// that key.
+export function dshManagedKeys(providerId) {
+  const id = String(providerId);
+  if (id === AUTO_CHANNEL_KEY || id === ANYSWITCH_CHANNEL_NAME) {
+    return [ANYSWITCH_CHANNEL_NAME, `_${AUTO_CHANNEL_KEY}`];
+  }
+  return [id.startsWith("_") ? id : `_${id}`];
+}
+
+// Our provider entries carry the dsh endpoint header; a user's own "_" channel
+// does not. Used only to retire the pseudo channel's pre-rename "_auto" key,
+// where no sidecar record may exist to prove ownership.
+function isManagedDshProvider(provider) {
+  return provider?.headers?.["x-agent-id"] === "dsh";
+}
+
 export function buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog = null, includeEfforts = true) {
-  const prefixedId = `_${providerId}`;
+  const providerKey = dshProviderKey(providerId);
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
   const segment = provider.baseUrlSegment ?? providerId;
@@ -235,7 +264,7 @@ export function buildDshProviderEntry(providerId, provider, port, token, knowled
   }
 
   return {
-    [prefixedId]: profile,
+    [providerKey]: profile,
   };
 }
 
@@ -245,16 +274,24 @@ export function mergeDshSettings(existingSettings, managedProviders, port, token
   const existingProviders = { ...(llmPiAi.providers ?? {}) };
   // Append the virtual auto-routing channel outside the entry-builder system:
   // it flows through the same cleanup/inject loops as any real channel, so
-  // deleting the endpoint's chain makes the next sync drop `_auto` via the
-  // ordinary previousManaged path.
+  // deleting the endpoint's chain makes the next sync drop the pseudo channel
+  // via the ordinary previousManaged path.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
   // 1. Clean up stale managed providers
   for (const prevId of previousManaged) {
-    const prefixed = `_${prevId}`;
-    if (!providers[prevId] && existingProviders[prefixed] !== undefined) {
-      delete existingProviders[prefixed];
+    if (providers[prevId]) continue;
+    for (const key of dshManagedKeys(prevId)) {
+      if (existingProviders[key] !== undefined) delete existingProviders[key];
     }
+  }
+  // Migration: before the pseudo channel was keyed by its display name it
+  // lived under the managed id "_auto". Retire that leftover so the picker
+  // never lists both groups; a user-written "_auto" without the dsh endpoint
+  // header is left alone.
+  const legacyAuto = existingProviders[`_${AUTO_CHANNEL_KEY}`];
+  if (legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
+    delete existingProviders[`_${AUTO_CHANNEL_KEY}`];
   }
 
   // 2. Inject current active providers
@@ -382,9 +419,18 @@ export function mergeDshProfilePatch(entries, providers, previousManaged = []) {
     : {};
   // Only the ids the previous sync wrote are removable. A provider the user
   // added in DSH's own settings — even one whose name starts with "_" — stays.
-  const removable = new Set(previousManaged.map((id) => (String(id).startsWith("_") ? String(id) : `_${id}`)));
+  // The pseudo channel contributes both its current key and the pre-rename
+  // "_auto" one, since a sidecar from the old writer still names it "auto".
+  const removable = new Set(previousManaged.flatMap((id) => dshManagedKeys(id)));
   for (const key of Object.keys(existing)) {
     if (removable.has(key) && !Object.hasOwn(providers, key)) delete existing[key];
+  }
+  // Sidecar-lost migration: the pseudo channel used to be written under the
+  // managed id "_auto". Retire that leftover (only with the dsh endpoint
+  // header) so the picker never lists both groups.
+  const legacyAuto = existing[`_${AUTO_CHANNEL_KEY}`];
+  if (legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
+    delete existing[`_${AUTO_CHANNEL_KEY}`];
   }
   Object.assign(existing, providers);
   config.providers = existing;

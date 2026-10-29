@@ -288,7 +288,7 @@ test("pi: _-prefix and sidecar excluded, ${VAR} reference resolution", async () 
 
 test("dsh: sidecar-only ownership (even _-prefixed user entries listed), profile dedup", async () => {
   const fixture = makeFixture();
-  writeJson(join(fixture.storeRoot, "dsh-sidecar.json"), { providers: ["managed"] });
+  writeJson(join(fixture.storeRoot, "dsh-sidecar.json"), { providers: ["managed", "auto"] });
   const patch = (providers) => {
     const lines = ["- id: llm-pi-ai", '  name: "@deepseek-ai/dsh-llm-pi-ai"', "  config:", "    providers:"];
     for (const [id, p] of Object.entries(providers)) {
@@ -305,6 +305,10 @@ test("dsh: sidecar-only ownership (even _-prefixed user entries listed), profile
   };
   const shared = {
     _managed: { displayName: "Managed", baseURL: "http://127.0.0.1:47820/openai/managed/v1", apiKeyEnv: "ANYSWITCH_RELAY_TOKEN", models: ["m1"] },
+    // The pseudo channel lives under its display-name key; the pre-rename
+    // "_auto" key of a profile not yet re-synced is owned by the same id.
+    Anyswitch: { displayName: "Anyswitch", baseURL: "http://127.0.0.1:47820/openai/auto/v1", apiKeyEnv: "ANYSWITCH_RELAY_TOKEN", models: ["auto"] },
+    _auto: { displayName: "Anyswitch", baseURL: "http://127.0.0.1:47820/openai/auto/v1", apiKeyEnv: "ANYSWITCH_RELAY_TOKEN", models: ["auto"] },
     userchan: { displayName: "User Chan", baseURL: "https://user.example.com/v1", apiKeyEnv: "DSH_USER_KEY", models: ["um1"] },
   };
   writeText(join(fixture.homeDir, ".dsh", "profiles", "alpha", "cordis.patch.yml"), patch(shared));
@@ -317,8 +321,9 @@ test("dsh: sidecar-only ownership (even _-prefixed user entries listed), profile
   );
   const service = makeService(fixture, { env: { DSH_USER_KEY: "dsh-env-secret" } });
   const scan = await service.scanLocalConfigs();
-  // userchan appears once (deduped across profiles); _managed is sidecar-owned;
-  // _userown is a `_`-prefixed USER entry dsh never auto-owns → a candidate.
+  // userchan appears once (deduped across profiles); _managed, Anyswitch and the
+  // legacy _auto key are sidecar-owned; _userown is a `_`-prefixed USER entry
+  // dsh never auto-owns → a candidate.
   assert.deepEqual(agentKeys(scan, "dsh").sort(), ["dsh::_userown", "dsh::userchan"]);
   assert.equal(findEntry(scan, "dsh", "userchan").status, "ok");
   assert.equal(findEntry(scan, "dsh", "_userown").status, "ok");

@@ -104,11 +104,13 @@ const MANAGED_ID_PREFIXES = {
 };
 
 // Managed ids that are not prefix-shaped: the Anyswitch pseudo-channel's
-// provider id is its visible channel name (kimi/pi render provider ids
-// verbatim), so it must be matched exactly or a forged ticket could delete it.
+// provider id is its visible channel name (kimi/pi/dsh render provider ids
+// verbatim in their pickers), so it must be matched exactly or a forged ticket
+// could delete it.
 const MANAGED_ID_EXACT = {
   kimi: [ANYSWITCH_CHANNEL_NAME],
   pi: [ANYSWITCH_CHANNEL_NAME],
+  dsh: [ANYSWITCH_CHANNEL_NAME],
 };
 
 function assertNotManagedId(entry) {

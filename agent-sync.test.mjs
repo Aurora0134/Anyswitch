@@ -485,9 +485,10 @@ describe("agent-sync Anyswitch 渠道名（九端点回归闸）", () => {
     assert.equal(zcode.provider._auto.name, "Anyswitch");
     assert.deepEqual(Object.keys(zcode.provider._auto.models), ["auto", "vm-a"]);
 
-    // DSH：profile patch 的 displayName。
+    // DSH：伪渠道以渠道名为 key（选择器的最近使用行/补全直接打印 key），displayName 同名。
     const dshPatch = readFileSync(join(tmpRoot, ".dsh", "profiles", "desktop", "cordis.patch.yml"), "utf8");
-    assert.match(dshPatch, /_auto:\n\s+displayName: Anyswitch/);
+    assert.match(dshPatch, /Anyswitch:\n\s+displayName: Anyswitch/);
+    assert.doesNotMatch(dshPatch, /_auto:/);
 
     // pi：模型选择器每行渲染 [provider id]，伪渠道的 key 就是 Anyswitch。
     const pi = JSON.parse(readFileSync(join(tmpRoot, ".pi", "agent", "models.json"), "utf8"));

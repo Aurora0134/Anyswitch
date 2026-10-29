@@ -242,6 +242,31 @@ test("kimi/pi: 伪渠道的 Anyswitch 显示名 id 同样是托管条目，拒�
   assert.equal(readFileSync(piPath, "utf8"), piBefore, "pi 托管伪渠道逐字节不动");
 });
 
+test("dsh: 伪渠道的 Anyswitch key 同样是托管条目，拒删", async () => {
+  const { dir, backupRoot } = setup();
+  const fixture = dshPatchFixture([
+    "      Anyswitch:",
+    "        displayName: Anyswitch",
+    "        api: openai-completions",
+    "        baseURL: http://127.0.0.1:47820/openai/auto/v1",
+    "        models:",
+    "          - id: auto",
+    "            name: auto",
+  ]);
+  const filePath = writeFixture(dir, "dsh/profiles/dsh-tui/cordis.patch.yml", fixture);
+  const before = readFileSync(filePath, "utf8");
+
+  const result = await removeImportedEntries(
+    [entryOf("dsh", filePath, "Anyswitch", "http://127.0.0.1:47820/openai/auto/v1")],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.removed, []);
+  assert.equal(result.failed.length, 1);
+  assert.ok(result.failed[0].error.startsWith("managed-entry"), JSON.stringify(result.failed));
+  assert.equal(readFileSync(filePath, "utf8"), before, "dsh 托管伪渠道逐字节不动");
+});
+
 test("zcode: provider_config.json 缺失时只删 config.json", async () => {
   const { dir, backupRoot } = setup();
   const { configPath, personalPath } = zcodeFixtures(dir);

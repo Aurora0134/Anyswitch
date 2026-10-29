@@ -55,7 +55,7 @@ import {
 } from "./grok-merge-config.mjs";
 import { readOpencodeConfig } from "./opencode-merge-config.mjs";
 import { readModelsJson } from "./pi-merge-models.mjs";
-import { dshProfilePatchPaths, getYamlModule, dshYamlSchema } from "./dsh-merge-config.mjs";
+import { dshManagedKeys, dshProfilePatchPaths, getYamlModule, dshYamlSchema } from "./dsh-merge-config.mjs";
 import { readQoderSettings } from "./qoder-merge-config.mjs";
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
@@ -411,10 +411,9 @@ async function scanDsh(homeDir, sidecarIds) {
   const yaml = await getYamlModule();
   const schema = dshYamlSchema(yaml);
   // dsh's ownership record is the sidecar alone (its merge protects even
-  // `_`-prefixed user entries): on-disk managed keys are `_`+sidecar id.
-  const managedKeys = new Set(
-    [...sidecarIds].map((id) => (String(id).startsWith("_") ? String(id) : `_${id}`)),
-  );
+  // `_`-prefixed user entries); translate each managed id through the writer's
+  // own key mapping, which also covers the pseudo channel's display-name key.
+  const managedKeys = new Set([...sidecarIds].flatMap((id) => dshManagedKeys(id)));
   const byIdAndUrl = new Map();
   for (const patchPath of dshProfilePatchPaths(dshHome)) {
     if (!existsSync(patchPath)) continue;
