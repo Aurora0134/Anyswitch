@@ -12416,9 +12416,11 @@ async function api(method, path, body) {
   }
 
   // ── 卡片 A：主仓库 ──
-  // 候选区生命周期：未设置主仓库时默认展开（新用户靠它一键上手），设置后默认
-  // 收起、只留一行弱化入口——按钮常驻显眼处时误触即换仓库，而老手基本用不上。
-  // 显式点过展开/收起后以存档为准，默认不再介入。
+  // 候选区生命周期：它只服务于「还没有一个能用的主仓库」——未设置时默认展开（新
+  // 用户靠它一键上手），路径失效时留着当重设入口；主仓库已选定且路径有效时整块
+  // 撤下：这张卡讲的就是当前仓库本身，此时候选区既没有待选的东西，常驻一行还会
+  // 读成「引导没做完」。换仓库走「选择主仓库」。
+  // 未撤下的那两种状态下，显式点过展开/收起后以存档为准，默认不再介入。
   const SKILLS_CANDIDATES_OPEN_KEY = "skills-candidates-open";
   function skillsCandidatesOpen() {
     try {
@@ -12454,8 +12456,10 @@ async function api(method, path, body) {
     if (skillsFlashCount) { badge.classList.remove("badge-flash"); void badge.offsetWidth; badge.classList.add("badge-flash"); }
     const candidates = (skillsState && skillsState.candidates) || [];
     const usable = candidates.filter((c) => c.exists && c.path !== (skillsState && skillsState.repoPath));
+    // 已选定且路径有效 ⇒ 候选区整块不出（生命周期见本节顶部注释）
+    const repoReady = Boolean(skillsState && skillsState.repoConfigured && skillsState.repoValid);
     const candOpen = skillsCandidatesOpen();
-    candEl.innerHTML = !usable.length
+    candEl.innerHTML = (!usable.length || repoReady)
       ? ""
       : candOpen
         ? usable.map((c) => `<button class="btn btn-mini" data-cand="${escapeHtml(c.path)}" title="${escapeHtml(c.path)}">使用 ${escapeHtml(shortHomePath(c.path))}</button>`).join("") +

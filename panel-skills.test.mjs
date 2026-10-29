@@ -1297,3 +1297,67 @@ describe("skills source wording: the global directory is not an Agent", () => {
     assert.doesNotMatch(panelJs, /Agent <b>\$\{escapeHtml\(endpointId\)\}<\/b>/);
   });
 });
+
+// ── 主仓库卡：候选区只为「还没有能用的主仓库」存在 ──
+// 用户报「已选定仓库后卡上仍常驻一行『候选仓库』」：那句话的作用是把还没选定的人
+// 领进门，选完就只剩一行读着像引导没做完的遗留。这里真跑 renderSkillsRepo（DOM
+// 用替身），钉住三种状态各自出什么。
+describe("skills master repo card: candidates only while no usable repo is selected", () => {
+  const read = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "panel-ui", name), "utf8");
+  const panelJs = read("panel.js");
+
+  const CAND = "C://Users//me//.agents//skills";
+  const CONFIGURED = {
+    repoPath: "C:/repo/skills",
+    repoConfigured: true,
+    repoValid: true,
+    skills: [],
+    candidates: [{ path: CAND, exists: true }],
+  };
+
+  function el() {
+    return {
+      className: "", textContent: "", innerHTML: "", offsetWidth: 0,
+      classList: { remove() {}, add() {} },
+      querySelectorAll: () => [],
+    };
+  }
+
+  // savedOpen 模拟 localStorage 里「候选区展开过」的存档：撤下后它不该把候选区带回来
+  function renderCandidates(state, savedOpen) {
+    const m = panelJs.match(/function renderSkillsRepo\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "panel.js must contain function renderSkillsRepo");
+    const els = { skillsRepoBadge: el(), skillsRepoPath: el(), skillsRepoCandidates: el() };
+    const run = new Function(
+      "$", "skillsState", "escapeHtml", "shortHomePath", "skillsFlashCount",
+      "skillsCandidatesOpen", "setCandidatesOpen", "setSkillsRepo",
+      `${m[0]}\n return renderSkillsRepo;`,
+    )(
+      (id) => els[id], state,
+      (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
+      (p) => p, false,
+      () => savedOpen, () => {}, () => {},
+    );
+    run();
+    return els.skillsRepoCandidates.innerHTML;
+  }
+
+  it("已选定且路径有效：候选区整块不出，存档说「展开过」也不带回", () => {
+    for (const savedOpen of [true, false]) {
+      const html = renderCandidates(CONFIGURED, savedOpen);
+      assert.equal(html, "", `savedOpen=${savedOpen} 时仍渲染了候选区`);
+    }
+  });
+
+  it("未设置主仓库：候选区照旧在场（默认展开时是可点的一键入口）", () => {
+    const unset = { repoPath: null, repoConfigured: false, repoValid: false, skills: [], candidates: [{ path: CAND, exists: true }] };
+    assert.match(renderCandidates(unset, true), /data-cand="/);
+    assert.match(renderCandidates(unset, false), /候选仓库（1）▾/);
+  });
+
+  it("路径失效：候选区留在卡上当重设入口", () => {
+    const broken = { ...CONFIGURED, repoValid: false };
+    assert.match(renderCandidates(broken, false), /候选仓库（1）▾/);
+    assert.match(renderCandidates(broken, true), /data-cand="/);
+  });
+});
