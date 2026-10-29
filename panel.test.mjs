@@ -10679,10 +10679,10 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
   const backendSession = (id) => ({ id, label: id, backend: true, shell: {}, output: [] });
   const resizePosts = (state) => state.posts.filter((p) => p.method === "POST" && p.url.includes("/resize"));
 
-  it("首次开启：终端页隐藏期不建流不测量，点开可见后才建流并按可见尺寸收首帧", () => {
+  it("首次开启：终端页隐藏期不建流不测量，点开可见后才建流并按可见尺寸收首帧", async () => {
     const { sandbox, state } = terminalGateSandbox({ viewHidden: true });
     // 面板加载即初始化：终端页还在隐藏（display:none）
-    sandbox.connect(backendSession("sess-a"));
+    await sandbox.connect(backendSession("sess-a"));
     assert.equal(sandbox.xterm(), null, "隐藏期不创建 xterm 实例");
     assert.equal(state.terms.length, 0, "隐藏期不把 xterm 打开进宿主");
     assert.equal(state.eventSources.length, 0, "隐藏期不开 SSE 流");
@@ -10690,7 +10690,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
 
     // 用户点开终端页：DOM 先可见，建流路径才放行
     sandbox.setViewHidden(false);
-    sandbox.connect(backendSession("sess-a"));
+    await sandbox.connect(backendSession("sess-a"));
     assert.ok(sandbox.xterm(), "可见期创建 xterm");
     assert.equal(sandbox.xterm().openedHost, sandbox.host(), "xterm 打开进终端页宿主");
     assert.equal(state.eventSources.length, 1, "可见期建立 SSE 流");
@@ -10862,9 +10862,10 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.deepEqual(resizePosts(state)[1].body, { cols: 119, rows: 26 });
   });
 
-  it("进后台即拆会话字节流：连接断开、实例销毁，未解析积压随实例一起清掉", () => {
+  it("进后台即拆会话字节流：连接断开、实例销毁，未解析积压随实例一起清掉", async () => {
     const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
-    sandbox.connect(backendSession("sess-a"));
+    // 建连里 fit 的 resize POST 落定后才开流（时序钉见 T10）：await 到 EventSource 就绪
+    await sandbox.connect(backendSession("sess-a"));
     const term = sandbox.xterm();
     const source = sandbox.source();
     sandbox.setWindowHidden(true);
@@ -10876,9 +10877,9 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.equal(state.terms.length, 1, "拆流不顺手新建实例");
   });
 
-  it("可见时不误拆、无流时拆是空操作", () => {
+  it("可见时不误拆、无流时拆是空操作", async () => {
     const { sandbox } = terminalGateSandbox({ viewHidden: false });
-    sandbox.connect(backendSession("sess-a"));
+    await sandbox.connect(backendSession("sess-a"));
     const source = sandbox.source();
     sandbox.setWindowHidden(false);
     sandbox.sync();

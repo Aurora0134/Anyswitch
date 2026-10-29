@@ -1058,3 +1058,79 @@ describe("回放链与真 xterm 对账", () => {
     assert.deepEqual(mirror.screenLines(), xtermViewport(fresh), "宽字回放后列位必须一致");
   });
 });
+
+describe("渲染快照（跨宿主重启的恢复原料）", () => {
+  // 落盘原料从「字节尾」换成「渲染快照」后，恢复=loadSnapshot 直接重建镜像。
+  // 这里的判据是往返等价：快照重建出的镜像与原镜像在画面、属性、光标、回放、
+  // 滚动区五个面逐字节一致，且恢复后继续喂字节两边仍不脱节——任何一处不一致，
+  // 重启后的画面就是另一张。
+
+  test("往返一致：画面/属性/光标/回放/滚动区，恢复后续写不脱节", () => {
+    const a = createScreenMirror({ cols: 30, rows: 5 });
+    a.write("普通行\r\n\x1b[1m粗\x1b[0m中文🏴‍☠️宽字\e[38;2;1;2;3m彩色\e[0m\r\n");
+    for (let i = 1; i <= 10; i += 1) a.write(`历史行 ${i}\r\n`);
+    a.write("\x1b[s\x1b[4;2HX\x1b[?2004h\x1b[?25l");
+    const b = createScreenMirror({ cols: 30, rows: 5 });
+    assert.equal(b.loadSnapshot(a.serializeSnapshot()), true, "合法快照必须重建成功");
+    assert.deepEqual(a.screenLines(), b.screenLines(), "画面逐行一致");
+    assert.deepEqual(a.screenAttrs(), b.screenAttrs(), "属性（含底色）逐格一致");
+    assert.deepEqual(a.historyLines(), b.historyLines(), "滚动区逐行一致");
+    assert.equal(a.toReplay(), b.toReplay(), "回放逐字节一致");
+    assert.equal(a.info().row, b.info().row, "光标行一致");
+    assert.equal(a.info().col, b.info().col, "光标列一致");
+    // 恢复后继续喂同一段字节：两边必须仍逐格一致（宽字续格重建正确性的试金石——
+    // 续格丢了空串标记，恢复后第一次原地擦写就会留下半个宽字）
+    const followup = "\x1b[2;5H你好🌍混排\x1b[K\r\n\t尾行";
+    a.write(followup);
+    b.write(followup);
+    assert.deepEqual(a.screenLines(), b.screenLines(), "恢复后续写画面一致");
+    assert.deepEqual(a.screenAttrs(), b.screenAttrs(), "恢复后续写属性一致");
+  });
+
+  test("备屏会话的快照恢复：inAlt、退屏落点、1049 语义全保留", () => {
+    const a = createScreenMirror({ cols: 30, rows: 5 });
+    for (let i = 1; i <= 7; i += 1) a.write(`主屏历史 ${i}\r\n`);
+    a.write("\x1b7\x1b[?1049h备屏帧");
+    assert.equal(a.info().inAlt, true, "前置：在备屏");
+    const b = createScreenMirror({ cols: 30, rows: 5 });
+    b.loadSnapshot(a.serializeSnapshot());
+    assert.equal(b.info().inAlt, true, "备屏语态必须随快照恢复");
+    assert.equal(a.toReplay(), b.toReplay(), "备屏会话的回放逐字节一致");
+    // 退备屏：两边落回同一张主屏、同一个保存点
+    a.write("\x1b[?1049l\x1b8");
+    b.write("\x1b[?1049l\x1b8");
+    assert.deepEqual(a.screenLines(), b.screenLines(), "退备屏后主屏一致");
+    assert.equal(a.toReplay(), b.toReplay(), "退备屏后回放一致");
+  });
+
+  test("快照预算按 UTF-8 字节裁最旧历史行，保存光标绝对行同步上提", () => {
+    const a = createScreenMirror({ cols: 20, rows: 3 });
+    for (let i = 1; i <= 30; i += 1) a.write(`历史${i}汉字\r\n`); // CJK：字节≠字符
+    a.write("\x1b7"); // 保存光标（缓冲绝对行）
+    const full = a.serializeSnapshot();
+    const trimmed = a.serializeSnapshot({ historyBytes: 120 });
+    assert.ok(trimmed.history.length < full.history.length, "预算生效：滚动区被裁");
+    const bytes = [...trimmed.history, ...trimmed.screen]
+      .reduce((total, row) => total + Buffer.byteLength(row.t), 0);
+    assert.ok(bytes <= 120 + 3 * (20 + 8), "预算按 UTF-8 字节计（屏幕行除外）");
+    // 裁剪后 saved.abs 已上提：恢复后的镜像与「历史更短」的语义一致，
+    // ESC 8 的落点必须与原镜像同屏同列
+    const b = createScreenMirror({ cols: 20, rows: 3 });
+    b.loadSnapshot(trimmed);
+    a.write("\x1b8");
+    b.write("\x1b8");
+    assert.equal(a.info().row, b.info().row, "ESC 8 落点行一致（绝对行随裁剪上提）");
+    assert.equal(a.info().col, b.info().col, "ESC 8 落点列一致");
+  });
+
+  test("畸形快照兜底成出厂态：字段缺失/类型不对不抛错", () => {
+    const b = createScreenMirror({ cols: 20, rows: 4 });
+    assert.equal(b.loadSnapshot(null), false, "null 拒绝");
+    assert.equal(b.loadSnapshot("junk"), false, "非对象拒绝");
+    assert.equal(b.loadSnapshot({ cols: "x", rows: 0, screen: "nope", history: 7, saved: { abs: "y" } }), true,
+      "对象就接受，字段逐项兜底");
+    assert.deepEqual(b.screenLines(), ["", "", "", ""], "兜底后是空白出厂屏");
+    assert.ok(Number.isFinite(b.info().row) && Number.isFinite(b.info().col), "光标是有限值");
+    assert.doesNotThrow(() => b.toReplay(), "兜底态的回放可用");
+  });
+});

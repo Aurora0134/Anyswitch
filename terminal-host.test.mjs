@@ -63,6 +63,15 @@ function readSessionRecord(host, id) {
   return JSON.parse(readFileSync(host.sessionStatePath(id), "utf8"));
 }
 
+// 记录的恢复原料是渲染快照（screen，v2 起）。要判「某段输出到没到盘上」，看快照
+// 里的渲染行：屏幕行 + 滚动区行的序列化文本。快照的行格式就是镜像自己的
+// serializeRow 输出（SGR 标注串），字面标记直接 includes 就能认。
+function recordScreenText(record) {
+  const screen = record.screen && Array.isArray(record.screen.screen) ? record.screen.screen : [];
+  const history = record.screen && Array.isArray(record.screen.history) ? record.screen.history : [];
+  return [...history, ...screen].map((row) => (row && typeof row.t === "string" ? row.t : "")).join("\n");
+}
+
 // SSE 帧采集器：后台持续读流、按 "\n\n" 切帧、解析 event:/data: 两行、追加进
 // frames，直到连接结束或被 abort 打断。合帧用例要数「一个窗口内出了几帧」，
 // 任何一次被半途弃置的读取都会吞掉后续数据让帧数失真，所以这里从不停读：
@@ -232,7 +241,7 @@ test("会话信号面：出生不播种 lastActiveAt、键入记 lastInputAt、s
 // 这里钉四件事：窗口按字节裁、只整块从头部丢、轮询列表不带走窗口、落盘尾部另按更紧
 // 的预算（整文件按防抖重写）。最后一件顺带钉住「从盘上恢复的会话，字节位是重算的」
 // ——不重算就是 NaN 比较，裁尾静默失效，窗口无上限地长。
-test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带窗口、落盘尾部更紧", async () => {
+test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带窗口、落盘换渲染快照", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-budget-`);
   const first = capturingPtyModule();
   const host = createTerminalHost({ root, port: 0, ptyModule: first.ptyModule, logger: { warn() {} } });
@@ -272,22 +281,25 @@ test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带�
     // 纯空跳，脏还在就直接冲），下面两次读盘不再跟在途写赛跑。
     await host.persistNow();
     const onDisk = readSessionRecord(host, created.id);
-    const diskBytes = Buffer.byteLength(onDisk.buffer.join(""));
-    assert.ok(diskBytes <= 128 * KB, `落盘尾部 ${diskBytes} 字节，超 128KB 预算`);
-    assert.ok(diskBytes > 100 * KB, `落盘尾部只剩 ${diskBytes} 字节，裁得比预算狠`);
-    assert.ok(diskBytes < liveBytes, "落盘尾部紧于内存窗口");
-    assert.ok(onDisk.buffer.every((chunk) => whole.test(chunk)), "落盘尾部同样整块");
+    // 落盘原料换成渲染快照（v2）：记录含 screen、不再带字节尾
+    assert.equal(onDisk.buffer, undefined, "字节尾不再落盘（恢复原料换成渲染快照）");
+    assert.ok(onDisk.screen && typeof onDisk.screen === "object", "落盘的是渲染快照");
+    assert.equal(onDisk.screen.screen.length, onDisk.rows, "屏幕行整屏落盘（最低交付物）");
+    assert.ok(onDisk.screen.consumedBytes > 0, "consumedBytes 随快照落盘（stream 的渲染回放门槛）");
+    const snapText = recordScreenText(onDisk);
+    assert.ok(snapText.includes("echo:#199"), "最新内容在快照里（画面+滚动区）");
     await host.close();
     hostClosed = true;
 
-    // 从盘上恢复后继续输出：裁尾仍按字节生效（字节位重算过，不是 undefined/NaN）
+    // 从盘上恢复：画面按快照整屏回来，不再按字节尾近似重建
     const second = capturingPtyModule();
     restoredHost = createTerminalHost({ root, port: 0, ptyModule: second.ptyModule, logger: { warn() {} } });
     const restoredPort = await listen(restoredHost);
     const restoredSession = restoredHost.sessions.get(created.id);
     assert.equal(restoredSession.pty, null, "恢复的会话不自动复活");
-    assert.ok(restoredSession.bufferBytes > 100 * KB && restoredSession.bufferBytes <= 128 * KB,
-      `恢复即按盘上尾部重算字节位（实得 ${restoredSession.bufferBytes}）`);
+    assert.ok(restoredSession.screen.info().consumedBytes > 0, "恢复的会话过渲染回放门槛");
+    assert.ok(restoredSession.screen.toReplay().includes("echo:#199"), "恢复画面带最新内容");
+    assert.equal(restoredSession.bufferBytes, 0, "字节尾不落盘：恢复的内存窗口从空起");
     await fetch(url(`/terminal/sessions/${created.id}/restart`, restoredPort), {
       method: "POST", headers: { ...token(restoredHost), "content-type": "application/json" }, body: "{}",
     });
@@ -300,14 +312,16 @@ test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带�
     const restoredLive = restoredHost.sessions.get(created.id);
     assert.ok(Number.isFinite(restoredLive.bufferBytes) && restoredLive.bufferBytes > 0,
       "字节位保持有限值（NaN 比较会让裁尾静默失效）");
+    // 巨行的开头早被镜像 5000 行滚动上限甩出去（快照只装最新画面），
+    // 再补一个小标记当「最新内容」的判据
+    revived.write("after-mega");
 
-    // 落盘尾部同样「最新一块无条件留」：单块超 128KB 预算也得存下去，
-    // 否则宿主再重启一次，恢复回来的就是一块白屏而不是那张画满的屏。
+    // 落盘快照同样「屏幕行无条件留」：下一笔记录至少带整份当前屏
     await waitPersist();
     await restoredHost.persistNow();
     const diskAgain = readSessionRecord(restoredHost, created.id);
-    assert.equal(diskAgain.buffer.length, 1, "超预算的单块照样落盘");
-    assert.ok(diskAgain.buffer[0].includes(marker(900)), "落的就是最新那块");
+    assert.equal(diskAgain.screen.screen.length, diskAgain.rows, "屏幕行整屏保留");
+    assert.ok(recordScreenText(diskAgain).includes("echo:after-mega"), "最新内容在快照里");
   } finally {
     if (!hostClosed) await host.close().catch(() => {});
     if (restoredHost) await restoredHost.close().catch(() => {});
@@ -781,7 +795,7 @@ test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
     calls[0].pty.dataListener("新输出");
     await host.persistNow();
     const persisted = readSessionRecord(host, created.id);
-    assert.ok(persisted.buffer.some((chunk) => chunk.includes("新输出")), "置脏后的变更落盘");
+    assert.ok(recordScreenText(persisted).includes("新输出"), "置脏后的变更落盘");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -791,7 +805,7 @@ test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
 // ④ 异步原子写的可观察性质：写进行中的任意时刻，落盘文件都是完整可解析的 JSON
 // （读者要么看到旧版全文、要么看到新版全文，永不看到半份）。大块输出拖长
 // writeFile(临时文件) 阶段，并发读者与写真正在时间上叠起来。读的是这条会话的
-// 记录文件——128KB 级尾部写的就是它（索引只有几百字节，叠不上写）。
+// 记录文件——快照写的就是它（索引只有几百字节，叠不上写）。
 test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-atomic-"));
   let pty = null;
@@ -830,11 +844,11 @@ test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件"
     for (const [index, text] of reads.entries()) {
       let parsed = null;
       assert.doesNotThrow(() => { parsed = JSON.parse(text); }, `第 ${index} 次读必须是完整 JSON`);
-      assert.ok(Array.isArray(parsed.buffer), `第 ${index} 次读必须是完整会话记录`);
+      assert.ok(parsed.screen && typeof parsed.screen === "object", `第 ${index} 次读必须是完整会话记录`);
     }
-    // 终态也完整：最后一轮的大块按落盘尾部预算留在盘上。
+    // 终态也完整：最后一轮的大块按快照预算留在盘上。
     const final = JSON.parse(readFileSync(recordPath, "utf8"));
-    assert.ok(final.buffer.length >= 1, "终态快照内容完好");
+    assert.ok(final.screen.screen.length >= 1, "终态快照内容完好");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -1014,8 +1028,11 @@ test("⑧ N 个会话同时出字：单拍被上限截断、欠账自己续上�
     for (const pty of ptys) pty.dataListener("tick");
     const first = await waitForStateWrite(root, before);
     assert.ok(first.files > 0, "第一拍必须真的落盘");
-    // 上限：单拍写量必须落在「上限 × 每条尾部预算」的量级内，不能是 N×尾部。
-    const capBytes = 4 * 128 * KB_ * 1.25;
+    // 上限：单拍写量必须落在「序列化上限 + 一份超限整写」的量级内，不能是 N×尾部。
+    // 快照的落盘预算按原始字节计（128KB），但记录序列化成 JSON 时 ESC 密集内容
+    // 膨胀到约 2 倍——泵的 PERSIST_PASS_MAX_BYTES（512KB 序列化）截断后，超限的
+    // 那一份仍整份写，所以上界 = 512KB + 一份（≈128KB×2.4），给到 1.5 倍余量。
+    const capBytes = 512 * KB_ * 1.5;
     assert.ok(first.bytes <= capBytes,
       `单拍写量 ${first.bytes}B 必须落在上限量级内（≤ ${Math.round(capBytes)}B）；旧实现一轮写 ${n}×128KB ≈ 2.5MB`);
 
@@ -1037,13 +1054,13 @@ test("⑧ N 个会话同时出字：单拍被上限截断、欠账自己续上�
     assert.ok(host.persistStats.lastPassBytes <= 4 * 128 * KB_ * 1.5,
       `单拍序列化字节 ${host.persistStats.lastPassBytes}B 必须落在 4 份的量级内`);
 
-    // 收敛：所有会话的记录都落到盘上，每条都守住 128KB 落盘尾部预算。
+    // 收敛：所有会话的记录都落到盘上，每条都守住 128KB 快照落盘预算。
     await host.persistNow();
     for (const session of host.sessions.values()) {
       const record = readSessionRecord(host, session.id);
-      const tailBytes = Buffer.byteLength(record.buffer.join(""));
-      assert.ok(tailBytes <= 128 * KB_,
-        `收敛后每条记录守 128KB 落盘尾部（${session.id} 实得 ${tailBytes}B）`);
+      const snapBytes = Buffer.byteLength(recordScreenText(record));
+      assert.ok(snapBytes <= 128 * KB_ * 1.15,
+        `收敛后每条快照守 128KB 落盘预算（${session.id} 实得 ${snapBytes}B；余量吸收逐行开销与屏幕行）`);
     }
     // 一拍写完的份数确实少于会话总数——上限真的在截断，不是「恰好一轮写完」。
     assert.ok(first.files < n || n <= 4,
@@ -1085,42 +1102,30 @@ test("⑨ 新码读得回旧格式（v1 整份文件）：逐字段恢复、尾�
     assert.ok(session.screen.screenLines().join("|").includes("旧宿主留下的第二屏"), "镜像已由尾部重喂出来");
 
     // 自然迁移：下一次落盘把 v1 换成 v2（索引点 id，正文进每会话记录），不需要
-    // 一次性迁移脚本，也不留迁移义务。
+    // 一次性迁移脚本，也不留迁移义务。迁移后的正文是渲染快照——字节尾不再落盘，
+    // 旧字节已按旧路径重喂进镜像，画面由快照承载。
     await restored.persistNow();
     const index = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
     assert.equal(index.version, 2, "索引升到 v2");
     assert.deepEqual(index.sessions, ["legacy-session-1"], "索引只点名 id");
     assert.deepEqual(index.theme, { dark: false, background: "#101010", foreground: "", palette: null }, "主题随索引保留（v1 无前景/调色板，按未上报落档）");
     const record = JSON.parse(readFileSync(restored.sessionStatePath("legacy-session-1"), "utf8"));
-    assert.deepEqual(record.buffer, legacyBuffer, "记录文件里的尾部与旧文件逐位相同");
+    assert.equal(record.version, 2, "记录升到 v2");
+    assert.equal(record.buffer, undefined, "字节尾不再落盘");
+    assert.ok(record.screen && typeof record.screen === "object", "迁移后的记录落渲染快照");
+    assert.ok(recordScreenText(record).includes("旧宿主留下的第二屏"), "旧内容由快照承载");
   } finally {
     await restored.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-// ⑩ 双上限与「最新一块必留」在分文件落盘之后仍成立。
+// ⑩ 双上限与「最新一块必留」在渲染快照落盘之后仍成立。
 // 契约（不许因落盘形态换代而破）：内存环 512KB + 4000 块；裁尾只整块从头部丢；
-// 最新一块无条件保留；落盘尾部 128KB、同样最新一块无条件留（单块超预算也得存，
-// 否则宿主再启动一次恢复回来的就是白屏）；session.bufferBytes 三处维护
-// （emit 累加 / restart 归零 / restore 重算）任何一处漏掉都让裁尾静默失效。
-//
-// 这是「契约保持」钉子，不是病灶钉子：它在改造前后都该绿。所以读盘用
-// readDiskTail 按形态自适应（v1 整份文件的 sessions[0].buffer / v2 每会话记录），
-// 不依赖新码才有的 host.sessionStatePath——否则它在旧码上会因为缺方法而红，
-// 那就分不清「契约破了」和「API 没了」。
-function readDiskTail(host, root, id) {
-  if (typeof host.sessionStatePath === "function") {
-    const record = JSON.parse(readFileSync(host.sessionStatePath(id), "utf8"));
-    return Array.isArray(record.buffer) ? record.buffer : [];
-  }
-  // v1：整份状态文件，按 id 找那条
-  const state = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
-  const item = (state.sessions ?? []).find((entry) => entry?.id === id);
-  return Array.isArray(item?.buffer) ? item.buffer : [];
-}
-
-test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘后仍成立", async () => {
+// 最新一块无条件保留；落盘快照守 128KB 预算、屏幕行无条件整屏保留（它是恢复的
+// 最低交付物）；session.bufferBytes 三处维护（emit 累加 / restart 归零 / restore
+// 重算）任何一处漏掉都让裁尾静默失效。
+test("⑩ 双上限（512KB / 4000 块）与最新一块必留在渲染快照落盘后仍成立", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-dualcap-"));
   const { calls, ptyModule } = capturingPtyModule();
   const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
@@ -1151,21 +1156,21 @@ test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘
     assert.ok(bytes <= 512 * KB_, `内存窗口 ${bytes}B 超 512KB 字节上限`);
     assert.ok(session.buffer[session.buffer.length - 1].includes("#59"), "字节裁剪后最新一块仍在");
 
-    // 落盘尾部：128KB 预算 + 最新一块无条件留。
+    // 落盘快照：屏幕行无条件整屏保留、最新内容在快照里。
     await host.persistNow();
-    const diskTail = readDiskTail(host, root, created.id);
-    const diskBytes = Buffer.byteLength(diskTail.join(""));
-    assert.ok(diskBytes <= 128 * KB_, `落盘尾部 ${diskBytes}B 超 128KB 预算`);
-    assert.ok(diskTail[diskTail.length - 1].includes("#59"), "落盘尾部保留的也是最新一块");
+    const diskRecord = readSessionRecord(host, created.id);
+    assert.ok(diskRecord.screen && Array.isArray(diskRecord.screen.screen), "落盘的是渲染快照");
+    assert.equal(diskRecord.screen.screen.length, diskRecord.rows, "屏幕行整屏落盘（最低交付物）");
+    assert.ok(recordScreenText(diskRecord).includes("#59"), "最新内容在快照里");
 
-    // 单块超预算：最新一块照样落盘（不然再启动一次就是白屏）
+    // 单块超预算：屏幕行照样整屏保留（恢复的最低交付物，不参与裁剪）
     pty.dataListener(`#MEGA ${"y".repeat(400 * KB_)}`);
     await host.persistNow();
-    const megaTail = readDiskTail(host, root, created.id);
-    assert.equal(megaTail.length, 1, "超预算的单块独占落盘尾部，旧块整块让位");
-    assert.ok(megaTail[0].includes("#MEGA"), "落的就是最新那块");
+    const megaRecord = readSessionRecord(host, created.id);
+    assert.equal(megaRecord.screen.screen.length, megaRecord.rows, "超预算下屏幕行照样整屏落盘");
 
-    // 宿主重启：恢复时按盘上尾部重算字节位（第三处维护点），不是 undefined/NaN
+    // 宿主重启：恢复按快照重建镜像（画面非空、过渲染回放门槛）；
+    // 内存窗口从空起（字节尾不再落盘），字节位保持有限值
     await host.close();
     const restored = createTerminalHost({
       root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} },
@@ -1173,9 +1178,9 @@ test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘
     try {
       const revived = restored.sessions.get(created.id);
       assert.ok(revived, "盘上落过的会话读得回来");
-      assert.equal(revived.bufferBytes, Buffer.byteLength(revived.buffer.join("")),
-        "restore 按读回的尾部重算字节位（漏了这处就是 NaN，裁尾静默失效）");
-      assert.ok(Number.isFinite(revived.bufferBytes) && revived.bufferBytes > 0, "字节位有限且非零");
+      assert.ok(revived.screen.info().consumedBytes > 0, "恢复的会话过渲染回放门槛");
+      assert.ok(revived.screen.screenLines().some((line) => line !== ""), "恢复画面非空");
+      assert.equal(revived.bufferBytes, 0, "字节尾不落盘：恢复窗口从空起");
     } finally {
       await restored.close();
     }
@@ -1249,10 +1254,11 @@ async function waitForQuiescence(root, { quietMs = 150, timeoutMs = 3000 } = {})
 // 中间某个 await 之后），这段窗口里新到的变更就会「不在文本里、却被当成已写」——
 // 那一块永久只活在内存里。旧写法（base 的注释专门警告过）正是这么写的。
 //
-// 复现手法：让一份超大记录正在写盘（8MB，写它要十几毫秒），确认这一拍还没结束
-// （passes 没增加 = 我们确实在窗口内），此刻再 emit 一个带标记的块，然后落定，
-// 断言标记必须在盘上。修前实测：脏被抹成 0，随后的 persistNow() 是纯空跳，
-// 标记不在盘上。
+// 注入点：persistNow 同步走进泵、序列化、清脏，在第一个 I/O await 上挂起。排队一个
+// 微任务，它必然在「已清脏、写未完」的窗口内执行——不赌磁盘快慢（快照化后记录从
+// 8MB 降到 128KB 量级，旧的 sleep(3) 观测窗口已经窄到测不住）。微任务里 emit 带
+// 标记的块，然后落定，断言标记必须在盘上。修前实测：脏被抹成 0，随后的
+// persistNow() 是纯空跳，标记不在盘上。
 test("⑪ 写盘期间到达的输出块必须落盘，不被那一笔成功的写抹掉", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-lostupdate-"));
   const { calls, ptyModule } = capturingPtyModule();
@@ -1267,16 +1273,14 @@ test("⑪ 写盘期间到达的输出块必须落盘，不被那一笔成功的�
     }).then((r) => r.json());
     const pty = calls[0].pty;
 
-    // 一块 8MB：单块超落盘尾部预算时「最新一块必留」，所以这份记录约 8MB，
-    // writeFile+rename 要十几毫秒，窗口足够宽。
-    pty.dataListener(`${"a".repeat(8 * 1024 * KB_)}`);
-    await sleep(200);
-
+    pty.dataListener("seed");
+    await host.persistNow();
     const passesBefore = host.persistStats.passes;
     const inFlight = host.persistNow();
-    await sleep(3);
+    // 微任务注入点：此刻必然已过「序列化＋清脏」、尚未完成写盘
+    await Promise.resolve();
     assert.equal(host.persistStats.passes, passesBefore,
-      "前置：8MB 的写盘此刻必须仍在进行（否则这次没测到窗口，得加大块）");
+      "前置：第二笔写盘此刻必须仍在进行（passes 未增加）");
     // 就在写盘窗口内：新到一个块
     pty.dataListener(marker);
     const late = host.persistNow();
@@ -1284,7 +1288,7 @@ test("⑪ 写盘期间到达的输出块必须落盘，不被那一笔成功的�
     await host.persistNow();
 
     const record = readSessionRecord(host, created.id);
-    assert.ok(record.buffer.join("").includes(marker),
+    assert.ok(recordScreenText(record).includes(marker),
       "写盘期间到达的块必须在盘上（不在盘上 = 那一笔成功的写把新脏抹掉了，关停前最后一块会永久丢）");
   } finally {
     await host.close().catch(() => {});
@@ -1399,10 +1403,10 @@ test("⑬ 全量冲净不被定向冲净降级：返回时不留欠账", async (
       assert.equal(host.persistStats.backlog, 0,
         `第 ${attempt} 次：全量冲净返回时必须没有欠账（实得 ${host.persistStats.backlog}）——关停时 SIGTERM 紧接着 exit(0)，欠账就是丢尾部`);
     }
-    // 落盘实证：每条会话的记录里都有最后一批尾部
+    // 落盘实证：每条会话的快照里都有最后一批输出
     for (const id of ids) {
       const record = readSessionRecord(host, id);
-      assert.ok(record.buffer.join("").includes("flush-11"), `会话 ${id} 的最后一批尾部必须在盘上`);
+      assert.ok(recordScreenText(record).includes("flush-11"), `会话 ${id} 的最后一批输出必须在盘上`);
     }
   } finally {
     await host.close().catch(() => {});
@@ -1458,7 +1462,7 @@ test("⑭ 全量冲净写期间又置脏：返回时必须没有欠账，且最�
       "正常路径不该留下「冲净不完整」的记录");
     for (const id of ids) {
       const record = readSessionRecord(host, id);
-      assert.ok(record.buffer.join("").includes(marker),
+      assert.ok(recordScreenText(record).includes(marker),
         `会话 ${id}：飞行期间到达的标记块必须在盘上（不在 = 那一轮之后泵提前退出了）`);
     }
   } finally {
@@ -2019,14 +2023,15 @@ test("restart 保史：镜像与字节窗原地保留，新进程续写在旧画
     assert.equal(calls.length, 2, "restart 重新 spawn");
     assert.equal((await restarted.json()).status, "running", "重开后回到 running");
 
-    assert.equal(session.screen.info().historyLines, historyBefore, "重开不得清镜像滚动区（历史归页签，2026-10-18 拍板）");
-    assert.ok(session.buffer.length >= bufferBefore, "重开不得清字节窗（宿主重启恢复的原料）");
-    assert.ok(session.screen.screenLines().join("|").includes("行 8"), "旧画面内容保留");
+    assert.equal(session.screen.info().historyLines, historyBefore + 4, "重开不清镜像滚动区，旧屏整屏归档（历史归页签＋干净基底，2026-10-29 拍板）");
+    assert.ok(session.buffer.length >= bufferBefore, "重开不得清字节窗");
+    assert.ok(session.screen.screenLines().every((line) => line === ""), "新进程画在干净屏上（旧屏不留在可见区被无擦除 TUI 叠画）");
+    assert.ok(session.screen.historyLines().join("|").includes("行 8"), "旧屏内容在滚动区里可回翻");
 
-    // 续写：新进程输出接在旧画面下方，滚动把旧屏行推入历史
+    // 续写：新进程从干净屏顶部起笔（归档后光标在行首，首行不触发滚动）
     calls[1].pty.dataListener?.("新进程行 1\r\n");
-    assert.equal(session.screen.info().historyLines, historyBefore + 1, "续写滚动进历史（旧画面下移一行）");
-    assert.ok(session.screen.screenLines().join("|").includes("新进程行 1"), "新进程输出落在画面上");
+    assert.equal(session.screen.info().historyLines, historyBefore + 4, "归档后历史只增不减");
+    assert.ok(session.screen.screenLines()[0].includes("新进程行 1"), "新进程输出落在干净屏顶部");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -2103,7 +2108,7 @@ test("并发 restart 合并成一次 spawn：两个请求拿到同一份快照",
   }
 });
 
-test("restart 衔接卫生：死在备屏先弹回主画面、光标半行补换行，合成字节入 journal", async () => {
+test("restart 衔接卫生：死在备屏先弹回主画面、旧屏归档进滚动区，合成字节入 journal", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-keep-history-`);
   const { calls, ptyModule } = capturingPtyModule();
   const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
@@ -2129,17 +2134,16 @@ test("restart 衔接卫生：死在备屏先弹回主画面、光标半行补换
 
     const info = session.screen.info();
     assert.equal(info.inAlt, false, "重开前必须弹回主画面——否则新进程输出画进备屏、退屏时整段丢");
-    assert.equal(info.col, 0, "弹回后光标在行首（主屏半行已被补换行送走）");
-    const screen = session.screen.screenLines().join("|");
-    assert.ok(screen.includes("主屏半行"), "弹回后主屏内容在");
-    assert.ok(!screen.includes("备屏帧"), "弹回后不得残留备屏帧");
+    assert.equal(info.col, 0, "弹回并归档后光标在行首");
+    assert.ok(session.screen.screenLines().every((line) => line === ""), "旧屏整屏归档：可见区干净（无擦除 TUI 叠不出残影）");
+    assert.ok(session.screen.historyLines().join("|").includes("主屏半行"), "旧屏内容进滚动区可回翻");
     // 合成字节走 emit 单咽喉：进字节窗，在线客户端与宿主重启恢复同拍复现同一衔接
     assert.ok(session.buffer.some((chunk) => chunk.includes("\u001b[?1049l")), "弹屏字节入 journal");
-    assert.ok(session.buffer.some((chunk) => chunk.includes("\r\n")), "补行字节入 journal");
+    assert.ok(session.buffer.some((chunk) => chunk.includes("\u001b[r\u001b[4;1H")), "旧屏归档序列入 journal（重置滚动区＋滚到底＋整屏 LF）");
 
-    // 续写从行首整行起笔，不拼进旧行尾
+    // 续写从干净屏顶部起笔
     calls[1].pty.dataListener?.("新壳起笔");
-    assert.equal(session.screen.screenLines()[1], "新壳起笔", "新进程首行整行落笔（不拼接）");
+    assert.ok(session.screen.screenLines()[0].includes("新壳起笔"), "新进程首行落在干净屏顶部");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -2273,11 +2277,11 @@ test("同身份 restart 保史：同 agentId/resume 重开仍走衔接卫生（�
       }),
     });
     assert.equal(same.status, 200, "同身份重开成功");
-    assert.equal(session.screen.info().historyLines, historyBefore, "同身份重开不得重置镜像（回滚历史归页签）");
+    assert.equal(session.screen.info().historyLines, historyBefore + 4, "同身份重开不清镜像滚动区，旧屏归档后只增不减（回滚历史归页签）");
     assert.ok(session.buffer.length >= bufferBefore, "同身份重开不得清字节窗");
-    assert.ok(session.screen.screenLines().join("|").includes("行 8"), "旧画面内容保留");
+    assert.ok(session.screen.historyLines().join("|").includes("行 8"), "旧画面内容在滚动区可回翻");
     calls[1].pty.dataListener?.("续写行\r\n");
-    assert.ok(session.screen.screenLines().join("|").includes("续写行"), "新输出续写在旧画面下方");
+    assert.ok(session.screen.screenLines()[0].includes("续写行"), "新输出落在干净屏顶部");
 
     // 换成另一段会话（同 agent、resume id 不同）＝身份变了：镜像按身份重置
     for (let i = 1; i <= 3; i += 1) calls[1].pty.dataListener?.(`切换前帧-${i}\r\n`);
@@ -2435,13 +2439,79 @@ test("宿主重启后 revive 保史：恢复的镜像不被重开路由抹掉（
     const revived = await fetch(url2(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(secondHost) });
     assert.equal(revived.status, 200);
     assert.ok(restored.screen.info().historyLines > 0, "revive 不得把恢复的镜像抹成空屏（历史归页签）");
-    assert.ok(restored.screen.screenLines().join("|").includes("历史源"), "恢复的旧画面保留");
-    // 续写接在恢复画面下方
+    assert.ok(restored.screen.historyLines().join("|").includes("历史源"), "恢复的旧屏归档进滚动区，内容可回翻");
+    assert.ok(restored.screen.screenLines().every((line) => line === ""), "revive 后可见区干净，新进程画在干净屏上");
+    // 续写从干净屏顶部起笔
     second.calls[0].pty.dataListener?.("revive 续写\r\n");
-    assert.ok(restored.screen.screenLines().join("|").includes("revive 续写"), "revive 后新输出落在画面上");
+    assert.ok(restored.screen.screenLines()[0].includes("revive 续写"), "revive 后新输出落在干净屏顶部");
   } finally {
     if (!hostClosed) await host.close().catch(() => {});
     if (secondHost) await secondHost.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 恢复的端到端判据是「逐字节一致」而不是「有内容」：重启后 F5 看到的画面必须
+// 就是关停前那张——快照经 JSON 落盘再读回，任何编解码损失都会在这里现形。
+test("快照恢复端到端：落盘→重启→重建的画面与关停前逐字节一致", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-snapshot-e2e-`);
+  const first = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule: first.ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  let secondHost = null;
+  let hostClosed = false;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "端到端", cwd: root, shell: "powershell", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    const pty = first.calls[0].pty;
+    pty.dataListener?.("普通行\r\n\x1b[1m粗体\x1b[0m中文🏴‍☠️宽\r\n");
+    for (let i = 1; i <= 9; i += 1) pty.dataListener?.(`历史 ${i}\r\n`);
+    pty.dataListener?.("\x1b7\x1b[?1049h备屏帧\x1b[?2004h");
+    await host.persistNow();
+    const before = host.sessions.get(created.id).screen.toReplay();
+    await host.close();
+    hostClosed = true;
+
+    secondHost = createTerminalHost({
+      root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} },
+    });
+    const restored = secondHost.sessions.get(created.id);
+    assert.ok(restored, "盘上落过的会话读得回来");
+    assert.equal(restored.screen.toReplay(), before, "恢复画面与关停前逐字节一致（含备屏语态）");
+    assert.equal(restored.screen.info().inAlt, true, "备屏语态随快照恢复");
+    // 恢复后备屏语义连续：退屏落到同一张主屏、同一个保存点
+    restored.screen.write("\x1b[?1049l\x1b8");
+    assert.ok(restored.screen.screenLines().join("|").includes("历史 9"), "退屏后主屏画面在（保存点与可见内容随快照回来）");
+  } finally {
+    if (!hostClosed) await host.close().catch(() => {});
+    if (secondHost) await secondHost.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 归档只针对「看得见东西」的屏：零输出会话重开不注入任何合成字节——
+// 不把一排空行推进历史，也不给在线客户端发无意义帧。
+test("衔接卫生对空白屏是纯空跳：零输出会话重开不注入任何合成字节", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-hygiene-blank-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "空白", cwd: root, shell: "powershell", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    const session = host.sessions.get(created.id);
+    assert.equal(session.buffer.length, 0, "前置：零输出");
+    await fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) });
+    assert.equal(session.buffer.length, 0, "空白屏重开不注入合成字节（无归档、无补行）");
+    assert.equal(session.screen.info().historyLines, 0, "历史不被空行污染");
+  } finally {
+    await host.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
