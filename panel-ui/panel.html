@@ -537,26 +537,29 @@ if (window.panelStartupController) panelStartupPlay();
   </nav>
   <!-- 设置目录：进设置视图时整组换上（替代主 tab 组，换内容而非追加），退出即还原。
        五项标签逐字复用设置子 tab 文本（通用/高级选项/自动路由/主题/关于），图标与主
-       tab 同一 feather 风（24 视窗空心描边 round caps）；点击与原子 tab 同走
+       tab 同一 feather 风（24 视窗空心描边 round caps）。图标按子页语义取：通用=齿轮
+       （设置入口那枚齿轮在设置态让位给「返回」，不同屏，不会两枚撞在一起）、高级选项=
+       推子（细调）、自动路由=路线（页内两张卡本就是「端点＋连线」）、主题=调色板
+       （不用日月：头行亮暗切换钮就在旁边）、关于=info。点击与原子 tab 同走
        activateSettingsSubTab，高亮/aria-selected/aria-current 由该函数内同步（同一
        状态源，双向一致）。静态 hidden：v1 整栏不出、v2 非设置态不出；显隐由
        body.settings-mode（运行时）与 data-prepaint-view="settings"（首帧）两条
        !important 规则收权，窄栏（<1200）图标栏的标签收起由 .rail-tab-label 既有规则自动覆盖。 -->
   <nav class="rail-dir" id="railSettingsDir" role="tablist" aria-label="设置分类" hidden>
     <button class="rail-tab" id="railDirGeneral" role="tab" aria-selected="false" aria-controls="settingsPanelGeneral" title="通用">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       <span class="rail-tab-label">通用</span>
     </button>
     <button class="rail-tab" id="railDirAdvanced" role="tab" aria-selected="false" aria-controls="settingsPanelAdvanced" title="高级选项">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
       <span class="rail-tab-label">高级选项</span>
     </button>
     <button class="rail-tab" id="railDirRoute" role="tab" aria-selected="false" aria-controls="settingsPanelRoute" title="自动路由">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>
       <span class="rail-tab-label">自动路由</span>
     </button>
     <button class="rail-tab" id="railDirTheme" role="tab" aria-selected="false" aria-controls="settingsPanelTheme" title="主题">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/><circle cx="7.6" cy="10.4" r="1.25"/><circle cx="11.2" cy="6.6" r="1.25"/><circle cx="15.6" cy="8.6" r="1.25"/></svg>
       <span class="rail-tab-label">主题</span>
     </button>
     <button class="rail-tab" id="railDirAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" title="关于">
