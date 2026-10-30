@@ -663,7 +663,7 @@ async function api(method, path, body) {
   function writeInstalledAgentsSnapshot(ids) {
     try { localStorage.setItem(INSTALLED_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
   }
-  // ── 看板「只显示运行中的卡」（设置→显示，本机浏览器偏好）─────────────────
+  // ── 看板「隐藏未运行的 Agent 卡」（设置→显示，本机浏览器偏好）───────────────
   // 开启后看板只留运行中的端点卡（生成中与待命），未运行的占位卡不上屏。
   // 与「未安装」过滤共用一个出口：两条件任一成立即 hidden（见 applyAgentCardVisibility）。
   // 不合并会互相盖掉——装着的死卡被这里藏掉后，环境检测那一轮若只按「未安装」重算，
@@ -890,7 +890,7 @@ async function api(method, path, body) {
       if (res && res.agents) {
         lastBoardAgents = res.agents;
         syncRouteChainsVer();
-        // 「只显示运行中的卡」用的运行中集合：status 是端点级真值（生成中与待命都算
+        // 「隐藏未运行的 Agent 卡」用的运行中集合：status 是端点级真值（生成中与待命都算
         // running），与卡面徽标、reorderAgentCards 的分层同一口径。先落定再渲卡，
         // 这一帧要藏掉的卡就不必先画一遍内容。
         applyBoardLiveAgentIds(new Set(res.agents.filter((a) => a && a.status === "running").map((a) => a.id)));
@@ -4696,7 +4696,7 @@ async function api(method, path, body) {
           else localStorage.removeItem(BOARD_LIVE_ONLY_LS_KEY);
         } catch {}
         applyAgentCardVisibility(installedAgentIds);
-        toast(boardLiveOnly ? "看板已只显示运行中的卡" : "看板已显示全部卡片");
+        toast(boardLiveOnly ? "已隐藏未运行的 Agent 卡" : "已恢复显示全部 Agent 卡");
       };
     }
 

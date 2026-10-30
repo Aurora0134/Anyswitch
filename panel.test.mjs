@@ -5719,12 +5719,12 @@ describe("设置项「开屏动画」", () => {
   });
 });
 
-describe("设置项「只显示运行中的卡」", () => {
+describe("设置项「隐藏未运行的 Agent 卡」", () => {
   const KEY = "panel-board-live-only";
   const LIST_KEY = "anyswitch.board-live-agents";
   const GATE = "data-prepaint-live-only";
   const STYLE_ID = "panelBoardLiveOnlyPrepaintCss";
-  const ROW = panelHtml.match(/<div class="modal-item-title">只显示运行中的卡<\/div>\s*<div class="modal-item-desc">([^<]*)<\/div>/);
+  const ROW = panelHtml.match(/<div class="modal-item-title">隐藏未运行的 Agent 卡<\/div>\s*<div class="modal-item-desc">([^<]*)<\/div>/);
   const prepaintSrc = (panelHtml.match(/<script id="panelBoardLiveOnlyPrepaint">([\s\S]*?)<\/script>/) || [])[1];
 
   it("行落在「显示」卡内，排在开屏动画与折线视窗节点数之间，markup 默认不勾", () => {
@@ -5732,20 +5732,21 @@ describe("设置项「只显示运行中的卡」", () => {
     const atLive = panelHtml.indexOf('id="boardLiveOnlyToggle"');
     const atSpark = panelHtml.indexOf('id="sparkWindowInput"');
     assert.ok(atStartup > 0 && atStartup < atLive && atLive < atSpark,
-      "卡内顺序 开屏动画 → 只显示运行中的卡 → 折线视窗节点数");
+      "卡内顺序 开屏动画 → 隐藏未运行的 Agent 卡 → 折线视窗节点数");
     assert.ok(!/<input type="checkbox" id="boardLiveOnlyToggle"[^>]*\bchecked\b/.test(panelHtml),
       "markup 不带 checked：默认关闭");
     const row = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atLive), atLive + 200);
     assert.ok(row.includes('<label class="toggle">'), "沿用设置页既有开关控件");
   });
 
-  it("说明文案按「关闭时…；开启后…」两句陈述，不出现标识符、不写默认值口吻", () => {
+  it("说明文案只陈述开启后的效果，不复述关闭态，不出现标识符、不写默认值口吻", () => {
     assert.ok(ROW, "行标题与说明在册");
-    assert.equal(ROW[1],
-      "关闭时，看板显示全部端点卡，未运行的端点保留一张占位卡；开启后，看板只显示运行中的端点卡（生成中与待命），未运行的卡片不显示。");
+    // 关闭态就是看板默认长相，再描述一遍属重复；用户 2026-10-30 明令只写开启效果。
+    assert.equal(ROW[1], "开启后，看板只保留检测到运行中客户端的 Agent 卡。");
+    assert.doesNotMatch(ROW[1], /关闭时|默认/, "不复述关闭效果，不写默认值口吻");
     assert.doesNotMatch(ROW[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+|localStorage|status/,
       "正文不出现字段名与承载面");
-    assert.doesNotMatch(ROW[1], /默认|建议|更快|更稳|代价/, "不写变更日志口吻、不替用户判断");
+    assert.doesNotMatch(ROW[1], /建议|更快|更稳|代价/, "不替用户判断");
   });
 
   // 真跑注入块：回显、写档、即时重算卡面是这颗开关的全部行为。回显读的是模块级
@@ -5788,11 +5789,11 @@ describe("设置项「只显示运行中的卡」", () => {
     const on = runToggleRow(null, true);
     assert.deepEqual(on.writes, [["set", KEY, "1"]], "开启写 \"1\"");
     assert.equal(on.applied.length, 1, "写档同时按新开关重算一次卡面，不等下一帧轮询");
-    assert.deepEqual(on.toasts, ["看板已只显示运行中的卡"]);
+    assert.deepEqual(on.toasts, ["已隐藏未运行的 Agent 卡"]);
     const off = runToggleRow("1", false);
     assert.deepEqual(off.writes, [["remove", KEY]], "关闭删存档，不留冗余值");
     assert.equal(off.applied.length, 1);
-    assert.deepEqual(off.toasts, ["看板已显示全部卡片"]);
+    assert.deepEqual(off.toasts, ["已恢复显示全部 Agent 卡"]);
   });
 
   it("本机偏好不占服务端设置：注入块里没有 POST 与保存态", () => {
@@ -7789,7 +7790,7 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
     assert.equal(cards.find((c) => c.id === "grok").hidden, true);
   });
 
-  // ── 设置「只显示运行中的卡」落到同一把可见性闸上 ──
+  // ── 设置「隐藏未运行的 Agent 卡」落到同一把可见性闸上 ──
   // 两把过滤（未安装 / 只看活卡）必须一次算完、一次写 hidden；分两处各写一次会互相
   // 盖掉：装着的死卡被活卡闸藏掉后，环境检测那一轮只按「未安装」重算，又会把死卡
   // 放出来。⑪⑫⑬ 钉死合并后的真值表。
