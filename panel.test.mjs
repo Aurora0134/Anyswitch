@@ -5719,6 +5719,181 @@ describe("设置项「开屏动画」", () => {
   });
 });
 
+describe("设置项「只显示运行中的卡」", () => {
+  const KEY = "panel-board-live-only";
+  const LIST_KEY = "anyswitch.board-live-agents";
+  const GATE = "data-prepaint-live-only";
+  const STYLE_ID = "panelBoardLiveOnlyPrepaintCss";
+  const ROW = panelHtml.match(/<div class="modal-item-title">只显示运行中的卡<\/div>\s*<div class="modal-item-desc">([^<]*)<\/div>/);
+  const prepaintSrc = (panelHtml.match(/<script id="panelBoardLiveOnlyPrepaint">([\s\S]*?)<\/script>/) || [])[1];
+
+  it("行落在「显示」卡内，排在开屏动画与折线视窗节点数之间，markup 默认不勾", () => {
+    const atStartup = panelHtml.indexOf('id="startupAnimationToggle"');
+    const atLive = panelHtml.indexOf('id="boardLiveOnlyToggle"');
+    const atSpark = panelHtml.indexOf('id="sparkWindowInput"');
+    assert.ok(atStartup > 0 && atStartup < atLive && atLive < atSpark,
+      "卡内顺序 开屏动画 → 只显示运行中的卡 → 折线视窗节点数");
+    assert.ok(!/<input type="checkbox" id="boardLiveOnlyToggle"[^>]*\bchecked\b/.test(panelHtml),
+      "markup 不带 checked：默认关闭");
+    const row = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atLive), atLive + 200);
+    assert.ok(row.includes('<label class="toggle">'), "沿用设置页既有开关控件");
+  });
+
+  it("说明文案按「关闭时…；开启后…」两句陈述，不出现标识符、不写默认值口吻", () => {
+    assert.ok(ROW, "行标题与说明在册");
+    assert.equal(ROW[1],
+      "关闭时，看板显示全部端点卡，未运行的端点保留一张占位卡；开启后，看板只显示运行中的端点卡（生成中与待命），未运行的卡片不显示。");
+    assert.doesNotMatch(ROW[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+|localStorage|status/,
+      "正文不出现字段名与承载面");
+    assert.doesNotMatch(ROW[1], /默认|建议|更快|更稳|代价/, "不写变更日志口吻、不替用户判断");
+  });
+
+  // 真跑注入块：回显、写档、即时重算卡面是这颗开关的全部行为。回显读的是模块级
+  // boardLiveOnly（启动时由 readBoardLiveOnly 从存档取），所以两段源码一起跑。
+  function runToggleRow(stored, nextChecked) {
+    const reader = (panelJs.match(/^ {2}function readBoardLiveOnly\(\) \{[\s\S]*?\n {2}\}/m) || [])[0];
+    const wiring = (panelJs.match(/^ {4}if \(boardLiveOnlyToggle\) \{[\s\S]*?\n {4}\}/m) || [])[0];
+    assert.ok(reader && wiring, "未真正取到 readBoardLiveOnly 与只看活卡的注入块，后续断言会全部落空");
+    const writes = [];
+    const store = {};
+    if (stored != null) store[KEY] = stored;
+    const toggle = { checked: false, onchange: null };
+    const applied = [];
+    const toasts = [];
+    vm.runInNewContext(`${reader}\nlet boardLiveOnly = readBoardLiveOnly();\n${wiring}`, {
+      boardLiveOnlyToggle: toggle,
+      BOARD_LIVE_ONLY_LS_KEY: KEY,
+      installedAgentIds: null,
+      applyAgentCardVisibility: (ids) => applied.push(ids),
+      toast: (text) => toasts.push(text),
+      localStorage: {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = v; writes.push(["set", k, v]); },
+        removeItem: (k) => { delete store[k]; writes.push(["remove", k]); },
+      },
+    });
+    const shown = toggle.checked;
+    if (nextChecked != null) {
+      assert.equal(typeof toggle.onchange, "function", "开关接上了 onchange");
+      toggle.checked = nextChecked;
+      toggle.onchange();
+    }
+    return { shown, writes, applied, toasts, wiring };
+  }
+
+  it("回显按存档（缺省即关），点一下把新值写回存档并当场重算卡面", () => {
+    assert.equal(runToggleRow(null, null).shown, false, "从未设过 → 关");
+    assert.equal(runToggleRow("1", null).shown, true);
+    assert.equal(runToggleRow("0", null).shown, false);
+    const on = runToggleRow(null, true);
+    assert.deepEqual(on.writes, [["set", KEY, "1"]], "开启写 \"1\"");
+    assert.equal(on.applied.length, 1, "写档同时按新开关重算一次卡面，不等下一帧轮询");
+    assert.deepEqual(on.toasts, ["看板已只显示运行中的卡"]);
+    const off = runToggleRow("1", false);
+    assert.deepEqual(off.writes, [["remove", KEY]], "关闭删存档，不留冗余值");
+    assert.equal(off.applied.length, 1);
+    assert.deepEqual(off.toasts, ["看板已显示全部卡片"]);
+  });
+
+  it("本机偏好不占服务端设置：注入块里没有 POST 与保存态", () => {
+    // 钉住承载面：这张卡的显隐只发生在面板这一页，服务端没有要知道它的理由。
+    assert.doesNotMatch(runToggleRow(null, true).wiring, /api\(|settingsSaving|settingsLoadGen|aria-busy/,
+      "逐控件即时写本地存档，不进服务端保存链");
+  });
+
+  // ── 首帧脚本：刷新时先闪一遍占位卡，等于这个开关白开 ──
+  function runLivePrepaint({ on = "1", list = null, denied = false, noStyle = false } = {}) {
+    const attrs = {};
+    const style = { textContent: "" };
+    const document = {
+      documentElement: {
+        setAttribute: (k, v) => { attrs[k] = v; },
+        removeAttribute: (k) => { delete attrs[k]; },
+      },
+      getElementById: (id) => (noStyle || id !== STYLE_ID ? null : style),
+    };
+    const store = {};
+    if (on != null) store[KEY] = on;
+    if (list != null) store[LIST_KEY] = list;
+    const localStorage = {
+      getItem: (k) => { if (denied) throw new Error("denied"); return k in store ? store[k] : null; },
+    };
+    new Function("document", "localStorage", prepaintSrc)(document, localStorage);
+    const painted = [...style.textContent.matchAll(/\[data-agent-id="([a-z]+)"\]\{display:none\}/g)].map((m) => m[1]);
+    return { attrs, cssText: style.textContent, painted };
+  }
+
+  it("首帧只藏「上一帧没在跑」的卡；开关关、清单缺失或非法一律不介入", () => {
+    assert.deepEqual(runLivePrepaint({ on: null, list: '["zcode"]' }).painted, [], "缺省即关 → 不画");
+    assert.deepEqual(runLivePrepaint({ on: "0", list: '["zcode"]' }).painted, [], "存档是 0 → 不画");
+    const one = runLivePrepaint({ on: "1", list: '["zcode"]' });
+    assert.deepEqual(one.painted, ["claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"],
+      "只留 zcode，其余八张首帧就不上屏");
+    assert.equal(one.attrs[GATE], "1", "挂首帧属性，样式层才生效");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: null }).painted, [], "没有清单 → 宁可闪一次");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: "not-json" }).painted, [], "解析不了 → 不画");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: '{"a":1}' }).painted, [], "非数组 → 不画");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode","zcode"]' }).painted, [], "重复项 → 不画");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: '["nope"]' }).painted, [], "未登记 id → 不画");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode",1]' }).painted, [], "非字符串项 → 不画");
+    assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode","claude","dsh","pi","kimi","opencode","qoder","codex","grok"]' }).painted,
+      [], "全在跑 → 没有要藏的卡，不挂属性");
+  });
+
+  it("空清单是合法状态：一个都没在跑时首帧就是空看板（不是「未知」）", () => {
+    const empty = runLivePrepaint({ on: "1", list: "[]" });
+    assert.deepEqual(empty.painted,
+      ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"], "九张全藏");
+    assert.equal(empty.attrs[GATE], "1");
+  });
+
+  it("存储不可用 / 样式节点不在册 → 静默不介入，不抛出", () => {
+    assert.doesNotThrow(() => runLivePrepaint({ on: "1", list: '["zcode"]', denied: true }));
+    const denied = runLivePrepaint({ on: "1", list: '["zcode"]', denied: true });
+    assert.ok(!(GATE in denied.attrs) && denied.cssText === "", "localStorage 抛错即放弃接管");
+    const noStyle = runLivePrepaint({ on: "1", list: '["zcode"]', noStyle: true });
+    assert.ok(!(GATE in noStyle.attrs), "样式节点被删走时不挂属性，避免画出无样式的首帧层");
+  });
+
+  it("首帧脚本的端点清单与 panel.js / panel.html 同一套", () => {
+    const listOf = (src, key) => (src.match(new RegExp(`const ${key} = \\[([^\\]]*)\\]`)) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    assert.deepEqual(listOf(prepaintSrc, "AGENT_IDS"), listOf(panelJs, "AGENT_CARD_ORDER"),
+      "绘制前脚本的端点清单必须与运行时的基准序逐项同（漏一格即首帧闪一张死卡）");
+  });
+
+  // ── 运行中集合的写档：每秒轮询不空转，变化才写、才重算 ──
+  const liveIdsFn = (panelJs.match(/function applyBoardLiveAgentIds\(ids\) \{[\s\S]*?\n  \}/) || [])[0];
+  function liveIdsSandbox() {
+    assert.ok(liveIdsFn, "panel.js must contain applyBoardLiveAgentIds");
+    const writes = [];
+    const applied = [];
+    const fn = new Function(
+      "localStorage", "BOARD_LIVE_AGENTS_LS_KEY", "applyAgentCardVisibility",
+      `let boardLiveOnly = true; let boardLiveAgentIds = null; let installedAgentIds = new Set(["zcode","claude"]);`
+        + `\n${liveIdsFn}\nreturn applyBoardLiveAgentIds;`,
+    )(
+      { setItem: (k, v) => writes.push([k, v]) },
+      LIST_KEY,
+      (ids) => applied.push(ids),
+    );
+    return { fn, writes, applied };
+  }
+
+  it("运行中集合变了才写存档、才重算卡面；同一份集合连轮询不重复动手", () => {
+    const { fn, writes, applied } = liveIdsSandbox();
+    fn(new Set(["zcode"]));
+    assert.deepEqual(writes, [[LIST_KEY, '["zcode"]']], "首帧写一次");
+    assert.equal(applied.length, 1);
+    fn(new Set(["zcode"]));
+    assert.equal(writes.length, 1, "顺序没变的那一轮不写存档");
+    assert.equal(applied.length, 1, "也不重复重算卡面");
+    fn(new Set());
+    assert.deepEqual(writes[1], [LIST_KEY, "[]"], "一个都没在跑也是真实状态，要落盘");
+    assert.equal(applied.length, 2);
+  });
+});
+
 describe("设置项「UI版本」", () => {
   // 与「开屏动画」同一取法：把 newUiEnabled 与 if (uiVersionSeg) {...} 两段源码
   // 原样取出配假 localStorage/document/分段钮执行——回显、写档、属性改写是这个
@@ -7568,7 +7743,7 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
   const visibilityFn = (panelJs.match(
     /function applyAgentCardVisibility\(ids\) \{[\s\S]*?\n  \}/,
   ) || [])[0];
-  function visibilitySandbox() {
+  function visibilitySandbox({ liveOnly = false, liveIds = null } = {}) {
     const cards = ["zcode", "claude", "kimi", "grok"].map((id) => ({
       id,
       hidden: null,
@@ -7583,7 +7758,11 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
       documentElement: { removeAttribute: (k) => { removedAttrs.push(k); } },
     };
     assert.ok(visibilityFn, "panel.js must contain applyAgentCardVisibility");
-    const apply = new Function("document", `${visibilityFn}\nreturn applyAgentCardVisibility;`)(document);
+    // 生产函数读两个模块级状态（只看活卡开关 / 最近一帧的运行中集合），沙箱按调用方
+    // 给的档注入：默认＝开关关、集合未知，即本组原有几条用例的语境。
+    const prelude = `let boardLiveOnly = ${liveOnly ? "true" : "false"};`
+      + ` let boardLiveAgentIds = ${liveIds === null ? "null" : "new Set(" + JSON.stringify(liveIds) + ")"};`;
+    const apply = new Function("document", `${prelude}\n${visibilityFn}\nreturn applyAgentCardVisibility;`)(document);
     return { apply, cards, removedAttrs };
   }
 
@@ -7608,6 +7787,40 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
       "每次接管（含 fail-open 全显示）都要摘属性");
     assert.equal(cards.find((c) => c.id === "zcode").hidden, false);
     assert.equal(cards.find((c) => c.id === "grok").hidden, true);
+  });
+
+  // ── 设置「只显示运行中的卡」落到同一把可见性闸上 ──
+  // 两把过滤（未安装 / 只看活卡）必须一次算完、一次写 hidden；分两处各写一次会互相
+  // 盖掉：装着的死卡被活卡闸藏掉后，环境检测那一轮只按「未安装」重算，又会把死卡
+  // 放出来。⑪⑫⑬ 钉死合并后的真值表。
+  it("⑪ 开关开启：已装但没在跑的卡也藏，运行中的留着", () => {
+    const { apply, cards } = visibilitySandbox({ liveOnly: true, liveIds: ["zcode", "grok"] });
+    apply(new Set(["zcode", "claude", "kimi", "grok"]));
+    assert.deepEqual(cards.map((c) => c.hidden), [false, true, true, false],
+      "四张都装着：zcode/grok 在跑留着，claude/kimi 未运行收起");
+    apply(new Set(["zcode", "grok"]));
+    assert.deepEqual(cards.map((c) => c.hidden), [false, true, true, false],
+      "未安装 + 未运行两把闸任一成立即藏（原「未安装」语义不被盖掉）");
+  });
+
+  it("⑫ 运行中集合未知（null）时不按活卡过滤：fail-open，绝不把在跑的卡藏掉", () => {
+    const { apply, cards, removedAttrs } = visibilitySandbox({ liveOnly: true, liveIds: null });
+    apply(null);
+    assert.deepEqual(cards.map((c) => c.hidden), [false, false, false, false],
+      "集合未知 + 检测未知 → 全显示");
+    apply(new Set(["zcode", "kimi"]));
+    assert.deepEqual(cards.map((c) => c.hidden), [false, true, false, true],
+      "集合未知时仍只按「未安装」这一把闸算");
+    assert.ok(!removedAttrs.includes("data-prepaint-live-only"),
+      "集合未知就不摘活卡首帧属性：这一刻摘掉会让预画藏好的占位卡弹回来闪一下");
+  });
+
+  it("⑬ 开关关闭：不按活卡过滤，且活卡首帧属性照摘（开关关时它本就没被挂上）", () => {
+    const { apply, cards, removedAttrs } = visibilitySandbox({ liveOnly: false, liveIds: [] });
+    apply(new Set(["zcode", "claude", "kimi", "grok"]));
+    assert.deepEqual(cards.map((c) => c.hidden), [false, false, false, false],
+      "空运行中集合在开关关闭时不得影响显示");
+    assert.ok(removedAttrs.includes("data-prepaint-live-only"), "开关关闭时照常交棒");
   });
 });
 

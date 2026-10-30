@@ -663,6 +663,41 @@ async function api(method, path, body) {
   function writeInstalledAgentsSnapshot(ids) {
     try { localStorage.setItem(INSTALLED_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
   }
+  // ── 看板「只显示运行中的卡」（设置→显示，本机浏览器偏好）─────────────────
+  // 开启后看板只留运行中的端点卡（生成中与待命），未运行的占位卡不上屏。
+  // 与「未安装」过滤共用一个出口：两条件任一成立即 hidden（见 applyAgentCardVisibility）。
+  // 不合并会互相盖掉——装着的死卡被这里藏掉后，环境检测那一轮若只按「未安装」重算，
+  // 又会把死卡放出来。
+  // 存档两份：开关 panel-board-live-only（"1" = 开，缺省即关）；最近一帧里
+  // status==="running" 的端点 id 集 anyswitch.board-live-agents，供 panel.html 的
+  // panelBoardLiveOnlyPrepaint 画首帧。
+  const BOARD_LIVE_ONLY_LS_KEY = "panel-board-live-only";
+  const BOARD_LIVE_AGENTS_LS_KEY = "anyswitch.board-live-agents";
+  let boardLiveOnly = readBoardLiveOnly();
+  // null = 还不知道谁在跑 → 不按活卡过滤（fail-open：宁可多显示一张占位卡，
+  // 也不把在跑的卡藏掉，与环境检测同口径）
+  let boardLiveAgentIds = readBoardLiveAgentsSnapshot();
+  function readBoardLiveOnly() {
+    try { return localStorage.getItem(BOARD_LIVE_ONLY_LS_KEY) === "1"; } catch { return false; }
+  }
+  function readBoardLiveAgentsSnapshot() {
+    try {
+      const raw = localStorage.getItem(BOARD_LIVE_AGENTS_LS_KEY);
+      if (typeof raw !== "string" || !raw) return null;
+      const parsed = JSON.parse(raw);
+      // 空数组是合法状态（一个都没在跑），不是「未知」——前者该出空看板，后者该全显示
+      return Array.isArray(parsed) && parsed.every((x) => typeof x === "string") ? new Set(parsed) : null;
+    } catch { return null; }
+  }
+  // 每帧对齐一次运行中集合：变了才重算卡面显隐、才写存档（每秒轮询不空转）。
+  function applyBoardLiveAgentIds(ids) {
+    const prev = boardLiveAgentIds;
+    const same = prev instanceof Set && prev.size === ids.size && [...ids].every((id) => prev.has(id));
+    if (same) return;
+    boardLiveAgentIds = ids;
+    try { localStorage.setItem(BOARD_LIVE_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
+    if (boardLiveOnly) applyAgentCardVisibility(installedAgentIds);
+  }
   function applyAgentCardVisibility(ids) {
     const container = document.querySelector(".agent-cards-container");
     if (!container) return;
@@ -670,14 +705,22 @@ async function api(method, path, body) {
       // hidden=true 才是隐藏：只有「ids 非 null 且不在册」才藏；ids 为 null
       // （检测未知/失败）按 fail-open 全显示。首版把布尔写反（null→全藏、
       // 已装→藏、未装→显），全装机器看板卡全数消失且取数救不回——此行为
-      // 测试所钉，勿再翻回。
-      card.hidden = ids !== null && !ids.has(card.getAttribute("data-agent-id"));
+      // 测试所钉，勿再翻回。只看活卡同口径：运行中集合未知（null）不参与过滤。
+      const id = card.getAttribute("data-agent-id");
+      const hiddenByInstall = ids !== null && !ids.has(id);
+      const hiddenByLiveOnly = boardLiveOnly && boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
+      card.hidden = hiddenByInstall || hiddenByLiveOnly;
     }
     // 运行时接管即摘首帧属性，prepaint CSS 层整体失效（与 panelCardOrderPrepaint
     // 的交棒同款手法）。无条件摘：null（fail-open 全显示）时若不摘，过期快照
     // 画的 CSS 层会压住本该显示的卡——首帧属性只在「首绘到本脚本执行之间」
     // 有意义，此后运行时是唯一真值源。
     document.documentElement.removeAttribute("data-prepaint-hidden-agents");
+    // 只看活卡的首帧属性多一道门：运行中集合还未知时不摘——这一刻摘掉，预画藏好的
+    // 占位卡会原样弹回来闪一下，等下一帧知道谁在跑再交棒。
+    if (!boardLiveOnly || boardLiveAgentIds !== null) {
+      document.documentElement.removeAttribute("data-prepaint-live-only");
+    }
   }
   // 可见集变化时由 initSettingsView 注册重建入口：buildKeepAliveEndpoints 嵌在
   // 它的闭包里，IIFE 层不能直引（跨作用域 ReferenceError），走回调解耦。
@@ -847,6 +890,10 @@ async function api(method, path, body) {
       if (res && res.agents) {
         lastBoardAgents = res.agents;
         syncRouteChainsVer();
+        // 「只显示运行中的卡」用的运行中集合：status 是端点级真值（生成中与待命都算
+        // running），与卡面徽标、reorderAgentCards 的分层同一口径。先落定再渲卡，
+        // 这一帧要藏掉的卡就不必先画一遍内容。
+        applyBoardLiveAgentIds(new Set(res.agents.filter((a) => a && a.status === "running").map((a) => a.id)));
         reorderAgentCards(res.agents);
         const zc = res.agents.find(a => a.id === "zcode");
         const cc = res.agents.find(a => a.id === "claude");
@@ -3921,6 +3968,7 @@ async function api(method, path, body) {
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
     const startupAnimationToggle = $("startupAnimationToggle");
+    const boardLiveOnlyToggle = $("boardLiveOnlyToggle");
     const uiVersionSeg = $("uiVersionSeg");
     const injectEffortToggle = $("injectEffortToggle");
     const credentialCacheToggle = $("credentialCacheToggle");
@@ -4633,6 +4681,22 @@ async function api(method, path, body) {
         try {
           localStorage.setItem("panel-startup-animation", startupAnimationToggle.checked ? "1" : "0");
         } catch {}
+      };
+    }
+
+    if (boardLiveOnlyToggle) {
+      // 与开屏动画同口径的本机浏览器偏好：点一下即时写存档、不 POST（看板卡的显隐
+      // 只发生在这一页，没有服务端要知道它）。不同处是即时生效——写档的同时把看板
+      // 卡的显隐按新开关重算一遍，不必等下一帧轮询。
+      boardLiveOnlyToggle.checked = boardLiveOnly;
+      boardLiveOnlyToggle.onchange = () => {
+        boardLiveOnly = boardLiveOnlyToggle.checked;
+        try {
+          if (boardLiveOnly) localStorage.setItem(BOARD_LIVE_ONLY_LS_KEY, "1");
+          else localStorage.removeItem(BOARD_LIVE_ONLY_LS_KEY);
+        } catch {}
+        applyAgentCardVisibility(installedAgentIds);
+        toast(boardLiveOnly ? "看板已只显示运行中的卡" : "看板已显示全部卡片");
       };
     }
 

@@ -148,6 +148,7 @@ try {
 </script>
 <style id="panelCardOrderPrepaintCss"></style>
 <style id="panelHiddenAgentsPrepaintCss"></style>
+<style id="panelBoardLiveOnlyPrepaintCss"></style>
 <script id="panelCardOrderPrepaint">
 (function () {
   // 看板端点卡的首帧卡序落位——与上面「首帧视图落位」同一形状的病、同一种解法。
@@ -215,6 +216,43 @@ try {
   }
   css.textContent = text;
   document.documentElement.setAttribute("data-prepaint-hidden-agents", "1");
+})();
+</script>
+<script id="panelBoardLiveOnlyPrepaint">
+(function () {
+  // 看板「只显示运行中的卡」（设置→显示，本机浏览器偏好）的首帧落位——与上面两张
+  // 首帧脚本同一形状的病、同一种解法：某张卡该不该上屏只有主脚本取回 /api/agents
+  // 才算得出来，主脚本 defer，首绘必然早于取数；不预画的话每次刷新都会先闪出全部
+  // 占位卡再收掉，而这个开关的全部意义就是不看见它们。
+  // 两个存档：开关 panel-board-live-only（"1" = 开；缺省/其它值一律不画）与上一帧
+  // 运行中的端点 id 集 anyswitch.board-live-agents（由 refreshAgents 写）。
+  // 清单缺失、非数组、含未登记 id 或重复一律不画——宁可闪一次，也不把在跑的卡藏掉；
+  // 空数组是合法状态（一个都没在跑），照画：那正是开着这个开关时的空看板。
+  // 运行时接棒：主脚本拿到可信帧后挂 [hidden] 并摘掉 <html> 属性，这层样式整体失效。
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  let on = null;
+  try { on = localStorage.getItem("panel-board-live-only"); } catch (e) { return; }
+  if (on !== "1") return;
+  let raw = null;
+  try { raw = localStorage.getItem("anyswitch.board-live-agents"); } catch (e) { return; }
+  if (typeof raw !== "string" || !raw) return;
+  let ids = null;
+  try { ids = JSON.parse(raw); } catch (e) { return; }
+  if (!Array.isArray(ids)) return;
+  for (let i = 0; i < ids.length; i++) {
+    if (typeof ids[i] !== "string" || AGENT_IDS.indexOf(ids[i]) < 0 || ids.indexOf(ids[i]) !== i) return;
+  }
+  const hidden = AGENT_IDS.filter((id) => ids.indexOf(id) < 0);
+  if (!hidden.length) return;
+  const css = document.getElementById("panelBoardLiveOnlyPrepaintCss");
+  if (!css) return;
+  let text = "";
+  for (const id of hidden) {
+    text += "html[data-prepaint-live-only] .agent-cards-container>.panel-card"
+      + '[data-agent-id="' + id + '"]{display:none}';
+  }
+  css.textContent = text;
+  document.documentElement.setAttribute("data-prepaint-live-only", "1");
 })();
 </script>
 </head>
@@ -2062,6 +2100,20 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
             <label class="toggle">
               <input type="checkbox" id="startupAnimationToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <!-- 只显示运行中的卡：本机浏览器偏好，存档在 localStorage 的 panel-board-live-only
+               （"1" = 开，缺省即关），不 POST、不进 settingsSaving。看板卡显隐由 panel.js
+               的 applyAgentCardVisibility 一处出口合并（与「未安装」过滤同一把闸）；
+               同一份存档还被 head 里的 panelBoardLiveOnlyPrepaint 读去画首帧。 -->
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">只显示运行中的卡</div>
+              <div class="modal-item-desc">关闭时，看板显示全部端点卡，未运行的端点保留一张占位卡；开启后，看板只显示运行中的端点卡（生成中与待命），未运行的卡片不显示。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="boardLiveOnlyToggle">
               <span class="slider"></span>
             </label>
           </div>
