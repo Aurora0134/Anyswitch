@@ -5302,6 +5302,13 @@
 
 
   #panelStartup { display: none; }
+  /* 开屏图标主题色：每个皮肤一组，落点是方块渐变的两个 stop（deep→mid）与中心节点
+     的 fill（core），见 #startupSvg 的 <stop> 与 panelStartupPlay 里建节点那段。
+     :root 这一组是兜底：data-style 缺失或变量未解析时回落到原品牌蓝，不闪黑。 */
+  :root { --startup-deep: #00377f; --startup-mid: #007bed; --startup-core: #00d8eb; }
+  :root[data-style="saas"] { --startup-deep: #054051; --startup-mid: #0a889f; --startup-core: #2ee9cf; }
+  :root[data-style="aurora"] { --startup-deep: #1a0f4d; --startup-mid: #3d5cd6; --startup-core: #3ee8ff; }
+  :root[data-style="sepia"] { --startup-deep: #59300e; --startup-mid: #c85e20; --startup-core: #ffd48a; }
   html[data-startup] #panelStartup {
     display: grid; place-items: center; position: fixed; inset: 0; z-index: 10000;
     /* 亚克力质感对齐 ZCode 桌面窗体（backgroundMaterial:"acrylic"）的 CSS 近似：

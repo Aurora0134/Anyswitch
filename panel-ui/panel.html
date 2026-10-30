@@ -262,8 +262,10 @@ try {
     <svg id="startupSvg" viewBox="0 0 512 512" aria-hidden="true">
       <defs>
         <linearGradient id="startupBlue" x1="0" y1="1" x2="1" y2="0">
-          <stop offset="0" stop-color="#00377f"/>
-          <stop offset="1" stop-color="#007bed"/>
+          <!-- 走 style 而非 stop-color 属性：presentation attribute 不解析 var()。
+               fallback 就是原品牌蓝，CSS 未就绪时退回改前画面。 -->
+          <stop offset="0" style="stop-color:var(--startup-deep,#00377f)"/>
+          <stop offset="1" style="stop-color:var(--startup-mid,#007bed)"/>
         </linearGradient>
       </defs>
       <rect x="27" y="28" width="459" height="459" rx="101" fill="url(#startupBlue)"/>
@@ -309,7 +311,8 @@ function panelStartupPlay(replayPulse) {
     circle.setAttribute("r", point[2]);
     circle.setAttribute("cx", point[0]);
     circle.setAttribute("cy", point[1]);
-    circle.setAttribute("fill", i === 0 ? "#00d8eb" : "#fff");
+    // 中心点跟随皮肤（--startup-core），fallback 为原青色；卫星点恒白。
+    circle.setAttribute("style", i === 0 ? "fill:var(--startup-core,#00d8eb)" : "fill:#fff");
     return nodes.appendChild(circle);
   });
   // 随机脉冲池：15 条边缘构对 + 下方 6 条中心辐射线，共 21 条。几何在初始化时按最终位置算死，
