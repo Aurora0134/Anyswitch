@@ -293,13 +293,13 @@ describe("createPromptsPanelService facade", () => {
     while (tempDirs.length) rmSync(tempDirs.pop(), { recursive: true, force: true });
   });
 
-  it("state exposes the nine endpoints and an initially empty sync snapshot", () => {
+  it("state exposes the ten endpoints and an initially empty sync snapshot", () => {
     const { facade } = makeFacade();
     const state = facade.getState();
     assert.equal(state.enabled, false);
     assert.deepEqual(state.presets, []);
     assert.deepEqual(state.sync, {});
-    assert.equal(state.endpoints.length, 9);
+    assert.equal(state.endpoints.length, 10);
     assert.equal(state.endpoints.some((e) => e.id === "qoder"), true, "qoder must reach the panel endpoint list");
     assert.equal(state.endpoints.some((e) => e.id === "codex"), true, "codex must reach the panel endpoint list");
     assert.equal(state.endpoints.some((e) => e.id === "grok"), true, "grok must reach the panel endpoint list");
@@ -311,7 +311,7 @@ describe("createPromptsPanelService facade", () => {
     const { preset } = facade.createPreset({ title: "规则A", content: "内容" });
     // Master is off: the sync removed blocks (none) but recorded results.
     let sync = facade.getState().sync;
-    assert.equal(Object.keys(sync).length, 9);
+    assert.equal(Object.keys(sync).length, 10);
     assert.equal(existsSync(join(homeDir, ".claude", "CLAUDE.md")), false);
 
     facade.setMaster(true);
@@ -385,7 +385,7 @@ describe("createPromptsPanelService facade", () => {
     // 状态清单不含被隐藏端点
     const state = hidden.getState();
     assert.equal(state.endpoints.some((e) => e.id === "grok"), false);
-    assert.equal(state.endpoints.length, 8);
+    assert.equal(state.endpoints.length, 9);
     // 任意 mutation 触发的 syncAll 对隐藏端点按空预设集处理：托管块被移除，
     // 文件只剩块时连文件一起删——不给未安装的 Agent 留注入内容
     hidden.createPreset({ title: "B", content: "加一条" });
