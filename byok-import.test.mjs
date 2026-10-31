@@ -1,12 +1,39 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createByokImportService, suggestBaseId } from "./byok-import.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { MANAGED_BEGIN as KIMI_BEGIN, MANAGED_END as KIMI_END } from "./kimi-merge-config.mjs";
 import { MANAGED_BEGIN as CODEX_BEGIN, MANAGED_END as CODEX_END } from "./codex-merge-config.mjs";
 import { MANAGED_BEGIN as GROK_BEGIN, MANAGED_END as GROK_END } from "./grok-merge-config.mjs";
+
+// ── hermetic js-yaml for the dsh scan ───────────────────────────
+// scanDsh reads profile patches through dsh-merge-config.mjs's getYamlModule(),
+// which probes %APPDATA%\npm\node_modules\@deepseek-ai\dsh\node_modules\js-yaml
+// and otherwise falls back to a bare "js-yaml" import. Neither exists on a
+// machine without a global dsh install, and scanLocalConfigs swallows scanner
+// errors — the dsh group would silently vanish and the dsh case below would
+// stay red on a clean machine (and green here only because this machine
+// happens to carry the global install). Ship a vendored parser copy in
+// test-helpers/vendor/js-yaml (js-yaml 4.3.2, the exact dependency the global
+// @deepseek-ai/dsh install carries) and point APPDATA at a fixture tree that
+// exposes it at the probed path. This must run at module load: getYamlModule()
+// caches the first parser it resolves for the whole process.
+const yamlFixtureRoot = mkTestDir("byok-import-yaml-");
+const fakeAppData = join(yamlFixtureRoot, "appdata");
+const fakeDshYaml = join(fakeAppData, "npm", "node_modules", "@deepseek-ai", "dsh", "node_modules", "js-yaml");
+mkdirSync(dirname(fakeDshYaml), { recursive: true });
+cpSync(join(dirname(fileURLToPath(import.meta.url)), "test-helpers", "vendor", "js-yaml"), fakeDshYaml, {
+  recursive: true,
+});
+const realAppData = process.env.APPDATA;
+process.env.APPDATA = fakeAppData;
+after(() => {
+  if (realAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = realAppData;
+});
 
 // ── fixture helpers ─────────────────────────────────────────────
 
