@@ -31,8 +31,16 @@ function driveWorker(services, lifecycle) {
 async function withPanel(options, run) {
   const journalDir = options.clientUpdateJournalDir ?? mkdtempSync(join(tmpdir(), "anys-client-update-"));
   const ownsJournal = !options.clientUpdateJournalDir;
+  // base 不隔离就会按 process.env 定位到宿主机真实 settings（relay-settings 的
+  // defaultSettingsPath）：本机先行版开关常开时，/panel/api/updates 会绕开注入的
+  // releaseService 改走真实 git ls-remote，用例随宿主机状态与网络通断漂移。
+  // 默认给每个用例一个干净的临时 LOCALAPPDATA（settings.json 不存在 → 稳定轨）；
+  // 显式传 base 的用例不受影响。纪律与 panel-self-update.test.mjs 的夹具一致。
+  const ownsBase = !options.base;
+  const base = options.base ?? { LOCALAPPDATA: mkdtempSync(join(tmpdir(), "anys-env-base-")) };
   options = {
     ...options,
+    base,
     clientUpdateJournalDir: journalDir,
     spawnClientUpdateWorkerFn: options.spawnClientUpdateWorkerFn ?? (() => process.pid),
   };
@@ -58,9 +66,27 @@ async function withPanel(options, run) {
       res.end("unhandled route error");
     });
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const root = `http://127.0.0.1:${server.address().port}`;
+  // undici 的 fetch 会直接拒连 WHATWG「bad port」受限清单上的端口（6000、
+  // 5060、10080 等都在内）。本机 netsh 的动态端口范围从 1024 起，listen(0)
+  // 可能分到这类端口，用例会偶发假红（实测撞过一次「fetch failed: bad port」）；
+  // 监听后校验，撞上就换口重听。
+  const BLOCKED_PORTS = new Set([
+    1, 7, 18, 19, 20, 21, 22, 23, 25, 37, 42, 43, 69, 77, 79, 87, 95, 101, 102,
+    103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 139, 143, 161, 179,
+    389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556,
+    563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045,
+    5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080,
+  ]);
+  let port;
+  for (;;) {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    port = server.address().port;
+    if (!BLOCKED_PORTS.has(port)) break;
+    server.close();
+    await once(server, "close");
+  }
+  const root = `http://127.0.0.1:${port}`;
   try {
     await run(
       async (path) => {
@@ -85,6 +111,7 @@ async function withPanel(options, run) {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
     if (ownsJournal) rmSync(journalDir, { recursive: true, force: true });
+    if (ownsBase) rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   }
 }
 
@@ -564,8 +591,6 @@ test("面板进程退出后，进行中的更新仍可查询，且同一客户�
     clientUpdateJournalDir: journalDir,
     environmentService: { async getState() { return clientState(); } },
     releaseService: { async getClientLatest() { return latestFor("1.1.0"); } },
-    // 安装必须离开面板进程。测试里的面板进程若自己去跑，就是还没修。
-    runClientLifecycleFn: async () => { throw new Error("update must not run inside the panel process"); },
     spawnClientUpdateWorkerFn: () => { spawned.push("claude"); return process.pid; },
   };
   try {
