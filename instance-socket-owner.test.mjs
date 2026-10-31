@@ -1,5 +1,5 @@
 // Socket→PID 兜底归组的单元测试（机制见 instance-socket-owner.mjs）：
-// netstat 行解析（双方向 / IPv6 / 状态过滤 / pid=0 过滤）、TTL 合并刷新、
+// netstat 行解析（双方向 / IPv6 bracket 容错 / 状态过滤 / pid=0 过滤）、TTL 合并刷新、
 // lookup 同步且绝不抛错。全部用注入式 execFn / nowFn，不 spawn 真 netstat。
 
 import { describe, it } from "node:test";
@@ -29,7 +29,10 @@ describe("parseNetstatOutput", () => {
     assert.deepEqual(map.get(11500), [{ foreignPort: 47821, pid: 12804 }]);
   });
 
-  it("accepts IPv6 loopback rows ([::1]:port)", () => {
+  // 防御性解析容错，不是产品承诺：生产命令 `netstat -ano -p tcp` 只输出
+  // IPv4 行（IPv6 行仅出现在 -p tcpv6 下；实测本机 -p tcp 76 行、bracket 行 0），
+  // bracket 地址段是正则为地址段兼容预留的容错分支，生产输入打不到它。
+  it("parses bracketed IPv6 addresses ([::1]:port) — defensive branch, unreachable via netstat -p tcp", () => {
     const map = parseNetstatOutput(NETSTAT_SAMPLE);
     assert.deepEqual(map.get(49673), [{ foreignPort: 47821, pid: 12804 }]);
   });
@@ -139,21 +142,30 @@ describe("createInstanceSocketOwner", () => {
     pending.shift()(null, NETSTAT_SAMPLE);
   });
 
-  it("keeps the last good snapshot when netstat fails (silent error, no throw)", async () => {
+  it("keeps the last good snapshot when netstat fails (silent error, no throw)", () => {
     let t = 1000;
-    const responses = [
-      (cb) => cb(null, NETSTAT_SAMPLE), // 预热成功
-      (cb) => cb(new Error("netstat unavailable")), // 过 TTL 后失败
-    ];
-    const execFn = (cmd, opts, cb) => responses.shift()((err, out) => {
-      cb(err, out);
-      // 失败回调之后立刻查：不得抛错，且旧快照仍可用
-    });
+    let calls = 0;
+    const pending = [];
+    // 挂起式 exec（同文件其他用例的写法）：手动控制刷新何时落地。
+    // 不能用同步回调夹具——lookup 的返回值在 refresh 落地前就已算好，
+    // 同步夹具会让"失败不清快照"的断言恒真（普查发现的原始问题）。
+    const execFn = (cmd, opts, cb) => { calls += 1; pending.push(cb); };
     const owner = createInstanceSocketOwner({ execFn, nowFn: () => t, ttlMs: 2000 });
+    assert.equal(calls, 1, "construction pre-warms once");
+    pending.shift()(null, NETSTAT_SAMPLE); // 预热成功
     assert.equal(owner.lookup({ localPort: 47821, remotePort: 11790 }), 22524);
 
-    t += 3000; // 过 TTL 触发第二次刷新，此次 netstat 失败
-    assert.equal(owner.lookup({ localPort: 47821, remotePort: 11790 }), 22524, "stale-but-good snapshot survives a failed refresh");
+    t += 3000; // 过 TTL：本次仍返回旧快照的值，并触发后台刷新，此次 netstat 失败
+    assert.equal(owner.lookup({ localPort: 47821, remotePort: 11790 }), 22524, "stale lookup serves the old snapshot");
+    assert.equal(calls, 2, "past TTL triggers a background refresh");
+    pending.shift()(new Error("netstat unavailable"), ""); // 失败落地，不得抛错
+
+    // 失败落地之后再查，才能钉住"失败不清快照"：若失败即清空快照，此处为 null
+    assert.equal(owner.lookup({ localPort: 47821, remotePort: 11790 }), 22524, "last good snapshot survives a failed refresh");
+    // 失败也推进 snapshotAt（防 miss→spawn→fail→miss 循环）：若失败不推进，
+    // stale 快照会让每次命中查询都重 spawn 注定失败的 netstat，calls 会涨
+    assert.equal(owner.lookup({ localPort: 47821, remotePort: 11790 }), 22524);
+    assert.equal(calls, 2, "a failed refresh still advances the freshness clock (no miss→spawn→fail loop)");
   });
 
   it("does not hammer netstat when every lookup misses", async () => {
