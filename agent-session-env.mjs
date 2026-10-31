@@ -5,10 +5,12 @@
 // Credentials ride environment variables ONLY: no agent config file is written,
 // no secret is concatenated into the command line, and the env never reaches
 // disk (terminal-host keeps it in memory for the session's lifetime). The one
-// exception is zcode: its terminal entry spawns zcode-cli-launcher.mjs and the
-// credential path lives entirely inside that launcher (the relay token lands as
-// the apiKey of the CLI slot's provider_config.json), so the terminal injects
-// no env for it at all.
+// exception is zcode (and, since the 10th endpoint, workbuddy): their terminal
+// entries spawn zcode-cli-launcher.mjs / workbuddy-launcher.mjs and the
+// credential path lives entirely inside that launcher (zcode: the relay token
+// lands as the apiKey of the CLI slot's provider_config.json; workbuddy: as the
+// apiKey of the managed entries in ~/.workbuddy/models.json), so the terminal
+// injects no credential env for them at all.
 //
 // The env contract is imported from each launcher's exported build*Env, so the
 // panel and the launchers can never drift apart. One piece is still copied
@@ -61,6 +63,13 @@ const INSTANCE_ID_MAX_LEN = 64;
 // 加载时静态算出（随安装树整体移动，不吃任何环境变量）。
 const ZCODE_CLI_LAUNCHER_PATH = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
 
+// workbuddy 同形态（2026-10-31 第 10 端点）：CLI 入口在 WorkBuddy 安装包的
+// app.asar.unpacked 里、没有自己的 PATH 条目，终端一律经同目录的
+// workbuddy-launcher.mjs 中转（relay 复用、models.json 写入与 env 都在 launcher
+// 内部完成）。这里只引用文件名，不要求文件此刻存在——launcher 由配置分支交付，
+// 两分支合并后落位；缺失由 launcher/启动器自己报「workbuddy launcher failed」。
+const WORKBUDDY_LAUNCHER_PATH = fileURLToPath(new URL("./workbuddy-launcher.mjs", import.meta.url));
+
 // cmd 包装的固定前缀。/d /c 防 AutoRun 劫持之后，先在 cmd 内部把伪控制台切到
 // UTF-8 再串接 agent：ConPTY 新建的伪控制台跟随系统 ANSI 码页（简中机上是
 // 936/GBK），而这些 CLI 把界面色块按 UTF-8 原始字节直接写控制台，conhost 拿
@@ -90,6 +99,11 @@ export const AGENT_TERMINAL_TARGETS = {
   // launchArgs 即上面的 launcher 路径：zcode 的执行体解析结果是 node.exe
   // （见 resolveZcodeTerminalExecutable），cmd /d /c node.exe <launcher> 成形。
   zcode: { name: "ZCode", kind: "cli", unset: [], launchArgs: [ZCODE_CLI_LAUNCHER_PATH] },
+  // workbuddy 同 zcode 形态：执行体是 node.exe，固定参数是 launcher 绝对路径。
+  // unset 只标上游真钥 CODEBUDDY_API_KEY（内置模型的直连凭证，不得随继承环境
+  // 漏进 PTY）；WORKBUDDY_CONFIG_DIR / CODEBUDDY_CONFIG_DIR 等 launcher 自己要
+  // 读的定位变量一律不动。relay 凭证由 launcher 自建，终端注入为零。
+  workbuddy: { name: "WorkBuddy", kind: "cli", unset: ["CODEBUDDY_API_KEY"], launchArgs: [WORKBUDDY_LAUNCHER_PATH] },
 };
 
 function agentError(message, code, cause) {
@@ -108,7 +122,7 @@ function requireTarget(agentId) {
 // 只认数字尾巴（agent-metrics.mjs normalizeInstanceId），随机标签折不进去，
 // 于是同一次会话被拆成两行——进程扫描的占位行带着面徽标却是零计数，流量行
 // 带着全部计数却读不出面；终端页的监测区、最近请求与「生成中」灯按占位行的
-// id 取数，一并落在空的那行上。这三家的托管配置都写明「无该环境变量即省略
+// id 取数，一并落在空的那行上。这几家的托管配置都写明「无该环境变量即省略
 // 该头」，所以省掉标签就等于用户在终端里自己敲这条命令的既有形态。
 // pi 不在列：models.json 的 x-agent-instance 落的是静态值（sync 写盘为
 // direct，launcher 拉起时改写成实例值、退出恢复——pi-merge-models.mjs），头照
@@ -116,7 +130,7 @@ function requireTarget(agentId) {
 // 头值被忽略、身份以连接属主进程归一，随机标签不再拆出第二行。codex 不在列：它的实例身份正源是
 // prompt_cache_key 的会话 id（GUI 多会话复用一个引擎进程，进程粒度根本不成立），
 // 标签只是该源缺失时的防撞车兜底，且 codex 不出进程占位行、拆不出第二行。
-const TERMINAL_INSTANCE_ID_FROM_SOCKET = new Set(["kimi", "grok", "opencode"]);
+const TERMINAL_INSTANCE_ID_FROM_SOCKET = new Set(["kimi", "grok", "opencode", "workbuddy"]);
 
 // Per-session instance id, same shape as each launcher's buildInstanceId
 // ("<cwd basename>-<launcher pid>"): the pid becomes a random per-session tag
@@ -148,6 +162,15 @@ function resolveZcodeTerminalExecutable(base) {
   return process.execPath;
 }
 
+// workbuddy 的终端形态同 zcode：交给 cmd 的执行体是 node.exe（process.execPath
+// 恒为绝对路径且存在），launcher 绝对路径作为固定参数（见
+// AGENT_TERMINAL_TARGETS.workbuddy.launchArgs）。这里不校验 launcher 文件存在
+// ——它由配置分支交付，校验会把两分支合入前的本端点点成 executable_missing；
+// WorkBuddy CLI 是否装了由 launcher 自己判定并报错。
+function resolveWorkbuddyTerminalExecutable() {
+  return process.execPath;
+}
+
 const EXECUTABLE_RESOLVERS = {
   claude: resolveClaudeExecutable,
   codex: resolveCodexExecutable,
@@ -158,6 +181,7 @@ const EXECUTABLE_RESOLVERS = {
   grok: resolveGrokExecutable,
   qoder: resolveQoderCliExecutable,
   zcode: resolveZcodeTerminalExecutable,
+  workbuddy: resolveWorkbuddyTerminalExecutable,
 };
 
 function resolveAgentExecutable(agentId, base) {
@@ -239,6 +263,11 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
     case "zcode":
       // env 全由 launcher 内部构造：凭证作为 apiKey 落在槽位
       // provider_config.json，不骑环境变量，终端注入为零。
+      return {};
+    case "workbuddy":
+      // 同 zcode：凭证与 NO_PROXY / ANYSWITCH_INSTANCE_ID 全由
+      // workbuddy-launcher.mjs 自建（models.json 的 apiKey 承载令牌），终端
+      // 只负责把上游真钥标删（unset 由 buildAgentSessionEnv 统一补）。
       return {};
     default:
       throw requireTarget(agentId);
