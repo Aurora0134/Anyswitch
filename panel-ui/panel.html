@@ -2733,7 +2733,8 @@ if (window.panelStartupController) panelStartupPlay();
 <!-- 导入配置包：包内容预览与 Skills 落点选择都在这个弹窗里确认（复用 .modal-overlay 体系）。
      已配仓库时勾选收成小字注释行，自选位置常开、与勾选互斥——自选一旦选到文件夹，
      勾选就强制退出并锁定（点它弹报错，清除自选后解锁）；未配过仓库时勾选行整段不出，
-     直接给默认落点。「备份并导入」是双击确认：第一击变红常驻，第二击才落。 -->
+     直接给默认落点。「备份并导入」单击即落定：写入前服务端先把整份数据备份一遍，
+     所以不再要二次确认，取消随时可点。 -->
 <div class="modal-overlay" id="dataImportModal">
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dataImportModalTitle">
     <div class="modal-head">

@@ -8,7 +8,7 @@ import vm from "node:vm";
 // 套件同时钉住「markup 里的 id ↔ JS 里取的 id ↔ 注册表里的子 tab」三者一致。
 // 导入的预览与 Skills 落点选择都在确认弹窗里：已配仓库时勾选收成小字注释行、
 // 自选位置常开且与勾选互斥（自选有内容即锁勾选，点它弹报错）；未配过仓库时
-// 直接给默认落点。「备份并导入」是双击确认，第一击变红常驻。
+// 直接给默认落点。「备份并导入」单击即落定（写入前整份备份已足够），不再有二次确认态。
 
 const source = readFileSync(new URL("./panel-ui/panel.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("./panel-ui/panel.html", import.meta.url), "utf8");
@@ -137,8 +137,8 @@ async function click(h, id, rounds = 2, ev) {
 }
 
 const pickPackage = (h) => click(h, "dataImportPickBtn");
-// 双击确认：第一击进确认态，第二击才落
-const confirmApply = (h, rounds = 3) => click(h, "dataImportApplyBtn", rounds).then(() => click(h, "dataImportApplyBtn", rounds));
+// 单击即落定：一击就发写入请求，没有中间确认态
+const confirmApply = (h, rounds = 3) => click(h, "dataImportApplyBtn", rounds);
 
 test("markup 与控制器共用同一批 id，且注册表里有高级选项子 tab", () => {
   for (const id of IDS) assert.ok(html.includes(`id="${id}"`), `panel.html 缺 #${id}`);
@@ -167,7 +167,6 @@ test("版式按 id 挂：本页各子面板的 display 都写在 id 上，漏一
   assert.match(css, /\.data-skills-inline \{/, "仓库勾选是小字注释行，样式要落档");
   assert.match(css, /\.data-skills-path \{/, "落点路径等宽小字");
   assert.match(css, /\.modal-item\[hidden\] \{ display: none; \}/, "modal-item 的 flex 会盖掉 hidden，必须显式补回");
-  assert.match(css, /\.btn-danger-armed \{/, "导入确认态要有常驻危险底");
   assert.match(css, /\.toast \{[\s\S]*?z-index: 400;/, "toast 要浮在弹窗蒙层（300）之上，否则弹窗内的报错被盖住");
 });
 
@@ -261,23 +260,21 @@ test("导入：形态 B 改过落点按 custom 交回；包里不含 Skills 时�
   assert.equal(JSON.stringify(bare.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t3", skillsMode: "skip" }));
 });
 
-test("导入：双击确认——第一击只进确认态不发请求，第二击才落定", async () => {
+test("导入：单击即落定——一击就发写入请求、弹窗收起，票据用掉后再点无效", async () => {
   const h = harness({
     respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : APPLY_OK),
   });
   await pickPackage(h);
-  await click(h, "dataImportApplyBtn");
-  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"], "确认态不该写入");
-  assert.equal(h.get("dataImportApplyBtn").textContent, "确认导入？再点一次");
-  assert.equal(h.get("dataImportApplyBtn").classList.contains("btn-danger-armed"), true);
   await click(h, "dataImportApplyBtn", 3);
+  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick", "/api/data/import-apply"],
+    "一击就该落定，中间不再有确认态");
   assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t1", skillsMode: "repo" }));
   assert.equal(h.modalOpen(), false, "落定后弹窗收起");
   assert.equal(h.summary().tone, "ok");
   assert.equal(h.summary().text, "导入完成 · 备份号 20260923-125900");
   assert.equal(h.meta(), "渠道 3");
   assert.equal(h.toasts.at(-1).message, "导入完成，已备份为 20260923-125900");
-  assert.equal(h.get("dataImportApplyBtn").disabled, true, "票据用掉后不许再点一次");
+  assert.equal(h.get("dataImportApplyBtn").disabled, true, "票据用掉后不许再点");
   await click(h, "dataImportApplyBtn");
   assert.equal(h.mutations.filter((m) => m.path === "/api/data/import-apply").length, 1, "票据一次性");
 });
@@ -356,8 +353,6 @@ test("导入：只摘掉勾选、不选自选，就是不导 Skills", async () =
   });
   await pickPackage(h);
   h.get("dataSkillsRepoCheck").checked = false;
-  h.get("dataSkillsRepoCheck").onchange();
-  assert.equal(h.get("dataImportApplyBtn").textContent, "备份并导入", "改落点要解除确认态");
   await confirmApply(h);
   assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t1", skillsMode: "skip" }));
 });
@@ -369,7 +364,7 @@ test("导入：取消/关闭弹窗丢弃这次选择，一个写入请求都不�
   assert.equal(h.modalOpen(), false);
   assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"]);
   assert.equal(h.summary().text, "尚未选择配置包");
-  assert.equal(h.get("dataImportApplyBtn").textContent, "备份并导入", "确认态随取消解除");
+  assert.equal(h.get("dataImportApplyBtn").textContent, "备份并导入", "按钮文案保持原样，取消不改它");
 });
 
 test("导入：读包失败在卡面转 danger；写入失败在弹窗里出原文、票据作废", async () => {
