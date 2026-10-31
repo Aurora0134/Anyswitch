@@ -915,6 +915,30 @@ test("buildTurns: 目录只列人打的字，注入的 user 文本不算轮", ()
   );
 });
 
+// 对话目录与标题共用同一份注入块判据（isInjectedUserBlock）：workbuddy 会把
+// `<system-reminder data-role="user-context">` / `<teammate-message ...>` /
+// `<user-context ...>` 三种整块上下文写成 user 消息。前缀表只列了 system-reminder
+// 家族时，另两种会原样变成目录行——这里锁定三条都不进目录，只留人打的那条。
+test("buildTurns: 三种注入块都不进目录，只留人打的那条（workbuddy 转录）", async () => {
+  const root = makeTmp();
+  const id = "sess-wb-injected-blocks";
+  const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, [
+    { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    workbuddyMessageEvent("user", '<system-reminder data-role="user-context">\n当前工作目录：C:\\Users\\me\\proj\n</system-reminder>', 1788000000500),
+    workbuddyMessageEvent("user", '<teammate-message from="researcher">\n调研已完成\n</teammate-message>', 1788000000800),
+    workbuddyMessageEvent("user", "<user-context>\n- OS: Windows 11\n</user-context>", 1788000000900),
+    workbuddyMessageEvent("user", "把目录行修好", 1788000001000),
+    workbuddyMessageEvent("assistant", "好", 1788000002000),
+  ]);
+
+  const messages = await testScanner({ workbuddy: [root] }).loadMessages("workbuddy", file);
+  assert.equal(messages.length, 5, "注入块仍是 transcript 的一部分，只在目录里被过滤");
+  assert.deepEqual(
+    buildTurns(messages).map((turn) => [turn.index, turn.preview]),
+    [[3, "把目录行修好"]],
+  );
+});
+
 // --- codex ------------------------------------------------------------------
 
 function codexLine(type, payload, timestamp = "2026-09-01T10:00:00.000Z") {

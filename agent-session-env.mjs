@@ -46,6 +46,7 @@ import {
   resolveGrokExecutable,
   resolveQoderCliExecutable,
   resolveZcodeCliExecutable,
+  resolveWorkbuddyExecutable,
 } from "./agent-discovery.mjs";
 import { RESUME_COMMAND } from "./session-scan.mjs";
 
@@ -173,22 +174,13 @@ function resolveZcodeTerminalExecutable(base) {
 // launcher 文件本身仍不校验存在性（它随 Anyswitch 安装树落位，缺失由 launcher
 // 自己报「workbuddy launcher failed」）。
 //
-// 入口位置与配置侧 agent-discovery 的 resolveWorkbuddyExecutable 同一份契约
-// （WORKBUDDY_EXECUTABLE 覆盖 + 安装包默认位，覆盖只收绝对路径），合入后可直接
-// 换成那个导出。
-function resolveWorkbuddyCliEntry(base) {
-  const override = typeof base?.WORKBUDDY_EXECUTABLE === "string" ? base.WORKBUDDY_EXECUTABLE.trim() : "";
-  // 裸名字/相对路径可能解析回 Anyswitch 的 workbuddy shim，不进终端。
-  if (override !== "") return isAbsolute(override) ? override : null;
-  const localAppData =
-    typeof base?.LOCALAPPDATA === "string" && base.LOCALAPPDATA !== ""
-      ? base.LOCALAPPDATA
-      : join(base?.USERPROFILE ?? "", "AppData", "Local");
-  return join(localAppData, "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy");
-}
-
+// 入口位置只认一份实现：配置侧 agent-discovery 的 resolveWorkbuddyExecutable
+// （WORKBUDDY_EXECUTABLE 覆盖 + 安装包默认位，覆盖只收绝对路径）。终端这边补的
+// 只有存在性校验——入口或内置 node 缺失 → null → executable_missing；相对路径
+// 覆盖由那边的 absoluteOverride 抛错，经 resolveAgentExecutable 的 catch 落成
+// 同一句产品文案，不再各写一套「一个抛错一个返回 null」的分叉。
 function resolveWorkbuddyTerminalExecutable(base) {
-  const entry = resolveWorkbuddyCliEntry(base);
+  const entry = resolveWorkbuddyExecutable(base);
   const entryInstalled = typeof entry === "string" && isAbsolute(entry) && existsSync(entry);
   const node = process.execPath;
   const nodeUsable = typeof node === "string" && isAbsolute(node) && existsSync(node);

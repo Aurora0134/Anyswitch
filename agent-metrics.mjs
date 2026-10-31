@@ -5,6 +5,9 @@ import { atomicWriteFile } from "./atomic-write.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
 import { readKimiServerInstances } from "./kimi-server-registry.mjs";
+// 配置根只认一份实现：写入器（models.json）与 BYOK/卸载都用它，扫描读同一棵
+// 会话注册表树。（该模块不 import 本文件，无循环依赖。）
+import { workbuddyConfigRoot } from "./workbuddy-merge-models.mjs";
 // 内切换杀的杀前判据。这里只借它的谓词（hasRunningCommand）与表形状——判定
 // 「锚 pid 之下有没有活命令」与切换守卫同一个函数、同一份数据，面板的忙显示与
 // 守卫的拒换因此同源，不会各说各话。
@@ -1013,18 +1016,15 @@ export function summarizeWorkbuddySurfaces(procCounts) {
 // 文件不存在 / 读不出 / 字段缺失一律按命令行判据照常计数（宁可多算，不静默漏）。
 const WORKBUDDY_SESSIONS_DIRNAME = "sessions";
 
-// 配置根：产品自己的环境变量优先，否则用户家目录下的 `.workbuddy`。
-function workbuddyConfigRoot(env = process.env) {
-  const configured = env?.WORKBUDDY_CONFIG_DIR;
-  if (typeof configured === "string" && configured.trim().length > 0) return configured.trim();
-  const home = env?.USERPROFILE ?? env?.HOME;
-  if (typeof home !== "string" || home.trim().length === 0) return null;
-  return join(home.trim(), ".workbuddy");
-}
+// 配置根与写入器共用一份（workbuddy-merge-models.workbuddyConfigRoot 认
+// WORKBUDDY_CONFIG_DIR / CODEBUDDY_CONFIG_DIR 两个变量）——扫描读的必须是写入器
+// 写的那棵树，自己再解析一遍就会出现「只设 CODEBUDDY_CONFIG_DIR 时读不到注册表、
+// 预热判据静默失效」这类分叉。根的解析在 collector 里做一次（见
+// createAgentMetricsCollector 的 workbuddySessionRoot），不按 pid 重复算。
 
 // 读一份注册表。任何异常（不存在、权限、半截写入、非对象）都返回 null，调用方
 // 据此回落到命令行判据——读不出不等于「它在待命」。
-function readWorkbuddySessionRecord(pid, configRoot = workbuddyConfigRoot()) {
+function readWorkbuddySessionRecord(pid, configRoot) {
   if (!Number.isInteger(pid) || pid <= 0 || typeof configRoot !== "string") return null;
   try {
     const raw = readFileSync(join(configRoot, WORKBUDDY_SESSIONS_DIRNAME, `${pid}.json`), "utf8");
@@ -1195,7 +1195,7 @@ function priorCountedIn(priorCounted, bucket, pid) {
   return pid !== null && set instanceof Set && set.has(pid);
 }
 
-function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = readWorkbuddySessionRecord) {
+function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = null) {
   const result = createEmptyProcessScan();
   if (typeof stdout !== "string" || stdout.length === 0) return result;
 
@@ -2747,9 +2747,12 @@ export function createAgentMetricsCollector(options = {}) {
   const journal = options.journal ?? null;
   // WorkBuddy 会话注册表的读取口（预热池判据，见 workbuddySessionIsIdlePrewarm）。
   // 默认读产品自己的磁盘注册表；测试注入纯函数即可覆盖三种形态，不碰真实家目录。
+  // 配置根在构造时按 options.env ?? process.env 解析一次（与写入器同一份
+  // workbuddyConfigRoot），不按 pid 重复算——扫描读的必须是写入器写的那棵树。
+  const workbuddySessionRoot = workbuddyConfigRoot(options.env ?? process.env);
   const workbuddySessionLookup = typeof options.workbuddySessionLookup === "function"
     ? options.workbuddySessionLookup
-    : readWorkbuddySessionRecord;
+    : (pid) => readWorkbuddySessionRecord(pid, workbuddySessionRoot);
   const stability = options.stability ?? createModelStabilityTracker({
     nowFn,
     persistPath: options.stabilityPath ?? (persistRoot ? join(persistRoot, STABILITY_FILENAME) : null),

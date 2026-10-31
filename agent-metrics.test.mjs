@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -5816,6 +5816,52 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     assert.equal(workbuddySessionIsIdlePrewarm(null), false, "读不出注册表不等于待命");
     assert.equal(workbuddySessionIsIdlePrewarm({ kind: "prewarm" }), true);
     assert.equal(workbuddySessionIsIdlePrewarm({ kind: "interactive", sessionId: "s" }), false);
+  });
+
+  // 配置根只有一份实现（写入器 workbuddy-merge-models.workbuddyConfigRoot）：它认
+  // WORKBUDDY_CONFIG_DIR / CODEBUDDY_CONFIG_DIR 两个变量，扫描必须读同一棵树，否则
+  // 只设后者时注册表读不到、预热池判据静默失效。这条用例因此**不注入** lookup：
+  // 走的就是默认的磁盘读取口，只把环境变量指向临时根（不碰真实 ~/.workbuddy）。
+  it("reads the registry from CODEBUDDY_CONFIG_DIR — the same root the writer uses", async () => {
+    const root = mkTestDir("anyswitch-wb-config-root-");
+    mkdirSync(join(root, "sessions"), { recursive: true });
+    writeFileSync(join(root, "sessions", "7901.json"), JSON.stringify({ kind: "prewarm", sessionId: "" }));
+
+    const collector = testCollector({
+      nowFn: () => 3000,
+      env: { CODEBUDDY_CONFIG_DIR: root },
+      execFn: (cmd, opts, cb) => cb(null, wmic(row(7900, 800), prewarmRow(7901, 7900))),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 0, "只设 CODEBUDDY_CONFIG_DIR 也要读到注册表，待命进程不计数");
+    assert.deepEqual(card.instances, [], "不起实例行");
+  });
+
+  it("options.env 优先于 process.env：注入的根决定读哪棵注册表", async () => {
+    const injected = mkTestDir("anyswitch-wb-env-injected-");
+    const ambient = mkTestDir("anyswitch-wb-env-ambient-");
+    // 两棵树对同一 pid 给出相反答案：读到注入的根 → 待命（0），误读 process.env
+    // 的根 → 正在服务（1）。
+    for (const [dir, record] of [
+      [injected, { kind: "prewarm" }],
+      [ambient, { kind: "interactive", sessionId: "0199c1a2-3b4d" }],
+    ]) {
+      mkdirSync(join(dir, "sessions"), { recursive: true });
+      writeFileSync(join(dir, "sessions", "7951.json"), JSON.stringify(record));
+    }
+    const saved = process.env.CODEBUDDY_CONFIG_DIR;
+    process.env.CODEBUDDY_CONFIG_DIR = ambient;
+    try {
+      const collector = testCollector({
+        nowFn: () => 3000,
+        env: { CODEBUDDY_CONFIG_DIR: injected },
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(7950, 800), prewarmRow(7951, 7950))),
+      });
+      assert.equal(wb(await collector.getAgentsStatus()).processCount, 0, "options.env 的根覆盖 process.env");
+    } finally {
+      if (saved === undefined) delete process.env.CODEBUDDY_CONFIG_DIR;
+      else process.env.CODEBUDDY_CONFIG_DIR = saved;
+    }
   });
 
   // ---- 终端归属（R4）：workbuddy 进 detected feed 后，终端页签才能绑定端点。

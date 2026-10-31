@@ -240,10 +240,15 @@ const INJECTED_USER_TEXT_PREFIXES = Object.freeze([
 const INJECTED_USER_TEXT_PATTERNS = Object.freeze([/^Called the [A-Za-z]+ tool with\b/]);
 
 // One line of a transcript: empty, or an envelope a client injected.
+// 末尾再问一次 isInjectedUserBlock：整块注入上下文（workbuddy 的
+// `<system-reminder data-role="user-context">` / `<teammate-message>` /
+// `<user-context>`）的名单只有那一份，标题路径与对话目录共用，不再各列一份
+// 前缀表——两处分叉正是这几类块漏进目录行的原因。
 function isInjectedUserTurn(text) {
   const trimmed = String(text ?? "").trim();
   if (trimmed === "") return true;
   if (INJECTED_USER_TEXT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
+  if (isInjectedUserBlock(trimmed)) return true;
   return INJECTED_USER_TEXT_PATTERNS.some((re) => re.test(trimmed));
 }
 

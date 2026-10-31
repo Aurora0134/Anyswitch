@@ -468,9 +468,20 @@ test("workbuddy 未装：CLI 入口取不到即 executable_missing，不再无�
         return true;
       });
     }
-    // 相对路径覆盖同样按「解析不到」处理，不会退回到安装位。
-    const relative = { ...base, WORKBUDDY_EXECUTABLE: "codebuddy.exe" };
-    assert.throws(() => buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base: relative }), { code: "executable_missing" });
+    // 相对路径覆盖同样按「解析不到」处理，不会退回到安装位。口径与 discovery 的
+    // absoluteOverride 同源：那边抛绝对路径错误，这里由既有的 catch 落成同一句
+    // executable_missing 产品文案（cause 留着原因，口径不再分叉）。
+    for (const override of ["codebuddy.exe", "./bin-workbuddy/workbuddy"]) {
+      const relative = { ...base, WORKBUDDY_EXECUTABLE: override };
+      assert.throws(
+        () => buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base: relative }),
+        (error) => {
+          assert.equal(error.code, "executable_missing", `${override}：相对路径覆盖不能进终端`);
+          assert.match(error.cause?.message ?? "", /must be an absolute path/, `${override}：原因来自共享的入口解析`);
+          return true;
+        },
+      );
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
