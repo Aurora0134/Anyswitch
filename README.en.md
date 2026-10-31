@@ -16,11 +16,11 @@
 
 <br>
 
-**A relay and control panel on your own machine: configure channels once, nine agents share them, one sealed copy of each upstream key.**
+**A relay and control panel on your own machine: configure channels once, ten agents share them, one sealed copy of each upstream key.**
 
 <br>
 
-The first agent is easy — five minutes, fill in a baseURL and a key. By the ninth, you are copying the same dozens of lines into a ninth config file; nine plaintext keys, each sitting in a directory that agent's process can read. A dead channel means manual switching; finding out who sent that 250 tok/s burst and through which channel means cross-checking nine windows and their logs.
+The first agent is easy — five minutes, fill in a baseURL and a key. By the tenth, you are copying the same dozens of lines into a tenth config file; ten plaintext keys, each sitting in a directory that agent's process can read. A dead channel means manual switching; finding out who sent that 250 tok/s burst and through which channel means cross-checking ten windows and their logs.
 
 The entire reason this tool exists is to make "configure once", "one sealed key", and "see at a glance who is running and which route they take" true at the same time.
 
@@ -33,7 +33,7 @@ wscript panel-app.vbs
 
 Runs locally on Windows · ships as source, no installer · panel and relay listen on loopback only
 
-[Screenshots](#see-it-working-configuration-routing-and-readouts-in-one-window) · [Install](#install-and-run) · [Channels](#configure-once-nine-agents-plug-in) · [Failover](#one-dead-channel-should-not-stop-the-pipeline) · [Readouts](#whos-running-which-route-how-much-one-panel-answers) · [Terminal](#virtual-terminal-run-agents-inside-the-panel-readouts-beside-them) · [Boundaries](#boundaries-to-accept-first)
+[Screenshots](#see-it-working-configuration-routing-and-readouts-in-one-window) · [Install](#install-and-run) · [Channels](#configure-once-ten-agents-plug-in) · [Failover](#one-dead-channel-should-not-stop-the-pipeline) · [Readouts](#whos-running-which-route-how-much-one-panel-answers) · [Terminal](#virtual-terminal-run-agents-inside-the-panel-readouts-beside-them) · [Boundaries](#boundaries-to-accept-first)
 
 </div>
 
@@ -92,9 +92,9 @@ npm test
 
 ---
 
-## Configure once, nine agents plug in
+## Configure once, ten agents plug in
 
-Nine agents, nine wiring details — configure once and they are all here:
+Ten agents, ten wiring details — configure once and they are all here:
 
 | Agent | Protocol surface | Launcher |
 | --- | --- | --- |
@@ -108,6 +108,7 @@ Nine agents, nine wiring details — configure once and they are all here:
 | DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh args]` |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` |
+| WorkBuddy | OpenAI | `node workbuddy-launcher.mjs [codebuddy args]` |
 
 ZCode CLI is explicit-configuration only: bring your own zcode CLI distribution and point `ZCODE_CLI_EXECUTABLE` at its entry file (`bin\zcode.mjs`); without it, that launcher is unavailable.
 
@@ -123,10 +124,11 @@ Config sync writes the managed channels into each agent's own config location; a
 | DeepSeek Harness | `~/.dsh/profiles/<name>/cordis.patch.yml` |
 | Qoder | `~/.qoder/settings.json` |
 | Grok Build | `~/.grok/config.toml` |
+| WorkBuddy | `~/.workbuddy/models.json` |
 
 What gets written is the local relay address and a local token — the real upstream key never enters any agent's config directory. Claude Code has no config-file surface; it gets environment variables injected by the launcher, with optional tier mapping in settings.
 
-Channels already scattered across those configs don't need re-copying either: BYOK import scans the local configs of 8 endpoints (Claude has no local config surface), pulls OpenAI-compatible channels into the central store, carries over what it can select and honestly skips the rest. Moving machines goes through an exported config bundle; off-machine import no longer fails the whole bundle.
+Channels already scattered across those configs don't need re-copying either: BYOK import scans the local configs of 9 endpoints (Claude has no local config surface), pulls OpenAI-compatible channels into the central store, carries over what it can select and honestly skips the rest. Moving machines goes through an exported config bundle; off-machine import no longer fails the whole bundle.
 
 ---
 
@@ -155,9 +157,9 @@ A node degrades after 2 consecutive failures and returns to the head of the chai
   <img src="docs/screenshots/s5-route-chain.png" alt="Route chain editor: hop-by-hop failover chain and candidate tile wall" width="80%">
 </p>
 
-### Virtual models: one name, recognized by all nine agents
+### Virtual models: one name, recognized by all ten agents
 
-A virtual model is a name you define, bound to a chain of 1–8 nodes. Once enabled, it appears next to `auto` in all nine agents' model lists; disable it and it disappears from every catalog.
+A virtual model is a name you define, bound to a chain of 1–8 nodes. Once enabled, it appears next to `auto` in all ten agents' model lists; disable it and it disappears from every catalog.
 
 It solves "same role, different name everywhere": define `deepseek-pro` as "primary channel → backup pool", then pick it in Claude Code, pick it in Codex — both walk the same chain. Chain state is shared across agents: once one agent degrades a node, other agents' requests route around it without paying for the discovery again.
 
@@ -173,7 +175,7 @@ Configuration and routing are the base; the readouts are what you use every day.
 
 - **Dashboard**: relay and terminal service status, live lamps for every chain hop, recent requests (including failures and 429s), per-agent instances. Multiple sessions of one client show as multiple instance rows, not merged into one blur.
 - **Usage stats**: today's overview (requests, tokens, cache hits, mean first-token latency, success rate), a 90-day heatmap, token trends, per-model usage and the request log.
-- **Sessions**: scans the nine clients' own session stores on demand, no separate index. Turn counting happens in the data layer — only what you actually said counts, never tool output posing as user input.
+- **Sessions**: scans the ten clients' own session stores on demand, no separate index. Turn counting happens in the data layer — only what you actually said counts, never tool output posing as user input.
 
 Instance attribution is not guesswork: clients started via a launcher (or the virtual terminal) are attributed by the owning process of the connection; desktop GUI forms are recognized separately and never mistaken for another CLI. Attribution has a cold-cache window — right after relay start, before process scanning warms up, a launcher-shaped instance row can briefly appear twice; it collapses after 10 idle minutes.
 
@@ -217,9 +219,9 @@ The terminal's backend is a separate process (port 47823) owned by the relay: it
 
 ---
 
-## Presets and skills: write once, effective in nine homes
+## Presets and skills: write once, effective in ten homes
 
-Prompt presets are instructions for *your* way of working, not a template library. Enabled presets are injected into the instruction files of all nine endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …), written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
+Prompt presets are instructions for *your* way of working, not a template library. Enabled presets are injected into the instruction files of all ten endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …), written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
 
 Skills use a main-repo model: one local directory acts as the source, deploying into each agent's skills directory. Deployed skills appear in each endpoint's own listing; the main repo and deployment surface are managed on the same Skills page — and only installed agents are served: anything not installed stays off the dashboard, auto-route tiles and session filters.
 
@@ -286,10 +288,10 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 - **One-step self-update and the "bleeding edge" channel haven't completed a real update round yet.** An update replaces the running panel — that step can only be walked by the first person who clicks it.
 - **Several attribution fixes live in the resident relay and need a relay restart to take effect**; the restart takes open terminal sessions with it — the page keeps the history and honestly marks the sessions as exited.
 - **Instance attribution has a cold-cache window.** Right after relay start, launcher-shaped instance rows can briefly double before process scanning warms up; they collapse after 10 idle minutes.
-- **In-panel launching for the nine CLIs, virtual models in all nine client pickers, and the About page's real install button** are verified down to code and tests, but not walked through on every client for you.
+- **In-panel launching for the ten CLIs, virtual models in all ten client pickers, and the About page's real install button** are verified down to code and tests, but not walked through on every client for you.
 - **No official models, no bundled channels.** Every upstream comes from a provider you enter; ports 47820 / 47821 / 47822 / 47823 are fixed in code and not configurable in the panel.
 
-This is the first stable release on the 0.7 line, not a 1.0 product: every line above is real. None of it stops someone whose channels are scattered across nine config files from using it — all of it decides whether it belongs on a production pipeline.
+This is the first stable release on the 0.7 line, not a 1.0 product: every line above is real. None of it stops someone whose channels are scattered across ten config files from using it — all of it decides whether it belongs on a production pipeline.
 
 ---
 
@@ -373,6 +375,6 @@ Do not copy new source over an old install, and do not upgrade with `git reset -
 <div align="center">
 
 **Your channels are configured once, inside Anyswitch.**<br>
-*Nine agents share them.*
+*Ten agents share them.*
 
 </div>
