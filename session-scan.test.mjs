@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
@@ -1311,6 +1311,95 @@ test("workbuddy: 大文件里只在头窗的 ai-title 也认（尾窗 16KB 之�
   const row = sessions.find((session) => session.endpoint === "workbuddy" && session.id === id);
   assert.equal(row.title, "只出现在开头的标题", "ai-title 优先于首条用户消息，不因文件大而丢");
   assert.equal(row.lastActive, 1788000100000, "lastActive 仍取最后一条事件");
+});
+
+// 真机会话的裁剪版（2026-10-31 本机复现）：1343 行、ai-title（"优化应用启动动画
+// 效果"）落在第 119 行，既不在头 60 行也不在尾 60 行；首条 user 消息是客户端注入
+// 的 `<system-reminder data-role="user-context">` 整块，不是人打的字。样本内容
+// （路径、标题文案）按原样脱敏后复制进临时目录，不读真实 ~/.workbuddy。
+const REAL_WORKBUDDY_TITLE = "优化应用启动动画效果";
+const REAL_WORKBUDDY_PROMPT = "启动动画掉帧，帮我看看";
+const REAL_WORKBUDDY_REMINDER =
+  '<system-reminder data-role="user-context">\n当前工作目录：C:\\Users\\me\\proj\n今天日期：2026-10-31\n</system-reminder>';
+
+function realWorkbuddySessionEvents({ aiTitleAt = 119, withAiTitle = true } = {}) {
+  const id = "9c1d2e3f-4a5b-4c6d-8e7f-001122334455";
+  const head = [
+    { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    // 客户端注入块：真机上它就是首条 user 消息，标题曾退化成这段机器文本。
+    workbuddyMessageEvent("user", REAL_WORKBUDDY_REMINDER, 1788000000500),
+    workbuddyMessageEvent("user", REAL_WORKBUDDY_PROMPT, 1788000001000),
+  ];
+  const events = [...head];
+  for (let i = events.length; i < 1343; i++) {
+    // ai-title 落在第 aiTitleAt 行（1-based）：中间段，两个窗口都看不见。
+    if (withAiTitle && i + 1 === aiTitleAt) {
+      events.push({ type: "ai-title", aiTitle: REAL_WORKBUDDY_TITLE, timestamp: 1788000002000 + i });
+      continue;
+    }
+    events.push(
+      i % 3 === 0
+        ? workbuddyMessageEvent("assistant", `第 ${i} 步的说明文字，用来把文件撑到 16KB 以上`, 1788000002000 + i)
+        : { type: "file-history-snapshot", snapshot: { index: i, blob: "x".repeat(120) }, timestamp: 1788000002000 + i },
+    );
+  }
+  return { id, events };
+}
+
+test("workbuddy: 中段 ai-title 也能读到，注入块不当标题/摘要（真机裁剪样本）", async () => {
+  const root = makeTmp();
+  const { id, events } = realWorkbuddySessionEvents();
+  const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, events);
+  // 样本仍是「大文件」：头 60 行之外、尾 16KB 之外的那一行只有全文件扫描能看见。
+  assert.ok(readFileSync(file).byteLength > 16_384, "样本必须走分块读路径");
+
+  const { sessions } = await testScanner({ workbuddy: [root] }).scanAll();
+  const row = sessions.find((session) => session.endpoint === "workbuddy" && session.id === id);
+  assert.equal(row.title, REAL_WORKBUDDY_TITLE, "ai-title 在第 119 行也要读到");
+  assert.ok(!row.summary.startsWith("<system-reminder"), `摘要不得是注入块开头：${row.summary}`);
+  assert.equal(row.summary, REAL_WORKBUDDY_PROMPT, "摘要取首条真正由人输入的话");
+  assert.equal(row.cwd, WORKBUDDY_CWD);
+});
+
+test("workbuddy: 全文件无 ai-title → 回落首条真实用户消息，跳过注入块", async () => {
+  const root = makeTmp();
+  const { id, events } = realWorkbuddySessionEvents({ withAiTitle: false });
+  writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, events);
+
+  const { sessions } = await testScanner({ workbuddy: [root] }).scanAll();
+  const row = sessions.find((session) => session.endpoint === "workbuddy" && session.id === id);
+  assert.equal(row.title, REAL_WORKBUDDY_PROMPT, "无 ai-title 时回落到首条真实用户消息");
+  assert.equal(row.summary, REAL_WORKBUDDY_PROMPT, "摘要同口径，不回落到注入块");
+  assert.ok(!row.summary.includes("<system-reminder"), "注入块整块不参与标题/摘要");
+});
+
+test("workbuddy: 多字节字符压在 16KB 块边界上，该行仍能解析（会话 id 与 cwd 不丢）", async () => {
+  const root = makeTmp();
+  const id = "sess-wb-utf8-edge";
+  const cwd = "C:\\Users\\me\\中文项目\\动画";
+  // 构造：让 cwd 里「中」的第一个字节落在 16383（0-based），即 16KB 块的最后一
+  // 个字节——第 1 块结尾只剩它的首字节。逐块 toString("utf8") 会把它变成
+  // U+FFFD，这行 JSON 也跟着坏掉；StringDecoder 则把半个字符留到下一块。
+  const skeleton = JSON.stringify({ type: "session-meta", pad: "", cwd, sessionId: id, timestamp: 1788000000000 });
+  const at = skeleton.indexOf("中");
+  const padBytes = 16_383 - Buffer.byteLength(skeleton.slice(0, at), "utf8");
+  assert.ok(padBytes > 0, "pad 需要能补齐到边界前一字节");
+  const metaLine = skeleton.replace('"pad":""', `"pad":"${"x".repeat(padBytes)}"`);
+  assert.equal(Buffer.byteLength(metaLine.slice(0, metaLine.indexOf("中")), "utf8"), 16_383, "「中」正好跨块");
+
+  const events = [metaLine];
+  for (let i = 0; i < 40; i++) {
+    events.push(JSON.stringify({ type: "file-history-snapshot", snapshot: { index: i, blob: "y".repeat(200) }, timestamp: 1788000001000 + i }));
+  }
+  const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, events, { sidecar: false });
+  assert.ok(readFileSync(file).byteLength > 16_384);
+
+  const { sessions } = await testScanner({ workbuddy: [root] }).scanAll();
+  const row = sessions.find((session) => session.endpoint === "workbuddy" && session.id === id);
+  assert.ok(row, "跨块边界的会话行没有被当成坏行丢掉");
+  assert.equal(row.id, id, "sessionId 完整");
+  assert.equal(row.cwd, cwd, "cwd 完整（含中文目录名）");
+  assert.ok(!row.cwd.includes("\uFFFD"), "没有 U+FFFD 替换字符");
 });
 
 test("workbuddy: 坏行与半截 JSON 跳过，不炸整轮，也不连坐其他会话", async () => {

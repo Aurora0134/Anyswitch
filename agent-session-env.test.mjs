@@ -36,6 +36,9 @@ function fakeBase(root, { claudePackageVersion = undefined, ...overrides } = {})
     // zcode CLI 入口是 node 拉起的 .mjs：覆盖变量指向一个真实存在的假文件，
     // 终端侧验证入口后实际交给 cmd 的执行体是 process.execPath（node.exe）。
     ZCODE_CLI_EXECUTABLE: exe("zcode.mjs"),
+    // workbuddy 装的判据是安装包内的 CLI 入口（agent-discovery 的
+    // resolveWorkbuddyExecutable 同一契约）；终端实际交给 cmd 的仍是 node.exe。
+    WORKBUDDY_EXECUTABLE: exe("codebuddy"),
     // Codex 两种安装形态：npm 全局 shim（APPDATA/npm/codex.cmd）优先，官方原生
     // 安装位（LOCALAPPDATA/[OI]/Codex/bin/<hash>/codex.exe）是回退。fakeBase 默认
     // 只摆原生那份以验证回退；需要 shim 优先的用例自行写 shim 并设 APPDATA。
@@ -382,7 +385,7 @@ test("zcode 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，en
   }
 });
 
-test("workbuddy 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，上游真钥标删", () => {
+test("workbuddy 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，env 零注入", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
@@ -395,8 +398,10 @@ test("workbuddy 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>�
     // 直接执行 .mjs），launcher 绝对路径作为固定参数——与 zcode 同形态。
     assert.deepEqual(launch.launch.args, ["/d", "/c", "chcp", "65001", ">nul", "&", process.execPath, WORKBUDDY_LAUNCHER_PATH]);
     assert.match(WORKBUDDY_LAUNCHER_PATH, /workbuddy-launcher\.mjs$/, "launcher 文件名是契约的一部分");
-    // 凭证与 NO_PROXY / 实例标签全由 launcher 自建；终端只把上游真钥标删。
-    assert.deepEqual(launch.env, { CODEBUDDY_API_KEY: null });
+    // 凭证与 NO_PROXY / 实例标签全由 launcher 自建；用户自己的内置模型凭据
+    // CODEBUDDY_API_KEY 不标删（与 launcher 入口同口径）。
+    assert.deepEqual(launch.env, {});
+    assert.equal("CODEBUDDY_API_KEY" in launch.env, false, "终端不删用户自己的内置模型凭据");
     assert.equal("ANYSWITCH_INSTANCE_ID" in launch.env, false, "实例身份交给 relay 反查属主（workbuddy-<pid>），终端不自造标签");
     assert.ok(!JSON.stringify({ file: launch.launch.file, args: launch.launch.args }).includes(TOKEN), "命令行不含 relay 令牌");
   } finally {
@@ -417,7 +422,73 @@ test("workbuddy 续接：launcher 固定参数 + --resume <会话 id>，env 不�
     });
     assert.deepEqual(launch.launch.args.slice(8), ["--resume", RESUME_SESSION_ID], "续接片段来自 RESUME_COMMAND 模板");
     assert.equal(launch.launch.args[6], process.execPath, "续接不换执行体");
-    assert.deepEqual(launch.env, { CODEBUDDY_API_KEY: null }, "续接不改凭证注入");
+    assert.deepEqual(launch.env, {}, "续接不改凭证注入");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("跨入口一致性：终端启动与 launcher 启动都不删 CODEBUDDY_API_KEY", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    // 用户自己的内置模型凭据：双击 / shim 起的 launcher 保留它（plan §3.2：只剥
+    // 会让客户端绕开 relay 的上游键），面板终端必须同口径。
+    const base = { ...fakeBase(root), CODEBUDDY_API_KEY: "user-own-builtin-key" };
+    const launch = buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base });
+    // 终端的可观测面是 env 增量：terminal-host 只把增量为 null 的键从继承环境里
+    // 删掉，键不出现在增量里就等于「原样透传」。
+    assert.equal("CODEBUDDY_API_KEY" in launch.env, false, "终端不标删用户的键");
+    const inherited = { ...base };
+    for (const [key, value] of Object.entries(launch.env)) {
+      if (value === null) delete inherited[key];
+    }
+    assert.equal(inherited.CODEBUDDY_API_KEY, "user-own-builtin-key", "终端会话里内置模型凭据仍在");
+    // launcher 入口的可观测面是同一份目标定义：删除决定只写在 unset 里，两侧
+    // 共用它，因此清单为空即两条入口都不删。
+    assert.deepEqual(AGENT_TERMINAL_TARGETS.workbuddy.unset, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workbuddy 未装：CLI 入口取不到即 executable_missing，不再无条件返回 node.exe", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    // 覆盖指向不存在的绝对路径；以及完全没有覆盖、安装位也空着——两种形态都算
+    // 「CLI 入口与内置 node 都拿不到」，不能开一个瞬间退出的 tab。
+    const goneOverride = { ...base, WORKBUDDY_EXECUTABLE: join(root, "bin", "codebuddy-gone") };
+    const noInstall = { ...base, LOCALAPPDATA: join(root, "local-empty") };
+    delete noInstall.WORKBUDDY_EXECUTABLE;
+    mkdirSync(noInstall.LOCALAPPDATA, { recursive: true });
+    for (const broken of [goneOverride, noInstall]) {
+      assert.throws(() => buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base: broken }), (error) => {
+        assert.equal(error.code, "executable_missing");
+        assert.match(error.message, /[一-鿿]/, "面向用户的 product 文案");
+        return true;
+      });
+    }
+    // 相对路径覆盖同样按「解析不到」处理，不会退回到安装位。
+    const relative = { ...base, WORKBUDDY_EXECUTABLE: "codebuddy.exe" };
+    assert.throws(() => buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base: relative }), { code: "executable_missing" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workbuddy 已装（入口存在其一）：可启动，执行体仍是 node.exe", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    // 默认安装位（LOCALAPPDATA/Programs/WorkBuddy/...）：入口存在即视为已安装。
+    const installed = join(base.LOCALAPPDATA, "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy");
+    mkdirSync(dirname(installed), { recursive: true });
+    writeFileSync(installed, "");
+    const noOverride = { ...base };
+    delete noOverride.WORKBUDDY_EXECUTABLE;
+    const launch = buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base: noOverride });
+    assert.deepEqual(launch.launch.args, ["/d", "/c", "chcp", "65001", ">nul", "&", process.execPath, WORKBUDDY_LAUNCHER_PATH],
+      "入口存在即可启动，执行体是 node.exe + launcher 绝对路径");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -764,7 +835,7 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
     grok: { label: "Grok Build", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "GROK_CODE_XAI_API_KEY", "NO_PROXY", "XAI_API_KEY", "no_proxy"] },
     qoder: { label: "Qoder", tail: [], envKeys: ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
     zcode: { label: "ZCode", tail: [], envKeys: [] },
-    workbuddy: { label: "WorkBuddy", tail: [], envKeys: ["CODEBUDDY_API_KEY"] },
+    workbuddy: { label: "WorkBuddy", tail: [], envKeys: [] },
   };
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
