@@ -1,6 +1,6 @@
 ---
 name: anyswitch-preset
-description: 规范 Anyswitch（原 apicred）提示词预设的写入流程与文本内容。凡用户要求新建、编写、添加、修改、删除、启用或停用 Anyswitch 预设，或说"写个预设""加一条预设""把这段话存成预设""改一下预设的措辞""给 kimi 关掉那条预设""现在有哪些预设"，或提到提示词预设 / prompt preset 时使用。预设会注入全部 9 个 coding agent 端点的全局指令文件，写入必须走 panel API——本 skill 给出唯一正确的流程与起草规范。
+description: 规范 Anyswitch（原 apicred）提示词预设的写入流程与文本内容。凡用户要求新建、编写、添加、修改、删除、启用或停用 Anyswitch 预设，或说"写个预设""加一条预设""把这段话存成预设""改一下预设的措辞""给 kimi 关掉那条预设""现在有哪些预设"，或提到提示词预设 / prompt preset 时使用。预设会注入全部 10 个 coding agent 端点的全局指令文件，写入必须走 panel API——本 skill 给出唯一正确的流程与起草规范。
 ---
 
 # Anyswitch 预设写入规范
@@ -10,7 +10,7 @@ description: 规范 Anyswitch（原 apicred）提示词预设的写入流程与�
 - 预设存在 `%LOCALAPPDATA%\Anyswitch\prompts.json`（数据根 2026-09-06 由旧名 `ApiCred` 翻转，旧路径已不存在），但**对各端点全局指令文件的注入只由 panel API 的变更触发**。手改 prompts.json 不会刷新任何端点文件，造成"文件里改了、端点里没生效"的静默不一致——禁止这样做。
 - 每条生效预设渲染进端点文件的托管块，托管块标记：`# >>> anyswitch-managed-prompts` … `# <<< anyswitch-managed-prompts`，**只注入正文，不注入标题**（title 仅存 prompts.json 供面板展示）；多条预设之间以一个空行分隔。
 - 某端点生效集 = 总开关 ∧ 预设 enabled ∧ 未被该端点 off override。
-- 9 个端点与目标文件：
+- 10 个端点与目标文件：
 
 | id | 端点 | 目标文件 | 热加载 |
 |---|---|---|---|
@@ -23,8 +23,9 @@ description: 规范 Anyswitch（原 apicred）提示词预设的写入流程与�
 | qoder | Qoder | ~/.qoder/rules/anyswitch-managed-prompts.md | 是 |
 | codex | Codex | ~/.codex/AGENTS.md | 否 |
 | grok | Grok Build | ~/.grok/rules/anyswitch-managed-prompts.md | 否 |
+| workbuddy | WorkBuddy | ~/.workbuddy/AGENTS.md | 否 |
 
-热加载端点写完即生效，其余 6 个下次会话启动才读到——向用户如实报告生效时机。
+热加载端点写完即生效，其余 7 个下次会话启动才读到——向用户如实报告生效时机。
 
 > agy（Antigravity）端点已于 2026-09-08 下线，不要再作为注入目标或验证抽查对象。
 > reasonix（Reasonix）端点已于 2026-09-16 下线，不要再作为注入目标或验证抽查对象。
@@ -62,7 +63,7 @@ curl -s -X POST http://127.0.0.1:47820/panel/api/prompts/preset/create \
 
 成功返回 `{ok:true, preset:{id,…}}`，记下 id。
 
-4. 端点范围：默认注入全部 9 端点，不必询问；仅当用户点名"只给某端点 / 不给某端点"时设 off override（见分支）。
+4. 端点范围：默认注入全部 10 端点，不必询问；仅当用户点名"只给某端点 / 不给某端点"时设 off override（见分支）。
 5. 写后验证（必做，不向用户承诺未验证的生效）：
    - `GET state` 确认新预设已在列表且 enabled；
    - 抽查一个目标文件（如 ~/.zcode/AGENTS.md），确认托管块内出现预设正文、且没有标题行（`## {title}` 不应出现）；
