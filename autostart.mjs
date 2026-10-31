@@ -38,9 +38,11 @@ const WATCHDOG_TASK_NAME = "AnyswitchWatchdog";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 export function getAutostartCommand(script = "relay-host.mjs") {
-  // node "<app>/<script>" — quoted because LOCALAPPDATA paths can contain
-  // spaces. kept for display/diagnostics; the scheduled task splits this into
-  // Execute (absolute node) + Arguments (quoted script).
+  // Plain-node form of the launch line: `node "<app>/<script>"`, quoted because
+  // LOCALAPPDATA paths can contain spaces. This is NOT what the scheduled task
+  // runs — the task's Exec action starts wscript.exe with silent-start.vbs, so
+  // registering this string instead would pop a console at every logon (see
+  // buildTaskXml). Currently exercised only by the tests.
   return `node "${join(__dirname, script)}"`;
 }
 

@@ -48,7 +48,10 @@ export class StreamTranslator {
     this.nextIndex = 0;
     this.textIndex = null;
     this.thinkingIndex = null;
-    // openai tool_call index -> { index, started }
+    // Open tool_use blocks only: upstream tool_call index -> { index }, where
+    // index is the Anthropic content block index allocated on first sight.
+    // closeToolBlocks() clears the map, so an entry's presence means the block
+    // has been opened but not yet closed.
     this.toolBlocks = new Map();
     this.stopReason = "end_turn";
     this.usage = { input_tokens: 0, output_tokens: 0 };

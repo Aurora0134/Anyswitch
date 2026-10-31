@@ -70,9 +70,10 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
-// JSON.stringify with sorted object keys, matching codex++ canonical_json_string
-// closely enough for tool-output text (key order is the only difference, and
-// no consumer parses it back positionally).
+// JSON.stringify, deliberately NOT canonical: object keys keep insertion order
+// (codex++'s canonical_json_string sorts them). Good enough here because every
+// call site only needs a re-parseable text form — tool-output text and
+// function.arguments — and none compares serialized bytes or key positions.
 function canonicalJsonString(value) {
   return JSON.stringify(value);
 }

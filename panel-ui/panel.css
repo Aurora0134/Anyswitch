@@ -525,8 +525,9 @@
     padding-top: 16px;
   }
   /* aurora 例外：恢复皮肤原生玻璃卡（玻璃透底 + 模糊 + 顶部 hairline + 描边 + 原生
-     大圆角），只去投影（hover 不浮由上面通用 :hover 规则同罩）。取值逐项抄 aurora
-     皮肤块的 .panel-card 基座（皮肤段 3600 一带），box-shadow 只留 inset 顶部高光。 */
+     大圆角），只去投影（hover 不浮由上面通用 :hover 规则同罩）。取值逐项抄本文件
+     aurora 皮肤段的 `.panel-card` 基座（即 `:root[data-style="aurora"] .panel-card`
+     那一条，段内唯一），box-shadow 只留 inset 顶部高光；改基座取值须同步这条例外。 */
   :root[data-ui-version="v2"][data-style="aurora"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {
     background: var(--surface);
     background-image: var(--card-hairline); background-position: top;
@@ -1510,10 +1511,10 @@
      骨架条复用会话页的 .sessions-skel（同一枚 shimmer），宽度在这里给，
      reduced-motion 下由文件末尾那条通配规则停成静帧。 */
   .board-card-loading { display: none; }
-  /* 用 `> div >` 而不是 `.card-body`：本文件靠后的那条闸门禁止再给 .card-body 写
+  /* 用 `> div >` 而不是 `.card-body`：panel-skills 的哨兵测试禁止再给通用 .card-body 写
      display（一张折叠卡身靠 UA 的 [hidden]{display:none} 收着，任何 display 都可能把
      它静默打回展开）。这里要压的是卡身**里面的数据块**，不碰卡身本身，选择器也就不该
-     出现那个类名——写成 .card-body 会被闸门判成违规，而它担心的事与本条无关。 */
+     出现那个类名——写成 .card-body 会被该测试判成违规，而它担心的事与本条无关。 */
   html[data-board="pending"] .agent-cards-container .panel-card > div > :not(.agent-top-bar):not(.board-card-loading) { display: none; }
   /* 骨架块跟在品牌行之后（pending 与 live 品牌行同位，flip 时标题不跳），上下间距零自设：
      上与品牌行相隔 14px 由 .agent-top-bar 自己的 margin-bottom 给——与 live 期标题到内容的
@@ -1885,7 +1886,8 @@
     font-family: var(--font-mono); font-weight: 500;
   }
   /* 四档行的收起容器：总开关关掉时整块藏起（显式声明打底，防止将来给容器加
-     display 规则时盖掉 UA 的 [hidden] 行为——见 panel.css:515 同因注释）。 */
+     display 规则时盖掉 UA 的 [hidden] 行为——同 .instance-count-badge[hidden] /
+     .telemetry-grid[hidden] 那两处兜底，成因见其注释）。 */
   #claudeTierRows[hidden] { display: none; }
   /* 「日志级别」从属段：与上面四档行同一套收起写法（显式声明打底，防止将来给容器加
      display 规则时盖掉 UA 的 [hidden] 行为）。段内首行必须把分隔线补回来——
@@ -3190,8 +3192,10 @@
   }
   /* 空链下垂虚线 / 幽灵预告段：灰色静态虚线 */
   .route-seg.is-dangling, .route-seg.ghost { --seg-c: var(--text-4); animation: none; opacity: 0.45; }
-  /* reduced-motion：全局（1186 行附近）已关掉全部动画；退避态补静态双线轨道线
-     （两条 1px 平行细线），方向靠箭头节静态形状，断靠散架 + 缺口锚点表达 */
+  /* reduced-motion：本文件 `@media (prefers-reduced-motion: reduce)` 的通配规则
+     （`* { transition: none !important; animation: none !important; }`）已关掉全部动画；
+     退避态补静态双线轨道线（两条 1px 平行细线），方向靠箭头节静态形状，断靠散架 +
+     缺口锚点表达 */
   @media (prefers-reduced-motion: reduce) {
     .route-seg.is-backoff {
       background: none; border-left: 1px solid var(--seg-c); border-right: 1px solid var(--seg-c);
@@ -3342,16 +3346,16 @@
   .stats-table tbody tr:hover { background: var(--surface-hover); }
   .stats-table tbody tr:first-child td { border-top: none; }
   .stats-table td.stats-cell-name { color: var(--text); word-break: break-all; }
-  /* 横向条（F 按模型 / G1 TPS） */
-  /* 横向条（F 按模型 / G1 TPS）：容器 grid 三列（标签 38% / 轨道 1fr / 数值 max-content），
-     数值列宽取全组最长行 → 各行轨道右端严格对齐（旧 flex 行 val 为 auto 宽，右端参差） */
+  /* 横向条（F 按模型 / G1 TPS）：容器 grid 四列（序号 max-content / 标签 38% / 轨道 1fr /
+     数值 max-content），数值列宽取全组最长行 → 各行轨道右端严格对齐（旧 flex 行 val 为
+     auto 宽，右端参差）。序号列只有在每行都带 rank 时才齐整——调用方要么全带、要么全不带。 */
   .stats-bars { display: grid; grid-template-columns: max-content minmax(0, 38%) minmax(0, 1fr) max-content; column-gap: 8px; font-size: 11.5px; }
   .stats-bars .empty-hint { grid-column: 1 / -1; }
+  /* 行不进自己的盒子、成员直接成为容器 grid 的项（才共享列宽）。连带后果：序号复用看板
+     状态检测卡的 .ms-rank（10px mono 灰字，仅第 1 名 .top 走 accent，规则定义在 .ms-list
+     一带），其 flex:none 在此语境被忽略，width:13px 照常生效。 */
   .stats-bar-row { display: contents; }
   .stats-bar-row > * { align-self: center; margin: 4px 0; }
-  /* 排名序号（F/G1 卡内榜与全量弹窗同构）：复用看板状态检测卡 .ms-rank/.top
-     （10px mono 灰字，仅第 1 名 accent 色，与看板 idx===0 同规则）；grid 语境下
-     .ms-rank 的 flex:none 被忽略，width:13px 照常生效。 */
   /* 占位行（榜单缺位补齐固定行数，配合双卡等高）：虚线行跨满四列，
      高度贴近常规榜行（11.5px 字行高约 16px + 上下 4px 边距） */
   .stats-bar-placeholder {
@@ -5155,7 +5159,9 @@
   box-shadow: none;
 }
 
-/* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
+/* toggle：本主题不另加规则——滑轨选中色来自基座 `.toggle input:checked + .slider`
+   （即 --accent token），滑轨是胶囊形且本就是平滑物，方角语言不适用于它；
+   暗色下只反色滑块（见本段「暗色专属修正」）。 */
 
 /* seg-control / view-tabs：方角分段 */
 :root[data-style="sepia"] .seg-control,

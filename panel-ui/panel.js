@@ -5132,10 +5132,13 @@ async function api(method, path, body) {
   // Terminal sessions are now backed by the persistent PTY host. The old mock
   // records remain as a shape reference for the inspector, but are not used as
   // a data source once the terminal page connects.
+  //
+  // 归属链（终端页的全局口径，不是某个会话的字段说明）：终端会话 → shell 进程 →
+  // 检测到的 Agent 进程/实例 → 请求、指标与路由都挂在实例号下；归属只认进程与
+  // 实例号，不从终端输出文本里猜。Agent 退出后会话保留终端自身状态，监测区随
+  // agent 一并隐藏。
   const terminalPreviewSessions = {
     checkout: {
-      // 归属链：终端会话 → shell 进程 → 检测到的 Agent 进程/实例 → 请求、指标与路由都挂在实例号下；
-      // 归属只认进程与实例号，不从终端输出文本里猜。Agent 退出后会话保留终端自身状态，监测区随 agent 一并隐藏。
       label: "demo-service", cwd: "D:\\dev\\demo-service", branch: "main",
       shell: { name: "PowerShell", pid: 23140 },
       agent: { name: "Codex CLI", endpointId: "codex", instanceId: "codex-23140", pid: 24512 },
@@ -5821,6 +5824,10 @@ async function api(method, path, body) {
         && typeof item.boundConversation.endpoint === "string" && typeof item.boundConversation.id === "string"
         ? { endpoint: item.boundConversation.endpoint, id: item.boundConversation.id }
         : null,
+      // status 两支同值是刻意的，不是笔误：后端快照的 status 只有 running/exited
+      //（terminal-host.mjs 的 snapshot 只产这两值），这里一律不采用，先落 idle；
+      // 真正的 working/idle 由信号在 terminalActivityApplyToSession /
+      // enrichTerminalSessions 里用 terminalSessionBusyFromSignals 重算。
       status: item.status === "running" ? "idle" : "idle",
       metrics: null,
       route: [],
@@ -8959,6 +8966,11 @@ async function api(method, path, body) {
         status: "idle", metrics: null,
         requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
       };
+      // 未就绪才会走到这段预览种子分支，而「+」按就绪位禁用（syncTerminalAddBtn
+      // 与降级空态的 addBtn.disabled）——正常 UI 下点不到它。它不被删除是刻意的
+      // （panel.test.mjs「降级预览分支原样保留」钉着），只作预览种子的形状参考，
+      // 不表示降级态会给用户造会话：降级与首连两态由 renderTerminalUnavailableState /
+      // renderTerminalPendingState 收走假会话。
       // 预览稿也要有视口才渲得出页签（渲染源是视口表）；「+」= 新视口。
       terminalViewportPlaceTerminal(id, "new");
       renderTerminalPreviewSession();
@@ -10604,7 +10616,9 @@ async function api(method, path, body) {
       return;
     }
     // 「落地」= 这个 agent 的列表已成功取回。抓取失败也写着同一个 endpoint，但那份
-    // 空表不是事实——按失败态消费掉自动展开，用户之后手动刷新成功就再也不会展开。
+    // 空表不是事实——失败**不**消费自动展开（置位只发生在下方 activeGroup 命中的
+    // 分支），所以下一拍真取回时仍会照常展开一次；反过来把失败当「已展开」记账，
+    // 就会让那次真展开永远不来。
     const loaded = !agentId || (terminalRailHistory.endpoint === agentId && !terminalRailHistory.error);
     const sessions = loaded ? terminalRailVisibleSessions() : [];
     // 移除自愈（M14）先于分组：该目录在移除之后来了新会话，就先把它从移除清单摘掉，
@@ -10954,8 +10968,12 @@ async function api(method, path, body) {
 
   // ---- 数据 ----
   // 历史会话只在进终端视图时拉一次（全量扫盘实测 6.7s、无缓存——禁挂轮询）；身份
-  // 换人时补拉一次。M9-D4 起段头刷新钮已砍（用户拍板只留搜索/视图选项），手动重取
-  // 入口随之消失——重取只剩这两条自动路径，要手动刷新可退出终端视图再进。
+  // 换人时补拉一次。M9-D4 起段头刷新钮已砍（用户拍板只留搜索/视图选项），界面上的
+  // 手动重取入口随之消失。现存自动重取共三条：①进页（受下方 30s TTL 闸，TTL 内
+  // 退出再进不发请求）；②身份换人（同步重拉）；③会话栏追赶
+  // maybeCatchUpTerminalRailHistory（终端页内新建会话、兜底行压着真行时发
+  // ?refresh=1，另有 20s 最小间隔与无进展收敛）。注意「退出终端视图再进」不是可靠的
+  // 手动刷新手段——TTL 内进来复用缓存。
   //
   // M4 起「进页」这条路径不再把请求排在首帧上：进页先拿缓存渲一帧，TTL 内一次都
   // 不发；过期才由 scheduleTerminalRailHistoryFetch 排到首帧之后补一拍。原来的写法
@@ -12866,7 +12884,8 @@ async function api(method, path, body) {
   // 视口锚定的整列 cascade：取当前可见窗口 [i0,i1] 而非恒为「前 K 行」，并在刷新后
   // 还原 scrollTop（与 sessions 的 keepScroll 同源）。翻到非最上刷新时，波在用户当前
   // 视口里自上而下流、位置不丢；到顶时 prevScrollTop=0、i0=0，与旧「前 K 行」逐字节等价。
-  // --i 重基为窗口内位次 (j-i0)：绝对行号会让中后段行的延迟溢出 450ms 预算；--i 走内联
+  // --i 重基为窗口内位次 (j-i0)：绝对行号会让中后段行的延迟把总时长顶出
+  // SKILLS_CASCADE_TOTAL_MS（320ms）预算；--i 走内联
   // setProperty 覆盖模板里的绝对 --i。步长仍由窗口行数反推，使「末行延迟+单行时长≡总时长」
   // 不变式继续成立，总时长不随仓库条数漂。行高均匀（名称/描述两行都 nowrap+ellipsis），
   // 首行 offsetHeight 即代表全体，不用逐行量。
@@ -13901,7 +13920,7 @@ async function api(method, path, body) {
     btn.className = "btn" + (danger ? " btn-danger" : " btn-primary");
     skillsModalConfirm = onConfirm || null;
     skillsModalGen++;
-    $("skillsModal").classList.toggle("skills-modal-wide", !!wide || !!diff); // 仅正文查阅加宽
+    $("skillsModal").classList.toggle("skills-modal-wide", !!wide || !!diff);
     $("skillsModal").classList.toggle("skills-modal-diff", !!diff);
     $("skillsModal").classList.add("show");
   }
@@ -14347,7 +14366,9 @@ async function api(method, path, body) {
         .map((id) => rows.find((el) => el.getAttribute("data-preset") === id))
         .filter(Boolean);
       reordered.forEach((el) => list.insertBefore(el, null));
-      // 行序即注入序，行内 index 需同步改名，否则同一次渲染里的过滤/重排会读错行
+      // 重排后把行内位次属性一并对齐，让 DOM 上的 index 与当前行序一致（当前无读取
+      // 方——data-preset-index 只在此处与列表渲染时写入；留着是为了排查/调试时属性
+      // 不撒谎，不要据此推断有代码按它读行）。
       reordered.forEach((el, i) => el.setAttribute("data-preset-index", String(i)));
       dragEl.classList.remove("preset-row-dragging");
       if (!presetDragReducedMotion()) {
@@ -14417,8 +14438,9 @@ async function api(method, path, body) {
         : injected
           ? '<span class="badge badge-ok">已注入</span>'
           : '<span class="badge badge-neutral">未注入</span>';
-      // hotReload=false 的端点（claude/zcode/dsh/pi/codex）：写盘即生效于新会话，
-      // 运行中会话需重开才加载新的全局指令文件
+      // hotReload=false 的端点：写盘即生效于新会话，运行中会话需重开才加载新的
+      // 全局指令文件。名单以 agent-prompts-inject.mjs 的 PROMPT_ENDPOINTS 为准
+      // （面板不复制这份清单），端点增减时这里不用跟着改。
       const hotNote = ep.hotReload ? "" : "（运行中会话需重开生效）";
       return `<div class="skills-skill-row"${ep.hotReload ? "" : ' title="运行中会话需重开生效"'}>
         <span style="min-width:0;">
@@ -15395,8 +15417,6 @@ async function api(method, path, body) {
   // 三入口（单渠道详情钮、号池详情钮、右键菜单）共用；storeTestBusy 防并发重入
   // （详情钮还会自身 disabled，菜单无可禁用元素，全靠这个标志挡第二轮）。
   let storeTestBusy = false;
-  // ids：按可见行展开后的渠道 id 序列；labelMap 解析显示名（池行取池名）。
-  // opts：{ btn } 仅详情钮传——按下即禁用改文案，finally 复位；右键菜单不传。
   // 测试失败原因上屏：后端 /api/store/test 的 error 是英文技术语，界面只出产品
   // 语言、原文进控制台（panelError 既有契约），这里按已知模式翻成用户语义，
   // 翻不出走 panelError 兜底。HTTP 200 例外：它只出现在 api() 给 message 拼的
@@ -15417,6 +15437,9 @@ async function api(method, path, body) {
     if (/store is unavailable/.test(raw)) return "渠道配置库暂不可用，请稍后再试";
     return panelError(e, "连接测试未通过");
   }
+  // 逐条测试渠道连通性并汇总结果；storeTestBusy 在飞期间后续调用直接空转返回。
+  // ids：按可见行展开后的渠道 id 序列；labelMap 解析显示名（池行取池名）。
+  // opts：{ btn } 仅详情钮传——按下即禁用改文案，finally 复位；右键菜单不传。
   async function runStoreTest(ids, opts) {
     if (storeTestBusy) return null;
     storeTestBusy = true;
@@ -17017,7 +17040,9 @@ async function api(method, path, body) {
       : { id: row.id, name: row.p.displayName || row.id, isPool: false });
   }
 
-  // ── 看板路由链状态（左栏「路由链」卡 + 胶囊 auto 标记共用口径） ──
+  // ── 看板路由链状态（只服务左栏「路由链」卡） ──
+  // 端点卡胶囊的 auto 标记不读 runtime.lamps，走 autoRouteMarkForTarget（见上方
+  // routeRuntimeCache 的声明注释），本文件里 routeRailLights 也只有路由链卡一个调用点。
   // 节点灯色判定：数据 = relay 进程内链状态（runtime API 的 lamps 字段，每次
   // 启动重新统计，与 model-stability 的持久 8h 口径刻意拆开）——green=可用 /
   // red=不可用（连续失败已降级退避）/ gray=本次启动尚无数据。不设基于 TTFT 的

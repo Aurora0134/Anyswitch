@@ -610,7 +610,8 @@ if (window.panelStartupController) panelStartupPlay();
   </nav>
   <!-- 终端会话栏：进终端视图时整组换上（与设置目录同一换血形制——换内容而非追加），
        退出终端即还原。栏体自上而下（M8 T1 两段合并）：「新建终端」钮 →「工作区」段头
-       （T7 三钮：搜索｜视图选项｜刷新）→ 目录分组树（live 会话内联进所属组）→ 栏底
+       （T7 两钮：搜索｜视图选项；刷新钮已砍，M9-D4，别按三钮去找它）→ 目录分组树
+       （live 会话内联进所属组）→ 栏底
        （亮暗/返回，M7-S4 三层 flex 钉底不用 sticky/fixed）。原左上角 agent 身份行已拆
        （M7-S0）；「打开的终端」段整段拆除（M8-T1）——live 判定＝该会话有开着终端替它
        续接（resume 两键映射），不再单列。行一律脚本渲染（HTML 不写死假数据）。静态
@@ -738,7 +739,10 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
         </div>
 
-        <!-- 路由链状态（存在已启用链时才显示，否则整卡隐藏不占位） -->
+        <!-- 路由链状态卡：当前搁置不在屏上——panel.js 的 ROUTE_SIDE_CARD_ENABLED 为 false，
+             渲染入口 renderRouteChainBoard 首行即返回，整卡恒保持 hidden。行渲染/hover 浮层/
+             点击跳转逻辑均保留，把该开关置 true 即恢复；恢复后的显隐规则是「存在已启用链才
+             上屏，否则整卡隐藏」。 -->
         <div class="panel-card" id="routeRailCard" hidden>
           <div class="card-header">
             <h2 class="card-title">
@@ -2036,7 +2040,9 @@ if (window.panelStartupController) panelStartupPlay();
   </section>
 
   <!-- 设置全页视图：页头齿轮切入（switchView 与主头行互斥），退出回到进入前视图；
-       不写入 panel-view，刷新按 restoreView 白名单恢复，永不落设置页 -->
+       本视图不写 panel-view（那份留给「←退出」的目标），但「停在设置页」另由
+       panel-settings-open 标记：刷新时 restoreView 若见其为 "1" 会直接落回设置页
+       （优先级低于 terminal-open），并非刷新必回主视图。 -->
   <section class="settings-view" id="settingsView" hidden>
     <nav class="view-tabs settings-subtabs" role="tablist" aria-label="设置分类">
       <button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true" aria-controls="settingsPanelGeneral">通用</button>
@@ -2443,10 +2449,11 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「高级选项」：先行版更新通道 + 数据迁移两张卡。版式沿用本页既有卡的写法——
-         卡头右侧放动作按钮（与「关于」的本地环境卡同构），卡体第一行是 role=status
-         的状态行、第二行是次要明细，需要控件的行用 .modal-item；状态色调走
-         data-tone，与 about-status 同规则。 -->
+    <!-- 「高级选项」：四张卡，依次为更新通道、导出配置包、导入配置包、备份位置。版式沿用
+         本页既有卡的写法——卡头右侧用 .card-head-actions 放动作按钮（与「关于」的本地环境
+         卡同构）；有状态行的卡（导出/导入/备份位置）首行是 role=status 的状态行、次行是
+         次要明细，需要控件的行才用 .modal-item（更新通道卡即整卡一行 .modal-item，没有状态
+         行）；状态色调走 data-tone，与 about-status 同规则。 -->
     <div class="settings-panel" id="settingsPanelAdvanced" hidden role="tabpanel" aria-labelledby="settingsTabAdvanced">
       <!-- 先行版开关：开=只切检测通道（换装仍由关于页的两步更新完成）；关=确认后
            先回退到最近的稳定版本再回到正式更新。开关行说明只摆两态事实，回退的
@@ -2825,7 +2832,9 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </div>
 
-<!-- 停止 Relay 二次确认模态框 -->
+<!-- Relay 生命周期二次确认模态框：停止与重启共用同一张 #stopRelayModal。
+     openLifecycleModal("stop"|"restart") 会改写标题（停止 Relay 服务 / 重启 Relay 与面板
+     服务）与确认键文案（确认停止 / 确认重启），故它不是「停止专用」弹层。 -->
 <div class="modal-overlay" id="stopRelayModal">
   <div class="modal-card" style="max-width:440px;">
     <div class="modal-head">

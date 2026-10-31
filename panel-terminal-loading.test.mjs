@@ -742,9 +742,10 @@ describe("T7 刷新会话列表：显式刷新带 ?refresh=1", () => {
   });
 
   it("源码：刷新按钮传 force=true，自动路径零参——调用点逐一位置绑定", () => {
-    // 全文只许这两个调用点，且各归其位：force 挂到自动路径上，每次进页都会触发
-    // 一次真扫描（refreshSessionsList 定义处的注释明写的纪律）。纯存在性断言分辨
-    // 不出 force 挂在哪个调用点，故按「全文数量 + 所在函数」双重钉住。
+    // 全文只许这两个调用点，且各归其位：自动路径必须零参、留在服务端 TTL 快照窗口内
+    // 复用；force 只属于刷新钮的 click handler——挂在自动路径上会让每次进页都触发一次
+    // 真扫描（refreshSessionsList 定义处明写的纪律）。纯存在性断言分辨不出 force 挂在
+    // 哪个调用点，故按「全文数量 + 所在函数」双重钉住。
     const callSites = panelJs.match(/refreshSessionsList\((\{[^}]*\})?\)/g) || [];
     assert.deepEqual(
       callSites,

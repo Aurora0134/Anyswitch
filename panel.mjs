@@ -615,12 +615,6 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
   }
 }
 
-// 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家（全量 scanAll
-// 要读九家存档，列表轮询路径用不起）。名单外与读盘失败降级为空表的纪律在
-// session-scan 的 scanEndpoint 里（匹配层拿到空表自然判不出，按「宁可不接」
-// 回落）。真正的执行位置由扫描承载决定——见 createPanelRouter 里的 scanHost：
-// 默认进 worker 线程，面板进程不被这段同步 fs 扫描按住。
-
 // Terminal-host lifecycle pull: the relay (47821) owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
 // /api/internal/*). Returns the parsed payload, or null when the relay is
@@ -1118,6 +1112,11 @@ export function createPanelRouter({
       scanAgent: (agentId) => sessionScanner.scanEndpoint(agentId),
     },
   });
+  // 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家，不是 scanAll
+  // ——全量要读九家存档，列表轮询路径用不起。边界：名单外与读盘失败一律降级为
+  // 空表（纪律在 session-scan 的 scanEndpoint 里），匹配层拿到空表自然判不出，
+  // 按「宁可不接」回落，绝不抛给调用方。默认执行位置是上方的 scanHost（worker
+  // 线程），面板进程不被这段同步 fs 扫描按住。
   // 注入的假扫描函数（单测）原地同步跑——不碰真存档，也不起 worker；显式指定
   // 了 worker 模块时一律走 worker（离线钉靠这条证明扫描不占事件循环）。
   const scanAgentConversations = scanAgentConversationsFn && !sessionScanWorkerFile
@@ -1220,7 +1219,7 @@ export function createPanelRouter({
   // tasklist 兜底轮）时允许回退到的上一份好 feed 的最大年龄。比拉取失败路
   // 径宽——兜底轮之后要等下一整轮探针扫描好谱系才回来。
   const PULLED_DETECTED_SUSPECT_STALE_MAX_MS = 10000;
-  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions }
+  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions, opencodeSessions }
 
   // 谱系盲判定：processes 为空数组，或非空但每行 ancestors 都是空数组——
   // tasklist 兜底轮的 feed 形状（谱系表为空但 relay 有应答）。空 ancestors

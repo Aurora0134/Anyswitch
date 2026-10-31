@@ -121,16 +121,17 @@ export function createRelayServer(deps) {
         };
         res.on("close", onResAborted);
         try {
-          // 档位映射 takeover (Claude tier entries) runs FIRST, ahead of the pool
+          // 入站模型归一（[1m] 变体标记 + 桌面路由别名）先于档位接管运行：
+          // 归一后的 body.model 才是档位接管、池/链规划、记账与回显看到的模型。
+          await handler.normalizeInboundModel(req.headers, body);
+
+          // 档位映射 takeover (Claude tier entries) runs ahead of the pool
           // and chain plans and of the tracker opening this request: it rewrites
           // body.model from a Claude tier name to the hosted model the operator
           // mapped it to, so pool fan-out, chain routing, the journal row and the
           // attribution below all see the destination, never the entry name.
           // No-op for every other endpoint and for any model the strict rules
           // already resolve.
-          // 入站模型归一（[1m] 变体标记 + 桌面路由别名）先于档位接管运行：
-          // 归一后的 body.model 才是档位接管、池/链规划、记账与回显看到的模型。
-          await handler.normalizeInboundModel(req.headers, body);
           await handler.planTierEntryMessages(req.headers, body, agentId);
 
           // Pool routing: a body.model of anthropic/<pool-id>/<model>
