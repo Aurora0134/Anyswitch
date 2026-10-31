@@ -185,7 +185,16 @@ describe("resident relay /v1/messages pool routing: streaming", () => {
       "member-a": () => statusError(503),
       "member-b": () => healthyStream("recovered on B"),
     });
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    // loadSparkSettings 必须显式注入：缺省时 getAgentsStatus 经默认
+    // loadSettings 实读真实 %LOCALAPPDATA%\Anyswitch\settings.json，破坏本文件
+    // 头部的全隔离声明。注入函数返回 {}，sparkWindowPoints 经
+    // parseSparkWindowPoints 回落出厂默认，行为等同无设置文件的干净环境
+    // （注入 null 不行——collector 会把 null 当「未注入」回落真 loader）。
+    const collector = createAgentMetricsCollector({
+      nowFn: () => 1000,
+      execFn: (cmd, opts, cb) => cb(null, ""),
+      loadSparkSettings: () => ({}),
+    });
     const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY, metricsCollector: collector });
 
     await withResident(deps, async (port) => {
