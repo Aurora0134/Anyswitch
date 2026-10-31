@@ -81,9 +81,9 @@ test("shimRoot follows USERPROFILE", () => {
   assert.equal(shimRoot({ USERPROFILE: "C:\\Users\\x" }), join("C:\\Users\\x", ".config", "anyswitch-bin"));
 });
 
-test("the registry covers the eight known commands and the shared bin/ members", () => {
+test("the registry covers the nine known commands and the shared bin/ members", () => {
   const byId = new Map(SHIM_SPECS.map((spec) => [spec.id, spec]));
-  for (const id of ["grok", "claude", "codex", "opencode", "pi"]) {
+  for (const id of ["grok", "claude", "codex", "opencode", "pi", "workbuddy"]) {
     assert.equal(byId.get(id).dir, `bin-${id}`);
     assert.equal(byId.get(id).command, id);
   }
@@ -91,6 +91,7 @@ test("the registry covers the eight known commands and the shared bin/ members",
   assert.deepEqual(byId.get("dsh").launcherArgs, ["--profile", "dsh-tui"]);
   assert.equal(byId.get("zcode").dir, "bin");
   assert.deepEqual(byId.get("zcode").extraFiles, ["zcode-app.vbs"]);
+  assert.equal(byId.get("workbuddy").launcher, "workbuddy-launcher.mjs");
   assert.equal(byId.get("agy").retired, true);
   assert.throws(() => findShimSpec("nope"), /unknown shim spec/);
 });

@@ -17,12 +17,13 @@ import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
 import { writeOpencodeConfig, opencodeConfigPath } from "./opencode-launcher.mjs";
 import { writeGrokConfig, grokConfigPath } from "./grok-merge-config.mjs";
+import { writeWorkbuddyModels, workbuddyModelsPath } from "./workbuddy-merge-models.mjs";
 
 // --- 同步结果的机器可读摘要 -----------------------------------------------
 // 同步子进程除了人看的日志，还在 stdout 上打一行定长前缀的 JSON 摘要，面板靠它
 // 区分「整次没做成」和「个别端点没写进去」：八个端点里挂掉一个，不该让同步按钮
 // 整颗报红。端点名与字段名固定，前端按名字取用。
-export const AGENT_ENDPOINTS = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok"];
+export const AGENT_ENDPOINTS = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok", "workbuddy"];
 export const SYNC_RESULT_PREFIX = "__ANYSWITCH_SYNC_RESULT__";
 
 // Codex 的模型目录每次同步都整份重写，而只改模型不动配置文本时 unchanged 为真，
@@ -147,6 +148,7 @@ export async function syncAllAgentConfigs({
     codex: null,
     opencode: null,
     grok: null,
+    workbuddy: null,
   };
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
@@ -295,6 +297,23 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.grok = { ok: false, error: err.message };
     logger?.warn?.(`grok config sync skipped: ${err.message}`);
+  }
+
+  // 9. WorkBuddy models.json sync (~/.workbuddy/models.json, WORKBUDDY_CONFIG_DIR 可改根)
+  try {
+    const workbuddyPath = workbuddyModelsPath(base);
+    const workbuddyResult = isAbsolute(workbuddyPath)
+      ? await writeWorkbuddyModels(store, port, token, root, workbuddyPath)
+      : relativeHomeFailure(workbuddyPath);
+    results.workbuddy = workbuddyResult;
+    if (!workbuddyResult.ok) {
+      logger?.warn?.(`workbuddy models.json not updated: ${workbuddyResult.reason ?? "unknown"}`);
+    } else if (!workbuddyResult.unchanged) {
+      logger?.info?.("workbuddy models.json synced");
+    }
+  } catch (err) {
+    results.workbuddy = { ok: false, error: err.message };
+    logger?.warn?.(`workbuddy config sync skipped: ${err.message}`);
   }
 
   return { ok: true, results };

@@ -530,16 +530,17 @@ test("probeExecutableVersion parses the first SemVer and classifies spawn failur
   assert.deepEqual(await run(timedOut), { missing: false, version: null });
 });
 
-test("an empty installation reports all nine clients, with six dual-installation cards", async (t) => {
+test("an empty installation reports all ten clients, with the registered installation records", async (t) => {
   const f = fixture(t);
   const state = await f.service({ now: () => Date.parse("2026-09-18T08:00:00Z") }).getState();
   assert.equal(state.checkedAt, "2026-09-18T08:00:00.000Z");
   assert.equal(state.platform, process.platform);
   assert.equal(state.nodeVersion, process.version);
-  assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"]);
+  assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok", "workbuddy"]);
   assert.deepEqual(state.clients[1].installations.map((i) => [i.kind, i.remoteId]), [["cli", "codex"], ["desktop", "codex-desktop"]]);
   // Qoder 与 Codex 同序 [cli, desktop]：index 0 是 qodercli.exe（remoteId qoder-cli）。
-  assert.deepEqual(state.clients.at(-2).installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder-cli"], ["desktop", "qoder"]]);
+  const qoder = state.clients.find((c) => c.id === "qoder");
+  assert.deepEqual(qoder.installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder-cli"], ["desktop", "qoder"]]);
   // DSH 官方桌面端上线后同样是两条安装记录：index 0 是 npm 全局 CLI（更新按钮装的
   // 就是这个包），index 1 是官方桌面端（官方发布文件渠道，remoteId dsh-desktop）。
   // 终端形态的第二个组件 dsh-tui 追加为 index 2，前两条的顺序与语义不动。
@@ -555,10 +556,14 @@ test("an empty installation reports all nine clients, with six dual-installation
   // 显式配置制的 CLI——CLI 没有官方 release 渠道，remoteId 恒为 null。
   const zcode = state.clients.find((c) => c.id === "zcode");
   assert.deepEqual(zcode.installations.map((i) => [i.kind, i.remoteId]), [["desktop", "zcode"], ["cli", null]]);
+  // WorkBuddy 两条记录都是本地读版本：没有可核验的官方源，remoteId 一律 null，
+  // 关于页不会为它发 404 查询。
+  const workbuddy = state.clients.find((c) => c.id === "workbuddy");
+  assert.deepEqual(workbuddy.installations.map((i) => [i.kind, i.remoteId]), [["cli", null], ["desktop", null]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
-    assert.equal(client.installations.length, client.id === "dsh" ? 3 : ["codex", "qoder", "claude", "kimi", "zcode"].includes(client.id) ? 2 : 1);
+    assert.equal(client.installations.length, client.id === "dsh" ? 3 : ["codex", "qoder", "claude", "kimi", "zcode", "workbuddy"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");
@@ -567,6 +572,53 @@ test("an empty installation reports all nine clients, with six dual-installation
       assert.equal(item.versionSource, null);
       assert.equal(item.issue, "entry_missing");
     }
+  }
+});
+
+// WorkBuddy 的安装树：桌面壳在 Programs/WorkBuddy/WorkBuddy.exe，CLI 内核在
+// 同一目录的 resources/app.asar.unpacked/cli/bin/codebuddy，CLI 版本在入口上两级
+// 的 cli/package.json（包名 @genie/agent-cli，bin 指回入口）。
+function installWorkbuddy(f, { cliName = "@genie/agent-cli", cliVersion = "2.165.0", desktopVersion = "5.9.3" } = {}) {
+  const root = join(f.base.LOCALAPPDATA, "Programs", "WorkBuddy");
+  const cliEntry = f.put(join(root, "resources/app.asar.unpacked/cli/bin/codebuddy"), "#!/usr/bin/env node\n");
+  f.put(join(root, "resources/app.asar.unpacked/cli/package.json"), JSON.stringify({
+    name: cliName, version: cliVersion, bin: { codebuddy: "bin/codebuddy" },
+  }));
+  const desktopExe = f.put(join(root, "WorkBuddy.exe"));
+  asarPackage(f, desktopExe, "@genie/workbuddy-desktop", desktopVersion);
+  return { root, cliEntry, desktopExe };
+}
+
+test("WorkBuddy reads the bundled CLI and the desktop shell, both without a remote source", async (t) => {
+  const f = fixture(t);
+  const installed = installWorkbuddy(f);
+  const state = await f.service().getState();
+  const client = state.clients.find((c) => c.id === "workbuddy");
+  assert.deepEqual(client.entryForms, ["Desktop", "CLI"]);
+  const [cli, desktop] = client.installations;
+  assert.deepEqual([cli.kind, cli.remoteId, cli.status], ["cli", null, "found"]);
+  assert.equal(cli.path, installed.cliEntry);
+  assert.equal(cli.version, "2.165.0");
+  assert.equal(cli.versionSource, "package.json");
+  assert.equal(cli.issue, null);
+  assert.deepEqual([desktop.kind, desktop.remoteId, desktop.status], ["desktop", null, "found"]);
+  assert.equal(desktop.path, installed.desktopExe);
+  assert.equal(desktop.version, "5.9.3");
+  assert.equal(desktop.versionSource, "app.asar/package.json");
+  assert.equal(desktop.issue, null);
+});
+
+test("WorkBuddy degrades to found/version_unavailable instead of erroring the page", async (t) => {
+  const f = fixture(t);
+  // 包名对不上 → 不报版本；asar 头坏掉 → 版本不可得。两条都要留在 found，
+  // 走既有降级路径（关于页显示「查询失败」而不是整页炸）。
+  installWorkbuddy(f, { cliName: "@genie/not-agent-cli" });
+  fs.writeFileSync(join(f.base.LOCALAPPDATA, "Programs/WorkBuddy/resources/app.asar"), "not an asar");
+  const client = (await f.service().getState()).clients.find((c) => c.id === "workbuddy");
+  for (const item of client.installations) {
+    assert.equal(item.status, "found");
+    assert.equal(item.version, null);
+    assert.equal(item.issue, "version_unavailable");
   }
 });
 
@@ -633,6 +685,7 @@ test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", 
     opencode: ["CLI"],
     grok: ["CLI"],
     zcode: ["Desktop", "CLI"],
+    workbuddy: ["Desktop", "CLI"],
   });
   const f = fixture(t);
   const state = await f.service().getState();

@@ -7,11 +7,11 @@ import {
   resolveOpencodeExecutable, resolvePiExecutable, resolveKimiExecutable,
   resolveDshExecutable, resolveZcodeExecutable, resolveZcodeCliExecutable,
   resolveQoderExecutable,
-  resolveQoderCliExecutable, resolveGrokExecutable,
+  resolveQoderCliExecutable, resolveGrokExecutable, resolveWorkbuddyExecutable,
 } from "./agent-discovery.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
-test("standalone discovery preserves all nine launcher installation choices", () => {
+test("standalone discovery preserves all ten launcher installation choices", () => {
   const base = { USERPROFILE: "C:\\Users\\fixture", APPDATA: "C:\\roaming", LOCALAPPDATA: "C:\\local" };
   assert.equal(defaultClaudeExecutable(base), "C:/roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe");
   assert.equal(resolveClaudeExecutable(base), defaultClaudeExecutable(base));
@@ -206,6 +206,20 @@ test("GROK_EXECUTABLE refuses shims that could recurse into the launcher", () =>
   assert.equal(resolveGrokExecutable(base), "C:\\Users\\fixture\\.grok\\bin\\grok.exe");
   assert.throws(() => resolveGrokExecutable({ ...base, GROK_EXECUTABLE: "grok.exe" }), /must be an absolute path/);
   assert.throws(() => resolveGrokExecutable({ ...base, GROK_EXECUTABLE: "C:\\custom\\grok.cmd" }), /must point at a \.exe/);
+});
+
+test("WORKBUDDY_EXECUTABLE refuses relative names that could recurse into the Anyswitch shim", () => {
+  const base = { USERPROFILE: "C:////Users////fixture", LOCALAPPDATA: "C:////Users////fixture////AppData////Local" };
+  // 默认落点不验存在性：未安装由调用方判（环境检测报「未找到」、launcher 报明确错误）。
+  assert.match(resolveWorkbuddyExecutable(base), /app\.asar\.unpacked[\\/]cli[\\/]bin[\\/]codebuddy$/);
+  assert.throws(
+    () => resolveWorkbuddyExecutable({ ...base, WORKBUDDY_EXECUTABLE: "workbuddy" }),
+    /must be an absolute path/,
+  );
+  assert.throws(
+    () => resolveWorkbuddyExecutable({ ...base, WORKBUDDY_EXECUTABLE: ".\\bin-workbuddy\\workbuddy" }),
+    /must be an absolute path/,
+  );
 });
 
 test("resolveZcodeCliExecutable: explicit-config only — override wins, unconfigured is null", () => {

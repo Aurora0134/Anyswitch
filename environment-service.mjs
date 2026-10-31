@@ -5,7 +5,7 @@ import {
   resolveClaudeExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
-  resolveZcodeCliExecutable, resolveDshTuiExecutable,
+  resolveZcodeCliExecutable, resolveDshTuiExecutable, resolveWorkbuddyExecutable,
 } from "./agent-discovery.mjs";
 import { compareVersions, parseVersion } from "./version-check.mjs";
 
@@ -26,6 +26,16 @@ export function resolveDshDesktopExecutable(base = process.env) {
 // 与 DSH 桌面端同型）。检测只认它自己的安装目录；未安装时这一行如实报未找到。
 export function resolveKimiDesktopExecutable(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Kimi Code", "Kimi Code.exe");
+}
+
+// WorkBuddy 的桌面壳（Electron 安装器的默认落点）。CLI 内核随包附带在
+// resources/app.asar.unpacked 内，由 resolveWorkbuddyExecutable 解析；这里只
+// 描述桌面端本体，环境检测的第二条安装记录用。
+export function resolveWorkbuddyDesktopExecutable(base = process.env) {
+  return join(
+    base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
+    "Programs", "WorkBuddy", "WorkBuddy.exe",
+  );
 }
 
 // The Codex CLI line must describe the same artifact the update button
@@ -107,6 +117,9 @@ const CLIENTS = [
   // package.json — `@xai-official/grok` is only how upstream ships it (and how
   // release-service reads the official latest), not the copy this machine runs.
   ["grok", "Grok Build", resolveGrokExecutable],
+  // WorkBuddy：桌面壳为主形态，CLI 内核随安装包附带（不在 PATH）。主记录按
+  // 契约是 CLI 安装记录，桌面端作为第二条记录由 inspectWorkbuddyDesktop 产出。
+  ["workbuddy", "WorkBuddy", resolveWorkbuddyExecutable],
 ];
 
 // 只有桌面形态的端点：本地那条记录就是桌面端，inspect 走 kind="desktop" 分支
@@ -138,6 +151,8 @@ export const CLIENT_ENTRY_FORMS = Object.freeze({
   pi: Object.freeze(["CLI"]),
   opencode: Object.freeze(["CLI"]),
   grok: Object.freeze(["CLI"]),
+  // WorkBuddy 桌面壳为主入口，内置 CLI 随安装包附带（同一端点两种形态）。
+  workbuddy: Object.freeze(["Desktop", "CLI"]),
   // ZCode 桌面端是主形态；CLI 形态为显式配置制——没有官方发行渠道，仅在
   // 用户以 ZCODE_CLI_EXECUTABLE 指定入口时出现，不参团官方版本比对。
   zcode: Object.freeze(["Desktop", "CLI"]),
@@ -249,6 +264,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       const expected = id === "zcode" ? ["zcode"]
         : id === "dsh-desktop" ? ["@deepseek-ai/dsh-desktop"]
         : id === "kimi-desktop" ? ["kimi-code-app"]
+        : id === "workbuddy-desktop" ? ["@genie/workbuddy-desktop", "workbuddy-desktop"]
         : ["qoder"];
       return [pkg.name, pkg.productName].some((name) => typeof name === "string" && expected.includes(name.toLowerCase()))
         ? productVersion(pkg.version) : null;
@@ -301,6 +317,21 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     if (!text) return null;
     const pkg = JSON.parse(text);
     return pkg.name === "zcode-runtime" ? productVersion(pkg.version) : null;
+  }
+
+  // WorkBuddy CLI 的版本在入口上两级（cli/package.json）：只认包名
+  // @genie/agent-cli 且 bin 指回该入口的那份清单，目录里别人的清单不算。
+  function workbuddyCliVersion(path) {
+    const dir = dirname(dirname(path));
+    const text = readText(join(dir, "package.json"));
+    if (!text) return null;
+    const pkg = JSON.parse(text);
+    if (pkg.name !== "@genie/agent-cli") return null;
+    const bins = typeof pkg.bin === "string" ? [pkg.bin] : Object.values(pkg.bin ?? {});
+    const pointsAtEntry = bins.some(
+      (bin) => typeof bin === "string" && resolve(dir, bin).toLowerCase() === resolve(path).toLowerCase(),
+    );
+    return pointsAtEntry ? productVersion(pkg.version) : null;
   }
 
   async function inspect(id, kind, locate) {
@@ -440,6 +471,39 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
+  // WorkBuddy 的两条安装记录：CLI 内核（入口在 app.asar.unpacked 内，不在 PATH）
+  // 与桌面壳。两条 remoteId 恒为 null —— 没有可核验的官方版本源，交出去只会让
+  // 关于页去查 404（与 zcode CLI 同一条纪律）。解析失败走既有降级路径。
+  async function inspectWorkbuddyCli() {
+    const result = { kind: "cli", remoteId: null, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const path = resolveWorkbuddyExecutable(base);
+      if (typeof path !== "string" || !isFile(path)) return result;
+      const found = { ...result, status: "found", path, issue: "version_unavailable" };
+      const version = workbuddyCliVersion(path);
+      return version ? { ...found, version, versionSource: "package.json", issue: null } : found;
+    } catch (error) {
+      if (missing(error) && result.status !== "found") return result;
+      return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
+    }
+  }
+
+  // 桌面端版本从 Electron 归档里的 package.json 读（纯 Node 解析 asar 头，
+  // 复用 readAsarPackageVersion；包名不是 @genie/workbuddy-desktop 就不报版本）。
+  async function inspectWorkbuddyDesktop() {
+    const result = { kind: "desktop", remoteId: null, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const path = resolveWorkbuddyDesktopExecutable(base);
+      if (!isFile(path)) return result;
+      const found = { ...result, status: "found", path, issue: "version_unavailable" };
+      const version = asarProductVersion("workbuddy-desktop", join(dirname(path), "resources", "app.asar"));
+      return version ? { ...found, version, versionSource: "app.asar/package.json", issue: null } : found;
+    } catch (error) {
+      if (missing(error) && result.status !== "found") return result;
+      return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
+    }
+  }
+
   // DSH 终端形态的第二个组件：界面插件 dsh-tui（community 包，装在
   // ~/.dsh/profiles/dsh-tui 下）。它和本体 harness 是同一个终端形态的两半，
   // 因此挂在 dsh 端点下作为第三条安装记录（kind "tui"），不另开端点。插件
@@ -481,7 +545,9 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       const extraInstallations = {
         dsh: inspectDshTui,
       };
-      const installations = await Promise.all(id === "qoder"
+      const installations = await Promise.all(id === "workbuddy"
+        ? [inspectWorkbuddyCli(), inspectWorkbuddyDesktop()]
+        : id === "qoder"
         ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
         : id === "zcode"
           // zcode 与 qoder 同型（同一端点 id 下挂 CLI 形态安装记录），但桌面是它

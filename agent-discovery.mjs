@@ -273,6 +273,20 @@ export function resolveQoderExecutable(base = process.env, io = { existsSync }) 
   return io.existsSync(entryPath) ? entryPath : join(base.USERPROFILE ?? "", ".qoder", "bin", "qodercli", "qodercli.exe");
 }
 
+// WorkBuddy 的内置 CLI：Electron 安装包内 resources/app.asar.unpacked/cli/bin/codebuddy
+// （包 @genie/agent-cli，无扩展名、不在 PATH）。入口存在性交给调用方判——
+// 环境检测卡要如实报「未找到」，launcher 报明确错误，解析函数本身不抛。
+// 覆盖只收绝对路径：裸名字/相对路径可能解析回 Anyswitch 的 workbuddy shim，
+// 让 launcher 递归进自己（与 CLAUDE_EXECUTABLE 的同一条防线）。
+export function resolveWorkbuddyExecutable(base = process.env) {
+  const override = absoluteOverride(base, "WORKBUDDY_EXECUTABLE");
+  if (override !== null) return override;
+  return join(
+    base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
+    "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy",
+  );
+}
+
 // Qoder CLI 的官方形态是 Bun 单文件 qodercli.exe，与桌面端共用 ~/.qoder 数据根；
 // 上面的 resolveQoderExecutable 偏向 IDE 的 qoder.cmd 调度器，环境检测与终端
 // 一键启动要的都是 CLI 执行体本身，路径因此单独解析。
