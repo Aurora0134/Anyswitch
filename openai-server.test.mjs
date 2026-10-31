@@ -721,6 +721,54 @@ describe("openai relay transport", () => {
     }
   });
 
+  it("sniffs a workbuddy User-Agent as workbuddy (fallback only — the URL prefix is the main channel)", async () => {
+    // 内置 CodeBuddy CLI 发自定义模型请求前会 delete user-agent，正常流量走 URL
+    // 段前缀；这一档只救「没走托管配置的探针/旧版本」。大小写也要吃（ua 已小写化）。
+    let startedMeta = null;
+    const fakeCollector = {
+      startRequest: (meta) => {
+        startedMeta = meta;
+        return {
+          recordFirstChunk: () => {},
+          recordEnd: () => {},
+        };
+      },
+    };
+
+    const server = createOpenAIRelayServer({
+      ...deps(
+        (async function* () {
+          yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+          yield new TextEncoder().encode("data: [DONE]\n\n");
+        })(),
+      ),
+      metricsCollector: fakeCollector,
+    });
+
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          authorization: TOKEN,
+          "content-type": "application/json",
+          "user-agent": "WorkBuddy/5.9.3 (Electron)",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-5",
+          stream: true,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(startedMeta, "metricsCollector.startRequest was called");
+      assert.equal(startedMeta.agentId, "workbuddy");
+    } finally {
+      await close();
+    }
+  });
+
   describe("chunk-envelope repair is gated on grok alone", () => {
     // A live deepseek-channel wire shape: choices + object only, no id/created/model.
     const ENVELOPELESS_SSE = [
@@ -2019,6 +2067,47 @@ describe("channel-qualified model slugs (<channel>~<model>)", () => {
       assert.ok(String(captured.url).startsWith("https://poke.invalid/"));
       assert.equal(captured.body.model, "claude-opus-5");
       assert.equal(captured.meta.providerId, "poke-api");
+    });
+  });
+
+  // WorkBuddy 是「模型 id 天生带渠道」× 「URL 段天生带身份前缀」的唯一组合：
+  // 客户端配置的 id 是 <channelId>~<modelId>，url 是 /openai/workbuddy~<channelId>/v1。
+  // slug 改写若把身份前缀丢掉，归属只剩 UA 一档——而它发请求前会 delete
+  // user-agent，agentId 必落 null（看板恒 0 请求、统计页无端点行）。两条用例把
+  // 「有前缀」「无前缀」两种组合的上游路径与 body.model 同时钉死。
+  function postChatTo(port, segment, model, headers = {}) {
+    return fetch(`http://127.0.0.1:${port}/openai/${segment}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: TOKEN, "content-type": "application/json", ...headers },
+      body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hello" }] }),
+    });
+  }
+
+  it("workbuddy: the identity prefix survives the packed-slug rewrite", async () => {
+    const captured = {};
+    await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      // 刻意不带 user-agent（客户端真机就是这样）：归属只能来自 URL 前缀。
+      const res = await postChatTo(port, "workbuddy~poke-api", "nim~deepseek-chat");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.deepEqual(captured.url, ["https://nim.invalid/v1/chat/completions"], "上游按 slug 的渠道路由，路径段仍是真实渠道 id");
+      assert.equal(captured.body.model, "deepseek-chat", "上游只见干净模型名，渠道不进 body");
+      assert.equal(captured.meta.providerId, "nim");
+      assert.equal(captured.meta.model, "deepseek-chat");
+      assert.equal(captured.meta.agentId, "workbuddy", "slug 改写保留 agentHint，归属不落 null");
+    });
+  });
+
+  it("workbuddy: a packed slug without the identity prefix keeps URL-segment routing and null attribution", async () => {
+    const captured = {};
+    await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postChatTo(port, "poke-api", "nim~deepseek-chat");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.deepEqual(captured.url, ["https://nim.invalid/v1/chat/completions"]);
+      assert.equal(captured.body.model, "deepseek-chat");
+      assert.equal(captured.meta.providerId, "nim");
+      assert.equal(captured.meta.agentId, null, "无前缀 / 无 x-agent-id / 无 UA 时不伪造归属");
     });
   });
 });

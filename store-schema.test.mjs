@@ -478,6 +478,26 @@ test("validateStore accepts a routingChains entry for the grok endpoint", () => 
   assert.deepEqual(result.errors, []);
 });
 
+// 第 10 端点必须能存自己的自动路由链：不在 ROUTING_ENDPOINT_IDS 里的 id 会让
+// 整份 store 校验失败、面板直接不肯加载（agy/reasonix 之所以保留也是这条理由）。
+test("validateStore accepts a routingChains entry for the workbuddy endpoint", () => {
+  const store = legalStoreWithChains();
+  store.routingChains.workbuddy = { chain: [{ node: "deepseek", model: "deepseek-chat" }] };
+  const result = validateStore(store);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test("validateStore reserves the workbuddy id as a virtual model name", () => {
+  // 端点 id 与虚拟模型名共用一张保留表：漏登记就能建出同名虚拟模型，把
+  // workbuddy 的链路由劫持到另一条链（同时该 id 也不再是合法端点键）。
+  const store = legalStoreWithPool();
+  store.virtualModels = [{ name: "workbuddy", chain: [{ node: "deepseek", model: "deepseek-chat" }] }];
+  const result = validateStore(store);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.some((e) => /reserved/i.test(e)), true);
+});
+
 test("validateStore accepts a bound model that is not in the node's catalog", () => {
   // Catalogs shift with discovered refreshes, so the schema deliberately does
   // NOT hard-validate chain models against provider catalogs.
