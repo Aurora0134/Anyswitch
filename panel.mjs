@@ -15,7 +15,8 @@
 // cannot POST those routes. Credentials are never echoed. The relay Bearer
 // token still guards /v1/* and /openai/* and is not pasted into the browser.
 
-import { readFileSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -31,6 +32,7 @@ import { spawnAgentSync } from "./agent-sync-spawn.mjs";
 import { readSyncStatus, writeSyncStatus, syncStatusFromResult } from "./sync-status.mjs";
 import { createSkillsService, pickFile, pickFolder } from "./agent-skills.mjs";
 import { createDataBundleService } from "./data-bundle.mjs";
+import { applyBackupRoot, backupRootInfo, readBackupRoot } from "./backup-location.mjs";
 import { createPromptsService } from "./agent-prompts.mjs";
 import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
@@ -3395,7 +3397,7 @@ export function createPanelRouter({
         homeDir: homedir(),
         env: base,
         removeFn: (entries, opts = {}) =>
-          removeImportedEntries(entries, { ...opts, backupRoot: join(relayRoot, "backups") }),
+          removeImportedEntries(entries, { ...opts, backupRoot: readBackupRoot(relayRoot) }),
       });
     }
     return byokImportService;
@@ -3639,6 +3641,9 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/status" && method === "GET") return handleStatus(res);
+    if (path === "/panel/api/backups" && method === "GET") {
+      return sendJson(res, 200, { ok: true, ...backupRootInfo(relayRoot) });
+    }
     if (path === "/panel/api/relay/status" && method === "GET") return handleRelayStatus(res);
     if (path === "/panel/api/relay/start" && method === "POST") return handleRelayStart(res);
     if (path === "/panel/api/relay/stop" && method === "POST") return handleRelayStop(res);
@@ -4489,6 +4494,40 @@ export function createPanelRouter({
         } catch (err) {
           return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
         }
+      }
+    }
+
+    // ── 备份位置（高级选项 tab 的「备份位置」卡）────────────────────────
+    // 只做三件事：选目录、换目录（连历史备份一起迁移）、恢复默认。「打开文件夹」
+    // 只认当前备份根，不接受界面传路径，避免变成任意目录打开的口子。业务失败
+    // 一律 200 + { ok:false, error }，与数据搬迁同一口径。
+    if (path.startsWith("/panel/api/backups/") && method === "POST") {
+      try {
+        const body = await readJsonBody(req);
+
+        if (path === "/panel/api/backups/pick") {
+          const picked = await pickFolderFn({ base, title: "选择备份位置" });
+          return sendJson(res, 200, { ok: true, ...picked });
+        }
+        if (path === "/panel/api/backups/set") {
+          const target = typeof body.path === "string" ? body.path.trim() : "";
+          if (!target) return sendJson(res, 400, { ok: false, error: "path 不能为空" });
+          const result = applyBackupRoot({ root: relayRoot, target });
+          return sendJson(res, 200, result.ok ? result : { ok: false, error: result.error });
+        }
+        if (path === "/panel/api/backups/reset") {
+          const result = applyBackupRoot({ root: relayRoot, target: null });
+          return sendJson(res, 200, result.ok ? result : { ok: false, error: result.error });
+        }
+        if (path === "/panel/api/backups/open") {
+          const dir = readBackupRoot(relayRoot);
+          mkdirSync(dir, { recursive: true });
+          spawn("explorer.exe", [dir], { detached: true, windowsHide: true, stdio: "ignore" }).unref();
+          return sendJson(res, 200, { ok: true });
+        }
+        return sendJson(res, 404, { ok: false, error: "not found" });
+      } catch (err) {
+        return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
       }
     }
 
