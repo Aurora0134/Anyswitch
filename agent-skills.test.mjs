@@ -1169,7 +1169,7 @@ describe("createSkillsService", () => {
       assert.equal(state.repoValid, false);
       assert.deepEqual(state.skills, []);
       // endpoints＝纯 Agent 清单；全局目录单列在 globalEndpoint（不当部署目标）
-      assert.equal(state.endpoints.length, 9);
+      assert.equal(state.endpoints.length, 10);
       assert.equal(state.globalEndpoint.id, "agents");
       assert.equal(state.globalEndpoint.dirExists, false);
       assert.throws(() => svc.setRepoPath(join(dir, "ghost")), /不存在/);
@@ -1540,7 +1540,7 @@ describe("createSkillsService invalid-repo guard", () => {
 });
 
 describe("endpoint registry", () => {
-  it("maps all ten endpoints (nine agents + 全局) under the given home", () => {
+  it("maps all eleven endpoints (ten agents + 全局) under the given home", () => {
     const endpoints = listEndpoints("C:\\fakehome");
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.skillsDir, join("C:\\fakehome", ".claude", "skills"));
@@ -1553,10 +1553,12 @@ describe("endpoint registry", () => {
     assert.equal(byId.codex.skillsDir, join("C:\\fakehome", ".codex", "skills"));
     // grok reads Claude-compatible SKILL.md packages from ~/.grok/skills/.
     assert.equal(byId.grok.skillsDir, join("C:\\fakehome", ".grok", "skills"));
+    // WorkBuddy：桌面壳与内置 CLI 共用 ~/.workbuddy/skills 这一份。
+    assert.equal(byId.workbuddy.skillsDir, join("C:\\fakehome", ".workbuddy", "skills"));
     // 全局端点：跨 Agent 约定俗成的通用技能目录，title 写「全局」
     assert.equal(byId.agents.skillsDir, join("C:\\fakehome", ".agents", "skills"));
     assert.equal(byId.agents.label, "全局");
-    for (const id of ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok", "agents"]) {
+    for (const id of ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok", "workbuddy", "agents"]) {
       assert.equal(byId[id].enabled, true, `${id} enabled`);
     }
   });

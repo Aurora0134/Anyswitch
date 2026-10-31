@@ -884,6 +884,79 @@ test("grok: 删块外 [model.<name>] 及其子表；[models] 复数表永不碰"
   assert.ok(after.includes("# 我的 grok 模型"), "注释保留");
 });
 
+// --- workbuddy -----------------------------------------------------------------
+
+test("workbuddy: 只摘目标数组项，顶层键与其它条目原样；workbuddy~ 托管 url 拒删", async () => {
+  const { dir, backupRoot } = setup();
+  const fixture = {
+    models: [
+      {
+        id: "mine",
+        name: "My Chan",
+        url: "https://wb.example.com/v1/chat/completions",
+        apiKey: "sk-mine",
+      },
+      {
+        id: "chan~m2",
+        name: "m2 · 某渠道",
+        url: "http://127.0.0.1:47820/openai/workbuddy~chan/v1/chat/completions",
+        apiKey: "t",
+      },
+    ],
+    availableModels: ["mine"],
+    unknownTopLevel: { keep: true },
+  };
+  const filePath = writeFixture(dir, "workbuddy/models.json", JSON.stringify(fixture, null, 2) + "\n");
+
+  const result = await removeImportedEntries(
+    // 票据里的 baseURL 是扫描侧报的「url 去掉 /chat/completions」，身份比对同口径
+    [entryOf("workbuddy", filePath, "mine", "https://wb.example.com/v1")],
+    { backupRoot, now: NOW },
+  );
+  assert.deepEqual(result.failed, []);
+  const text = readFileSync(filePath, "utf8");
+  const after = JSON.parse(text);
+  assert.deepEqual(after.models.map((n) => n.id), ["chan~m2"], "只摘掉目标条目");
+  assert.deepEqual(after.availableModels, ["mine"], "顶层键原样保留");
+  assert.deepEqual(after.unknownTopLevel, { keep: true }, "未知顶层键不动");
+  assert.ok(text.endsWith("\n"), "沿用文件自身的尾换行");
+
+  // 托管项：url 命中 workbuddy~ 段 → 即便票据伪造也拒删
+  const managed = await removeImportedEntries(
+    [entryOf("workbuddy", filePath, "chan~m2", "http://127.0.0.1:47820/openai/workbuddy~chan/v1")],
+    { backupRoot, now: NOW },
+  );
+  assert.equal(managed.removed.length, 0);
+  assert.ok(managed.failed[0].error.startsWith("managed-entry"), managed.failed[0].error);
+  assert.deepEqual(JSON.parse(readFileSync(filePath, "utf8")).models.map((n) => n.id), ["chan~m2"],
+    "托管条目原样保留");
+});
+
+test("workbuddy: 裸数组形状按数组还原；坏 JSON 不动文件", async () => {
+  const { dir, backupRoot } = setup();
+  const filePath = writeFixture(
+    dir,
+    "workbuddy/array/models.json",
+    JSON.stringify([{ id: "a", url: "https://a.example.com/v1/chat/completions" }, { id: "b", url: "https://b.example.com/v1/chat/completions" }], null, 2),
+  );
+  const result = await removeImportedEntries(
+    [entryOf("workbuddy", filePath, "a", "https://a.example.com/v1")],
+    { backupRoot, now: NOW },
+  );
+  assert.deepEqual(result.failed, []);
+  const after = JSON.parse(readFileSync(filePath, "utf8"));
+  assert.ok(Array.isArray(after), "仍按数组形状写回");
+  assert.deepEqual(after.map((n) => n.id), ["b"]);
+
+  const broken = writeFixture(dir, "workbuddy/broken/models.json", "{ not json");
+  const refused = await removeImportedEntries(
+    [entryOf("workbuddy", broken, "x", "https://x.example.com/v1/chat/completions")],
+    { backupRoot, now: NOW },
+  );
+  assert.ok(refused.failed[0].error.startsWith("unparseable-source"));
+  assert.equal(readFileSync(broken, "utf8"), "{ not json", "坏文件逐字节不动");
+});
+
 // --- 通用行为 ------------------------------------------------------------------
 
 test("通用: 同文件多条目只备一次、逐条独立成败", async () => {

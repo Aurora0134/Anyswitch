@@ -101,6 +101,9 @@ const MANAGED_ID_PREFIXES = {
   dsh: ["_"],
   qoder: ["qoder-custom-anyswitch-"],
   grok: ["anyswitch-"],
+  // workbuddy 的托管 id 是 packChannelModelSlug 的 <渠道>~<模型>（或伪渠道的裸模型名），
+  // 没有可用前缀；托管身份只由 url 的 workbuddy~ 段认（见 removeWorkbuddyEntry）。
+  workbuddy: [],
 };
 
 // Managed ids that are not prefix-shaped: the Anyswitch pseudo-channel's
@@ -399,6 +402,50 @@ function removeGrokEntry(entry, ctx) {
     if (segments[0] === "model" && segments.length >= 2 && segments[1] === id) return "primary";
     return null;
   });
+}
+
+// --- workbuddy (models.json 数组项) -----------------------------------------
+
+// 托管项签名：写入侧把 url 拼成 <relay>/openai/workbuddy~<渠道>/v1/chat/completions。
+// 认这一条就够——不依赖 sidecar，sidecar 丢了也删不掉托管项。
+const WORKBUDDY_RELAY_RE = /^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/openai\/workbuddy~/;
+// 扫描侧报给票据的 baseURL 是「url 去掉 /chat/completions」（store 自己会再加回），
+// 身份比对必须同一口径，否则照票据删自己刚导入的条目会判 identity-mismatch。
+const WORKBUDDY_CHAT_SUFFIX = /\/chat\/completions$/;
+
+// WorkBuddy 的 models.json 有两种被读取的形状（GUI 都认，CLI 只认对象）：
+// 对象（托管写入侧的固定形状）与裸数组（手写遗留）。这里按读进来的形状还原，
+// 只摘掉目标条目，其余条目与顶层键原样保留；缩进与行尾沿用文件自身。
+function removeWorkbuddyEntry(entry, ctx) {
+  const filePath = entry.sourcePath;
+  if (!existsSync(filePath)) throw new RemovalError("entry-not-found", filePath);
+  const original = readFileSync(filePath, "utf8");
+  let data;
+  try {
+    data = JSON.parse(stripBom(original));
+  } catch (error) {
+    throw new RemovalError("unparseable-source", `${filePath}: ${error.message}`);
+  }
+  const arrayShape = Array.isArray(data);
+  const list = arrayShape ? data : (isRecord(data) ? data.models : null);
+  if (!Array.isArray(list)) {
+    throw new RemovalError("unsupported-layout", `${filePath}: "models" is not an array`);
+  }
+  const index = list.findIndex((node) => isRecord(node) && node.id === entry.sourceId);
+  if (index < 0) throw new RemovalError("entry-not-found", `${entry.sourceId} in ${filePath}`);
+  const node = list[index];
+  const nodeURL = String(node.url ?? "").trim();
+  if (WORKBUDDY_RELAY_RE.test(nodeURL)) {
+    throw new RemovalError("managed-entry", "entry points at the Anyswitch workbuddy relay route");
+  }
+  assertEntryIdentity(entry, nodeURL.replace(WORKBUDDY_CHAT_SUFFIX, ""));
+  const nextList = [...list.slice(0, index), ...list.slice(index + 1)];
+  const next = arrayShape ? nextList : { ...data, models: nextList };
+  const indentMatch = original.match(/\n([ \t]+)\S/);
+  let text = indentMatch ? JSON.stringify(next, null, indentMatch[1]) : JSON.stringify(next);
+  if (original.includes("\r\n")) text = text.replace(/\n/g, "\r\n");
+  if (original.endsWith("\n") && !text.endsWith("\n")) text += "\n";
+  ctx.writeFile(filePath, entry.agentId, text);
 }
 
 // --- whole-file JSON endpoints (pi / qoder) ---------------------------------
@@ -895,6 +942,7 @@ const HANDLERS = {
   dsh: removeDshEntry,
   qoder: removeQoderEntry,
   grok: removeGrokEntry,
+  workbuddy: removeWorkbuddyEntry,
 };
 
 /**

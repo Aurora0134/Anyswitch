@@ -1,5 +1,5 @@
-// BYOK import service: scan the local configs of the 8 supported endpoints
-// (zcode/kimi/codex/opencode/pi/dsh/qoder/grok — Claude Code has no local
+// BYOK import service: scan the local configs of the 9 supported endpoints
+// (zcode/kimi/codex/opencode/pi/dsh/qoder/grok/workbuddy — Claude Code has no local
 // config surface and is out of scope) for user-configured OpenAI-compatible
 // channels, present them as checkable candidates, and import the selected ones
 // into the central store (store.json + a DPAPI-sealed credential per channel).
@@ -60,7 +60,7 @@ import { readQoderSettings } from "./qoder-merge-config.mjs";
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
 
-export const BYOK_IMPORT_AGENTS = Object.freeze(["zcode", "kimi", "codex", "opencode", "pi", "dsh", "qoder", "grok"]);
+export const BYOK_IMPORT_AGENTS = Object.freeze(["zcode", "kimi", "codex", "opencode", "pi", "dsh", "qoder", "grok", "workbuddy"]);
 
 const AGENT_NAMES = {
   zcode: "ZCode",
@@ -71,6 +71,7 @@ const AGENT_NAMES = {
   dsh: "DeepSeek Harness",
   qoder: "Qoder",
   grok: "Grok Build",
+  workbuddy: "WorkBuddy",
 };
 
 // The relay fingerprint an injected entry always carries (zcode-personal-config
@@ -513,6 +514,59 @@ function scanGrok(homeDir, sidecarIds) {
   return candidates;
 }
 
+// workbuddy: ~/.workbuddy/models.json。条目是扁平数组项（id/name/url/apiKey 同层，
+// url 是完整 /chat/completions 全路径 —— GUI 与 CLI 都按「整串直用」处理）。
+// 文件形状两种都读：对象 {"models":[…]} 与裸数组（GUI 都认，CLI 只认对象），
+// 读不出来的文件按「没有候选」处理，不改写。
+// 托管项识别凭 url 里的 workbuddy~ 段（与写入侧同一签名），sidecar 只作补充——
+// sidecar 丢失后仍能把托管项挡在导入候选之外。
+const WORKBUDDY_RELAY_PATH = /^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/openai\/workbuddy~/;
+const WORKBUDDY_CHAT_SUFFIX = /\/chat\/completions$/;
+
+function readWorkbuddyModels(modelsPath) {
+  let text;
+  try {
+    text = readFileSync(modelsPath, "utf8");
+  } catch {
+    return []; // absent / unreadable: no candidates
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/^\uFEFF/, ""));
+  } catch {
+    return []; // fail-closed on the read side too: never guess at a broken file
+  }
+  if (Array.isArray(parsed)) return parsed;
+  if (isRecord(parsed) && Array.isArray(parsed.models)) return parsed.models;
+  return [];
+}
+
+function scanWorkbuddy(homeDir, sidecarIds) {
+  const modelsPath = join(homeDir, ".workbuddy", "models.json");
+  const candidates = [];
+  for (const node of readWorkbuddyModels(modelsPath)) {
+    if (!isRecord(node) || typeof node.id !== "string" || node.id.length === 0) continue;
+    const id = node.id;
+    if (sidecarIds.has(id)) continue;
+    const url = node.url;
+    if (typeof url !== "string" || url.length === 0) continue;
+    if (WORKBUDDY_RELAY_PATH.test(url)) continue;
+    // The entry's url is the full chat-completions endpoint; the store keeps a
+    // base and appends /chat/completions itself.
+    const baseURL = url.replace(WORKBUDDY_CHAT_SUFFIX, "");
+    if (baseURL.length === 0) continue;
+    candidates.push({
+      sourceId: id,
+      sourcePath: modelsPath,
+      displayName: typeof node.name === "string" && node.name ? node.name : id,
+      baseURL,
+      models: [{ id, displayName: typeof node.name === "string" && node.name ? node.name : id }],
+      keySource: literalKey(node.apiKey),
+    });
+  }
+  return candidates;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Shared pipeline: key resolution, duplicate detection, id suggestion
 // ─────────────────────────────────────────────────────────────
@@ -624,6 +678,7 @@ export function createByokImportService({
     dsh: () => scanDsh(homeDir, readSidecarIds(paths.root, "dsh")),
     qoder: () => scanQoder(homeDir, readSidecarIds(paths.root, "qoder")),
     grok: () => scanGrok(homeDir, readSidecarIds(paths.root, "grok")),
+    workbuddy: () => scanWorkbuddy(homeDir, readSidecarIds(paths.root, "workbuddy")),
   };
 
   async function scanLocalConfigs() {

@@ -33,10 +33,10 @@ const PRESET_A = { id: "aaaaaaaaaaaa", title: "规则A", tag: "", enabled: true,
 const PRESET_B = { id: "bbbbbbbbbbbb", title: "规则B", tag: "", enabled: true, content: "第二行\n第三行" };
 
 describe("agent-prompts-inject endpoint table", () => {
-  it("covers all nine endpoints with verified targets", () => {
+  it("covers all ten endpoints with verified targets", () => {
     const { injector, homeDir } = makeInjector();
     const endpoints = injector.listEndpoints();
-    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]);
+    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok", "workbuddy"]);
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.target, join(homeDir, ".claude", "CLAUDE.md"));
     assert.equal(byId.kimi.target, join(homeDir, ".kimi-code", "AGENTS.md"));
@@ -51,15 +51,18 @@ describe("agent-prompts-inject endpoint table", () => {
     // grok: a dedicated *.md under the always-scanned ~/.grok/rules/ dir —
     // never the user's own ~/.grok/AGENTS.md.
     assert.equal(byId.grok.target, join(homeDir, ".grok", "rules", "anyswitch-managed-prompts.md"));
+    // workbuddy: the memory file CodeBuddy reads at session start — taken over as a
+    // managed block by user decision (no extra backup).
+    assert.equal(byId.workbuddy.target, join(homeDir, ".workbuddy", "AGENTS.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
     // Qoder re-watches a loaded rule file, so preset edits land next turn.
     assert.equal(byId.qoder.hotReload, true);
     // codex and grok read their rule files once at session start, no watcher.
-    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok"]) {
+    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok", "workbuddy"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
-    assert.equal(PROMPT_ENDPOINTS.length, 9);
+    assert.equal(PROMPT_ENDPOINTS.length, 10);
   });
 });
 

@@ -83,6 +83,7 @@
     --ep-qoder: #c026d3;
     --ep-codex: #16a34a;
     --ep-grok: #52525b;
+    --ep-workbuddy: #0d9488;
     /* 圆点内描边：亮底用深环托住白点，暗底用浅环托住黑点 */
     --ep-ring: rgba(15, 23, 42, 0.28);
 
@@ -176,6 +177,7 @@
     --ep-qoder: #e879f9;
     --ep-codex: #4ade80;
     --ep-grok: #a1a1aa;
+    --ep-workbuddy: #2dd4bf;
     --ep-ring: rgba(248, 250, 252, 0.55);
 
     /* Claude Code 头像方砖：暗底保持原有深棕砖（亮色的淡橙底在暗底会晃眼） */

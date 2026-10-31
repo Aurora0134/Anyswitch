@@ -51,6 +51,10 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },
   { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
   { id: "grok", label: "Grok Build", hotReload: false, targetRel: "~/.grok/rules/anyswitch-managed-prompts.md", home: [".grok", "rules", "anyswitch-managed-prompts.md"] },
+  // WorkBuddy（Electron 桌面壳 + 内置 CodeBuddy Code CLI）：CodeBuddy 在会话启动时读
+  // 记忆文件，故 hotReload:false。该文件现为手工抄本，用户已裁决接管为托管块，
+  // 不另留备份；卸载时由移除托管块还原。
+  { id: "workbuddy", label: "WorkBuddy", hotReload: false, targetRel: "~/.workbuddy/AGENTS.md", home: [".workbuddy", "AGENTS.md"] },
 ]);
 
 // Bodies only: the title lives in prompts.json for the panel; it never

@@ -45,6 +45,8 @@ export const ENDPOINT_DEFS = Object.freeze([
   { id: "qoder", label: "Qoder", relSkillsDir: [".qoder", "skills"] },
   { id: "codex", label: "Codex", relSkillsDir: [".codex", "skills"] },
   { id: "grok", label: "Grok Build", relSkillsDir: [".grok", "skills"] },
+  // WorkBuddy：桌面壳与内置 CLI 共用同一份 skills 目录（与 models.json 同根）。
+  { id: "workbuddy", label: "WorkBuddy", relSkillsDir: [".workbuddy", "skills"] },
   // 全局端点：跨 Agent 约定俗成的通用技能目录（ZCode 等客户端直接读取
   // ~/.agents/skills）。它不是任何 Agent，不参与环境检测的「装没装」——
   // 可见性与部署资格对它恒放行（见 createSkillsService 的 endpointUsable）。
