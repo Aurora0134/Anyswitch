@@ -106,10 +106,13 @@ test("renderShimScripts emits the canonical triplet (grok template shape)", () =
   assert.match(scripts.cmd, /^@ECHO off\nSETLOCAL\n/);
   assert.match(scripts.cmd, /node "%LOCALAPPDATA%\\Anyswitch\\app\\grok-launcher\.mjs" %\*/);
   assert.match(scripts.cmd, /EXIT \/b %ERRORLEVEL%/);
-  // ps1: piped-stdin branch + splat
+  // ps1: piped-stdin branch + splat, with the no-stdin fallback asserted
+  // separately — `/& node $launcher @args/` alone matches BOTH branch bodies,
+  // so deleting `$input |` or either branch would have gone unnoticed
   assert.match(scripts.ps1, /Join-Path \$env:LOCALAPPDATA 'Anyswitch\\app\\grok-launcher\.mjs'/);
   assert.match(scripts.ps1, /\$MyInvocation\.ExpectingInput/);
-  assert.match(scripts.ps1, /& node \$launcher @args/);
+  assert.match(scripts.ps1, /\$input \| & node \$launcher @args/);
+  assert.match(scripts.ps1, /else \{\n  & node \$launcher @args\n\}/);
   assert.match(scripts.ps1, /exit \$LASTEXITCODE/);
   // LF everywhere, trailing newline, ASCII only
   for (const text of Object.values(scripts)) {
@@ -123,7 +126,9 @@ test("renderShimScripts places fixed launcher args before the user's own", () =>
   const scripts = renderShimScripts(findShimSpec("dsh"));
   assert.match(scripts.sh, /dsh-launcher\.mjs" --profile dsh-tui "\$@"/);
   assert.match(scripts.cmd, /dsh-launcher\.mjs" --profile dsh-tui %\*/);
-  assert.match(scripts.ps1, /& node \$launcher --profile dsh-tui @args/);
+  // same branch-split as the grok test: each ps1 branch body asserted on its own
+  assert.match(scripts.ps1, /\$input \| & node \$launcher --profile dsh-tui @args/);
+  assert.match(scripts.ps1, /else \{\n  & node \$launcher --profile dsh-tui @args\n\}/);
 });
 
 test("shimFileNames is the extensionless/cmd/ps1 triplet", () => {
@@ -277,6 +282,22 @@ test("addShimToPath appends the spec's directory once", async () => {
 test("broadcast is a separate explicit step", async () => {
   const home = mkTestDir("shim-broadcast-");
   const { manager, broadcastLog } = testManager(home);
+  // none of the mutating operations broadcast on their own — installing,
+  // PATH append and the uninstall composition all stay silent; notifying
+  // running consoles is the caller's explicit decision
+  manager.installShim("grok");
+  await manager.addShimToPath("grok");
+  await manager.retireShim("grok");
+  assert.deepEqual(broadcastLog, []);
+  // the explicit step delegates to the injected broadcaster, failures included
   await manager.broadcastEnvironmentChange();
   assert.deepEqual(broadcastLog, ["broadcast"]);
+  const failing = createShimManager({
+    env: { USERPROFILE: home, LOCALAPPDATA: join(home, "AppData", "Local") },
+    pathStore: { read: async () => null, write: async () => {} },
+    broadcastFn: async () => {
+      throw new Error("no broadcast");
+    },
+  });
+  await assert.rejects(() => failing.broadcastEnvironmentChange(), /no broadcast/);
 });
