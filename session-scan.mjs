@@ -79,10 +79,16 @@ const SUMMARY_MAX_CHARS = 160;
 //   dsh --profile <p> --resume <id>  (`dsh tui --resume <session>` launcher example)
 //   zcode --resume <id>      (--resume <sessionId>, session_<hex> from the CLI's own db)
 //   qodercli --resume <id>   (-r, --resume [id], project-scoped resolution)
+//   workbuddy --resume <id>  (本端点 CLI 的 -r/--resume [sessionId]；入口由本轮
+//                            shim 提供的 `workbuddy` 命令承担，见下方说明)
 // The command names are each CLI's own install command (npm bin / vendor PATH
 // entry) — never an Anyswitch-managed takeover shim, which exists only on
-// machines that hand-installed one. dsh carries its profile flag because bare
-// `dsh` refuses to boot without one and the copied command must run as-is.
+// machines that hand-installed one. The one exception is workbuddy: its CLI
+// lives inside the app's app.asar.unpacked and has no PATH entry of its own,
+// so `workbuddy` IS this round's shim command (workbuddy-integration-plan §1.5),
+// installed by the same shim-manager pass as the other endpoints. dsh carries
+// its profile flag because bare `dsh` refuses to boot without one and the
+// copied command must run as-is.
 export const RESUME_COMMAND = Object.freeze({
   claude: (meta) => `claude --resume ${meta.id}`,
   kimi: (meta) => `kimi --session ${meta.id}`,
@@ -93,6 +99,7 @@ export const RESUME_COMMAND = Object.freeze({
   dsh: (meta) => `dsh --profile dsh-tui --resume ${meta.id}`,
   zcode: (meta) => `zcode --resume ${meta.id}`,
   qoder: (meta) => `qodercli --resume ${meta.id}`,
+  workbuddy: (meta) => `workbuddy --resume ${meta.id}`,
 });
 
 function resumeCommandFor(endpoint, meta) {
@@ -1701,6 +1708,191 @@ function createGrokAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
+// workbuddy — ~/.workbuddy/projects/<cwd-slug>/<sessionId>.jsonl（2026-10-31
+// 本机实测，见 workbuddy-integration-plan.md §1.5 / §3.5）。cwd-slug 是项目
+// 路径小写、`\`→`-`（`C:\Users\me\proj` → `c-users-me-proj`）；同名目录
+// <sessionId>/ 只放 subagents/ 与 tool-results/，是会话的旁挂数据，不是会话
+// 本身，因此扫描只认 <project>/<sessionId>.jsonl 这一层。
+// 一行一事件，type 有 session-meta / message / reasoning / function_call /
+// function_call_result / credit-usage / ai-title / file-history-snapshot——
+// 只有 message 是对话；reasoning 是模型草稿、function_call* 是工具往返、
+// credit-usage 是计费、其余是索引与快照，都不进 transcript。官方没有字段级
+// schema，所有取值都按「有就用、没有就跳过」处理（坏行/半截 JSON 一律跳过）。
+// 标题优先级：ai-title.aiTitle → 首条用户消息 → 目录名。删除只动会话文件与
+// 同名目录，绝不碰任何全局索引/数据库（grok 先例）。
+// ---------------------------------------------------------------------------
+
+// 事件里的一轮对话：role 可能在顶层也可能在 message 内，content 同理（实测
+// 用户块元素 type 为 input_text；助手块形态未实测，交给 extractText 兼容）。
+// 非 message 事件（reasoning / function_call* / credit-usage / ai-title …）
+// 一律返回 null——它们是引擎记账，不是人打的字或最终回答。
+function workbuddyMessage(value) {
+  if (!value || typeof value !== "object" || value.type !== "message") return null;
+  const message = value.message && typeof value.message === "object" ? value.message : value;
+  const role = firstString(message.role, value.role);
+  if (role !== "user" && role !== "assistant") return null;
+  const text = extractText(message.content ?? value.content).trim();
+  if (text === "") return null;
+  return { role, content: text, ts: parseTimestampMs(value.timestamp) };
+}
+
+function createWorkbuddyAdapter(roots) {
+  function parseSession(path, projectDirName) {
+    // head 取 sessionId / cwd / 首条用户消息 / 创建时间，tail 取最近活跃时间与
+    // ai-title（标题生成与改名都落成独立事件，可能在后段）。工具结果不在本
+    // 文件里（见 tool-results/），单文件不会大到需要全量读。
+    const { head, tail } = readHeadTailLines(path, 60, 60);
+
+    let sessionId = null;
+    let cwd = null;
+    let createdAt = null;
+    let firstUserMessage = null;
+
+    for (const line of head) {
+      let value;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (sessionId === null && typeof value?.sessionId === "string" && value.sessionId !== "") {
+        sessionId = value.sessionId;
+      }
+      if (cwd === null && typeof value?.cwd === "string" && value.cwd.trim() !== "") cwd = value.cwd;
+      if (createdAt === null) createdAt = parseTimestampMs(value?.timestamp);
+      if (firstUserMessage === null) {
+        const message = workbuddyMessage(value);
+        if (message !== null && message.role === "user") firstUserMessage = message.content;
+      }
+      if (sessionId !== null && cwd !== null && createdAt !== null && firstUserMessage !== null) break;
+    }
+
+    let lastActive = null;
+    let aiTitle = null;
+    for (let i = tail.length - 1; i >= 0; i--) {
+      let value;
+      try {
+        value = JSON.parse(tail[i]);
+      } catch {
+        continue;
+      }
+      if (lastActive === null) lastActive = parseTimestampMs(value?.timestamp);
+      // 标题是最后一次 ai-title 说了算：倒序首个命中即最新一次。
+      if (aiTitle === null && value?.type === "ai-title") aiTitle = firstString(value.aiTitle);
+      if (lastActive !== null && aiTitle !== null) break;
+    }
+    // 长工具往返可能把带 cwd 的那行挤出 head 窗；尾窗兜底，再没有就空串（不猜）。
+    if (cwd === null) {
+      for (let i = tail.length - 1; i >= 0; i--) {
+        let value;
+        try {
+          value = JSON.parse(tail[i]);
+        } catch {
+          continue;
+        }
+        if (typeof value?.cwd === "string" && value.cwd.trim() !== "") {
+          cwd = value.cwd;
+          break;
+        }
+      }
+    }
+    // 标题只生成过一次、又没被改名时，ai-title 落在会话开头（可能在 head 窗
+    // 内而不在尾窗）：尾窗没命中就回头找 head，最后一条仍是最新一次。
+    if (aiTitle === null) {
+      for (const line of head) {
+        let value;
+        try {
+          value = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (value?.type === "ai-title") {
+          const title = firstString(value.aiTitle);
+          if (title !== null) aiTitle = title;
+        }
+      }
+    }
+
+    // 会话 id 的权威来源是文件名（<sessionId>.jsonl）；行内 sessionId 只作补位。
+    const id = sessionId ?? basename(path).replace(/\.jsonl$/, "");
+    if (id === "") return null;
+
+    // 标题三级回退；全都没有才落 null（既有空态口径，不自造文案）。
+    const title =
+      (aiTitle !== null && truncateText(aiTitle, TITLE_MAX_CHARS)) ||
+      (firstUserMessage !== null && truncateText(firstUserMessage, TITLE_MAX_CHARS)) ||
+      pathBasename(cwd) ||
+      projectDirName ||
+      null;
+
+    return makeMeta({
+      endpoint: "workbuddy",
+      id,
+      title: title || null,
+      summary: firstUserMessage !== null ? truncateText(firstUserMessage, SUMMARY_MAX_CHARS) || null : null,
+      project: cwd,
+      file: path,
+      createdAt,
+      lastActive: lastActive ?? createdAt,
+    });
+  }
+
+  return {
+    id: "workbuddy",
+    roots: () => roots,
+    async scan() {
+      const sessions = [];
+      for (const root of roots) {
+        let projectDirs;
+        try {
+          projectDirs = readdirSync(root, { withFileTypes: true });
+        } catch {
+          continue; // no projects dir → no workbuddy sessions
+        }
+        for (const projectDir of projectDirs) {
+          if (!projectDir.isDirectory()) continue;
+          const projectPath = join(root, projectDir.name);
+          let entries;
+          try {
+            entries = readdirSync(projectPath, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const entry of entries) {
+            // 同名 sidecar 目录（subagents/、tool-results/）不是会话。
+            if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+            try {
+              const meta = parseSession(join(projectPath, entry.name), projectDir.name);
+              if (meta) sessions.push(meta);
+            } catch {
+              // unreadable/corrupt file — skip, never fail the whole scan
+            }
+          }
+        }
+      }
+      return sessions;
+    },
+    async loadMessages(file) {
+      const target = assertUnderRoots(file, roots);
+      const messages = [];
+      for (const value of parseJsonl(readFileSync(target, "utf8"))) {
+        const message = workbuddyMessage(value);
+        if (message !== null) messages.push(message);
+      }
+      return messages;
+    },
+    async delete(file) {
+      const target = assertUnderRoots(file, roots);
+      // Sidecar cleanup first: <sessionId>/ holds subagents/tool-results.
+      const sidecar = join(dirname(target), basename(target).replace(/\.jsonl$/, ""));
+      if (existsSync(sidecar)) rmSync(sidecar, { recursive: true, force: true });
+      rmSync(target);
+      return true;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // SQLite adapters (zcode / opencode). All open read-only via a
 // file:...?mode=ro URI so active WAL stores are safe to read concurrently.
 // Open/query failure degrades the adapter to an empty list — it must never
@@ -2010,6 +2202,7 @@ function defaultRoots(home = homedir()) {
     qoder: [join(home, ".qoder", "projects")],
     codex: [join(home, ".codex", "sessions")],
     grok: [join(home, ".grok", "sessions")],
+    workbuddy: [join(home, ".workbuddy", "projects")],
   };
 }
 
@@ -2023,6 +2216,7 @@ const ADAPTER_FACTORIES = {
   qoder: createQoderAdapter,
   codex: createCodexAdapter,
   grok: createGrokAdapter,
+  workbuddy: createWorkbuddyAdapter,
 };
 
 export function createSessionScanner({ roots: rootOverrides } = {}) {
@@ -2083,7 +2277,7 @@ export function createSessionScanner({ roots: rootOverrides } = {}) {
     },
 
     // 单端点扫描（绑定捕获 / 复活兜底用）：只读该 agent 一家存档——全量
-    // scanAll 要读九家，1s 轮询路径用不起。名单外与读盘失败都降级为空表：
+    // scanAll 要读十家，1s 轮询路径用不起。名单外与读盘失败都降级为空表：
     // 匹配层拿到空表自然判不出，按「宁可不接」回落，绝不让调用方抛。
     async scanEndpoint(endpoint) {
       const adapter = adapters.get(endpoint);

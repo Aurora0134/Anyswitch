@@ -14,7 +14,7 @@ import {
 
 // 绑定存储与匹配的纯数据层合同：文件形态（version+bindings、原子写）、读写
 // 回环、畸形条目清洗；匹配纪律（同 agent 同 cwd、生命周期重叠、最新活跃胜
-// 出、并列判不出）；九家续会参数拼法。
+// 出、并列判不出）；十家续会参数拼法。
 describe("terminal-conversation-bindings", () => {
   function mkStore() {
     const dir = mkdtempSync(join(tmpdir(), "anyswitch-tcb-"));
@@ -121,6 +121,7 @@ describe("terminal-conversation-bindings", () => {
       assert.deepEqual(resumeArgsFor("dsh", b), ["--resume", "abc-123"], "dsh 追加片段不带 --profile（launch.args 已有，带了撞二次选择）");
       assert.deepEqual(resumeArgsFor("zcode", b), ["--resume", "abc-123"]);
       assert.deepEqual(resumeArgsFor("qoder", b), ["--resume", "abc-123"]);
+      assert.deepEqual(resumeArgsFor("workbuddy", b), ["--resume", "abc-123"], "workbuddy 与 RESUME_COMMAND 同口径（命令名由 shim 提供）");
     });
 
     it("returns null for unsupported agents and unusable bindings", () => {
@@ -130,10 +131,10 @@ describe("terminal-conversation-bindings", () => {
       assert.equal(resumeArgsFor("pi", binding({ file: null })), null, "pi 没有 file 接不出");
     });
 
-    it("RESUMABLE_AGENTS matches exactly the nine covered endpoints", () => {
+    it("RESUMABLE_AGENTS matches exactly the ten covered endpoints", () => {
       assert.deepEqual(
         [...RESUMABLE_AGENTS].sort(),
-        ["claude", "codex", "dsh", "grok", "kimi", "opencode", "pi", "qoder", "zcode"],
+        ["claude", "codex", "dsh", "grok", "kimi", "opencode", "pi", "qoder", "workbuddy", "zcode"],
       );
     });
   });

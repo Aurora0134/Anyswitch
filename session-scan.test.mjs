@@ -24,7 +24,7 @@ function makeTmp() {
 // never the real home dirs.
 function testScanner(overrides = {}) {
   const roots = {};
-  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]) {
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok", "workbuddy"]) {
     roots[id] = [makeTmp()];
   }
   Object.assign(roots, overrides);
@@ -1184,6 +1184,200 @@ test("grok: delete removes only the session dir and never the global search inde
 });
 
 
+// --- workbuddy ---------------------------------------------------------------
+// root is ~/.workbuddy/projects: <cwd-slug>/<sessionId>.jsonl, one event per
+// line; the same-name directory holds subagents/ + tool-results/ sidecars.
+
+const WORKBUDDY_PROJECT_DIR = "c--users-me-proj";
+const WORKBUDDY_CWD = "C:\\Users\\me\\proj";
+
+function writeWorkbuddySession(root, projectDir, sessionId, events, { sidecar = true } = {}) {
+  const dir = join(root, projectDir);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${sessionId}.jsonl`);
+  writeFileSync(
+    file,
+    events.map((event) => (typeof event === "string" ? event : JSON.stringify(event))).join("\n") + "\n",
+    "utf8",
+  );
+  if (sidecar) {
+    mkdirSync(join(dir, sessionId, "subagents"), { recursive: true });
+    writeFileSync(join(dir, sessionId, "subagents", "child.jsonl"), "{}\n", "utf8");
+    mkdirSync(join(dir, sessionId, "tool-results"), { recursive: true });
+    writeFileSync(join(dir, sessionId, "tool-results", "r1.txt"), "tool output", "utf8");
+  }
+  return file;
+}
+
+// One workbuddy message event: role + [{type:"input_text"|"output_text", text}].
+function workbuddyMessageEvent(role, text, timestamp, overrides = {}) {
+  return {
+    type: "message",
+    role,
+    content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+    timestamp,
+    cwd: WORKBUDDY_CWD,
+    ...overrides,
+  };
+}
+
+test("workbuddy: ai-title 标题、首条用户消息摘要、cwd 与会话 id 全部落位", async () => {
+  const root = makeTmp();
+  const id = "0f4b7c1e-1111-4a2b-8c3d-222233334444";
+  const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, [
+    { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    workbuddyMessageEvent("user", "帮我改一下构建脚本", 1788000001000),
+    // 内部事件：reasoning / function_call / function_call_result / credit-usage
+    { type: "reasoning", text: "模型草稿", timestamp: 1788000001500 },
+    { type: "function_call", name: "Read", input: { path: "a" }, timestamp: 1788000002000 },
+    { type: "function_call_result", output: "文件内容", timestamp: 1788000002500 },
+    { type: "credit-usage", credits: 3, timestamp: 1788000003000 },
+    workbuddyMessageEvent("assistant", "好的，我先看构建脚本", 1788000004000),
+    { type: "ai-title", aiTitle: "构建脚本修订", timestamp: 1788000005000 },
+    { type: "file-history-snapshot", snapshot: { n: 1 }, timestamp: 1788000006000 },
+  ]);
+
+  const scanner = testScanner({ workbuddy: [root] });
+  const { sessions, endpointErrors } = await scanner.scanAll();
+  assert.deepEqual(endpointErrors.filter((entry) => entry.endpoint === "workbuddy"), []);
+  const rows = sessions.filter((row) => row.endpoint === "workbuddy");
+  assert.equal(rows.length, 1);
+  const meta = rows[0];
+  assert.equal(meta.id, id, "id 取会话 id（与文件名同源）");
+  assert.equal(meta.title, "构建脚本修订", "ai-title 优先于首条用户消息");
+  assert.equal(meta.summary, "帮我改一下构建脚本", "列表预览是首条用户消息");
+  assert.equal(meta.project, WORKBUDDY_CWD);
+  assert.equal(meta.cwd, WORKBUDDY_CWD, "cwd 取自事件行内字段——续接要在原目录起");
+  assert.equal(meta.file, file);
+  assert.equal(meta.createdAt, 1788000000000);
+  assert.equal(meta.lastActive, 1788000006000, "lastActive 取最后一个事件的 timestamp");
+  assert.equal(meta.resumeCommand, `workbuddy --resume ${id}`, "resume 模板是新增的 shim 命令");
+  assert.deepEqual(
+    Object.keys(meta),
+    ["endpoint", "id", "title", "summary", "project", "cwd", "originator", "file", "createdAt", "lastActive", "resumeCommand"],
+    "makeMeta 的字段一个不少（originator 无来源时落 null，不自造）",
+  );
+
+  // 只留用户与助手可见消息；reasoning/function_call*/credit-usage/ai-title 等
+  // 内部事件不进 transcript。
+  const messages = await scanner.loadMessages("workbuddy", file);
+  assert.deepEqual(
+    messages.map((message) => [message.role, message.content]),
+    [["user", "帮我改一下构建脚本"], ["assistant", "好的，我先看构建脚本"]],
+  );
+  assert.equal(messages[0].ts, 1788000001000);
+  assert.equal(messages[1].ts, 1788000004000);
+});
+
+test("workbuddy: 没有 ai-title 时回落到首条用户消息，再没有才用目录名", async () => {
+  const root = makeTmp();
+  const withUser = "sess-wb-plain";
+  writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, withUser, [
+    { type: "session-meta", sessionId: withUser, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    workbuddyMessageEvent("user", "  这条才是标题候选  ", 1788000001000),
+  ]);
+  // 只有元数据、没有一条对话：标题回落到项目目录名（cwd-slug），不自造文案。
+  const bare = "sess-wb-bare";
+  writeWorkbuddySession(root, "c--users-me-bareproject", bare, [
+    { type: "session-meta", sessionId: bare, timestamp: 1788000000000 },
+  ]);
+
+  const { sessions } = await testScanner({ workbuddy: [root] }).scanAll();
+  const byId = new Map(sessions.filter((row) => row.endpoint === "workbuddy").map((row) => [row.id, row]));
+  assert.equal(byId.get(withUser).title, "这条才是标题候选", "首条用户消息去空白后作标题");
+  assert.equal(byId.get(withUser).summary, "这条才是标题候选");
+  assert.equal(byId.get(withUser).project, WORKBUDDY_CWD, "从 message 行也能取到 cwd");
+  assert.equal(byId.get(bare).title, "c--users-me-bareproject", "无 ai-title 无消息 → 目录名");
+  assert.equal(byId.get(bare).summary, null, "没有可摘要的对话就落 null（既有空态）");
+  assert.equal(byId.get(bare).cwd, "", "取不到 cwd 就空串，不从 slug 反推");
+});
+
+test("workbuddy: 大文件里只在头窗的 ai-title 也认（尾窗 16KB 之外）", async () => {
+  const root = makeTmp();
+  const id = "sess-wb-bigtail";
+  const events = [
+    { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    workbuddyMessageEvent("user", "首条提问", 1788000001000),
+    // 标题只生成过一次，落在会话开头；后面几十 KB 的快照把它顶出尾窗。
+    { type: "ai-title", aiTitle: "只出现在开头的标题", timestamp: 1788000002000 },
+  ];
+  for (let i = 0; i < 200; i++) {
+    events.push({ type: "file-history-snapshot", snapshot: { index: i, blob: "x".repeat(200) }, timestamp: 1788000003000 + i });
+  }
+  events.push(workbuddyMessageEvent("assistant", "回答", 1788000100000));
+  writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, events);
+
+  const { sessions } = await testScanner({ workbuddy: [root] }).scanAll();
+  const row = sessions.find((session) => session.endpoint === "workbuddy" && session.id === id);
+  assert.equal(row.title, "只出现在开头的标题", "ai-title 优先于首条用户消息，不因文件大而丢");
+  assert.equal(row.lastActive, 1788000100000, "lastActive 仍取最后一条事件");
+});
+
+test("workbuddy: 坏行与半截 JSON 跳过，不炸整轮，也不连坐其他会话", async () => {
+  const root = makeTmp();
+  const good = "sess-wb-good";
+  const garbage = "sess-wb-garbage";
+  writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, good, [
+    "not json at all {",
+    '{"type":"message",', // 半截 JSON
+    { type: "session-meta", sessionId: good, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    "",
+    workbuddyMessageEvent("user", "坏行夹在中间也要能读", 1788000001000),
+    '{"type":"ai-title","aiTitle":', // 尾部半截
+  ]);
+  // 整份文件都是垃圾：仍然只算一条坏文件，扫描继续
+  writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, garbage, ["garbage", "}{", ""]);
+
+  const { sessions, endpointErrors } = await testScanner({ workbuddy: [root] }).scanAll();
+  assert.deepEqual(endpointErrors.filter((entry) => entry.endpoint === "workbuddy"), []);
+  const rows = sessions.filter((row) => row.endpoint === "workbuddy");
+  assert.equal(rows.length, 2, "两条会话文件都在，坏行一条都没炸掉整轮");
+  const goodRow = rows.find((row) => row.id === good);
+  assert.equal(goodRow.title, "坏行夹在中间也要能读");
+  assert.equal(goodRow.cwd, WORKBUDDY_CWD);
+  // loadMessages 同样跳过坏行
+  const messages = await testScanner({ workbuddy: [root] }).loadMessages("workbuddy", goodRow.file);
+  assert.deepEqual(messages.map((message) => message.content), ["坏行夹在中间也要能读"]);
+});
+
+test("workbuddy: 越界路径被 assertUnderRoots 拒绝（读与删同一守卫）", async () => {
+  const root = makeTmp();
+  const outside = makeTmp();
+  const foreign = join(outside, "sess-foreign.jsonl");
+  writeFileSync(foreign, JSON.stringify({ type: "session-meta", sessionId: "x" }) + "\n", "utf8");
+
+  const scanner = testScanner({ workbuddy: [root] });
+  await assert.rejects(() => scanner.loadMessages("workbuddy", foreign), /outside endpoint roots/);
+  const result = await scanner.deleteSessions([{ endpoint: "workbuddy", file: foreign }]);
+  assert.equal(result.ok.length, 0);
+  assert.equal(result.fail.length, 1);
+  assert.match(result.fail[0].reason, /outside endpoint roots/);
+  assert.ok(existsSync(foreign), "越界文件一个字节都不动");
+});
+
+test("workbuddy: delete 只删会话文件与同名目录，不碰全局索引与其他会话", async () => {
+  const root = makeTmp();
+  const id = "sess-wb-delete";
+  const sibling = "sess-wb-sibling";
+  // 根上的“全局索引”（模拟客户端自己的索引/数据库）必须原样留着
+  const globalIndex = join(root, "session-index.json");
+  writeFileSync(globalIndex, '{"sessions":[]}', "utf8");
+  const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, [
+    { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+  ]);
+  writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, sibling, [
+    { type: "session-meta", sessionId: sibling, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+  ]);
+
+  const result = await testScanner({ workbuddy: [root] }).deleteSessions([{ endpoint: "workbuddy", file }]);
+  assert.equal(result.ok.length, 1);
+  assert.equal(existsSync(file), false, "会话文件已删");
+  assert.equal(existsSync(join(root, WORKBUDDY_PROJECT_DIR, id)), false, "同名 sidecar 目录一起清掉");
+  assert.ok(existsSync(join(root, WORKBUDDY_PROJECT_DIR, sibling, "subagents", "child.jsonl")),
+    "同一项目里的其他会话原样保留");
+  assert.equal(existsSync(globalIndex), true, "全局索引/数据库绝不碰（grok 先例）");
+});
+
 
 // One real zcode/opencode assistant turn. A "tool" part carries the call AND
 // its result (state.output when completed, state.error when it failed, neither
@@ -1550,9 +1744,9 @@ test("scan offload: 结果与 in-process 扫描逐字段一致", async () => {
   const inProcess = await scanner.scanAll();
   // worker 侧也给全套临时根（workerData.roots）：跨线程跑的是同一份扫描代码，
   // 但绝不去读真 home 下的存档。注意 createSessionScanner 是「覆盖式合并默认
-  // 根」，所以九个端点都要给临时目录，漏一个就会去扫真 home。
+  // 根」，所以十个端点都要给临时目录，漏一个就会去扫真 home。
   const workerRoots = {};
-  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]) {
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok", "workbuddy"]) {
     workerRoots[id] = [makeTmp()];
   }
   workerRoots.claude = [claudeRoot];

@@ -12,12 +12,13 @@
 //
 // 覆盖名单与 session-scan.mjs 的 RESUME_COMMAND 表同一份：只有能把对话 id
 // 非交互地传回 CLI 的端点才可接。qoder 认 -r <id>（无参才弹选择器），dsh /
-// zcode 的 CLI 亦有 --resume <id>，三家已随 RESUME_COMMAND 一同补齐；纯 shell
-// 会话没有可传回的对话 id，维持现状。
+// zcode / workbuddy 的 CLI 亦有 --resume <id>，四家已随 RESUME_COMMAND 一同
+// 补齐；纯 shell 会话没有可传回的对话 id，维持现状。
 //
 // resume 后是否同一对话文件：claude/kimi/grok/pi/opencode/dsh/zcode/qoder 续写
 // 原存档，绑定天然不失效；codex 若另起新 rollout，由 revive 成功后的延迟重扫
-// （pickRefreshedMeta）按「复活时刻之后唯一活跃」自愈换绑。
+// （pickRefreshedMeta）按「复活时刻之后唯一活跃」自愈换绑。workbuddy 的
+// `--resume <sessionId>` 读写同一个 <sessionId>.jsonl，同属续写原存档一类。
 
 import { readFileSync } from "node:fs";
 import { atomicWriteFile } from "./atomic-write.mjs";
@@ -26,7 +27,7 @@ export const TERMINAL_CONVERSATION_BINDINGS_FILE = "terminal-conversation-bindin
 
 // 可按对话 id 续会的端点（参数格式见 resumeArgsFor，与 session-scan.mjs 的
 // RESUME_COMMAND 注释同源：各家 CLI 自己 --help 文档化的形态）。
-export const RESUMABLE_AGENTS = new Set(["claude", "kimi", "pi", "opencode", "codex", "grok", "dsh", "zcode", "qoder"]);
+export const RESUMABLE_AGENTS = new Set(["claude", "kimi", "pi", "opencode", "codex", "grok", "dsh", "zcode", "qoder", "workbuddy"]);
 
 // 追加在 launch.args 末尾的续会参数。pi 认存档文件路径（同 RESUME_COMMAND 里
 // 的 meta.file），其余各家认对话 id；codex 是子命令形态（codex resume <id>）。
@@ -43,6 +44,9 @@ const RESUME_ARGS = {
   dsh: (binding) => ["--resume", binding.conversationId],
   zcode: (binding) => ["--resume", binding.conversationId],
   qoder: (binding) => ["--resume", binding.conversationId],
+  // workbuddy 与 RESUME_COMMAND 同口径（workbuddy --resume <id>）：这里只追加
+  // 参数片段，命令名由终端执行体（shim）负责。
+  workbuddy: (binding) => ["--resume", binding.conversationId],
   pi: (binding) => (typeof binding.file === "string" && binding.file !== "" ? ["--session", binding.file] : null),
 };
 

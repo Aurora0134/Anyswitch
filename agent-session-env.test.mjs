@@ -59,7 +59,7 @@ function fakeBase(root, { claudePackageVersion = undefined, ...overrides } = {})
 }
 
 test("白名单只含进终端的 CLI Agent，桌面 GUI 不在列", () => {
-  assert.deepEqual(Object.keys(AGENT_TERMINAL_TARGETS), ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"]);
+  assert.deepEqual(Object.keys(AGENT_TERMINAL_TARGETS), ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode", "workbuddy"]);
   for (const banned of ["codex-desktop"]) {
     assert.equal(AGENT_TERMINAL_TARGETS[banned], undefined, `${banned} 不得进终端`);
   }
@@ -224,7 +224,7 @@ test("终端启动的实例身份：能按连接属主认出来的端点一律�
     // 那才是实例行唯一能对上进程扫描的身份。自造的随机标签只有数字尾巴折得进
     // 规范形，折不进就把一次会话拆成两行：带面徽标的进程占位行零计数、带全部
     // 计数的流量行读不出面，终端页的监测区与最近请求还按占位行 id 取数取到全零。
-    for (const agentId of ["kimi", "grok", "opencode", "dsh", "qoder"]) {
+    for (const agentId of ["kimi", "grok", "opencode", "dsh", "qoder", "workbuddy"]) {
       const env = buildAgentSessionEnv({ agentId, token: TOKEN, base });
       assert.equal("ANYSWITCH_INSTANCE_ID" in env, false, `${agentId} 不发实例标签变量`);
       assert.equal("ANYSWITCH_AGENT_INSTANCE" in env, false, `${agentId} 不发实例标签变量`);
@@ -278,8 +278,8 @@ test("launch 一律 cmd /d /c 包装并前置 UTF-8 码页切换：归属链的�
       // 与文件路径里不允许出现任何令牌。
       const commandLine = JSON.stringify({ file: launch.launch.file, args: launch.launch.args });
       assert.ok(!commandLine.includes(TOKEN), `${agentId} 的命令行不含 relay 令牌`);
-      assert.ok(JSON.stringify(launch.env).includes(TOKEN) || agentId === "codex" || agentId === "grok" || agentId === "zcode",
-        `${agentId} 的令牌经 env 注入（codex/grok 的令牌在各自托管配置里，zcode 的由 launcher 落槽位 provider_config.json）`);
+      assert.ok(JSON.stringify(launch.env).includes(TOKEN) || agentId === "codex" || agentId === "grok" || agentId === "zcode" || agentId === "workbuddy",
+        `${agentId} 的令牌经 env 注入（codex/grok 的令牌在各自托管配置里，zcode/workbuddy 的由 launcher 落配置）`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -295,9 +295,9 @@ test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "dsh") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
-      // zcode 固定 8 段：/d /c chcp 65001 >nul & + node.exe + launcher 路径
-      //（launcher 形态见专项测试）。其他端点不追加主题覆盖参数。
-      assert.equal(launch.launch.args.length, agentId === "zcode" ? 8 : 7, `${agentId} 的附加参数清单`);
+      // zcode / workbuddy 固定 8 段：/d /c chcp 65001 >nul & + node.exe +
+      // launcher 路径（launcher 形态见专项测试）。其他端点不追加主题覆盖参数。
+      assert.equal(launch.launch.args.length, agentId === "zcode" || agentId === "workbuddy" ? 8 : 7, `${agentId} 的附加参数清单`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -316,7 +316,7 @@ test("claude bypassPermissions 开关：开 = 追加 --dangerously-skip-permissi
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "claude") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
-      assert.equal(launch.launch.args.length, agentId === "dsh" ? 9 : agentId === "zcode" ? 8 : 7, `${agentId} 不受 bypassPermissions 开关影响`);
+      assert.equal(launch.launch.args.length, agentId === "dsh" ? 9 : agentId === "zcode" || agentId === "workbuddy" ? 8 : 7, `${agentId} 不受 bypassPermissions 开关影响`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -377,6 +377,47 @@ test("zcode 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，en
     // provider_config.json，终端注入为零。
     assert.deepEqual(launch.env, {});
     assert.ok(!JSON.stringify({ file: launch.launch.file, args: launch.launch.args }).includes(TOKEN), "命令行不含 relay 令牌");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workbuddy 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，上游真钥标删", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const launch = buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base });
+    assert.equal(launch.label, "WorkBuddy", "显示名与计划 §5 一致");
+    assert.equal(launch.agentName, "WorkBuddy");
+    assert.equal(launch.shell, "cmd");
+    assert.equal(launch.launch.file, base.ComSpec, "经 cmd 启动（归属链硬前提）");
+    // 执行体是 node.exe（WorkBuddy 的 CLI 入口在 app.asar.unpacked 内，cmd 不能
+    // 直接执行 .mjs），launcher 绝对路径作为固定参数——与 zcode 同形态。
+    assert.deepEqual(launch.launch.args, ["/d", "/c", "chcp", "65001", ">nul", "&", process.execPath, WORKBUDDY_LAUNCHER_PATH]);
+    assert.match(WORKBUDDY_LAUNCHER_PATH, /workbuddy-launcher\.mjs$/, "launcher 文件名是契约的一部分");
+    // 凭证与 NO_PROXY / 实例标签全由 launcher 自建；终端只把上游真钥标删。
+    assert.deepEqual(launch.env, { CODEBUDDY_API_KEY: null });
+    assert.equal("ANYSWITCH_INSTANCE_ID" in launch.env, false, "实例身份交给 relay 反查属主（workbuddy-<pid>），终端不自造标签");
+    assert.ok(!JSON.stringify({ file: launch.launch.file, args: launch.launch.args }).includes(TOKEN), "命令行不含 relay 令牌");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workbuddy 续接：launcher 固定参数 + --resume <会话 id>，env 不变", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const launch = buildAgentSessionLaunch({
+      agentId: "workbuddy",
+      cwd: root,
+      token: TOKEN,
+      base,
+      resume: { endpoint: "workbuddy", id: RESUME_SESSION_ID },
+    });
+    assert.deepEqual(launch.launch.args.slice(8), ["--resume", RESUME_SESSION_ID], "续接片段来自 RESUME_COMMAND 模板");
+    assert.equal(launch.launch.args[6], process.execPath, "续接不换执行体");
+    assert.deepEqual(launch.env, { CODEBUDDY_API_KEY: null }, "续接不改凭证注入");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -454,6 +495,7 @@ const RESUME_FILE = "C:\\Users\\someone\\.pi\\sessions\\3f2b8c1e.jsonl";
 // 每个端点的续接参数（模板去掉命令名之后的部分，含端点固定参数——dsh 的
 // --profile 与 zcode 的 CLI launcher 路径都在固定段）。
 const ZCODE_CLI_LAUNCHER_PATH = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
+const WORKBUDDY_LAUNCHER_PATH = fileURLToPath(new URL("./workbuddy-launcher.mjs", import.meta.url));
 const RESUME_ARGS_BY_ENDPOINT = {
   claude: ["--resume", RESUME_SESSION_ID],
   kimi: ["--session", RESUME_SESSION_ID],
@@ -466,6 +508,9 @@ const RESUME_ARGS_BY_ENDPOINT = {
   dsh: ["--profile", "dsh-tui", "--resume", RESUME_SESSION_ID],
   zcode: [ZCODE_CLI_LAUNCHER_PATH, "--resume", RESUME_SESSION_ID],
   qoder: ["--resume", RESUME_SESSION_ID],
+  // workbuddy 同 zcode 形态：launcher 路径是端点固定参数，续接片段是
+  // ["--resume", id]（与 session-scan 的 RESUME_COMMAND 同口径）。
+  workbuddy: [WORKBUDDY_LAUNCHER_PATH, "--resume", RESUME_SESSION_ID],
 };
 
 test("续接：九个端点按模板重建参数，exe/env/label 与普通启动同源", () => {
@@ -695,6 +740,7 @@ test("续接：纯函数可桩测，返回模板端点与重建出的参数", ()
   const PURE_RESUME_ARGS = {
     ...RESUME_ARGS_BY_ENDPOINT,
     zcode: ["--resume", RESUME_SESSION_ID],
+    workbuddy: ["--resume", RESUME_SESSION_ID],
   };
   for (const [endpoint, expected] of Object.entries(PURE_RESUME_ARGS)) {
     assert.deepEqual(
@@ -718,6 +764,7 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
     grok: { label: "Grok Build", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "GROK_CODE_XAI_API_KEY", "NO_PROXY", "XAI_API_KEY", "no_proxy"] },
     qoder: { label: "Qoder", tail: [], envKeys: ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
     zcode: { label: "ZCode", tail: [], envKeys: [] },
+    workbuddy: { label: "WorkBuddy", tail: [], envKeys: ["CODEBUDDY_API_KEY"] },
   };
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
@@ -725,10 +772,12 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
     assert.deepEqual(Object.keys(FROZEN), Object.keys(AGENT_TERMINAL_TARGETS), "冻结表覆盖全部端点");
     for (const [agentId, frozen] of Object.entries(FROZEN)) {
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, instanceId: "pinned" });
-      // 执行体按端点各自的解析结果落位：zcode 是 node.exe + launcher 路径。
-      const executable = agentId === "zcode" ? process.execPath : launch.launch.args[6];
+      // 执行体按端点各自的解析结果落位：launcher 端点（zcode/workbuddy）是
+      // node.exe + launcher 路径。
+      const launcherForm = agentId === "zcode" || agentId === "workbuddy";
+      const executable = launcherForm ? process.execPath : launch.launch.args[6];
       const expected = ["/d", "/c", "chcp", "65001", ">nul", "&", executable, ...frozen.tail];
-      if (agentId === "zcode") expected.push(launch.launch.args[7]);
+      if (launcherForm) expected.push(launch.launch.args[7]);
       assert.deepEqual(launch.launch.args, expected, `${agentId} 的 argv 与改造前逐位一致`);
       assert.equal(launch.label, frozen.label, `${agentId} 的页签名不变`);
       assert.equal(launch.shell, "cmd");
