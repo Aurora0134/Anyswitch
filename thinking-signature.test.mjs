@@ -72,8 +72,14 @@ test("the wire chain decodes to the narration kind", () => {
   assert.equal(new TextDecoder().decode(marker), "narration");
 });
 
-test("the buffer parses cleanly to the end", () => {
-  // findField returns null on any trailing garbage or truncated element, so
-  // a non-null walk of the whole buffer IS the clean-parse check.
-  assert.ok(findField(signatureBytes, 2) !== null);
+test("a buffer that does not parse cleanly to the end yields null", () => {
+  // The clean-parse rule is what makes the positive walk above mean
+  // anything: a buffer cut off mid-element, or ending in a length-delimited
+  // key with no payload behind it, must return null even though field 2
+  // itself was seen on the way. (Legal trailing fields parse and are
+  // ignored; these are buffers that cannot parse at all.)
+  const truncated = signatureBytes.subarray(0, signatureBytes.length - 1);
+  assert.equal(findField(truncated, 2), null);
+  const trailingKey = new Uint8Array([...signatureBytes, 0x0a]);
+  assert.equal(findField(trailingKey, 2), null);
 });
