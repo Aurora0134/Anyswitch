@@ -731,7 +731,10 @@ async function api(method, path, body) {
     const prev = installedAgentIds;
     installedAgentIds = ids;
     installedAgentIdsAt = Date.now();
-    if (ids === null) return;
+    if (ids === null) {
+      renderSessErrBanner(); // 检测未知＝按「全部可见」重画（fail-open）
+      return;
+    }
     const same = prev instanceof Set && ids.size === prev.size && [...ids].every((id) => prev.has(id));
     if (same) return;
     writeInstalledAgentsSnapshot(ids);
@@ -740,6 +743,7 @@ async function api(method, path, body) {
     renderRouteChains();                // 设置-自动路由瓦片墙
     sessEpOptionsKey = "";              // 会话筛选下拉按新可见集重算
     refreshSessEndpointOptions();
+    renderSessErrBanner();              // 会话页端点错误横幅同口径重算
   }
   function loadInstalledAgentIds() {
     if (installedAgentIdsAt && Date.now() - installedAgentIdsAt < 60000 && installedAgentIds) {
@@ -20406,10 +20410,18 @@ async function api(method, path, body) {
   /* ============================================================
      端点错误横幅（逐条列出；可关闭，下次进视图仍再现）
      ============================================================ */
+  // 横幅的可见口径：本机没有这个 Agent 就不提示——没装（或已卸载）的端点没有会话
+  // 可读，它的存档即便读不出来也不是用户能处理的事。检测未知（installedAgentIds
+  // 为 null）时 fail-open，全部照常显示，宁可多提示也不把真故障藏掉。
+  function sessVisibleEndpointErrors(errs, installedIds) {
+    if (!Array.isArray(errs)) return [];
+    if (!(installedIds instanceof Set)) return errs.slice();
+    return errs.filter((e) => e && installedIds.has(e.endpoint));
+  }
   function renderSessErrBanner() {
     const host = $("sessErrHost");
     if (!host) return;
-    const errs = sessState.endpointErrors || [];
+    const errs = sessVisibleEndpointErrors(sessState.endpointErrors, installedAgentIds);
     host.innerHTML = errs.map((e) =>
       `<div class="sessions-err-banner"><span>⚠</span><span>${esc(sessEpName(e.endpoint))} 的会话目录未配置或不可读，其历史会话暂不可浏览。</span><button class="eb-close" data-eb="${esc(e.endpoint)}" title="关闭提示">×</button></div>`
     ).join("");

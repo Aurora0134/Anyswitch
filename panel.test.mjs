@@ -1540,6 +1540,24 @@ describe("panel.html sessions tab", () => {
       "sessErrHost 带 sessions-err-host 类");
   });
 
+  it("端点错误横幅只给本机装着的 Agent 报：未安装的不提示，检测未知时全显示", () => {
+    // 现场（2026-10-31）：本机没装 opencode，会话页却顶着一条「OpenCode 的会话目录
+    // 不可读」。横幅的可见口径必须和筛选下拉、看板卡同一个真值源（installedAgentIds）。
+    const m = panelJs.match(/function sessVisibleEndpointErrors\(errs, installedIds\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "sessVisibleEndpointErrors found in panel.js");
+    const filter = new Function(`${m[0]}\nreturn sessVisibleEndpointErrors;`)();
+    const errs = [{ endpoint: "opencode", reason: "x" }, { endpoint: "zcode", reason: "y" }];
+    assert.deepEqual(filter(errs, new Set(["zcode"])).map((e) => e.endpoint), ["zcode"],
+      "未安装端点的错误条不进横幅");
+    assert.deepEqual(filter(errs, null).map((e) => e.endpoint), ["opencode", "zcode"],
+      "检测未知时 fail-open，宁可多提示");
+    assert.deepEqual(filter(undefined, new Set(["zcode"])), [], "没有错误条目时给空数组");
+    assert.ok(panelJs.includes("sessVisibleEndpointErrors(sessState.endpointErrors, installedAgentIds)"),
+      "渲染路径走统一口径");
+    const hook = panelJs.match(/function applyInstalledAgentIds\(ids\) \{[\s\S]*?\n  \}/);
+    assert.ok(hook && hook[0].includes("renderSessErrBanner()"), "已安装集变化后横幅重算");
+  });
+
   it("extends switchView with the sessions branch and keeps aria-selected in sync", () => {
     const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "switchView found in panel.js");
