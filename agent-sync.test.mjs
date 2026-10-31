@@ -123,6 +123,22 @@ describe("agent-sync", () => {
     assert.match(grokText, /context_window = 4096/, "store contextWindow lands verbatim");
     assert.match(grokText, /extra_headers = \{ "x-agent-id" = "grok" \}/);
     assert.match(grokText, /env_http_headers = \{ "x-agent-instance" = "ANYSWITCH_INSTANCE_ID" \}/);
+
+    assert.ok(res.results.workbuddy);
+    const workbuddyPath = join(tmpRoot, ".workbuddy", "models.json");
+    assert.equal(existsSync(workbuddyPath), true, "workbuddy models.json must land under the injected USERPROFILE");
+    const workbuddy = JSON.parse(readFileSync(workbuddyPath, "utf8"));
+    // 写形状固定为对象：CLI 的 parseModelsJson 只认 {models, availableModels}。
+    assert.equal(Array.isArray(workbuddy), false);
+    assert.deepEqual(workbuddy.models.map((model) => model.id), ["alpha~model-1"]);
+    const workbuddyEntry = workbuddy.models[0];
+    assert.equal(workbuddyEntry.name, "model-1 · Alpha");
+    assert.equal(workbuddyEntry.vendor, "Anyswitch");
+    assert.equal(workbuddyEntry.url, "http://127.0.0.1:47821/openai/workbuddy~alpha/v1/chat/completions");
+    assert.equal(workbuddyEntry.apiKey, "test-token");
+    assert.equal(workbuddyEntry.useCustomProtocol, true);
+    assert.equal(workbuddyEntry.maxInputTokens, 4096, "store contextWindow lands verbatim");
+    assert.equal("availableModels" in workbuddy, false, "既有文件没有该键就不创建");
   });
 
   it("createStoreWatcher triggers callback when store.json changes", async () => {
@@ -444,9 +460,9 @@ describe("agent-sync Anyswitch 渠道名（九端点回归闸）", () => {
   });
 
   // 每个端点都配一条链、且存在一个虚拟模型：伪渠道（auto + 虚拟模型）会进全部
-  // 八个配置文件型端点。回归闸只认「用户在模型选择器里能看到的渠道文字」。
+  // 九个配置文件型端点。回归闸只认「用户在模型选择器里能看到的渠道文字」。
   function fullStore() {
-    const endpoints = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok"];
+    const endpoints = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok", "workbuddy"];
     const store = {
       version: 2,
       providers: {
@@ -469,7 +485,7 @@ describe("agent-sync Anyswitch 渠道名（九端点回归闸）", () => {
     return store;
   }
 
-  it("八个配置文件型端点的伪渠道都显示为 Anyswitch", async () => {
+  it("九个配置文件型端点的伪渠道都显示为 Anyswitch", async () => {
     mkdirSync(join(tmpRoot, ".dsh", "profiles", "desktop"), { recursive: true });
     const res = await syncAllAgentConfigs({
       store: fullStore(),
@@ -528,6 +544,14 @@ describe("agent-sync Anyswitch 渠道名（九端点回归闸）", () => {
     const grokText = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
     assert.match(grokText, /\[model\."anyswitch-auto"\]\nmodel = "auto"[\s\S]*?name = "auto · Anyswitch"/);
     assert.match(grokText, /\[model\."anyswitch-auto~vm-a"\]\nmodel = "vm-a"[\s\S]*?name = "vm-a · Anyswitch"/);
+
+    // WorkBuddy：模型条目行读 name，伪渠道的显示名就是 Anyswitch；id 用裸模型名
+    // （链拦截按 body.model 字面匹配），url 段带 workbuddy~ 身份前缀。
+    const workbuddy = JSON.parse(readFileSync(join(tmpRoot, ".workbuddy", "models.json"), "utf8"));
+    const workbuddyById = new Map(workbuddy.models.map((model) => [model.id, model]));
+    assert.equal(workbuddyById.get("auto").name, "auto · Anyswitch");
+    assert.equal(workbuddyById.get("vm-a").name, "vm-a · Anyswitch");
+    assert.equal(workbuddyById.get("auto").url, "http://127.0.0.1:47821/openai/workbuddy~alpha/v1/chat/completions");
   });
 });
 
@@ -580,7 +604,7 @@ describe("agent-sync 同步结果摘要", () => {
     for (const name of summary.failed) {
       assert.ok(!summary.synced.includes(name), `${name} 不能同时出现在两个名单里`);
     }
-    assert.equal(summary.synced.length + summary.failed.length, 8, "八个端点各归一个名单");
+    assert.equal(summary.synced.length + summary.failed.length, 9, "九个端点各归一个名单");
   });
 
   it("仓库数据读不出来时整体失败，不给面板任何端点名单", async () => {
@@ -631,7 +655,7 @@ describe("agent-sync 同步结果摘要", () => {
     }
     assert.deepEqual(after, before, "CWD 目录清单不变：没有任何新文件落盘");
     const summary = buildSyncSummary(res);
-    assert.deepEqual([...summary.failed].sort(), [...AGENT_ENDPOINTS].sort(), "八个端点全进失败名单");
+    assert.deepEqual([...summary.failed].sort(), [...AGENT_ENDPOINTS].sort(), "九个端点全进失败名单");
     assert.deepEqual(summary.synced, [], "成功名单为空");
   });
 

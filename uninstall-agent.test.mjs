@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createUninstallDriver, UNINSTALL_ENDPOINT_IDS } from "./uninstall-agent.mjs";
 import { createShimManager, shimRoot } from "./shim-manager.mjs";
-import { createPromptsInjector, MANAGED_BEGIN, MANAGED_END } from "./agent-prompts-inject.mjs";
+import { createPromptsInjector, buildManagedBlock, MANAGED_BEGIN, MANAGED_END } from "./agent-prompts-inject.mjs";
 import { createJunction } from "./agent-skills.mjs";
 import * as kimiMerge from "./kimi-merge-config.mjs";
 import * as grokMerge from "./grok-merge-config.mjs";
@@ -20,6 +20,7 @@ import * as zcodeMerge from "./zcode-merge-config.mjs";
 import * as zcodePersonal from "./zcode-personal-config.mjs";
 import * as opencodeMerge from "./opencode-merge-config.mjs";
 import * as piMerge from "./pi-merge-models.mjs";
+import * as workbuddyMerge from "./workbuddy-merge-models.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const FIXTURE_PORT = 47821;
@@ -83,10 +84,10 @@ function managedProviders() {
   return { chan1: { models: { m1: { contextWindow: 128000 } } } };
 }
 
-test("the registry covers all nine integrated endpoints", () => {
+test("the registry covers all ten integrated endpoints", () => {
   assert.deepEqual(
     [...UNINSTALL_ENDPOINT_IDS].sort(),
-    ["claude", "codex", "dsh", "grok", "kimi", "opencode", "pi", "qoder", "zcode"],
+    ["claude", "codex", "dsh", "grok", "kimi", "opencode", "pi", "qoder", "workbuddy", "zcode"],
   );
 });
 
@@ -626,6 +627,92 @@ test("claude: a CLAUDE.md holding only the managed block is deleted", async () =
   const result = await driver.uninstallEndpoint("claude");
   assert.equal(result.ok, true);
   assert.ok(!existsSync(claudeMd));
+});
+
+// ─────────────────────────────────────────────────────────────
+// workbuddy
+// ─────────────────────────────────────────────────────────────
+
+function seedWorkbuddy(home, sidecarRoot, { sidecar = true } = {}) {
+  const modelsPath = join(home, ".workbuddy", "models.json");
+  const managed = workbuddyMerge.buildWorkbuddyModelEntry(
+    "chan1",
+    { models: {} },
+    "m1",
+    {},
+    FIXTURE_PORT,
+    "tok",
+  );
+  writeJson(modelsPath, {
+    models: [
+      { id: "user-1", name: "Mine", url: "https://mine.example/v1/chat/completions" },
+      managed,
+    ],
+    theme: "dark",
+  });
+  writeFileSync(
+    join(home, ".workbuddy", "AGENTS.md"),
+    "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n",
+  );
+  if (sidecar) seedSidecar(sidecarRoot, "workbuddy-sidecar.json", ["chan1"]);
+  return modelsPath;
+}
+
+test("workbuddy: managed models, prompt block, skill junctions and sidecar are removed", async () => {
+  const home = mkTestDir("uninstall-workbuddy-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const modelsPath = seedWorkbuddy(home, sidecarRoot);
+
+  // skills：一个指向仓库的联接 + 一个本地真目录（必须留下）。
+  const repo = mkTestDir("workbuddy-skills-repo-");
+  mkdirSync(join(repo, "my-skill"), { recursive: true });
+  writeFileSync(join(repo, "my-skill", "SKILL.md"), "---\nname: my-skill\n---\n");
+  const skillsDir = join(home, ".workbuddy", "skills");
+  mkdirSync(skillsDir, { recursive: true });
+  createJunction(join(skillsDir, "my-skill"), join(repo, "my-skill"));
+  mkdirSync(join(skillsDir, "local-skill"), { recursive: true });
+  writeFileSync(join(skillsDir, "local-skill", "SKILL.md"), "---\nname: local-skill\n---\n");
+
+  const result = await driver.uninstallEndpoint("workbuddy");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  const models = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(models.models.map((entry) => entry.id), ["user-1"]);
+  assert.equal(models.theme, "dark", "未知顶层键原样保留");
+  assert.equal(readFileSync(join(home, ".workbuddy", "AGENTS.md"), "utf8"), "# My notes\n");
+  assert.ok(!existsSync(join(skillsDir, "my-skill")), "junction removed");
+  assert.ok(existsSync(join(repo, "my-skill", "SKILL.md")), "junction target intact");
+  assert.ok(existsSync(join(skillsDir, "local-skill", "SKILL.md")), "real dir untouched");
+  assert.ok(!existsSync(join(sidecarRoot, "workbuddy-sidecar.json")));
+  assert.equal(stepsByName(result)["prompt-block"].changed, true);
+  assert.equal(stepsByName(result)["skill-junctions"].changed, true);
+
+  const again = await driver.uninstallEndpoint("workbuddy");
+  assert.equal(again.ok, true);
+  for (const step of again.steps) assert.equal(step.changed, false, step.step);
+});
+
+test("workbuddy: sidecar-lost residue is removed by the URL-signature sweep", async () => {
+  const home = mkTestDir("uninstall-workbuddy-nosidecar-");
+  const { driver } = testDriver(home);
+  const modelsPath = seedWorkbuddy(home, join(home, "AppData", "Local", "Anyswitch"), { sidecar: false });
+
+  const result = await driver.uninstallEndpoint("workbuddy");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  assert.equal(stepsByName(result)["config-sync"].changed, false, "空 sidecar + 空 store 走早退");
+  assert.equal(stepsByName(result)["marker-sweep"].changed, true);
+  const models = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(models.models.map((entry) => entry.id), ["user-1"]);
+});
+
+test("workbuddy: a models.json created by the strip itself is reclaimed", async () => {
+  const home = mkTestDir("uninstall-workbuddy-husk-");
+  const { driver, sidecarRoot } = testDriver(home);
+  seedSidecar(sidecarRoot, "workbuddy-sidecar.json", ["chan1"]);
+  const modelsPath = join(home, ".workbuddy", "models.json");
+
+  const result = await driver.uninstallEndpoint("workbuddy");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  assert.ok(!existsSync(modelsPath), "no models.json husk");
 });
 
 // ─────────────────────────────────────────────────────────────

@@ -39,7 +39,8 @@ import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, rmdirSync } f
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { relayDataRoot } from "./relay-settings.mjs";
-import { createPromptsInjector } from "./agent-prompts-inject.mjs";
+import { atomicWriteFile } from "./atomic-write.mjs";
+import { createPromptsInjector, applyManagedBlock } from "./agent-prompts-inject.mjs";
 import { createShimManager, SHIM_SPECS } from "./shim-manager.mjs";
 
 import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
@@ -57,6 +58,7 @@ import { writePiModels, piModelsPath } from "./pi-launcher.mjs";
 import * as piMerge from "./pi-merge-models.mjs";
 import { dshSettingsPath } from "./dsh-launcher.mjs";
 import * as dshMerge from "./dsh-merge-config.mjs";
+import * as workbuddyMerge from "./workbuddy-merge-models.mjs";
 
 // Placeholder port/token for the strip syncs: with an empty managed set no
 // provider entry is ever built, so neither value reaches a file. They exist
@@ -571,18 +573,33 @@ async function stripDsh(ctx) {
   return steps;
 }
 
-// claude's only on-disk residue: the CLAUDE.md managed block and the skill
-// junctions under ~/.claude/skills. Junction removal follows the documented
-// semantics (agent-skills.mjs): rmdir on a junction removes ONLY the link,
-// never the target; real directories are never touched.
-function removeClaudeSkillJunctions(skillsDir) {
-  if (!existsSync(skillsDir)) return { step: "skill-junctions", ok: true, changed: false };
+// WorkBuddy 的提示词托管块（~/.workbuddy/AGENTS.md）：PROMPT_ENDPOINTS 的登记
+// 在另一分支，卸载不能依赖它已合并——这里直接用注入器导出的纯变换
+// applyManagedBlock 摘块，语义与快照注入完全同源（空文件删除、保留用户正文）。
+function stripWorkbuddyPromptBlock(homeDir) {
+  const target = join(homeDir, ".workbuddy", "AGENTS.md");
+  if (!existsSync(target)) return { step: "prompt-block", ok: true, changed: false };
+  const text = readFileSync(target, "utf8");
+  const next = applyManagedBlock(text, null);
+  if (next === text) return { step: "prompt-block", ok: true, changed: false };
+  if (next.trim() === "") {
+    rmSync(target, { force: true });
+    return { step: "prompt-block", ok: true, changed: true, removed: true };
+  }
+  atomicWriteFile(target, next);
+  return { step: "prompt-block", ok: true, changed: true };
+}
+
+// claude / workbuddy 的 skills 目录联接清理：rmdir 只摘链接，绝不碰目标目录
+// （agent-skills.mjs 的既有语义）；普通目录原样保留。
+function removeSkillJunctions(skillsDir, step = "skill-junctions") {
+  if (!existsSync(skillsDir)) return { step, ok: true, changed: false };
   const removed = [];
   let entries = [];
   try {
     entries = readdirSync(skillsDir);
   } catch {
-    return { step: "skill-junctions", ok: true, changed: false };
+    return { step, ok: true, changed: false };
   }
   for (const name of entries) {
     const abs = join(skillsDir, name);
@@ -596,7 +613,7 @@ function removeClaudeSkillJunctions(skillsDir) {
     rmdirSync(abs);
     removed.push(name);
   }
-  return { step: "skill-junctions", ok: true, changed: removed.length > 0, ...(removed.length > 0 ? { removed } : {}) };
+  return { step, ok: true, changed: removed.length > 0, ...(removed.length > 0 ? { removed } : {}) };
 }
 
 function stripClaude(ctx) {
@@ -608,7 +625,50 @@ function stripClaude(ctx) {
     steps.push(stepFail("prompt-block", error));
   }
   try {
-    steps.push(removeClaudeSkillJunctions(join(ctx.homeDir, ".claude", "skills")));
+    steps.push(removeSkillJunctions(join(ctx.homeDir, ".claude", "skills")));
+  } catch (error) {
+    steps.push(stepFail("skill-junctions", error));
+  }
+  return steps;
+}
+
+// WorkBuddy 的模型条目没有 marker/前缀，托管身份只剩 url 签名（merge 模块的
+// MANAGED_URL_RE）。空集同步 + 签名清扫两道都要：sidecar 在时前者按记录重建，
+// sidecar 丢了后者按 url 认领。
+function isWorkbuddyModelsHusk(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const keys = Object.keys(parsed);
+  if (!keys.includes("models") || !Array.isArray(parsed.models) || parsed.models.length > 0) return false;
+  const extra = keys.filter((key) => key !== "models");
+  if (extra.length === 0) return true;
+  return extra.length === 1 && extra[0] === "availableModels" &&
+    Array.isArray(parsed.availableModels) && parsed.availableModels.length === 0;
+}
+
+async function stripWorkbuddy(ctx) {
+  const modelsPath = workbuddyMerge.workbuddyModelsPath(ctx.env);
+  const steps = [];
+  const existedBefore = existsSync(modelsPath);
+  try {
+    steps.push(syncStep(await workbuddyMerge.writeWorkbuddyModels({}, STRIP_PORT, STRIP_TOKEN, ctx.sidecarRoot, modelsPath)));
+  } catch (error) {
+    steps.push(stepFail("config-sync", error));
+  }
+  steps.push(sweepJsonResidue({
+    configPath: modelsPath,
+    read: workbuddyMerge.readWorkbuddyModels,
+    selectManaged: workbuddyMerge.selectManagedModels,
+    validate: null,
+    writeWithBackup: workbuddyMerge.writeWorkbuddyModelsWithBackup,
+  }));
+  reclaimCreatedHusk(steps, modelsPath, existedBefore, isWorkbuddyModelsHusk);
+  try {
+    steps.push(stripWorkbuddyPromptBlock(ctx.homeDir));
+  } catch (error) {
+    steps.push(stepFail("prompt-block", error));
+  }
+  try {
+    steps.push(removeSkillJunctions(join(ctx.homeDir, ".workbuddy", "skills")));
   } catch (error) {
     steps.push(stepFail("skill-junctions", error));
   }
@@ -629,6 +689,7 @@ const ENDPOINT_DEFS = Object.freeze([
   { id: "dsh", strip: stripDsh, sidecar: dshMerge.sidecarPath, shim: "dsh" },
   { id: "zcode", strip: stripZcode, sidecar: zcodeMerge.sidecarPath, shim: "zcode" },
   { id: "pi", strip: stripPi, sidecar: piMerge.sidecarPath, shim: "pi" },
+  { id: "workbuddy", strip: stripWorkbuddy, sidecar: workbuddyMerge.sidecarPath, shim: "workbuddy" },
 ]);
 
 export const UNINSTALL_ENDPOINT_IDS = Object.freeze(ENDPOINT_DEFS.map((def) => def.id));

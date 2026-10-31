@@ -59,6 +59,7 @@ export const SHIM_SPECS = Object.freeze([
   { id: "pi", command: "pi", dir: "bin-pi", launcher: "pi-launcher.mjs" },
   { id: "dsh", command: "dsh-cli", dir: "bin", launcher: "dsh-launcher.mjs", launcherArgs: ["--profile", "dsh-tui"] },
   { id: "zcode", command: "zcode", dir: "bin", launcher: "zcode-launcher.mjs", extraFiles: ["zcode-app.vbs"] },
+  { id: "workbuddy", command: "workbuddy", dir: "bin-workbuddy", launcher: "workbuddy-launcher.mjs" },
   { id: "agy", command: "agy", dir: "bin", launcher: "antigravity-launcher.mjs", retired: true },
 ]);
 
