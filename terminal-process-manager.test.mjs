@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   ensureTerminalHost,
@@ -37,13 +37,28 @@ function makeDeps({ ownerPid = null, alive = [], commandLines = {} } = {}) {
   };
 }
 
-test("ensureTerminalHost discovers a serving backend and never spawns", async () => {
+test("ensureTerminalHost reports a serving backend as reused without fabricating a pid", async () => {
   const root = mkTestDir("anyswitch-tpm-");
   const result = await ensureTerminalHost(root, { probeFn: async () => true });
   assert.equal(result.ok, true);
   assert.equal(result.reused, true);
   assert.equal(result.port, TERMINAL_HOST_PORT);
-  assert.equal(existsSync(getTerminalHostPidPath(root)), false, "discovery mode never writes a pid file");
+  assert.equal(result.pid, null, "no legacy pid file — the discovery result must not fabricate a pid");
+  assert.equal(existsSync(getTerminalHostPidPath(root)), false, "discovery leaves no pid file behind");
+});
+
+test("ensureTerminalHost surfaces the pid from a legacy pid file when the backend is serving", async () => {
+  const root = mkTestDir("anyswitch-tpm-");
+  writeFileSync(getTerminalHostPidPath(root), "2384", "utf8");
+  const result = await ensureTerminalHost(root, { probeFn: async () => true });
+  assert.equal(result.ok, true);
+  assert.equal(result.reused, true);
+  assert.equal(result.pid, 2384, "the legacy pid is read from the file, not fabricated");
+  assert.equal(
+    readFileSync(getTerminalHostPidPath(root), "utf8"),
+    "2384",
+    "discovery reads the legacy pid file without rewriting it",
+  );
 });
 
 test("ensureTerminalHost reports relay-required instead of spawning when the port is dead", async () => {
