@@ -85,6 +85,8 @@ function withFakeAgents(fn) {
     GROK_EXECUTABLE: exe("grok.exe"),
     DSH_EXECUTABLE: exe("dsh.cmd"),
     ZCODE_CLI_EXECUTABLE: exe("zcode.mjs"),
+    // WorkBuddy 的安装判据是安装包内的 CLI 入口（终端实际交给 cmd 的仍是 node.exe）。
+    WORKBUDDY_EXECUTABLE: exe("codebuddy"),
     LOCALAPPDATA: join(root, "local"),
     USERPROFILE: join(root, "user"),
   };
@@ -107,7 +109,7 @@ function withFakeAgents(fn) {
 }
 
 describe("续接历史会话（terminal agent-sessions + resume）", () => {
-  it("九个端点：按模板重建的续接参数随 launch 转发，env/label 与普通启动同源", async () => {
+  it("十个端点：按模板重建的续接参数随 launch 转发，env/label 与普通启动同源", async () => {
     await withFakeAgents(async (cwd) => {
       const expected = {
         claude: ["--resume", SESSION_ID],
@@ -120,7 +122,11 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         dsh: ["--profile", "dsh-tui", "--resume", SESSION_ID],
         zcode: [fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url)), "--resume", SESSION_ID],
         qoder: ["--resume", SESSION_ID],
+        // workbuddy 同 zcode 形态：launcher 绝对路径是端点固定参数，续接片段排在
+        // 其后；执行体是 node.exe（process.execPath）。
+        workbuddy: [process.execPath, fileURLToPath(new URL("./workbuddy-launcher.mjs", import.meta.url)), "--resume", SESSION_ID],
       };
+      assert.equal(Object.keys(expected).length, 10, "续接路由覆盖全部十个端点");
       for (const [endpoint, tail] of Object.entries(expected)) {
         const root = mkTestDir("anyswitch-resume-route-root-");
         const { router, calls } = resumeRouter({ root });

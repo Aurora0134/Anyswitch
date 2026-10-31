@@ -100,10 +100,12 @@ export const AGENT_TERMINAL_TARGETS = {
   // （见 resolveZcodeTerminalExecutable），cmd /d /c node.exe <launcher> 成形。
   zcode: { name: "ZCode", kind: "cli", unset: [], launchArgs: [ZCODE_CLI_LAUNCHER_PATH] },
   // workbuddy 同 zcode 形态：执行体是 node.exe，固定参数是 launcher 绝对路径。
-  // unset 只标上游真钥 CODEBUDDY_API_KEY（内置模型的直连凭证，不得随继承环境
-  // 漏进 PTY）；WORKBUDDY_CONFIG_DIR / CODEBUDDY_CONFIG_DIR 等 launcher 自己要
-  // 读的定位变量一律不动。relay 凭证由 launcher 自建，终端注入为零。
-  workbuddy: { name: "WorkBuddy", kind: "cli", unset: ["CODEBUDDY_API_KEY"], launchArgs: [WORKBUDDY_LAUNCHER_PATH] },
+  // 不标删任何键：launcher（双击 / shim）保留用户自己的内置模型凭据
+  // CODEBUDDY_API_KEY，终端入口必须同口径——只有会让客户端绕开 relay 的上游键
+  // 才剥（claude/kimi 的 ANTHROPIC_API_KEY、grok 的 XAI 对），否则同一台机器上
+  // 「双击能用的内置模型」会在面板终端里变成「凭据被删」。relay 凭证由 launcher
+  // 自建，终端注入为零。
+  workbuddy: { name: "WorkBuddy", kind: "cli", unset: [], launchArgs: [WORKBUDDY_LAUNCHER_PATH] },
 };
 
 function agentError(message, code, cause) {
@@ -164,11 +166,34 @@ function resolveZcodeTerminalExecutable(base) {
 
 // workbuddy 的终端形态同 zcode：交给 cmd 的执行体是 node.exe（process.execPath
 // 恒为绝对路径且存在），launcher 绝对路径作为固定参数（见
-// AGENT_TERMINAL_TARGETS.workbuddy.launchArgs）。这里不校验 launcher 文件存在
-// ——它由配置分支交付，校验会把两分支合入前的本端点点成 executable_missing；
-// WorkBuddy CLI 是否装了由 launcher 自己判定并报错。
-function resolveWorkbuddyTerminalExecutable() {
-  return process.execPath;
+// AGENT_TERMINAL_TARGETS.workbuddy.launchArgs）。但「装了没有」这件事只能看
+// WorkBuddy 自己的 CLI 入口——把 process.execPath 当判据等于不校验，没装
+// WorkBuddy 的机器点「+」会开一个瞬间退出的 tab。入口与内置 node 任一取不到就
+// 返回 null，由 resolveAgentExecutable 转成既有的 executable_missing 文案。
+// launcher 文件本身仍不校验存在性（它随 Anyswitch 安装树落位，缺失由 launcher
+// 自己报「workbuddy launcher failed」）。
+//
+// 入口位置与配置侧 agent-discovery 的 resolveWorkbuddyExecutable 同一份契约
+// （WORKBUDDY_EXECUTABLE 覆盖 + 安装包默认位，覆盖只收绝对路径），合入后可直接
+// 换成那个导出。
+function resolveWorkbuddyCliEntry(base) {
+  const override = typeof base?.WORKBUDDY_EXECUTABLE === "string" ? base.WORKBUDDY_EXECUTABLE.trim() : "";
+  // 裸名字/相对路径可能解析回 Anyswitch 的 workbuddy shim，不进终端。
+  if (override !== "") return isAbsolute(override) ? override : null;
+  const localAppData =
+    typeof base?.LOCALAPPDATA === "string" && base.LOCALAPPDATA !== ""
+      ? base.LOCALAPPDATA
+      : join(base?.USERPROFILE ?? "", "AppData", "Local");
+  return join(localAppData, "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy");
+}
+
+function resolveWorkbuddyTerminalExecutable(base) {
+  const entry = resolveWorkbuddyCliEntry(base);
+  const entryInstalled = typeof entry === "string" && isAbsolute(entry) && existsSync(entry);
+  const node = process.execPath;
+  const nodeUsable = typeof node === "string" && isAbsolute(node) && existsSync(node);
+  if (!entryInstalled || !nodeUsable) return null;
+  return node;
 }
 
 const EXECUTABLE_RESOLVERS = {
@@ -266,8 +291,9 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
       return {};
     case "workbuddy":
       // 同 zcode：凭证与 NO_PROXY / ANYSWITCH_INSTANCE_ID 全由
-      // workbuddy-launcher.mjs 自建（models.json 的 apiKey 承载令牌），终端
-      // 只负责把上游真钥标删（unset 由 buildAgentSessionEnv 统一补）。
+      // workbuddy-launcher.mjs 自建（models.json 的 apiKey 承载令牌）。用户自己的
+      // 内置模型凭据 CODEBUDDY_API_KEY 保留在继承环境里——launcher 也保留它，
+      // 两条入口同口径，终端不标删任何键。
       return {};
     default:
       throw requireTarget(agentId);

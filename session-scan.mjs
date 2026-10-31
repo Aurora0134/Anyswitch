@@ -53,6 +53,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { zstdDecompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 
@@ -246,6 +247,18 @@ function isInjectedUserTurn(text) {
   return INJECTED_USER_TEXT_PATTERNS.some((re) => re.test(trimmed));
 }
 
+// 与上面同一类注入，但来源是客户端写进 user 角色的整块上下文：workbuddy 会把
+// `<system-reminder data-role="user-context" ...>` / `<teammate-message ...>` /
+// `<user-context ...>` 原样落成首条 user 消息。这类块不是人打的字，拿它当标题
+// 或摘要等于把整段机器文本贴到列表上。大小写不敏感（客户端拼标签的大小写并不
+// 统一）、容许前导空白的缩进形态；只匹配开头，正文里引用这些标签的真实提问
+// 不受影响。
+const INJECTED_USER_BLOCK = /^\s*<(?:system-reminder|teammate-message|user-context)\b/i;
+
+function isInjectedUserBlock(text) {
+  return INJECTED_USER_BLOCK.test(String(text ?? ""));
+}
+
 // Directory preview cap. The panel used to slice 40 raw characters off whatever
 // landed first — usually a tag or a file path — so the row said nothing about
 // the round it pointed at.
@@ -290,6 +303,11 @@ function parseJsonl(text) {
 // The head is read LINE BY LINE (not one 16KB split): a single JSONL row can
 // exceed 16KB on its own (kimi profile.bind rows are ~16KB), and a fixed chunk
 // split would truncate it and hide every later line from the head parse.
+// 两个窗口都按 16KB 字节块读，但块边界不等于字符边界：中文/emoji 正好压在
+// 16KB 上时，各自 buf.toString("utf8") 会把它劈成两个 U+FFFD，落在边界的那一行
+// JSON 解析失败、被当作坏行跳过（标题、cwd、sessionId 一起丢）。改用
+// StringDecoder 把不完整的多字节尾巴留在解码器内部等下一块补齐；尾窗口读完
+// 再 end() 冲刷残留。
 function readHeadTailLines(path, headN, tailN) {
   const SMALL_FILE_BYTES = 16_384;
   const CHUNK = 16_384;
@@ -302,29 +320,38 @@ function readHeadTailLines(path, headN, tailN) {
       const tail = all.slice(Math.max(0, all.length - tailN));
       return { head, tail };
     }
+    const buf = Buffer.alloc(CHUNK);
     // Head: stream chunks from position 0, emitting complete lines until headN.
     const head = [];
     let pos = 0;
     let carry = "";
-    const buf = Buffer.alloc(CHUNK);
+    const headDecoder = new StringDecoder("utf8");
     while (head.length < headN && pos < size) {
       const n = readSync(fd, buf, 0, Math.min(CHUNK, size - pos), pos);
       if (n <= 0) break;
       pos += n;
-      carry += buf.toString("utf8", 0, n);
+      carry += headDecoder.write(buf.subarray(0, n));
       let nl;
       while (head.length < headN && (nl = carry.indexOf("\n")) !== -1) {
         head.push(carry.slice(0, nl));
         carry = carry.slice(nl + 1);
       }
     }
-    // Tail: read the last 16KB chunk; drop the first (likely partial) line.
-    const tailPos = size - SMALL_FILE_BYTES;
-    const tailBuf = Buffer.alloc(SMALL_FILE_BYTES);
-    const tailRead = readSync(fd, tailBuf, 0, SMALL_FILE_BYTES, tailPos);
-    const tailLines = tailBuf.toString("utf8", 0, tailRead).split("\n").slice(1);
-    const tail = tailLines.slice(Math.max(0, tailLines.length - tailN));
-    return { head, tail };
+    if (tailN <= 0) return { head, tail: [] };
+    // Tail: 从 size-16KB 处按块读到文件尾（同样逐块 write、末尾 end），再丢掉
+    // 第一行——它多半是从行中间截断的半截。
+    const tailDecoder = new StringDecoder("utf8");
+    let tailText = "";
+    let tailPos = size - SMALL_FILE_BYTES;
+    while (tailPos < size) {
+      const n = readSync(fd, buf, 0, Math.min(CHUNK, size - tailPos), tailPos);
+      if (n <= 0) break;
+      tailPos += n;
+      tailText += tailDecoder.write(buf.subarray(0, n));
+    }
+    tailText += tailDecoder.end();
+    const tailLines = tailText.split("\n").slice(1);
+    return { head, tail: tailLines.slice(Math.max(0, tailLines.length - tailN)) };
   } finally {
     closeSync(fd);
   }
@@ -1736,6 +1763,50 @@ function workbuddyMessage(value) {
   return { role, content: text, ts: parseTimestampMs(value.timestamp) };
 }
 
+// 中段 ai-title 的定向扫描。头 60 / 尾 60 行都没命中的大文件里，标题事件就可能
+// 停在中间（真机 1343 行会话的 ai-title 落在第 119 行），只读两个窗口永远看不
+// 见。这里按 16KB 块流式再走一遍整份文件，但不做整文件解析：只有含字面量
+// "ai-title" 的行才 JSON.parse，其余行连解析都不做；命中的最后一次即最新标题
+// （标题生成与改名都是追加的独立事件）。解码同样经 StringDecoder，跨块多字节
+// 字符不会把这条命中行劈成坏行。
+function readLastAiTitle(path) {
+  const CHUNK = 65_536;
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(CHUNK);
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let title = null;
+    const take = (line) => {
+      if (!line.includes('"ai-title"')) return;
+      let value;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        return; // 半截/坏行：跳过，不炸整轮
+      }
+      if (value?.type !== "ai-title") return;
+      const found = firstString(value.aiTitle);
+      if (found !== null) title = found;
+    };
+    for (;;) {
+      const n = readSync(fd, buf, 0, CHUNK, null);
+      if (n <= 0) break;
+      carry += decoder.write(buf.subarray(0, n));
+      let nl;
+      while ((nl = carry.indexOf("\n")) !== -1) {
+        take(carry.slice(0, nl));
+        carry = carry.slice(nl + 1);
+      }
+    }
+    carry += decoder.end();
+    if (carry !== "") take(carry);
+    return title;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function createWorkbuddyAdapter(roots) {
   function parseSession(path, projectDirName) {
     // head 取 sessionId / cwd / 首条用户消息 / 创建时间，tail 取最近活跃时间与
@@ -1762,7 +1833,12 @@ function createWorkbuddyAdapter(roots) {
       if (createdAt === null) createdAt = parseTimestampMs(value?.timestamp);
       if (firstUserMessage === null) {
         const message = workbuddyMessage(value);
-        if (message !== null && message.role === "user") firstUserMessage = message.content;
+        // 客户端把自己注入的上下文也写成 user 消息（首条常是
+        // `<system-reminder data-role="user-context" ...>` 整块），跳过去找第一
+        // 条真正由人输入的话：否则标题与摘要都会是那段机器文本。
+        if (message !== null && message.role === "user" && !isInjectedUserBlock(message.content)) {
+          firstUserMessage = message.content;
+        }
       }
       if (sessionId !== null && cwd !== null && createdAt !== null && firstUserMessage !== null) break;
     }
@@ -1812,6 +1888,9 @@ function createWorkbuddyAdapter(roots) {
         }
       }
     }
+    // 头窗与尾窗都没命中：标题事件也可能停在长会话的中段（真机 1343 行、ai-title
+    // 在第 119 行），这时补一次定向流式扫描——只看含 "ai-title" 的行，取最后一次。
+    if (aiTitle === null) aiTitle = readLastAiTitle(path);
 
     // 会话 id 的权威来源是文件名（<sessionId>.jsonl）；行内 sessionId 只作补位。
     const id = sessionId ?? basename(path).replace(/\.jsonl$/, "");
