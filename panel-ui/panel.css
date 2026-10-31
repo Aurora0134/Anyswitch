@@ -1749,6 +1749,8 @@
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-md); padding: 8px 16px;
     font-size: 12.5px; font-weight: 600; color: var(--text); opacity: 0;
+    /* 绝对路径没有空格可断行，给 toast 封顶并按字符换行，长路径不至于横穿整屏 */
+    max-width: min(680px, calc(100vw - 48px)); overflow-wrap: anywhere;
     transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out); pointer-events: none; z-index: 400;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -1863,6 +1865,8 @@
   .data-bundle-meta:empty { display: none; }
   .data-bundle-note { font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
   .data-bundle-note[data-tone="warn"] { color: var(--warn); }
+  /* 备份位置：用户会照着这行去资源管理器里找，等宽字更易逐段核对 */
+  .data-backup-path { font-family: var(--font-mono); }
   /* 导入弹窗里的 Skills 落点：仓库勾选是小字注释量级（不是正栏），路径等宽再小一档；
      自选位置与勾选互斥——自选选到文件夹后勾选强制退出并锁定，锁定的点击在 JS 里
      拦下弹报错，这里只负责把它画得不可点。 */

@@ -43,6 +43,7 @@ const IDS = [
   "dataSkillsRepoLine", "dataSkillsRepoLabel", "dataSkillsRepoCheck", "dataSkillsRepoPath",
   "dataSkillsCustomItem", "dataSkillsCustomPath", "dataSkillsCustomPickBtn", "dataSkillsCustomClearBtn",
   "dataSkillsDefaultItem", "dataSkillsDefaultPath", "dataSkillsDefaultPickBtn",
+  "dataBackupPath", "dataBackupOpenBtn", "dataBackupPickBtn", "dataBackupResetBtn",
 ];
 
 function harness({ respondPost, errorText } = {}) {
@@ -122,7 +123,7 @@ const EXPORT_OK = {
   skippedCredentials: [],
 };
 
-const APPLY_OK = { ok: true, backupId: "20260923-125900", counts: { providers: 3 }, applied: { store: true, credentials: 3 } };
+const APPLY_OK = { ok: true, backupId: "20260923-125900", backupDir: "C:\\anyswitch\\backups\\pre-import-20260923-125900", counts: { providers: 3 }, applied: { store: true, credentials: 3 } };
 
 const applyHarness = (watchdog, applyResult = {}) => harness({
   respondPost: ({ path }) => (path === "/api/data/import-pick"
@@ -273,7 +274,8 @@ test("导入：单击即落定——一击就发写入请求、弹窗收起，�
   assert.equal(h.summary().tone, "ok");
   assert.equal(h.summary().text, "导入完成 · 备份号 20260923-125900");
   assert.equal(h.meta(), "渠道 3");
-  assert.equal(h.toasts.at(-1).message, "导入完成，已备份为 20260923-125900");
+  assert.equal(h.toasts.at(-1).message, "导入完成，已备份到 C:\\anyswitch\\backups\\pre-import-20260923-125900",
+    "toast 指明落点：绝对路径，而不是只有备份号");
   assert.equal(h.get("dataImportApplyBtn").disabled, true, "票据用掉后不许再点");
   await click(h, "dataImportApplyBtn");
   assert.equal(h.mutations.filter((m) => m.path === "/api/data/import-apply").length, 1, "票据一次性");
@@ -483,9 +485,11 @@ test("生命周期：离开期间落地的结果等切回，看过之后下次�
 
 test("生命周期：控制器真的接进了设置页子 tab 机制，不留「有钩子没人调」的死代码", () => {
   // 这条是本次问题的根：控制器原先声明了 reset() 却零调用点，等于没有生命周期。
-  assert.ok(source.includes('if (which !== "advanced") dataBundle.leave();'), "切走高级选项时离开");
-  assert.ok(source.includes('if (which === "advanced") return dataBundle.enter();'), "切回高级选项时进入");
-  assert.ok(source.includes("leaveSettingsView = () => { about.leave(); dataBundle.leave(); };"),
+  assert.ok(source.includes('if (which !== "advanced") { dataBundle.leave(); backupLocation.leave(); }'),
+    "切走高级选项时两个控制器都离开");
+  assert.ok(source.includes('if (which === "advanced") { dataBundle.enter(); return backupLocation.enter(); }'),
+    "切回高级选项时两个控制器都进入");
+  assert.ok(source.includes("leaveSettingsView = () => { about.leave(); dataBundle.leave(); backupLocation.leave(); };"),
     "整个设置视图关掉时也要复位（否则从看板回来还挂着旧结果）");
   assert.ok(source.includes("enter() { away = false; awaitReturn = false; }"), "enter 消费「等切回」");
   assert.ok(source.includes("leave() { away = true; if (awaitReturn) return; resetResults(); }"), "leave 按等切回决定清不清");

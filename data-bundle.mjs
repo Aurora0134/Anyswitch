@@ -27,6 +27,7 @@ import { loadStore, storePaths, writeStore } from "./store-io.mjs";
 import { defaultSettingsPath, relayDataRoot } from "./relay-settings.mjs";
 import { promptsPath } from "./agent-prompts.mjs";
 import { validateStore } from "./store-schema.mjs";
+import { readBackupRoot } from "./backup-location.mjs";
 
 export const BUNDLE_FORMAT = 1;
 export const EXPORT_PREFIX = "anyswitch-export";
@@ -156,6 +157,9 @@ export function createDataBundleService({
   // Skills 仓库指向在每次导出/预览/落定时现读，不在建服务时缓存：面板服务是惰性
   // 单例，用户可能在两次操作之间改过仓库位置，读到旧值会把 skills 落去错地方。
   skillsConfigFn = () => loadSkillsConfig({ base }),
+  // 备份位置每次落定时现读：用户可能刚在设置里换过目录，缓存旧值会把备份
+  // 写回旧位置，界面上却显示新路径。
+  backupRootFn = () => readBackupRoot(paths.root),
   homeDir = homedir(),
   tarPath = DEFAULT_TAR,
   spawnFn = spawn,
@@ -420,7 +424,7 @@ export function createDataBundleService({
       const store = JSON.parse(readFileSync(join(dir, "store.json"), "utf8"));
 
       const backupId = stamp(now());
-      const backupDir = join(paths.root, "backups", `pre-import-${backupId}`);
+      const backupDir = join(backupRootFn(), `pre-import-${backupId}`);
       const saved = [];
       mkdirSync(backupDir, { recursive: true });
       for (const name of CONFIG_FILES) {

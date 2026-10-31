@@ -2505,6 +2505,26 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="data-bundle-meta" id="dataImportMeta"></div>
         </div>
       </div>
+
+      <!-- 备份位置：上面两张卡每次写入前都会在这里留一份备份。路径是本机事实，
+           只存本机（不进配置包）；换目录时服务端先把历史备份整体迁过去再落盘。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            备份位置
+          </h2>
+          <div class="card-head-actions">
+            <button type="button" class="btn btn-mini" id="dataBackupOpenBtn">打开文件夹</button>
+            <button type="button" class="btn btn-mini" id="dataBackupPickBtn">更改位置…</button>
+            <button type="button" class="btn btn-mini" id="dataBackupResetBtn" hidden>恢复默认</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="data-bundle-meta data-backup-path" id="dataBackupPath" role="status" aria-live="polite"></div>
+          <div class="data-bundle-note">导入配置包、导入本地渠道并移除原配置时，备份保存在此文件夹；更改位置时，已有备份将一并迁移至新位置。</div>
+        </div>
+      </div>
     </div>
   </section>
 

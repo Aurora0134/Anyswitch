@@ -2726,7 +2726,9 @@ async function api(method, path, body) {
           `${summary}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
         showMeta(importMeta, [...metaParts, note].filter(Boolean).join(" · "));
         resultLanded();
-        notify(`导入完成，已备份为 ${result.backupId}`, false);
+        notify(result.backupDir
+          ? `导入完成，已备份到 ${result.backupDir}`
+          : `导入完成，已备份为 ${result.backupId}`, false);
       } catch (err) {
         // 票据在服务端已一次性作废，留在弹窗里只能取消后重选包。
         const detail = errorText(err, "导入未完成");
@@ -2759,6 +2761,93 @@ async function api(method, path, body) {
     return {
       enter() { away = false; awaitReturn = false; },
       leave() { away = true; if (awaitReturn) return; resetResults(); },
+    };
+  }
+
+  // 备份位置：只改目录，不碰备份内容。换目录与恢复默认都走同一条迁移——服务端
+  // 先整份复制再删源，目标有同名项就整次拒绝，所以失败时源目录一个字节不动，
+  // 文案才能直说「未做任何改动」。
+  function createBackupLocationController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback }) {
+    const get = (id) => doc.getElementById(id);
+    const pathLine = get("dataBackupPath");
+    const openBtn = get("dataBackupOpenBtn");
+    const pickBtn = get("dataBackupPickBtn");
+    const resetBtn = get("dataBackupResetBtn");
+    if (!pathLine || !openBtn || !pickBtn || !resetBtn) return { enter() {}, leave() {} };
+
+    let busy = false;
+    const render = (path, isDefault) => {
+      pathLine.textContent = path;
+      resetBtn.hidden = isDefault;
+    };
+    const setBusy = (on) => {
+      busy = on;
+      openBtn.disabled = on;
+      pickBtn.disabled = on;
+      resetBtn.disabled = on;
+    };
+    const failure = (err) => notify(`未做任何改动：${errorText(err, "未知原因")}`, true);
+
+    async function load() {
+      try {
+        const info = await request("GET", "/api/backups");
+        render(info.path, info.isDefault);
+      } catch (err) {
+        notify(errorText(err, "读取备份位置失败"), true);
+      }
+    }
+
+    async function openFolder() {
+      try {
+        await request("POST", "/api/backups/open");
+      } catch (err) {
+        notify(errorText(err, "打不开文件夹"), true);
+      }
+    }
+
+    async function pick() {
+      if (busy) return;
+      let picked;
+      try {
+        picked = await request("POST", "/api/backups/pick");
+      } catch (err) {
+        notify(errorText(err, "位置选择失败"), true);
+        return;
+      }
+      if (picked.cancelled || !picked.path) return;
+      setBusy(true);
+      try {
+        const result = await request("POST", "/api/backups/set", { path: picked.path });
+        render(result.path, false);
+        notify(`备份位置已改为 ${result.path}`, false);
+      } catch (err) {
+        failure(err);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function reset() {
+      if (busy) return;
+      setBusy(true);
+      try {
+        const result = await request("POST", "/api/backups/reset");
+        render(result.path, true);
+        notify("备份位置已恢复默认", false);
+      } catch (err) {
+        failure(err);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    openBtn.onclick = openFolder;
+    pickBtn.onclick = pick;
+    resetBtn.onclick = reset;
+    return {
+      // 进子页现读：本机文件可能被别处改过，不吃页面加载时的旧值。
+      enter() { load(); },
+      leave() {},
     };
   }
 
@@ -4081,7 +4170,8 @@ async function api(method, path, body) {
     // 数据搬迁用 panelFailure：被折叠的失败要额外告诉用户「刷新页面重试」这条
     // 有意义的下一步，并指向面板日志里的服务端原文。
     const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelFailure });
-    leaveSettingsView = () => { about.leave(); dataBundle.leave(); };
+    const backupLocation = createBackupLocationController({ request: api, doc: document, notify: toast, errorText: panelFailure });
+    leaveSettingsView = () => { about.leave(); dataBundle.leave(); backupLocation.leave(); };
     const settingsSubTabs = {
       general: ["settingsTabGeneral", "settingsPanelGeneral"],
       advanced: ["settingsTabAdvanced", "settingsPanelAdvanced"],
@@ -4104,7 +4194,7 @@ async function api(method, path, body) {
       if (!selected || $(selected[0]).classList.contains("active")) return;
       resetPageScroll();
       if (which !== "about") about.leave();
-      if (which !== "advanced") dataBundle.leave();
+      if (which !== "advanced") { dataBundle.leave(); backupLocation.leave(); }
       for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
         const on = name === which;
         $(tabId).classList.toggle("active", on);
@@ -4136,7 +4226,7 @@ async function api(method, path, body) {
       // 重生成选项，于是渠道增删/改名后回到这一页看到的就是最新模型清单。
       // 拉取失败保留上一次生成的选项，不让一次网络抖动把四行变成空下拉。
       if (which === "general") refreshStoreState().then(renderClaudeTierOptions, () => {});
-      if (which === "advanced") return dataBundle.enter();
+      if (which === "advanced") { dataBundle.enter(); return backupLocation.enter(); }
       if (which === "about") return about.enter();
     }
     // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（导航 + telemetry-view），剥 id
@@ -16055,10 +16145,10 @@ async function api(method, path, body) {
   let byokImportEntries = [];   // 摊平的候选行；勾选框只带下标，key 不序列化进 DOM
 
   // 回执拼装：导入计数打底，部分失败/本地移除失败追加；纯函数便于摘出单测
-  function byokImportReceiptText(result, deleteLocal) {
+  function byokImportReceiptText(result, deleteLocal, backupLocation = "") {
     const parts = [
       deleteLocal
-        ? `已导入 ${result.imported} 条渠道，本地原始配置已移除（原文件已备份）`
+        ? `已导入 ${result.imported} 条渠道，本地原始配置已移除（原文件已备份${backupLocation ? `到 ${backupLocation}` : ""}）`
         : `已导入 ${result.imported} 条渠道，本地配置原样保留`,
     ];
     const failedCount = (result.failed || []).length;
@@ -16084,13 +16174,13 @@ async function api(method, path, body) {
 
   // 回执落点：渠道总览状态小字（结论 10s 淡出）+ toast；人不在渠道 tab 置
   // 「等切回」标记并暂停淡出计时，切回看过再复位（与刷新终态同一惯例）
-  function landByokImportReceipt(text, isErr) {
+  function landByokImportReceipt(text, isErr, toastText = text) {
     setStoreRefreshStatus(text, isErr ? "err" : "done");
     if (currentView !== "store") {
       storeStatusAwaitReturn = true;
       disarmStoreStatusTimer();
     }
-    toast(text, isErr);
+    toast(toastText, isErr);
   }
 
   function byokImportSelectedKeys() {
@@ -16178,7 +16268,12 @@ async function api(method, path, body) {
       for (const f of r.failed || []) reportMaskedPanelError("导入本地配置：条目入库失败", `${f.key}：${f.error}`);
       for (const f of r.removeFailed || []) reportMaskedPanelError("导入本地配置：本地原始配置移除失败", `${f.key}：${f.error}`);
       const hasFailure = (r.failed || []).length > 0 || (r.removeFailed || []).length > 0;
-      landByokImportReceipt(byokImportReceiptText(r, deleteLocal), hasFailure);
+      const receipt = byokImportReceiptText(r, deleteLocal);
+      // 状态小字有 360px 上限，路径摆不下；toast 才是能看见落点的那一处。
+      const toastText = deleteLocal && r.backupDir
+        ? byokImportReceiptText(r, deleteLocal, r.backupDir)
+        : receipt;
+      landByokImportReceipt(receipt, hasFailure, toastText);
       await refreshStoreState();
     } catch (e) {
       if (e.code === "ticket-expired") {
