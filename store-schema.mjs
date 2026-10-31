@@ -297,10 +297,6 @@ function validatePools(store, errors) {
 // not drop them while any store may still hold those keys. The skills-only
 // "agents" (全局 ~/.agents/skills) endpoint is deliberately NOT listed here:
 // it has no relay/launcher presence, only the skills scanner sees it.
-// "workbuddy" (第 10 端点) is registered here first because the relay/panel
-// store must accept its 自动路由 chain before anything else; its ENDPOINT_DEFS
-// row in agent-skills.mjs lands on the panel branch — until that merge the two
-// lists differ by this single id, which is the intended order, not drift.
 export const ROUTING_ENDPOINT_IDS = Object.freeze([
   "claude",
   "zcode",
