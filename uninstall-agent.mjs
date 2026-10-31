@@ -576,8 +576,6 @@ async function stripDsh(ctx) {
 // WorkBuddy 的提示词托管块（~/.workbuddy/AGENTS.md）：PROMPT_ENDPOINTS 的登记
 // 在另一分支，卸载不能依赖它已合并——这里直接用注入器导出的纯变换
 // applyManagedBlock 摘块，语义与快照注入完全同源（空文件删除、保留用户正文）。
-// 目录口径走 merge 模块的 workbuddyConfigRoot：WORKBUDDY_CONFIG_DIR /
-// CODEBUDDY_CONFIG_DIR 改根时，提示词与模型表必须落在同一个目录里。
 function stripWorkbuddyPromptBlock(configRoot) {
   const target = join(configRoot, "AGENTS.md");
   if (!existsSync(target)) return { step: "prompt-block", ok: true, changed: false };
@@ -647,9 +645,13 @@ function isWorkbuddyModelsHusk(parsed) {
     Array.isArray(parsed.availableModels) && parsed.availableModels.length === 0;
 }
 
+// 口径说明：models.json 跟随写入器（workbuddyConfigRoot），认 WORKBUDDY_CONFIG_DIR /
+// CODEBUDDY_CONFIG_DIR；提示词块与 skills 跟随注入侧 PROMPT_ENDPOINTS 与部署侧
+// ENDPOINT_DEFS 的静态 home 口径（homeDir + .workbuddy），十条端点共用同一套机制。
+// 两者不一致是既有公共设计，不是遗漏——卸载必须清理注入侧真正写入的位置。
 async function stripWorkbuddy(ctx) {
-  const configRoot = workbuddyMerge.workbuddyConfigRoot(ctx.env, ctx.homeDir);
   const modelsPath = workbuddyMerge.workbuddyModelsPath(ctx.env, ctx.homeDir);
+  const promptRoot = join(ctx.homeDir, ".workbuddy");
   const steps = [];
   const existedBefore = existsSync(modelsPath);
   try {
@@ -666,12 +668,12 @@ async function stripWorkbuddy(ctx) {
   }));
   reclaimCreatedHusk(steps, modelsPath, existedBefore, isWorkbuddyModelsHusk);
   try {
-    steps.push(stripWorkbuddyPromptBlock(configRoot));
+    steps.push(stripWorkbuddyPromptBlock(promptRoot));
   } catch (error) {
     steps.push(stepFail("prompt-block", error));
   }
   try {
-    steps.push(removeSkillJunctions(join(configRoot, "skills")));
+    steps.push(removeSkillJunctions(join(promptRoot, "skills")));
   } catch (error) {
     steps.push(stepFail("skill-junctions", error));
   }
