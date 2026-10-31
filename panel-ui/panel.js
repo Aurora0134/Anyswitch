@@ -2487,7 +2487,6 @@ async function api(method, path, body) {
     let ticket = null;
     let preview = null;
     let customPath = null;
-    let applyArmed = false;
     let busy = false;
     // 本卡文本分两种身份，复位规则不同——混为一谈就会出现「成功文案无限期挂着」：
     //   状态 = 卡面初始行。预览摘要与 Skills 落点选择都在弹窗里，不占卡面。
@@ -2564,13 +2563,8 @@ async function api(method, path, body) {
     }
 
     // ── 导入：预览与落点选择全在弹窗里 ──────────────────────────
-    // 「备份并导入」是双击确认：内置浏览器里 window.confirm 会卡死，第一击变红
-    // 常驻（不自动复位），换包/改落点/取消/落定才解除。
-    function disarmApply() {
-      applyArmed = false;
-      applyBtn.textContent = "备份并导入";
-      applyBtn.classList.remove("btn-danger-armed");
-    }
+    // 「备份并导入」单击即落定：内置浏览器里 window.confirm 会卡死，而写入前服务端
+    // 本来就会把整份数据备份一遍，红色确认态只是多一步，取消随时可点。
     function openModal() { modal.classList.add("show"); }
     // 取消/关闭 = 丢弃这次选择：票据作废（服务端留着等过期扫掉），卡面回初值。
     function closeModal() {
@@ -2578,7 +2572,6 @@ async function api(method, path, body) {
       ticket = null;
       preview = null;
       customPath = null;
-      disarmApply();
       show(summaryLine, "", initial.import);
       showMeta(importMeta, "");
     }
@@ -2598,7 +2591,8 @@ async function api(method, path, body) {
       ticket = result.token ?? null;
       preview = result;
       customPath = null;
-      disarmApply();
+      // 上一次导入的忙碌文案可能还挂在按钮上，新包进来先回到 idle 文案。
+      applyBtn.textContent = "备份并导入";
       applyBtn.disabled = !ticket;
       modalError.hidden = true;
       const from = result.sourceComputer ? `来自 ${result.sourceComputer} · ` : "";
@@ -2653,7 +2647,6 @@ async function api(method, path, body) {
         customClearBtn.hidden = false;
         repoCheck.checked = false;
         syncRepoLock();
-        disarmApply();
       } catch (err) {
         notify(errorText(err, "位置选择失败"), true);
       }
@@ -2665,7 +2658,6 @@ async function api(method, path, body) {
       customClearBtn.hidden = true;
       repoCheck.checked = true;
       syncRepoLock();
-      disarmApply();
     }
 
     async function runDefaultPick() {
@@ -2673,7 +2665,6 @@ async function api(method, path, body) {
         const result = await request("POST", "/api/skills/repo/pick", {});
         if (result.cancelled || !result.path) return;
         defaultPathLine.textContent = result.path;
-        disarmApply();
       } catch (err) {
         notify(errorText(err, "位置选择失败"), true);
       }
@@ -2681,13 +2672,6 @@ async function api(method, path, body) {
 
     async function runApply() {
       if (busy || !ticket) return;
-      if (!applyArmed) {
-        applyArmed = true;
-        applyBtn.textContent = "确认导入？再点一次";
-        applyBtn.classList.add("btn-danger-armed");
-        return;
-      }
-      disarmApply();
       const usedTicket = ticket;
       const usedPreview = preview;
       let decision = { skillsMode: "skip" };
@@ -2764,7 +2748,6 @@ async function api(method, path, body) {
     get("dataImportModalCancel").onclick = closeModal;
     repoLabel.onclick = repoLockGuard;
     repoCheck.onclick = repoLockGuard;
-    repoCheck.onchange = disarmApply;
     customPickBtn.onclick = runCustomPick;
     customClearBtn.onclick = runCustomClear;
     defaultPickBtn.onclick = runDefaultPick;

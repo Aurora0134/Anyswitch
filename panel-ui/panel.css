@@ -1873,9 +1873,6 @@
   .data-skills-inline.is-locked label { opacity: .45; cursor: not-allowed; }
   .data-skills-path { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
   .data-skills-inline .data-skills-path { padding-left: 20px; }
-  /* 导入是双击确认：第一击进确认态（实色危险底），常驻到落定或取消，不自动复位 */
-  .btn-danger-armed { background: var(--danger); border-color: var(--danger); color: #fff; }
-  .btn-danger-armed:hover:not(:disabled) { filter: brightness(1.05); }
   /* Claude Code 档位映射行：复用 .modal-number 的全部取值（底色/边框/焦点环都走
      主题 token），这里只把它从「右对齐的小数字框」改成「左对齐的模型名框」——
      不引入任何颜色声明，因此三套主题与亮暗都无需特化片段。 */
