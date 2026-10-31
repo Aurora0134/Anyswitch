@@ -192,5 +192,5 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - 全量：在 `app\` 目录下运行 `npm test`（即 `node --test *.test.mjs`）。glob 由 Node 自带的 test runner 展开，Windows npm script 不展开通配符也没关系。推荐 Node.js 24 LTS；API 下限范围为 `>=22.15.0 <23 || >=23.8.0`，用于满足会话读取的内置 SQLite 与 zstd 依赖，不代表范围内所有 Node 版本均已实测。relay 与面板自身零依赖，但套件覆盖虚拟终端的终端宿主（`terminal-host.mjs` 导入 `node-pty`），首次运行前先执行一次 `npm install`。
 - 单文件：`node --test <file>.test.mjs`（如 `node --test autostart.test.mjs`）。
 - 环境依赖说明：
-  - `dpapi.test.mjs` 走真实 Windows DPAPI（CurrentUser 作用域，经 `dpapi.ps1`），需要 Windows 交互登录会话下运行；非交互/无用户上下文的服务会话中会失败。
+  - `dpapi.test.mjs` 走真实 Windows DPAPI（CurrentUser 作用域，经 `dpapi.ps1`），需要 Windows 交互登录会话下运行；非交互/无用户上下文的服务会话中 DPAPI 探测不可用，相关用例报告为 skipped 而非失败。
   - dsh / reasoning 相关用例（`dsh-launcher.test.mjs`、`dsh-merge-config.test.mjs`、`reasoning-fallback.test.mjs`）依赖本机已安装 dsh（roaming npm 根下的 `@deepseek-ai/dsh`）；未安装时 `loadPiAiReasoningIndex` 相关用例自动跳过（按空索引短路），其余用例不受影响。
