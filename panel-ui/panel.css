@@ -1399,9 +1399,16 @@
   .ms-rate.g { color: var(--ok); }
   .ms-rate.y { color: var(--warn); }
   .ms-rate.r { color: var(--danger); }
-  .ms-cells { position: relative; display: flex; align-items: flex-end; gap: 3px; height: 22px; margin: 8px 0 0 19px; contain: layout; }
+  /* 柱宽 = 整数槽位（--ms-slot 由 panel.js 按容器实测宽下取整写入，48 柱均分
+     「可用宽 − 47 个 3px 间隙」）：等分 flex（flex:1 1 0）会把 259px 分成每柱
+     2.46px 这类分数宽，浏览器涂色时对每根柱左右边缘各自取整到像素格，相邻柱
+     可见宽就在 2px/3px 间交替（2026-10-31 实测复现）。改固定整数槽宽后，除不尽
+     的余数由 space-between 摊进间隙——间隙是背景色，3px/4px 之差不可见，柱子
+     严格同宽且首尾柱贴行两端、整行铺满。shrink 保留 1：仅当槽位常量漂移导致
+     总宽超出容器时兜底收缩，正常路径永不触发。 */
+  .ms-cells { position: relative; display: flex; align-items: flex-end; justify-content: space-between; gap: 3px; height: 22px; margin: 8px 0 0 19px; contain: layout; }
   .ms-cells::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--border); pointer-events: none; }
-  .ms-cell { flex: 1 1 0; min-width: 0; height: 4px; border-radius: 1.5px 1.5px 0 0; background-color: var(--ok); cursor: pointer; }
+  .ms-cell { flex: 0 1 var(--ms-slot, 2px); height: 4px; border-radius: 1.5px 1.5px 0 0; background-color: var(--ok); cursor: pointer; }
   .ms-cell.mid { background-color: var(--warn); }
   .ms-cell.bad { background-color: var(--danger); }
   .ms-cell.idle { height: 2px !important; background-color: var(--text-4); opacity: 0.35; cursor: default; border-radius: 1px; }

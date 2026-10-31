@@ -341,6 +341,9 @@ async function api(method, path, body) {
     initStoreTab();
     initStatsTab();
     initSessionsTab();
+    // typeof 守卫理由同 initTerminalPreview：panel-startup 测试把 init() 抽进桩
+    // 环境真跑，桩里只有固定名单上的函数。
+    if (typeof bindMsBarResize === "function") bindMsBarResize();
     loadAutostartState();
     // 首刷预加载：链配置 + 路由链运行时必须在第一次 agents 渲染（1s 轮询）
     // 之前落地，否则胶囊标记只能靠 loading 守卫抑制（直连样式一帧）。
@@ -1670,6 +1673,43 @@ async function api(method, path, body) {
       });
       list.appendChild(item);
     });
+    syncMsBarSlot();
+  }
+
+  // 柱图槽位同步（.ms-cell 宽度的整数化来源，机制见 panel.css .ms-cell 注释）：
+  // 宽量自 msList（与 .ms-item 同宽——flex 列内拉伸到列表内容宽），扣掉 .ms-item
+  // 左右 padding 共 4px、.ms-cells margin-left 19px 与 47 个 3px 间隙后，48 柱
+  // 均分下取整。卡隐藏时量到 0 保持旧值，可见后由渲染或 RO 回调补算。槽位相关
+  // 常量（4/19/141/48）与 CSS（padding/margin/gap）及后端 BUCKET_COUNT=48 是
+  // 一组约定，改一处须同步。
+  function syncMsBarSlot() {
+    const list = $("msList");
+    if (!list) return;
+    const w = list.clientWidth;
+    if (!w) return;
+    const slot = Math.max(2, Math.floor((w - 4 - 19 - 141) / 48));
+    list.style.setProperty("--ms-slot", slot + "px");
+  }
+
+  // 容器宽实变（窗口缩放/栅格塌折）→ 防抖重算槽位（与 bindStatsChartResize 同款
+  // 的实际变宽判定 + 160ms 防抖）：只更新 --ms-slot 一个变量，柱子随新槽宽自动
+  // 重排，不整卡重渲。注册即有一帧回调，首槽位由此落定；渲染路径每 15s 轮询再
+  // 兜底补算一次。
+  let msBarResizeRO = null;
+  function bindMsBarResize() {
+    if (msBarResizeRO || typeof ResizeObserver !== "function") return;
+    const list = $("msList");
+    if (!list) return;
+    let lastW = 0;
+    let timer = null;
+    msBarResizeRO = new ResizeObserver((entries) => {
+      const w = Math.round(entries[entries.length - 1].contentRect.width);
+      if (!w || w === lastW) return;
+      lastW = w;
+      clearTimeout(timer);
+      timer = setTimeout(syncMsBarSlot, 160);
+    });
+    msBarResizeRO.observe(list);
   }
 
   function applyFaultBanner(agent, bannerEl, msgEl, timeEl) {
