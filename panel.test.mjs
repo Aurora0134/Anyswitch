@@ -15054,6 +15054,9 @@ describe("BYOK 导入本地配置（面板前端）", () => {
     const receipt = vmFn("byokImportReceiptText");
     assert.equal(receipt({ imported: 3, failed: [], removeFailed: [] }, true),
       "已导入 3 条渠道，本地原始配置已移除（原文件已备份）");
+    assert.equal(receipt({ imported: 1, failed: [], removeFailed: [] }, true, "D:\\backups\\byok-import-1"),
+      "已导入 1 条渠道，本地原始配置已移除（原文件已备份到 D:\\backups\\byok-import-1）",
+      "给了落点就把落点写进回执，toast 才看得出备份去了哪");
     assert.equal(receipt({ imported: 2, failed: [], removeFailed: [] }, false),
       "已导入 2 条渠道，本地配置原样保留");
     assert.equal(receipt({ imported: 2, failed: [{ key: "a", error: "x" }], removeFailed: [] }, false),
@@ -15075,7 +15078,7 @@ describe("BYOK 导入本地配置（面板前端）", () => {
     assert.ok(fn.includes('if (currentView !== "store")'), "人不在渠道 tab 才置标记");
     assert.ok(fn.includes("storeStatusAwaitReturn = true;"), "等切回标记");
     assert.ok(fn.includes("disarmStoreStatusTimer()"), "暂停淡出等人切回");
-    assert.ok(fn.includes("toast(text, isErr)"), "结果 toast");
+    assert.ok(fn.includes("toast(toastText, isErr)"), "结果 toast 用带落点的那一份");
   });
 
   it("票据过期给逐字提示且只认重新扫描；被折叠原文进面板日志", () => {

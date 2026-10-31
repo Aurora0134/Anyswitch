@@ -66,7 +66,9 @@ test("readRemoteRefs：一次往返解析默认分支 HEAD 与 v-tag；附注 ta
 });
 
 test("readRemoteRefs：远端默认分支叫 master 也能解析（回归：曾写死 main）", async () => {
-  // 只给 HEAD 与 tag，不给任何 refs/heads/*：解析结果必须与分支名无关。
+  // 共享夹具 LS_REMOTE_OUTPUT 里混着一行 refs/heads/feature（远端另有分支的情形），
+  // 解析必须忽略它；查询参数也不点名任何分支。结论只依赖 HEAD 与 tag，因此与默认分支
+  // 叫什么无关——这里证明的是「不白问」，不是「远端没有 refs/heads/*」。
   const git = fakeSpawn(({ args }) => (args0("ls-remote")(args) ? { stdout: LS_REMOTE_OUTPUT } : { stdout: "" }));
   const remote = await readRemoteRefs({ repoUrl: REPO_URL, spawnFn: git.spawnFn, env: {} });
   assert.equal(remote?.headSha, "0123456789abcdef0123456789abcdef01234567", "不依赖 refs/heads/main 存在");

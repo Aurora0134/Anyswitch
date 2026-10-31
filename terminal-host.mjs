@@ -1395,7 +1395,8 @@ export function createTerminalHost({
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     feedMirror(session, text);
     session.lastActiveAt = Date.now();
-    // 每个输出块都改写这条会话的记录（buffer 尾部与 lastActiveAt）：只置这一条
+    // 每个输出块都改写这条会话的记录（镜像快照与 lastActiveAt；记录正文不含原始
+    // 字节，见 sessionRecord）：只置这一条
     // 会话的脏标，250ms 防抖到点的那一拍只重写它自己那份文件——别的会话空闲与
     // 否不再影响这个会话的单拍成本。
     markSessionDirty(session);
@@ -1447,7 +1448,9 @@ export function createTerminalHost({
       session.screen.flush();
       const wasInAlt = session.screen.info().inAlt;
       session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
-      // 字节窗是宿主重启恢复的原料：旧 agent 的字节全部作废（计数同步归零）。
+      // 字节窗跟着作废（计数同步归零），与镜像重建同拍：它不是恢复原料——宿主重启
+      // 恢复走镜像快照（见文件头与 sessionRecord），字节窗只服务单会话按需读与 v1
+      // 兜底，留着旧 agent 的字节只会让这两条路径读到已不存在的画面。
       session.buffer.length = 0;
       session.bufferBytes = 0;
       // 顺序硬要求：先弹备屏再清屏——反了清屏落进备屏、应用退屏时主画面又回来。

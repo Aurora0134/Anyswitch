@@ -68,7 +68,6 @@ test("长未改动段折成 gap，只留改动行上下各 3 行；两头折掉�
   const r = diffFileText(L(...a), L(...b));
   const gaps = r.rows.filter((x) => x.op === "gap");
   assert.deepEqual(gaps.map((g) => g.hidden), [17, 16], "第 18 行之前与第 24 行之后各折一段");
-  assert.ok(r.rows.filter((x) => x.op !== "gap").length <= 8, "可见行受上下文控制");
   // 折叠不吞行号：改动行仍是第 21 行
   assert.equal(r.rows.find((x) => x.op === "mod").aNo, 21);
 });

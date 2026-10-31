@@ -135,7 +135,9 @@ function tailLines(text, limit, maxChars) {
   return tail.length > maxChars ? tail.slice(tail.length - maxChars) : tail;
 }
 
-// 全局安装最新（或钉住的）版本；action 只影响结果措辞，命令同一跳。
+// 走 `npm install --global` 装或升一个包，包名由调用方从固定表查出、不来自请求。
+// version 默认 latest，需要钉住时由调用方传入；registry / allowScripts 只在调用方
+// 显式给出时追加，否则沿用用户 npm 配置与默认脚本策略（白名单不放行 postinstall）。
 // 超时给得很宽、只当泄漏兜底：中途杀 npm 会在全局目录里留下半截安装，比等它跑完更糟。
 function runNpmInstall({
   pkg,
@@ -558,6 +560,8 @@ async function runOfficialMsixUpdate(spec, { spawn, io, timeoutMs, maxOutputChar
   }
 }
 
+// action（install/update）只决定这次调用是否被允许，以及上层给用户的结果措辞；
+// 它不会传进任何一条腿——同一客户端的安装与更新走的是同一条命令。
 export function runClientLifecycle({
   id,
   action,

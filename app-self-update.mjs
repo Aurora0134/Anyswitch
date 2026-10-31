@@ -120,8 +120,9 @@ function defaultSpawnPanelHost({ appDir, execPath = process.execPath }) {
   return child.pid;
 }
 
-// 自更新 worker 的脱离拉起，形态与 spawnClientUpdateWorker 逐字一致：
-// 管道丢弃使面板退出不带走安装（journal.mjs 同一条注释的理由）。
+// 自更新 worker 的脱离拉起，形态与 client-update-journal.mjs 的
+// spawnClientUpdateWorker 逐字一致：stdio 置 ignore 丢弃管道，面板退出不会连带
+// 收走安装进程（理由见该函数上方注释）。两处须保持同形，改一处要同步另一处。
 export function spawnSelfUpdateWorker({
   runId,
   journalDir,

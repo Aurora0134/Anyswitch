@@ -15,9 +15,16 @@
 //
 // One adapter per endpoint, unified shape:
 //   { id, roots(), scan(), loadMessages(file), delete(file) }
-// scan() returns SessionMeta[] with a 10-field contract:
-//   endpoint / id / title / summary / project / cwd / file / createdAt /
-//   lastActive / resumeCommand
+// scan() returns SessionMeta[] with an 11-field contract:
+//   endpoint / id / title / summary / project / cwd / originator / file /
+//   createdAt / lastActive / resumeCommand
+// `originator` is the client-surface tag the codex CLI writes into its
+// session_meta (`codex-tui` for CLI / VS Code surfaces, `codex_work_desktop`
+// for the desktop GUI). Only the codex adapter fills it — every other adapter
+// passes null, because no other CLI records an equivalent. The terminal
+// attribution join (terminal-attribution.mjs, terminal-conversation-bindings.mjs)
+// reads it to stop a desktop session from winning a cwd match that belongs to a
+// terminal CLI session, so dropping the field is not a cosmetic change.
 // `cwd` is the absolute working directory the conversation was held in — the
 // one field a resume needs to start in the right place (claude & friends keep
 // their archives per project directory, so `--resume <id>` in the wrong
@@ -26,8 +33,16 @@
 // row, the sqlite directory column) and falls back to "" when it cannot be
 // established — never to a guess. `project` keeps its existing meaning and
 // value; `cwd` is the same path when known, "" otherwise.
-// loadMessages(file) returns { role, content, ts }[] (or a degraded note for
-// endpoints without a real transcript). delete(file) removes the session after
+// loadMessages(file) returns { role, content, ts }[] — always a bare array, never
+// a wrapper object and never a "no transcript" placeholder. Corrupt or
+// half-written records are skipped row by row, so a store that exists but holds
+// nothing usable yields []; a missing/unreadable path or an invalid sqlite
+// locator still throws and surfaces as an error from the panel route. Every
+// adapter validates `file` before touching disk (assertUnderRoots() for the
+// file-backed stores, parseSqliteLocator() for zcode/opencode), and tool output
+// is kept as role "tool" rather than dropped, so buildTurns() sees one shape
+// across all nine endpoints.
+// delete(file) removes the session after
 // a canonicalize + roots() whitelist check (path-traversal guard).
 // buildTurns(messages) reduces that array to the rounds a human actually typed
 // — the 「对话目录」 the panel renders. Injected user-role text (tool output

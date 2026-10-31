@@ -6,6 +6,15 @@
 // tasklist / powershell / taskkill / HTTP probe) is an injected fake, so no
 // real process is spawned or killed and the production relay on 47821 is
 // never touched.
+//
+// One deliberate exception, documented so the claim above stays honest: the
+// liveness test below also calls the un-injected probePidLiveness on our own
+// PID and on PID 999999. Both are pure kernel existence checks
+// (process.kill(pid, 0) — signal 0 delivers nothing): they spawn and kill
+// nothing, never reach the tasklist fallback, and are deterministic — our own
+// process is by definition alive, and 999999 is not 4-aligned, so the
+// Windows kernel (which only hands out multiples of 4) can never have
+// assigned it to a real process.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -65,6 +74,27 @@ function makeStopDeps({
   };
 }
 
+// Minimal stand-in for the child process getProcessCommandLineAsync wires up:
+// the source only touches stdout (setEncoding/on("data")), on("error"/"close")
+// and kill() (timeout path). Events are emitted on a microtask, like a real
+// child's, so the promise executor finishes wiring its handlers first.
+function fakePowerShellChild({ code = 0, stdout = "" } = {}) {
+  const handlers = {};
+  const child = {
+    stdout: {
+      setEncoding() {},
+      on(_event, fn) { handlers.data = fn; },
+    },
+    on(event, fn) { handlers[event] = fn; },
+    kill() {},
+  };
+  queueMicrotask(() => {
+    if (stdout) handlers.data?.(stdout);
+    handlers.close?.(code);
+  });
+  return child;
+}
+
 test("isOwnProcess accepts a relay-host command line inside the app dir", () => {
   assert.equal(isOwnProcess(OWN_RELAY_CMD, APP_DIR), true);
 });
@@ -86,9 +116,26 @@ test("isOwnProcess rejects a foreign command line and unreadable command lines",
 });
 
 test("getProcessCommandLine returns null for invalid PIDs without spawning powershell", () => {
-  assert.equal(getProcessCommandLine(0), null);
-  assert.equal(getProcessCommandLine(-1), null);
-  assert.equal(getProcessCommandLine(null), null);
+  // Counting stub: without it this test could not see the difference between
+  // "the guard returned null" and "the guard skipped the spawn" — the latter
+  // is the behavior its name claims to lock.
+  let spawnCalls = 0;
+  const spawnSyncSpy = () => {
+    spawnCalls += 1;
+    return { status: 0, stdout: "should never be reached" };
+  };
+  assert.equal(getProcessCommandLine(0, { spawnSync: spawnSyncSpy }), null);
+  assert.equal(getProcessCommandLine(-1, { spawnSync: spawnSyncSpy }), null);
+  assert.equal(getProcessCommandLine(null, { spawnSync: spawnSyncSpy }), null);
+  assert.equal(spawnCalls, 0, "invalid PIDs must short-circuit before any powershell spawn");
+
+  // Positive control: with the same seam, a valid PID does go through the
+  // spawn path — proving the zero count above is a real finding and not a
+  // stub that is simply never consulted.
+  assert.equal(
+    getProcessCommandLine(4242, { spawnSync: () => ({ status: 0, stdout: "node.exe relay-host.mjs\n" }) }),
+    "node.exe relay-host.mjs",
+  );
 });
 
 test("stopRelay refuses to kill a live PID whose command line is foreign", async () => {
@@ -323,9 +370,23 @@ test("stopRelay kills an owner PID that arrives as a Promise (a Promise owner mu
 // --- async command-line query (the stop-leg cold-start fix) --------------
 
 test("getProcessCommandLineAsync mirrors the sync null-on-invalid contract without spawning", async () => {
-  assert.equal(await getProcessCommandLineAsync(0), null);
-  assert.equal(await getProcessCommandLineAsync(-1), null);
-  assert.equal(await getProcessCommandLineAsync(null), null);
+  // Counting stub over the injectable spawn seam — same teeth as the sync
+  // test: the name claims "without spawning", so the spawn count is asserted,
+  // not just the null return.
+  let spawnCalls = 0;
+  const spawnSpy = () => {
+    spawnCalls += 1;
+    return fakePowerShellChild({ stdout: "node.exe relay-host.mjs" });
+  };
+  assert.equal(await getProcessCommandLineAsync(0, { spawn: spawnSpy }), null);
+  assert.equal(await getProcessCommandLineAsync(-1, { spawn: spawnSpy }), null);
+  assert.equal(await getProcessCommandLineAsync(null, { spawn: spawnSpy }), null);
+  assert.equal(spawnCalls, 0, "invalid PIDs must short-circuit before any powershell spawn");
+
+  // Positive control: a valid PID exercises the stubbed spawn path end to end
+  // (stdout collected, close(0), trimmed line returned).
+  assert.equal(await getProcessCommandLineAsync(4242, { spawn: spawnSpy }), "node.exe relay-host.mjs");
+  assert.equal(spawnCalls, 1, "a valid PID must go through the (stubbed) powershell path");
 });
 
 test("stopRelay accepts an async (Promise-returning) injected command-line mapper", async () => {
@@ -370,19 +431,45 @@ test("probePidLiveness 区分「确认死亡」与「探针无结论」", () => 
 });
 
 test("probePidLiveness 对无效 PID 与真实进程给出正确结论", () => {
+  // Pure invalid-PID logic: no OS touch at all.
   assert.equal(probePidLiveness(0), "dead");
   assert.equal(probePidLiveness(-1), "dead");
   assert.equal(probePidLiveness(Number.NaN), "dead");
+  // Real OS, deterministic verdicts — this is the only direct coverage of the
+  // default nativeLivenessProbe's success/ESRCH mappings (see the file header
+  // for why these two do not break the all-fakes rule).
   assert.equal(probePidLiveness(process.pid), "alive", "本进程必然活着");
   // A PID that cannot exist is a positive finding of absence, not an
   // inconclusive probe: the watchdog still has to be able to clean up orphans.
+  // 999999 is not machine-dependent luck — the Windows kernel only assigns
+  // 4-aligned PIDs (every live PID in tasklist is a multiple of 4), and
+  // 999999 % 4 === 3, so it can never name a real process. The native probe
+  // therefore deterministically answers ESRCH → "dead" and never reaches the
+  // tasklist fallback.
   assert.equal(probePidLiveness(999999), "dead", "不存在的 PID 是确认死亡，不是无结论");
 });
 
 test("isPidAlive 保持保守口径：无结论不算存活", () => {
-  assert.equal(isPidAlive(process.pid), true);
-  assert.equal(isPidAlive(0), false);
-  assert.equal(isPidAlive(999999), false);
+  // The conservatism is the whole contract (see isPidAlive in the source: kill
+  // gates must not act on a guess). Before the deps passthrough this was
+  // untestable — no injected probe could make the boolean view see "unknown",
+  // so the old assertions only re-covered dead/alive facts the probe test
+  // already had.
+  assert.equal(
+    isPidAlive(4242, { nativeProbe: () => "unknown", crossCheck: () => "unknown" }),
+    false,
+    "探针两级都无结论 → 不判活（保守口径，宁可不杀）",
+  );
+  assert.equal(
+    isPidAlive(4242, { nativeProbe: () => "unknown", crossCheck: () => "alive" }),
+    true,
+    "交叉检查确认活着 → 判活",
+  );
+  assert.equal(
+    isPidAlive(4242, { nativeProbe: () => "dead" }),
+    false,
+    "确认死亡 → 不判活",
+  );
 });
 
 // --- degraded reporting (2026-10-05) ----------------------------------------

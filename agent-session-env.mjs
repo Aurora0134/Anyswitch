@@ -14,11 +14,15 @@
 //
 // The env contract is imported from each launcher's exported build*Env, so the
 // panel and the launchers can never drift apart. One piece is still copied
-// locally with its source cited (the launchers do not export it):
-//   - the buildInstanceId scheme (each launcher), and only for the two clients
-//     that cannot do without it (see TERMINAL_INSTANCE_ID_FROM_SOCKET): the
-//     session's shell pid does not exist yet at assembly time, so the launcher
-//     pid in that scheme becomes a per-session random tag.
+// locally with its source cited (the launchers do export buildInstanceId, but
+// its pid slot is the launcher's own pid, which does not exist yet when the
+// launch spec is assembled):
+//   - the buildInstanceId scheme (each launcher): terminalInstanceId derives the
+//     per-session tag for every endpoint that ships one, i.e. all of them except
+//     the three the relay identifies by socket owner (see
+//     TERMINAL_INSTANCE_ID_FROM_SOCKET — a tag there would split one session
+//     across two instance rows), substituting a per-session random tag for that
+//     launcher pid.
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -137,8 +141,12 @@ const TERMINAL_INSTANCE_ID_FROM_SOCKET = new Set(["kimi", "grok", "opencode", "w
 
 // Per-session instance id, same shape as each launcher's buildInstanceId
 // ("<cwd basename>-<launcher pid>"): the pid becomes a random per-session tag
-// because the shell pid does not exist yet at assembly time. Only reached for
-// the two clients above — everyone else ships no tag at all.
+// because the shell pid does not exist yet at assembly time. Produced for every
+// endpoint NOT in TERMINAL_INSTANCE_ID_FROM_SOCKET; the three members get null
+// instead, so their launchers ship no instance header and the relay names the
+// session by socket owner. Not to be used as a general-purpose id: the random
+// tag never folds into the canonical "<agentId>-<pid>" form, which is exactly
+// why the socket-owner set must stay out of it.
 function terminalInstanceId(cwd, endpoint) {
   const base = basename(String(cwd || "")).replace(/[^A-Za-z0-9._:-]/g, "-");
   const tag = randomUUID().replace(/-/g, "").slice(0, 8);
@@ -298,11 +306,6 @@ function claudeBypassArg(agentId, enabled) {
   return agentId === "claude" && enabled === true ? [CLAUDE_BYPASS_PERMISSIONS_ARG] : [];
 }
 
-// Theme selection belongs to the agent. The terminal supplies appearance
-// queries and notifications; launch arguments must not replace the user's
-// chosen theme as a workaround for an incomplete terminal implementation.
-
-
 // ---------------------------------------------------------------------------
 // 续接历史会话：把「哪一条对话」换成续接参数
 // ---------------------------------------------------------------------------
@@ -432,6 +435,9 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
   // （bin.js "select a profile only once"）。合并时把续接参数里与固定参数完全
   // 相同的「--flag value」对去掉：值相同语义幂等；其余端点的续接参数不含固定
   // 参数对，逐位不变。
+  // 启动参数只有三个来源：端点固定参数、bypass 开关、续接参数。不得为让 agent
+  // 跟随面板亮暗而追加主题参数——亮暗归属由终端的询问/通知契约回答，主题选择
+  // 权在用户（grok 分支只透传显式给的值，见 buildTargetEnv）。
   const fixedArgs = [
     ...(target.launchArgs ?? []),
     ...claudeBypassArg(agentId, claudeBypassPermissions),

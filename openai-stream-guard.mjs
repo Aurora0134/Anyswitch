@@ -76,14 +76,14 @@ function toolCallErrorLine() {
   return streamErrorLine(INCOMPLETE_TOOL_CALL_MESSAGE);
 }
 
-// Payload of a `data:` line (line keeps its trailing newline), or null when
-// the line is not a data line (comments, event lines, blank separators).
 function looksLikeJsonObjectOrArray(payload) {
   if (!payload) return false;
   const c = payload[0];
   return c === "{" || c === "[";
 }
 
+// Payload of a `data:` line (line keeps its trailing newline), or null when
+// the line is not a data line (comments, event lines, blank separators).
 function dataPayload(line) {
   if (!line.startsWith("data:")) return null;
   let payload = line.slice(5, -1); // drop "data:" and the trailing newline

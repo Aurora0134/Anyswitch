@@ -15,7 +15,8 @@
 // cannot POST those routes. Credentials are never echoed. The relay Bearer
 // token still guards /v1/* and /openai/* and is not pasted into the browser.
 
-import { readFileSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -31,6 +32,7 @@ import { spawnAgentSync } from "./agent-sync-spawn.mjs";
 import { readSyncStatus, writeSyncStatus, syncStatusFromResult } from "./sync-status.mjs";
 import { createSkillsService, pickFile, pickFolder } from "./agent-skills.mjs";
 import { createDataBundleService } from "./data-bundle.mjs";
+import { applyBackupRoot, backupRootInfo, readBackupRoot } from "./backup-location.mjs";
 import { createPromptsService } from "./agent-prompts.mjs";
 import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
@@ -613,12 +615,6 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
   }
 }
 
-// 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家（全量 scanAll
-// 要读十家存档，列表轮询路径用不起）。名单外与读盘失败降级为空表的纪律在
-// session-scan 的 scanEndpoint 里（匹配层拿到空表自然判不出，按「宁可不接」
-// 回落）。真正的执行位置由扫描承载决定——见 createPanelRouter 里的 scanHost：
-// 默认进 worker 线程，面板进程不被这段同步 fs 扫描按住。
-
 // Terminal-host lifecycle pull: the relay (47821) owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
 // /api/internal/*). Returns the parsed payload, or null when the relay is
@@ -1091,13 +1087,17 @@ export function createPanelRouter({
   readRemoteHeadRelationFn = readRemoteHeadRelationDefault,
   // 远端身份短缓存 TTL：进页自动检查吃缓存，refresh=1 的强制检查绕过。
   remoteIdentityTtlMs = 60_000,
- }) {
+  // Claude session-end 记账（journalSessionEnd）的时间源：firstSeen 与 endTs
+  // 都取这里。默认真实时钟，行为不变；单测注入可控时钟，startTs/durationMs
+  // 的跨度断言就不再依赖真实时间推进（消除墙钟 sleep 的不稳定模式）。
+  sessionNowFn = Date.now,
+}) {
   const settingsFile = defaultSettingsPath(base);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
   const logLevelGate = createLogLevelGate(settingsFile, base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
-  // 扫描承载（session-scan-worker.mjs）：session-scan 的十个 adapter 全是同步 fs，
+  // 扫描承载（session-scan-worker.mjs）：session-scan 的九个 adapter 全是同步 fs，
   // 在哪调用就在哪按住事件循环。这里把「十家全量」与「单端点」两种扫描都送进
   // 独立 worker 线程；worker 不可用时退回本进程（面板仍出列表，只那一拍会卡），
   // 降级路径在承载里按冷却窗收敛并记 warn。
@@ -1112,6 +1112,11 @@ export function createPanelRouter({
       scanAgent: (agentId) => sessionScanner.scanEndpoint(agentId),
     },
   });
+  // 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家，不是 scanAll
+  // ——全量要读十家存档，列表轮询路径用不起。边界：名单外与读盘失败一律降级为
+  // 空表（纪律在 session-scan 的 scanEndpoint 里），匹配层拿到空表自然判不出，
+  // 按「宁可不接」回落，绝不抛给调用方。默认执行位置是上方的 scanHost（worker
+  // 线程），面板进程不被这段同步 fs 扫描按住。
   // 注入的假扫描函数（单测）原地同步跑——不碰真存档，也不起 worker；显式指定
   // 了 worker 模块时一律走 worker（离线钉靠这条证明扫描不占事件循环）。
   const scanAgentConversations = scanAgentConversationsFn && !sessionScanWorkerFile
@@ -1129,7 +1134,7 @@ export function createPanelRouter({
     return sessionListSnapshot;
   }
   // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描走扫描承载（worker
-  // 线程），十个 adapter 的同步 fs 不跑在面板进程的事件循环上。列表路由与启动预热
+  // 线程），九个 adapter 的同步 fs 不跑在面板进程的事件循环上。列表路由与启动预热
   // 共用这一定位点。
   function ensureSessionScanService() {
     if (!sessionScanService) {
@@ -1214,7 +1219,7 @@ export function createPanelRouter({
   // tasklist 兜底轮）时允许回退到的上一份好 feed 的最大年龄。比拉取失败路
   // 径宽——兜底轮之后要等下一整轮探针扫描好谱系才回来。
   const PULLED_DETECTED_SUSPECT_STALE_MAX_MS = 10000;
-  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions }
+  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions, opencodeSessions }
 
   // 谱系盲判定：processes 为空数组，或非空但每行 ancestors 都是空数组——
   // tasklist 兜底轮的 feed 形状（谱系表为空但 relay 有应答）。空 ancestors
@@ -2950,7 +2955,7 @@ export function createPanelRouter({
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
-  // kimi, qoder, codex, opencode, grok, workbuddy). Runs the standalone sync runner so the
+  // kimi, qoder, codex, opencode, grok). Runs the standalone sync runner so the
   // merge logic loads from disk — catalog-writer fixes apply here without a
   // panel/relay restart.
   async function handleAgentSync(res) {
@@ -3395,7 +3400,7 @@ export function createPanelRouter({
         homeDir: homedir(),
         env: base,
         removeFn: (entries, opts = {}) =>
-          removeImportedEntries(entries, { ...opts, backupRoot: join(relayRoot, "backups") }),
+          removeImportedEntries(entries, { ...opts, backupRoot: readBackupRoot(relayRoot) }),
       });
     }
     return byokImportService;
@@ -3415,13 +3420,13 @@ export function createPanelRouter({
     if (!Number.isFinite(pid) || pid <= 0) return;
     const key = `${pid}:${token}`;
     if (body.ended !== true) {
-      if (!sessionFirstSeen.has(key)) sessionFirstSeen.set(key, Date.now());
+      if (!sessionFirstSeen.has(key)) sessionFirstSeen.set(key, sessionNowFn());
       return;
     }
     if (journaledSessions.has(key)) return;
     if (journaledSessions.size >= 4096) journaledSessions.clear(); // bound; ended fires once per session
     journaledSessions.add(key);
-    const endTs = Date.now();
+    const endTs = sessionNowFn();
     const startTs = sessionFirstSeen.get(key) ?? endTs;
     sessionFirstSeen.delete(key);
     const agentId = typeof body.agentId === "string" && body.agentId.trim() ? body.agentId.trim() : "claude";
@@ -3639,6 +3644,9 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/status" && method === "GET") return handleStatus(res);
+    if (path === "/panel/api/backups" && method === "GET") {
+      return sendJson(res, 200, { ok: true, ...backupRootInfo(relayRoot) });
+    }
     if (path === "/panel/api/relay/status" && method === "GET") return handleRelayStatus(res);
     if (path === "/panel/api/relay/start" && method === "POST") return handleRelayStart(res);
     if (path === "/panel/api/relay/stop" && method === "POST") return handleRelayStop(res);
@@ -4489,6 +4497,40 @@ export function createPanelRouter({
         } catch (err) {
           return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
         }
+      }
+    }
+
+    // ── 备份位置（高级选项 tab 的「备份位置」卡）────────────────────────
+    // 只做三件事：选目录、换目录（连历史备份一起迁移）、恢复默认。「打开文件夹」
+    // 只认当前备份根，不接受界面传路径，避免变成任意目录打开的口子。业务失败
+    // 一律 200 + { ok:false, error }，与数据搬迁同一口径。
+    if (path.startsWith("/panel/api/backups/") && method === "POST") {
+      try {
+        const body = await readJsonBody(req);
+
+        if (path === "/panel/api/backups/pick") {
+          const picked = await pickFolderFn({ base, title: "选择备份位置" });
+          return sendJson(res, 200, { ok: true, ...picked });
+        }
+        if (path === "/panel/api/backups/set") {
+          const target = typeof body.path === "string" ? body.path.trim() : "";
+          if (!target) return sendJson(res, 400, { ok: false, error: "path 不能为空" });
+          const result = applyBackupRoot({ root: relayRoot, target });
+          return sendJson(res, 200, result.ok ? result : { ok: false, error: result.error });
+        }
+        if (path === "/panel/api/backups/reset") {
+          const result = applyBackupRoot({ root: relayRoot, target: null });
+          return sendJson(res, 200, result.ok ? result : { ok: false, error: result.error });
+        }
+        if (path === "/panel/api/backups/open") {
+          const dir = readBackupRoot(relayRoot);
+          mkdirSync(dir, { recursive: true });
+          spawn("explorer.exe", [dir], { detached: true, windowsHide: true, stdio: "ignore" }).unref();
+          return sendJson(res, 200, { ok: true });
+        }
+        return sendJson(res, 404, { ok: false, error: "not found" });
+      } catch (err) {
+        return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
       }
     }
 

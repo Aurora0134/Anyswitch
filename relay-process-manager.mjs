@@ -22,8 +22,11 @@ import { probeRelay, probeRelayHealth } from "./openai-server.mjs";
 const RELAY_PORT = 47821;
 const RELAY_HOST_SCRIPT = fileURLToPath(new URL("relay-host.mjs", import.meta.url));
 // Directory every Anyswitch relay process is spawned from — the resident
-// relay-host.mjs AND the per-launch launchers (zcode/dsh/pi/kimi/qoder,
-// which also legitimately bind 47821) all run scripts located here.
+// relay-host.mjs AND the per-launch endpoint launchers all run scripts located
+// here. Eight of those launchers (codex/dsh/grok/opencode/pi/qoder/zcode/
+// zcode-cli) also bind 47821 themselves. Note what is NOT in that set: kimi and
+// claude start through launch.mjs, which takes an ephemeral port (listen(0)),
+// so they never own 47821 even though they too spawn from this directory.
 // This is the trust boundary for the PID identity check before any taskkill.
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 
@@ -132,8 +135,13 @@ function tasklistLivenessProbe(pid) {
 // decision changes meaning. Only the terminal host's parent watchdog — the
 // one caller that acts by EXITING on a death verdict — asks for the
 // tri-state, because for it a wrong "dead" is unrecoverable.
-export function isPidAlive(pid) {
-  return probePidLiveness(pid) === "alive";
+export function isPidAlive(pid, deps = {}) {
+  // deps passes straight through to probePidLiveness (nativeProbe/crossCheck) —
+  // same optional-injection shape as opencode-launcher's loadStore: the default
+  // is the real module-level probe chain, so production behavior is unchanged;
+  // tests wire fakes because the default reads the live OS process table and
+  // cannot be made to answer "unknown" deterministically.
+  return probePidLiveness(pid, deps) === "alive";
 }
 
 const NETSTAT_TIMEOUT_MS = 3000;
@@ -249,10 +257,16 @@ findPortOwnerPid.uncached = findPortOwnerPid;
 // on Win11 24H2, so it must not be used). Returns null whenever the query
 // fails, times out, or yields nothing — callers treat null as "cannot verify"
 // and must NOT kill the PID (fail-safe).
-export function getProcessCommandLine(pid) {
+export function getProcessCommandLine(pid, deps = {}) {
   if (!pid || pid <= 0) return null;
+  // spawnSync is injectable so tests can prove the invalid-PID guard really
+  // short-circuits before any powershell process is created (the guard is a
+  // spawn-avoiding optimization on top of the null contract, and the two are
+  // only separable from the outside through this seam). Default is the real
+  // spawnSync — production behavior unchanged.
+  const spawnSyncFn = deps.spawnSync ?? spawnSync;
   try {
-    const r = spawnSync(
+    const r = spawnSyncFn(
       "powershell.exe",
       [
         "-NoProfile",
@@ -277,12 +291,17 @@ export function getProcessCommandLine(pid) {
 // the watchdog are already async contexts, so the kill gate pays this only on
 // the rare fallback (pid file missing / disagrees with the port owner) — and
 // never freezes the panel while doing so.
-export function getProcessCommandLineAsync(pid) {
+export function getProcessCommandLineAsync(pid, deps = {}) {
   if (!pid || pid <= 0) return Promise.resolve(null);
+  // spawn is injectable for the same reason as getProcessCommandLine's
+  // spawnSync: the invalid-PID guard must be provable as "spawns nothing",
+  // not just observable as "returns null". Default is the real spawn —
+  // production behavior unchanged.
+  const spawnFn = deps.spawn ?? spawn;
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(
+      child = spawnFn(
         "powershell.exe",
         [
           "-NoProfile",

@@ -1206,10 +1206,13 @@ export function createStoreService({
 
     /**
      * Save a virtual model (虚拟模型): an endpoint-agnostic named route chain.
-     * `name` is the wire-facing model id (lowercase-start [a-z0-9._-], ≤64;
-     * "auto" and endpoint ids are reserved — they are the chain-routing
-     * trigger word and the per-endpoint routing keys, a name collision would
-     * intercept requests to the wrong target) and `chain` is the exact
+     * `name` is the wire-facing model id: it must start with an ASCII letter,
+     * followed by letters, digits, ".", "_" or "-" only, at most 64 chars.
+     * Case is not normalized — mixed case ("MyChain") is legal and is stored
+     * verbatim as the model id clients will send. "auto" and endpoint ids are
+     * reserved and refused case-insensitively (they are the chain-routing
+     * trigger word and the per-endpoint routing keys; a name collision would
+     * intercept requests to the wrong target). `chain` is the exact
      * saveRouteChain shape.
      *
      * `previousName` (optional) turns the write into a rename: the entry

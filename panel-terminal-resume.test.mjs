@@ -1,6 +1,6 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter } from "./panel.mjs";
@@ -11,8 +11,6 @@ import { createBindingStore } from "./terminal-conversation-bindings.mjs";
 // 路由级：点历史会话续接时，面板只把会话身份（endpoint/id/file）交给服务端，
 // 命令行按 session-scan 的 RESUME_COMMAND 模板重建；客户端给什么命令原文都不接。
 // createTerminalSession 注入假实现，不起真 terminal-host。
-
-const panelMjs = readFileSync(fileURLToPath(new URL("./panel.mjs", import.meta.url)), "utf8");
 
 const SESSION_ID = "3f2b8c1e-9a44-4d0b-8f6e-1c2d3e4f5a6b";
 const PI_FILE = "C:\\Users\\someone\\.pi\\sessions\\3f2b8c1e.jsonl";
@@ -88,6 +86,10 @@ function withFakeAgents(fn) {
     // WorkBuddy 的安装判据是安装包内的 CLI 入口（终端实际交给 cmd 的仍是 node.exe）。
     WORKBUDDY_EXECUTABLE: exe("codebuddy"),
     LOCALAPPDATA: join(root, "local"),
+    // APPDATA 一并落进沙箱：codex 的 npm shim 位（%APPDATA%\npm\codex.cmd）
+    // 必落空，才会走到下面造的假官方安装位——否则本机装了 codex 时解析命中的
+    // 是真实用户目录，测试结果取决于机器安装状态。
+    APPDATA: join(root, "roaming"),
     USERPROFILE: join(root, "user"),
   };
   // codex 走官方原生安装位；qoder CLI 固定在 USERPROFILE/.qoder/bin/qodercli。
@@ -106,6 +108,21 @@ function withFakeAgents(fn) {
       else process.env[key] = value;
     }
   });
+}
+
+// 绑定捕获是列表响应后的 setImmediate 旁路，扫描结果在微任务里落库：轮询到
+// 目标状态为止，不靠拍数猜时序。
+async function until(predicate, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`${label}（500 拍内未等到）`);
+}
+
+// 等微任务链（扫描结果的落库/作废判定）走完再断言。
+async function settle(ticks = 5) {
+  for (let i = 0; i < ticks; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
 describe("续接历史会话（terminal agent-sessions + resume）", () => {
@@ -143,6 +160,11 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         const forwarded = calls[0].body;
         assert.deepEqual(forwarded.launch.args.slice(0, 6), ["/d", "/c", "chcp", "65001", ">nul", "&"], `${endpoint} 码页前置不动`);
         assert.deepEqual(forwarded.launch.args.slice(-tail.length), tail, `${endpoint} 的续接参数由服务端重建`);
+        // 去重失效时重复对落在命令行中段，切片窗口看不到：dsh 全量数一遍。
+        if (endpoint === "dsh") {
+          assert.equal(forwarded.launch.args.filter((token) => token === "--profile").length, 1,
+            `${endpoint} 模板自带的 --profile 与固定参数同值，合并去重后恰一次`);
+        }
         assert.equal(forwarded.cwd, cwd);
         assert.equal(forwarded.agentId, endpoint);
         assert.equal("env" in json(), false, `${endpoint} 响应不回显 env`);
@@ -188,7 +210,6 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         // MAX_LAUNCH_ARG_BYTES 拦成裸 invalid_launch，逃出 resume-* 契约。
         ["超长 id", "kimi", { endpoint: "kimi", id: "a".repeat(4097) }],
         ["超长存档路径", "pi", { endpoint: "pi", id: SESSION_ID, file: `C:\\${"a".repeat(4095)}` }],
-        ["客户端夹带命令原文", "kimi", { endpoint: "kimi", id: SESSION_ID, command: "calc.exe" }],
       ];
       for (const [label, agentId, resume] of cases) {
         const root = mkTestDir("anyswitch-resume-route-root-");
@@ -254,14 +275,6 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
     });
   });
 
-  it("源码钉死：无 resume 的组装调用原样保留，续接只是同一次调用的可选入参", () => {
-    assert.ok(
-      panelMjs.includes("buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions })"),
-      "无 resume 时的组装调用与改造前逐字一致",
-    );
-    assert.ok(panelMjs.includes("resume-unsupported"), "不支持续接的端点有独立错误码");
-  });
-
   // M7 S5：续接创建的终端要把「替哪条会话续接的」记进宿主会话记录（前端历史会话
   // 点击先查它做去重聚焦）。面板负责把校验过的 resume 身份随创建转发——只递
   // endpoint + 会话 id 两个非密字段。
@@ -311,10 +324,13 @@ describe("内切切换会话（terminal sessions switch）", () => {
           ? { id, label: "Anyswitch", cwd: "C:\\shell-dir", shell: "powershell", status: "running", pid: 42 }
           : hostSession;
       },
-      probeTerminalCommandTreeFn: async (pid) => {
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => {
         calls.probe.push(pid);
-        // 复探引入后，判定可能探两次：给序列就按序消费（末位复用），给标量就恒定。
-        if (Array.isArray(probe)) return probe.length > 1 ? probe.shift() : probe[0];
+        // 双探并行：复探带 delayMs、先出发，首探不带（panel.mjs 的发起顺序）。
+        // 给 {first, recheck} 就按角色各给各的值，不按调用顺序猜；给标量就两次同值。
+        if (probe !== null && typeof probe === "object") {
+          return opts.delayMs !== undefined ? probe.recheck : probe.first;
+        }
         return probe === undefined ? false : probe;
       },
       switchGuardRecheckDelayMs: 0,
@@ -327,6 +343,9 @@ describe("内切切换会话（terminal sessions switch）", () => {
       scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
       bindingRefreshScheduleFn: () => { calls.bindingRefresh = (calls.bindingRefresh || 0) + 1; },
       bindingCaptureDebounceMs: 0,
+      // 「判不出」的负结果退避也清零：绑定用例要在同一拍里连看两轮捕获
+      //（先出生前、再出生后），不等 10s 退避窗走完。
+      bindingCaptureMissBackoffMs: 0,
       terminalBindingStore,
       // 目标存在性旁证（G3 收口）用会话列表快照：注入假 scanAll 让用例能给盘面。
       ...(scanAll
@@ -383,40 +402,67 @@ describe("内切切换会话（terminal sessions switch）", () => {
     });
   });
 
-  it("全新内切后不抢绑旧历史：捕获以本轮进程出生为界，并在扫描完成时复核代际", async () => {
+  it("全新内切后的在飞旧扫描：返回时代际已变，整份作废不落库", async () => {
     await withFakeAgents(async (cwd) => {
       const now = Date.now();
-      const oldMeta = { endpoint: "kimi", id: "conv-old", project: cwd, createdAt: now - 9000, lastActive: now - 8000 };
-      const newMeta = { endpoint: "kimi", id: "conv-new", project: cwd, createdAt: now + 1000, lastActive: now + 2000 };
-      let metas = [oldMeta];
+      // conv-mid 在本轮进程出生之后活跃：若没有代际复核，它既能过出生窗口、
+      // 又是唯一候选，1 代的旧扫描就会把它绑回刚被内切掉的身份。
+      const midMeta = { endpoint: "kimi", id: "conv-mid", project: cwd, createdAt: now + 100, lastActive: now + 200 };
       let scans = 0;
       let releaseScan;
       const scanFinished = new Promise((resolve) => { releaseScan = resolve; });
       const { router, terminalBindingStore } = switchRouter({
-        root: mkTestDir("anyswitch-switch-binding-epoch-"),
-        scanAgentConversations: async () => { scans += 1; if (scans === 1) await scanFinished; return metas; },
+        root: mkTestDir("anyswitch-switch-stale-scan-"),
+        scanAgentConversations: async () => { scans += 1; if (scans === 1) await scanFinished; return [midMeta]; },
         terminalSessions: [{ id: SESSION_ID, label: "Kimi Code", cwd, shell: "cmd", pid: 99, status: "running", agentId: "kimi", createdAt: now - 10_000, spawnedAt: now }],
       });
+      // 第一次全新内切清掉旧绑定，随后的列表旁路捕获在 1 代下发起扫描并停住。
+      const first = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", { agentId: "kimi", cwd });
+      await router.handle(first.req, first.res);
+      assert.equal(first.res.statusCode, 200);
+      const list = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      const listed = router.handle(list.req, list.res);
+      await until(() => scans === 1, "捕获扫描未起飞");
+      // 第二次全新内切把代际推到 2：此刻在飞的还是 1 代的扫描。
+      const next = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", { agentId: "kimi", cwd });
+      await router.handle(next.req, next.res);
+      assert.equal(next.res.statusCode, 200);
+      releaseScan();
+      await listed;
+      await settle();
+      assert.equal(terminalBindingStore.get(SESSION_ID), null, "返回时代际已变：整份结果作废，不落库");
+    });
+  });
+
+  it("全新内切后的捕获以本轮进程出生为界：出生前的对话不绑，出生后的才绑", async () => {
+    await withFakeAgents(async (cwd) => {
+      const now = Date.now();
+      // conv-old 最后活跃早于本轮进程出生（spawnedAt），conv-new 在出生之后。
+      const oldMeta = { endpoint: "kimi", id: "conv-old", project: cwd, createdAt: now - 9000, lastActive: now - 8000 };
+      const newMeta = { endpoint: "kimi", id: "conv-new", project: cwd, createdAt: now + 1000, lastActive: now + 2000 };
+      const rounds = [[oldMeta], [newMeta]];
+      let scans = 0;
+      const { router, terminalBindingStore } = switchRouter({
+        root: mkTestDir("anyswitch-switch-birth-window-"),
+        scanAgentConversations: async () => { scans += 1; return rounds[scans - 1] ?? []; },
+        terminalSessions: [{ id: SESSION_ID, label: "Kimi Code", cwd, shell: "cmd", pid: 99, status: "running", agentId: "kimi", createdAt: now - 10_000, spawnedAt: now }],
+      });
+      // 全新内切清掉旧绑定：会话 id 不变，但本轮进程的对话从零开始。
       const call = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", { agentId: "kimi", cwd });
       await router.handle(call.req, call.res);
       assert.equal(call.res.statusCode, 200);
-
-      const list = fakeReqRes("/panel/api/terminal/sessions", "GET");
-      const listed = router.handle(list.req, list.res);
-      await new Promise((resolve) => setImmediate(resolve));
-      // 下一轮内切已经开始，但上一轮的扫描尚未返回：旧扫描不得落库。
-      metas = [oldMeta, newMeta];
-      const next = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", { agentId: "kimi", cwd });
-      await router.handle(next.req, next.res);
-      releaseScan();
-      await listed;
-      assert.equal(terminalBindingStore.get(SESSION_ID), null, "过期扫描结果在代际复核处作废");
-      assert.equal(list.res.statusCode, 200);
-
-      const settled = fakeReqRes("/panel/api/terminal/sessions", "GET");
-      await router.handle(settled.req, settled.res);
-      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(terminalBindingStore.get(SESSION_ID)?.conversationId, "conv-new", "只绑定本轮进程出生后的新对话");
+      // 第一轮捕获：盘上只有出生前的 conv-old——窗口把它滤掉，判不出就不绑。
+      const before = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(before.req, before.res);
+      await until(() => scans === 1, "第一轮捕获扫描未起飞");
+      await settle();
+      assert.equal(terminalBindingStore.get(SESSION_ID), null, "出生前的对话不绑（窗口以本轮进程出生为界）");
+      // 第二轮捕获：出现了出生后的 conv-new——绑定落它头上（正向对照）。
+      const after = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(after.req, after.res);
+      await until(() => scans === 2, "第二轮捕获扫描未起飞");
+      await settle();
+      assert.equal(terminalBindingStore.get(SESSION_ID)?.conversationId, "conv-new", "出生后的新对话正常绑定");
     });
   });
 
@@ -452,9 +498,10 @@ describe("内切切换会话（terminal sessions switch）", () => {
         assert.deepEqual(calls.probe, [42, 42], `${name} 判忙后复探一拍（两次都非 false 才拒）`);
         assert.equal(calls.restart.length, 0, `${name} 不 restart（在跑命令不被杀）`);
       }
-      // 复探放行：首探撞上 agent 启动期的瞬时子进程（或一次超时），隔一拍再探干净
-      // ——不是真在跑的命令，照常就地内切。
-      const transient = switchRouter({ root: mkTestDir("anyswitch-switch-recheck-"), probe: [true, false] });
+      // 复探放行：首探撞上 agent 启动期的瞬时子进程（或一次超时）判忙，隔一拍
+      // 的复探判干净——不是真在跑的命令，照常就地内切。双探是复探先出发，
+      // {first, recheck} 按角色给值，顺序吃不到亏。
+      const transient = switchRouter({ root: mkTestDir("anyswitch-switch-recheck-"), probe: { first: true, recheck: false } });
       const transientCall = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
         resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
       });

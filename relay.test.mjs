@@ -12,7 +12,20 @@ import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 import { createServiceHealth } from "./service-health.mjs";
+import { RETRY_UPSTREAM_MS } from "./chain-routing.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
+
+// ---- 环境隔离（模块体最前，先于任何用例执行）----
+// relay 的默认依赖面（settings.json、thinking-efforts.db.json、mid-system
+// rewrite 与图片降级两门）都是请求时经函数默认参数现读 process.env，导入链里
+// 没有 import 期捕获（relay-settings.mjs / effort-catalog.mjs / effort-injection.mjs
+// 逐一核对过）。这里把三个用户根整体重定向进本进程的临时根，用例从此读不到
+// 真实机器的 Anyswitch 配置；确需真开关行为的用例（mid-system rewrite 的
+// settings 回退）自行覆盖 LOCALAPPDATA 并在 finally 还原。
+const ISOLATED_ENV_ROOT = mkTestDir("anyswitch-relay-env-");
+for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
+  process.env[key] = ISOLATED_ENV_ROOT;
+}
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -45,7 +58,11 @@ function syntheticStore() {
 
 function makeDeps(overrides = {}) {
   let generation = null;
-  const store = overrides.store ?? syntheticStore();
+  // `store` 只用于构造 loadStore 的默认值；其余键全部透传给 createHandler。
+  // 此前这里只挑六个固定键，overrides 里的 effortInjector / buildUpstreamURLs
+  // 等注入面会被静默丢弃，用例便落到真实磁盘上的默认注入器与默认 URL 组装上。
+  const { store: storeOverride, ...passthrough } = overrides;
+  const store = storeOverride ?? syntheticStore();
   return {
     token: TOKEN,
     loadStore: overrides.loadStore ?? (() => ({ ok: true, store })),
@@ -63,6 +80,7 @@ function makeDeps(overrides = {}) {
       })),
     recordGeneration: overrides.recordGeneration ?? ((g) => { generation = g; }),
     readGeneration: overrides.readGeneration ?? (() => generation),
+    ...passthrough,
   };
 }
 
@@ -297,10 +315,12 @@ test("a level the model does not list lands on the nearest one it does", async (
 
 test("Claude asking for no thinking is respected, default and all", async () => {
   const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
-  for (const off of [{ thinking: { type: "disabled" } }, { effort: "off" }]) {
+  for (const [round, off] of [{ thinking: { type: "disabled" } }, { effort: "off" }].entries()) {
     const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), ...off };
     await handler.handleMessages(AUTH, body);
-    assert.equal("reasoning_effort" in sent[0], false);
+    // 每轮断言自己的那一次发送：off 这轮若被补上默认档位，这里必须红。
+    assert.equal(sent.length, round + 1, `round ${round}: exactly one upstream send`);
+    assert.equal("reasoning_effort" in sent[round], false, `round ${round}: ${JSON.stringify(off)}`);
   }
 });
 
@@ -519,9 +539,12 @@ test("clientEffortFromAnthropic reads every way Claude names a depth", () => {
   assert.deepEqual(clientEffortFromAnthropic(null), { stated: false, level: null });
 });
 
-test("buildWireCatalog fails whole catalog on collision", () => {
-  // "a" + "b/m" and "a/b" + "m" would collide, but the second provider id is
-  // itself illegal, so packWireId rejects it before a partial catalog is built.
+test("buildWireCatalog rejects an illegal provider id instead of emitting a partial catalog", () => {
+  // "a" + "b/m" and "a/b" + "m" would collide on one wire id, but a provider id
+  // containing '/' is itself illegal (the packWireId invariant), so the
+  // collision branch of buildWireCatalog is unreachable: the catalog fails as a
+  // whole on the provider-id invariant first. The property under test is that
+  // it FAILS — no partial catalog escapes.
   const store = {
     version: 2,
     providers: {
@@ -529,7 +552,7 @@ test("buildWireCatalog fails whole catalog on collision", () => {
       "a/b": { models: { m: {} } },
     },
   };
-  assert.throws(() => buildWireCatalog(store), /wire-ID invariant|collision/);
+  assert.throws(() => buildWireCatalog(store), /wire-ID invariant/);
 });
 
 // ---------- protocol translation ----------
@@ -540,8 +563,7 @@ test("anthropicToOpenAI uses the bare model id and hoists system", () => {
     "claude-opus-5",
   );
   assert.equal(out.model, "claude-opus-5");
-  // System is hoisted to a leading OpenAI system message, passed through
-  // verbatim — no injected reasoning-language directive.
+  // System is hoisted to a leading OpenAI system message, passed through verbatim.
   assert.equal(out.messages[0].role, "system");
   assert.equal(out.messages[0].content, "be terse");
   assert.equal(out.max_tokens, 8);
@@ -553,7 +575,6 @@ test("anthropicToOpenAI emits no system message when no system text", () => {
     "claude-opus-5",
   );
   assert.equal(out.messages[0].role, "user");
-  assert.ok(out.messages.every((m) => !String(m.content ?? "").includes("REASONING LANGUAGE")));
 });
 
 test("anthropicToOpenAI converts tool_use and tool_result", () => {
@@ -569,8 +590,7 @@ test("anthropicToOpenAI converts tool_use and tool_result", () => {
     },
     "m",
   );
-  // The translated tool_use/tool_result messages lead the list directly —
-  // no injected system directive.
+  // The translated tool_use/tool_result messages lead the list directly.
   assert.equal(out.messages[0].tool_calls[0].function.name, "read");
   assert.equal(out.messages[1].role, "tool");
   assert.equal(out.messages[1].tool_call_id, "t1");
@@ -1342,21 +1362,32 @@ test("an auto-route request gates over every node its chain can reach", async ()
 });
 
 test("a refused auto-route request spends no backoff probe", async () => {
-  const { handler, store, snapshotOf } = gateFixture();
+  const { handler, store } = gateFixture();
   store.routingChains = { claude: { chain: [{ node: "poke-api", model: "claude-opus-5" }] } };
   await handler.handleModels(AUTH, "claude");
 
-  // Stick the chain on the second node, then re-point it and get refused.
+  // Stick the chain on the second node through the real demotion path: plan
+  // once to register the chain, latch poke-api with CHAIN_DEMOTE_AFTER_FAILURES
+  // consecutive failures, then let nvidia-nim's success move the position past
+  // it. The backoff anchor is placed OUTSIDE the retry window, so the next
+  // plan() would be the upstream probe (re-anchor + restart from the head) —
+  // which is exactly what a 409-refused request must NOT spend: the catalog
+  // gate refuses before chainState.plan() ever runs (handler.mjs gates first,
+  // precisely so a refused request doesn't spend the probe).
   store.routingChains.claude.chain.push({ node: "nvidia-nim", model: "deepseek-ai/deepseek-v4-pro" });
   await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
-  handler.chainState.noteSuccess("claude", "nvidia-nim", "deepseek-ai/deepseek-v4-pro", Date.now());
+  handler.chainState.noteFailure("claude", "poke-api", "claude-opus-5");
+  handler.chainState.noteFailure("claude", "poke-api", "claude-opus-5");
+  handler.chainState.noteSuccess("claude", "nvidia-nim", "deepseek-ai/deepseek-v4-pro", Date.now() - RETRY_UPSTREAM_MS - 60_000);
   const position = handler.chainState.get("claude");
-  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+  assert.ok(position, "setup: the demotion must actually pin the chain on nvidia-nim");
+  assert.equal(position.nodeId, "nvidia-nim");
 
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
   const stale = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
   assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /re-run model discovery/, "the refusal is the catalog gate's own");
   assert.deepEqual(handler.chainState.get("claude"), position, "a refusal must not move or re-anchor the chain position");
-  assert.ok(snapshotOf(), "the snapshot itself stays bound; only discovery re-binds it");
 });
 
 test("another endpoint's discovery does not break this endpoint's live channel", async () => {
@@ -1460,15 +1491,6 @@ test("aborted upstream fetch surfaces as a throw, not a 502", async () => {
     ),
     /abort/i,
   );
-});
-
-test("every catalog entry unpacks back to a store hit", async () => {
-  const store = syntheticStore();
-  const handler = createHandler(makeDeps({ store }));
-  for (const entry of buildWireCatalog(store)) {
-    const out = await handler.handleMessages(AUTH, messageBody(entry.wireId));
-    assert.equal(out.status, 200, `${entry.wireId} should route`);
-  }
 });
 
 test("every catalog entry unpacks back to a store hit when pools exist", async () => {

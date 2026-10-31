@@ -88,14 +88,19 @@ function retryMs() {
 // 真跑 enterTerminalRail / scheduleTerminalRailHistoryFetch / terminalRailHistoryFresh /
 // syncTerminalRailHistory / refreshTerminalRailHistory 五个真身，只把网络面（api）与
 // 渲染面替成桩：断言落在「发了几条请求、什么时候发」而不是任何墙钟。
-function makeRailEnv({ history, agentId = "ep-1", view = "terminal", apiImpl } = {}) {
+function makeRailEnv({ history, agentId = "ep-1", view = "terminal", apiImpl, fetchedAtAgo } = {}) {
   const clock = makeClock();
   const seen = { api: [], rail: 0, historyRender: [], toast: [] };
   // 可注入的「现在」：退避与 TTL 都是时间闸，测试要么等墙钟（禁止）要么把时钟捏在手里。
   let virtualNow = Date.now();
   const DateStub = { now: () => virtualNow };
-  // renderTerminalRail 在真身里会调 syncTerminalRailHistory（9325-9326），桩照此接线，
-  // 否则「进页 → 渲一帧 → 判身份」这条链在测试里是断的。工厂建好后再把 sync 填进来。
+  // 缓存时间戳一律由本工厂相对虚拟钟折算（fetchedAtAgo＝这份缓存已存在多少毫秒），
+  // 夹具不再各自取 Date.now()——真钟与虚拟钟只在上面这一行对齐一次，此后不混用。
+  const seed = { endpoint: "", sessions: [], fetchedAt: 0, error: null, ...history };
+  if (fetchedAtAgo !== undefined) seed.fetchedAt = virtualNow - fetchedAtAgo;
+  // renderTerminalRail 真身渲完一帧会调 syncTerminalRailHistory 认身份（这条接线由
+  // T2 的「源码：renderTerminalRail 真身认身份」用例钉住，此处不引行号防漂移），
+  // 桩照此接线，否则「进页 → 渲一帧 → 判身份」这条链在测试里是断的。工厂建好后再把 sync 填进来。
   const railHook = { sync: null };
   const rendersRail = () => { seen.rail += 1; if (railHook.sync) railHook.sync(agentId); };
   const factory = new Function(
@@ -105,7 +110,7 @@ function makeRailEnv({ history, agentId = "ep-1", view = "terminal", apiImpl } =
     "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout",
     "TERMINAL_RAIL_HISTORY_TTL_MS", "TERMINAL_RAIL_HISTORY_RETRY_MS", "Date",
     `
-    let terminalRailHistory = ${JSON.stringify({ endpoint: "", sessions: [], fetchedAt: 0, error: null, ...history })};
+    let terminalRailHistory = ${JSON.stringify(seed)};
     let terminalRailFetchQueued = false;
     let terminalRailFetchInFlight = false;
     let terminalRailRendered = { history: null };
@@ -165,9 +170,20 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
     assert.match(sync, /refreshTerminalRailHistory\(\{ endpoint: agentId \}\);/);
   });
 
+  it("源码：renderTerminalRail 真身渲一帧后认身份（桩里手工补的 sync 接线有据可依）", () => {
+    // 桩环境把 renderTerminalRail 整个替掉了，「进页 → 渲一帧 → 认身份」这条真实
+    // 接线在本文件的真跑里永远走不到——在源码层钉住它，接线断开时这里要红。
+    assert.match(
+      extractFn("renderTerminalRail"),
+      /syncTerminalRailHistory\(agentId\);/,
+      "渲完一帧要认身份，否则进页后的身份切换没人接",
+    );
+  });
+
   it("真跑：TTL 内进页一条请求都不发（缓存直接用）", () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-1", sessions: [{ id: "a" }], fetchedAt: Date.now(), error: null },
+      history: { endpoint: "ep-1", sessions: [{ id: "a" }], error: null },
+      fetchedAtAgo: 0,
     });
     env.enterTerminalRail();
     assert.equal(env.seen.rail, 1, "进页先渲一帧");
@@ -178,7 +194,8 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
 
   it("真跑：缓存过期才补拉，且补拉不在进页这一拍上", async () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-1", sessions: [], fetchedAt: Date.now() - railTtl() - 1000, error: null },
+      history: { endpoint: "ep-1", sessions: [], error: null },
+      fetchedAtAgo: railTtl() + 1000,
     });
     env.enterTerminalRail();
     assert.deepEqual(env.seen.api, [], "进页这一拍只渲不拉");
@@ -199,19 +216,21 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
 
   it("真跑：同身份过期时补拉保留屏上已有的行（stale-while-revalidate）", async () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-1", sessions: [{ id: "a" }], fetchedAt: Date.now() - railTtl() - 1000, error: null },
+      history: { endpoint: "ep-1", sessions: [{ id: "a" }], error: null },
+      fetchedAtAgo: railTtl() + 1000,
     });
     env.enterTerminalRail();
     env.clock.flushAll();
     // 请求在飞：行还在（没被清成空表）
     assert.equal(env.snapshot().sessions.length, 1, "复取期间行不清空");
     await Promise.resolve();
-    assert.equal(env.snapshot().fetchedAt > Date.now() - railTtl(), true, "落地后刷新时间戳");
+    assert.equal(env.snapshot().fetchedAt > env.now() - railTtl(), true, "落地后刷新时间戳（对齐虚拟钟，不混真钟）");
   });
 
   it("真跑：换身份当场清行、同步重拉一次（既有契约）；同身份不排队", () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-old", sessions: [{ id: "old" }], fetchedAt: Date.now(), error: null },
+      history: { endpoint: "ep-old", sessions: [{ id: "old" }], error: null },
+      fetchedAtAgo: 0,
     });
     env.enterTerminalRail();
     assert.equal(env.snapshot().endpoint, "ep-1", "身份已认下");
@@ -223,8 +242,9 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
 
   it("真跑：离开终端页后补拉落地前自行放弃", async () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-1", sessions: [], fetchedAt: Date.now() - railTtl() - 1000, error: null },
+      history: { endpoint: "ep-1", sessions: [], error: null },
       view: "board",
+      fetchedAtAgo: railTtl() + 1000,
     });
     env.enterTerminalRail();
     env.clock.flushAll();
@@ -234,7 +254,8 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
 
   it("真跑：补拉失败不清行、不弹提示，并按短退避（不是 TTL、不是每秒）允许重试", async () => {
     const env = makeRailEnv({
-      history: { endpoint: "ep-1", sessions: [{ id: "a" }, { id: "b" }], fetchedAt: Date.now() - railTtl() - 1000, error: null },
+      history: { endpoint: "ep-1", sessions: [{ id: "a" }, { id: "b" }], error: null },
+      fetchedAtAgo: railTtl() + 1000,
       apiImpl: () => Promise.reject(new Error("HTTP 500")),
     });
     env.enterTerminalRail();
@@ -245,7 +266,7 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
     const after = env.snapshot();
     assert.equal(after.sessions.length, 2, "失败不清屏上已有的行");
     assert.equal(after.error, null, "有行在手就不落失败态（那份行仍是事实，只是旧）");
-    assert.ok(after.retryAt > Date.now(), "失败记下重试闸");
+    assert.ok(after.retryAt > env.now(), "失败记下重试闸（对齐虚拟钟，不混真钟）");
     // 重试闸立到：立刻再进页也不发（不是每秒重试）
     env.enterTerminalRail();
     env.clock.flushAll();
@@ -482,10 +503,15 @@ async function primeSession(w, session) {
 describe("T3 切签：旧画面留到新画面就绪再换", () => {
   it("源码：切换入口先停放旧画面，拆流公共体一字未改", () => {
     const render = extractFn("renderTerminalPreviewSession");
-    const parkAt = render.indexOf("parkTerminalScreen();");
-    const connectAt = render.indexOf("connectTerminalStream(session, { revive });");
-    assert.ok(parkAt > 0, "切换入口调 parkTerminalScreen");
-    assert.ok(connectAt > parkAt, "停放排在建流之前");
+    // 切换入口有两条路径（deferScreen 让帧路径 / 默认直排路径），各有同一对
+    // 「停放 → 建流」。逐路径配对核对——indexOf 首次命中只会落进 deferScreen
+    // 分支，默认路径反转时它无感。
+    const parkAt = [...render.matchAll(/parkTerminalScreen\(\);/g)].map((m) => m.index);
+    const connectAt = [...render.matchAll(/connectTerminalStream\(session, \{ revive \}\);/g)].map((m) => m.index);
+    assert.equal(parkAt.length, 2, "两条切换路径各停放一次");
+    assert.equal(connectAt.length, 2, "两条切换路径各建流一次");
+    assert.ok(connectAt[0] > parkAt[0], "deferScreen 让帧路径：停放排在建流之前");
+    assert.ok(connectAt[1] > parkAt[1], "默认直排路径：停放排在建流之前");
     // 拆流公共体保持原样：签名与 dispose 都在（别的沙箱按这两个特征切它）
     const close = extractFn("closeTerminalStream");
     assert.match(close, /^function closeTerminalStream\(\) \{/);
@@ -542,7 +568,7 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     assert.ok(writeAt >= 0 && disposeAt > writeAt, `销毁排在新画面写入之后（${w.log.join(" → ")}）`);
   });
 
-  it("真跑：旧实例的自动应答打不进新会话 PTY（两道闸各测一次）", async () => {
+  it("真跑：旧实例的自动应答打不进新会话 PTY（定投目标已换人 + 监听已摘）", async () => {
     const w = makeTerminalWorld();
     const { term: termA } = await primeSession(w, terminalSession("A"));
     termA.fireAutoReply("\u001b[?1;2c");
@@ -551,10 +577,11 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     w.world.parkTerminalScreen();
     await w.world.connectTerminalStream(terminalSession("B"));
     assert.equal(w.world.bound(), "B", "新连接的定投目标已是新会话");
-    // 闸一：disableStdin 让内核在产生处早退（桩按同一语义建模）
-    termA.fireAutoReply("\u001b[?1;2c");
-    assert.deepEqual(w.inputPosts, ["A:\u001b[?1;2c"], "垫片实例的应答没有新增投递");
-    // 闸二：onData 监听已随停放摘除——把 disableStdin 硬关掉也派发不到任何投递点
+    // 停放把 disableStdin 置位与拆流摘监听同拍完成，桩环境里可独立判红的闸只有
+    // 「监听已摘」这一道：把 disableStdin 硬关掉，应答仍派发不到任何投递点。
+    // disableStdin 置位本身由「源码：切换入口先停放旧画面」（源码正则）与
+    // 「真跑：销毁旧实例…」（置位后的实例属性）两条钉住；若这里对着置位态再发
+    // 一枪，结果与下一枪全同（监听已空，走不走 disableStdin 早退都无投递），无判别力。
     termA.options.disableStdin = false;
     termA.fireAutoReply("\u001b[?1;2c");
     assert.deepEqual(w.inputPosts, ["A:\u001b[?1;2c"], "监听已摘，旧字节无处可去");
@@ -714,10 +741,25 @@ describe("T7 刷新会话列表：显式刷新带 ?refresh=1", () => {
     assert.match(src, /\/api\/sessions\/list\$\{force \? "\?refresh=1" : ""\}/);
   });
 
-  it("源码：刷新按钮传 force=true（其余调用点不传）", () => {
-    const callers = panelJs.match(/refreshSessionsList\([^)]*\)/g) || [];
-    assert.ok(callers.includes("refreshSessionsList({ force: true })"), "刷新按钮带 force");
-    assert.ok(callers.includes("refreshSessionsList()"), "首次装载等自动路径不带 force");
+  it("源码：刷新按钮传 force=true，自动路径零参——调用点逐一位置绑定", () => {
+    // 全文只许这两个调用点，且各归其位：自动路径必须零参、留在服务端 TTL 快照窗口内
+    // 复用；force 只属于刷新钮的 click handler——挂在自动路径上会让每次进页都触发一次
+    // 真扫描（refreshSessionsList 定义处明写的纪律）。纯存在性断言分辨不出 force 挂在
+    // 哪个调用点，故按「全文数量 + 所在函数」双重钉住。
+    const callSites = panelJs.match(/refreshSessionsList\((\{[^}]*\})?\)/g) || [];
+    assert.deepEqual(
+      callSites,
+      ["refreshSessionsList()", "refreshSessionsList({ force: true })"],
+      "全文件只有自动路径零参与刷新钮带 force 两个调用点（定义行的形参不在其列）",
+    );
+    const enter = extractFn("enterSessionsView");
+    assert.match(enter, /refreshSessionsList\(\)/, "首次装载等自动路径零参调用");
+    assert.doesNotMatch(enter, /refreshSessionsList\(\s*\{/, "自动路径不携带任何选项");
+    assert.match(
+      extractFn("initSessionsTab"),
+      /sessRefreshBtn[\s\S]{0,200}refreshSessionsList\(\{ force: true \}\)/,
+      "force 绑定在刷新钮的 click handler 里，不落在别的调用点",
+    );
   });
 
   it("真跑：force=true 的请求 URL 带 refresh=1，自动路径不带", async () => {
@@ -738,13 +780,15 @@ describe("T7 刷新会话列表：显式刷新带 ?refresh=1", () => {
 // 就原地留成残行。客户端不重排已折行的内容，所以只能靠重建流拿一次镜像整屏自绘帧
 // 来抹。本组钉四件事：首连不误判、变化只重建一次、被动重对齐不重开进程、拆流清账。
 describe("T8 列宽变化：残行靠镜像整屏自绘抹掉", () => {
-  const reflowConst = panelJs.match(/const TERMINAL_REFLOW_REPAINT_DELAY_MS = \d+;/)?.[0];
-  assert.ok(reflowConst, "TERMINAL_REFLOW_REPAINT_DELAY_MS 在 panel.js 里");
-
   function makeReflowWorld({ hiddenView = false, es = {}, term = { cols: 120, rows: 30 }, session = { id: "s1", backend: true, backendState: { cols: 120, rows: 30 } } } = {}) {
     const clock = makeClock();
     const calls = [];
     const st = { session };
+    // 常量取值收在工厂里（同 makeTerminalWorld 的 staleConst、73-79 行的 TTL 纪律）：
+    // 这条常量还不存在时红在用到它的各条用例上，而不是炸在 describe 求值期、把整组
+    // T8 用例从计数里静默带走。
+    const reflowConst = panelJs.match(/const TERMINAL_REFLOW_REPAINT_DELAY_MS = \d+;/)?.[0];
+    assert.ok(reflowConst, "TERMINAL_REFLOW_REPAINT_DELAY_MS 在 panel.js 里");
     const factory = new Function(
       "$", "setTimeout", "clearTimeout", "connectTerminalStream", "terminalSessionFor", "initial",
       `
@@ -882,7 +926,12 @@ describe("T10 建连：fit 的 resize POST 落定后再开流", () => {
 
   it("fit 返回 null（同尺寸没发 POST）：不等待，当拍开流", async () => {
     const w = makeTerminalWorld({ fitImpl: () => null });
-    await w.world.connectTerminalStream(terminalSession("S"));
-    assert.equal(w.sources.length, 1, "无 POST 可等：直开");
+    const connectPromise = w.world.connectTerminalStream(terminalSession("S"));
+    // 零等待的可观测形态：这条路径上（revive 分支未走、resizeInFlight 为 null）从
+    // 函数入口到 EventSource 创建之间没有任何 await——async 函数首次挂起前全程
+    // 同步，调用一返回流就应已开出。放在 await 之后再断言，多付任意一拍它都照样
+    // 绿，钉不住「不因这条等待多付一个来回」，故同步即断言。
+    assert.equal(w.sources.length, 1, "无 POST 可等：调用当拍直开，一个微任务都不多付");
+    await connectPromise;
   });
 });

@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   readQoderSettings,
   writeQoderSettingsWithBackup,
@@ -50,7 +49,10 @@ const PORT = 47821;
 
 describe("readQoderSettings", () => {
   it("returns empty object for missing file", () => {
-    assert.deepEqual(readQoderSettings(join(tmpdir(), "nonexistent-qoder.json")), {});
+    // 夹具落在本文件自己的临时根下：共享 os.tmpdir() 上的固定文件名可能被并行
+    // 进程或上次运行恰好占住，「读不存在的文件」就变成「解析一个真实文件」。
+    const dir = mkTestDir("qoder-merge-test-");
+    assert.deepEqual(readQoderSettings(join(dir, "settings.json")), {});
   });
 
   it("throws UnparseableQoderSettingsError for a corrupt file instead of treating it as empty", () => {
@@ -168,22 +170,25 @@ describe("buildQoderProviders", () => {
   });
 
   it("lets the effort library overrule the store's reasoning flag", () => {
+    // 夹具模型名必须不命中 effort-catalog 的非文本名字兜底（NON_TEXT_RE）：
+    // 名字自命中时兜底就会给出同样的 non-text 结果，删掉库行输出也不变，
+    // 「库行覆盖 store 标志」这条路径就没被隔离验证。
     const providers = {
       "test-p": {
         models: {
-          "agnes-image-2.0-flash": { displayName: "Agnes", isReasoning: true },
+          "agnes-chat-2.0-flash": { displayName: "Agnes", isReasoning: true },
           "glm-5.3": { displayName: "GLM" },
         },
       },
     };
     const catalog = {
       models: new Map([
-        ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+        ["agnes-chat-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
       ]),
     };
     const conn = buildQoderProviders(providers, PORT, TOKEN, catalog)[managedConnectionId("test-p")];
     assert.deepEqual(
-      conn.models.find((m) => m.model === "agnes-image-2.0-flash").capabilities.thinking,
+      conn.models.find((m) => m.model === "agnes-chat-2.0-flash").capabilities.thinking,
       { modes: [] },
     );
     // No library row for glm-5.3 -> optimistic default levels, clipped to the
@@ -332,11 +337,17 @@ describe("mergeQoderSettings", () => {
   it("replaces the current managed set even without previousManagedIds (idempotent re-sync)", () => {
     const managedProviders = extractManagedProviders(STORE);
     const first = mergeQoderSettings({}, managedProviders, PORT, TOKEN);
-    // Second merge over the first result with no previousManagedIds: the
-    // currentManagedIds deletion pass must still drop the old managed entries
-    // before re-adding them, so no duplicates/stale keys accumulate.
+    // Second merge over the first result with no previousManagedIds: what comes
+    // out must be EXACTLY the current pool's connections — none dropped, none
+    // stale, values rebuilt fresh. The expectation is anchored to an
+    // independent build from the same pool instead of comparing the two merge
+    // runs against each other: object keys are unique and a same-pool
+    // overwrite reproduces identical keys even if the managed write were
+    // removed entirely, so that comparison could never fail. Stale-id removal
+    // itself is covered by the previousManagedIds case above and the sidecar
+    // end-to-end case below.
     const second = mergeQoderSettings(first.config, managedProviders, PORT, TOKEN);
-    assert.deepEqual(Object.keys(second.config.providers).sort(), Object.keys(first.config.providers).sort());
+    assert.deepEqual(second.config.providers, buildQoderProviders(managedProviders, PORT, TOKEN));
   });
 
   it("removes the dead modelConfigs.customModels array", () => {
@@ -394,16 +405,26 @@ describe("writeQoderSettingsWithBackup", () => {
   it("prunes backups down to the newest 5 after a write", () => {
     const dir = mkTestDir("qoder-merge-test-");
     const filePath = join(dir, "settings.json");
-    for (let i = 1; i <= 6; i++) {
-      writeFileSync(join(dir, `settings.backup.2020-01-0${i}T00-00-00-000Z.json`), `old${i}`, "utf8");
-    }
+    // 夹具备份名从当前时钟往回推，而不是写死 2020 年：写死的旧名依赖本机时钟
+    // 晚于夹具时间，时钟回拨就会把本次写入的新备份当成最旧的一条裁掉。备份名
+    // 同为 ISO 时间戳的字典序，按分钟回推即可保证新备份必然排在所有夹具之后。
+    const backupName = (minutesAgo) =>
+      `settings.backup.${new Date(Date.now() - minutesAgo * 60_000).toISOString().replace(/[:.]/g, "-")}.json`;
+    const seeded = [60, 50, 40, 30, 20, 10].map(backupName);
+    seeded.forEach((name, i) => writeFileSync(join(dir, name), `old${i}`, "utf8"));
     writeFileSync(filePath, JSON.stringify({ providers: {} }), "utf8");
     const result = writeQoderSettingsWithBackup(filePath, { providers: { "qoder-custom-anyswitch-x": { model: "new" } } });
     assert.equal(result.ok, true);
     const backups = readdirSync(dir).filter((n) => n.startsWith("settings.backup.")).sort();
-    assert.equal(backups.length, 5);
-    assert.equal(backups[0], "settings.backup.2020-01-03T00-00-00-000Z.json", "oldest backups pruned");
-    assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
+    // 7 个裁到 5：最旧两条（60/50 分钟前）被删，其余按时间序保留，本次写入的
+    // 备份（刚刚产生）必然最新。
+    assert.deepEqual(backups, [
+      seeded[2],
+      seeded[3],
+      seeded[4],
+      seeded[5],
+      result.backupPath.split(/[\\/]/).pop(),
+    ]);
   });
 });
 
@@ -421,7 +442,7 @@ describe("sidecar", () => {
   });
 });
 
-describe("auto routing channel (_auto)", () => {
+describe("auto routing channel (auto)", () => {
   const CHAIN_STORE = {
     ...STORE,
     routingChains: {
@@ -628,21 +649,32 @@ describe("writeQoderConfig (high-level)", () => {
     // home 变量缺失的调用方（agent-sync / qoder-launcher / uninstall）会把
     // join("", ".qoder", …) 的相对路径喂进来：真实用户配置不被更新，写入器却会
     // 在进程 CWD 静默建出 .qoder/settings.json。合并入口必须拒绝相对路径落盘。
+    // CWD 断言在专用临时目录里做：测试可能从任意目录启动（比如真实主目录，
+    // 那里本来就有 .qoder），对着启动目录断言会把宿主机状态误判成回归。
     const dir = mkTestDir("qoder-write-test-");
-    const cwdQoderDir = join(process.cwd(), ".qoder");
-    assert.equal(existsSync(cwdQoderDir), false, "CWD 里不应已有 .qoder 目录（环境不对就先失败，避免误删）");
-    const result = writeQoderConfig(STORE, PORT, TOKEN, dir, join(".qoder", "settings.json"));
-    // 红阶段这里真的会在 CWD 写出 .qoder；断言前先清掉自证不留痕。
-    if (existsSync(cwdQoderDir)) rmSync(cwdQoderDir, { recursive: true, force: true });
-    assert.equal(result.ok, false);
-    assert.equal(result.unchanged, true, "相对路径一个字节都不该写");
-    assert.ok(result.reason.length > 0, "失败原因非空");
-    assert.equal(existsSync(cwdQoderDir), false, "CWD 里没有新落盘的 .qoder");
+    const previousCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const cwdQoderDir = join(process.cwd(), ".qoder");
+      assert.equal(existsSync(cwdQoderDir), false, "全新临时 CWD 里不应已有 .qoder 目录");
+      const result = writeQoderConfig(STORE, PORT, TOKEN, dir, join(".qoder", "settings.json"));
+      assert.equal(result.ok, false);
+      assert.equal(result.unchanged, true, "相对路径一个字节都不该写");
+      assert.ok(result.reason.length > 0, "失败原因非空");
+      // 不做任何清场、直接检查落盘痕迹：若闸门失效真的在 CWD 建出了 .qoder，
+      // 这条断言就是抓回归的证据——测试自己先把痕迹删掉，断言就恒真了。
+      assert.equal(existsSync(cwdQoderDir), false, "CWD 里没有新落盘的 .qoder");
+    } finally {
+      process.chdir(previousCwd);
+    }
   });
 });
 
 describe("qoderSettingsPath", () => {
   it("resolves to <base>/.qoder/settings.json", () => {
-    assert.equal(qoderSettingsPath("/home/user"), join("/home/user", ".qoder", "settings.json"));
+    // 期望值写死为布局契约（base 前缀 + .qoder + settings.json），不与实现共用
+    // 同一个 join 表达式——否则实现换成任何等价拼接都测不出差异。分隔符归一
+    // 让同一条断言在 win32/POSIX 下都成立。
+    assert.equal(qoderSettingsPath("/home/user").replaceAll("\\", "/"), "/home/user/.qoder/settings.json");
   });
 });

@@ -46,8 +46,11 @@ async function findWorkbenchTarget(port, timeoutMs) {
 }
 
 // The expression evaluated in the renderer: locate the model-catalog store on
-// the React fiber tree and call refreshByokModelCatalogs(). Returns true when
-// the store was found and the refresh awaited.
+// the React fiber tree and call refreshByokModelCatalogs(). It resolves to a
+// status string, never a boolean: 'refreshed' | 'store-not-found' |
+// 'no-root' | 'no-root-fiber', where the last two mean the #root container or
+// its React fiber key was missing (renderer DOM not built yet), and are not
+// evidence that the refresh itself failed.
 const REFRESH_EXPRESSION = `(async () => {
   const container = document.getElementById('root');
   if (!container) return 'no-root';
@@ -122,7 +125,15 @@ function evaluateOnTarget(wsUrl, expression, timeoutMs) {
 
 // Attach to a running Qoder on the given CDP port and trigger one model-catalog
 // refresh. Polls until the workbench renderer appears or the deadline passes.
-// Returns 'refreshed' | 'store-not-found' | 'no-renderer' | 'timeout'.
+// Best-effort by contract: a disabled/occupied CDP port, an unready renderer or
+// a failed evaluate is reported as a status string, not thrown, so the launcher
+// can log and move on. Callers may only rely on 'refreshed' meaning the refresh
+// completed; every other value names the boundary that was hit:
+// 'no-port' (invalid port argument, nothing attempted) | 'timeout' (no
+// workbench target with a debugger URL before the deadline) |
+// 'evaluate-failed' (websocket/Runtime.evaluate error) | 'no-root' |
+// 'no-root-fiber' (renderer DOM not built yet) | 'store-not-found' (fiber walk
+// matched no store of the expected shape — the Qoder internals likely changed).
 export async function refreshQoderModelCatalog({
   port,
   timeoutMs = DEFAULT_TIMEOUT_MS,

@@ -489,8 +489,12 @@ function extractParentPid(line) {
   return null;
 }
 
-// Image-name → counting-bucket table, mirroring the probe's WHERE list in
-// scanProcesses. Rows are claimed by their image NAME field — authoritative
+// Image-name → counting-bucket table — the only filter that decides which
+// scanned rows become counts. The probe query (PS_PROCESS_SCAN_QUERY) is an
+// unfiltered full-table dump (2026-10-28), so every process on the machine
+// reaches this table; an image name absent here stays lineage-only (ppidByPid /
+// cmdByPid) and never increments a bucket. Rows are claimed by their image
+// NAME field — authoritative
 // in every probe shape — never by a substring of the whole line: the probe's
 // own cmd.exe wrapper (child_process.exec shells out on Windows) shows up in
 // the result carrying every agent name literal inside its command line, so
@@ -516,8 +520,9 @@ const AGENT_IMAGE_BUCKETS = [
   ["dsh.exe", "dsh"],
   // pi 的原生形态（上游发布的原生二进制，若在）：镜像名即会话进程，由 pi 桶
   // 分支照 dsh.exe 的 accept-by-name 直接计数——isPiNode 那套 @earendil-works
-  // 包路径谓词对原生行的命令行不适用。白名单（PS_PROCESS_SCAN_QUERY）本就
-  // 拉取 pi.exe 行，桶表缺席时该行只进谱系表不进任何计数，原生形态整段漏计
+  // 包路径谓词对原生行的命令行不适用。扫描查询是全表 dump（PS_PROCESS_SCAN_QUERY
+  // 不带镜像名白名单），pi.exe 行一定会到达认领逻辑；桶表缺席时该行只进谱系表
+  // 不进任何计数，原生形态整段漏计
   // （2026-10-25 体检确认的潜伏缺陷）。与 node.exe 形态（npm 包）是同一会话
   // 可能的两种形态，「pi.exe 父＋node 子」谱系的双计防护见 parseTasklistCsv
   // 循环后的裁决。
@@ -4801,8 +4806,10 @@ export function createAgentMetricsCollector(options = {}) {
         clientForm: s.clientForm ?? null,
         transport: s.transport ?? null,
         identitySource: s.identitySource ?? null,
-        // 形态徽标：仅桌面合成行（claude-desktop）携带，贴 "Desktop"；
-        // 逐 PID 的 CLI/未分型行不贴，外观与折叠前逐字一致。
+        // 形态徽标：取自进程扫描的逐 PID 分型（claudeSurfaceByPid，见
+        // CLAUDE_SURFACE_LABELS）。桌面合成行贴 "Desktop"，命令行读得出、
+        // 判定为终端里起的 CLI 行贴 "TUI"；分型落空（读不到命令行那一轮）
+        // 的 pid 不贴——留空即「形态未知」，不拿来猜。
         ...(s.surface ? { surface: claudeSurfaceLabel(s.surface) } : {}),
       };
     });
@@ -5103,7 +5110,8 @@ function extractCachedTokens(usage) {
 // （input_tokens/output_tokens/cache_read_input_tokens）都能提出
 // {prompt, completion, cached}。上游两种形状都会原样到达记账口（stream-pipe
 // 的 Anthropic 上行、OpenAI 透传、会话 reporter），只认一种形状会让另一条
-// 渠道的 token 恒记 0。session reporter 的 normalizedUsage 与本函数同口径。
+// 渠道的 token 恒记 0。session reporter 的记账口直接调用本函数，两条路径
+// 共用同一份形状归一。
 function normalizeUsageTokens(usage) {
   if (!usage || typeof usage !== "object") return { prompt: 0, completion: 0, cached: 0 };
   return {
@@ -5453,8 +5461,10 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
 
     // Sparkline sample: successful requests only, same eligibility as the
     // aggregate collector's recentSamples (failures/aborts/empty completions
-    // produce no tps point). TPS mirrors its cap rule too (300 tok/s guard
-    // against degenerate sub-100ms generations).
+    // produce no tps point). Only the raw measurement is buffered here: the
+    // shared speed rule is applied downstream by sampleTps / windowTps
+    // (isMeasuredSample — a generation window under 200ms is a packet burst,
+    // not a rate). The rule is window-based, never a tok/s cap.
     const reqDuration = Math.max(1, endTime - ctx.startTime);
     const norm = normalizeUsageTokens(usage);
     if (!hadError && !aborted) {

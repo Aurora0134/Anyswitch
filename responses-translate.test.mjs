@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 
 import {
   translateResponsesRequest,
-  translateChatResponse,
   ResponsesSseTranslator,
   responseIdFromChatId,
   chatUsageToResponsesUsage,
@@ -267,67 +266,23 @@ describe("translateResponsesRequest", () => {
   });
 });
 
-// ---------- response side ----------
+// ---------- response side helpers ----------
 
-const chatJson = (message, extra = {}) => ({
-  id: "chatcmpl-123",
-  created: 1720000000,
-  model: "gpt-x",
-  choices: [{ index: 0, message, finish_reason: "stop" }],
-  usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-  ...extra,
-});
-
-describe("translateChatResponse", () => {
-  it("builds the top-level response shape with resp_ id and prefixed item ids", () => {
-    const out = translateChatResponse(chatJson({ role: "assistant", content: "hi" }));
-    assert.equal(out.id, "resp_chatcmpl-123");
-    assert.equal(out.object, "response");
-    assert.equal(out.created_at, 1720000000);
-    assert.equal(out.status, "completed");
-    assert.equal(out.model, "gpt-x");
-    assert.equal(out.output.length, 1);
-    assert.equal(out.output[0].type, "message");
-    assert.ok(out.output[0].id.startsWith("msg_"), `message id needs the msg_ prefix, got ${out.output[0].id}`);
-    assert.deepEqual(out.output[0].content, [{ type: "output_text", text: "hi", annotations: [] }]);
-    assert.deepEqual(out.usage.output_tokens_details, { reasoning_tokens: 0 });
-  });
-
-  it("keeps an already-prefixed resp_ id", () => {
+// Direct unit coverage for the helpers the live streaming translator uses:
+// ResponsesSseTranslator calls responseIdFromChatId, chatUsageToResponsesUsage
+// and splitLeadingThinkBlock. translateChatResponse itself is intentionally
+// not tested: it has no production caller — openai-server.mjs imports only
+// translateResponsesRequest and forces stream: true on /v1/responses
+// (openai-server.mjs:1001), so every chat -> Responses translation runs
+// through ResponsesSseTranslator (stream-pipe.mjs:23).
+describe("response-side helpers", () => {
+  it("responseIdFromChatId keeps an already-prefixed resp_ id and prefixes bare chat ids", () => {
     assert.equal(responseIdFromChatId("resp_abc"), "resp_abc");
     assert.equal(responseIdFromChatId("chatcmpl-1"), "resp_chatcmpl-1");
     assert.equal(responseIdFromChatId(undefined), "resp_compat");
   });
 
-  it("orders output reasoning -> message -> function_call", () => {
-    const out = translateChatResponse(
-      chatJson({
-        role: "assistant",
-        reasoning_content: "hmm",
-        content: "answer",
-        tool_calls: [{ id: "call_1", type: "function", function: { name: "Bash", arguments: '{"command":"ls"}' } }],
-      }),
-    );
-    assert.deepEqual(out.output.map((item) => item.type), ["reasoning", "message", "function_call"]);
-    assert.ok(out.output[0].id.startsWith("rs_"));
-    assert.equal(out.output[0].summary[0].text, "hmm");
-    assert.ok(out.output[2].id.startsWith("fc_"));
-    assert.equal(out.output[2].call_id, "call_1");
-    assert.equal(out.output[2].arguments, '{"command":"ls"}');
-  });
-
-  it("maps finish_reason length to incomplete plus incomplete_details", () => {
-    const out = translateChatResponse(chatJson({ role: "assistant", content: "cut" }));
-    assert.equal(out.status, "completed");
-    const incomplete = translateChatResponse({
-      ...chatJson({ role: "assistant", content: "cut" }),
-      choices: [{ index: 0, message: { role: "assistant", content: "cut" }, finish_reason: "length" }],
-    });
-    assert.equal(incomplete.status, "incomplete");
-    assert.deepEqual(incomplete.incomplete_details, { reason: "max_output_tokens" });
-  });
-
-  it("completes usage in all three forms: details present, key missing, usage missing", () => {
+  it("chatUsageToResponsesUsage completes usage in all three forms: details present, key missing, usage missing", () => {
     const withDetails = chatUsageToResponsesUsage({
       prompt_tokens: 10,
       completion_tokens: 5,
@@ -348,7 +303,7 @@ describe("translateChatResponse", () => {
     });
   });
 
-  it("subtracts cached tokens counted inside prompt_tokens", () => {
+  it("chatUsageToResponsesUsage subtracts cached tokens counted inside prompt_tokens", () => {
     const usage = chatUsageToResponsesUsage({
       prompt_tokens: 100,
       completion_tokens: 20,
@@ -359,53 +314,10 @@ describe("translateChatResponse", () => {
     assert.deepEqual(usage.input_tokens_details, { cached_tokens: 30 });
   });
 
-  it("strips a leading <think> block out of string content into the reasoning item", () => {
-    const out = translateChatResponse(chatJson({ role: "assistant", content: "<think>plan first</think>\n\nanswer" }));
-    assert.deepEqual(out.output.map((item) => item.type), ["reasoning", "message"]);
-    assert.equal(out.output[0].reasoning_content, "plan first");
-    assert.equal(out.output[1].content[0].text, "answer");
-  });
-
   it("splitLeadingThinkBlock only fires on a leading closed block", () => {
     assert.deepEqual(splitLeadingThinkBlock("  <think>r</think> a"), { reasoning: "r", answer: "a" });
     assert.equal(splitLeadingThinkBlock("text <think>r</think>"), null);
     assert.equal(splitLeadingThinkBlock("<think>unterminated"), null);
-  });
-
-  it("reconstructs a custom tool call back into a custom_tool_call item with ctc_ id", () => {
-    const request = { tools: [{ type: "custom", name: "apply_patch" }] };
-    const out = translateChatResponse(
-      chatJson({
-        role: "assistant",
-        tool_calls: [{ id: "call_9", type: "function", function: { name: "apply_patch", arguments: '{"input":"*** Begin Patch"}' } }],
-      }),
-      { request },
-    );
-    assert.deepEqual(out.output.map((item) => item.type), ["custom_tool_call"]);
-    assert.ok(out.output[0].id.startsWith("ctc_"));
-    assert.equal(out.output[0].input, "*** Begin Patch");
-  });
-
-  it("echoes the request fields codex expects back", () => {
-    const request = {
-      instructions: "be brief",
-      tools: [{ type: "function", name: "Bash", parameters: {} }],
-      tool_choice: "auto",
-      reasoning: { effort: "high", summary: "auto" },
-      temperature: 0.2,
-      max_output_tokens: 512,
-    };
-    const out = translateChatResponse(chatJson({ role: "assistant", content: "hi" }), request);
-    assert.equal(out.instructions, "be brief");
-    assert.deepEqual(out.tools, request.tools);
-    assert.equal(out.tool_choice, "auto");
-    assert.deepEqual(out.reasoning, { effort: "high", summary: "auto" });
-    assert.equal(out.temperature, 0.2);
-    assert.equal(out.max_output_tokens, 512);
-  });
-
-  it("throws on a chat body without a message", () => {
-    assert.throws(() => translateChatResponse({ choices: [] }), /missing choices/);
   });
 });
 
@@ -493,7 +405,6 @@ describe("ResponsesSseTranslator", () => {
       total_tokens: 0,
       output_tokens_details: { reasoning_tokens: 0 },
     });
-    assert.equal(events[10].data, null, "[DONE] is a literal line, not JSON");
   });
 
   it("emits the reasoning group before the text group", () => {

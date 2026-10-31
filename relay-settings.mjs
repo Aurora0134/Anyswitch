@@ -406,7 +406,12 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     ...patch,
   };
 
-  // If keepAlive was patched, deep-merge it cleanly
+  // keepAlive patches merge field-by-field because the panel PATCHes one field at
+  // a time: anything not in the patch has to survive untouched. `mode` is the
+  // source of truth — when the patch carries it, `enabled` is recomputed as
+  // mode !== "off"; a legacy client sending only `enabled` gets `mode` derived
+  // instead. Both directions are needed: `enabled` alone cannot express the
+  // retired "basic" mode, which normalizeKeepAliveMode folds into "enhanced".
   if (patch.keepAlive && typeof patch.keepAlive === "object") {
     const merged = {
       ...(current.raw.keepAlive || {}),

@@ -48,11 +48,15 @@ test("read returns entries sorted by ts ascending even across files", () => {
   let current = t0;
   const journal = createUsageJournal({ dir, now: () => current });
 
-  current = t0 + DAY_MS; // next local day
-  journal.appendRequest({ ts: 300 });
+  // The fixture must disagree with ts order everywhere: the earlier day file
+  // holds the largest ts, the later day file holds smaller ts in descending
+  // order. Day-ascending concatenation alone yields [300, 200, 100], so this
+  // test goes red if read()'s ts sort is ever removed.
   current = t0;
-  journal.appendRequest({ ts: 100 });
+  journal.appendRequest({ ts: 300 });
+  current = t0 + DAY_MS; // next local day
   journal.appendRequest({ ts: 200 });
+  journal.appendRequest({ ts: 100 });
 
   assert.deepEqual(
     journal.readRequests().map((e) => e.ts),
@@ -221,9 +225,14 @@ test("raw appendFileSync from another process is seen on the next read", () => {
 
 test("file removed externally is skipped, not cached as empty; rebuilt file is read again", () => {
   const dir = tempDir();
-  const journal = createUsageJournal({ dir });
+  // Fixed injected clock: the append's "today" and the "yesterday" path below
+  // derive from the same instant, so they can never straddle local midnight
+  // and collapse into one file (real clock would let the writeFileSync below
+  // truncate the just-appended "kept" line in that millisecond-wide window).
+  const t0 = Date.parse("2026-08-28T10:00:00"); // local parse, matches dayKey local day
+  const journal = createUsageJournal({ dir, now: () => t0 });
   journal.appendRequest({ ts: 1, tag: "kept" });
-  const oldFile = join(dir, `requests-${dayKey(Date.now() - DAY_MS)}.jsonl`);
+  const oldFile = join(dir, `requests-${dayKey(t0 - DAY_MS)}.jsonl`);
   writeFileSync(oldFile, '{"ts":0,"tag":"old"}\n');
   assert.deepEqual(journal.readRequests().map((e) => e.tag), ["old", "kept"]); // cache both
 

@@ -7,7 +7,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes, describeRelayStartupFailure } from "./relay-host.mjs";
@@ -64,7 +63,16 @@ test("appendCrashLog synchronously appends the labelled crash trace", () => {
 });
 
 test("appendCrashLog never throws on an unwritable path", () => {
-  appendCrashLog(join(tmpdir(), "anyswitch-no-such-dir", "relay-host.log"), "unhandledRejection", "lost");
+  // Deterministic unwritable target inside the sandbox: the parent directory
+  // is never created, so appendFileSync fails with ENOENT and the crash path
+  // must swallow it — the fatal handler gets exactly one shot and must not
+  // die again on its own evidence write. (Bare calls assert nothing and, run
+  // against the real os.tmpdir(), were neither deterministic nor sandboxed.)
+  assert.doesNotThrow(() => appendCrashLog(
+    join(mkTestDir("anyswitch-rh-"), "missing-parent-dir", "relay-host.log"),
+    "unhandledRejection",
+    "lost",
+  ));
 });
 
 // Startup warm-up of the collector's process-scan cache. The regression shape:
@@ -79,9 +87,13 @@ test("warmProcessScanCache kicks the collector's first scan round immediately", 
 });
 
 test("warmProcessScanCache does not wait for the scan round to land", () => {
-  // A scan promise that never resolves: if the warm-up awaited it, the relay
-  // startup path would hang right here.
-  warmProcessScanCache({ scanProcesses: () => new Promise(() => {}) });
+  // A scan promise that never resolves: the warm-up must stay a synchronous
+  // fire-and-forget kick — it hands back nothing the startup path could
+  // await, so a round that never lands cannot hold startup. (A bare call has
+  // no discriminating power: even an await-regressed implementation passes
+  // it, because an async function only suspends at its first await.)
+  const result = warmProcessScanCache({ scanProcesses: () => new Promise(() => {}) });
+  assert.equal(result, undefined, "fire-and-forget: the warm-up must not become an awaitable");
 });
 
 test("warmProcessScanCache swallows a rejected scan round without an unhandled rejection", async () => {
@@ -116,7 +128,9 @@ function fakeChild(pid = 5150) {
   const child = new EventEmitter();
   child.pid = pid;
   child.killed = false;
+  child.killCalls = 0;
   child.kill = () => {
+    child.killCalls += 1;
     child.killed = true;
   };
   return child;
@@ -246,9 +260,11 @@ test("createTerminalHostSupervisor.stop kills the child exactly once and tolerat
   await supervisor.start();
   supervisor.stop();
   assert.equal(child.killed, true, "shutdown kills the terminal host first");
+  assert.equal(child.killCalls, 1, "the kill lands exactly once");
   child.emit("exit", null, "SIGTERM"); // our own kill landing must not warn
   supervisor.stop();
   assert.doesNotThrow(() => supervisor.stop());
+  assert.equal(child.killCalls, 1, "a stopped supervisor tolerates repeats without killing again");
 });
 
 test("createTerminalHostSupervisor.start is idempotent while the child is alive", async () => {
@@ -792,7 +808,11 @@ test("POST /terminal-host/start answers 500 on a readiness timeout and never cle
     const res = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
     assert.equal(res.status, 500);
     assert.deepEqual(await res.json(), { ok: false, error: "terminal_host_start_timeout" });
-    assert.ok(probes > 1, "超时窗口内探测是重试的");
+    // The retry rhythm itself is pinned deterministically by the non-200 probe
+    // test above; here the first probe may legitimately consume the whole
+    // window (a stalled tick between the fetch and the deadline check), so any
+    // lower bound above 1 is scheduling-dependent, not a behaviour claim.
+    assert.ok(probes >= 1, "超时回答前就绪探测确实跑过");
     assert.equal(JSON.parse(readFileSync(h.settingsPath, "utf8")).terminalHostManualStop, true, "失败不能清掉手动关停标记");
     assert.equal(h.supervisor.isManualStop(), true);
   } finally {
@@ -802,14 +822,19 @@ test("POST /terminal-host/start answers 500 on a readiness timeout and never cle
 
 test("POST /terminal-host/stop sets the flag, clears sessions via the host, then kills it", async () => {
   const order = [];
+  // Record inside fetchFn, assert outside: the stop route wraps the clear-all
+  // call in a degradation catch (clearFailed → warn → delete state file), so
+  // an AssertionError thrown in here would be swallowed as "clear failed" and
+  // the test would pass without any of these checks having taken effect.
+  const observed = {};
   let h;
   h = routeHarness({
     fetchFn: async (url, options) => {
+      observed.url = url;
+      observed.method = options.method;
+      observed.authorization = options.headers.authorization;
+      observed.stateAtClear = h.supervisor.status().state;
       order.push("clear-all");
-      assert.equal(url, "http://127.0.0.1:47823/terminal/sessions/clear-all");
-      assert.equal(options.method, "POST");
-      assert.equal(options.headers.authorization, "Bearer test-token");
-      assert.equal(h.supervisor.status().state, "running", "清场调用发生在 kill 子进程之前");
       return { ok: true, json: async () => ({ ok: true, cleared: 3 }) };
     },
   });
@@ -826,6 +851,10 @@ test("POST /terminal-host/stop sets the flag, clears sessions via the host, then
     assert.equal(body.ok, true);
     assert.equal(body.host.state, "stopped-manual");
     assert.deepEqual(order, ["clear-all"], "sessions are cleared before the kill");
+    assert.equal(observed.url, "http://127.0.0.1:47823/terminal/sessions/clear-all");
+    assert.equal(observed.method, "POST");
+    assert.equal(observed.authorization, "Bearer test-token");
+    assert.equal(observed.stateAtClear, "running", "清场调用发生在 kill 子进程之前");
     assert.equal(JSON.parse(readFileSync(h.settingsPath, "utf8")).terminalHostManualStop, true);
 
     // Idempotent: already stopped is still ok.

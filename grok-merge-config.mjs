@@ -62,12 +62,14 @@ export const MANAGED_END = "# <<< anyswitch-managed-grok <<<";
 // relay 侧按 x-agent-id 同一条白名单校验）。
 const GROK_AGENT_ID = "grok";
 const MANAGED_ID_PREFIX = "anyswitch-";
-// The auto pseudo-channel collapses channel and model into one catalog key:
-// its only model is the virtual "auto", so "anyswitch-auto~auto" would just
-// stutter. The key keeps the managed prefix so the stale-table strip catches
-// it like every other managed entry — and because the branch fires on the
-// channel alone, every model of that channel lands on this one key, which is
-// what the duplicate-key gate in buildGrokManagedToml guards.
+// Bare catalog key for the auto pseudo-channel's trigger-word model: that one
+// model is literally named "auto", so packing it normally would read
+// "anyswitch-auto~auto". Only this single model takes the short key — the
+// channel's other virtual models keep their own channel-qualified slugs (see
+// managedModelKey), because folding several models onto one key would get all
+// of them dropped by the duplicate-key gate in buildGrokManagedToml. The
+// managed prefix stays so the stale-table strip catches it like every other
+// managed entry.
 export const AUTO_MODEL_KEY = `${MANAGED_ID_PREFIX}${AUTO_CHANNEL_KEY}`;
 // Picker copy for the reasoning_efforts sub-tables: low→xhigh mirror the
 // wording of grok's built-in model catalog (extracted from the binary's

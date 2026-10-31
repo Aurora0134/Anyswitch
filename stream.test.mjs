@@ -3,7 +3,10 @@
 //
 // The load-bearing invariant: an upstream that never emits reasoning must
 // translate byte-for-byte the same as it always has. Reasoning support is an
-// additive path, never a rewrite of the existing one.
+// additive path, never a rewrite of the existing one. The two byte-for-byte
+// tests below enforce that against literal golden frame text — the full raw
+// SSE string, never parsed back into objects — so framing, JSON key order and
+// payload shape all count, not just the event names.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -11,14 +14,20 @@ import assert from "node:assert/strict";
 import { StreamTranslator, SSEParser, sseEvent, REASONING_FIELDS } from "./stream.mjs";
 import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 
-// Feed one parsed OpenAI chunk through a fresh translator and return the
-// emitted Anthropic event frames as [{ event, data }] pairs.
-function translate(chunks, wireId = "anthropic/poke-api/claude-opus-5") {
+// Feed one parsed OpenAI chunk through a fresh translator and return the raw
+// Anthropic SSE frames as a single string — the bytes a client would read.
+function translateRaw(chunks, wireId = "anthropic/poke-api/claude-opus-5") {
   const translator = new StreamTranslator(wireId);
   let out = "";
   for (const chunk of chunks) out += translator.chunk(chunk);
   out += translator.finish();
-  return parseEvents(out);
+  return out;
+}
+
+// Same, with the frames parsed into [{ event, data }] pairs for structural
+// assertions.
+function translate(chunks, wireId) {
+  return parseEvents(translateRaw(chunks, wireId));
 }
 
 function parseEvents(text) {
@@ -35,15 +44,67 @@ function parseEvents(text) {
 
 const delta = (d, extra = {}) => ({ choices: [{ index: 0, delta: d, ...extra }] });
 
+// Literal golden frames for the two no-reasoning streams: the exact bytes the
+// relay has always put on the wire. Pinned as raw text — not built with
+// sseEvent(), not parsed back into objects — so framing, JSON key order and
+// payload shape are all under test. Every frame ends with a blank line,
+// including the last one. (The tool golden's \\" renders the single
+// backslash-quote pair JSON.stringify puts around the argument fragment.)
+const TEXT_ONLY_GOLDEN = `event: message_start
+data: {"type":"message_start","message":{"id":"c1","type":"message","role":"assistant","model":"anthropic/poke-api/claude-opus-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`;
+
+const TOOL_CALL_GOLDEN = `event: message_start
+data: {"type":"message_start","message":{"id":"c2","type":"message","role":"assistant","model":"anthropic/poke-api/claude-opus-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"Bash","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"command\\":\\"ls\\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":0}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`;
+
 // ---------- zero-regression guard: no reasoning upstream ----------
 
 test("a text-only stream translates byte-for-byte as before", () => {
-  const events = translate([
+  const chunks = [
     { id: "c1", choices: [{ index: 0, delta: { role: "assistant" } }] },
     { id: "c1", choices: [{ index: 0, delta: { content: "你" } }] },
     { id: "c1", choices: [{ index: 0, delta: { content: "好" } }] },
     { id: "c1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2 } },
-  ]);
+  ];
+  const raw = translateRaw(chunks);
+  assert.equal(raw, TEXT_ONLY_GOLDEN);
+  const events = parseEvents(raw);
   assert.deepEqual(
     events.map((e) => e.event),
     ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
@@ -57,12 +118,15 @@ test("a text-only stream translates byte-for-byte as before", () => {
 });
 
 test("a tool-call-only stream translates byte-for-byte as before", () => {
-  const events = translate([
+  const chunks = [
     { id: "c2", choices: [{ index: 0, delta: { role: "assistant" } }] },
     { id: "c2", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Bash", arguments: "" } }] } }] },
     { id: "c2", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"command":"ls"}' } }] } }] },
     { id: "c2", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
-  ]);
+  ];
+  const raw = translateRaw(chunks);
+  assert.equal(raw, TOOL_CALL_GOLDEN);
+  const events = parseEvents(raw);
   assert.deepEqual(
     events.map((e) => e.event),
     ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
