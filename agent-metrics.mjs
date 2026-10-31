@@ -994,6 +994,59 @@ export function workbuddySurfaceLabel(surface) {
   return WORKBUDDY_SURFACE_LABELS[surface];
 }
 
+// 卡内分面汇总（"Desktop ×1 · CLI ×1"），与 DSH / kimi 同形同源：面由进程扫描的
+// 父链判定，请求面上 Desktop 与 CLI 同像（同一条 workbuddy agentId），只有扫描
+// 能在此之前分辨。读不出面的那一档由 workbuddySurfaceLabel 落「未知」，副行
+// 加总仍等于卡上进程数。
+export function summarizeWorkbuddySurfaces(procCounts) {
+  const enginePids = procCounts?.workbuddyEnginePids instanceof Set ? procCounts.workbuddyEnginePids : [];
+  return groupSurfaceCounts(enginePids, procCounts?.workbuddySurfaceByPid).map(
+    ([surface, count]) => ({ surface, label: workbuddySurfaceLabel(surface), count }),
+  );
+}
+
+// 产品自己的会话注册表：`<config root>/sessions/<pid>.json`，每个 agent 运行时
+// 进程一份，`kind` 说明它的用途（interactive / prewarm …），`sessionId` 是它正在
+// 服务的会话。预热池的空闲备用进程也带完整命令行（`--prewarm --prewarm-id
+// wb-pool-…`），只看命令行分不出来，但它们没在服务任何会话——按会话计数就会在
+// 面板上挂一条 0 流量的幽灵行。判据因此收窄成「注册表说它在待命」才不计数：
+// 文件不存在 / 读不出 / 字段缺失一律按命令行判据照常计数（宁可多算，不静默漏）。
+const WORKBUDDY_SESSIONS_DIRNAME = "sessions";
+
+// 配置根：产品自己的环境变量优先，否则用户家目录下的 `.workbuddy`。
+function workbuddyConfigRoot(env = process.env) {
+  const configured = env?.WORKBUDDY_CONFIG_DIR;
+  if (typeof configured === "string" && configured.trim().length > 0) return configured.trim();
+  const home = env?.USERPROFILE ?? env?.HOME;
+  if (typeof home !== "string" || home.trim().length === 0) return null;
+  return join(home.trim(), ".workbuddy");
+}
+
+// 读一份注册表。任何异常（不存在、权限、半截写入、非对象）都返回 null，调用方
+// 据此回落到命令行判据——读不出不等于「它在待命」。
+function readWorkbuddySessionRecord(pid, configRoot = workbuddyConfigRoot()) {
+  if (!Number.isInteger(pid) || pid <= 0 || typeof configRoot !== "string") return null;
+  try {
+    const raw = readFileSync(join(configRoot, WORKBUDDY_SESSIONS_DIRNAME, `${pid}.json`), "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// 注册表说这个进程是不是预热池里的空闲备用：`kind` 明说 prewarm，或没有会话 id
+// （空串 / 缺席 / 非字符串）都算没在服务。真机那条 `--prewarm` 行注册表是
+// kind:"interactive" 且有 sessionId——它正在服务，照常计数。
+export function workbuddySessionIsIdlePrewarm(record) {
+  if (record === null || typeof record !== "object") return false;
+  const kind = typeof record.kind === "string" ? record.kind.trim().toLowerCase() : "";
+  if (kind === "prewarm") return true;
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim()
+    : (typeof record.sessionId === "number" && Number.isFinite(record.sessionId) ? String(record.sessionId) : "");
+  return sessionId.length === 0;
+}
+
 // Terminal (console) liveness for TUI-profile DSH engines. Windows lets a
 // process outlive its terminal: when the console host dies abruptly
 // (terminal crash, taskkill) the attached harness is not notified and keeps
@@ -1142,9 +1195,15 @@ function priorCountedIn(priorCounted, bucket, pid) {
   return pid !== null && set instanceof Set && set.has(pid);
 }
 
-function parseTasklistCsv(stdout, priorCounted = null) {
+function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = readWorkbuddySessionRecord) {
   const result = createEmptyProcessScan();
   if (typeof stdout !== "string" || stdout.length === 0) return result;
+
+  // 注册表第二判据（见 workbuddySessionIsIdlePrewarm）：只对本来就要计数的行问一次，
+  // 读不出（null）时按命令行判据照常计数。
+  const wbSessionLookup = typeof workbuddySessionLookup === "function" ? workbuddySessionLookup : null;
+  const workbuddyIdlePrewarm = (pid) => pid !== null && wbSessionLookup !== null
+    && workbuddySessionIsIdlePrewarm(wbSessionLookup(pid));
 
   // pi 双计防护的工作区（写入见 pi 桶分支与 node 分支，裁决在循环后）：
   // nativePiPids 收原生 pi.exe 行的 pid；piNodeCandidates 收命中 isPiNode 的
@@ -1417,7 +1476,11 @@ function parseTasklistCsv(stdout, priorCounted = null) {
       // 家族集：本镜像的每一行都进（谱系 / 行存活），含 helper / daemon /
       // sidecar——它们永不计数，但要保住家族面的存活判定。
       if (pid) result.workbuddyPids.add(pid);
-      if (isSession || (isCommandLineUnreadable(commandLine) && priorCountedIn(priorCounted, "workbuddy", pid))) {
+      // 第二判据：预热池的空闲备用进程（`--prewarm --prewarm-id wb-pool-…`）命令行
+      // 与真会话同形，只有产品注册表能说它在待命。注册表读不出时照常计数。
+      const countsAsSession = isSession
+        || (isCommandLineUnreadable(commandLine) && priorCountedIn(priorCounted, "workbuddy", pid));
+      if (countsAsSession && !workbuddyIdlePrewarm(pid)) {
         result.workbuddy += 1;
         if (pid) result.workbuddyEnginePids.add(pid);
       }
@@ -1510,6 +1573,25 @@ function parseTasklistCsv(stdout, priorCounted = null) {
           // (attachKimiSurfaces), because a `kimi web` boot is the same node
           // row with the same install path and no distinguishing flag.
           result.kimiSurfaceByPid.set(pid, "tui");
+        }
+      }
+      // WorkBuddy 终端形态（真机 2026-10-31）：launcher 用 process.execPath 再 spawn
+      // `node <install>\resources\app.asar.unpacked\cli\bin\codebuddy`，镜像名是
+      // node.exe——只认 WorkBuddy.exe 的判据对这条形态全盲（终端里起的会话一张行
+      // 都没有）。入口路径与桌面运行时的谓词同一个（WORKBUDDY_RUNTIME_RE）；launcher
+      // 自身那行（`…\workbuddy-launcher.mjs`）不含该路径段，天然不命中；`--type=`
+      // 是 Electron 辅助子进程，`--version` 是环境检测探针（短命令行的尾 token），
+      // 两者都不算会话。预热池的空闲备用同样只认注册表（见 workbuddyIdlePrewarm）。
+      const isWorkbuddyNode = WORKBUDDY_RUNTIME_RE.test(commandLine ?? "")
+        && !commandLine?.includes("--type=")
+        && !/\s--version\s*$/.test(commandLine ?? "");
+      if (isWorkbuddyNode) {
+        if (pid) result.workbuddyPids.add(pid);
+        // 引擎集必须同步收：占位行与行存活只认引擎集，只进家族集的 pid 会被同一轮
+        // 的 pid 行淘汰逻辑当轮清掉（进程在、行却闪一下就没）。
+        if (!workbuddyIdlePrewarm(pid)) {
+          result.workbuddy += 1;
+          if (pid) result.workbuddyEnginePids.add(pid);
         }
       }
     }
@@ -2663,6 +2745,11 @@ export function createAgentMetricsCollector(options = {}) {
   // one in; the panel and per-launch launcher collectors pass nothing and
   // behave exactly as before.
   const journal = options.journal ?? null;
+  // WorkBuddy 会话注册表的读取口（预热池判据，见 workbuddySessionIsIdlePrewarm）。
+  // 默认读产品自己的磁盘注册表；测试注入纯函数即可覆盖三种形态，不碰真实家目录。
+  const workbuddySessionLookup = typeof options.workbuddySessionLookup === "function"
+    ? options.workbuddySessionLookup
+    : readWorkbuddySessionRecord;
   const stability = options.stability ?? createModelStabilityTracker({
     nowFn,
     persistPath: options.stabilityPath ?? (persistRoot ? join(persistRoot, STABILITY_FILENAME) : null),
@@ -2889,7 +2976,7 @@ export function createAgentMetricsCollector(options = {}) {
       // failed round — the tasklist fallback still gets its say.
       const psOut = await psProbe.query().catch(() => null);
       if (typeof psOut === "string" && psOut.trim().length > 0) {
-        const counts = parseTasklistCsv(psOut, priorCountedPids());
+        const counts = parseTasklistCsv(psOut, priorCountedPids(), workbuddySessionLookup);
         // 常驻探针这一路带命令行与父进程列，是唯一能认全 node 型客户端的
         // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。
         counts.countsAuthoritative = true;
@@ -2917,7 +3004,7 @@ export function createAgentMetricsCollector(options = {}) {
       await new Promise((resolve) => {
         execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, async (err, stdout) => {
           if (!err && typeof stdout === "string") {
-            const counts = parseTasklistCsv(stdout, priorCountedPids());
+            const counts = parseTasklistCsv(stdout, priorCountedPids(), workbuddySessionLookup);
             // 这半张视图认不出 node 型客户端：报了行的轮次其桶内计数不可信
             // （见 createEmptyProcessScan 上方）；零行则没有可误判归属的行，
             // 沿用「端点已关闭」这一既有语义。
@@ -2995,7 +3082,7 @@ export function createAgentMetricsCollector(options = {}) {
   // Served from the cached scan (≤ scan TTL old); an empty lineage table
   // (tasklist fallback path) yields empty ancestor lists — the panel then
   // cannot attribute and sessions stay plain shells.
-  const DETECTED_CLIENT_ENDPOINTS = ["codex", "dsh", "kimi", "claude", "opencode", "grok", "pi", "qoder"];
+  const DETECTED_CLIENT_ENDPOINTS = ["codex", "dsh", "kimi", "claude", "opencode", "grok", "pi", "qoder", "workbuddy"];
 
   function getDetectedClientProcesses() {
     const counts = cachedProcessCounts ?? createEmptyProcessScan();
@@ -4933,15 +5020,20 @@ export function createAgentMetricsCollector(options = {}) {
 
     // WorkBuddy Agent Status（汇总卡 + 实例桶；agent 运行时每进程一行，
     // 行 id 由进程扫描占位或 socket 反查合成 workbuddy-<pid>，面由父链决定）
-    const workbuddyAgent = buildAggregateAgentStatus({
-      id: "workbuddy",
-      name: "WorkBuddy",
-      state: workbuddyState,
-      processCount: procCounts.workbuddy || 0,
-      tpsWindow: recentSampleWindow,
-      nowFn,
-      instances: instanceSnapshots("workbuddy"),
-    });
+    // 卡内分面汇总（"Desktop ×2 · CLI ×1"）：Desktop 的 GUI 运行时与终端拉起的
+    // CLI 共用同一个 agentId，请求面同像，只有进程扫描能在第一条请求之前分辨。
+    const workbuddyAgent = {
+      ...buildAggregateAgentStatus({
+        id: "workbuddy",
+        name: "WorkBuddy",
+        state: workbuddyState,
+        processCount: procCounts.workbuddy || 0,
+        tpsWindow: recentSampleWindow,
+        nowFn,
+        instances: instanceSnapshots("workbuddy"),
+      }),
+      surfaces: summarizeWorkbuddySurfaces(procCounts),
+    };
 
     return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent, grokAgent, workbuddyAgent];
   }
