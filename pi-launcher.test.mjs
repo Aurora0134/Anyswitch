@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { buildInstanceId, buildPiLauncherEnv, runPiLauncher, writePiModels, resolvePiExecutable } from "./pi-launcher.mjs";
 import { readSidecar } from "./pi-merge-models.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
@@ -28,7 +27,9 @@ describe("buildInstanceId", () => {
   });
 
   it("defaults to the launcher's own cwd and pid", () => {
-    assert.match(buildInstanceId(), /^[A-Za-z0-9._:-]{1,64}$/);
+    // 零参调用必须解析为"本 launcher 进程"的 cwd 与 pid：与显式传入二者的
+    // 构造结果全等。缺省值一旦漂移（换成常量、丢掉 pid 等）此处即红。
+    assert.equal(buildInstanceId(), buildInstanceId({ cwd: process.cwd(), pid: process.pid }));
   });
 });
 
@@ -70,104 +71,173 @@ describe("resolvePiExecutable", () => {
   });
 });
 
+// runPiLauncher 无参调用模块级 loadStore()，它每次都读 process.env.LOCALAPPDATA
+// （store-io.mjs 的 defaultRoot）。不隔离时用例结果由宿主机真实 store 决定：
+// 换机、清空 store 或该变量缺失必红/必崩。这里把该变量临时指向夹具目录并还原，
+// 整个 runPiLauncher 套件与宿主机解耦。
+async function withFakeLocalAppData(run) {
+  const root = mkTestDir("pi-launch-localappdata-");
+  const previous = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = root;
+  try {
+    return await run(root);
+  } finally {
+    if (previous === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previous;
+  }
+}
+
+// 过 validateStore 的最小 v2 store：writeModels 是桩，store 内容无关紧要，
+// 只需 loadStore 判 ok:true；下面的 deepEqual 断言同时证明读到的确实是这份
+// 夹具而非宿主机真实 store。
+const VALID_STORE = {
+  version: 2,
+  providers: {
+    "poke-api": {
+      displayName: "Poke API",
+      baseURL: "https://poke.example/v1",
+      protocol: "openai-compatible",
+      credentialFile: "poke-api.dpapi",
+      models: { m1: { displayName: "M1" } },
+    },
+  },
+};
+
+function writeFakeStore(root) {
+  mkdirSync(join(root, "Anyswitch"), { recursive: true });
+  writeFileSync(join(root, "Anyswitch", "store.json"), `${JSON.stringify(VALID_STORE, null, 2)}\n`, "utf8");
+}
+
 describe("runPiLauncher", () => {
   it("starts relay, writes models, spawns pi, closes relay", async () => {
-    const calls = [];
-    const code = await runPiLauncher({
-      startRelay: async () => {
-        calls.push("startRelay");
-        return { port: 7000, token: "tok", close: async () => calls.push("closeRelay") };
-      },
-      writeModels: async (store, port, sidecarRoot) => {
-        calls.push(`writeModels:${port}`);
-        return { unchanged: false, backupPath: "backup.json" };
-      },
-      spawnPi: async ({ env }) => {
-        calls.push(`spawnPi:${env.ANYSWITCH_RELAY_TOKEN}:${env.NO_PROXY}`);
-        return 0;
-      },
-      log: () => {},
-      base: {},
+    await withFakeLocalAppData(async (storeRoot) => {
+      writeFakeStore(storeRoot);
+      const calls = [];
+      let loadedStore = null;
+      let sidecarRoot = null;
+      const code = await runPiLauncher({
+        startRelay: async () => {
+          calls.push("startRelay");
+          return { port: 7000, token: "tok", close: async () => calls.push("closeRelay") };
+        },
+        writeModels: async (store, port, root) => {
+          loadedStore = store;
+          sidecarRoot = root;
+          calls.push(`writeModels:${port}`);
+          return { unchanged: false, backupPath: "backup.json" };
+        },
+        spawnPi: async ({ env }) => {
+          calls.push(`spawnPi:${env.ANYSWITCH_RELAY_TOKEN}:${env.NO_PROXY}`);
+          return 0;
+        },
+        log: () => {},
+        base: { LOCALAPPDATA: storeRoot },
+      });
+      assert.equal(code, 0);
+      assert.deepEqual(calls, [
+        "startRelay",
+        "writeModels:7000",
+        "spawnPi:tok:127.0.0.1,localhost",
+        "closeRelay",
+      ]);
+      // 同步读的是夹具 store，data root 也由 base 指向夹具根——任何分支
+      // 落到宿主机真实数据上都会在此处红。
+      assert.deepEqual(loadedStore, VALID_STORE);
+      assert.equal(sidecarRoot, join(storeRoot, "Anyswitch"));
     });
-    assert.equal(code, 0);
-    assert.deepEqual(calls, [
-      "startRelay",
-      "writeModels:7000",
-      "spawnPi:tok:127.0.0.1,localhost",
-      "closeRelay",
-    ]);
   });
 
   it("passes a generated ANYSWITCH_INSTANCE_ID into the spawned env", async () => {
-    let spawnedEnv = null;
-    await runPiLauncher({
-      startRelay: async () => ({ port: 7000, token: "tok", close: async () => {} }),
-      writeModels: async () => ({ unchanged: true }),
-      spawnPi: async ({ env }) => {
-        spawnedEnv = env;
-        return 0;
-      },
-      base: {},
+    await withFakeLocalAppData(async () => {
+      let spawnedEnv = null;
+      await runPiLauncher({
+        startRelay: async () => ({ port: 7000, token: "tok", close: async () => {} }),
+        writeModels: async () => ({ unchanged: true }),
+        spawnPi: async ({ env }) => {
+          spawnedEnv = env;
+          return 0;
+        },
+        base: {},
+      });
+      assert.match(spawnedEnv.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
+      // The shared scheme is "<cwd basename>-<launcher pid>"; this process IS
+      // the launcher here, so the id ends with our own pid.
+      assert.ok(spawnedEnv.ANYSWITCH_INSTANCE_ID.endsWith(`-${process.pid}`));
     });
-    assert.match(spawnedEnv.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
-    // The shared scheme is "<cwd basename>-<launcher pid>"; this process IS
-    // the launcher here, so the id ends with our own pid.
-    assert.ok(spawnedEnv.ANYSWITCH_INSTANCE_ID.endsWith(`-${process.pid}`));
   });
 
   it("closes relay even when spawn throws", async () => {
-    let closed = false;
-    await assert.rejects(
-      runPiLauncher({
-        startRelay: async () => ({ port: 7000, token: "tok", close: async () => { closed = true; } }),
-        writeModels: async () => ({ unchanged: true }),
-        spawnPi: async () => {
-          throw new Error("spawn failed");
-        },
-        base: {},
-      }),
-      /spawn failed/,
-    );
-    assert.equal(closed, true);
+    await withFakeLocalAppData(async () => {
+      let closed = false;
+      await assert.rejects(
+        runPiLauncher({
+          startRelay: async () => ({ port: 7000, token: "tok", close: async () => { closed = true; } }),
+          writeModels: async () => ({ unchanged: true }),
+          spawnPi: async () => {
+            throw new Error("spawn failed");
+          },
+          base: {},
+        }),
+        /spawn failed/,
+      );
+      assert.equal(closed, true);
+    });
   });
 
   it("continues when store is unreadable, logging a warning", async () => {
-    const logs = [];
-    const code = await runPiLauncher({
-      startRelay: async () => ({ port: 7000, token: "tok", close: async () => {} }),
-      writeModels: async () => ({ unchanged: true }),
-      spawnPi: async () => 1,
-      log: (line) => logs.push(line),
-      base: process.env,
+    await withFakeLocalAppData(async (storeRoot) => {
+      // store.json 存在但不是合法 JSON → loadStore 分类 UNPARSEABLE（ok:false），
+      // 与缺失走同一条 !loaded.ok 分支；取"存在但读不了"更贴用例名。
+      mkdirSync(join(storeRoot, "Anyswitch"), { recursive: true });
+      writeFileSync(join(storeRoot, "Anyswitch", "store.json"), "{ not json", "utf8");
+      const logs = [];
+      let writeCalled = false;
+      const code = await runPiLauncher({
+        startRelay: async () => ({ port: 7000, token: "tok", close: async () => {} }),
+        writeModels: async () => {
+          writeCalled = true;
+          return { unchanged: true };
+        },
+        spawnPi: async () => 1,
+        log: (line) => logs.push(line),
+        base: { LOCALAPPDATA: storeRoot },
+      });
+      assert.equal(code, 1, "pi still launches, exit code passes through");
+      assert.equal(writeCalled, false, "models sync is skipped without a usable store");
+      assert.ok(
+        logs.some((line) => line.includes("store could not be read")),
+        "the skip is explained via the log callback",
+      );
     });
-    assert.equal(code, 1);
   });
 
   it("launches pi with the plain base env when the relay cannot be acquired", async () => {
-    const logs = [];
-    let writeCalled = false;
-    let spawned = null;
-    const code = await runPiLauncher({
-      startRelay: async () => {
-        throw new Error("port 47821 is held by a foreign process");
-      },
-      writeModels: async () => {
-        writeCalled = true;
-        return { unchanged: true };
-      },
-      spawnPi: async ({ env, args }) => {
-        spawned = { env, args };
-        return 3;
-      },
-      log: (line) => logs.push(line),
-      base: { PATH: "x" },
-      piArgs: ["--help"],
+    await withFakeLocalAppData(async () => {
+      const logs = [];
+      let writeCalled = false;
+      let spawned = null;
+      const code = await runPiLauncher({
+        startRelay: async () => {
+          throw new Error("port 47821 is held by a foreign process");
+        },
+        writeModels: async () => {
+          writeCalled = true;
+          return { unchanged: true };
+        },
+        spawnPi: async ({ env, args }) => {
+          spawned = { env, args };
+          return 3;
+        },
+        log: (line) => logs.push(line),
+        base: { PATH: "x" },
+        piArgs: ["--help"],
+      });
+      assert.equal(code, 3, "pi's own exit code passes through");
+      assert.equal(writeCalled, false, "models sync must not run without a relay");
+      assert.deepEqual(spawned.env, { PATH: "x" }, "no relay env is injected on the fallback path");
+      assert.deepEqual(spawned.args, ["--help"]);
+      assert.ok(logs.some((line) => line.includes("relay unavailable")), "stderr explains the fallback");
     });
-    assert.equal(code, 3, "pi's own exit code passes through");
-    assert.equal(writeCalled, false, "models sync must not run without a relay");
-    assert.deepEqual(spawned.env, { PATH: "x" }, "no relay env is injected on the fallback path");
-    assert.deepEqual(spawned.args, ["--help"]);
-    assert.ok(logs.some((line) => line.includes("relay unavailable")), "stderr explains the fallback");
   });
 
   // 托管条目的盘上形态：静态 token + "direct" 实例值，直启不崩；launcher 拉起前
@@ -193,84 +263,93 @@ describe("runPiLauncher", () => {
   });
 
   it("retags managed providers for the launch and restores the static values on exit", async () => {
-    const dir = mkTestDir("pi-launch-tag-");
-    const modelsPath = join(dir, "models.json");
-    writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
-    let duringSpawn = null;
-    let spawnedInstance = null;
-    const code = await runPiLauncher({
-      startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
-      writeModels: async () => ({ unchanged: true }),
-      spawnPi: async ({ env }) => {
-        spawnedInstance = env.ANYSWITCH_INSTANCE_ID;
-        duringSpawn = JSON.parse(readFileSync(modelsPath, "utf8"));
-        return 0;
-      },
-      base: {},
-      modelsPath,
-    });
-    assert.equal(code, 0);
-    assert.equal(duringSpawn.providers._poke.apiKey, "relay-tok", "launch token on disk while pi runs");
-    assert.equal(duringSpawn.providers._poke.headers["x-agent-instance"], spawnedInstance);
-    assert.notEqual(spawnedInstance, "direct");
-    assert.equal(duringSpawn.providers["user-own"].apiKey, "sk-user", "foreign provider never retagged");
-    const after = JSON.parse(readFileSync(modelsPath, "utf8"));
-    assert.equal(after.providers._poke.headers["x-agent-instance"], "direct", "static value restored after exit");
-  });
-
-  it("leaves a concurrent launcher's retag in place on exit", async () => {
-    const dir = mkTestDir("pi-launch-tag-");
-    const modelsPath = join(dir, "models.json");
-    writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
-    await runPiLauncher({
-      startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
-      writeModels: async () => ({ unchanged: true }),
-      spawnPi: async () => {
-        // A second launcher retags the same entry while this pi is running.
-        const config = JSON.parse(readFileSync(modelsPath, "utf8"));
-        config.providers._poke.headers["x-agent-instance"] = "other-launcher-999";
-        writeFileSync(modelsPath, JSON.stringify(config, null, 2) + "\n", "utf8");
-        return 0;
-      },
-      base: {},
-      modelsPath,
-    });
-    const after = JSON.parse(readFileSync(modelsPath, "utf8"));
-    assert.equal(
-      after.providers._poke.headers["x-agent-instance"],
-      "other-launcher-999",
-      "restore must not clobber a tag this launch did not write",
-    );
-  });
-
-  it("restores the static instance value even when spawn throws", async () => {
-    const dir = mkTestDir("pi-launch-tag-");
-    const modelsPath = join(dir, "models.json");
-    writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
-    await assert.rejects(
-      runPiLauncher({
+    await withFakeLocalAppData(async () => {
+      const dir = mkTestDir("pi-launch-tag-");
+      const modelsPath = join(dir, "models.json");
+      writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
+      let duringSpawn = null;
+      let spawnedInstance = null;
+      const code = await runPiLauncher({
         startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
         writeModels: async () => ({ unchanged: true }),
-        spawnPi: async () => {
-          throw new Error("spawn failed");
+        spawnPi: async ({ env }) => {
+          spawnedInstance = env.ANYSWITCH_INSTANCE_ID;
+          duringSpawn = JSON.parse(readFileSync(modelsPath, "utf8"));
+          return 0;
         },
         base: {},
         modelsPath,
-      }),
-      /spawn failed/,
-    );
-    const after = JSON.parse(readFileSync(modelsPath, "utf8"));
-    assert.equal(after.providers._poke.headers["x-agent-instance"], "direct");
+      });
+      assert.equal(code, 0);
+      assert.equal(duringSpawn.providers._poke.apiKey, "relay-tok", "launch token on disk while pi runs");
+      assert.equal(duringSpawn.providers._poke.headers["x-agent-instance"], spawnedInstance);
+      assert.notEqual(spawnedInstance, "direct");
+      assert.equal(duringSpawn.providers["user-own"].apiKey, "sk-user", "foreign provider never retagged");
+      const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+      assert.equal(after.providers._poke.headers["x-agent-instance"], "direct", "static value restored after exit");
+    });
+  });
+
+  it("leaves a concurrent launcher's retag in place on exit", async () => {
+    await withFakeLocalAppData(async () => {
+      const dir = mkTestDir("pi-launch-tag-");
+      const modelsPath = join(dir, "models.json");
+      writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
+      await runPiLauncher({
+        startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
+        writeModels: async () => ({ unchanged: true }),
+        spawnPi: async () => {
+          // A second launcher retags the same entry while this pi is running.
+          const config = JSON.parse(readFileSync(modelsPath, "utf8"));
+          config.providers._poke.headers["x-agent-instance"] = "other-launcher-999";
+          writeFileSync(modelsPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+          return 0;
+        },
+        base: {},
+        modelsPath,
+      });
+      const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+      assert.equal(
+        after.providers._poke.headers["x-agent-instance"],
+        "other-launcher-999",
+        "restore must not clobber a tag this launch did not write",
+      );
+    });
+  });
+
+  it("restores the static instance value even when spawn throws", async () => {
+    await withFakeLocalAppData(async () => {
+      const dir = mkTestDir("pi-launch-tag-");
+      const modelsPath = join(dir, "models.json");
+      writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
+      await assert.rejects(
+        runPiLauncher({
+          startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
+          writeModels: async () => ({ unchanged: true }),
+          spawnPi: async () => {
+            throw new Error("spawn failed");
+          },
+          base: {},
+          modelsPath,
+        }),
+        /spawn failed/,
+      );
+      const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+      assert.equal(after.providers._poke.headers["x-agent-instance"], "direct");
+    });
   });
 });
 
 describe("writePiModels", () => {
   it("returns unchanged when there are no Anyswitch providers with models", async () => {
+    // 独占夹具目录而非裸 tmpdir()：sidecarRoot 与 models.json 都落夹具内，
+    // 不受宿主 %TEMP% 里残留的 pi-sidecar.json 影响，也绝不碰真实 models.json。
+    const dir = mkTestDir("pi-write-noop-");
     const result = await writePiModels(
       { version: 2, providers: { empty: { models: {} } } },
       47821,
-      tmpdir(),
-      join(tmpdir(), "models.json"),
+      dir,
+      join(dir, "models.json"),
     );
     assert.equal(result.ok, true);
     assert.equal(result.unchanged, true);

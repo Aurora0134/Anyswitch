@@ -114,9 +114,17 @@ test("管道/文件名里带空格与特殊字符的执行路径原样传递，�
   const { calls, spawn } = fakeSpawn((_, callback) => callback(null, "", ""));
   const npmCli = "C:\\Program Files (x86)\\node dir\\node_modules\\npm\\bin\\npm-cli.js";
   const io = { existsSync: () => true };
-  await runClientLifecycle({ id: "dsh", action: "install", spawn, execPath: "C:\\Program Files (x86)\\node dir\\node.exe", io });
+  // dsh 是双腿客户端，桌面腿走 official-feed：不注入 fetchFn 会落到真 fetch，
+  // 真实请求官方 feed 并把整包安装包拉进内存。这里注入立即失败的替身，桌面腿
+  // 只记 networkError；本用例断言只看 npm 腿。
+  const result = await runClientLifecycle({
+    id: "dsh", action: "install", spawn,
+    execPath: "C:\\Program Files (x86)\\node dir\\node.exe", io,
+    fetchFn: () => Promise.reject(new Error("测试替身：桌面腿不联网")),
+  });
   assert.equal(calls[0].args[0], npmCli);
   assert.deepEqual(calls[0].args.slice(1, 4), ["install", "--global", "--no-audit"]);
+  assert.equal(result.legs.find((l) => l.form === "desktop").networkError, true, "桌面腿被替身掐断，全程不真实联网");
 });
 
 // ── Grok Build：先跑它自身的升级命令，失败才降级到 npm ──────────────────
@@ -273,7 +281,7 @@ test("codex 桌面腿 exit 43 或无可用升级文案都记为已最新，整�
     (call, callback) => callback(call.file === "winget" ? Object.assign(new Error("exit 1"), { code: 1 }) : null, "No applicable upgrade found", ""),
   ]) {
     const { calls, spawn } = fakeSpawn(impl);
-    const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\node\node.exe", io });
+    const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\\node\\node.exe", io });
     assert.equal(result.ok, true);
     const desktop = result.legs.find((l) => l.form === "desktop");
     assert.equal(desktop.ok, true);
@@ -288,7 +296,7 @@ test("codex 桌面腿失败时打开商店页降级，整体记失败", async ()
     call.file === "winget" ? "" : "",
     call.file === "winget" ? "store source unavailable" : "",
   ));
-  const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\node\node.exe", io: { existsSync: () => true } });
+  const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\\node\\node.exe", io: { existsSync: () => true } });
   assert.equal(result.ok, false);
   const desktop = result.legs.find((l) => l.form === "desktop");
   assert.equal(desktop.ok, false);
@@ -300,7 +308,7 @@ test("codex 桌面腿失败时打开商店页降级，整体记失败", async ()
 test("codex 桌面腿 winget 缺失时不伪装失败也不开商店页", async () => {
   const { calls, spawn } = fakeSpawn((call, callback) => callback(
     call.file === "winget" ? Object.assign(new Error("spawn winget ENOENT"), { code: "ENOENT" }) : null, "", ""));
-  const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\node\node.exe", io: { existsSync: () => true } });
+  const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\\node\\node.exe", io: { existsSync: () => true } });
   const desktop = result.legs.find((l) => l.form === "desktop");
   assert.equal(desktop.ok, false);
   assert.equal(desktop.wingetMissing, true);
@@ -311,7 +319,7 @@ test("codex 桌面腿 winget 缺失时不伪装失败也不开商店页", async 
 test("codex 任一腿被超时杀掉都会向上聚合 timedOut", async () => {
   const { spawn } = fakeSpawn((call, callback) => callback(
     call.file === "winget" ? Object.assign(new Error("killed"), { killed: true, signal: "SIGTERM" }) : null, "", ""));
-  const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\node\node.exe", io: { existsSync: () => true } });
+  const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\\node\\node.exe", io: { existsSync: () => true } });
   assert.equal(result.timedOut, true);
 });
 

@@ -73,12 +73,15 @@ function buildSandbox(block) {
 }
 
 // 全 10 卡的默认看板 payload：聚合卡已启动（status=running）空闲且从未活动
-// （无 sessions、无 lastSeen），claude 无会话——默认全部落待命层，用例按需
-// 覆盖个别端点（status 改 "stopped" 即落入底组）。
+// （无 sessions、无 lastSeen），claude 无会话但进程仍在——默认全部落待命层，
+// 用例按需覆盖个别端点（status 改 "stopped" 即落入底组）。
+// claude 的 processCount 必须给 1：后端口径是无会话且进程为 0 必判 stopped
+// （agent-metrics.mjs：claudeIsRunning = sessions>0 || processCount>0），
+// 夹具要停留在「running 空闲」这个线上真实存在的状态上。
 function board(overrides = {}) {
   return AGENT_IDS.map((id) => {
     if (overrides[id]) return overrides[id];
-    if (id === "claude") return { id, status: "running", processCount: 0, sessions: [] };
+    if (id === "claude") return { id, status: "running", processCount: 1, sessions: [] };
     return { id, status: "running", processCount: 1, metrics: { activeRequests: 0 }, sessions: [] };
   });
 }
@@ -115,11 +118,20 @@ describe("panel.html 端点卡待命下沉排序", () => {
   });
 
   it("① 聚合卡生成中但 lastSeen 很老仍在上组（生成中不看锚点）", () => {
+    // 对照卡取基准序末位的 grok（首位 zcode 无论归哪层都排第 0，无判别力）：
+    // 若生成中判定失效、grok 被按 10 分钟前的老锚点下沉，它会给出到待命层
+    // 末尾，全序断言即被打破。
     const t = makeReorder();
-    const agents = board({ zcode: aggGenerating("zcode") });
-    agents.find((a) => a.id === "zcode").sessions = [{ lastSeen: t.now() - 600 * 1000 }];
+    const agents = board({
+      dsh: aggIdleSince("dsh", 60 * 1000, t.now()),
+      grok: aggGenerating("grok"),
+    });
+    agents.find((a) => a.id === "grok").sessions = [{ lastSeen: t.now() - 600 * 1000 }];
     t.reorderAgentCards(agents);
-    assert.equal(t.appends[0][0], "zcode");
+    assert.deepEqual(t.appends[0], [
+      "grok",
+      "zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "workbuddy",
+    ], "生成中的 grok 虽 lastSeen 很老仍独占顶层（生成中不看锚点），其余已启动卡按基准序落待命层");
   });
 
   it("② 待命 ≤5s 留上组；跨过 5s 边界那一刻才重排 DOM（顺序没变不动 DOM）", () => {
@@ -148,11 +160,18 @@ describe("panel.html 端点卡待命下沉排序", () => {
   });
 
   it("③ 页签隐藏很久后回看板：按服务端锚点第一拍就位，不再等观察期", () => {
+    // 生成中的 kimi 作对照，否则默认板什么都不覆盖时输出与期望恒等、用例无判
+    // 别力：若锚点退化成「面板观测起点」，首拍全员都在宽限期内，dsh 会顶进上
+    // 组且整体退回基准序，期望即被打破。
     const t = makeReorder();
     t.reorderAgentCards(board({
+      kimi: aggGenerating("kimi"),
       dsh: aggIdleSince("dsh", 10 * 60 * 1000, t.now()),
     }));
-    assert.deepEqual(t.appends[0], BASE_ORDER, "10 分钟前最后活动的已启动卡首拍即落待命层（基准序）");
+    assert.deepEqual(t.appends[0], [
+      "kimi",
+      "zcode", "claude", "dsh", "pi", "opencode", "qoder", "codex", "grok", "workbuddy",
+    ], "10 分钟前最后活动的 dsh 按服务端锚点首拍即落待命层（不等观察期），生成中的 kimi 居顶");
   });
 
   it("④ claude 会话整行退出后锚点消失，面板记忆让待命计时连续", () => {

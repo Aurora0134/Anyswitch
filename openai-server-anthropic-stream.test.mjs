@@ -7,6 +7,21 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
+
+// Isolation fixture: redirect the per-user data root to a temp directory for
+// this whole test process. Deps below inject every injectable default-path
+// reader, but not every reader goes through deps (protocol.mjs
+// anthropicToOpenAI consults midSystemRewriteEnabled() directly), so the env
+// redirect is what guarantees no request touches the real
+// %LOCALAPPDATA%\Anyswitch tree — same idea as panel-self-update.test.mjs's
+// per-case base. node --test runs each file in its own process, so this
+// cannot leak into sibling suites; test-helpers/tmp.mjs sweeps it on exit.
+const envRoot = mkTestDir("anys-anthropic-stream-env-");
+process.env.LOCALAPPDATA = envRoot;
+process.env.APPDATA = envRoot;
+process.env.USERPROFILE = envRoot;
 
 const TOKEN = "test-token-anthropic-stream";
 
@@ -23,6 +38,15 @@ const STORE = {
   },
 };
 
+// Without these injections createHandler falls back to the disk-backed
+// defaults (defaultEffortInjector + imageFallbackEnabled/imageHeuristicEnabled),
+// which read the real %LOCALAPPDATA%\Anyswitch settings.json and
+// thinking-efforts.db.json on every request — contradicting the isolation
+// promised in the file header. isEnabled:false makes inject() short-circuit
+// before the effort library is ever opened; same pattern as
+// anthropic-server-chain.test.mjs (OFF_EFFORT_INJECTOR).
+const OFF_EFFORT_INJECTOR = () => createEffortInjector({ isEnabled: () => false });
+
 function createMockDeps({ upstreamFetch, getKeepAliveConfig }) {
   return {
     token: TOKEN,
@@ -32,7 +56,24 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig }) {
     recordGeneration: () => {},
     readGeneration: () => null,
     getKeepAliveConfig,
+    effortInjector: OFF_EFFORT_INJECTOR(),
+    imageFallbackGate: () => false,
+    imageHeuristicGate: () => false,
   };
+}
+
+// Subsequence scan over the emitted Anthropic SSE event names. The cursor must
+// advance PAST the matched frame: stopping at the match's start (`cursor = at`)
+// lets a repeated name in `order` be satisfied by the very same earlier
+// occurrence, so a missing second delta could never fail this loop.
+function assertSseEventOrder(text, order) {
+  let cursor = 0;
+  for (const event of order) {
+    const needle = `event: ${event}`;
+    const at = text.indexOf(needle, cursor);
+    assert.ok(at !== -1, `missing ${event}`);
+    cursor = at + needle.length;
+  }
 }
 
 async function withServer(deps, fn) {
@@ -87,12 +128,7 @@ describe("resident relay /v1/messages streaming (Anthropic path)", () => {
       // The client speaks the Anthropic Messages protocol: the relay must
       // translate the upstream OpenAI chunks into Anthropic-shaped events.
       const order = ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"];
-      let cursor = 0;
-      for (const event of order) {
-        const at = text.indexOf(`event: ${event}`, cursor);
-        assert.ok(at !== -1, `missing ${event}`);
-        cursor = at;
-      }
+      assertSseEventOrder(text, order);
       assert.ok(text.includes('"text_delta"'));
       assert.ok(text.includes("He"), "first text fragment must survive");
       assert.ok(text.includes("llo"), "second text fragment must survive");
@@ -130,12 +166,7 @@ describe("resident relay /v1/messages streaming (Anthropic path)", () => {
         "message_delta",
         "message_stop",
       ];
-      let cursor = 0;
-      for (const event of order) {
-        const at = text.indexOf(`event: ${event}`, cursor);
-        assert.ok(at !== -1, `missing ${event}`);
-        cursor = at;
-      }
+      assertSseEventOrder(text, order);
       assert.ok(text.includes('"thinking"'), "a thinking block must be opened");
       assert.ok(text.includes('"thinking_delta"'), "reasoning must stream as thinking_delta");
       assert.ok(text.includes("想"), "the thinking text must survive");
@@ -145,14 +176,18 @@ describe("resident relay /v1/messages streaming (Anthropic path)", () => {
   });
 
   it("exhausts keep-alive retries on empty streams and answers 502 with a readable message", async () => {
-    const upstreamFetch = async () => ({
-      ok: true,
-      status: 200,
-      body: sseStream([
-        'data: {"id":"1","choices":[{"delta":{}}]}\n\n',
-        "data: [DONE]\n\n",
-      ]),
-    });
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"1","choices":[{"delta":{}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
 
     const deps = createMockDeps({
       upstreamFetch,
@@ -165,6 +200,13 @@ describe("resident relay /v1/messages streaming (Anthropic path)", () => {
       const body = await res.json();
       assert.equal(body.error.type, "api_error");
       assert.match(body.error.message, /模型未返回任何内容/, "exhaustion message must be readable Chinese, not mojibake");
+      // The title promises retry EXHAUSTION, so the spent-budget semantics must
+      // be asserted, not just the 502: with maxRetries 1 the upstream is called
+      // twice, and the wording must claim a spent budget — the never-configured
+      // variant (「未配置重试」) satisfies neither of these (stream-pipe.mjs
+      // anthropicExhaustedMessage distinguishes the two via retryCtx).
+      assert.equal(callCount, 2, "initial attempt + exactly one keep-alive retry");
+      assert.match(body.error.message, /保活重试已耗尽/, "a spent retry budget may claim exhaustion");
     });
   });
 

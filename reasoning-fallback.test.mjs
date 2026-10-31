@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import {
   buildReasoningIndex,
   resolveKnowledgeReasoning,
   loadPiAiReasoningIndex,
 } from "./reasoning-fallback.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // pi-ai provider data file shape: { "<api>": { "<modelId>": model } }
 const zaiDoc = {
@@ -144,30 +146,68 @@ test("loadPiAiReasoningIndex returns empty map when package is absent", () => {
   assert.equal(index.size, 0);
 });
 
-test("loadPiAiReasoningIndex reads the real installed pi-ai data when present", (t) => {
-  // The DSH package installed under the roaming npm root ships the pi-ai
-  // database this fallback exists to read. If that layout ever moves, this
-  // test failing is the early warning.
-  const dshRoot = join(
-    process.env.APPDATA ?? "",
-    "npm",
+// The loader used to carry a smoke test against the DSH package actually
+// installed under the host's roaming npm root. It could never fail: the
+// pi-ai 1.4.0 database keys its entries "chat:<modelId>" (a bare id like
+// "glm-5.2" resolves to undefined), so the entry assertions were dead code,
+// and the only live check — index.size !== 0 — skipped rather than failed
+// on machines without the install. A unit test cannot tripwire a host
+// install anyway; the loader contract is pinned here with fixtures instead.
+test("loadPiAiReasoningIndex reads the package data dir through the default fs", () => {
+  const pkgRoot = mkTestDir("anys-reasoning-pkg-");
+  const dataDir = join(
+    pkgRoot,
     "node_modules",
-    "@deepseek-ai",
-    "dsh",
+    "@earendil-works",
+    "pi-ai",
+    "dist",
+    "providers",
+    "data",
   );
-  const index = loadPiAiReasoningIndex(dshRoot);
-  if (index.size === 0) {
-    // Machine without the DSH install — report the skip instead of passing silently.
-    t.skip("DSH pi-ai package is not installed on this machine");
-    return;
-  }
-  const glm = index.get("glm-5.2");
-  if (glm) {
-    // The real database's values are upstream-owned and drift with each DSH
-    // update (pi-ai 0.85.1 reclassified glm-5.2 zai → qwen), so pin structure,
-    // not values — the layout-move tripwire is the index.size check above.
-    assert.equal(typeof glm.thinkingFormat, "string");
-    assert.ok(glm.thinkingFormat.length > 0, "glm-5.2 entry has a thinking format");
-    assert.ok(glm.levels.length > 0);
-  }
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, "zai.json"), JSON.stringify(zaiDoc));
+  // pi-ai 1.4.0 ships composite keys ("chat:<modelId>") rather than bare
+  // model ids: the index carries data keys verbatim, and key derivation
+  // stays the caller's job (dsh-merge-config looks ids up itself).
+  writeFileSync(
+    join(dataDir, "catalog.json"),
+    JSON.stringify({
+      "openai-completions": {
+        "chat:glm-5.2": {
+          id: "chat:glm-5.2",
+          reasoning: true,
+          thinkingLevelMap: { high: "high" },
+          compat: { thinkingFormat: "qwen" },
+        },
+      },
+    }),
+  );
+  // Real data dirs ship a .manifest.json sibling; it parses but matches no
+  // model shape, so it must contribute no entries.
+  writeFileSync(
+    join(dataDir, ".manifest.json"),
+    JSON.stringify({ schemaVersion: 3, files: ["zai.json"] }),
+  );
+  // One malformed file must not sink the index; non-.json files are not read.
+  writeFileSync(join(dataDir, "broken.json"), "{ not json");
+  writeFileSync(join(dataDir, "notes.txt"), "not a data file");
+
+  const index = loadPiAiReasoningIndex(pkgRoot);
+  assert.deepEqual([...index.keys()].sort(), ["chat:glm-5.2", "glm-4.5", "glm-5.2"]);
+  assert.equal(index.get("glm-5.2").thinkingFormat, "zai");
+  assert.equal(index.get("chat:glm-5.2").thinkingFormat, "qwen");
+});
+
+test("loadPiAiReasoningIndex returns an empty map when the data dir cannot be listed", () => {
+  const index = loadPiAiReasoningIndex("C:\\anywhere", {
+    existsSync: () => true,
+    readdirSync: () => {
+      throw new Error("EACCES");
+    },
+    readFileSync: () => {
+      throw new Error("unreachable");
+    },
+  });
+  assert.ok(index instanceof Map);
+  assert.equal(index.size, 0);
 });

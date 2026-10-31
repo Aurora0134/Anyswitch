@@ -45,8 +45,6 @@ function promptsRouter(promptsService) {
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
-    aliasResolver: null,
-    aliasPath: null,
     fetchRelayAgents: async () => null,
     promptsService,
   });

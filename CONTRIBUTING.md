@@ -22,7 +22,7 @@
 
 - Environment notes:
   - `dpapi.test.mjs` exercises real Windows DPAPI (CurrentUser scope, via `dpapi.ps1`) and must run in a Windows interactive logon session; in non-interactive/service sessions without a user context the DPAPI probe fails and the affected cases report as skipped instead of failing.
-  - dsh/reasoning-related cases (`dsh-launcher.test.mjs`, `dsh-merge-config.test.mjs`, `reasoning-fallback.test.mjs`) depend on a local dsh installation (`@deepseek-ai/dsh` under the roaming npm root). When dsh is not installed, the `loadPiAiReasoningIndex` cases skip automatically (short-circuit on an empty index); all other cases are unaffected.
+  - dsh/reasoning-related cases (`dsh-launcher.test.mjs`, `dsh-merge-config.test.mjs`, `reasoning-fallback.test.mjs`) depend on a local dsh installation (`@deepseek-ai/dsh` under the roaming npm root), and so do the dsh endpoint's cases in `uninstall-agent.test.mjs` (the dsh cases themselves, plus the two `uninstallAll` cases whose endpoint loop strips dsh too). When dsh is not installed, the `loadPiAiReasoningIndex` cases skip automatically (short-circuit on an empty index) and the uninstall driver's dsh-touching cases skip on an unresolvable js-yaml; all other cases are unaffected.
 
 ### Code style
 

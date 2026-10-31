@@ -162,7 +162,7 @@ describe("attributeTerminalSessions", () => {
         [cwdSession],
         [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
         codexAgents([]),
-        [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+        { codex: [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }] },
       );
       assert.equal(out[0].agent.instanceId, null, "行不存在不绑，与 pid 路同一判据");
     });
@@ -173,7 +173,7 @@ describe("attributeTerminalSessions", () => {
           [session],
           [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
           codexAgents(["codex-sess-x"]),
-          [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+          { codex: [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }] },
         );
         assert.equal(out[0].agent.instanceId, null);
       }
@@ -184,17 +184,23 @@ describe("attributeTerminalSessions", () => {
         [cwdSession],
         [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
         codexAgents(["codex-6100", "codex-sess-x"]),
-        [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+        { codex: [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }] },
       );
       assert.equal(out[0].agent.instanceId, "codex-6100", "进程形状仍是第一优先");
     });
 
     it("non-codex endpoints never consult the bridge feed", () => {
+      // 行在 agents 负载里存在、cwd 也匹配：kimi 若误拿 codex 的 feed 就会绑上
+      // codex-sess-x，唯一拦住它的是 feeds 按 best.agentId 取键（kimi 不在会话
+      // 桥名单里），这里把那一步真正钉住。
       const out = attributeTerminalSessions(
         [{ ...baseSession, cwd: "D:\\dev\\bridge" }],
         [{ agentId: "kimi", pid: 4321, ancestors: [8888] }],
-        [{ id: "kimi", name: "Kimi Code", instances: [] }],
-        [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+        [
+          { id: "kimi", name: "Kimi Code", instances: [] },
+          { id: "codex", name: "Codex", instances: [{ id: "codex-sess-x" }] },
+        ],
+        { codex: [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }] },
       );
       assert.equal(out[0].agent.instanceId, null);
     });
@@ -431,12 +437,9 @@ describe("filterTerminalRequestRows", () => {
 
   it("strict instanceId filter, newest-first", () => {
     const out = filterTerminalRequestRows(rows, { agentId: "kimi", instanceId: "kimi-4321" });
+    // 精确结果集已蕴含「无 instanceId 的行（ts=4）不参与 bound 匹配」；
+    // unbound 查询那侧由下一条用例覆盖它仍被返回。
     assert.deepEqual(out.map((r) => r.ts), [5, 1]);
-  });
-
-  it("rows without instanceId never match a bound instance", () => {
-    const out = filterTerminalRequestRows(rows, { agentId: "kimi", instanceId: "kimi-4321" });
-    assert.equal(out.some((r) => r.ts === 4), false);
   });
 
   it("unbound query returns the endpoint's rows, newest-first", () => {

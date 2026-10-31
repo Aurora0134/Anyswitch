@@ -2,6 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
+import { DEFAULT_SPARK_WINDOW_POINTS } from "./relay-settings.mjs";
 
 const TOKEN = "test-token-keepalive";
 
@@ -18,6 +20,27 @@ const STORE = {
   },
 };
 
+// effort 注入与图片降级两门钉死为关（与 openai-server-chain.test.mjs 同一桩）：
+// 不注入时 handler 回落 relay-settings 的磁盘现读默认（openai-handler.mjs
+// `effortInjector ?? defaultEffortInjector`），逐请求读本机 %LOCALAPPDATA%\Anyswitch
+// 下的 settings.json 与 thinking-efforts 库，测试结果就会挂在本机用户目录上。
+// isEnabled 短路在目录/开关读取之前，注入器全程不落盘。
+const OFF_EFFORT_INJECTOR = createEffortInjector({ isEnabled: () => false });
+
+function createIsolatedCollector(extra = {}) {
+  return createAgentMetricsCollector({
+    nowFn: () => 1000,
+    execFn: (cmd, opts, cb) => cb(null, ""),
+    // getAgentsStatus 每次都会经 loadSettings() 现读本机 settings.json 取折线
+    // 视窗（agent-metrics.mjs 的 loadSparkSettings 三元）。注意传 false 挡不住：
+    // false||null 后仍回落 loadSettings 照样读盘（已用重定向 LOCALAPPDATA 的
+    // 探针实测，sparkWindowPoints:5 仍生效）；必须给函数桩，且返回出厂窗口值，
+    // 让 applySparkWindow 的新旧比较恒等、零副作用。
+    loadSparkSettings: () => ({ sparkWindowPoints: DEFAULT_SPARK_WINDOW_POINTS }),
+    ...extra,
+  });
+}
+
 function createMockDeps({ upstreamFetch, getKeepAliveConfig, metricsCollector }) {
   return {
     token: TOKEN,
@@ -28,6 +51,9 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig, metricsCollector })
     readGeneration: () => null,
     getKeepAliveConfig,
     metricsCollector,
+    effortInjector: OFF_EFFORT_INJECTOR,
+    imageFallbackGate: () => false,
+    imageHeuristicGate: () => false,
   };
 }
 
@@ -63,6 +89,19 @@ function sseStream(chunks) {
   })();
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 轮询到条件成立为止；超时即失败（绝不静默放过——条件没等到就是测试本身没跑到位）。
+async function waitUntil(cond, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`waitUntil(${label}) timed out after ${timeoutMs}ms`);
+    await sleep(2);
+  }
+}
+
 describe("openai relay keep-alive anti-truncation", () => {
   it("(a) recovers on empty stream via 1 keep-alive retry and delivers successful stream to client", async () => {
     let callCount = 0;
@@ -90,7 +129,7 @@ describe("openai relay keep-alive anti-truncation", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10 }),
@@ -118,6 +157,12 @@ describe("openai relay keep-alive anti-truncation", () => {
     });
   });
 
+  // 夹具故意不带 mode：这是 per-launch 兜底中继的现役配置形状——8 个
+  // *-launcher.mjs 的 createOpenAIProductionDeps() 都不转发 getKeepAliveConfig，
+  // 运行时落到 stream-pipe.mjs 的内置兜底 {enabled:true,maxRetries:1,backoffMs:500}
+  // （同样无 mode）→ enhanced=false → 不打 ping、SSE 头未提交，耗尽走 502 JSON。
+  // 面板常驻链路的 parseKeepAliveConfig 产物恒带 mode，同一场景走 (A4) 的
+  // 200+SSE。两条分支都是现役行为，各有用例钉住，502 与 SSE 并不自相矛盾。
   it("(b) exhausts retries when all attempts return empty stream, returns 502 and keeps fault latched", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
@@ -132,7 +177,7 @@ describe("openai relay keep-alive anti-truncation", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10 }),
@@ -183,7 +228,7 @@ describe("openai relay keep-alive anti-truncation", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10 }),
@@ -219,7 +264,7 @@ describe("openai relay keep-alive anti-truncation", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: false, maxRetries: 1, backoffMs: 10 }),
@@ -241,6 +286,9 @@ describe("openai relay keep-alive anti-truncation", () => {
     });
   });
 
+  // 无 mode 夹具同 (b)：per-launch 兜底中继的现役配置形状，耗尽契约是 502 JSON
+  // 而非 enhanced 档的 200+SSE。逐端点开关的语义由 callCount 断言独立承载，
+  // 在任一档位下都成立；状态断言只负责钉住这条分支的客户端可见契约。
   it("(c2) does NOT retry on an endpoint switched off in the panel, while other endpoints keep retrying", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
@@ -255,7 +303,7 @@ describe("openai relay keep-alive anti-truncation", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10, endpoints: { dsh: { enabled: false } } }),
@@ -273,6 +321,11 @@ describe("openai relay keep-alive anti-truncation", () => {
     });
   });
 
+  // 无 mode 夹具同 (b)：per-launch 兜底中继的现役形状——守卫非整轮持有，内容
+  // 逐块下发（字节真会中途提交），且 maxRetries 照常生效，所以「已提交压过重试
+  // 预算」在这里是可区分的真语义：bytes 已到客户端后再炸，不重试，客户端拿到
+  // partial content + mid-response 错误帧（stream-pipe.mjs 的 committed 分支）。
+  // enhanced 档整轮持有一个字节都不下发，永远走不到这条路。
   it("(d) does NOT retry when stream was already committed (bytes delivered mid-response)", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
@@ -332,7 +385,7 @@ describe("openai relay keep-alive anti-truncation", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10 }),
@@ -378,13 +431,20 @@ describe("openai relay keep-alive anti-truncation", () => {
 
     await withServer(deps, async (port) => {
       const p = postChat(port, { signal: ac.signal });
-      // Abort quickly after first call settles
-      setTimeout(() => ac.abort(), 20);
+      // 旧版用 setTimeout(20ms) 盲等，带两个竞态：abort 可能抢在首轮上游调用
+      // 之前（callCount=0，假红）；而断言紧跟 await p 立即采样，落在退避窗
+      // （backoffMs 200 → computeRetryDelay 100–200ms，keepalive-backoff.mjs）
+      // 之前——忽略 abort 的实现要到 ~100ms 后才发起第二次调用，恒然断不到，
+      // 对缺陷永远假绿。所以改为：先等首轮调用确实发生，再 abort；然后等过
+      // 一个完整退避窗以上才断言，给「忽略 abort 的重试」留出暴露窗口。
+      await waitUntil(() => callCount === 1, 2_000, "first upstream call");
+      ac.abort();
       try {
         await p;
       } catch {
         /* client abort error expected */
       }
+      await sleep(400); // > 最长退避 200ms
       assert.equal(callCount, 1, "must not perform subsequent retries after client aborts");
     });
   });
@@ -418,7 +478,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
@@ -452,7 +512,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       ]),
     });
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
@@ -466,7 +526,10 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       assert.ok(!text.includes("cut mid"), "truncated bytes must not leak");
       assert.ok(text.includes('"error"'), "a structured error event replaces the turn");
       assert.ok(!/\ndata: \[DONE\]/.test(text), "no bare [DONE] terminator line may ride along");
-      assert.equal(text.trim().startsWith(":") || text.includes(": ping") || text.includes("data:"), true);
+      // 管道开跑即同步打首个 ping（stream-pipe.mjs `if (pings) { ping(); … }`），
+      // 所以首字节必是 ': ping'——这才真正钉住了「ping 提交了 SSE 头、错误帧
+      // 只能 ride SSE」的机制；原来的三支析取式被任意 data: 帧满足，恒真。
+      assert.ok(text.startsWith(": ping"), "keep-alive pings committed the SSE headers (first bytes are the ping)");
 
       const status = await collector.getAgentsStatus();
       const zcode = status.find((a) => a.id === "zcode");
@@ -491,7 +554,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       };
     };
 
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
@@ -539,7 +602,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
         ]),
       };
     };
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
@@ -578,7 +641,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
         ]),
       };
     };
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
@@ -613,7 +676,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
         ]),
       };
     };
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
@@ -650,7 +713,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
         yield enc.encode("data: [DONE]\n\n");
       })(),
     });
-    const collector = createAgentMetricsCollector({ nowFn: () => fakeNow, execFn: (cmd, opts, cb) => cb(null, "") });
+    const collector = createIsolatedCollector({ nowFn: () => fakeNow });
     const deps = createMockDeps({
       upstreamFetch,
       getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),

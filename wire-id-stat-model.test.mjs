@@ -45,6 +45,11 @@ describe("wireIdToStatModel", () => {
     // A model id legitimately starting with "anthropic/" after its provider
     // segment must survive intact.
     assert.equal(wireIdToStatModel("anthropic/prov/anthropic/weird-model"), "anthropic/weird-model");
+    // Locks the single strip itself: a provider literally named "anthropic" is
+    // legal (the store invariant only bans '/' in provider ids), so the head
+    // prefix legitimately reappears. A repeat/head-stripping implementation
+    // would consume it too and yield "x" instead of "anthropic/x".
+    assert.equal(wireIdToStatModel("anthropic/anthropic/anthropic/x"), "anthropic/x");
   });
 });
 
@@ -55,10 +60,11 @@ describe("wireIdToTargetId", () => {
     assert.equal(wireIdToTargetId("anthropic/vendorb-go/go/glm-5.3-flash"), "vendorb-go");
   });
 
-  it("extracts the pool segment of a pool wire id (same wire shape)", () => {
-    assert.equal(wireIdToTargetId("anthropic/sensenova/kimi-k3"), "sensenova");
-  });
-
+  // Pool wire ids need no separate case: they share this exact wire shape and
+  // this function never reads the model segment, so any wireId with the same
+  // provider segment takes the same path and yields the same result. Pool
+  // attribution lives in unpackWireId's pool resolution and the callers
+  // (memberPlan?.poolId), not here.
   it("returns null for non-wire-id input (auto, bare models, non-strings)", () => {
     assert.equal(wireIdToTargetId("auto"), null);
     assert.equal(wireIdToTargetId("kimi-k3"), null);
@@ -77,5 +83,10 @@ describe("wireIdToTargetId", () => {
 
   it("does not double-strip (segment taken after exactly one prefix strip)", () => {
     assert.equal(wireIdToTargetId("anthropic/prov/anthropic/weird-model"), "prov");
+    // A repeat/head-stripping implementation would consume the second
+    // "anthropic/" too and return null; exactly one strip keeps "anthropic"
+    // as the provider segment (a provider with that id is legal — the store
+    // invariant only bans '/' in provider ids).
+    assert.equal(wireIdToTargetId("anthropic/anthropic/anthropic/x"), "anthropic");
   });
 });

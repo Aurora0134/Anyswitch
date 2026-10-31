@@ -502,7 +502,8 @@ test("DSH 只有社区插件过期时端点级按钮也要出现", async () => {
   const actions = descendants(line, (node) => node.tagName === "button" && node.className.includes("about-client-action"));
   assert.equal(actions.length, 1, "端点级一颗");
   assert.equal(actions[0].textContent, "更新");
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新/, "批量入口照常计数");
+  // 计数要带数字断言：count 归零时文案同样是无计数的「全部更新」，裸 /全部更新/ 不随计数变化
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/, "批量入口照常计数：插件渠道让 dsh 计入端点数，与全量场景同为 8");
 });
 
 test("DSH 社区插件未装且本体未装时不代装插件", async () => {
@@ -670,7 +671,12 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
   assert.equal(h.get("settingsPanelGeneral").hidden, false);
   assert.equal(h.get("settingsPanelAbout").hidden, true);
   assert.equal(pageScrollResets, 4);
-  assert.match(source, /if \(settings\) viewReady = enterSettingsView\(\); else leaveSettingsView\(\);/);
+  // 主视图切换必须把 settings 视图生命周期接上：进入调 enterSettingsView、离开调
+  // leaveSettingsView（后者是 About 与数据搬迁卡离开钩子的总闸，else 半句全套件仅
+  // 此处覆盖）。只验接线存在，不钉整行写法——加花括号、换行、抽成函数都不该误报；
+  // switchView 内部的时序（hidden 先落定、再进钩子）由 panel.test.mjs 钉。
+  assert.match(source, /enterSettingsView\(\)/, "主视图切换接通 settings 进入钩子");
+  assert.match(source, /leaveSettingsView\(\)/, "主视图切换接通 settings 离开钩子");
   // 数据搬迁卡：每次切到「非高级选项」的子页都要让它离开（结果文案据此复位），
   // 切回高级选项才进入。此前它声明的复位钩子零调用点，等于没有生命周期。
   assert.equal(bundleLeaves, 4, "此前每次切走非高级选项子页都已让它离开");
@@ -767,7 +773,11 @@ test("本地环境卡为可更新客户端出更新按钮，桌面应用只留�
   assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/);
 });
 
-test("已是最新的客户端不出动作按钮，未安装的出安装按钮", async () => {
+// 「本地与官方一致 → 不出动作位」不在本用例断言：它由更新确认收尾用例行为性覆盖
+// （「批量中先完成的端点立即显示已更新…」「单点更新完成到确认前…」「并行单点更新
+// 不共用过期重检…」三处在 comparison 落到 current 后断言 actionButtons(...).length === 0）。
+// 本用例只钉安装/更新动作位的出现条件。
+test("未安装且可代装的客户端出安装按钮（grok 未安装不代装），可更新的出更新按钮", async () => {
   const local = environment();
   local.clients[0].installations[0].status = "not_found";
   local.clients[0].installations[0].version = null;
@@ -1085,6 +1095,12 @@ test("重新检测时「查询中…」占用结论位、不叠加在旧结论�
     if (path.startsWith("/api/environment/latest/")) return new Promise((resolve) => pending.push(() => resolve(latest())));
     return normal(path);
   });
+  // 反复放行 /api/environment/latest/ 上挂着的查询，直到连续两轮 tick 都没有待放行请求为止。
+  // 为什么要两轮而不是一轮：面板的后续查询可能挂在更长的异步链后面，单轮轮空不足以说明已经查完；
+  // 任何一轮取到请求就把 empty 清零，因此清零的是「连续」而不是「累计」。
+  // 200 轮只是上限，不是期望轮数；耗尽后直接返回，此时可能仍有未放行的请求。
+  // 边界：本函数只保证请求侧放空，调用方仍需各自 await entering / refreshing 才算状态真正落地——
+  // 本用例两处断言「有新版本」都依赖「先 settle 再 await」这个顺序。
   const settleLatest = async () => {
     let empty = 0;
     for (let round = 0; round < 200; round += 1) {
@@ -1283,7 +1299,14 @@ test("不一致提示行：三种形态的文案、「不再显示」按状态�
   assert.match(h.get("aboutDriftNotice").textContent, /当前安装不是官方发布的版本（0\.6\.7-1234567），官方最新为 0\.6\.6/);
 });
 
-test("先行与不一致的定稿文案逐字落盘（对稿结论）", () => {
+test("先行版开关与确认弹层的定稿文案逐字落盘（对稿结论）", () => {
+  // 本用例只保留套件里别处没有覆盖的文案契约：高级选项页「更新通道」卡的开关行
+  // 说明、开关控件、先行版徽标与「不再显示」的动作文案、开启/关闭确认弹层与
+  // toast。这些 UI 片段没有渲染用例走过，逐字落盘是它们唯一的回归保护。
+  // 关于页的先行状态行（已是先行版最新 / 发现先行新提交）、不一致提示行三形态与
+  // 中性状态行（已检查更新）不在字面层重复断言——「先行轨」两条与「不一致提示行」
+  // 用例已通过渲染结果逐字验证它们出现在正确的状态分支上，ahead 形态另见
+  // 「update check runs once…all server states render」。
   // 高级选项页「更新通道」卡：开关行说明。
   assert.ok(html.includes("关闭时，更新只提供官方正式发布的版本；开启后，检查更新跟随上游最新提交，安装的版本号会带提交标识并显示「先行版」标记。从先行版关闭时，会先回退到离当前最近的稳定版本。"), "开关行说明");
   assert.ok(html.includes('id="bleedingEdgeToggle"'));
@@ -1296,13 +1319,6 @@ test("先行与不一致的定稿文案逐字落盘（对稿结论）", () => {
   assert.ok(source.includes("回退期间面板与 Relay 会自动重启，服务中断几秒钟；安装目录中的手动修改会被覆盖。关闭后，更新只提供官方正式发布的版本。"), "回退确认后半");
   assert.ok(source.includes("当前已在稳定版本（"), "就地关闭确认");
   assert.ok(source.includes("确认回退并关闭？"), "回退确认按钮");
-  // 关于页先行轨状态行。
-  assert.ok(source.includes("已是先行版最新") && source.includes("发现先行新提交"), "先行状态行");
-  // 不一致提示行三形态。
-  assert.ok(source.includes("当前安装不是官方发布的版本（"), "ahead+游离合并");
-  assert.ok(source.includes("领先于官方最新"), "仅 ahead");
-  assert.ok(source.includes("当前安装不是官方发布的版本，官方最新为"), "仅游离");
-  assert.ok(source.includes("已检查更新"), "不一致家族的状态行中性文案");
 });
 
 // ── 一键自更新（服务端 autoApply 流水线，前端只跟同一 runId）──────────────

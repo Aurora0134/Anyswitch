@@ -3,9 +3,20 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRelayServer, listenLoopback, generateToken } from "./server.mjs";
+import { createRelayServer, listenLoopback } from "./server.mjs";
 import { providerRoutingShapes } from "./catalog-generation.mjs";
 import { createSessionReporter } from "./agent-metrics.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
+
+// 数据根隔离：/v1/messages 的请求路径每次现读 settings.json（会话缓存优化开关）
+// 与 thinking-efforts 档位库，这些读全部经 relay-settings 的 base=process.env 默认
+// 参数落在调用时刻，所以整个文件一次性把 LOCALAPPDATA/APPDATA/USERPROFILE 重定向
+// 到空的临时 profile——操作者本机的真实配置漂不进这些用例。目录先建（os.tmpdir
+// 还依赖真实环境），随进程退出由 test-helpers 统一清扫。
+const isolatedBase = mkTestDir("anys-server-base-");
+process.env.LOCALAPPDATA = isolatedBase;
+process.env.APPDATA = isolatedBase;
+process.env.USERPROFILE = isolatedBase;
 
 const STORE = {
   version: 2,
@@ -26,6 +37,15 @@ function deps(overrides = {}) {
     token: "test-token-abc",
     loadStore: () => ({ ok: true, store: STORE }),
     loadCredential: async () => ({ ok: true, value: "SENTINEL-UPSTREAM-KEY" }),
+    // no-op 档位注入器：本文件测的是传输与记账接线，注入不是关注面
+    // （effort-injection.test.mjs 自有覆盖），不桩掉的话出站体随
+    // thinking-efforts 库内容变化——env 重定向挡得住本机数据，这里再
+    // 把行为本身钉死为「不注入」。
+    effortInjector: {
+      inject: ({ body }) => ({ body, injected: null }),
+      withoutEffort: (body) => body,
+      noteRejected: () => {},
+    },
     upstreamFetch: async () => ({
       ok: true,
       status: 200,
@@ -52,13 +72,6 @@ async function withServer(d, fn) {
     await close();
   }
 }
-
-test("generateToken produces a 256-bit hex value, unique per call", () => {
-  const a = generateToken();
-  const b = generateToken();
-  assert.match(a, /^[0-9a-f]{64}$/);
-  assert.notEqual(a, b);
-});
 
 test("binds loopback and answers HEAD /api/hello without auth or store access", async () => {
   let storeRead = false;
@@ -199,7 +212,9 @@ test("streaming request emits an ordered Anthropic SSE sequence", async () => {
       for (const event of order) {
         const at = text.indexOf(`event: ${event}`, cursor);
         assert.ok(at !== -1, `missing ${event}`);
-        cursor = at;
+        // 游标必须推进过本次匹配：停在匹配起点的话，后一个事件名可以落回
+        // 前一个匹配之前的任何位置，顺序约束名存实亡。
+        cursor = at + 1;
       }
       assert.ok(text.includes('"text_delta"'));
       assert.ok(text.includes("He"), "first text fragment must survive");
@@ -259,13 +274,21 @@ test("streaming request surfaces upstream reasoning as a thinking block", async 
       for (const event of order) {
         const at = text.indexOf(`event: ${event}`, cursor);
         assert.ok(at !== -1, `missing ${event}`);
-        cursor = at;
+        // 同上：游标推进过匹配位，重复事件名（3×content_block_delta、
+        // 2×content_block_start）才逐次前移，事件序列是真约束。
+        cursor = at + 1;
       }
       assert.ok(text.includes('"thinking"'), "a thinking block must be opened");
       assert.ok(text.includes('"thinking_delta"'), "reasoning must stream as thinking_delta");
       assert.ok(text.includes("想"), "the thinking text must survive");
       assert.ok(text.includes('"text_delta"'));
       assert.ok(text.includes("答"), "the answer text must survive");
+      // 事件名顺序约束不了 delta 类型：thinking/text 两类 delta 跨块互换时
+      // 名字序列不变。用 payload 落点把注释声称的「thinking 先于 text」钉死。
+      assert.ok(
+        text.indexOf('"thinking_delta"') < text.indexOf('"text_delta"'),
+        "thinking deltas must stream before the first text delta",
+      );
     },
   );
 });

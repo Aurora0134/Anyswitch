@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildKimiManagedToml,
@@ -9,9 +9,6 @@ import {
   stripPrefixedTables,
   writeKimiConfigTomlWithBackup,
   extractManagedProviders,
-  readSidecar,
-  writeSidecar,
-  sidecarPath,
   kimiProviderId,
   kimiModelAlias,
   MANAGED_BEGIN,
@@ -82,15 +79,35 @@ describe("kimi-merge-config", () => {
   });
 
   it("strips a pre-rename block carrying the legacy apicred markers", () => {
+    // The legacy end marker is 2 chars shorter than MANAGED_END, so the strip
+    // must cut off the marker it actually found — never a fixed length. The
+    // fixture therefore carries real user content AFTER the block: with a bare
+    // newline between block and content, a fixed-length cut used to eat the
+    // first 2 chars (e.g. "[p" of a following [providers.…] header) and hand
+    // kimi syntactically broken TOML.
     const legacy = [
+      "# user hooks",
+      "[[hooks]]",
+      'event = "Stop"',
       "# >>> apicred-managed-kimi (managed by ApiCred; do not edit) >>>",
       '[providers."_old"]',
+      'api_key = "stale-token"',
       "# <<< apicred-managed-kimi <<<",
       "",
+      "[[hooks]]",
+      'event = "Reset"',
     ].join("\n");
     const stripped = stripManagedBlock(legacy);
     assert.equal(stripped.includes("apicred"), false);
-    assert.equal(stripped, "");
+    assert.equal(stripped.includes("_old"), false);
+    assert.equal(stripped.includes("stale-token"), false);
+    assert.match(stripped, /# user hooks/);
+    assert.match(stripped, /event = "Stop"/);
+    assert.match(
+      stripped,
+      /\[\[hooks\]\]\nevent = "Reset"/,
+      "content after the legacy block survives byte-for-byte",
+    );
   });
 
   it("strips unmarked provider/model tables left by a Kimi self-rewrite", () => {
@@ -232,28 +249,11 @@ describe("pool channels", () => {
   });
 });
 
-describe("kimi sidecar", () => {
-  it("readSidecar returns empty list for missing file", () => {
-    const dir = mkTestDir("kimi-sidecar-");
-    assert.deepEqual(readSidecar(dir), { providers: [] });
-  });
-
-  it("writeSidecar and readSidecar round-trip sorted", () => {
-    const dir = mkTestDir("kimi-sidecar-");
-    writeSidecar(dir, ["zeta", "alpha"]);
-    assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] });
-    assert.ok(existsSync(sidecarPath(dir)));
-  });
-
-  it("writeSidecar keeps the shared on-disk format", () => {
-    const dir = mkTestDir("kimi-sidecar-");
-    writeSidecar(dir, ["poke-api"]);
-    assert.equal(
-      readFileSync(sidecarPath(dir), "utf8"),
-      '{\n  "providers": [\n    "poke-api"\n  ]\n}\n',
-    );
-  });
-});
+// kimi 的 readSidecar/writeSidecar/sidecarPath 只是 merge-common.mjs 共享实现
+// 接到本模块文件名上的薄封装：读写语义（缺失/损坏读空、排序往返、磁盘格式）
+// 由 merge-common.test.mjs 直接覆盖，"kimi-sidecar.json" 文件名契约由
+// uninstall-agent.test.mjs 经 kimiMerge.sidecarPath 的真实卸载链路钉死，
+// 这里不再重复。
 
 describe("auto routing channel (Anyswitch)", () => {
   const CHAIN_STORE = {

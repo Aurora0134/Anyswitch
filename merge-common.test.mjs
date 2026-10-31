@@ -4,7 +4,10 @@
 // one JSON object { "providers": [ids…] } — sorted, 2-space indent, trailing
 // newline, written atomically — and a fail-open read (missing or corrupt file
 // reads back as an empty managed list, because the sidecar is a cache of
-// "what we injected last time", never user data).
+// "what we injected last time", never user data). Scope note: the fail-open
+// implementation guards JSON.parse only, so it covers unparseable text but
+// NOT parseable-but-malformed sidecars — those pass through raw and are
+// pinned as a known gap below, not promised.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -19,11 +22,30 @@ describe("merge-common sidecar", () => {
     assert.deepEqual(readSidecar(join(dir, "x-sidecar.json")), { providers: [] });
   });
 
-  it("reads a corrupt sidecar as an empty managed list", () => {
+  it("reads an unparseable sidecar as an empty managed list (fail-open)", () => {
     const dir = mkTestDir("merge-common-");
     const path = join(dir, "x-sidecar.json");
     writeFileSync(path, "{ not json");
     assert.deepEqual(readSidecar(path), { providers: [] });
+  });
+
+  // Characterization, not endorsement: readSidecar guards JSON.parse only,
+  // so parseable-but-malformed content (valid JSON that is not an object
+  // carrying a providers array) flows through raw. Every merge writer then
+  // dereferences `.providers` bare (e.g. kimi-launcher.mjs:48,
+  // codex-merge-config.mjs:555, dsh-merge-config.mjs:451) and throws
+  // TypeError instead of failing open — only byok-import.mjs:88 defends
+  // with Array.isArray. writeSidecar itself always writes the correct shape,
+  // so reaching this needs external corruption; the fail-open promise in the
+  // merge-common.mjs header is honored for this half only in spirit. If the
+  // source ever extends fail-open to shape corruption, flip these pins.
+  it("passes parseable-but-malformed sidecars through raw (known fail-open gap)", () => {
+    const dir = mkTestDir("merge-common-");
+    for (const content of ["null", "[]", "{}", '"str"', '{"providers":null}']) {
+      const path = join(dir, "x-sidecar.json");
+      writeFileSync(path, content);
+      assert.deepEqual(readSidecar(path), JSON.parse(content), content);
+    }
   });
 
   it("round-trips a provider list sorted", () => {

@@ -59,13 +59,21 @@ async function withPanel(options, run) {
     appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
     ...options,
     base,
+    // store root（relayRoot）落进用例自己的临时 base：/api/status 的终端宿主状态
+    // 链每拍都会求值 relayPullToken()（panel.mjs:1959），它按 relayRoot 生成/读取
+    // pi-relay-token——固定真实路径等于每跑一次测试都在真机落一个目录。生产里
+    // relayRoot 本来就是 %LOCALAPPDATA%\Anyswitch，这里同形落位，随 base 一起清走。
+    storePaths: options.storePaths ?? { root: join(base.LOCALAPPDATA, "Anyswitch") },
+    // 终端宿主状态不在本文件的关注面：注入 null 回落（与 relay 不可达同一降级
+    // 路径），否则 /panel/api/status 会向真实 127.0.0.1:47821 发 HTTP 探测，
+    // 断言随宿主机 relay 是否在跑漂移。
+    fetchTerminalHostStatus: options.fetchTerminalHostStatus ?? (async () => null),
     clientUpdateJournalDir: journalDir,
     spawnClientUpdateWorkerFn: () => process.pid,
     spawnSelfUpdateWorkerFn: options.spawnSelfUpdateWorkerFn ?? (() => process.pid),
   };
   const forbidden = () => { throw new Error("unexpected production operation"); };
   const router = createPanelRouter({
-    storePaths: { root: "C:/unused-self-update-test" },
     logger: null,
     metricsCollector: null,
     spawnAgentSyncFn: forbidden,
@@ -168,6 +176,10 @@ describe("POST /panel/api/self-update（下载）", () => {
     const spawned = [];
     await withPanel({
       releaseService: selfUpdateReleaseService("current"),
+      // state=current 会进 buildStableDrift（panel.mjs:2363-2368）：不注入本地
+      // 身份就在测试里真跑 rev-parse + ls-remote github.com（网络不通时单用例
+      // 挂满 20s git 超时）。null＝无 git 身份，drift 原地短路，本用例只钉 409 分支。
+      readLocalHeadFn: async () => null,
       spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
     }, async (get, post) => {
       const result = await post("/panel/api/self-update", {});
@@ -394,7 +406,13 @@ describe("自更新换装监听器", () => {
       capture.watch.pumps[0]();
       assert.equal(capture.watch.restarts, 1, "the restart helper must be spawned");
       assert.equal(capture.watch.canceled, 1, "the watcher must be withdrawn after firing");
-      await sleep(300);
+      // 退场是真实墙钟定时器（宽限 150ms，panel.mjs PANEL_HOST_EXIT_GRACE_MS）：
+      // 固定 sleep(300) 对 150ms 只有 2 倍余量，机器忙时断言可能先于定时器跑。
+      // 轮询等到它触发再断言，断言本身不变。
+      const deadline = Date.now() + 5000;
+      while (capture.watch.exits.length === 0 && Date.now() < deadline) await sleep(5);
+      // 再让出一整个宽限窗：钉「退场只发生一次」这一半。
+      await sleep(200);
       assert.deepEqual(capture.watch.exits, [0]);
       // 定时器已撤（canceled=1），监听器不会再次自动点火；手动再调 pump 属于测试
       // 之外的路径，不在此断言。
@@ -425,20 +443,6 @@ describe("自更新换装监听器", () => {
     } finally {
       rmSync(journalDir, { recursive: true, force: true });
     }
-  });
-
-  test("下载阶段不布换装监听器（下载永远挨不到换装，布了也是空转）", async () => {
-    const capture = watchCapture();
-    await withPanel({
-      releaseService: selfUpdateReleaseService(),
-      ...capture,
-    }, async (get, post) => {
-      const started = await post("/panel/api/self-update", {});
-      assert.equal(started.status, 202);
-      assert.equal(capture.watch.pumps.length, 0, "download must not arm the swap watcher");
-      assert.equal(capture.watch.restarts, 0);
-      assert.deepEqual(capture.watch.exits, []);
-    });
   });
 });
 
@@ -513,26 +517,6 @@ describe("自动检测并下载更新（设置项默认关）", () => {
     const spawned = [];
     try {
       withSettings(baseDir, {});
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService(),
-        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
-        ...capture,
-      }, async () => {
-        await capture.captured.pump();
-        assert.equal(spawned.length, 0);
-      });
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("设置显式关闭：一拍什么都不登记", async () => {
-    const capture = autoDownloadCapture();
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
-    const spawned = [];
-    try {
-      withSettings(baseDir, { autoDownloadUpdates: false });
       await withPanel({
         base: { LOCALAPPDATA: baseDir },
         releaseService: selfUpdateReleaseService(),

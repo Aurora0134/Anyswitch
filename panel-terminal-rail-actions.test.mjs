@@ -469,11 +469,18 @@ describe("S2 分组移除（finding 1b）", () => {
     });
 
     it("未分组原先不存在：新建一个并沉底", () => {
+      // 入参必须深拷贝：terminalRailRegroupRemoved 会就地清空被移除组的 rows
+      // （panel.js「group.rows = []」），filter 浅拷贝的元素仍是夹具原对象——
+      // 不拷贝就把模块级 GROUPS 永久污染，后面「归一化口径」用例的 alpha 组
+      // 变空组被整体丢弃、断言恒真（普查 finding：测试隔离缺陷）。
       const out = runRegroup(["c:/dev/alpha"])(
-        GROUPS.filter((g) => g.key !== ""),
+        JSON.parse(JSON.stringify(GROUPS)).filter((g) => g.key !== ""),
       );
       assert.deepEqual(out.map((g) => g.key), ["C:\\dev\\beta", ""], "未分组新建且沉底");
       assert.deepEqual(out[1].rows.map((r) => r.id), ["a-1"], "alpha 的行进未分组");
+      // 夹具完好性：本用例不得动到共享 GROUPS（后续用例还要用它取快照）
+      assert.equal(GROUPS.find((g) => g.key === "C:\\dev\\alpha").rows.length, 1,
+        "共享夹具不被就地改写（深拷贝入参）");
     });
 
     it("清单为空：原样返回（不复制、不重排）", () => {
@@ -750,9 +757,16 @@ describe("S2 分组移除（finding 1b）", () => {
       const render = extractFn("renderTerminalRailHistory");
       const headAt = render.indexOf("rail-term-group-head");
       assert.ok(headAt > 0, "组头渲染可取样");
-      // 组头动作钮的渲染必须绕开未分组：菜单/新建钮只在有目录键的组出现
-      assert.ok(/group\.key[\s\S]{0,200}rail-term-group-menu|rail-term-group-menu[\s\S]{0,200}group\.key/.test(render),
-        "菜单钮的渲染条件含组键判定（未分组不出现）");
+      // 组头动作钮的渲染必须绕开未分组：钉死 headActions 三元的条件就是组键真值，
+      // 且 ⋯ 钮落在有键分支里（旧断言只匹配属性插值自身，改弱/反转条件也过——普查 finding）。
+      const actionsAt = render.indexOf("const headActions");
+      assert.ok(actionsAt > 0, "动作区渲染可取样");
+      const elseAt = render.indexOf(': "";', actionsAt);
+      assert.ok(elseAt > 0, "动作区有无键分支的空串兜底");
+      const block = render.slice(actionsAt, elseAt + ': "";'.length);
+      assert.match(block, /const headActions = group\.key\s*\?/,
+        "动作区只在有目录键的组渲染（条件反转/改弱/删除都过不了这条）");
+      assert.ok(block.includes('data-rail-term-group-menu="${esc(group.key)}"'), "⋯ 钮挂组键且在有键分支内");
     });
 
     it("CSS：菜单容器与 danger 项在册，0ms 硬切；恢复区样式已随区拆掉", () => {
@@ -985,7 +999,12 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       const actionsAt = render.indexOf("const headActions");
       assert.ok(actionsAt > 0, "动作钮渲染可取样");
       const block = render.slice(actionsAt, render.indexOf("parts.push(`", actionsAt));
-      assert.ok(block.includes("group.key"), "动作钮的渲染条件含组键判定");
+      // 钉死条件本体（旧断言只查文本存在性，`group.key` 命中的是属性插值——普查 finding：
+      // 把条件改成恒真/反转都照样过）。hover 卡豁免由 scheduleTerminalRailHoverCard
+      // 的 `!key` 守卫承担（「⋯ 菜单打开期间抑制 hover 卡」用例已钉）。
+      assert.match(block, /const headActions = group\.key\s*\?/, "动作钮的渲染条件就是组键真值");
+      assert.ok(block.includes('data-rail-term-group-new="${esc(group.key)}"'), "⊕ 在有键分支（未分组无 ⊕）");
+      assert.ok(block.includes('data-rail-term-group-menu="${esc(group.key)}"'), "⋯ 在有键分支（未分组无 ⋯）");
       assert.ok(block.includes(': ""'), "无组键（未分组）时动作区为空串");
     });
 
@@ -1045,7 +1064,7 @@ describe("S4 底栏钉住（finding 2，m6 §3）", () => {
       assert.ok(!/transition/.test(ruleBody(".rail-term-scroll {")), "滚动层本体无过渡");
     });
 
-    it("vm 真跑：进列清隐退、出列 2s 后才隐", async () => {
+    it("vm 真跑：进列清隐退、出列过了滞留期才隐，滞留期内回列不隐", async () => {
       const log = { attrs: [], timers: [] };
       const fn = new Function("log", `
         const els = { railTerminalDir: { attr: "", toggleAttribute(name, force) { this.attr = force ? name : ""; log.attrs.push(this.attr); } }, v2Rail: { listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } } };
@@ -1055,15 +1074,23 @@ describe("S4 底栏钉住（finding 2，m6 §3）", () => {
           const dir = $("railTerminalDir");
           if (dir) dir.toggleAttribute("data-quiet", !!quiet);
         }
-        const TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000;
+        // 滞留值只在沙盒内调小（生产 2000 已由上一条静态断言钉死），真跑不再等 2.1s
+        // 墙钟——普查 finding：负载抖动时 100ms 余量可能提前断言。
+        const TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 40;
         ${extractFn("initTerminalRailScrollbarQuiet")}
         initTerminalRailScrollbarQuiet();
         return { enter: () => els.v2Rail.listeners.pointerenter(), leave: () => els.v2Rail.listeners.pointerleave() };
       `)(log);
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       assert.deepEqual(log.attrs, ["data-quiet"], "初态隐退（thumb 随指针进列才出现）");
       fn.leave();
-      await new Promise((r) => setTimeout(r, 2100));
-      assert.deepEqual(log.attrs.slice(-1), ["data-quiet"], "离开 2s 后隐退");
+      await sleep(15);
+      fn.enter();
+      await sleep(120);
+      assert.deepEqual(log.attrs.slice(-1), [""], "滞留期内回列：取消隐退排程，过了滞留点仍可见");
+      fn.leave();
+      await sleep(140);
+      assert.deepEqual(log.attrs.slice(-1), ["data-quiet"], "离开过了滞留期才隐退");
       fn.enter();
       assert.deepEqual(log.attrs.slice(-1), [""], "进列即恢复可见");
     });
@@ -1433,8 +1460,11 @@ describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树"
     });
     sandbox.fn.render("kimi");
     assert.ok(sandbox.list.html.includes('data-rail-term-session="t-a"'), "spawnedAt(500) 在旧会话 lastActive(300) 之后：兜底行在场");
-    assert.ok(!sandbox.list.html.includes(">旧会话<") || sandbox.list.html.includes('data-rail-term-session="t-a"'),
-      "兜底行不被旧会话顶掉");
+    // 旧断言 `!includes(">旧会话<") || includes(t-a)` 的第二个分句被上一行保证成立，
+    // 整条恒真（普查 finding）。改成有约束力的并存断言：真行不吞兜底行、兜底行也不吞真行。
+    assert.ok(sandbox.list.html.includes(">旧会话<"), "旧会话真行照常在场（兜底行不吞真行）");
+    assert.ok(sandbox.list.html.indexOf('data-rail-term-session="t-a"') < sandbox.list.html.indexOf(">旧会话<"),
+      "兜底行仍在组顶（不被旧会话顶掉）");
   });
 });
 
@@ -1662,28 +1692,30 @@ describe("M8 T2 选中态跟随聚焦", () => {
 
 describe("M8 T3 文案与时间格式", () => {
   it("栏内局部时间格式：dsh 式无前缀（不动会话页共用的 sessRelTime）", () => {
-    const fn = new Function(`
+    // 冻结时钟沙盒：实现内部自取 Date.now()/new Date()，旧写法直接喂真实时刻——
+    // 昨天/跨年分支随运行日期漂移、月/年边界还有毫秒级竞态（普查 finding）。固定
+    // 「现在」后全分支确定性断言，年内/跨年两种日期形制都钉死（旧写法每天只能测到其一）。
+    const NOW = new Date(2026, 9, 15, 12, 0, 0).getTime(); // 固定「现在」＝2026-10-15 12:00 本地时
+    const fn = new Function("NOW", `
       const SESS_MIN = 60 * 1000, SESS_HOUR = 60 * SESS_MIN, SESS_DAY = 24 * SESS_HOUR;
+      const FixedDate = class extends globalThis.Date {
+        static now() { return NOW; }
+        constructor(...args) { super(...(args.length ? args : [NOW])); }
+      };
+      const Date = FixedDate;
       ${extractFn("terminalRailRelTime")}
       return terminalRailRelTime;
-    `)();
-    const now = Date.now();
-    const at = (ms) => now - ms;
+    `)(NOW);
+    const at = (ms) => NOW - ms;
     assert.equal(fn(at(30 * 1000)), "刚刚", "半分钟内 = 刚刚");
     assert.equal(fn(at(-5000)), "刚刚", "时钟回拨防御");
     assert.equal(fn(at(5 * 60 * 1000)), "5分钟", "分钟无「前」缀");
     assert.equal(fn(at(3 * 60 * 60 * 1000)), "3小时", "小时无「前」缀");
     assert.equal(fn(at(3 * 24 * 60 * 60 * 1000)), "3天", "天无「前」缀");
-    const yesterday = new Date(now - 24 * 60 * 60 * 1000);
-    if (yesterday.getDate() !== new Date(now).getDate()) {
-      assert.equal(fn(yesterday.getTime()), "昨天", "昨天");
-    }
+    assert.equal(fn(at(24 * 60 * 60 * 1000)), "昨天", "昨天（固定时钟，不再随运行日期漂移）");
     // 跨年走 YYYY年M月D日，年内走 M月D日（与 sessRelTime 的日期形制同源，只去前缀）
-    const far = new Date(now - 400 * 24 * 60 * 60 * 1000);
-    const expectFar = far.getFullYear() === new Date(now).getFullYear()
-      ? `${far.getMonth() + 1}月${far.getDate()}日`
-      : `${far.getFullYear()}年${far.getMonth() + 1}月${far.getDate()}日`;
-    assert.equal(fn(far.getTime()), expectFar, "远古日期形制");
+    assert.equal(fn(new Date(2026, 0, 5, 12, 0, 0).getTime()), "1月5日", "年内形制 M月D日");
+    assert.equal(fn(new Date(2025, 8, 10, 12, 0, 0).getTime()), "2025年9月10日", "跨年形制 YYYY年M月D日");
     // 栏内局部实现钉死：不许去改共用的 sessRelTime
     const sess = extractFn("sessRelTime");
     assert.ok(sess.includes("分钟前"), "会话页共用函数原样（带「前」缀）");
@@ -1843,9 +1875,29 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       const s = src();
       assert.ok(/event\.key === "Escape"/.test(s), "Esc 清空+收起");
       assert.ok(s.includes("railTermSearchClear"), "清空钮在册");
-      assert.ok(s.includes("退出后列表滚动回顶") || s.includes("scrollTop = 0"), "退出后滚动回顶（m6c §A6）");
       // 外点仅空查询收起：收起条件带 query 判空
       assert.ok(/terminalRailSearch\.query/.test(s), "外点收起判 query 空（有查询只失焦）");
+      // 退出后滚动回顶：真跑 closeTerminalRailSearch。旧断言 `s.includes("退出后列表
+      // 滚动回顶")` 只命中实现上方的注释，删掉 scrollTop=0 实现行也照过（普查 finding）；
+      // 且全测试集此前没有该函数的真跑，这里把行为钉死。
+      const scrollEl = { scrollTop: 42 };
+      const headEl = { classList: { add() {}, remove() {} } };
+      const inputEl = { tabIndex: 0, value: "接入", blur() {} };
+      const state = { open: true, query: "接入", timer: null, searching: true };
+      const closeLog = { renders: 0 };
+      const close = new Function("scrollEl", "headEl", "inputEl", "state", "closeLog", `
+        function $(id) { return id === "railTermSectionHead" ? headEl : (id === "railTermSearchInput" ? inputEl : null); }
+        const document = { querySelector: (sel) => (sel === ".rail-term-scroll" ? scrollEl : null) };
+        const terminalRailSearch = state;
+        function renderTerminalRailHistory() { closeLog.renders += 1; }
+        function terminalRailAgentId() { return "kimi"; }
+        ${extractFn("closeTerminalRailSearch")}
+        return closeTerminalRailSearch;
+      `)(scrollEl, headEl, inputEl, state, closeLog);
+      close();
+      assert.equal(scrollEl.scrollTop, 0, "退出后列表滚动回顶（m6c §A6，实现行为真跑）");
+      assert.equal(closeLog.renders, 1, "退出后重渲回树");
+      assert.equal(state.open, false, "搜索态随退出收起");
     });
 
     it("结果行＝T2 同一套（live 聚焦/去重/续接）；归档行进结果且点击落提示句", () => {
@@ -1912,9 +1964,42 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
       assert.equal(byKey.get("C:\\dev\\alpha\\sub").depth, 2, "sub 的深度 2（父 alpha）");
       assert.equal(byKey.get("C:\\dev").depth, 0, "dev 深度 0");
       assert.equal(byKey.get("").depth, 0, "未分组不嵌套");
-      // 祖先组自动展开（m6c §B3）：树模式下所有祖先键在自动展开集里
-      const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
-      assert.ok(/ancestor/i.test(s), "祖先自动展开逻辑在册");
+      // 祖先组自动展开（m6c §B3）：真跑 applyTerminalRailViewChoice("groupBy",
+      // "workspace-tree")，钉死解折叠分支本体。旧断言 /ancestor/i 命中的是另一个
+      // 函数（terminalRailIsAncestorDir）的函数名与注释，删掉解折叠分支也照过——
+      // 普查 finding：该分支全测试集零真实覆盖。
+      const collapsed = new Set(["c:\\dev", "c:\\dev\\alpha", "c:\\dev\\alpha\\sub"]);
+      const viewLog = { collapsedSaved: 0, rendered: 0 };
+      const choose = new Function("collapsed", "viewLog", `
+        const TERMINAL_RAIL_VIEW_GROUPS = [
+          { label: "分组方式", field: "groupBy", items: [] },
+          { label: "排序方式", field: "orderBy", items: [] },
+          { label: "筛选会话", field: "archivedFilter", items: [] },
+        ];
+        const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+        const terminalRailLastGroups = [
+          { key: "C:\\\\dev", depth: 0 },
+          { key: "C:\\\\dev\\\\alpha", depth: 1 },
+          { key: "C:\\\\dev\\\\alpha\\\\sub", depth: 2 },
+          { key: "", depth: 0 },
+        ];
+        const terminalRailCollapsedGroups = collapsed;
+        let terminalRailFlipMode = "instant";
+        function closeTerminalRailViewMenu() {}
+        function saveTerminalRailCollapsedGroups() { viewLog.collapsedSaved += 1; }
+        function saveTerminalRailViewPrefs() {}
+        function renderTerminalRailHistory() { viewLog.rendered += 1; }
+        function terminalRailAgentId() { return "kimi"; }
+        ${extractFn("terminalRailNormDir")}
+        ${extractFn("applyTerminalRailViewChoice")}
+        return applyTerminalRailViewChoice;
+      `)(collapsed, viewLog);
+      choose("groupBy", "workspace-tree");
+      assert.equal(collapsed.has("c:\\dev\\alpha"), false, "祖先组（depth 1）自动展开");
+      assert.equal(collapsed.has("c:\\dev\\alpha\\sub"), false, "更深祖先组（depth 2）同样展开");
+      assert.equal(collapsed.has("c:\\dev"), true, "顶层组（depth 0）不动（它不是别人的祖先挂点）");
+      assert.equal(viewLog.collapsedSaved, 1, "展开态落盘");
+      assert.equal(viewLog.rendered, 1, "切树后重渲一次");
     });
 
     it("单列表：无组平铺，全部会话一个列表（树标签＝会话）", () => {
@@ -2686,9 +2771,11 @@ describe("M10 F2：点「移除分组」先收场组头菜单再开弹窗", () =
 });
 
 describe("M12-A 内切判定矩阵（vm 真跑）", () => {
-  // 点栏内历史会话、去重未命中后：对当前聚焦页签的会话 A 做判定——空白壳/idle/
-  // exited 就地换内容（同页签），working/补读失败走新开页签（保护在跑任务、
-  // 宁多开勿错杀）。一次内切期间在飞闸忽略后续点击。
+  // 点栏内历史会话、去重未命中后：对当前活跃视口显示的终端 A 做判定。视口是唯一能换
+  // 内容的槽——空白壳/idle/exited 就地换（同页签）；working、switch_busy 与补读失败
+  // 都属「旧终端可能在跑」，走保活分支：旧终端留后台不杀，目标终端挂进当前视口，页签
+  // 数同样不变（绝不 /switch，那会 terminate 旧进程树）。唯一加页签的情形是没有可挂
+  // 视口（placement "new"）。一次内切期间在飞闸忽略后续点击。
 
   it("空白壳内切接管：同页签换内容，POST switch 带目标 resume＋cwd，不开新页签", async () => {
     const { fn, log } = runSwitch({
@@ -3013,16 +3100,19 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
       if (method === "POST" && path.endsWith("/switch")) { log.switchBodies.push(body); return Promise.resolve(switchImpl()); }
       return Promise.reject(new Error("unexpected " + method + " " + path));
     }
-    // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 6462-6477），按实例
-    // activeRequests 置 working/idle。
+    // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 panel.js:7758），按实例
+    // activeRequests 置 working/idle。抽取的生产实现改名落地（enrichTerminalSessionsReal），
+    // 由同名路由壳按 realEnrich 二选一——桩与真实现不能同名共处一域：函数声明提升
+    // 会让后声明者（真实现）永远盖过桩，开关整个失效（普查 finding，曾致全部用例
+    // 实跑真 enrich、注释口径与执行路径不符）。
+    function enrichTerminalSessionsStub(agents) {
+      const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
+      const working = !!(row && row.activeRequests > 0);
+      for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
+    }
     function enrichTerminalSessions(agents) {
-      if (!realEnrich) {
-        const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
-        const working = !!(row && row.activeRequests > 0);
-        for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
-        return;
-      }
-      enrichTerminalSessionsReal(agents);
+      if (realEnrich) enrichTerminalSessionsReal(agents);
+      else enrichTerminalSessionsStub(agents);
     }
     function createAgentTerminal(opts, options) { log.creates.push(opts); log.placements.push(options || {}); return Promise.resolve(createImpl(opts)); }
     function terminalBackendSession(item) { return { ...item }; }
@@ -3046,8 +3136,7 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
     ${extractFn("terminalCommandRunning")}
     ${extractFn("terminalSessionBusyFromSignals")}
     ${extractFn("noteTerminalWorkingStatus")}
-    ${extractFn("enrichTerminalSessions")}
-    const enrichTerminalSessionsReal = enrichTerminalSessions;
+    ${extractFn("enrichTerminalSessions").replace("function enrichTerminalSessions(", "function enrichTerminalSessionsReal(")}
     let terminalRailSelectPending = null;
     let terminalRailSelectSeq = 0;
     const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
@@ -3363,6 +3452,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
   // scrollTop 12——幽灵绝对位＝100−50＋12＝62px。
   const runExitFlip = ({ armed = true, reduced = false, mode = "archive" } = {}) => {
     const log = { posts: [], toasts: [], renders: 0, flipModes: [], ghosts: [] };
+    const timers = []; // 退场幽灵移除定时器的捕获池（沙盒内 setTimeout 桩的落点）
     // 量测选择器与生产同串（2026-10-26 起含组头与水位线钮）
     const TERMINAL_RAIL_MOTION_SELECTOR_STUB = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
     const makeGhost = (id) => {
@@ -3403,7 +3493,10 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
     const sessions = ["s-1", "s-2", "s-3", "s-4", "s-5", "s-6"].map((id, i) => ({
       id, endpoint: "kimi", project: "C:\\dev\\alpha", title: `会话 ${id}`, lastActive: 100 - i,
     }));
-    const fn = new Function("log", "list", "window", "armed", "swap", "sessions", "mode", `
+    const fn = new Function("log", "list", "window", "armed", "swap", "sessions", "mode", "timers", `
+      // setTimeout 捕获桩：退场幽灵的移除定时器（110ms）不真等墙钟（普查 finding：
+      // 150ms 等待余量偏薄，负载抖动会提前断言）——记下回调与延迟值，测试里手动放行。
+      const setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
       let terminalRailPrefs = mode === "archive"
         ? { archived: [], removedGroups: [] }
         : { archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: [] };
@@ -3429,8 +3522,8 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       ${extractFn("terminalRailArchiveSession")}
       ${extractFn("terminalRailUnarchiveSession")}
       return { archive: terminalRailArchiveSession, unarchive: terminalRailUnarchiveSession };
-    `)(log, list, { matchMedia: () => ({ matches: reduced }) }, armed, swap, sessions, mode);
-    return { fn, log, host, list };
+    `)(log, list, { matchMedia: () => ({ matches: reduced }) }, armed, swap, sessions, mode, timers);
+    return { fn, log, host, list, timers };
   };
 
   describe("flip 门（vm 真跑）", () => {
@@ -3449,7 +3542,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
 
   describe("退场幽灵行（vm 真跑）", () => {
     it("归档：被归档行克隆进滚动层——inert＋绝对定位＋100ms ease-out 淡出 fill forwards，淡出后移除", async () => {
-      const { fn, log, host } = runExitFlip();
+      const { fn, log, host, timers } = runExitFlip();
       fn.archive("s-1");
       assert.equal(log.ghosts.length, 1, "只有离开布局的那一行有幽灵");
       assert.equal(log.ghosts[0].id, "s-1", "幽灵是被归档行");
@@ -3464,17 +3557,20 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       assert.equal(ghost.style.top, "62px", "绝对位＝行视口位−滚动层位＋scrollTop（100−50＋12）");
       assert.equal(ghost.style.left, "8px", "左缘对齐原行");
       assert.equal(ghost.style.width, "240px", "宽同原行");
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(timers.length, 1, "退场排了一个移除定时器（不再真等墙钟）");
+      assert.equal(timers[0].ms, 110, "移除延迟 110ms（略长于 100ms 淡出）");
+      timers[0].fn();
       assert.equal(ghost.removed, true, "淡出后移除（不残留 DOM）");
       assert.equal(host.children.length, 1, "存活行不克隆——下方行交给 FLIP 位移，不叠幽灵");
     });
 
     it("撤销镜像：水位线让位的回填行克隆淡出（s-6 回隐藏池）", async () => {
-      const { fn, log } = runExitFlip({ mode: "unarchive" });
+      const { fn, log, timers } = runExitFlip({ mode: "unarchive" });
       fn.unarchive("kimi", "s-1");
       assert.equal(log.ghosts.length, 1, "只有让位的回填行有幽灵");
       assert.equal(log.ghosts[0].id, "s-6", "幽灵是水位线让位的 s-6");
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(timers.length, 1, "退场排了一个移除定时器");
+      timers[0].fn();
       assert.equal(log.ghosts[0].ghost.removed, true, "淡出后移除");
     });
 

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -27,6 +27,13 @@ function fakeOpencodeChild({ code = 0, signal = null, error = null } = {}) {
   });
   return child;
 }
+
+// Opaque on purpose: writeConfig is mocked in the launcher tests, so nothing
+// here depends on the real Anyswitch store schema. Injected via loadStore so
+// the writeConfig-wiring tests never read the host machine's real store
+// (the module-level default resolves it from process.env.LOCALAPPDATA).
+const FAKE_STORE = { version: 2, providers: {} };
+const fakeLoadStore = () => ({ ok: true, store: FAKE_STORE });
 
 describe("buildInstanceId", () => {
   it("builds <cwd basename>-<pid> and scrubs characters outside the relay charset", () => {
@@ -239,6 +246,7 @@ describe("runOpencodeLauncher", () => {
         calls.push({ writeConfig: { storeVersion: store?.version, port, sidecarRoot } });
         return { ok: true, unchanged: false, backupPath: "B" };
       },
+      loadStore: fakeLoadStore,
       log: (line) => calls.push({ log: line }),
       spawnFn: () => {
         calls.push("spawn");
@@ -265,11 +273,28 @@ describe("runOpencodeLauncher", () => {
       startRelay: async () => ({ port: 47821, token: "tok", close: async () => {} }),
       base,
       writeConfig: async () => ({ ok: false, unchanged: true, reason: "unparseable" }),
+      loadStore: fakeLoadStore,
       log: (line) => calls.push(line),
       spawnFn: () => fakeOpencodeChild({ code: 0 }),
     });
     assert.equal(code, 0);
     assert.deepEqual(calls, ["warning: opencode.json not updated: unparseable"]);
+  });
+
+  it("logs a warning and still spawns when the store cannot be read", async () => {
+    const calls = [];
+    const code = await runOpencodeLauncher({
+      startRelay: async () => ({ port: 47821, token: "tok", close: async () => {} }),
+      base,
+      writeConfig: async () => ({ ok: true, unchanged: true }),
+      loadStore: () => ({ ok: false, reason: "store-absent" }),
+      log: (line) => calls.push(line),
+      spawnFn: () => fakeOpencodeChild({ code: 0 }),
+    });
+    // An unreadable store must not block the launch: the sync is skipped with
+    // a warning and opencode starts anyway.
+    assert.equal(code, 0);
+    assert.deepEqual(calls, ["warning: Anyswitch store could not be read; opencode config not updated"]);
   });
 
   it("launches natively when the relay cannot start: verbatim env, config still synced, nothing to close", async () => {
@@ -285,6 +310,7 @@ describe("runOpencodeLauncher", () => {
         calls.push({ writeConfig: { port, sidecarRoot } });
         return { ok: true, unchanged: true };
       },
+      loadStore: fakeLoadStore,
       log: (line) => calls.push({ log: line }),
       spawnFn: (cmd, args, opts) => {
         calls.push({ spawn: { env: opts.env, args } });
@@ -310,16 +336,28 @@ describe("runOpencodeLauncher", () => {
   });
 
   it("skips config sync entirely when no writeConfig is wired (default no-op)", async () => {
-    // The existing runOpencodeLauncher tests above all exercise this default:
-    // none of them wires writeConfig and none touches the disk. Pin it so a
-    // future default change cannot silently start rewriting the real config.
+    // Without a wired writer the launcher must not sync at all: the sync branch
+    // would read the store and possibly rewrite the real opencode.json, which
+    // only production main() opts into. Every sync outcome is observable —
+    // "updated" or a "warning" log line, or a thrown store read — so pinning
+    // the exact call sequence with an empty log keeps the default hermetic.
+    // (A filesystem existsSync here would be vacuous: the default config path
+    // follows process.env, not the injected base.)
+    const calls = [];
     const code = await runOpencodeLauncher({
-      startRelay: async () => ({ port: 47821, token: "tok", close: async () => {} }),
+      startRelay: async () => {
+        calls.push("startRelay");
+        return { port: 47821, token: "tok", close: async () => calls.push("closeRelay") };
+      },
       base,
-      spawnFn: () => fakeOpencodeChild({ code: 0 }),
+      log: (line) => calls.push({ log: line }),
+      spawnFn: () => {
+        calls.push("spawn");
+        return fakeOpencodeChild({ code: 0 });
+      },
     });
     assert.equal(code, 0);
-    assert.equal(existsSync(join("C:\\Users\\tester", ".config", "opencode", "opencode.json")), false);
+    assert.deepEqual(calls, ["startRelay", "spawn", "closeRelay"]);
   });
 });
 

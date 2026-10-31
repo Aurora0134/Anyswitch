@@ -58,8 +58,6 @@ function routerWith({ relayStatus, relayResult, pulledAgents, metricsCollector }
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: metricsCollector ?? null,
-    aliasResolver: null,
-    aliasPath: null,
     startTime: 123456,
     getRelayStatusFn: async () => relayStatus ?? { status: "stopped", pid: null, port: 47821 },
     startRelayFn: async () => relayResult ?? { ok: true, relay: { status: "running", pid: 4242, port: 47821 } },
@@ -138,7 +136,7 @@ describe("panel router relay control + pull-mode agents", () => {
         warn: (m) => entries.push(["warn", m]),
         error: (m) => entries.push(["error", m]),
       },
-      metricsCollector: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: null,
       fetchRelayAgents: async () => null,
     });
     const { req, res, json } = fakeReqRes("/panel/api/logs/ingest", "POST", { level: "warn", message: "keep-alive: retrying claude request (empty_stream, attempt 1/1)" });
@@ -156,7 +154,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
       logger: { info: (m) => entries.push(m), warn: (m) => entries.push(m), error: (m) => entries.push(m) },
-      metricsCollector: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: null,
       fetchRelayAgents: async () => null,
     });
     const { req, res } = fakeReqRes("/panel/api/logs/ingest", "POST", { level: "debug", message: "x" });
@@ -174,7 +172,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
       logger,
-      metricsCollector: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: null,
       fetchRelayAgents: async () => null,
     });
     const { req, res, json } = fakeReqRes("/panel/api/logs/clear", "POST", {});
@@ -191,7 +189,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
       logger: { info: () => {}, warn: () => {}, error: () => {}, clear: () => { cleared = true; } },
-      metricsCollector: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: null,
       fetchRelayAgents: async () => null,
     });
     const { req, res } = fakeReqRes("/panel/api/logs/clear", "POST", {}, { origin: "http://evil.example", "x-anyswitch-panel": undefined });
@@ -215,7 +213,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let called = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       startRelayFn: async () => { called = true; return { ok: true, relay: { status: "running", pid: 7, port: 47821 } }; },
       fetchRelayAgents: async () => null,
     });
@@ -231,7 +229,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let called = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       stopRelayFn: async () => { called = true; return { ok: true, relay: { status: "stopped", pid: null, port: 47821 } }; },
       fetchRelayAgents: async () => null,
     });
@@ -245,7 +243,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let called = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       stopRelayFn: async () => { called = true; return { ok: true, relay: { status: "stopped", pid: null, port: 47821 } }; },
       fetchRelayAgents: async () => null,
     });
@@ -261,7 +259,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let called = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       stopRelayFn: async () => { called = true; return { ok: true }; },
       fetchRelayAgents: async () => null,
     });
@@ -276,7 +274,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let called = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       stopRelayFn: async () => { called = true; return { ok: true, relay: { status: "stopped", pid: null, port: 47821 } }; },
       fetchRelayAgents: async () => null,
     });
@@ -295,7 +293,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let called = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       restartRelayFn: async () => { called = true; return { ok: true, relay: { status: "running", pid: 8, port: 47821 } }; },
       fetchRelayAgents: async () => null,
     });
@@ -319,7 +317,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const local = [{ id: "claude", status: "stopped" }];
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, aliasResolver: null, aliasPath: null,
+      logger: null,
       metricsCollector: { getAgentsStatus: async () => local },
       fetchRelayAgents: async () => null, // relay down -> null
     });
@@ -343,7 +341,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let relayAnswers = true;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, aliasResolver: null, aliasPath: null,
+      logger: null,
       metricsCollector: { getAgentsStatus: async () => blindLocal },
       fetchRelayAgents: async () => (relayAnswers ? pulled : null),
     });
@@ -379,7 +377,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let localAsked = false;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, aliasResolver: null, aliasPath: null,
+      logger: null,
       metricsCollector: { getAgentsStatus: async () => { localAsked = true; return [{ id: "claude", status: "running" }]; } },
       // 面板自己那 1500ms 预算撞上 relay 冷探针时，真实现返回超时标记（不是 null）。
       fetchRelayAgents: async () => ({ pullTimeout: true }),
@@ -398,7 +396,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let answer = pulled;
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, aliasResolver: null, aliasPath: null,
+      logger: null,
       metricsCollector: null,
       fetchRelayAgents: async () => answer,
     });
@@ -418,7 +416,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const local = [{ id: "claude", status: "stopped" }];
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, aliasResolver: null, aliasPath: null,
+      logger: null,
       metricsCollector: { getAgentsStatus: async () => local },
       fetchRelayAgents: async () => null,
     });
@@ -451,7 +449,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const pulled = { window: "8h", buckets: 48, models: [{ model: "glm-4.7", provider: "bigmodel", total: 12, successRate: 99, status: "green", cells: [] }] };
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayStability: async () => pulled,
     });
@@ -466,7 +464,7 @@ describe("panel router relay control + pull-mode agents", () => {
     const snap = { window: "8h", buckets: 48, models: [{ model: "gpt-5.2", total: 3, successRate: 33.3, status: "red", cells: [] }] };
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, aliasResolver: null, aliasPath: null,
+      logger: null,
       metricsCollector: { getModelStability: () => snap },
       fetchRelayAgents: async () => null,
       fetchRelayStability: async () => null,
@@ -514,7 +512,6 @@ describe("panel router relay control + pull-mode agents", () => {
     const router = createPanelRouter({
       storePaths: { root: dir, storeFile, credentialsDir: join(dir, "credentials"), appDir: join(dir, "app") },
       logger: null, metricsCollector: { getModelStability: () => ({ window: "8h", buckets: 48, models }) },
-      aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchRelayStability: async () => (pulled ? { window: "8h", buckets: 48, models } : null),
     });
@@ -638,12 +635,16 @@ describe("panel router relay control + pull-mode agents", () => {
 // reg.exe and no real watchdog process is touched here.
 describe("panel router followAgent watchdog coordination", () => {
   function watchdogRouter(calls, opts = {}) {
+    // GET /api/settings 按 base 解析 settings.json：不传 base 会落到真实
+    // %LOCALAPPDATA%\Anyswitch，读的是本机安装产品的设置文件。给临时 base
+    // 隔离掉（mkTestDir 的进程退出清扫兜底回收）；用例只断言注入的
+    // watchdog 探针值，settings 落盘内容不参与断言。
+    const { base } = tempBase();
     return createPanelRouter({
+      base,
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null,
       metricsCollector: null,
-      aliasResolver: null,
-      aliasPath: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: opts.regDisableFails ? false : true, ...(opts.regDisableFails ? { error: "boom" } : {}) }; },
       isWatchdogAutostartEnabledFn: async () => opts.registryEnabled ?? false,
@@ -669,7 +670,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
       isWatchdogAutostartEnabledFn: async () => false,
@@ -696,7 +697,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
       isWatchdogAutostartEnabledFn: async () => true,
@@ -718,7 +719,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: false, error: "reg.exe exploded" }),
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
       isWatchdogAutostartEnabledFn: async () => false,
@@ -753,7 +754,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => false,
@@ -780,7 +781,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => false,
@@ -804,7 +805,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
       isWatchdogAutostartEnabledFn: async () => false,
@@ -825,7 +826,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => false,
@@ -861,7 +862,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => false,
@@ -905,6 +906,12 @@ describe("panel router watchdog probe snapshot", () => {
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 探针计数在轮次开始时同步自增，但轮次起跑要过真实定时器/微任务——固定 50ms
+  // 的 sleep 是在赌调度。改成有界轮询等计数到位，下面的精确断言原样保留。
+  const untilCount = async (get, target) => {
+    const deadline = Date.now() + 2_000;
+    while (get() < target && Date.now() < deadline) await sleep(5);
+  };
 
   it("prewarm at router creation kicks the first probe round before any request", async () => {
     const { base } = tempBase();
@@ -913,7 +920,7 @@ describe("panel router watchdog probe snapshot", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => { calls++; await hang; return false; },
@@ -923,7 +930,7 @@ describe("panel router watchdog probe snapshot", () => {
       fetchRelayAgents: async () => null,
     });
     router.prewarmWatchdogProbes();
-    await sleep(50);
+    await untilCount(() => calls, 2);
     assert.equal(calls, 2); // one shared round: registry probe + liveness probe
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
@@ -935,7 +942,7 @@ describe("panel router watchdog probe snapshot", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => { autoCalls++; if (autoCalls > 1) await hang; return false; },
@@ -966,7 +973,7 @@ describe("panel router watchdog probe snapshot", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => { rounds++; if (rounds > 2) await gate; return false; },
@@ -991,7 +998,7 @@ describe("panel router watchdog probe snapshot", () => {
     assert.deepEqual(JSON.parse(g3.res.body).watchdog, { autostart: false, running: false });
     // ...and exactly one background refresh was shared between them.
     release();
-    await sleep(50);
+    await untilCount(() => rounds, 4);
     assert.equal(rounds, 4);
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
@@ -1003,7 +1010,7 @@ describe("panel router watchdog probe snapshot", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => { calls++; if (fail) throw new Error("reg.exe exploded"); return false; },
@@ -1034,7 +1041,7 @@ describe("panel router watchdog probe snapshot", () => {
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => { regOn = true; return { ok: true }; },
       disableWatchdogAutostartFn: async () => { regOn = false; return { ok: true }; },
       isWatchdogAutostartEnabledFn: async () => { autoCalls++; return regOn; },
@@ -2419,7 +2426,7 @@ describe("panel router route-chain runtime", () => {
     };
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayChainRuntime: async () => pulled,
     });
@@ -2433,7 +2440,7 @@ describe("panel router route-chain runtime", () => {
   it("GET /panel/api/route-chain/runtime falls back to an empty endpoints map when the relay is down", async () => {
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayChainRuntime: async () => null,
     });
@@ -2950,7 +2957,7 @@ describe("panel router route-chain enabled 开关 API", () => {
   function routerWithStoreService(storeService) {
     return createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       storeService,
     });
@@ -4885,13 +4892,21 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("a11y：图例项为 button，趋势/环形 SVG 有 role=img 与 aria-label", () => {
-    assert.ok(!panelJs.includes('document.createElement("span");\n      chip.className = "stats-legend-item"'),
+    // 断言钉在创建现场（目标 className/aria-label 前一小段窗口），不做全文
+    // includes：panel.js 里 createElement("button") 有 7 处、role=img 有 3 处，
+    // 全文匹配对「图例/SVG 这一处」零区分度，图例改回 span 也照样绿。
+    const legendAt = panelJs.indexOf('chip.className = "stats-legend-item"');
+    assert.ok(legendAt > 0, "stats legend chip builder found");
+    const legendChip = panelJs.slice(Math.max(0, legendAt - 160), legendAt + 1);
+    assert.ok(legendChip.includes('document.createElement("button")'), "legend items are buttons");
+    assert.ok(!legendChip.includes('document.createElement("span")'),
       "trend legend chip no longer a span");
-    assert.ok(panelJs.includes('document.createElement("button")'), "legend items are buttons");
     assert.ok(panelJs.includes('ariaLabel: "Token 趋势图"'), "trend chart aria-label wired");
     assert.ok(panelJs.includes('ariaLabel: "首字响应 TTFT 趋势图"'), "ttft chart aria-label wired");
-    assert.ok(panelJs.includes('aria-label", "模型用量环形图"'), "donut svg aria-label wired");
-    assert.ok(panelJs.includes('svg.setAttribute("role", "img")'), "svg role=img set");
+    const donutAt = panelJs.indexOf('aria-label", "模型用量环形图"');
+    assert.ok(donutAt > 0, "donut svg aria-label wired");
+    assert.ok(panelJs.slice(Math.max(0, donutAt - 160), donutAt + 1).includes('svg.setAttribute("role", "img")'),
+      "svg role=img set");
   });
 
   it("统计卡口径标注唯一性", () => {
@@ -5242,11 +5257,14 @@ describe("panel-host self-restart endpoint + control-plane-only page", () => {
   function restartRouter({ hostKind, spawnImpl, exitImpl } = {}) {
     const calls = { spawns: 0, exits: [] };
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/anyswitch" },
+      // /api/status 的默认 getRelayStatusFn 会向真实 127.0.0.1:47821 发 HTTP
+      // 探针并 spawn netstat（本机 relay 在跑就连真进程都被读到），终端宿主
+      // 状态链还会按 relayRoot 落 pi-relay-token——root 关进临时目录、relay
+      // 状态改注入桩，这条路由不再对宿主机产生任何真实副作用。
+      storePaths: { root: mkTestDir("anyswitch-panel-restart-") },
+      getRelayStatusFn: async () => ({ status: "stopped", pid: null, port: 47821 }),
       logger: null,
       metricsCollector: null,
-      aliasResolver: null,
-      aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchTerminalHostStatus: async () => null,
       hostKind,
@@ -5256,6 +5274,13 @@ describe("panel-host self-restart endpoint + control-plane-only page", () => {
     return { router, calls };
   }
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 退出是排程在真实定时器上的（宽限 150ms / 兜底 1200ms+150ms），固定 sleep 的
+  // 余量只有百来毫秒，负载一抖就赌输。改成有界轮询等事件落定，下面的断言原样
+  // 保留：等到才断言，等不到照样红。
+  const waitFor = async (predicate, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate() && Date.now() < deadline) await wait(10);
+  };
 
   it("answers first and exits only after the response has flushed", async () => {
     const { router, calls } = restartRouter();
@@ -5267,7 +5292,7 @@ describe("panel-host self-restart endpoint + control-plane-only page", () => {
     assert.equal(calls.spawns, 1, "the detached helper is the only thing that can bring the next host up");
     assert.deepEqual(calls.exits, [], "exiting before the flush is what the browser cannot distinguish from failure");
     res.emit("finish");
-    await wait(250);
+    await waitFor(() => calls.exits.length > 0, 2_000);
     assert.deepEqual(calls.exits, [0]);
   });
 
@@ -5277,7 +5302,7 @@ describe("panel-host self-restart endpoint + control-plane-only page", () => {
     await router.handle(req, res);
     // No "finish" emitted: the backstop must still release 47820, otherwise the
     // frontend's recovery poll waits forever on a port we are holding.
-    await wait(1_500);
+    await waitFor(() => calls.exits.length > 0, 5_000);
     assert.deepEqual(calls.exits, [0]);
   });
 
@@ -5692,8 +5717,11 @@ describe("设置项「注入推理强度」", () => {
   function makeRouter(base, { onSync } = {}) {
     return createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      // root 跟 base 同形落位（生产里 relayRoot 就是 %LOCALAPPDATA%\Anyswitch）：
+      // POST injectThinkingEffort 会把同步结果写到 root 下的 sync-status.json，
+      // 写死固定真实路径等于每次跑测试都在临时目录外落一个共享可变文件。
+      storePaths: { root: join(base.LOCALAPPDATA, "Anyswitch") },
+      logger: null, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => false,
@@ -6916,7 +6944,7 @@ describe("设置项「运行日志」", () => {
     return createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
-      logger, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger, metricsCollector: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
       isWatchdogAutostartEnabledFn: async () => false,
@@ -8007,7 +8035,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
   function terminalRouter({ sessions, detected, codexSessions, agents, journalRows, root, scanAgentConversations } = {}) {
     return createPanelRouter({
       storePaths: { root: root ?? "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => agents ?? null,
       // 数组形态 = 只喂进程面（旧用例默认）；codex 桥接数据走 codexSessions 键，
       // 与真实端点的 { processes, codexSessions } 负载同形；函数形态 = 逐请求
@@ -8069,7 +8097,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     let readCalls = 0;
     const router = createPanelRouter({
       storePaths: { root: mkTestDir("anyswitch-session-read-root-") },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchTerminalSessionReadFn: async () => {
         readCalls += 1;
         return { status: 200, body: hostBody };
@@ -8094,7 +8122,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
   it("单会话读原样带回宿主的 404（记录已消失时调用方据此降级）", async () => {
     const router = createPanelRouter({
       storePaths: { root: mkTestDir("anyswitch-session-read-404-root-") },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchTerminalSessionReadFn: async () => ({ status: 404, body: { error: "not_found" } }),
     });
     const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/deadbeef", "GET");
@@ -8112,7 +8140,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     const proxied = [];
     const router = createPanelRouter({
       storePaths: { root: mkTestDir("anyswitch-session-stream-root-") },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchTerminalSessionReadFn: async () => { readCalls += 1; return { status: 200, body: { id: "098fb88f" } }; },
       terminalProxyFetchFn: async (url) => {
         proxied.push(String(url));
@@ -8348,8 +8376,10 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
   });
 });
 
-// 前端接线：适配层读注入的 agent 字段、指标/路由/请求按看板口径映射，
-// 最后一标签可关、底栏行列随 resize 联动。映射函数在 vm 里真跑。
+// 前端接线：适配层把注入的 agent 原样挂进会话模型，指标/路由/请求行按看板口径
+// 在 vm 里真跑映射与模板；结构层只测「渲染拆层」与关页签守卫这两件接线契约。
+// 底栏尺寸/PID 徽标已退役（退役判据在底栏块），本块不覆盖它，别把旧的
+// 「底栏行列随 resize 联动」当成本处的回归钉。
 describe("虚拟终端归属前端（adapter + 映射口径）", () => {
   async function vmFn(name, args, deps = []) {
     const source = [name, ...deps].map((fnName) => {
@@ -8575,7 +8605,8 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
 // 实况行内联归属（面 R 撤换路由链区块后）：侧栏不再有路由链图形，「谁在
 // 服务」由实况行副行回答——实例身份（model/providerId）优先、走看板胶囊同
 // 一口径，auto 链身份缺位时回落路由当前跳（真实服务方只在路由运行态里）。
-// 归属函数在桩环境里真跑（同 terminalFontSizeSandbox 先例）。
+// 归属函数体从 panel.js 抽出，补上 storePools / storeProviders / routeNodeInfoCache
+// 三个模块态桩后在 new Function 里真跑（桩环境抽函数体的先例见 fontSizeSandbox）。
 describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收列 / 排印收口）", () => {
   function servingSandbox() {
     const bodies = ["terminalServingLabel", "hasDisplayIdentity", "capsuleLabel", "routeNodeName"].map((fnName) => {
@@ -12148,7 +12179,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     };
     const router = createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       agentsActivityBridge: bridge,
     });
@@ -12490,22 +12521,6 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
     assert.equal(agents[2].instances[0].activeRequests, 0, "点到且新鲜的实例行按真值写");
     assert.equal(agents[2].instances[0].status, "idle", "实例行 status 同步镜像");
     assert.equal(agents[2].metrics.activeRequests, 2, "端点级键没点到 → 原样不动（不擅自归零）");
-  });
-
-  it("snapshot 帧按 at 取时效：过期行不改数不命中（合并计数身份的桥缓存旧值）", async () => {
-    const agents = mkBoardAgents();
-    const now = Date.now();
-    const hit = await vmFn("boardActivityApplyFrame",
-      [{ type: "snapshot", instances: [
-        { endpointId: "kimi", instanceId: null, activeRequests: 0, at: now - 60000 },
-        { endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: now - 60000 },
-        { endpointId: "dsh", instanceId: null, activeRequests: 2, at: now - 100 },
-      ] }, agents],
-      ["terminalActivityKey"]);
-    assert.deepEqual(hit, ["dsh"], "只有 at 新鲜的行算真值触达");
-    assert.equal(agents[0].metrics.activeRequests, 0, "过期行不改写 kimi 端点计数");
-    assert.equal(agents[0].instances[0].activeRequests, 0, "过期行不改写 kimi 实例计数");
-    assert.equal(agents[2].metrics.activeRequests, 2, "新鲜行照常按真值写");
   });
 
   it("snapshot 帧按 at 取时效：过期行不改数不命中（合并计数身份的桥缓存旧值）", async () => {
@@ -13086,7 +13101,7 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
     const calls = [];
     const router = createPanelRouter({
       storePaths: { root },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       createTerminalSession: createSession ?? (async (body, options) => {
         calls.push({ body, options });
@@ -13230,7 +13245,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
     const router = createPanelRouter({
       storePaths: { root },
       base: base ?? process.env,
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchTerminalSessionFn: fetchSession ?? (async (id) => ({ ...session, id })),
       restartTerminalSessionFn: restartSession ?? (async (id, body, options) => {
@@ -13488,7 +13503,7 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
   function listRouter({ root, sessions, scanAgentConversations }) {
     return createPanelRouter({
       storePaths: { root },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => sessions,
@@ -13601,7 +13616,7 @@ parentPort.on("message", (message) => {
 `);
     const router = createPanelRouter({
       storePaths: { root },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => [
@@ -13684,7 +13699,7 @@ parentPort.on("message", (message) => {
     let scans = 0;
     const router = createPanelRouter({
       storePaths: { root },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => [
@@ -13719,7 +13734,7 @@ parentPort.on("message", (message) => {
     let matchable = false;
     const router = createPanelRouter({
       storePaths: { root },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => [
@@ -13767,7 +13782,7 @@ parentPort.on("message", (message) => {
     let scans = 0;
     const router = createPanelRouter({
       storePaths: { root },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => [
@@ -13804,7 +13819,7 @@ parentPort.on("message", (message) => {
     const router = createPanelRouter({
       storePaths: { root },
       base: { ...process.env },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => [
@@ -13877,7 +13892,7 @@ describe("内切杀前复核（switch-guard 双探）", () => {
     const router = createPanelRouter({
       storePaths: { root: mkTestDir("anyswitch-switch-guard-") },
       base: { ...process.env },
-      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
       fetchTerminalSessionsList: async () => [],
@@ -14658,8 +14673,6 @@ describe("panel router terminal-host lifecycle proxy", () => {
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null,
       metricsCollector: null,
-      aliasResolver: null,
-      aliasPath: null,
       getRelayStatusFn: async () => ({ status: "running", pid: 1234, port: 47821 }),
       fetchRelayAgents: async () => null,
       fetchTerminalHostStatus: async () => {

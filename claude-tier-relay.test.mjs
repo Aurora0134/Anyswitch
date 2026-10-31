@@ -1,7 +1,9 @@
 // 档位映射 (Claude Code tier entries) on the relay path: handler-level refusal /
 // takeover behaviour plus real loopback requests against both relay frontends
 // with a recording mock upstream. Synthetic store only — no real credentials, no
-// DPAPI, no network egress.
+// DPAPI, no network egress. The settings root is redirected to an empty temp
+// dir at load and the effort injector plus both image gates are fixed thunks,
+// so nothing on the request path touches the real user profile either.
 //
 // The load-bearing assertions are (1) what the UPSTREAM is asked for and what
 // the tracker is told, which must both be the hosted model and never the entry
@@ -12,8 +14,21 @@ import assert from "node:assert/strict";
 
 import { createHandler } from "./handler.mjs";
 import { createRelayServer, listenLoopback as listenPerLaunch } from "./server.mjs";
-import { createOpenAIRelayServer, listenLoopback as listenResident } from "./openai-server.mjs";
+import { createOpenAIRelayServer, listenLoopback as listenResident, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
+
+// 最后一条通向真实用户目录的路：mid-system 改写开关在 anthropicToOpenAI 里现读
+// settings.json 而 handler 没有给它注入面（handler.mjs 调它时不传 options），图片
+// 两门之外的其余 relay-settings 默认门同理。store / 凭据 / 上游 / 档位映射已经全
+// 部注入，这里再把三个基础目录整体重定向到空临时目录——node --test 每个文件独
+// 立进程，不影响其他测试文件；设置读取落空按默认值处理，与此前本机键缺失时的
+// 出网语义一致，本文件不再随宿主机 settings 与 effort db 漂移。
+const settingsBase = mkTestDir("anys-tier-relay-settings-");
+process.env.LOCALAPPDATA = settingsBase;
+process.env.APPDATA = settingsBase;
+process.env.USERPROFILE = settingsBase;
 
 const TOKEN = "test-token-claude-tier-mapping";
 
@@ -105,6 +120,12 @@ function makeDeps({ mappings = DEFAULT_MAPPINGS, store = syntheticStore(), ...ov
       error: (message) => logs.push({ level: "error", message }),
     },
     getClaudeTierMapping: () => mappings,
+    // 隔离：effort 注入与图片两门给死值（同 relay.test.mjs / openai-handler.test.mjs
+    // 的注入做法）。本文件断言不涉及推理强度与图片，宿主机的 settings 键与
+    // thinking-efforts.db.json 都不得影响出网 body 或任何用例结果。
+    effortInjector: createEffortInjector({ isEnabled: () => false, catalog: { models: new Map() } }),
+    imageFallbackGate: () => false,
+    imageHeuristicGate: () => false,
     ...overrides,
   });
   return { handler, sent, logs };
@@ -336,6 +357,10 @@ function relayDeps({ agentId, mappings = DEFAULT_MAPPINGS, upstreamFetch, metric
     recordGeneration: () => {},
     readGeneration: () => null,
     getClaudeTierMapping: () => mappings,
+    // 与 makeDeps 同一套隔离：两个 relay 前端都把 deps 原样交给 createHandler。
+    effortInjector: createEffortInjector({ isEnabled: () => false, catalog: { models: new Map() } }),
+    imageFallbackGate: () => false,
+    imageHeuristicGate: () => false,
     metricsCollector,
   };
 }
@@ -485,10 +510,11 @@ describe("resident relay", () => {
         relayDeps({ upstreamFetch: recordingUpstream(calls), metricsCollector: null }),
       );
       const { port, close } = await listenResident(server, 0);
-      // 0 是必须的：listenResident 的默认端口就是生产常驻中继的 47821，而端口
-      // 被自家中继占用时它会「复用」并返回那个端口——漏传 0 的测试会直接把请求
-      // 打进正在服务的中继。钉死这一点，端口漂移时先红在这里。
-      assert.notEqual(port, 47821, "a test must never land on the live resident relay");
+      // 0 是必须的：listenResident 的默认端口就是生产常驻中继的 DEFAULT_RELAY_PORT，
+      // 而端口被自家中继占用时它会「复用」并返回那个端口——漏传 0 的测试会把请求
+      // 直接打进正在服务的中继，且负分支在真中继上同样 400 + 零上游调用，其余断
+      // 言抓不住。对照量用导出常量而不是硬编码端口：默认端口漂移时这条绊线跟着走。
+      assert.notEqual(port, DEFAULT_RELAY_PORT, "a test must never land on the live resident relay");
       try {
         const res = await post(port, "opus", headers);
         if (expectServed) {

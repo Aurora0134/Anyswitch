@@ -219,7 +219,10 @@ test("导入：选包后预览进弹窗，卡面回初值；形态 A 的勾选�
   assert.equal(h.get("dataSkillsRepoPath").textContent, "C:\\Users\\me\\Desktop\\work\\skills");
   assert.equal(h.get("dataSkillsRepoCheck").checked, true, "默认导入到本机仓库");
   assert.equal(h.get("dataSkillsCustomItem").hidden, false, "自选行常开");
-  assert.equal(h.get("dataSkillsCustomPickBtn").disabled, false, "自选随时可点");
+  // 自选按钮随时可点是设计决定：锁定不置 disabled（禁用的控件点不出反馈），
+  // 走 is-locked 加点击拦截。控制器里一旦出现对它的 disabled 赋值这条要红，
+  // 比 assert 桩默认值 false 更真——那只在测桩自己。
+  assert.ok(!source.includes("customPickBtn.disabled"), "自选随时可点，锁定不用 disabled");
   assert.equal(h.get("dataSkillsCustomClearBtn").hidden, true, "还没选过就没有清除");
   assert.equal(h.get("dataSkillsDefaultItem").hidden, true, "已配仓库不出默认落点行");
   assert.equal(h.get("dataImportApplyBtn").disabled, false);
@@ -366,7 +369,6 @@ test("导入：取消/关闭弹窗丢弃这次选择，一个写入请求都不�
   assert.equal(h.modalOpen(), false);
   assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"]);
   assert.equal(h.summary().text, "尚未选择配置包");
-  assert.equal(h.get("dataImportApplyBtn").textContent, "备份并导入", "按钮文案保持原样，取消不改它");
 });
 
 test("导入：读包失败在卡面转 danger；写入失败在弹窗里出原文、票据作废", async () => {

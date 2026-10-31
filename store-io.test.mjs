@@ -13,6 +13,7 @@ import {
   ensureLayout,
   resolveCredentialPath,
   readCiphertext,
+  loadV1Store,
   LOAD_REASON,
 } from "./store-io.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
@@ -295,17 +296,74 @@ test("readCiphertext returns the raw bytes for a valid ref", () => {
   assert.deepEqual(result.ciphertext, bytes);
 });
 
-// ---------- v1 store field shape ----------
+// ---------- legacy v1 (read-only) ----------
 
-test("v1 entries carry only credentialFile and baseURL, so v2 must synthesise the rest", () => {
-  // Documents the migration gap the v2 loader has to close. Uses a synthetic v1 object,
-  // not the real scope directory.
-  const v1Entry = {
-    credentialFile: "credential-11111111-1111-1111-1111-111111111111.dpapi",
-    baseURL: "https://example.test/v1",
-  };
-  assert.deepEqual(Object.keys(v1Entry).sort(), ["baseURL", "credentialFile"]);
-  assert.equal(v1Entry.displayName, undefined);
-  assert.equal(v1Entry.protocol, undefined);
-  assert.equal(v1Entry.models, undefined);
+// loadV1Store → v1Paths reads %LOCALAPPDATA% on every call (store-io.mjs:125),
+// so pointing that env var at a temp dir gives a disposable v1 scope. Restored
+// in finally so later tests in this process keep their environment.
+function withV1LocalAppData(run) {
+  const local = mkTestDir("anyswitch-v1-scope-");
+  const previous = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = local;
+  try {
+    return run(local);
+  } finally {
+    if (previous === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = previous;
+  }
+}
+
+test("loadV1Store parses a v1 scope whose entries carry only credentialFile and baseURL", () => {
+  // The v1 field shape is asserted against what loadV1Store actually parses,
+  // documenting the migration gap the v2 loader has to close.
+  withV1LocalAppData((local) => {
+    const scope = "scope-valid";
+    const scopeDir = join(local, "OpenCodeApiCred", "scopes", scope);
+    mkdirSync(scopeDir, { recursive: true });
+    writeFileSync(
+      join(scopeDir, "store.json"),
+      JSON.stringify({
+        version: 1,
+        providers: {
+          "prov-one": {
+            credentialFile: "credential-11111111-1111-1111-1111-111111111111.dpapi",
+            baseURL: "https://example.test/v1",
+          },
+        },
+      }),
+    );
+
+    const result = loadV1Store(scope);
+    assert.equal(result.ok, true);
+    assert.deepEqual(Object.entries(result.store.providers), [
+      ["prov-one", { credentialFile: "credential-11111111-1111-1111-1111-111111111111.dpapi", baseURL: "https://example.test/v1" }],
+    ]);
+    assert.equal(result.store.providers["prov-one"].displayName, undefined);
+    assert.equal(result.store.providers["prov-one"].protocol, undefined);
+    assert.equal(result.store.providers["prov-one"].models, undefined);
+    // v1 keeps credentials in the scope dir itself.
+    assert.equal(result.paths.credentialsDir, scopeDir);
+  });
+});
+
+test("loadV1Store classifies absent, unparsable and invalid v1 scopes", () => {
+  withV1LocalAppData((local) => {
+    // Absent: the scope directory was never created.
+    assert.equal(loadV1Store("scope-absent").reason, LOAD_REASON.ABSENT);
+
+    const brokenDir = join(local, "OpenCodeApiCred", "scopes", "scope-broken");
+    mkdirSync(brokenDir, { recursive: true });
+    writeFileSync(join(brokenDir, "store.json"), "{ not json");
+    assert.equal(loadV1Store("scope-broken").reason, LOAD_REASON.UNPARSABLE);
+
+    for (const [scope, body] of [
+      ["scope-wrong-version", { version: 2, providers: {} }],
+      ["scope-null-providers", { version: 1, providers: null }],
+    ]) {
+      const dir = join(local, "OpenCodeApiCred", "scopes", scope);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "store.json"), JSON.stringify(body));
+      assert.equal(loadV1Store(scope).reason, LOAD_REASON.INVALID);
+    }
+  });
 });

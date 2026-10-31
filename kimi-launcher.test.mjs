@@ -25,8 +25,9 @@ function parseKimiCodeCustomHeaders(raw) {
 }
 
 // A fake relay handle that records whether it was closed, optionally carrying
-// a mock session tracker.
-function fakeRelay({ tracker = null } = {}) {
+// a mock session tracker. Pass the same `events` array to fakeTracker so one
+// test can observe the teardown order (reportEnd must precede relay close).
+function fakeRelay({ tracker = null, events = [] } = {}) {
   const state = { closed: false };
   return {
     state,
@@ -36,19 +37,21 @@ function fakeRelay({ tracker = null } = {}) {
       sessionTracker: tracker,
       close: async () => {
         state.closed = true;
+        events.push("relay-close");
       },
     },
   };
 }
 
-function fakeTracker() {
-  const calls = { pids: [], endCount: 0 };
+function fakeTracker(events = []) {
+  const calls = { pids: [], endCount: 0, events };
   return {
     calls,
     tracker: {
       setClaudePid: (pid) => calls.pids.push(pid),
       reportEnd: () => {
         calls.endCount += 1;
+        events.push("reportEnd");
       },
     },
   };
@@ -73,8 +76,6 @@ test("buildKimiLauncherEnv injects endpoint identity and instance tag via KIMI_C
     "x-agent-id": "kimi",
     "x-agent-instance": "ws-1",
   });
-  // 实例 id 必须通过 relay 侧的字符集校验，否则会被静默丢弃。
-  assert.equal(sanitizeInstanceId("ws-1"), "ws-1");
 });
 
 test("buildKimiLauncherEnv always carries x-agent-id, even without an instanceId", () => {
@@ -111,7 +112,13 @@ test("runKimiLauncher generates the instance id and passes it to buildEnv", asyn
 
   assert.equal(code, 0);
   assert.equal(typeof captured.instanceId, "string");
-  assert.ok(captured.instanceId.endsWith(`-${process.pid}`), "launcher pid is the discriminator");
+  // The shared scheme is "<cwd basename>-<launcher pid>" and this process IS
+  // the launcher here, so the id must be exactly what buildInstanceId()
+  // computes for this process. Equality rather than a pid-suffix check: the
+  // 64-char cap (pinned in buildInstanceId's own test) can truncate the pid
+  // tail when the run directory's basename is long, and that must not depend
+  // on where the suite happens to run.
+  assert.equal(captured.instanceId, buildInstanceId());
   assert.equal(sanitizeInstanceId(captured.instanceId), captured.instanceId);
   const headers = parseKimiCodeCustomHeaders(
     buildKimiLauncherEnv({ port: 1, token: "t", base: {}, instanceId: captured.instanceId }).KIMI_CODE_CUSTOM_HEADERS,
@@ -123,8 +130,9 @@ test("runKimiLauncher generates the instance id and passes it to buildEnv", asyn
 test("runKimiLauncher registers the child PID on the session tracker and reports session end", async () => {
   // 与 claude 的 runLauncher 对齐：子进程 PID 上报给 session reporter
   // （reportSession 要求 PID），退出时发 ended 信号，relay 随之拆除。
-  const { calls, tracker } = fakeTracker();
-  const { state, handle } = fakeRelay({ tracker });
+  const events = [];
+  const { calls, tracker } = fakeTracker(events);
+  const { state, handle } = fakeRelay({ tracker, events });
   let capturedOnPid = null;
 
   const code = await runKimiLauncher({
@@ -140,7 +148,10 @@ test("runKimiLauncher registers the child PID on the session tracker and reports
   assert.equal(code, 0);
   assert.equal(typeof capturedOnPid, "function");
   assert.deepEqual(calls.pids, [4321]);
-  assert.equal(calls.endCount, 1, "session end is reported before the relay is torn down");
+  assert.equal(calls.endCount, 1);
+  // 面板先收到 ended 再失去 relay：两桩共享同一条时间线，顺序回归（先拆
+  // relay 再上报）会在这里被抓到。
+  assert.deepEqual(calls.events, ["reportEnd", "relay-close"], "session end is reported before the relay is torn down");
   assert.equal(state.closed, true);
 });
 

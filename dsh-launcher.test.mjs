@@ -11,6 +11,29 @@ import { join } from "node:path";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
+// ---- Data-root isolation (process-wide) ----
+//
+// runDshLauncher reads the Anyswitch store through the store-io default root,
+// which is process.env.LOCALAPPDATA (store-io's defaultRoot) — the per-call
+// `base` option never reaches it (base only steers relayDataRoot, i.e. the
+// shared token file and the sidecar root). Redirect LOCALAPPDATA itself so
+// every store read lands in a throwaway root instead of the live
+// %LOCALAPPDATA%\Anyswitch\store.json: without a usable store there, the
+// launcher's sync is skipped and the writeConfig stubs in the runDshLauncher
+// tests below would never run. The fixture mirrors dshChannelStore(): a
+// minimal valid v2 store that validateStore accepts, so the sync path runs
+// end to end on any machine. The redirect also covers the resident-relay
+// branch (base omitted → base = process.env), so pi-relay-token is minted
+// here, never beside the real user data.
+const isolatedLocalAppData = mkTestDir("dsh-launcher-root-");
+mkdirSync(join(isolatedLocalAppData, "Anyswitch"), { recursive: true });
+writeFileSync(
+  join(isolatedLocalAppData, "Anyswitch", "store.json"),
+  `${JSON.stringify(dshChannelStore(), null, 2)}\n`,
+  "utf8",
+);
+process.env.LOCALAPPDATA = isolatedLocalAppData;
+
 test("buildDshLauncherEnv injects ANYSWITCH_RELAY_TOKEN and NO_PROXY", () => {
   const env = buildDshLauncherEnv({
     port: 47821,
@@ -221,7 +244,22 @@ function dshChannelStore() {
   };
 }
 
-test("writeDshConfig reports a no-op when there are no channels and nothing was managed before", async () => {
+// writeDshConfig parses and emits cordis.patch.yml through js-yaml, which this
+// project does not declare: resolveYamlModule prefers the copy vendored inside
+// a global @deepseek-ai/dsh install and only then falls back to a bare
+// "js-yaml". On a machine with neither, the whole write path cannot run —
+// skip with that reason instead of failing with an unrelated MODULE_NOT_FOUND.
+async function requireYamlModule(t) {
+  try {
+    return await getYamlModule();
+  } catch (error) {
+    t.skip(`js-yaml is unavailable (${error.message}); install @deepseek-ai/dsh globally to run this test`);
+    return null;
+  }
+}
+
+test("writeDshConfig reports a no-op when there are no channels and nothing was managed before", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
   const dir = mkTestDir("dsh-write-");
   try {
     const result = await writeDshConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, "settings.yaml"));
@@ -232,7 +270,9 @@ test("writeDshConfig reports a no-op when there are no channels and nothing was 
   }
 });
 
-test("writeDshConfig writes every existing profile and clears them after the last channel is deleted", async () => {
+test("writeDshConfig writes every existing profile and clears them after the last channel is deleted", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
   const dir = mkTestDir("dsh-write-");
   try {
     mkdirSync(join(dir, "profiles", "dsh-tui"), { recursive: true });
@@ -240,7 +280,6 @@ test("writeDshConfig writes every existing profile and clears them after the las
     assert.equal(first.ok, true);
     assert.equal(first.unchanged, false);
     assert.equal(existsSync(join(dir, "settings.yaml")), false);
-    const yaml = await getYamlModule();
     const patchPath = join(dir, "profiles", "dsh-tui", "cordis.patch.yml");
     const written = yaml.load(readFileSync(patchPath, "utf8"));
     const channel = written.find((entry) => entry.id === "llm-pi-ai").config.providers["_poke-api"];

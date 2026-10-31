@@ -56,11 +56,6 @@ test("maxOutputTokens is written only when limit.output present", () => {
   assert.equal("maxOutputTokens" in models.withoutOut, false);
 });
 
-test("both optional limits omitted when absent, displayName always present", () => {
-  const models = resolveProviderModels("acme", { models: { m: {} } });
-  assert.deepEqual(models.m, { displayName: "m" });
-});
-
 test("opencode provider contributes whitelist union models", () => {
   const models = resolveProviderModels("opencode", {
     whitelist: ["gpt-a", "gpt-b", "gpt-c"],

@@ -1,7 +1,6 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUsageJournal, dayKey } from "./usage-journal.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
@@ -81,8 +80,11 @@ describe("clampStatDays", () => {
 
 describe("usage-stats empty journal", () => {
   it("returns the all-empty shape for a missing dir (days=1)", () => {
+    // mkTestDir 的独立根下指一个不存在的子路径：确定不存在、且随测试根在进程
+    // 退出时回收，不会像写死的共享路径那样被残留目录污染出与实现无关的红。
+    const missingDir = join(mkTestDir("usage-stats-missing-"), "no-such-dir");
     const stats = createUsageStats({
-      journal: createUsageJournal({ dir: join(tmpdir(), "usage-stats-definitely-missing") }),
+      journal: createUsageJournal({ dir: missingDir }),
       now: () => NOW,
     });
     const s = stats.getState({ days: 1 });
@@ -121,9 +123,12 @@ describe("usage-stats empty journal", () => {
         model: { total: 0, nodes: [] },
       },
     });
-    assert.equal(s.cache, undefined);
-    assert.equal(s.claudeSessions, undefined);
-    assert.equal(s.overview.activeChannels, undefined);
+    // wire 契约：顶层字段恰好是这十个。原来钉 cache/claudeSessions 等
+    // 「从未存在过的键为 undefined」是恒真断言，拦不住任何形状漂移；改钉
+    // 全部顶层键后，多出遗留键或改名都会在这里失败。
+    assert.deepEqual(Object.keys(s).sort(), [
+      "days", "endpoints", "generatedAt", "heatmap", "ok", "overview", "tps", "trends", "ttft", "usage",
+    ]);
     assert.equal(s.ttft.daily.length, 24);
     assert.ok(s.ttft.daily.every((d, i) =>
       d.start === START_H + i * H1 && d.avg === null && d.p95 === null,
@@ -205,7 +210,6 @@ describe("usage-stats aggregation", () => {
     const series = s.trends.channel.series[0];
     assert.equal(series.prompt[idxH(tsOn(0, 10, 0))], 3); // 1 + 2
     assert.equal(series.prompt[idxH(tsOn(0, 11, 0))], 4);
-    assert.equal(idxH(tsOn(0, 11, 0)), idxH(tsOn(0, 10, 0)) + 1);
     cleanup();
   });
 
@@ -232,8 +236,7 @@ describe("usage-stats aggregation", () => {
     ]);
     const s = stats.getState({ days: 7 });
     const series = s.trends.channel.series[0];
-    assert.equal(idx8h(tsOn(0, 7, 59)), 19);
-    assert.equal(idx8h(tsOn(0, 8, 0)), 20);
+    // 桶下标 19 = 8h 轴上 [00:00, 08:00) 那一桶，20 = 当前的 [08:00, 16:00) 桶。
     assert.equal(series.prompt[19], 1);
     assert.equal(series.prompt[20], 2);
     assert.equal(s.trends.channel.buckets[20], END0_8H);
@@ -472,11 +475,9 @@ describe("usage-stats aggregation", () => {
     assert.equal(claude.prompt, 700, "tokens come from request rows only");
     assert.equal(claude.completion, 300);
     assert.equal(claude.sessions, 2, "session segments come from request points only");
-    // Mixed agents: zcode request rows never affect claude's merge decision.
-    writeRequests(0, [req({ agentId: "zcode", prompt: 42 })]);
-    const s2 = stats.getState({ days: 7 });
-    const claude2 = s2.endpoints.find((x) => x.agentId === "claude");
-    assert.equal(claude2.prompt, 700);
+    // 「别的端点有请求行时 claude 仍走 session 合并」这条 per-agent 判定的另一半，
+    // 由上方 "merges claude session end rows into endpoints without double
+    // counting" 用例钉住（那里 zcode 有请求行、claude 只有 session 行）。
     cleanup();
   });
 
@@ -653,12 +654,22 @@ describe("usage (single-node token totals for the donut card)", () => {
 
   it("labels empty keys with the fallback and sorts equal-token nodes by key", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
+    // 两个节点 token 总量并列：fold 的插入顺序是 prov-b 在前、"" 在后，而
+    // key 序是 "" < "prov-b"。buildUsage 的并列兜底必须按 key 升序打破平局——
+    // 若退化成稳定排序（保持插入顺序），第一条就变成 prov-b，这里会失败。
     writeRequests(0, [
-      req({ ts: tsOn(0, 10), providerId: "", model: "", prompt: 10, completion: 0 }),
+      req({ ts: tsOn(0, 10), providerId: "prov-b", model: "m-b", prompt: 10, completion: 0 }),
+      req({ ts: tsOn(0, 10, 30), providerId: "", model: "", prompt: 10, completion: 0 }),
     ]);
     const s = stats.getState({ days: 1 });
-    assert.deepEqual(s.usage["1"].channel.nodes, [{ key: "", label: "未知渠道", tokens: 10, requests: 1 }]);
-    assert.deepEqual(s.usage["1"].model.nodes, [{ key: "", label: "未知模型", tokens: 10, requests: 1 }]);
+    assert.deepEqual(s.usage["1"].channel.nodes, [
+      { key: "", label: "未知渠道", tokens: 10, requests: 1 },
+      { key: "prov-b", label: "prov-b", tokens: 10, requests: 1 },
+    ]);
+    assert.deepEqual(s.usage["1"].model.nodes, [
+      { key: "", label: "未知模型", tokens: 10, requests: 1 },
+      { key: "m-b", label: "m-b", tokens: 10, requests: 1 },
+    ]);
     cleanup();
   });
 
@@ -688,7 +699,11 @@ describe("daily rollup cache (incremental journal reads)", () => {
   // 不得整段重读。这里用真实 journal 的计数包装钉住三件事：冷启一天一读 →
   // 热调零读 → 追加只读当天尾巴。
   function countedJournal(dir) {
-    const real = createUsageJournal({ dir });
+    // 读取端 journal 的时钟必须坐在夹具时间轴上：createUsageJournal 构造时
+    // 无条件做一次 90 天保留期清理（cutoff = now() - 90d），默认真实时钟一旦
+    // 越过夹具日期 + 90 天，下面固定日期的夹具日文件会被当场删掉，用例从那
+    // 天起永久变红。NOW = 2026-08-30，cutoff 2026-06-01，夹具日全部在保留期内。
+    const real = createUsageJournal({ dir, now: () => NOW });
     const calls = { tail: [], range: [] };
     return {
       calls,

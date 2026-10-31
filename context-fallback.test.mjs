@@ -29,6 +29,38 @@ describe("CONTEXT_TIER_RULES", () => {
       );
     }
   });
+
+  it("pins the minimax-m3.1 rule on its own keyword, scoped to the m3.1 sub-family", () => {
+    // The rule's documented tier (1,000,000) equals UNMATCHED_CONTEXT_FALLBACK,
+    // so fallbackContextWindow probes cannot tell a rule hit from a fallback
+    // miss — deleting the rule or widening it to "minimax" stays green. Pin the
+    // rule structurally: exactly one minimax keyword, spelled "minimax-m3.1".
+    // A bare "minimax" keyword would drag older non-flash M-rows onto this
+    // tier, which the source comment explicitly reserves for its own rule.
+    const minimaxRules = CONTEXT_TIER_RULES.filter((rule) =>
+      rule.keyword.includes("minimax"),
+    );
+    assert.deepEqual(
+      minimaxRules.map((rule) => rule.keyword),
+      ["minimax-m3.1"],
+    );
+    assert.equal(minimaxRules[0].contextWindow, 1_000_000);
+  });
+
+  it("pins the step-5 rule explicitly even though its tier equals the default", () => {
+    // step-5 also documents 1,000,000, which coincides with the unmatched
+    // default: the behavioral probe below survives deleting this rule. The
+    // rule exists to pin the value to a citation, so assert it is present,
+    // un-shadowed by a broader "step" keyword, and still 1M.
+    const stepRules = CONTEXT_TIER_RULES.filter((rule) =>
+      rule.keyword.includes("step"),
+    );
+    assert.deepEqual(
+      stepRules.map((rule) => rule.keyword),
+      ["step-5"],
+    );
+    assert.equal(stepRules[0].contextWindow, 1_000_000);
+  });
 });
 
 describe("fallbackContextWindow", () => {
@@ -108,7 +140,10 @@ describe("fallbackContextWindow", () => {
   it("maps MiniMax M3.1 Flash ids to the 1M tier, including channel decorations", () => {
     // Vendor documents 1,000,000 for MiniMax-M3.1-Flash. The keyword is scoped
     // to the m3.1 sub-family, so the bare "minimax" spelling a gateway might
-    // carry for an older M row stays on the unmatched default.
+    // carry for an older M row stays on the unmatched default. Note these
+    // probes cannot distinguish the rule hit from the default — the two values
+    // coincide — so the rule's existence and keyword scope are pinned
+    // structurally in the CONTEXT_TIER_RULES describe above.
     assert.equal(fallbackContextWindow("MiniMax-M3.1-Flash"), 1_000_000);
     assert.equal(fallbackContextWindow("minimax-m3.1-flash"), 1_000_000);
     assert.equal(fallbackContextWindow("[云]MiniMax-M3.1-Flash"), 1_000_000);
@@ -118,6 +153,8 @@ describe("fallbackContextWindow", () => {
   });
 
   it("maps Step 5 Preview to the 1M tier", () => {
+    // Same-value caveat as the MiniMax tier above: 1M is also the unmatched
+    // default, so rule presence is pinned structurally, not here.
     assert.equal(fallbackContextWindow("step-5-preview"), 1_000_000);
     assert.equal(fallbackContextWindow("Step-5-Preview"), 1_000_000);
     assert.equal(fallbackContextWindow("[云]step-5-preview"), 1_000_000);

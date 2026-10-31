@@ -151,6 +151,12 @@ export async function runOpencodeLauncher({
   // default is a no-op so tests stay hermetic (a default-real writer would
   // rewrite the user's actual config); production main() wires it explicitly.
   writeConfig = null,
+  // Where writeConfig is wired, the store comes through this reader (same
+  // injection surface as runGrokLauncher's loadStore). Default is the
+  // module-level loadStore — production behavior unchanged; tests that wire
+  // writeConfig inject a fake, because the default reads the host store
+  // under process.env.LOCALAPPDATA and would couple them to the machine.
+  loadStore: loadStoreFn = loadStore,
   log = () => {},
 }) {
   // Relay acquisition with a native fallback: opencode has no resident-probe
@@ -166,7 +172,7 @@ export async function runOpencodeLauncher({
 
   try {
     if (writeConfig) {
-      const loaded = loadStore();
+      const loaded = loadStoreFn();
       if (!loaded.ok) {
         log("warning: Anyswitch store could not be read; opencode config not updated");
       } else {

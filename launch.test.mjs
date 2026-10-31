@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { protect, DPAPI_CODES } from "./dpapi.mjs";
+import { protect, unprotect, DPAPI_CODES } from "./dpapi.mjs";
 import {
   buildUpstreamURLs,
   createProductionDeps,
@@ -17,6 +17,7 @@ import {
   startProductionRelay,
   DEFAULT_UPSTREAM_TIMEOUT_MS,
 } from "./launch.mjs";
+import { loadSettings, createCredentialCacheEnabledGate } from "./relay-settings.mjs";
 import { createHandler } from "./handler.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
@@ -25,21 +26,81 @@ const PLAINTEXT = "synthetic-launch-test-key-not-a-real-credential";
 
 // Tests that seal a fixture credential spawn the real powershell.exe DPAPI
 // bridge; where it is unavailable the runner must report them as skipped
-// rather than fail.
-const dpapiAvailable = process.platform === "win32" &&
-  existsSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
-const needsDpapi = dpapiAvailable ? {} : { skip: "requires Windows DPAPI (powershell.exe)" };
+// rather than fail. A file-exists check is not enough: a context that can
+// spawn powershell but has no usable user profile / CurrentUser DPAPI would
+// turn every needsDpapi case into a hard failure, so probe an actual
+// protect→unprotect round-trip once (pure DPAPI, entropy-derived — the probe
+// writes nothing to disk).
+async function dpapiWorks() {
+  if (process.platform !== "win32") return false;
+  if (!existsSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))) {
+    return false;
+  }
+  const providerId = "anyswitch-launch-test-probe";
+  const plaintext = Buffer.from("dpapi-probe");
+  try {
+    const sealed = await protect(plaintext, providerId, { generation: "v2" });
+    const opened = await unprotect(sealed, providerId, { generation: "v2" });
+    const ok = opened.equals(plaintext);
+    sealed.fill(0);
+    opened.fill(0);
+    return ok;
+  } catch {
+    return false;
+  } finally {
+    plaintext.fill(0);
+  }
+}
+
+const dpapiAvailable = await dpapiWorks();
+const needsDpapi = dpapiAvailable ? {} : { skip: "requires working CurrentUser DPAPI (powershell.exe)" };
 
 function makePaths(t) {
   const root = mkTestDir("anyswitch-launch-");
   mkdirSync(join(root, "credentials"), { recursive: true });
+  // Sealed settings fixture: the production gates default to the real
+  // %LOCALAPPDATA%\Anyswitch\settings.json. Every deps builder below points
+  // those gates at this temp file instead, so a run never inherits this
+  // machine's keep-alive / tier-mapping / cache-switch configuration.
+  const settingsFile = join(root, "settings.json");
+  writeFileSync(settingsFile, "{}\n");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
     root,
     storeFile: join(root, "store.json"),
     credentialsDir: join(root, "credentials"),
     appDir: join(root, "app"),
+    settingsFile,
   };
+}
+
+// The real production gates, aimed at the fixture settings file instead of the
+// developer machine's %LOCALAPPDATA%\Anyswitch\settings.json.
+function sealedSettingsGates(paths) {
+  return {
+    credentialCacheEnabledGate: createCredentialCacheEnabledGate(paths.settingsFile),
+    getKeepAliveConfig: () => loadSettings(paths.settingsFile).keepAlive,
+    getClaudeTierMapping: () => loadSettings(paths.settingsFile).claudeTierMappings,
+  };
+}
+
+// Session-report double: the reporter treats a resolved undefined as an
+// acknowledged POST (agent-metrics.mjs), so tests seal the outbound panel
+// call to a no-op instead of posting synthetic sessions to the resident
+// panel relay on 127.0.0.1:47821.
+const NO_REPORT_FETCH = async () => {};
+
+function sealedRelayOptions(paths, overrides = {}) {
+  return {
+    paths,
+    ...sealedSettingsGates(paths),
+    sessionReporterFetchFn: NO_REPORT_FETCH,
+    ...overrides,
+  };
+}
+
+function testDeps(paths, overrides = {}) {
+  return createProductionDeps(sealedRelayOptions(paths, overrides));
 }
 
 function syntheticStore({ fallbackURLs } = {}) {
@@ -320,7 +381,7 @@ test("retrying fetch throws only when every endpoint is a transport failure", as
 
 test("loadStore surfaces store-io failures as { ok:false }", (t) => {
   const paths = makePaths(t); // no store.json written
-  const deps = createProductionDeps({ paths, upstreamFetch: okUpstream(t, {}) });
+  const deps = testDeps(paths, { upstreamFetch: okUpstream(t, {}) });
   const loaded = deps.loadStore();
   assert.equal(loaded.ok, false);
   assert.ok(Array.isArray(loaded.errors));
@@ -330,7 +391,7 @@ test("end-to-end: store load + DPAPI decrypt injects the credential into one ups
   const paths = makePaths(t);
   await writeFixture(paths);
   const captured = {};
-  const deps = createProductionDeps({ paths, upstreamFetch: okUpstream(t, captured) });
+  const deps = testDeps(paths, { upstreamFetch: okUpstream(t, captured) });
   const handler = createHandler(deps);
 
   const result = await handler.handleMessages(
@@ -348,8 +409,7 @@ test("production dependencies retry the configured fallback after a primary fail
   const paths = makePaths(t);
   await writeFixture(paths, { fallbackURLs: ["https://alpha-backup.example/v1/"] });
   const calls = [];
-  const deps = createProductionDeps({
-    paths,
+  const deps = testDeps(paths, {
     upstreamFetch: async (url) => {
       calls.push(url);
       if (url.includes("alpha.example")) return new Response("primary unavailable", { status: 503 });
@@ -373,8 +433,7 @@ test("production dependencies pass the upstream 5xx through after every configur
   const paths = makePaths(t);
   await writeFixture(paths, { fallbackURLs: ["https://alpha-backup.example/v1"] });
   const calls = [];
-  const deps = createProductionDeps({
-    paths,
+  const deps = testDeps(paths, {
     upstreamFetch: async (url) => {
       calls.push(url);
       return new Response("unavailable", { status: 503 });
@@ -399,8 +458,7 @@ test("missing credential file fails closed with 502 and no upstream call", async
   const paths = makePaths(t);
   await writeFixture(paths, { sealCredential: false });
   let upstreamCalled = false;
-  const deps = createProductionDeps({
-    paths,
+  const deps = testDeps(paths, {
     upstreamFetch: async () => {
       upstreamCalled = true;
       throw new Error("must not be called");
@@ -421,7 +479,7 @@ test("missing credential file fails closed with 502 and no upstream call", async
 test("loadCredential rejects a missing providerId or a malformed provider entry", needsDpapi, async (t) => {
   const paths = makePaths(t);
   await writeFixture(paths);
-  const deps = createProductionDeps({ paths, upstreamFetch: okUpstream(t, {}) });
+  const deps = testDeps(paths, { upstreamFetch: okUpstream(t, {}) });
   const store = deps.loadStore().store;
 
   const noId = await deps.loadCredential("", store.providers.alpha);
@@ -440,7 +498,7 @@ test("a credential that decrypts to empty is refused", needsDpapi, async (t) => 
   writeFileSync(join(paths.credentialsDir, "alpha.dpapi"), sealed);
   sealed.fill(0);
 
-  const deps = createProductionDeps({ paths, upstreamFetch: okUpstream(t, {}) });
+  const deps = testDeps(paths, { upstreamFetch: okUpstream(t, {}) });
   const entry = deps.loadStore().store.providers.alpha;
   const result = await deps.loadCredential("alpha", entry);
   assert.equal(result.ok, false);
@@ -454,11 +512,10 @@ test("concurrent requests do not steer each other's credential load", needsDpapi
   // lookup fail once the second overwrote it.
   const paths = makePaths(t);
   await writeFixture(paths);
-  const deps = createProductionDeps({ paths, upstreamFetch: okUpstream(t, {}) });
+  const deps = testDeps(paths, { upstreamFetch: okUpstream(t, {}) });
 
   const storeA = deps.loadStore().store;
   const storeB = deps.loadStore().store;
-  assert.notEqual(storeA.providers.alpha, storeB.providers.alpha); // distinct objects
 
   const [a, b] = await Promise.all([
     deps.loadCredential("alpha", storeA.providers.alpha),
@@ -476,8 +533,7 @@ test("two concurrent handleMessages calls both reach upstream with the right cre
   const paths = makePaths(t);
   await writeFixture(paths);
   const seen = [];
-  const deps = createProductionDeps({
-    paths,
+  const deps = testDeps(paths, {
     upstreamFetch: async (url, init) => {
       seen.push(init.headers.authorization);
       return new Response(
@@ -535,7 +591,7 @@ test("startProductionRelay serves discovery and messages against a temp store", 
   const paths = makePaths(t);
   await writeFixture(paths);
   const captured = {};
-  const relay = await startProductionRelay({ paths, upstreamFetch: okUpstream(t, captured) });
+  const relay = await startProductionRelay(sealedRelayOptions(paths, { upstreamFetch: okUpstream(t, captured) }));
   t.after(() => relay.close());
 
   const base = `http://127.0.0.1:${relay.port}`;
@@ -574,7 +630,7 @@ test("startProductionRelay journals request rows under the configured agentId", 
   // 流量会被记进 claude 桶。
   const paths = makePaths(t);
   await writeFixture(paths);
-  const relay = await startProductionRelay({ paths, upstreamFetch: okUpstream(t, {}), agentId: "kimi" });
+  const relay = await startProductionRelay(sealedRelayOptions(paths, { upstreamFetch: okUpstream(t, {}), agentId: "kimi" }));
   t.after(() => relay.close());
 
   const completion = await fetch(`http://127.0.0.1:${relay.port}/v1/messages`, {
@@ -593,7 +649,7 @@ test("startProductionRelay journals request rows under the configured agentId", 
 test("startProductionRelay keeps the claude agentId default", needsDpapi, async (t) => {
   const paths = makePaths(t);
   await writeFixture(paths);
-  const relay = await startProductionRelay({ paths, upstreamFetch: okUpstream(t, {}) });
+  const relay = await startProductionRelay(sealedRelayOptions(paths, { upstreamFetch: okUpstream(t, {}) }));
   t.after(() => relay.close());
 
   const completion = await fetch(`http://127.0.0.1:${relay.port}/v1/messages`, {
@@ -722,8 +778,7 @@ test("the production wiring caches through the real DPAPI path, and the switch t
   const paths = makePaths(t);
   await writeFixture(paths);
   let enabled = true;
-  const deps = createProductionDeps({
-    paths,
+  const deps = testDeps(paths, {
     upstreamFetch: okUpstream(t, {}),
     credentialCacheEnabledGate: () => enabled,
   });

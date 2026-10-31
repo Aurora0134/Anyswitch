@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
   defaultAnchorDir,
   ensureGitAnchor,
@@ -16,7 +16,10 @@ function scratch() {
 test("defaultAnchorDir is LocalAppData/Anyswitch-git/objects, not under the data dir", () => {
   const env = { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" };
   assert.equal(defaultAnchorDir(env), join("C:\\Users\\x\\AppData\\Local", "Anyswitch-git", "objects"));
-  assert.equal(defaultAnchorDir(env).includes("\\ApiCred\\"), false);
+  // Real invariant from the git-anchor.mjs header: the anchor must sit OUTSIDE
+  // the data dir %LOCALAPPDATA%\Anyswitch\ so a parent wipe misses the history.
+  const dataDirPrefix = join("C:\\Users\\x\\AppData\\Local", "Anyswitch") + sep;
+  assert.equal(defaultAnchorDir(env).startsWith(dataDirPrefix), false);
 });
 
 test("restores a missing gitfile when the object store still exists", () => {

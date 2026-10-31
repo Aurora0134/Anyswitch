@@ -32,12 +32,15 @@ describe("logger line format", () => {
   it("takes the level from the call, never from words inside the message", () => {
     // The historical failure this pins: a caller hand-wrote its own level word
     // into the text and the entry then claimed a different one, so the level
-    // field stopped being trustworthy. The field is the only source of truth.
+    // field stopped being trustworthy. The prose below carries a level word of
+    // its own that DISAGREES with the call — a text-sniffing implementation
+    // would flip the field to "warn"; the field must win and the prose must
+    // survive verbatim.
     const logger = createLogger({ sink: () => {}, now: () => FIXED_TS });
-    logger.info("sync finished with failures: zcode, dsh");
+    logger.info("[warn] sync finished with failures: zcode, dsh");
     const [entry] = logger.getHistory();
     assert.equal(entry.level, "info", "the field decides, not the prose");
-    assert.equal(entry.message, "sync finished with failures: zcode, dsh");
+    assert.equal(entry.message, "[warn] sync finished with failures: zcode, dsh", "the prose is kept verbatim, hand-written level word and all");
   });
 
   it("formats the stamp zero-padded from local parts", () => {

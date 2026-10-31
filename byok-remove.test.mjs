@@ -542,9 +542,36 @@ test("opencode: opencode.jsonc 文本手术——删首成员，注释与尾逗�
   );
 });
 
+// 与 opencodeJsoncFixture 的唯一差别：bar 作为 provider 的最后成员不带尾逗号。
+// 只有"末成员无尾逗号"才迫使 splice 走"删前驱成员尾逗号"分支
+// （byok-remove.mjs 中 target.commaAfter 为 null 的 else 路径）。
+function opencodeJsoncLastMemberFixture() {
+  return [
+    "{",
+    "  // 用户手写的渠道",
+    '  "provider": {',
+    '    "foo": {',
+    '      "npm": "@ai-sdk/openai-compatible",',
+    '      "options": {',
+    '        "baseURL": "https://foo.example/v1",',
+    '        "apiKey": "sk-foo", // foo 的行内注释',
+    "      },",
+    '      "models": { "m1": {} },',
+    "    },",
+    "    /* bar 的块注释 */",
+    '    "bar": {',
+    '      "options": { "baseURL": "https://bar.example/v1" },',
+    "    }",
+    "  },",
+    '  "theme": "dark",',
+    "}",
+    "",
+  ].join("\n");
+}
+
 test("opencode: 删最后一个成员时移除前导逗号", async () => {
   const { dir, backupRoot } = setup();
-  const filePath = writeFixture(dir, "opencode/opencode.jsonc", opencodeJsoncFixture());
+  const filePath = writeFixture(dir, "opencode/opencode.jsonc", opencodeJsoncLastMemberFixture());
 
   const result = await removeImportedEntries(
     [entryOf("opencode", filePath, "bar", "https://bar.example/v1")],
@@ -553,9 +580,14 @@ test("opencode: 删最后一个成员时移除前导逗号", async () => {
 
   assert.deepEqual(result.failed, []);
   const after = readFileSync(filePath, "utf8");
+  // jsoncToJsonText 会剥掉 } 前的悬空逗号，JSON.parse+Object.keys 对前导逗号
+  // 是否被删完全不敏感，所以这里必须做字节级断言：foo 的收口大括号必须直接
+  // 接换行+块注释（尾逗号已随末成员删除），不得残留悬空的前导逗号。
+  assert.ok(after.includes("}\n    /* bar 的块注释 */"), "foo 的尾逗号已移除，块注释保留");
+  assert.ok(!after.includes("},\n    /* bar 的块注释 */"), "不得残留悬空的前导逗号");
   const parsed = JSON.parse(jsoncToJsonText(after));
   assert.deepEqual(Object.keys(parsed.provider), ["foo"]);
-  assert.ok(after.includes("/* bar 的块注释 */"), "成员前的块注释保留");
+  assert.equal(parsed.theme, "dark");
 });
 
 test("opencode: opencode.json 纯 JSON 删空 provider 后仍合法", async () => {
@@ -584,6 +616,39 @@ test("opencode: opencode.json 纯 JSON 删空 provider 后仍合法", async () =
   const parsed = JSON.parse(readFileSync(filePath, "utf8"));
   assert.deepEqual(parsed.provider, {}, "删空后留空结构");
   assert.equal(parsed.$schema, "https://opencode.ai/config.json");
+});
+
+test("opencode: opencode.json 纯 JSON 删末成员时前驱的尾逗号必须随之移除", async () => {
+  const { dir, backupRoot } = setup();
+  // 纯 JSON 的末成员本就无尾逗号（JSON.stringify 产物），删它必然走前导逗号
+  // 分支；悬空逗号会让 JSON 非法——实现若漏删，surgery 自检必须拒写而不是
+  // 留下坏文件，所以这里的 removed 断言对分支缺失有区分度。
+  const filePath = writeFixture(
+    dir,
+    "opencode/opencode.json",
+    JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        provider: {
+          foo: { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://foo.example/v1" }, models: {} },
+          bar: { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://bar.example/v1" }, models: {} },
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  const result = await removeImportedEntries(
+    [entryOf("opencode", filePath, "bar", "https://bar.example/v1")],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.failed, []);
+  assert.deepEqual(result.removed, ["opencode::bar"]);
+  // 纯 JSON 无注释可兜底：严格 JSON.parse 通过即证明没有悬空逗号残留。
+  const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+  assert.deepEqual(Object.keys(parsed.provider), ["foo"]);
 });
 
 test("opencode: baseURL 不一致 → 拒删且文件逐字节不动", async () => {

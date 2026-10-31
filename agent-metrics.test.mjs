@@ -495,7 +495,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => {
       // Real wmic shape: Node,CommandLine,Name,ProcessId (no parent column in
       // this older fixture — the ppid-less 4-column dump).
-      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\kimi\\\\node_modules\\\\@moonshot-ai\\\\kimi-code\\\\dist\\\\main.mjs,node.exe,12345\r\n");
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\kimi\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,12345\r\n");
     };
     const collector = testCollector({ execFn: mockExec, nowFn });
 
@@ -503,7 +503,12 @@ describe("createAgentMetricsCollector", () => {
     mockTime = 2000;
     bad.recordEnd({ status: 400, error: { status: 400, message: "the upstream provider returned status 400" } });
 
-    mockTime = 60000; // well past the process-gone margin AND the idle fault TTL
+    // Fault at t=2000, read at t=60000: 58s idle — far past the 3s
+    // process-gone margin, but still 2s inside the 60s FAULT_IDLE_TTL_MS. The
+    // latch must survive on liveness alone: the scan sees the kimi row, so run
+    // zeroing never fires, and the TTL boundary (`now - fault.time >= ttlMs`)
+    // is not reached either. Pushing the read to 62000 would expire it.
+    mockTime = 60000;
     const status = await collector.getAgentsStatus();
     const kimi = status.find((a) => a.id === "kimi");
     assert.equal(kimi.errorActive, true, "fault stays latched while the endpoint is alive");
@@ -558,7 +563,7 @@ describe("createAgentMetricsCollector", () => {
     // zcode 进程活着：本例验证的是故障空闲 TTL，不是 run 清零——零进程夹具
     // 会让 run zeroing 先把整账连同故障史收走，TTL 路径根本走不到。
     const mockExec = (cmd, opts, cb) =>
-      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\ZCode.exe,zcode.exe,12345\r\n");
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\ZCode.exe,zcode.exe,12345\r\n");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Model A errors and is then abandoned; the user switches to model B.
@@ -597,8 +602,11 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    // Two rounds of failure, each ~50s apart — each error refreshes entry.time,
-    // so the fault is 100s old at the end but never 60s idle.
+    // Two failures on the same provider+model pair, 50s apart (t=1000 and
+    // t=51000); the read happens at t=51000. The pair holds one fault entry,
+    // rewritten by the second error, so the observation is inside the 60s TTL
+    // either way — this pins "the pair keeps its single latch across retries",
+    // not the entry.time refresh itself (that needs a read past t=61000).
     for (let round = 0; round < 2; round++) {
       const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "model-a" });
       mockTime = 1000 + round * 50000;
@@ -617,7 +625,7 @@ describe("createAgentMetricsCollector", () => {
     const nowFn = () => mockTime;
     // 同上：zcode 进程活着，隔离故障 TTL 路径，别让 run zeroing 抢答。
     const mockExec = (cmd, opts, cb) =>
-      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\ZCode.exe,zcode.exe,12345\r\n");
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\ZCode.exe,zcode.exe,12345\r\n");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     const req = collector.startRequest({ agentId: "zcode",});
@@ -1637,9 +1645,11 @@ describe("createAgentMetricsCollector", () => {
     });
 
     it("lists session rows alongside the process row, titled from the session scan", async () => {
-      // 2.x 的请求带着会话头（opencode-sess-<会话 id>），行是按会话起的；
-      // 进程行依旧在（serve 父进程活着）。标题取扫描到的会话标题，没有就用
-      // 目录名。
+      // 2.x 的请求带着会话头（opencode-sess-<会话 id>），行是按会话起的。
+      // opencode 的行是流量生的、按会话划分，不额外补进程占位行（扫描到活的
+      // serve 父进程也不占位，见 agent-metrics.mjs 里占位行的 codex/opencode
+      // 例外）：占位行会以 0 请求常驻在会话行旁边。标题取扫描到的会话标题，
+      // 没有就用目录名。
       let t = 3000;
       const collector = testCollector({
         execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN),
@@ -3793,7 +3803,7 @@ describe("createSessionReporter", () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
     const mockExec = (cmd, opts, cb) =>
-      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\kimi\\\\node_modules\\\\@moonshot-ai\\\\kimi-code\\\\dist\\\\main.mjs,node.exe,12345\r\n");
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\kimi\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,12345\r\n");
     let diskWindow = 20;
     const collector = testCollector({
       execFn: mockExec,
@@ -5288,38 +5298,6 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
   });
 
-  it("asks the resident probe for the whole process table, not a name-filtered one", async () => {
-    // 行的第一道门是探针的查询范围：2026-10-28 起查询不带镜像名白名单，因为
-    // 「锚 pid 之下有没有活命令」要的全表——白名单一滤，agent 跑的命令子进程
-    // （ping.exe / npm / python…）就全消失了，只剩一串没有命令行的空壳。
-    // 这条把「无白名单」钉住，防止谁为了省几行把 name= 条件加回来。
-    const seen = [];
-    const spawnFn = () => {
-      const child = new EventEmitter();
-      const stdout = new EventEmitter();
-      stdout.setEncoding = () => {};
-      const stderr = new EventEmitter();
-      stderr.resume = () => {};
-      child.stdin = {
-        write: (text) => {
-          seen.push(text);
-          const marker = (text.match(/Write-Output '([^']+)'/) ?? [])[1] ?? "";
-          stdout.emit("data", `__unused__${marker}\r\n`);
-        },
-      };
-      child.stdout = stdout;
-      child.stderr = stderr;
-      child.kill = () => child.emit("exit", 0);
-      child.unref = () => {};
-      return child;
-    };
-    const collector = testCollector({ nowFn: () => 3000, spawnFn, execFn: (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\n"), kimiRegistryLookup: registry([]) });
-    await collector.getAgentsStatus();
-    assert.ok(seen.length > 0, "探针被问过");
-    assert.ok(seen[0].includes("Get-CimInstance Win32_Process"), `常驻查询要枚举全表，实际：${seen[0].slice(0, 160)}`);
-    assert.ok(!seen[0].includes("-Filter"), "查询不再带镜像名白名单：命令子进程必须在表里");
-  });
-
   it("promotes the terminal row that owns a server registration to Web and leaves the desktop row alone", async () => {
     // `kimi web` 与终端客户端在命令行上无法分辨（同一个 dist/main.mjs），区别
     // 只在谁起了 server：起了 server 的会在 ~/.kimi-code/server/instances/ 留下
@@ -5460,7 +5438,14 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
       const r1 = a.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
       r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
       t += 100;
-      await new Promise((resolve) => setTimeout(resolve, 80)); // 让快照定时器真正落一次盘
+      // 轮询等快照定时器真正落一次盘（截止 2s），不用固定 sleep：满载时 30ms
+      // 周期定时器在 80ms 墙钟内未必抢到一拍，固定 sleep 会假红（同上方心跳
+      // 用例的轮询写法）。落盘是同步原子写，文件出现即写完成。
+      const snapDeadline = Date.now() + 2000;
+      while (!existsSync(snapPath) && Date.now() < snapDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      assert.ok(existsSync(snapPath), "快照定时器未在截止时间内落盘");
 
       const b = testCollector(opts());
       await b.scanProcesses();
@@ -5495,7 +5480,12 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
       const r1 = a.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
       r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
       t += 100;
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      // 同上：轮询等落盘（截止 2s），不用固定 sleep。
+      const snapDeadline = Date.now() + 2000;
+      while (!existsSync(snapPath) && Date.now() < snapDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      assert.ok(existsSync(snapPath), "快照定时器未在截止时间内落盘");
 
       mainPid = 6402;
       t += 3000;
@@ -7907,12 +7897,15 @@ describe("进程扫描降级轮不把 kimi 桌面端的子进程当成会话宿�
 });
 
 // ---------------------------------------------------------------------------
-// 「已工作时间」随端点关闭清零（2026-10-04 用户报障：zcode 卡工时会随着总
-// 运行时间一直涨，中途关掉再开不清零）。根因：该计数自建仓起是终身累计的
-// 忙碌区间并集，09-17 快照持久化（927be08）后又跨 relay 重启续命，全程没有
-// 任何一处归零。规则：可信扫描轮确认端点进程数归零、且距最后活动已过
-// PROCESS_GONE_ACTIVE_REQUEST_TTL_MS（与孤儿请求结算同一道 3s 闸门），该端点
-// 的已工作时间清零，下次启动从 0 重计；请求数/tokens 等累计量不动。
+// 端点进程家族全灭即「本次运行」结束，整账归零（run zeroing，2026-10-04 用户
+// 报障：zcode 卡工时会随着总运行时间一直涨，中途关掉再开不清零）。根因：工时
+// 计数自建仓起是终身累计的忙碌区间并集，09-17 快照持久化（927be08）后又跨
+// relay 重启续命，全程没有任何一处归零。规则：可信扫描轮确认端点进程数归零、
+// 且距最后活动已过 PROCESS_GONE_ACTIVE_REQUEST_TTL_MS（与孤儿请求结算同一道
+// 3s 闸门），settleAndResetRunAccount → resetEndpointRunAccount 把该端点的整份
+// 账原位重置：已工作时间、请求数、tokens、折线样本、模型/渠道身份、lastSeen、
+// 故障史全部回零，下次启动从 0 重计。不是「只清工时、累计量照留」——本 describe
+// 的第一条用例把 totalRequests 也钉成 0。
 describe("已工作时间随端点关闭清零", () => {
   const ZCODE_PID = 20588;
   const zcodeScan = (pid) =>

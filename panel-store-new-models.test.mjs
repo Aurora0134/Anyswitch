@@ -14,14 +14,6 @@ const panelJs = readFileSync(
   "utf8"
 );
 
-function extractFn(name, params) {
-  const m = panelJs.match(
-    new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
-  );
-  assert.ok(m, `panel.js must contain function ${name}`);
-  return m[0];
-}
-
 // 机制块：常量 + 状态变量 + 全部函数（从 STORE_NEW_MODELS_KEY 到 orderStoreModelIds 收尾）
 const mechSrc = panelJs.match(
   /const STORE_NEW_MODELS_KEY[\s\S]*?function orderStoreModelIds\(discoveredIds, newIds\) \{[\s\S]*?\n  \}/
@@ -45,6 +37,7 @@ function makeHarness(providers) {
       consumeStoreNewModels,
       orderStoreModelIds,
       raw: () => JSON.parse(localStorage.getItem(STORE_NEW_MODELS_KEY) || "{}"),
+      rawStr: () => localStorage.getItem(STORE_NEW_MODELS_KEY), // null = 从未落盘（区别于 "{}"）
       setTs: (pid, ts) => {
         const raw = JSON.parse(localStorage.getItem(STORE_NEW_MODELS_KEY) || "{}");
         if (raw[pid]) { raw[pid].ts = ts; localStorage.setItem(STORE_NEW_MODELS_KEY, JSON.stringify(raw)); }
@@ -67,8 +60,15 @@ describe("store-new-models 标记与合并", () => {
   it("重复刷新合并去重、保序，且 ts 刷新", () => {
     const h = makeHarness(PROV);
     h.markStoreNewModels("p1", ["x"]);
-    h.markStoreNewModels("p1", ["x", "y"]);
+    const staleTs = Date.now() - 60_000; // 把 ts 拨回过去，制造可观测的「未刷新」基准
+    h.setTs("p1", staleTs);
+    h.markStoreNewModels("p1", ["x", "y"]); // 重复登记 x 应去重，y 追加
     assert.deepEqual(h.storeNewIdsFor("p1"), ["x", "y"]);
+    // panel.js markStoreNewModels 末尾以 { ids, ts: Date.now() } 整体重写该渠道条目：
+    // ts 必须存在且晚于拨回的旧值，否则老化和 TTL 判定都会失真
+    const ts = h.raw().p1.ts;
+    assert.ok(Number.isFinite(ts), "重新登记后必须存在数字 ts");
+    assert.ok(ts > staleTs, "重新登记必须把 ts 刷新到晚于登记前的旧值");
   });
 
   it("空 added 不产生记录", () => {
@@ -88,13 +88,23 @@ describe("store-new-models 标记与合并", () => {
 });
 
 describe("store-new-models 失效与老化清理", () => {
-  it("已不在 discovered 的 id 被清理，全失效则删档", () => {
-    const h = makeHarness(PROV); // discovered 只有 a/b/c
+  it("已不在 discovered 的 id 被清理，有效项回写保留", () => {
+    const h = makeHarness(PROV); // discovered: a/b/c/d/x/y（ghost、ghost2 均未发现）
     h.markStoreNewModels("p1", ["a", "ghost"]);
-    assert.deepEqual(h.storeNewIdsFor("p1"), ["a"]);
+    assert.deepEqual(h.storeNewIdsFor("p1"), ["a"]); // ghost 失效被清
     h.markStoreNewModels("p1", ["ghost2"]);
     // 此刻 p1 = [a, ghost2]，ghost2 失效被清
     assert.deepEqual(h.storeNewIdsFor("p1"), ["a"]);
+    // 部分清理走「有剩余有效项 → 回写」分支，不能整条删档
+    assert.deepEqual(h.raw().p1.ids, ["a"]);
+  });
+
+  it("全部失效则删档", () => {
+    const h = makeHarness(PROV);
+    h.markStoreNewModels("p1", ["ghost", "ghost2"]); // 均不在 discovered
+    assert.deepEqual(h.storeNewIdsFor("p1"), []);
+    // 全失效走 else 分支整条删档，不残留 { ids: [], ts } 空壳
+    assert.deepEqual(h.raw(), {});
   });
 
   it("超过 TTL 的待读记录被老化清除", () => {
@@ -114,9 +124,12 @@ describe("store-new-models 消耗语义", () => {
     assert.deepEqual(h.storeNewIdsFor("p1"), []);
   });
 
-  it("consume 空渠道不报错", () => {
+  it("consume 空渠道不报错，且不发生落盘", () => {
     const h = makeHarness(PROV);
     assert.doesNotThrow(() => h.consumeStoreNewModels("nope"));
+    // panel.js consumeStoreNewModels 由 if (map[providerId]) 守卫：key 不存在时
+    // 连 saveStoreNewModels 都不该调——落盘与否只有看原始字符串才区分得出来
+    assert.equal(h.rawStr(), null);
   });
 });
 
@@ -136,30 +149,5 @@ describe("store-new-models 置顶排序", () => {
   it("新增 id 不在 discovered 中时被忽略", () => {
     const h = makeHarness(PROV);
     assert.deepEqual(h.orderStoreModelIds(["a", "b"], ["zzz"]), ["a", "b"]);
-  });
-});
-
-describe("store-new-models render 消耗语义（看过即复位）", () => {
-  // 模拟 renderProviderDetail 的判定：有待读 → 置顶+高光 → 渲染末尾 consume。
-  // 第一次 render 高光，第二次 render 新增态已消耗 → 不再置顶/高光。
-  it("第一次 render 置顶高光并消耗，第二次 render 复位", () => {
-    const h = makeHarness(PROV);
-    h.markStoreNewModels("p1", ["c", "a"]); // 新增 a、c
-    const discovered = ["a", "b", "c", "d"];
-
-    // 第一次 render：有待读 → 置顶 + 高光，渲染末尾消耗
-    const ids1 = h.storeNewIdsFor("p1");
-    const highlight1 = ids1.length > 0;
-    const ordered1 = highlight1 ? h.orderStoreModelIds(discovered, ids1) : discovered;
-    assert.equal(highlight1, true);
-    assert.deepEqual(ordered1, ["a", "c", "b", "d"]); // 新增置顶、组内保原相对序
-    if (highlight1) h.consumeStoreNewModels("p1");
-
-    // 第二次 render：新增态已消耗 → 原序、无高光
-    const ids2 = h.storeNewIdsFor("p1");
-    const highlight2 = ids2.length > 0;
-    const ordered2 = highlight2 ? h.orderStoreModelIds(discovered, ids2) : discovered;
-    assert.equal(highlight2, false);
-    assert.deepEqual(ordered2, ["a", "b", "c", "d"]); // 放回原位
   });
 });

@@ -17,6 +17,39 @@ const panelJs = readFileSync(
   "utf8",
 );
 
+// 从源码抽出真实 helper（正则截函数体 + new Function 注入闭包依赖），不用测试内
+// 手抄副本：否则源码阈值/口径变化后这组用例仍旧全绿，是假覆盖。
+function extractSrc(re, label) {
+  const m = panelJs.match(re);
+  assert.ok(m, label + " found in panel-ui/panel.js");
+  return m[0];
+}
+function evalConst(re, label) {
+  return new Function(`return (${extractSrc(re, label).replace(new RegExp("^const " + label + " = "), "").replace(/;$/, "")});`)();
+}
+// 陈旧判定：阈值常量与函数体一并取自源码
+const INSTANCE_STALE_MS = evalConst(/const INSTANCE_STALE_MS = ([^;]+);/, "INSTANCE_STALE_MS");
+const isInstanceStale = new Function(
+  "INSTANCE_STALE_MS",
+  `return (${extractSrc(/function isInstanceStale\(inst\) \{[\s\S]*?\n  \}/, "isInstanceStale")});`,
+)(INSTANCE_STALE_MS);
+// 折线取值：窗口上限取源码默认值，pruneSparkBuffer 一并注入真实实现
+const sparkWindowPoints = evalConst(/const DEFAULT_SPARK_WINDOW_POINTS = ([^;]+);/, "DEFAULT_SPARK_WINDOW_POINTS");
+const pruneSparkBuffer = new Function(
+  "sparkWindowPoints",
+  `return (${extractSrc(/function pruneSparkBuffer\(buf\) \{[\s\S]*?\n  \}/, "pruneSparkBuffer")});`,
+)(sparkWindowPoints);
+const sparkValues = new Function(
+  "sparkWindowPoints", "pruneSparkBuffer",
+  `return (${extractSrc(/function sparkValues\(buf, authoritativeHistory\) \{[\s\S]*?\n  \}/, "sparkValues")});`,
+)(sparkWindowPoints, pruneSparkBuffer);
+const formatDurationSeconds = new Function(
+  `return (${extractSrc(/function formatDurationSeconds\(ms\) \{[\s\S]*?\n  \}/, "formatDurationSeconds")});`,
+)();
+const formatRelativeAge = new Function(
+  `return (${extractSrc(/function formatRelativeAge\(ts\) \{[\s\S]*?\n  \}/, "formatRelativeAge")});`,
+)();
+
 function fakeElement() {
   return {
     className: "", dataset: {}, hidden: false,
@@ -49,15 +82,12 @@ function makeEnv() {
     updateSparkline: (containerId, dataPoints, minVal, maxVal) => {
       calls.update.push({ id: containerId, dataPoints, minVal, maxVal });
     },
-    sparkValues: (buf) => (buf ? buf.map((p) => p.v) : []),
-    formatDurationSeconds: () => "0秒",
+    sparkValues,
+    formatDurationSeconds,
     escapeHtml: (s) => String(s ?? ""),
     formatTokens: () => "0",
-    // 与 panel.html 同口径：active 豁免，lastSeen 超 2min 为陈旧
-    isInstanceStale: (inst) => !inst || inst.status === "active"
-      ? false
-      : (typeof inst.lastSeen === "number" && (Date.now() - inst.lastSeen) > 2 * 60 * 1000),
-    formatRelativeAge: () => "3 小时前",
+    isInstanceStale,
+    formatRelativeAge,
     document: { createElement: () => { const el = fakeElement(); created.push(el); return el; } },
   };
   return env;
@@ -65,7 +95,7 @@ function makeEnv() {
 
 function makeRenderInstanceRows(env) {
   const m = panelJs.match(/function renderInstanceRows\(\{[^}]*\}\) \{[\s\S]*?\n  \}/);
-  assert.ok(m, "renderInstanceRows found in panel.html");
+  assert.ok(m, "renderInstanceRows found in panel.js");
   return new Function(
     "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
     "formatDurationSeconds", "escapeHtml", "formatTokens", "isInstanceStale", "formatRelativeAge", "document",
@@ -78,7 +108,7 @@ function makeRenderInstanceRows(env) {
 
 function makeApplyDetailFold(env, open) {
   const m = panelJs.match(/function applyDetailFold\(prefix\) \{[\s\S]*?\n  \}/);
-  assert.ok(m, "applyDetailFold found in panel.html");
+  assert.ok(m, "applyDetailFold found in panel.js");
   const gridEl = fakeElement();
   const btn = {
     textContent: "",
@@ -98,7 +128,7 @@ const KIMI_INSTANCE = {
   tokens: {}, requests: 3, activeDurationMs: 65000,
 };
 
-describe("panel.html 实例栏收起态不画折线（buffer 照常累积）", () => {
+describe("panel.js 实例栏收起态不画折线（buffer 照常累积）", () => {
   it("收起态渲染实例行：零折线绘制调用，实例采样照常入 buffer", () => {
     const env = makeEnv();
     env.isDetailOpen = () => false;
@@ -123,7 +153,7 @@ describe("panel.html 实例栏收起态不画折线（buffer 照常累积）", (
   });
 });
 
-describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
+describe("panel.js 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
   it("折叠钮展开（applyDetailFold open=true）立即触发本栏实例折线补绘", () => {
     const env = makeEnv();
     const fold = makeApplyDetailFold(env, true);
@@ -143,7 +173,7 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
 
   it("redrawInstanceSparklines 用已攒 buffer 逐实例绘制三条折线，不串栏", () => {
     const m = panelJs.match(/function redrawInstanceSparklines\(prefix\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "redrawInstanceSparklines found in panel.html");
+    assert.ok(m, "redrawInstanceSparklines found in panel.js");
     const buffers = {
       "kimi:a1": { tps: [{ t: 0, v: 10 }, { t: 0, v: 11 }], cache: [{ t: 0, v: 80 }], ttft: [{ t: 0, v: 0.4 }], sparkHistory: { ttft: [0.3, 0.42] } },
       "kimi:a2": { tps: [{ t: 0, v: 5 }], cache: [], ttft: [] },
@@ -158,7 +188,7 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
     const fn = new Function("document", "instanceSparkBuffers", "sparkValues", "updateSparkline", `return (${m[0]});`)(
       foldDoc,
       buffers,
-      (buf, hist) => (hist && hist.length ? hist.slice(-1) : (buf || []).map((p) => p.v)),
+      sparkValues,
       (id, dataPoints, minVal, maxVal) => calls.push({ id, dataPoints, minVal, maxVal }),
     );
     fn("kimi");
@@ -167,19 +197,19 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
       "kimiInstSparkTps-a2", "kimiInstSparkCache-a2", "kimiInstSparkTtft-a2",
     ], "kimi 两实例各三条，pi 不串栏");
     const ttft = calls.find((c) => c.id === "kimiInstSparkTtft-a1");
-    assert.deepEqual(ttft.dataPoints, [0.42], "ttft 补绘用 buffer 暂存的权威历史（与渲染时口径一致）");
+    assert.deepEqual(ttft.dataPoints, [0.3, 0.42], "ttft 补绘用 buffer 暂存的权威历史（与渲染时同用真实 sparkValues 口径）");
     const cache = calls.find((c) => c.id === "kimiInstSparkCache-a1");
     assert.equal(cache.minVal, 0);
     assert.equal(cache.maxVal, 100);
   });
 });
 
-describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开补绘", () => {
+describe("panel.js 端点级旧机制（zcode/qoder）收起不绘制、展开补绘", () => {
   function makeRedrawEndpoint(env) {
     const m = panelJs.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "redrawEndpointSparklines found in panel.html");
+    assert.ok(m, "redrawEndpointSparklines found in panel.js");
     const km = panelJs.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
-    assert.ok(km, "ENDPOINT_SPARK_KEYS found in panel.html");
+    assert.ok(km, "ENDPOINT_SPARK_KEYS found in panel.js");
     const keys = new Function(`return (${km[0].replace(/^const ENDPOINT_SPARK_KEYS = /, "").replace(/;$/, "")})`)();
     const historyBuffers = {
       ttft: [{ t: 0, v: 1.1 }, { t: 0, v: 1.2 }], tps: [{ t: 0, v: 30 }], cache: [{ t: 0, v: 90 }],
@@ -189,7 +219,7 @@ describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开
     const fn = new Function("$", "historyBuffers", "sparkValues", "updateSparkline", "ENDPOINT_SPARK_KEYS", "endpointStaleFlags", `return (${m[0]});`)(
       (id) => gridEls[id] || null,
       historyBuffers,
-      (buf) => (buf || []).map((p) => p.v),
+      sparkValues,
       (id, dataPoints, minVal, maxVal) => env.calls.update.push({ id, dataPoints, minVal, maxVal }),
       keys,
       env.endpointStaleFlags,
@@ -211,7 +241,7 @@ describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开
   it("renderZcode/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
     for (const fnName of ["renderZcode", "renderQoder"]) {
       const m = panelJs.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
-      assert.ok(m, fnName + " found in panel.html");
+      assert.ok(m, fnName + " found in panel.js");
       assert.ok(!m[0].includes("updateSparkline("), fnName + " 不得裸调 updateSparkline（收起态会直写隐藏 DOM）");
       const prefix = fnName === "renderZcode" ? "zc" : "qoder";
       assert.ok(m[0].includes(`redrawEndpointSparklines("${prefix}")`), fnName + " 改走 redrawEndpointSparklines");
@@ -227,7 +257,7 @@ describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开
 
   it("旧机制 setFold 展开（open=true）立即补绘端点级折线", () => {
     const m = panelJs.match(/const setFold = \(open\) => \{[\s\S]*?\n    \};/);
-    assert.ok(m, "setFold found in panel.html");
+    assert.ok(m, "setFold found in panel.js");
     const env = makeEnv();
     const grid = { hidden: true, closest: () => null };
     const brief = { hidden: false };
@@ -245,7 +275,9 @@ describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开
     fn(false);
     assert.deepEqual(env.calls.redrawEp, ["zc"], "收起方向不补绘");
     assert.equal(aggWrap.hidden, true, "收起态隐藏「全局汇总」行（tokens/请求数由简要栏承载）");
-    assert.deepEqual(env.calls.redraw, [], "旧机制卡不再挂实例行，不拨实例折线");
+    // setFold 未注入实例级补绘依赖，运行时断言恒真；改断源码文本：旧机制折叠
+    // 不得回潮挂实例行补绘（实例行归 data-prefix 栏的 applyDetailFold）。
+    assert.ok(!m[0].includes("redrawInstanceSparklines"), "旧机制折叠不得触发实例级折线补绘");
   });
 
   it("陈旧端点（endpointStaleFlags 置位）可见也零绘制，恢复新鲜后照常", () => {
@@ -260,7 +292,7 @@ describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开
   });
 });
 
-describe("panel.html 陈旧实例行（lastSeen 超阈值）速率类隐藏", () => {
+describe("panel.js 陈旧实例行（lastSeen 超阈值）速率类隐藏", () => {
   // 数小时前的 last-N 窗口均值不再冒充实时数据：速率类三格置 —、折线停绘、
   // 简要胶囊行换成相对时间；工时等累计量不受影响。
   const STALE_INSTANCE = {
@@ -283,7 +315,7 @@ describe("panel.html 陈旧实例行（lastSeen 超阈值）速率类隐藏", ()
     assert.ok(!grid.innerHTML.includes("最后活动"), "grid has no tail annotation");
     assert.ok((grid.innerHTML.match(/inst-stale/g) || []).length === 3, "速率类三格压暗，工时卡不动");
     assert.ok(!grid.innerHTML.includes("12.3"), "stale tps hidden");
-    assert.ok(grid.innerHTML.includes("0秒"), "工时累计量照常显示");
+    assert.ok(grid.innerHTML.includes("1分5秒"), "工时累计量照常显示（真实 formatDurationSeconds(65000)）");
   });
 
   it("新鲜行不受影响：lastSeen 近 1 分钟内照常绘制三条折线", () => {
@@ -309,12 +341,22 @@ describe("panel.html 陈旧实例行（lastSeen 超阈值）速率类隐藏", ()
     assert.equal(grid.dataset.stale, "0", "missing lastSeen never marked stale");
     assert.ok(!row.innerHTML.includes("tag-stale"), "no stale bubble");
   });
+
+  it("active 豁免：status=active 即使 lastSeen 很久前也不判陈旧（真实 helper 行为）", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [{ ...STALE_INSTANCE, status: "active" }] });
+    assert.equal(env.calls.update.length, 3, "active 行照常绘制三条折线");
+    const grid = env.created.find((el) => el.className === "instance-telemetry-grid");
+    assert.equal(grid.dataset.stale, "0", "active never marked stale regardless of lastSeen");
+  });
 });
 
 
 describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶）", () => {
   const m = panelJs.match(/function claudeAggregateMetrics\(sessions, retired\) \{[\s\S]*?\n  \}/);
-  assert.ok(m, "claudeAggregateMetrics found in panel.html");
+  assert.ok(m, "claudeAggregateMetrics found in panel.js");
   const claudeAggregateMetrics = new Function(`return (${m[0]});`)();
 
   it("tokens/请求/工时累加，tps 求和，缓存按 prompt 加权，TTFT/lastSeen 取最近会话", () => {
@@ -366,15 +408,13 @@ describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶�
   it("退役账不存在或为 null 时与旧口径逐位一致", () => {
     const sessions = [{ tokens: { prompt: 10, completion: 5, cached: 2 }, requests: 1, lastSeen: 42, lastTtftMs: 111 }];
     const withNull = claudeAggregateMetrics(sessions, null);
-    const withUndefined = claudeAggregateMetrics(sessions);
-    const legacy = claudeAggregateMetrics(sessions, undefined);
-    assert.deepEqual(withNull, withUndefined);
-    assert.deepEqual(withUndefined, legacy);
-    assert.equal(legacy.totalRequests, 1);
+    const omitted = claudeAggregateMetrics(sessions);
+    assert.deepEqual(withNull, omitted, "显式 null 退役账 ≡ 省略第二参（旧调用签名兼容）");
+    assert.equal(omitted.totalRequests, 1);
   });
 });
 
-describe("panel.html 看板会话行命名「会话 #x」（按卡内行显示顺序 1 起）", () => {
+describe("panel.js 看板会话行命名「会话 #x」（按卡内行显示顺序 1 起）", () => {
   // 实例/会话行不再直接显示会话标题（首条用户消息），改按本卡行序编号；
   // 伪「全局汇总」行保持原标题、不参与编号。
   const SESSION_A = { id: "a", title: "帮我修登录页样式", status: "active", tokens: {}, requests: 1 };

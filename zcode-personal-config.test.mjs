@@ -231,11 +231,21 @@ describe("mergePersonalProviderConfig against an existing file", () => {
 
   it("never touches rules it did not manage last time", () => {
     const { doc } = seededDisk();
+    // 合并对外来规则是同引用透传：与 doc 里的同一对象做 deepEqual 时，原地篡改
+    // 也检测不到。先克隆留底再合并，并补一层序列化字节对比——写盘走
+    // JSON.stringify，键序漂移也是行为变化，「逐字节原样保留」才真正被钉住。
+    const foreignRuleBefore = JSON.parse(JSON.stringify(doc.config.providerConfigRules.providerRules[1]));
+    const foreignModelBefore = JSON.parse(
+      JSON.stringify(doc.config.modelConfigRules.providerModelRules.find((r) => r.providerId === "builtin:zai")),
+    );
     const fresh = injectedEntry({ providerId: "poke-api", models: { "m-alpha": {} } });
     const { config } = mergePersonalProviderConfig(doc, { [fresh.prefixedId]: fresh.entry }, [fresh.prefixedId, "_gone-api"]);
 
     const foreign = config.config.providerConfigRules.providerRules.find((r) => r.providerId === "builtin:zai");
-    assert.deepEqual(foreign, doc.config.providerConfigRules.providerRules[1]);
+    assert.deepEqual(foreign, foreignRuleBefore, "foreign provider rule content untouched");
+    assert.equal(JSON.stringify(foreign), JSON.stringify(foreignRuleBefore), "foreign provider rule keeps its exact key order too");
+    const foreignModel = config.config.modelConfigRules.providerModelRules.find((r) => r.providerId === "builtin:zai");
+    assert.equal(JSON.stringify(foreignModel), JSON.stringify(foreignModelBefore), "foreign model rule untouched as well");
   });
 
   it("carries the user's own client-side settings through untouched", () => {
@@ -321,14 +331,21 @@ describe("mergePersonalProviderConfig against an existing file", () => {
 
 describe("validatePersonalProviderConfig", () => {
   it("rejects unknown top-level and config-level keys", () => {
-    assert.equal(validatePersonalProviderConfig({ schemaVersion: 1, config: {}, extra: 1 }).valid, false);
-    assert.equal(
-      validatePersonalProviderConfig({
-        schemaVersion: 1,
-        config: { providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [] }, bogus: 1 },
-      }).valid,
-      false,
-    );
+    // 夹具除未知键外必须完全合法：{schemaVersion, config:{}, extra} 这种缺
+    // providerConfigRules 的文档走的是另一条失败路径，顶层未知键检查被整个剥掉
+    // 断言照样绿。用完整文档夹具、并断言错误指向对应那一层，才钉得住检查本身。
+    const complete = {
+      schemaVersion: 1,
+      config: { providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [] } },
+    };
+    const topLevelGate = validatePersonalProviderConfig({ ...complete, extra: 1 });
+    assert.equal(topLevelGate.valid, false);
+    assert.match(topLevelGate.error, /document has unknown key "extra"/);
+    assert.equal(validatePersonalProviderConfig(complete).valid, true, "fixture minus the unknown key must validate");
+
+    const configLevelGate = validatePersonalProviderConfig({ ...complete, config: { ...complete.config, bogus: 1 } });
+    assert.equal(configLevelGate.valid, false);
+    assert.match(configLevelGate.error, /config has unknown key "bogus"/);
   });
 
   it("rejects an unknown api type and a duplicate provider id", () => {
@@ -386,6 +403,11 @@ describe("validatePersonalProviderConfig", () => {
           providerModelRules: [
             { providerId: "_kestrel-default", modelId: "glm-5.3", config: { properties: { contextWindow: 1000000 } } },
           ],
+          // 客户端 schema 把 manualProviderModelRules 定为必填，客户端自己回写的
+          // canonical 形态恒有该键（见「mergePersonalProviderConfig on a fresh
+          // file」第二条用例的口径）。缺了它这个夹具就只是在测校验器对缺键的
+          // 容忍，算不上「ZCode 留在盘上的文档」。
+          manualProviderModelRules: [],
         },
       },
     };
@@ -1064,11 +1086,15 @@ describe("defaultCliModelSelection（CLI 槽位的默认模型选择）", () => 
   });
 
   it("treats underscore channels as regular managed entries when _auto is absent", () => {
-    const entries = { "_pool-a": cliEntryOf("pool-a", ["mimo-v2.6-flash-free"]) };
+    // 非 _auto 的下划线渠道走的是同一条解析路径，而不是 disabled 兜底：
+    // kimi-k3-mix 的合法值域 ["low","high","max"] 不含 disabled，选出的必须是
+    // "low"——若这里退化成兜底（"disabled"）或整段跳过该渠道（返回 null），
+    // 断言都会失败。null 规则下的兜底形态由下一条用例单独钉住，两头互补。
+    const entries = { "_pool-a": cliEntryOf("pool-a", ["kimi-k3-mix"]) };
     assert.deepEqual(defaultCliModelSelection(entries, builtinRules), {
       providerId: "_pool-a",
-      modelId: "mimo-v2.6-flash-free",
-      options: { reasoningLevel: "disabled" },
+      modelId: "kimi-k3-mix",
+      options: { reasoningLevel: "low" },
     });
   });
 
@@ -1109,7 +1135,13 @@ describe("mergePersonalProviderConfig 的 defaultModelSelection 选项", () => {
     const { prefixedId, entry } = injectedEntry({ providerId: "poke-api" });
     const selection = { providerId: prefixedId, modelId: "m-alpha", options: { reasoningLevel: "disabled" } };
     const fresh = mergePersonalProviderConfig(null, { [prefixedId]: entry }, [], { defaultModelSelection: selection });
-    assert.deepEqual(fresh.config.config.defaultModelSelection, selection);
+    // 期望值写字面量而非 selection 本身：源码按引用透传，与传入对象比较只能证
+    // 明键存在，钉不住内容是否被正确写入。
+    assert.deepEqual(fresh.config.config.defaultModelSelection, {
+      providerId: prefixedId,
+      modelId: "m-alpha",
+      options: { reasoningLevel: "disabled" },
+    });
     assert.equal(validatePersonalProviderConfig(fresh.config).valid, true);
 
     // 已有选择的文件（无论选择长什么样）原样保留——生成值绝不覆盖用户选择。

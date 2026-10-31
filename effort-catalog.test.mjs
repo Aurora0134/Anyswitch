@@ -269,14 +269,30 @@ describe("pickDefaultEffort", () => {
 
 describe("effortWireValue", () => {
   it("uses the library wire spelling and falls back to the level name", () => {
-    const resolved = resolveModelEfforts("deepseek-v4-flash", {
-      models: new Map([["deepseek-v4-flash", normalizeEffortEntry(SAMPLE_MODELS["deepseek-v4-flash"])]]),
-    });
-    assert.equal(effortWireValue(resolved, "high"), "high");
+    // Fixture shape copied from real library rows: low->high is glm-5.2's
+    // actual non-identity map, xhigh pinned null is kimi-k3's (supported but
+    // carries no value), max with no wire entry is deepseek-v4-flash's. An
+    // identity-only fixture cannot tell the mapping branch from the
+    // level-name fallback.
+    const catalog = {
+      models: new Map([[
+        "glm-5.2",
+        normalizeEffortEntry({
+          kind: "reasoning",
+          levels: ["low", "medium", "high", "xhigh", "max"],
+          default: "high",
+          wire: { minimal: null, low: "high", medium: "high", high: "high", xhigh: null },
+          thinkingFormat: "zai",
+        }),
+      ]]),
+    };
+    const resolved = resolveModelEfforts("glm-5.2", catalog);
+    assert.equal(effortWireValue(resolved, "low"), "high", "non-empty wire spelling replaces the level name");
+    assert.equal(effortWireValue(resolved, "high"), "high", "identity wire entry passes through");
     // xhigh is offered but the raw thinkingLevelMap pins it null: a non-empty
     // value is still required downstream, so the level name is sent.
     assert.equal(effortWireValue(resolved, "xhigh"), "xhigh");
-    assert.equal(effortWireValue(resolved, "medium"), "medium");
+    assert.equal(effortWireValue(resolved, "max"), "max", "a level with no wire entry falls back to the level name");
   });
 });
 

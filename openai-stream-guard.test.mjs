@@ -50,7 +50,7 @@ describe("OpenAIStreamGuard", () => {
     assert.equal(emitted + verdict.tail, sse, "a healthy stream must be byte-identical");
   });
 
-  it("waits for a tool name that arrives in a later delta before releasing the stream", () => {
+  it("under whole-turn hold a late-arriving tool name does not release the stream; held bytes flush at finish", () => {
     // Under whole-turn hold a pure tool-call stream
     // stays held even once the call has id + name + parseable args: the name
     // arriving late no longer releases mid-stream, but the stream still
@@ -226,7 +226,7 @@ describe("OpenAIStreamGuard", () => {
     assert.equal(verdict.action, "error");
     assert.equal(verdict.truncated, true);
     assert.match(verdict.error.error.message, /截断|truncat/i);
-    assert.equal((emitted + verdict.errorLine).includes("data: [DONE]"), false);
+    assert.match(verdict.errorLine, /^data: \{"error":/, "the cut ends in a structured error event, not a terminator line");
   });
 
   it("a [DONE] alone (no finish_reason) is enough to prove clean termination", () => {
@@ -391,17 +391,6 @@ describe("holdEntireTurn (plan A: whole-turn hold in enhanced mode)", () => {
     assert.ok(emitted.includes("reasoning_content"), "basic mode must stream live");
   });
 
-  it("single-flag signature: holdToolCalls is not a constructor option", () => {
-    // The constructor now takes only holdEntireTurn. A caller still passing
-    // the removed holdToolCalls option gets basic-mode behavior: a complete
-    // tool call releases the hold live.
-    const guard = new OpenAIStreamGuard({ holdToolCalls: true });
-    const emitted = pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"bash","arguments":"{}"}}]}}]}\n\n',
-    ]);
-    assert.ok(emitted.includes('"name":"bash"'), "without holdEntireTurn a complete tool call must release live");
-  });
-
   it("rejects a truncated JSON data line even when later chunks terminate cleanly", () => {
     // Production: glm-5.3 cut a reasoning chunk mid-object (missing closing
     // braces). JSON.parse failed at the client (AI_JSONParseError) because
@@ -421,7 +410,7 @@ describe("holdEntireTurn (plan A: whole-turn hold in enhanced mode)", () => {
     assert.equal(verdict.action, "reject");
     assert.equal(verdict.reason, "malformed_json_chunk");
     assert.equal(verdict.truncated, true);
-    assert.equal((verdict.tail || "").includes("chat.completion.chunk"), false);
+    assert.equal(JSON.stringify(verdict).includes("chat.completion.chunk"), false, "the malformed line's bytes must not appear anywhere in the verdict, especially not as a flushable tail");
   });
 
   it("hasProvenContent: the upstream first token is observable while whole-turn hold keeps bytes withheld", () => {

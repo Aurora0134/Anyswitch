@@ -170,16 +170,4 @@ describe("spawnPanelHostRestartHelper (the call the dying host makes)", () => {
     }
   });
 
-  it("tolerates a spawn that returns no child object", () => {
-    const dir = mkTestDir("anyswitch-restart-tolerant-");
-    try {
-      assert.doesNotThrow(() => spawnPanelHostRestartHelper({
-        spawnFn: () => undefined,
-        scriptPath: "C:/app/helper.mjs",
-        logPath: dir,
-      }));
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
 });

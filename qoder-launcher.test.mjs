@@ -9,7 +9,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
@@ -17,9 +16,11 @@ import {
   resolveQoderExecutable,
   runQoderLauncher,
   realSpawnQoder,
+  main,
   RELAY_PORT,
 } from "./qoder-launcher.mjs";
 import { QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
+import { getTokenPath } from "./pi-relay-token.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Opaque on purpose: writeConfig is mocked, so no test here depends on the
@@ -89,13 +90,24 @@ test("buildQoderLauncherEnv injects ANYSWITCH_RELAY_TOKEN and NO_PROXY", () => {
 test("buildQoderLauncherEnv inherits Qoder-side endpoint overrides verbatim", () => {
   // Qoder's own endpoint env vars are the user's channel to redirect the CLI;
   // the launcher must pass them through untouched, never invent values.
+  // Both documented vars (qoder-launcher.mjs header) ride in the base so the
+  // passthrough assertions below can actually fail if either is dropped or
+  // rewritten.
   const env = buildQoderLauncherEnv({
     token: "tok",
-    base: { QODER_CLI_BIN: "C:\\tools\\qodercli.exe", QODER_BIG_MODEL_ENDPOINT: "https://example.invalid/v1" },
+    base: {
+      QODER_CLI_BIN: "C:\\tools\\qodercli.exe",
+      QODER_BIG_MODEL_ENDPOINT: "https://example.invalid/v1",
+      QODER_OPENAPI_ENDPOINT: "https://example.invalid/openapi",
+    },
   });
   assert.equal(env.QODER_CLI_BIN, "C:\\tools\\qodercli.exe");
   assert.equal(env.QODER_BIG_MODEL_ENDPOINT, "https://example.invalid/v1");
-  assert.equal("QODER_OPENAPI_ENDPOINT" in env, false);
+  assert.equal(env.QODER_OPENAPI_ENDPOINT, "https://example.invalid/openapi");
+  // And neither endpoint var may be invented when the caller omits it.
+  const bare = buildQoderLauncherEnv({ token: "tok", base: { PATH: "/usr/bin" } });
+  assert.equal("QODER_BIG_MODEL_ENDPOINT" in bare, false);
+  assert.equal("QODER_OPENAPI_ENDPOINT" in bare, false);
 });
 
 test("resolveQoderExecutable accepts absolute override and rejects relative", () => {
@@ -277,27 +289,53 @@ test("runQoderLauncher tears the relay down even when spawn fails", async () => 
 
 test("runQoderLauncher hands spawnQoder an onSpawned hook that never blocks the launch", async () => {
   // The launcher awaits spawnQoder (i.e. Qoder's exit code), so an onSpawned
-  // hook whose warm-up never settles must not stall the launch.
-  const deps = recordingDeps();
-
-  const code = await runQoderLauncher({
-    ...deps,
-    ...relayReturning(deps),
-    spawnQoder: async ({ onSpawned }) => {
-      assert.equal(typeof onSpawned, "function");
-      onSpawned();
-      onSpawned();
-      return 0;
+  // hook whose warm-up never settles must not stall the launch — not even for
+  // a spawnQoder implementation that awaits the hook's return. The warm-up
+  // below stalls until the launch has already resolved: a hook that ever
+  // starts awaiting refreshCatalog trips the failsafe race instead of
+  // hanging the suite.
+  const releases = [];
+  const deps = recordingDeps({
+    refreshCatalog: ({ port }) => {
+      deps.calls.push(`refreshCatalog:${port}`);
+      return new Promise((resolve) => releases.push(resolve));
     },
-    base: FAKE_BASE,
-    probeRelay: async () => false,
   });
+  let failsafe = null;
+  try {
+    const code = await Promise.race([
+      runQoderLauncher({
+        ...deps,
+        ...relayReturning(deps),
+        spawnQoder: async ({ onSpawned }) => {
+          assert.equal(typeof onSpawned, "function");
+          // Even a conscientious spawnQoder that awaits the hook's return must
+          // sail through: the launcher's hook hands back nothing that waits on
+          // the warm-up.
+          const warmup = onSpawned();
+          if (warmup) await warmup;
+          onSpawned();
+          return 0;
+        },
+        base: FAKE_BASE,
+        probeRelay: async () => false,
+      }),
+      new Promise((_, reject) => {
+        failsafe = setTimeout(() => reject(new Error("the launch stalled on the unresolved catalog warm-up")), 2000);
+      }),
+    ]);
 
-  assert.equal(code, 0);
-  assert.deepEqual(
-    deps.calls.filter((c) => c.startsWith("refreshCatalog")),
-    [`refreshCatalog:${QODER_CDP_PORT}`, `refreshCatalog:${QODER_CDP_PORT}`],
-  );
+    assert.equal(code, 0);
+    // Every spawn fired the warm-up against the CDP port while it was still
+    // pending.
+    assert.deepEqual(
+      deps.calls.filter((c) => c.startsWith("refreshCatalog")),
+      [`refreshCatalog:${QODER_CDP_PORT}`, `refreshCatalog:${QODER_CDP_PORT}`],
+    );
+  } finally {
+    clearTimeout(failsafe);
+    for (const release of releases) release();
+  }
 });
 
 test("runQoderLauncher logs a failing catalog warm-up without failing the launch", async () => {
@@ -387,17 +425,137 @@ test("runQoderLauncher rejects a caller that omits writeConfig before any side e
   assert.deepEqual(deps.calls, [], "the guard must run before the relay is touched");
 });
 
-test("main() wires every machine-touching dep to its real implementation", async () => {
-  // No defaults means main() is the only place the real writers get through —
-  // if a wiring line is dropped the desktop launcher stops syncing BYOK loudly,
-  // so pin the wiring here rather than letting it rot silently.
-  const source = readFileSync(fileURLToPath(new URL("./qoder-launcher.mjs", import.meta.url)), "utf8");
-  const body = source.slice(source.indexOf("export async function main"));
-  assert.ok(body.length > 0, "main() must stay in qoder-launcher.mjs");
-  assert.match(body, /writeConfig: \([\s\S]{0,120}writeQoderConfig\(/);
-  assert.match(body, /loadStore[,\s]/);
-  assert.match(body, /loadToken: \([\s\S]{0,60}loadOrGenerateToken\(/);
-  assert.match(body, /refreshCatalog: \([\s\S]{0,60}refreshQoderModelCatalog\(/);
+test("main() threads argv through runQoderLauncher and returns the child exit code", async () => {
+  // Every machine-touching dep is overridden, so main() runs its full wiring
+  // without touching the real relay, the real settings.json or a real spawn.
+  // (refreshCatalog's default wiring is intentionally not exercised here: the
+  // real refresh polls a live CDP endpoint, and its hook-side contract — the
+  // launcher handing spawnQoder a working hook — is pinned by the
+  // runQoderLauncher tests below via injection.)
+  const deps = recordingDeps();
+
+  const code = await main(["--resume", "--user-flag"], {
+    ...deps,
+    ...relayReturning(deps),
+    spawnQoder: async ({ env, args }) => {
+      deps.calls.push("spawnQoder");
+      deps.spawned = { env, args };
+      return 7;
+    },
+    base: FAKE_BASE,
+    probeRelay: async () => false,
+  });
+
+  assert.equal(code, 7, "main() returns the child's exit code");
+  assert.deepEqual(deps.spawned.args, ["--resume", "--user-flag"], "argv must reach spawnQoder verbatim");
+  assert.equal(deps.spawned.env.ANYSWITCH_RELAY_TOKEN, "per-launch-token");
+  assert.deepEqual(deps.calls, ["startRelay", "writeConfig", "spawnQoder", "closeRelay"]);
+});
+
+test("main() wires the real shared-token reader as loadToken", async () => {
+  // Resident-relay mode sources the child's token from loadToken, so main
+  // must wire the real token-file reader. The assertion reads the file the
+  // real reader creates under the fixture LOCALAPPDATA back: a dropped wiring
+  // fails runQoderLauncher's dep guard, a stand-in reader cannot produce it.
+  const dir = mkTestDir("qoder-main-token-");
+  try {
+    const base = { USERPROFILE: join(dir, "home"), LOCALAPPDATA: join(dir, "local") };
+    const deps = recordingDeps();
+    const { loadToken, ...depsButLoadToken } = deps;
+    let capturedToken = null;
+
+    const code = await main([], {
+      ...depsButLoadToken,
+      spawnQoder: async ({ env }) => {
+        deps.calls.push("spawnQoder");
+        capturedToken = env.ANYSWITCH_RELAY_TOKEN;
+        return 0;
+      },
+      base,
+      probeRelay: async () => true,
+    });
+
+    assert.equal(code, 0);
+    // loadToken is main's real default here, so it is not recorded by the
+    // recorder — the file read-back below is what proves it ran.
+    assert.deepEqual(deps.calls, ["writeConfig", "spawnQoder"]);
+    const tokenFile = readFileSync(getTokenPath(join(dir, "local", "Anyswitch")), "utf8").trim();
+    assert.equal(capturedToken, tokenFile, "the child token must be the real token file's content under base.LOCALAPPDATA");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main() wires the real store reader as loadStore", async () => {
+  // The real loadStore resolves its root from process.env.LOCALAPPDATA at
+  // call time (store-io.mjs defaultRoot), so redirect the env at an empty
+  // fixture root: the real reader must classify the store as absent and the
+  // launch must degrade loudly. A dropped wiring fails the dep guard; a
+  // stand-in reader that reports ok would reach writeConfig instead.
+  const dir = mkTestDir("qoder-main-store-");
+  const localRoot = join(dir, "local");
+  const savedLocal = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = localRoot;
+  try {
+    const deps = recordingDeps();
+    const { loadStore, ...depsButLoadStore } = deps;
+
+    const code = await main([], {
+      ...depsButLoadStore,
+      ...relayReturning(deps),
+      base: { USERPROFILE: join(dir, "home"), LOCALAPPDATA: localRoot },
+      probeRelay: async () => false,
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(deps.calls, ["startRelay", "spawnQoder", "closeRelay"], "no config write without a readable store");
+    assert.ok(deps.logs.some((l) => l.includes("Anyswitch store could not be read")), "the real store reader must classify the absent fixture store");
+  } finally {
+    if (savedLocal === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = savedLocal;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main() wires the real settings.json writer as writeConfig", async () => {
+  // A text pin passes as long as the string "writeQoderConfig(" survives
+  // anywhere in main(); this pin makes the real writer prove itself: the
+  // managed connection must actually land in settings.json under
+  // base.USERPROFILE carrying the relay port and token. A dropped wiring
+  // fails the dep guard; a stand-in writer writes nothing.
+  const dir = mkTestDir("qoder-main-write-");
+  try {
+    const base = { USERPROFILE: join(dir, "home"), LOCALAPPDATA: join(dir, "local") };
+    const deps = recordingDeps({
+      loadStore: () => ({
+        ok: true,
+        // Minimal visible-channel shape: one provider with one model is all
+        // deriveVisibleChannels (pool-providers.mjs) needs to surface one
+        // managed connection for the real writer.
+        store: { providers: { "fake-channel": { models: { "fake-model": {} } } } },
+      }),
+    });
+    const { writeConfig, ...depsButWriteConfig } = deps;
+
+    const code = await main([], {
+      ...depsButWriteConfig,
+      ...relayReturning(deps),
+      base,
+      probeRelay: async () => false,
+    });
+
+    assert.equal(code, 0);
+    const settings = JSON.parse(readFileSync(join(dir, "home", ".qoder", "settings.json"), "utf8"));
+    const managed = Object.values(settings.providers ?? {}).filter((c) => c.apiKey === "per-launch-token");
+    assert.equal(managed.length, 1, "the real writer must land exactly one managed connection carrying the relay token");
+    assert.ok(
+      managed[0].baseUrl.startsWith(`http://127.0.0.1:${RELAY_PORT}/`),
+      `the connection must point at the relay port, got ${managed[0].baseUrl}`,
+    );
+    assert.deepEqual(managed[0].models.map((m) => m.model), ["fake-model"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("realSpawnQoder prepends the CDP debugging port and fires onSpawned", async () => {

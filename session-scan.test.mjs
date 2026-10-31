@@ -1514,6 +1514,9 @@ const FIXTURE_TURN = [
   toolPart({ callID: "call_run", tool: "Grep", state: { status: "running", input: {} } }),
 ];
 
+// Shared 1.x-shape store: session/message/part only, no session_v2 table.
+// zcode 用它建自家 db；opencode 用它模拟 1.x 安装——无 v2 表仍可扫可载的
+// 语义由下面「opencode: scans its own db」用例钉住（同一夹具、同一路径）。
 function makeSessionDb(dir, fileName = "db.sqlite", turnParts = FIXTURE_TURN) {
   const dbPath = join(dir, fileName);
   const db = new DatabaseSync(dbPath);
@@ -1749,17 +1752,6 @@ test("opencode 2.x: reads session_v2 + session_message and still lists 1.x-only 
   check.close();
 });
 
-test("opencode 1.x install: no session_v2 table still scans and loads", async () => {
-  const root = makeTmp();
-  makeSessionDb(root, "opencode.db");
-  const scanner = testScanner({ opencode: [root] });
-  const { sessions } = await scanner.scanAll();
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].id, "sess_db1");
-  const messages = await scanner.loadMessages("opencode", sessions[0].file);
-  assert.equal(messages[1].content, "数据库里的回答\n[Tool: Bash]\n[Tool: Read]\n[Tool: Grep]");
-});
-
 test("sqlite tool blocks without a usable name fall back to [Tool: unknown]", async () => {
   const root = makeTmp();
   mkdirSync(join(root, "cli", "db"), { recursive: true });
@@ -1834,12 +1826,27 @@ test("scanAll merges adapters, sorts by lastActive desc, isolates failures", asy
 test("scanEndpoint: 只扫指定端点，名单外与读盘失败都降级为空表", async () => {
   const claudeRoot = makeTmp();
   writeClaudeSession(claudeRoot, "C--work-e", "sess-e.jsonl", [claudeLine({ sessionId: "sess-e" })]);
-  const scanner = testScanner({ claude: [claudeRoot] });
+  // 另一个端点也备好真实会话：单端点扫描的结果里不许混进它。
+  const qoderRoot = makeTmp();
+  writeQoderSession(qoderRoot, "C--work-e", "sess-q.jsonl", [
+    JSON.stringify({ type: "workspace-directories", sessionId: "sess-q", directories: ["C:\\work\\e"] }),
+    JSON.stringify({ type: "runtime-config", sessionId: "sess-q", model: "auto", timestamp: 1788000000000 }),
+    JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-01T01:13:50.000Z", message: { role: "user", content: [{ type: "text", text: "qoder 问题" }] } }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot], qoder: [qoderRoot] });
   const metas = await scanner.scanEndpoint("claude");
-  assert.equal(metas.length, 1);
-  assert.equal(metas[0].endpoint, "claude");
+  assert.deepEqual(
+    metas.map((m) => [m.endpoint, m.id]),
+    [["claude", "sess-e"]],
+    "只出指定端点的行",
+  );
   // 绑定捕获/复活兜底的调用纪律：判不出就空表，绝不让调用方吃到异常。
   assert.deepEqual(await scanner.scanEndpoint("not-an-endpoint"), []);
+  // adapter 在册但 scan() 抛错（坏 db）同样降级为空表——catch 分支不许漏。
+  const badRoot = makeTmp();
+  mkdirSync(join(badRoot, "cli", "db"), { recursive: true });
+  writeFileSync(join(badRoot, "cli", "db", "db.sqlite"), "this is not a sqlite file", "utf8");
+  assert.deepEqual(await testScanner({ zcode: [badRoot] }).scanEndpoint("zcode"), []);
 });
 
 // --- 扫描离线程（session-scan-worker.mjs） -----------------------------------
@@ -2053,24 +2060,115 @@ test("重复 id：同一段对话出现在两个项目目录时只出一行，�
 });
 
 test("重复 id：不同端点的同 id 不是同一个会话，不许合并", async () => {
-  const root = makeTmp();
-  writeClaudeSession(root, "C--work-proj", "sess-shared.jsonl", [claudeLine({ sessionId: "sess-shared" })]);
-  const { sessions } = await claudeScanner(root).scanAll();
-  const claudeRows = sessions.filter((row) => row.id === "sess-shared");
-  assert.equal(claudeRows.length, 1);
-  assert.equal(claudeRows[0].endpoint, "claude", "端点仍是区分键的一部分");
+  // 两个端点各自产出同 id 会话：若去重键漏掉 endpoint 分量，qoder 那行会被 claude 吃掉。
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-proj", "sess-shared.jsonl", [claudeLine({ sessionId: "sess-shared" })]);
+  const qoderRoot = makeTmp();
+  writeQoderSession(qoderRoot, "C--work-proj", "sess-shared.jsonl", [
+    JSON.stringify({ type: "workspace-directories", sessionId: "sess-shared", directories: ["C:\\work\\proj"] }),
+    JSON.stringify({ type: "runtime-config", sessionId: "sess-shared", model: "auto", timestamp: 1788000000000 }),
+    JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-01T01:13:50.000Z", message: { role: "user", content: [{ type: "text", text: "qoder 端的同 id 会话" }] } }),
+  ]);
+  const { sessions } = await testScanner({ claude: [claudeRoot], qoder: [qoderRoot] }).scanAll();
+  const rows = sessions.filter((row) => row.id === "sess-shared");
+  assert.equal(rows.length, 2, "两个端点各出一行——按裸 id 去重这里就只剩一行");
+  assert.deepEqual(
+    rows.map((row) => row.endpoint).sort(),
+    ["claude", "qoder"],
+  );
 });
 
 test("cwd: 每个 adapter 的 SessionMeta 都带这个字段（契约不靠个别 adapter 自觉）", async () => {
-  const root = makeTmp();
-  writeClaudeSession(root, "C--work-myproj", "sess-contract.jsonl", [claudeLine({})]);
-  const { sessions } = await claudeScanner(root).scanAll();
-  assert.ok(sessions.length > 0);
-  for (const session of sessions) {
-    assert.equal(typeof session.cwd, "string", `${session.endpoint} 的 cwd 是字符串（缺失时为 ""）`);
+  // 九个端点各备一个可列出的最小会话：任何一家绕开 makeMeta 漏掉 cwd 都会被抓到。
+  const roots = {};
+
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-myproj", "sess-contract.jsonl", [claudeLine({})]);
+  roots.claude = [claudeRoot];
+
+  const kimiRoot = makeTmp();
+  const kimiDir = join(kimiRoot, "sessions", "wd_x", "session_kc");
+  mkdirSync(join(kimiDir, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(kimiDir, "agents", "main", "wire.jsonl"),
+    JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "kimi 提问" }], time: 1788000001000 }) + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(kimiRoot, "session_index.jsonl"),
+    JSON.stringify({ sessionId: "session_kc", sessionDir: kimiDir, workDir: "C:\\work\\k" }) + "\n",
+    "utf8",
+  );
+  roots.kimi = [kimiRoot];
+
+  const dshRoot = makeTmp();
+  const dshId = "88888888-9999-aaaa-bbbb-cccccccccccc";
+  writeDshSession(dshRoot, "--C-work-dshproj--", dshId, [
+    [dshHeader(dshId, "C:\\work\\dshproj")],
+    [{ type: "user/message", seq: 1, time: 1788000001000, data: { content: [{ type: "text", text: "dsh 提问" }] } }],
+  ]);
+  roots.dsh = [dshRoot];
+
+  const piRoot = makeTmp();
+  const piDir = join(piRoot, "--C--work-piproj--");
+  mkdirSync(piDir, { recursive: true });
+  writeFileSync(
+    join(piDir, "2026-09-01T10-00-00-000Z_019fb399-cccc-7d24-a26b-39732b7ce85b.jsonl"),
+    [
+      JSON.stringify({ type: "session", version: 3, id: "019fb399-cccc-7d24-a26b-39732b7ce85b", timestamp: "2026-09-01T10:00:00.000Z", cwd: "C:\\work\\piproj" }),
+      JSON.stringify({ type: "message", timestamp: "2026-09-01T10:00:02.000Z", message: { role: "user", content: "pi 提问", timestamp: 1788000002000 } }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  roots.pi = [piRoot];
+
+  const qoderRoot = makeTmp();
+  writeQoderSession(qoderRoot, "C--work-qoderproj", "019fb399-dddd-7d24-a26b-39732b7ce85b.jsonl", [
+    JSON.stringify({ type: "workspace-directories", sessionId: "019fb399-dddd-7d24-a26b-39732b7ce85b", directories: ["C:\\work\\qoderproj"] }),
+    JSON.stringify({ type: "runtime-config", sessionId: "019fb399-dddd-7d24-a26b-39732b7ce85b", model: "auto", timestamp: 1788000000000 }),
+    JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-01T01:13:50.000Z", message: { role: "user", content: [{ type: "text", text: "qoder 提问" }] } }),
+  ]);
+  roots.qoder = [qoderRoot];
+
+  const codexRoot = makeTmp();
+  writeCodexSession(codexRoot, join("2026", "09", "01"), "rollout-2026-09-01T10-00-00-019fb399-eeee-7d24-a26b-39732b7ce85b.jsonl", [
+    codexLine("session_meta", { id: "019fb399-eeee-7d24-a26b-39732b7ce85b", timestamp: "2026-09-01T10:00:00.000Z", cwd: "C:\\work\\codexproj" }),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "codex 提问" }] }, "2026-09-01T10:00:03.000Z"),
+  ]);
+  roots.codex = [codexRoot];
+
+  const grokRoot = makeTmp();
+  writeGrokSession(grokRoot, "proj", "01912345-cccc-7000-8000-000000000009", {
+    summary: {
+      sessionId: "01912345-cccc-7000-8000-000000000009",
+      cwd: "C:\\work\\grokproj", // flat fields, no `info`
+      generated_title: "grok 会话",
+      num_messages: 2,
+      created_at: 1788000000000,
+      updated_at: 1788000001000,
+    },
+  });
+  roots.grok = [grokRoot];
+
+  const zcodeRoot = makeTmp();
+  mkdirSync(join(zcodeRoot, "cli", "db"), { recursive: true });
+  makeSessionDb(join(zcodeRoot, "cli", "db"));
+  roots.zcode = [zcodeRoot];
+
+  const opencodeRoot = makeTmp();
+  makeSessionDb(opencodeRoot, "opencode.db");
+  roots.opencode = [opencodeRoot];
+
+  const { sessions } = await testScanner(roots).scanAll();
+  const byEndpoint = new Map(sessions.map((s) => [s.endpoint, s]));
+  for (const endpoint of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]) {
+    const row = byEndpoint.get(endpoint);
+    assert.ok(row, `${endpoint} 的夹具会话在列表里`);
+    assert.equal(typeof row.cwd, "string", `${endpoint} 的 cwd 是字符串（缺失时为 ""）`);
+    assert.notEqual(row.cwd, "", `${endpoint} 的 cwd 落到夹具给的项目目录，不是空串`);
   }
   // 字段是 additive：既有九个一个不少
   for (const key of ["endpoint", "id", "title", "summary", "project", "file", "createdAt", "lastActive", "resumeCommand"]) {
-    assert.ok(key in sessions[0], `既有字段 ${key} 原样在册`);
+    assert.ok(key in byEndpoint.get("claude"), `既有字段 ${key} 原样在册`);
   }
 });

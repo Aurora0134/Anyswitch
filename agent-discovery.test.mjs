@@ -16,7 +16,12 @@ test("standalone discovery preserves all ten launcher installation choices", () 
   assert.equal(defaultClaudeExecutable(base), "C:/roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe");
   assert.equal(resolveClaudeExecutable(base), defaultClaudeExecutable(base));
   assert.equal(resolveCodexExecutable({ ...base, CODEX_EXECUTABLE: "C:\\custom\\codex.exe" }), "C:\\custom\\codex.exe");
-  assert.equal(resolveOpencodeExecutable(base), join(base.APPDATA, "npm/node_modules/@opencode/cli/node_modules/@opencode/cli-windows-x64/bin/opencode.exe"));
+  // 注入恒 false 的 existsSync 隔离真实文件系统：夹具 C:\roaming 是凭空路径，
+  // 未安装时必须确定落在首选包首选变体的占位路径，不随宿主机上的真实安装漂移。
+  assert.equal(
+    resolveOpencodeExecutable(base, { existsSync: () => false }),
+    join(base.APPDATA, "npm/node_modules/@opencode/cli/node_modules/@opencode/cli-windows-x64/bin/opencode.exe"),
+  );
   assert.equal(resolvePiExecutable(base), join(base.APPDATA, "npm/pi.cmd"));
   // kimi 两种官方形态：npm 全局 shim 优先（面板更新按钮装的就是那个包），
   // 没有 shim 才回退官方原生执行体（~/.kimi-code/bin/kimi.exe）。

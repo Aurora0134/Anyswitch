@@ -2,26 +2,35 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDshProviderEntry,
-  mergeDshSettings,
-  readDshSettings,
-  writeDshSettingsWithBackup,
   extractManagedProviders,
   readSidecar,
   writeSidecar,
   writeDshProfilePatches,
-  validateDshSettings,
-  UnparseableDshSettingsError,
   getYamlModule,
   dshYamlSchema,
-  deriveAutoRouteChannel,
 } from "./dsh-merge-config.mjs";
-import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Every provider profile carries the relay token in its headers; the tests
 // thread one fixed value through the builders and assert it lands verbatim.
 const TOKEN = "test-relay-token";
+
+// writeDshProfilePatches/getYamlModule parse and emit cordis.patch.yml through
+// js-yaml, which this project does not declare: resolveYamlModule prefers the
+// copy vendored inside a global @deepseek-ai/dsh install and only then falls
+// back to a bare "js-yaml". On a machine with neither, the whole YAML surface
+// cannot run — skip with that reason instead of failing with an unrelated
+// MODULE_NOT_FOUND (same guard as dsh-launcher.test.mjs).
+async function requireYamlModule(t) {
+  try {
+    return await getYamlModule();
+  } catch (error) {
+    t.skip(`js-yaml is unavailable (${error.message}); install @deepseek-ai/dsh globally to run this test`);
+    return null;
+  }
+}
 
 test("buildDshProviderEntry creates valid dsh profile", () => {
   const provider = {
@@ -173,38 +182,60 @@ test("buildDshProviderEntry knowledge tier never overrides store-declared levels
   assert.ok(!entry._p.models[0].compat, "store-declared levels carry no per-model format");
 });
 
-test("mergeDshSettings manages lifecycle and preserves user sections", () => {
-  const existing = {
-    "ui-theme": { preference: "dark" },
-    "llm-pi-ai": {
-      providers: {
-        custom_manual: {
-          baseURL: "https://api.custom.com",
-          api: "openai-completions",
-          models: [{ id: "m1" }],
-        },
-        _old_provider: {
-          baseURL: "http://127.0.0.1:47821/openai/old/v1",
-          api: "openai-completions",
-          models: [{ id: "old-m" }],
+test("writeDshProfilePatches manages the channel lifecycle and preserves user rows", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-lifecycle-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    writeFileSync(patchPath, yaml.dump([
+      { id: "ui-theme", name: "@deepseek-ai/dsh-client-ui-theme", config: { preference: "dark" } },
+      {
+        id: "llm-pi-ai",
+        name: "@deepseek-ai/dsh-llm-pi-ai",
+        config: {
+          providers: {
+            custom_manual: {
+              baseURL: "https://api.custom.com",
+              api: "openai-completions",
+              models: [{ id: "m1" }],
+            },
+            _old_provider: {
+              baseURL: "http://127.0.0.1:47821/openai/old/v1",
+              api: "openai-completions",
+              models: [{ id: "old-m" }],
+            },
+          },
         },
       },
-    },
-  };
+    ], { lineWidth: -1 }), "utf8");
+    // The sidecar records what the previous sync managed: only those ids may
+    // be removed from the profile — a user-added provider never is.
+    writeSidecar(dir, ["old_provider"]);
 
-  const activeProviders = {
-    new_provider: {
-      models: { "m-new": { contextWindow: 32000 } },
-    },
-  };
+    const store = {
+      version: 2,
+      providers: {
+        new_provider: {
+          models: { "m-new": { contextWindow: 32000 } },
+        },
+      },
+    };
+    const result = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, true, result.reason);
 
-  const { config, managed } = mergeDshSettings(existing, activeProviders, 47821, TOKEN, ["old_provider"]);
-
-  assert.equal(config["ui-theme"].preference, "dark");
-  assert.ok(config["llm-pi-ai"].providers.custom_manual, "user custom provider preserved");
-  assert.equal(config["llm-pi-ai"].providers._old_provider, undefined, "stale managed provider removed");
-  assert.ok(config["llm-pi-ai"].providers._new_provider, "new managed provider injected");
-  assert.deepEqual(managed, ["new_provider"]);
+    const entries = yaml.load(readFileSync(patchPath, "utf8"));
+    assert.equal(entries.find((entry) => entry.id === "ui-theme").config.preference, "dark", "界面自己的行保持原样");
+    const providers = entries.find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.ok(providers.custom_manual, "user custom provider preserved");
+    assert.equal(providers._old_provider, undefined, "stale managed provider removed");
+    assert.ok(providers._new_provider, "new managed provider injected");
+    assert.deepEqual(readSidecar(dir), { providers: ["new_provider"] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("extractManagedProviders filters providers without models", () => {
@@ -219,24 +250,9 @@ test("extractManagedProviders filters providers without models", () => {
   assert.deepEqual(Object.keys(result), ["valid"]);
 });
 
-test("validateDshSettings validates structure", () => {
-  assert.equal(validateDshSettings({}).valid, true);
-  assert.equal(validateDshSettings(null).valid, false);
-  assert.equal(validateDshSettings({ "llm-pi-ai": "invalid" }).valid, false);
-  assert.equal(
-    validateDshSettings({
-      "llm-pi-ai": {
-        providers: {
-          p1: { baseURL: "http://test", api: "openai-completions", models: [{ id: "m1" }] },
-        },
-      },
-    }).valid,
-    true,
-  );
-});
-
-test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其它设置保持原样", async () => {
-  const yaml = await getYamlModule();
+test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其它设置保持原样", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
   const dir = mkTestDir("dsh-patch-test-");
   try {
     const profiles = join(dir, "profiles");
@@ -308,18 +324,12 @@ test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其�
   }
 });
 
-// 2026-09-29 事故的真实边界：dsh-tui 的 patch 被写坏（模板那行裸 `[]` 和真正的条目行
-// 并存）之后，面板与 dsh 用的是同一份严格 js-yaml（dsh 自带那份），两边读它都直接报
-// 「end of the stream or a document separator is expected」——同步器连合并都进不去，
-// 整份跳过并报失败，dsh 一键启动同时崩掉。**代码不会自己修好这种文件**：本次是靠人工
-// 按备份逐行修回（bridge/tmp/repair-dsh-cordis-patch.mjs）。
-// 本用例钉住这条边界里唯一能自动化的部分：patch 不是 YAML 数组时，跳过它、逐字节不动，
-// 同期其它界面照常写好——免得以后有人把「跳过」误读成「已修复」，再等一个不会来的自愈。
 // dsh 0.1.7 自带的 patch 用 cordis 的 !!js 标签按平台启停 bash/pwsh 插件；js-yaml 4
 // 删掉了全部 js 类型，裸 load 直接抛 unknown tag，四个界面的同步曾因此整批跳过。
 // 解析要把表达式收进包装、写回时原样带回标签——不许求值、不许丢标签。
-test("带 !!js 平台表达式的官方 patch 照常同步，表达式逐字节留在原地", async () => {
-  const yaml = await getYamlModule();
+test("带 !!js 平台表达式的官方 patch 照常同步，表达式逐字节留在原地", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
   const dir = mkTestDir("dsh-patch-js-expr-");
   try {
     const profiles = join(dir, "profiles");
@@ -366,8 +376,9 @@ test("带 !!js 平台表达式的官方 patch 照常同步，表达式逐字节�
   }
 });
 
-test("llm-pi-ai 行自带的 !!js 值在重写该行后仍带标签", async () => {
-  const yaml = await getYamlModule();
+test("llm-pi-ai 行自带的 !!js 值在重写该行后仍带标签", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
   const dir = mkTestDir("dsh-patch-js-row-");
   try {
     const profiles = join(dir, "profiles");
@@ -404,8 +415,13 @@ test("llm-pi-ai 行自带的 !!js 值在重写该行后仍带标签", async () =
   }
 });
 
-test("坏掉的 profile patch 只被跳过、不被改动，同期其它界面照常写好", async () => {
-  const yaml = await getYamlModule();
+// 2026-09-29 事故边界里唯一能自动恢复的部分：patch 能被 js-yaml 解析、但不是条目
+// 数组时，记入 skipped、逐字节不动，同期其它界面照常写好——免得以后有人把「跳过」
+// 误读成「已修复」，再等一个不会来的自愈。语法错误（事故本身的形状）不走这条链路，
+// 由下一个用例单独钉住。
+test("patch 能解析但不是条目数组时只跳过这一个 profile，其它界面照常写好", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
   const dir = mkTestDir("dsh-patch-skip-");
   try {
     const profiles = join(dir, "profiles");
@@ -439,6 +455,53 @@ test("坏掉的 profile patch 只被跳过、不被改动，同期其它界面�
   }
 });
 
+// 2026-09-29 事故的真实形状：dsh-tui 的 patch 被写坏（模板那行裸 `[]` 和真正的条目
+// 行并存）之后，面板与 dsh 用的是同一份严格 js-yaml（dsh 自带那份），两边读它都直接
+// 报「end of the stream or a document separator is expected」。这个语法异常不带
+// UNPARSEABLE_DSH_SETTINGS 码，不在同步器的跳过名单里，所以现状是：
+// writeDshProfilePatches 把异常整体抛出去——所有界面一个都不会写，dsh 一键启动同崩
+// （agent-sync 调用链自己有 catch，会降级成 ok:false 警告；launcher 路径没有 catch）。
+// **代码不会自己修好这种文件，也不会替你跳过它**：本次是靠人工按备份逐行修回
+// （bridge/tmp/repair-dsh-cordis-patch.mjs）。本用例把现状钉住——将来若给语法错误补
+// 上「跳过并报失败」，这里会红，逼着改动的人同步更新这条边界的说法。
+test("2026-09-29 事故形状：patch 带 YAML 语法错误时同步整体抛错，其它界面一个都不写", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-syntax-broken-");
+  try {
+    const profiles = join(dir, "profiles");
+    for (const name of ["dsh-tui", "web"]) mkdirSync(join(profiles, name), { recursive: true });
+    const brokenPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const broken = [
+      "- id: ui-theme",
+      "  name: '@deepseek-ai/dsh-client-ui-theme'",
+      "  config: {}",
+      "[]",
+      "- id: llm-pi-ai",
+      "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+      "  config:",
+      "    providers: {}",
+      "",
+    ].join("\n");
+    writeFileSync(brokenPath, broken, "utf8");
+    const webPath = join(profiles, "web", "cordis.patch.yml");
+    const webBefore = yaml.dump([
+      { id: "ui-theme", name: "@deepseek-ai/dsh-client-ui-theme", config: { preference: "dark" } },
+    ], { lineWidth: -1 });
+    writeFileSync(webPath, webBefore, "utf8");
+
+    await assert.rejects(
+      () => writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, dir),
+      /end of the stream or a document separator/i,
+      "语法错误不在跳过名单里：现状是整体抛错，不是记成 skipped 或 ok:false",
+    );
+    assert.equal(readFileSync(brokenPath, "utf8"), broken, "坏文件保持原样，等人工修");
+    assert.equal(readFileSync(webPath, "utf8"), webBefore, "抛错路径一个界面都没写——正是注释里「一键启动同崩」的形状");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // 失联不得伪装成功（2026-10-25 体检项）：dsh 在装而 profiles 目录失联（被移走、读不出）
 // 时，同步必须报 ok:false，交给 agent-sync 既有的 warn 日志与 failed 名单接管，而不是顶
 // 着「no dsh profiles」的 ok 计成同步成功；「dsh 未装/没有 profile」维持 ok+unchanged 正常
@@ -457,7 +520,8 @@ const SYNC_PRESENCE_STORE = {
   },
 };
 
-test("dsh 在装而 profiles 目录失联时必须报失败，不得伪装成正常跳过", async () => {
+test("dsh 在装而 profiles 目录失联时必须报失败，不得伪装成正常跳过", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
   const dir = mkTestDir("dsh-patch-lost-");
   try {
     const home = join(dir, "home");
@@ -475,7 +539,8 @@ test("dsh 在装而 profiles 目录失联时必须报失败，不得伪装成正
   }
 });
 
-test("profiles 位置被普通文件顶替（patch 面读不出来）时必须报失败", async () => {
+test("profiles 位置被普通文件顶替（patch 面读不出来）时必须报失败", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
   const dir = mkTestDir("dsh-patch-notdir-");
   try {
     const home = join(dir, "home");
@@ -492,7 +557,8 @@ test("profiles 位置被普通文件顶替（patch 面读不出来）时必须�
   }
 });
 
-test("dsh 未装（家目录不存在）时维持 ok+unchanged 正常跳过", async () => {
+test("dsh 未装（家目录不存在）时维持 ok+unchanged 正常跳过", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
   const dir = mkTestDir("dsh-patch-absent-");
   try {
     const result = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, join(dir, "home"));
@@ -502,7 +568,8 @@ test("dsh 未装（家目录不存在）时维持 ok+unchanged 正常跳过", as
   }
 });
 
-test("profiles 目录在而是空的时候维持 ok+unchanged 正常跳过", async () => {
+test("profiles 目录在而是空的时候维持 ok+unchanged 正常跳过", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
   const dir = mkTestDir("dsh-patch-empty-");
   try {
     mkdirSync(join(dir, "home", "profiles"), { recursive: true });
@@ -513,7 +580,8 @@ test("profiles 目录在而是空的时候维持 ok+unchanged 正常跳过", asy
   }
 });
 
-test("dsh 卸载后（家目录整个没了）不因 sidecar 残留记录报假失败", async () => {
+test("dsh 卸载后（家目录整个没了）不因 sidecar 残留记录报假失败", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
   const dir = mkTestDir("dsh-patch-gone-");
   try {
     const home = join(dir, "home");
@@ -528,151 +596,125 @@ test("dsh 卸载后（家目录整个没了）不因 sidecar 残留记录报假�
   }
 });
 
-test("round-trip read/write settings with yaml backup", async () => {
-  const yaml = await getYamlModule();
-  const dir = mkTestDir("dsh-merge-test-");
-  try {
-    const filePath = join(dir, "settings.yaml");
-    const initial = { "ui-theme": { preference: "light" } };
-
-    const w1 = writeDshSettingsWithBackup(filePath, initial, yaml);
-    assert.equal(w1.ok, true);
-    assert.equal(w1.unchanged, false);
-
-    const r1 = readDshSettings(filePath, yaml);
-    assert.equal(r1["ui-theme"].preference, "light");
-
-    const w2 = writeDshSettingsWithBackup(filePath, initial, yaml);
-    assert.equal(w2.ok, true);
-    assert.equal(w2.unchanged, true);
-
-    const updated = { "ui-theme": { preference: "dark" } };
-    const w3 = writeDshSettingsWithBackup(filePath, updated, yaml);
-    assert.equal(w3.ok, true);
-    assert.equal(w3.unchanged, false);
-    assert.ok(w3.backupPath);
-
-    // Corrupt test
-    writeFileSync(filePath, "::invalid: yaml: [", "utf8");
-    assert.throws(() => readDshSettings(filePath, yaml), UnparseableDshSettingsError);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("writeDshSettingsWithBackup prunes settings backups to the newest 5", async () => {
-  const yaml = await getYamlModule();
-  const dir = mkTestDir("dsh-merge-test-");
-  try {
-    const filePath = join(dir, "settings.yaml");
-    for (let i = 1; i <= 6; i++) {
-      writeFileSync(join(dir, `settings.backup.2020-01-0${i}T00-00-00-000Z.yaml`), `old${i}`, "utf8");
-    }
-    writeFileSync(filePath, yaml.dump({ "ui-theme": { preference: "light" } }), "utf8");
-    const result = writeDshSettingsWithBackup(filePath, { "ui-theme": { preference: "dark" } }, yaml);
-    assert.equal(result.ok, true);
-    const backups = readdirSync(dir).filter((n) => n.startsWith("settings.backup.")).sort();
-    assert.equal(backups.length, 5);
-    assert.equal(backups[0], "settings.backup.2020-01-03T00-00-00-000Z.yaml", "oldest backups pruned");
-    assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("sidecar read and write round-trip", () => {
+test("sidecar 落盘为 dsh 专属文件名，内容按共享实现的排序往返", () => {
   const dir = mkTestDir("dsh-sidecar-test-");
   try {
-    assert.deepEqual(readSidecar(dir), { providers: [] });
+    assert.equal(existsSync(join(dir, "dsh-sidecar.json")), false, "没写过就不该有文件");
     writeSidecar(dir, ["p2", "p1"]);
+    // dsh 包装层唯一自己的东西就是文件名：排序与字节格式都是 merge-common 的共享
+    // 实现（那边已逐字节断言）。这里钉住包装没有把文件名写错。
+    assert.equal(
+      readFileSync(join(dir, "dsh-sidecar.json"), "utf8"),
+      '{\n  "providers": [\n    "p1",\n    "p2"\n  ]\n}\n',
+    );
     assert.deepEqual(readSidecar(dir), { providers: ["p1", "p2"] });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("pool surfaces as one dsh channel with unioned models and dissolves cleanly", () => {
-  const store = {
-    version: 2,
-    providers: {
-      alpha: {
-        displayName: "Alpha",
-        baseURL: "https://alpha.invalid/v1",
-        protocol: "openai-compatible",
-        credentialFile: "alpha.dpapi",
-        models: {
-          "model-a": { displayName: "Model A", contextWindow: 100000 },
-          "model-shared": { displayName: "Shared (alpha)" },
+test("pool 以一条 dsh 渠道浮出（模型取并集），解散后残留条目被清掉", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-pool-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const store = {
+      version: 2,
+      providers: {
+        alpha: {
+          displayName: "Alpha",
+          baseURL: "https://alpha.invalid/v1",
+          protocol: "openai-compatible",
+          credentialFile: "alpha.dpapi",
+          models: {
+            "model-a": { displayName: "Model A", contextWindow: 100000 },
+            "model-shared": { displayName: "Shared (alpha)" },
+          },
+        },
+        beta: {
+          displayName: "Beta",
+          baseURL: "https://beta.invalid/v1",
+          protocol: "openai-compatible",
+          credentialFile: "beta.dpapi",
+          models: {
+            "model-shared": { displayName: "Shared (beta)" },
+            "model-b": { displayName: "Model B" },
+          },
         },
       },
-      beta: {
-        displayName: "Beta",
-        baseURL: "https://beta.invalid/v1",
-        protocol: "openai-compatible",
-        credentialFile: "beta.dpapi",
-        models: {
-          "model-shared": { displayName: "Shared (beta)" },
-          "model-b": { displayName: "Model B" },
-        },
+      pools: {
+        "pool-ab": { displayName: "Pool AB", members: ["alpha", "beta"] },
       },
-    },
-    pools: {
-      "pool-ab": { displayName: "Pool AB", members: ["alpha", "beta"] },
-    },
-  };
+    };
 
-  const managedProviders = extractManagedProviders(store);
-  const { config, managed } = mergeDshSettings({}, managedProviders, 47821, TOKEN, []);
-  const providers = config["llm-pi-ai"].providers;
-  const pool = providers["_pool-ab"];
-  assert.ok(pool);
-  assert.equal(pool.displayName, "Pool AB");
-  assert.equal(pool.baseURL, "http://127.0.0.1:47821/openai/pool-ab/v1");
-  assert.equal(pool.apiKeyEnv, undefined);
-  assert.deepEqual(pool.headers, {
-    "x-agent-id": "dsh",
-    Authorization: `Bearer ${TOKEN}`,
-  });
-  assert.deepEqual(pool.models.map((m) => m.id), ["model-a", "model-shared", "model-b"]);
-  // First member in pool order wins the shared model's metadata.
-  assert.equal(pool.models[1].name, "Shared (alpha)");
-  // Member channels are absorbed into the pool channel — every endpoint sees
-  // one provider per pool, exactly like the wire catalog.
-  assert.equal(providers._alpha, undefined);
-  assert.equal(providers._beta, undefined);
-  assert.ok(managed.includes("pool-ab"));
+    const first = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
+    assert.equal(first.ok, true, first.reason);
+    const providers = yaml.load(readFileSync(patchPath, "utf8")).find((entry) => entry.id === "llm-pi-ai").config.providers;
+    const pool = providers["_pool-ab"];
+    assert.ok(pool);
+    assert.equal(pool.displayName, "Pool AB");
+    assert.equal(pool.baseURL, "http://127.0.0.1:47821/openai/pool-ab/v1");
+    assert.equal(pool.apiKeyEnv, undefined);
+    assert.deepEqual(pool.headers, {
+      "x-agent-id": "dsh",
+      Authorization: `Bearer ${TOKEN}`,
+    });
+    assert.deepEqual(pool.models.map((m) => m.id), ["model-a", "model-shared", "model-b"]);
+    // First member in pool order wins the shared model's metadata.
+    assert.equal(pool.models[1].name, "Shared (alpha)");
+    // Member channels are absorbed into the pool channel — every endpoint sees
+    // one provider per pool, exactly like the wire catalog.
+    assert.equal(providers._alpha, undefined);
+    assert.equal(providers._beta, undefined);
+    assert.deepEqual(readSidecar(dir), { providers: ["pool-ab"] });
 
-  // Dissolve the pool: the stale managed entry is removed via the sidecar list.
-  const withoutPool = mergeDshSettings(
-    config,
-    extractManagedProviders({ version: 2, providers: store.providers }),
-    47821,
-    TOKEN,
-    managed,
-  );
-  assert.equal(withoutPool.config["llm-pi-ai"].providers["_pool-ab"], undefined);
-  assert.ok(withoutPool.config["llm-pi-ai"].providers._alpha);
+    // Dissolve the pool: the same store without it. The stale managed entry is
+    // removed via the sidecar list, and the members resurface as standalone
+    // channels.
+    const withoutPool = await writeDshProfilePatches({ version: 2, providers: store.providers }, 47821, TOKEN, dir, dir);
+    assert.equal(withoutPool.ok, true, withoutPool.reason);
+    const after = yaml.load(readFileSync(patchPath, "utf8")).find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(after["_pool-ab"], undefined, "dissolved pool channel removed");
+    assert.equal(after._alpha.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
+    assert.ok(after._beta, "members resurface as standalone channels");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("pool id equal to a member provider id absorbs all members into one channel", () => {
-  const store = {
-    version: 2,
-    providers: {
-      alpha: { models: { "model-a": { displayName: "Model A" } } },
-      beta: { models: { "model-b": { displayName: "Model B" } } },
-    },
-    pools: {
-      alpha: { displayName: "Alpha Pool", members: ["alpha", "beta"] },
-    },
-  };
-  const { config, managed } = mergeDshSettings({}, extractManagedProviders(store), 47821, TOKEN, []);
-  const providers = config["llm-pi-ai"].providers;
-  assert.equal(providers._alpha.displayName, "Alpha Pool");
-  assert.equal(providers._alpha.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
-  assert.deepEqual(providers._alpha.models.map((m) => m.id), ["model-a", "model-b"]);
-  // beta is absorbed even though its id differs from the pool id.
-  assert.equal(providers._beta, undefined);
-  assert.deepEqual(managed, ["alpha"]);
+test("pool id 与成员 id 相同时，成员仍被并进同一条渠道", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-pool-twin-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const store = {
+      version: 2,
+      providers: {
+        alpha: { models: { "model-a": { displayName: "Model A" } } },
+        beta: { models: { "model-b": { displayName: "Model B" } } },
+      },
+      pools: {
+        alpha: { displayName: "Alpha Pool", members: ["alpha", "beta"] },
+      },
+    };
+    const result = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    const providers = yaml.load(readFileSync(patchPath, "utf8")).find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(providers._alpha.displayName, "Alpha Pool");
+    assert.equal(providers._alpha.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
+    assert.deepEqual(providers._alpha.models.map((m) => m.id), ["model-a", "model-b"]);
+    // beta is absorbed even though its id differs from the pool id.
+    assert.equal(providers._beta, undefined);
+    assert.deepEqual(readSidecar(dir), { providers: ["alpha"] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // Virtual "auto" routing channel: injected when the
@@ -690,131 +732,133 @@ const DSH_CHAIN_STORE = {
   },
 };
 
-test("mergeDshSettings injects the pseudo channel under the Anyswitch key", () => {
-  const auto = deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh");
-  const { config, managed } = mergeDshSettings(
-    {},
-    extractManagedProviders(DSH_CHAIN_STORE),
-    47821,
-    TOKEN,
-    [],
-    null,
-    auto,
-  );
-  const entry = config["llm-pi-ai"].providers.Anyswitch;
-  assert.ok(entry, "the pseudo channel must be injected under the display-name key");
-  assert.equal(config["llm-pi-ai"].providers._auto, undefined, "the pre-rename key is not written");
-  assert.equal(entry.displayName, "Anyswitch");
-  assert.equal(entry.api, "openai-completions");
-  // The base URL points at the chain HEAD node, not at a literal "auto" segment.
-  assert.equal(entry.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");
-  assert.equal(entry.apiKeyEnv, undefined);
-  assert.deepEqual(entry.headers, {
-    "x-agent-id": "dsh",
-    Authorization: `Bearer ${TOKEN}`,
-  });
-  assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
-  assert.ok(!entry.models[0].reasoningEfforts, "the virtual model carries no reasoning levels");
-  assert.ok(managed.includes("auto"), "sidecar records the logical id, not the display-name key");
-  assert.equal(validateDshSettings(config).valid, true);
+test("有路由链时伪渠道以 Anyswitch 键写进 profile，URL 段指向链头节点", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-auto-inject-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const result = await writeDshProfilePatches(DSH_CHAIN_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    const providers = yaml.load(readFileSync(join(profiles, "dsh-tui", "cordis.patch.yml"), "utf8"))
+      .find((entry) => entry.id === "llm-pi-ai").config.providers;
+    const entry = providers.Anyswitch;
+    assert.ok(entry, "the pseudo channel must be written under its display-name key");
+    assert.equal(providers._auto, undefined, "the pre-rename key is not written");
+    assert.equal(entry.displayName, "Anyswitch");
+    assert.equal(entry.api, "openai-completions");
+    // The base URL points at the chain HEAD node, not at a literal "auto" segment.
+    assert.equal(entry.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");
+    assert.equal(entry.apiKeyEnv, undefined);
+    assert.deepEqual(entry.headers, {
+      "x-agent-id": "dsh",
+      Authorization: `Bearer ${TOKEN}`,
+    });
+    assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
+    assert.ok(!entry.models[0].reasoningEfforts, "the virtual model carries no reasoning levels");
+    assert.ok(providers["_poke-api"], "real channels are written alongside");
+    // sidecar records the logical id, not the display-name key.
+    assert.deepEqual(readSidecar(dir), { providers: ["auto", "poke-api"] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("mergeDshSettings does not inject the pseudo channel without a route chain", () => {
-  const { config, managed } = mergeDshSettings(
-    {},
-    extractManagedProviders(DSH_CHAIN_STORE),
-    47821,
-    TOKEN,
-    [],
-    null,
-    deriveAutoRouteChannel({ providers: DSH_CHAIN_STORE.providers }, "dsh"),
-  );
-  assert.equal(config["llm-pi-ai"].providers.Anyswitch, undefined);
-  assert.equal(config["llm-pi-ai"].providers._auto, undefined);
-  assert.ok(!managed.includes("auto"));
+test("没有路由链就不写伪渠道", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-auto-absent-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const result = await writeDshProfilePatches(
+      { version: 2, providers: DSH_CHAIN_STORE.providers },
+      47821,
+      TOKEN,
+      dir,
+      dir,
+    );
+    assert.equal(result.ok, true, result.reason);
+    const providers = yaml.load(readFileSync(join(profiles, "dsh-tui", "cordis.patch.yml"), "utf8"))
+      .find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(providers.Anyswitch, undefined);
+    assert.equal(providers._auto, undefined);
+    assert.ok(providers["_poke-api"]);
+    assert.deepEqual(readSidecar(dir), { providers: ["poke-api"] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("mergeDshSettings cleans up the pseudo channel on the re-sync after the chain is deleted", () => {
-  const first = mergeDshSettings(
-    {},
-    extractManagedProviders(DSH_CHAIN_STORE),
-    47821,
-    TOKEN,
-    [],
-    null,
-    deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
-  );
-  assert.ok(first.config["llm-pi-ai"].providers.Anyswitch);
-  const second = mergeDshSettings(
-    first.config,
-    extractManagedProviders(DSH_CHAIN_STORE),
-    47821,
-    TOKEN,
-    first.managed,
-    null,
-    deriveAutoRouteChannel({ providers: DSH_CHAIN_STORE.providers }, "dsh"),
-  );
-  assert.equal(
-    second.config["llm-pi-ai"].providers.Anyswitch,
-    undefined,
-    "stale pseudo channel removed once the chain is gone",
-  );
-  assert.ok(second.config["llm-pi-ai"].providers["_poke-api"], "real channels survive the cleanup");
-  assert.ok(!second.managed.includes("auto"));
+test("链删掉后，下一次同步把伪渠道清掉", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-auto-cleanup-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const first = await writeDshProfilePatches(DSH_CHAIN_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(first.ok, true, first.reason);
+    assert.ok(
+      yaml.load(readFileSync(patchPath, "utf8")).find((entry) => entry.id === "llm-pi-ai").config.providers.Anyswitch,
+    );
+
+    const second = await writeDshProfilePatches(
+      { version: 2, providers: DSH_CHAIN_STORE.providers },
+      47821,
+      TOKEN,
+      dir,
+      dir,
+    );
+    assert.equal(second.ok, true, second.reason);
+    const providers = yaml.load(readFileSync(patchPath, "utf8")).find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(
+      providers.Anyswitch,
+      undefined,
+      "stale pseudo channel removed once the chain is gone",
+    );
+    assert.ok(providers["_poke-api"], "real channels survive the cleanup");
+    assert.deepEqual(readSidecar(dir), { providers: ["poke-api"] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("mergeDshSettings retires the legacy _auto managed entry on the first sync after the rename", () => {
-  const legacy = {
-    "llm-pi-ai": {
-      providers: {
-        _auto: {
-          displayName: "Anyswitch",
-          api: "openai-completions",
-          baseURL: "http://127.0.0.1:47821/openai/poke-api/v1",
-          headers: { "x-agent-id": "dsh", Authorization: `Bearer ${TOKEN}` },
-          models: [{ id: "auto", name: "auto", contextWindow: 1000000 }],
-        },
-        "_poke-api": { displayName: "poke-api", api: "openai-completions", baseURL: "http://127.0.0.1:47821/openai/poke-api/v1" },
-      },
-    },
-  };
-  const { config } = mergeDshSettings(
-    legacy,
-    extractManagedProviders(DSH_CHAIN_STORE),
-    47821,
-    TOKEN,
-    ["auto"],
-    null,
-    deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
-  );
-  const providers = config["llm-pi-ai"].providers;
-  assert.equal(providers._auto, undefined, "the legacy key is retired");
-  assert.ok(providers.Anyswitch, "the pseudo channel lives under its new key");
-  assert.ok(providers["_poke-api"], "real channels are untouched");
+test("用户自己写的 _auto 渠道（没有 dsh 头）原样保留，伪渠道照常注入", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-user-auto-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    writeFileSync(patchPath, [
+      "- id: llm-pi-ai",
+      "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+      "  config:",
+      "    providers:",
+      "      _auto:",
+      "        displayName: my own",
+      "        api: openai-completions",
+      "        baseURL: https://mine.example/v1",
+      "",
+    ].join("\n"), "utf8");
+
+    const result = await writeDshProfilePatches(DSH_CHAIN_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    const providers = yaml.load(readFileSync(patchPath, "utf8")).find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(providers._auto.displayName, "my own", "a user provider is never excised");
+    assert.ok(providers.Anyswitch, "the managed pseudo channel is injected beside it");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("mergeDshSettings leaves a user-written _auto provider without the dsh header alone", () => {
-  const own = {
-    "llm-pi-ai": {
-      providers: {
-        _auto: { displayName: "my own", api: "openai-completions", baseURL: "https://mine.example/v1" },
-      },
-    },
-  };
-  const { config } = mergeDshSettings(
-    own,
-    extractManagedProviders(DSH_CHAIN_STORE),
-    47821,
-    TOKEN,
-    [],
-    null,
-    deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
-  );
-  assert.equal(config["llm-pi-ai"].providers._auto.displayName, "my own", "a user provider is never excised");
-});
-
-test("writeDshProfilePatches retires the legacy _auto key on the write path", async () => {
-  const yaml = await getYamlModule();
+test("writeDshProfilePatches retires the legacy _auto key on the write path", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
   const dir = mkTestDir("dsh-patch-auto-rename-");
   try {
     const profiles = join(dir, "profiles");

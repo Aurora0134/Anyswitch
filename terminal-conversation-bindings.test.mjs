@@ -208,7 +208,11 @@ describe("terminal-conversation-bindings", () => {
     });
 
     it("same id twice (or the bound archive itself) stays a confirmation, not a rebind", () => {
-      assert.equal(pickRefreshedMeta([meta("same", 12_000)], scope).id, "same");
+      // 索引把同一对话列了两条（同 id、各有一次活跃）：不算「多条判不出」的
+      // 冲突，仍返回该 id——调用方比对绑定 id 相同即确认原绑定，不换绑。
+      const picked = pickRefreshedMeta([meta("same", 12_000), meta("same", 11_000)], scope);
+      assert.ok(picked, "同 id 重复不是冲突，不能判死");
+      assert.equal(picked.id, "same");
     });
   });
 

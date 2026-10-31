@@ -83,12 +83,30 @@ test("missing directory, unreadable directory and unreadable files all degrade t
   const noPermission = await readKimiServerInstances({ env: ENV, nowFn: () => now, io: fakeIo({}, { throwOnReaddir: true }) });
   assert.equal(noPermission.size, 0);
 
+  // 不可读文件必须真的出现在 readdir 枚举里：源码只对枚举到的 .json 名调
+  // readFile，只写进 throwOnReadFor 而不进 files 的话，抛错分支一次都不会被
+  // 执行（普查发现的原缺陷）。C.json 给一条新鲜有效、pid 独有的登记，让任何
+  // 回归都在断言里现形：异常没被 catch 住整个读取会 reject；压根没抛错则
+  // keys 会多出 9999。
+  const attempted = [];
   const brokenFile = await readKimiServerInstances({
     env: ENV,
     nowFn: () => now,
-    io: fakeIo({ "A.json": REAL_ROW, "B.json": "{half-written" }, { throwOnReadFor: (n) => n === "C.json" }),
+    io: fakeIo(
+      {
+        "A.json": REAL_ROW,
+        "B.json": "{half-written",
+        "C.json": `{"pid":9999,"port":7000,"heartbeat_at":${now}}`,
+      },
+      { throwOnReadFor: (n) => { attempted.push(n); return n === "C.json"; } },
+    ),
   });
-  assert.deepEqual([...brokenFile.keys()], [21460]);
+  assert.ok(attempted.includes("C.json"), "C.json 被 readdir 枚举并真正尝试读取，readFile 抛错分支被执行");
+  assert.deepEqual(
+    [...brokenFile.keys()],
+    [21460],
+    "readFile 抛错的那条与半写 JSON 各自只丢那一条，可读的照常解出",
+  );
 });
 
 test("only .json files are considered, and stale heartbeats are dropped", async () => {

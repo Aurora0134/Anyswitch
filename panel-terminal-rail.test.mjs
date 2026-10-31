@@ -319,8 +319,13 @@ describe("终端视图左栏换血（M4）", () => {
 
   describe("历史会话：分组、水位线、指纹（vm 真跑）", () => {
     const groupFn = () => {
+      // sessDirName 是一行式函数：通用 extractFn 以首个「\n  }」截断，对它越界，
+      // 会把后面的 sessTitle 与整个 sessCopyText（引 navigator/document/toast）一起
+      // 塞进沙箱。这里按行精确取样生产实现，沙箱里只进被测函数真正依赖的代码。
+      const sessDirNameSrc = panelJs.match(/^ {2}function sessDirName\(p\) \{.*\}$/m)?.[0];
+      assert.ok(sessDirNameSrc, "sessDirName found in panel.js");
       const fn = new Function(`
-        ${extractFn("sessDirName")}
+        ${sessDirNameSrc}
         ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
         return terminalRailGroupSessions;
@@ -972,9 +977,11 @@ describe("终端视图左栏换血（M4）", () => {
         getAttribute: (name) => (name === "data-terminal-terminal" ? "t1" : "viewport-1"),
         querySelector: () => ({ click: () => clicked.push("t1") }),
       }] };
+      // t9 必须有自己的视口：无视口会在进页签扫描前就走「就地结束」早退分支
+      // （terminalViewportForTerminal 先判），循环根本不跑，断言就成了恒真。
       const missing = runRail({
-        sessions: { t1: {}, t2: {} }, tabs,
-        viewports: [{ id: "viewport-1", terminalId: "t1" }],
+        sessions: { t1: {}, t2: {}, t9: {} }, tabs,
+        viewports: [{ id: "viewport-1", terminalId: "t1" }, { id: "viewport-9", terminalId: "t9" }],
       });
       missing.sandbox.close("t9");
       assert.deepEqual(clicked, [], "id 对不上时什么都不点");
@@ -1281,7 +1288,9 @@ describe("终端视图左栏换血（M4）", () => {
 
     it("源码钉死：栏体渲染在连接链里是旁挂调用，异常不外溢", () => {
       const sync = extractFn("syncTerminalAddBtn");
-      assert.ok(sync.includes("try"), "栏体渲染包在 try 里——它读 DOM/会话表，任何异常都不该决定连接成败");
+      // 用结构判定而不是 includes("try")：函数注释里就有「必须 try 包住」四个字，
+      // 字面 includes 命中的是注释，真 try/catch 被删掉也不会红。
+      assert.ok(/\btry\s*\{/.test(sync), "栏体渲染包在 try 里——它读 DOM/会话表，任何异常都不该决定连接成败");
       const connect = extractFn("connectTerminalBackend");
       assert.ok(!/^\s*renderTerminalRail\(\);$/m.test(connect.split(".then(")[1] || ""),
         "连接成功链里不裸调栏体渲染");
@@ -1560,8 +1569,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(create.includes("terminalRailSwitchOrCreateCore({ agentId, cwd })"), "有 agent 与点历史行同一道内切判定门（2026-10-25 对齐超实例）");
       assert.ok(create.includes('api("POST", "/api/terminal/sessions"'), "无 agent 建空白终端");
       assert.ok(create.includes("terminalBackendReady"), "就绪闸与页签栏加号同拍");
-      assert.ok(extractFn("renderTerminalRail").includes("newBtn.disabled = !terminalBackendReady")
-        || panelJs.includes("railTermNewBtn") && panelJs.includes("disabled = !terminalBackendReady"),
+      assert.ok(extractFn("renderTerminalRail").includes("newBtn.disabled = !terminalBackendReady"),
         "禁用态跟就绪位同拍");
     });
 
@@ -2327,9 +2335,18 @@ describe("done（跑完未读）标记与绿点（dsh completed/completionUnread
     const sendAt = panelJs.indexOf("function sendTerminalInput");
     const sendBlock = panelJs.slice(sendAt, sendAt + 700);
     assert.ok(sendBlock.includes("terminalDoneUnread.delete(sessionId)"), "键入即读：sendTerminalInput 清标");
-    const hollowAt = panelJs.indexOf("terminalHollowStreak.delete(id);");
-    const closeBlock = panelJs.slice(hollowAt - 200, hollowAt + 500);
-    assert.ok(closeBlock.includes("terminalDoneUnread.delete(id)") && closeBlock.includes("terminalPrevWorking.delete(id)"), "关页签即失效：done 标记与上一拍状态两表同清");
+    // 关页签那一路的真身是 terminalCloseTerminal（页签 × 与左栏 live 行 × 共用），
+    // 它用 terminalId 逐表清；不能锚「terminalHollowStreak.delete(id);」的首次出现——
+    // 那落在 pruneTerminalHollowStreak 里，钉的不是关页签（回归也不会红）。
+    const closeFn = extractFn("terminalCloseTerminal");
+    assert.ok(closeFn.includes("terminalHollowStreak.delete(terminalId)")
+      && closeFn.includes("terminalDoneUnread.delete(terminalId)")
+      && closeFn.includes("terminalPrevWorking.delete(terminalId)"),
+      "关页签即失效：done 标记与上一拍状态两表同清（terminalCloseTerminal 用 terminalId 逐表清）");
+    // 整表换血的孤儿清理本体：pruneTerminalDoneState 同清两表（rebuild 调用点由下方一条钉）。
+    const pruneFn = extractFn("pruneTerminalDoneState");
+    assert.ok(pruneFn.includes("terminalDoneUnread.delete(id)") && pruneFn.includes("terminalPrevWorking.delete(id)"),
+      "孤儿清理函数确实同清 done 与上一拍状态两表");
     const rebuildAt = panelJs.indexOf("function rebuildTerminalBackendSessions");
     const rebuildBlock = panelJs.slice(rebuildAt, rebuildAt + 700);
     assert.ok(rebuildBlock.includes("pruneTerminalDoneState()"), "整表换血清孤儿标记（别处关掉的会话不串到同 id 下一代）");

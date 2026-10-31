@@ -2,7 +2,7 @@ import test, { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -357,8 +357,13 @@ describe("importSkill", () => {
 // below. The helper zips `sourceDir` into `zipName` using bsdtar itself.
 const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
 const tarPath = join(systemRoot, "System32", "tar.exe");
-function zipDir(sourceDir, zipPath) {
-  const r = spawnSync(tarPath, ["-a", "-c", "-f", zipPath, basename(sourceDir)], { cwd: dirname(sourceDir) });
+function zipDir(sourceDir, zipPath, { atRoot = false } = {}) {
+  // atRoot 把目录内容直接压在归档根（SKILL.md 位于压缩包根的形态）；
+  // 默认压目录本身（GitHub「Download ZIP」的单层包装形态）。
+  const args = atRoot
+    ? ["-a", "-c", "-f", zipPath, "-C", sourceDir, ...readdirSync(sourceDir)]
+    : ["-a", "-c", "-f", zipPath, basename(sourceDir)];
+  const r = spawnSync(tarPath, args, { cwd: dirname(sourceDir) });
   if (r.status !== 0) throw new Error(`zip fixture failed: ${r.stderr}`);
 }
 
@@ -372,10 +377,13 @@ describe("importSkill (zip sources)", () => {
     try {
       const repo = join(dir, "repo");
       writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      // 夹具把文件直接压在归档根，里面没有任何叫 pack 的目录：
+      // findZipSkillRoot 走「根含 SKILL.md → root===解压根」分支，dirName 只能
+      // 取自 zip 文件名——单层包装目录形态（dirName 取目录名）由下一条用例覆盖
       const src = join(dir, "pack");
       writeSkill(src, { name: "zipped-skill", description: "from zip" });
       const zipPath = join(dir, "pack.zip");
-      zipDir(src, zipPath);
+      zipDir(src, zipPath, { atRoot: true });
 
       const r = importSkill({ repoPath: repo, sourcePath: zipPath });
       assert.equal(r.ok, true);
@@ -969,9 +977,13 @@ describe("diffSkillContent", () => {
 
   it("服务层从已配置仓库取 repoPath，未配置时报错而不是猜", () => {
     const { dir, cleanup } = tempRoot();
+    // base 必须显式指向隔离的数据根：传空对象时 relayDataRoot 退回相对路径
+    // AppData\Local\Anyswitch，随 CWD 解析——在用户主目录下跑测试就会读到
+    // 真实的 skills.json，未配置守卫永远不会触发
+    const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
     const svc = createSkillsService({
       homeDir: join(dir, "home"),
-      base: {}, // 无 ANYSWITCH_SKILLS_REPO → 未配置主仓库
+      base,
       spawnFn: () => {},
       recycleDirFn: mockRecycle([]),
     });

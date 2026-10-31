@@ -2,12 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
 
 const TOKEN = "test-token-pool";
 
 // Two-member pool plus a pool that reuses its first member's id (the
-// pools-before-providers tie break). member-c carries no shared model and
-// only exists to prove model filtering.
+// pools-before-providers tie break). member-c wears both hats: as a provider
+// it carries gpt-c-only — the model no test-pool member has, which is the 404
+// model-filtering case — and as a pool id it fronts the same-name pool, whose
+// members (member-c, member-d) must both carry gpt-pool for the failover case
+// to have something to route.
 const STORE = {
   version: 2,
   providers: {
@@ -83,6 +87,14 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig, metricsCollector })
     upstreamFetch,
     recordGeneration: () => {},
     readGeneration: () => null,
+    // Effort injection pinned OFF: without this the handler falls back to
+    // defaultEffortInjector, which reads the real settings.json and the
+    // effort catalog on every upstream attempt and rewrites the outbound
+    // body per host config — the request shape would belong to the machine,
+    // not the test. With isEnabled always false, inject returns the body
+    // untouched (the dbPath is only ever reached on an enabled branch), so
+    // nothing here touches disk.
+    effortInjector: createEffortInjector({ isEnabled: () => false }),
     getKeepAliveConfig,
     metricsCollector,
   };
@@ -169,7 +181,17 @@ describe("pool routing: streaming", () => {
       "member-a": () => statusError(503),
       "member-b": () => healthyStream("recovered on B"),
     });
-    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    // getAgentsStatus reads disk settings only to trim the spark window, and
+    // it does so ONLY when loadSparkSettings is a function — a `false` option
+    // collapses to null inside the collector and falls back to the real
+    // loadSettings() against the machine's %LOCALAPPDATA% (same trap as
+    // agent-metrics-journal.test.mjs). A function stub returning {} pins the
+    // window at its default and keeps these assertions off host settings.
+    const collector = createAgentMetricsCollector({
+      nowFn: () => 1000,
+      execFn: (cmd, opts, cb) => cb(null, ""),
+      loadSparkSettings: () => ({}),
+    });
     const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY, metricsCollector: collector });
 
     await withServer(deps, async (port) => {

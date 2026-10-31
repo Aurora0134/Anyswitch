@@ -24,7 +24,9 @@ it("caches remote results for ten minutes, merges in-flight requests, and lets f
   const forcedWhilePending = service.getClientLatest("claude", { force: true });
   assert.equal(calls, 1);
   first.resolve(json({ latest: "2.1.276" }));
-  assert.deepEqual(await initial, await forcedWhilePending);
+  // 在途合并钉在身份上：两次调用返回的是同一个在途 Promise，force 也不例外
+  // （对同一对象做 deepEqual 恒真，钉不住合并语义）。
+  assert.equal(initial, forcedWhilePending);
   assert.equal((await service.getClientLatest("claude")).version, "2.1.276");
   assert.equal(calls, 1);
   current += 599999;
@@ -96,8 +98,6 @@ it("accepts only matching official release links and constrained pagination", as
     assert.equal(result.errorCode, "invalid_response", JSON.stringify(body));
     assert.equal(result.version, null);
   }
-  const npmUrl = await createReleaseService({ now, fetchFn: async () => json({ latest: "1.0.41", alpha: "1.0.41" }) }).getClientLatest("grok");
-  assert.deepEqual(npmUrl, { state: "ok", version: "1.0.41", url: "https://www.npmjs.com/package/@xai-official/grok", source: "npm:@xai-official/grok:latest", checkedAt, errorCode: null });
 });
 
 it("follows all release pages before deciding and never trusts partial results", async () => {
@@ -218,13 +218,18 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
 
 it("answers the Claude desktop static source without any network request", async () => {
   let fetched = 0;
-  const service = createReleaseService({ now, fetchFn: async () => { fetched++; return json({}); } });
-  assert.deepEqual(await service.getClientLatest("claude-desktop"), {
+  let current = Date.parse(checkedAt);
+  const service = createReleaseService({ now: () => current, fetchFn: async () => { fetched++; return json({}); } });
+  const first = await service.getClientLatest("claude-desktop");
+  assert.deepEqual(first, {
     state: "ok", version: null, url: "https://claude.ai/download", source: "claude-desktop:win32-x64:msix", checkedAt, errorCode: null,
   });
   assert.equal(fetched, 0, "静态条目没有可请求的版本端点");
-  // 十分钟缓存同样覆盖静态条目：命中缓存时连结果对象都不重建。
-  assert.equal((await service.getClientLatest("claude-desktop")).checkedAt, checkedAt);
+  // 十分钟缓存同样覆盖静态条目：时钟推进后仍命中缓存，返回的还是同一个结果
+  // 对象；若静态分支被重新执行，新对象的 checkedAt 会跟着新时钟走（时钟冻结时
+  // 此断言恒真，钉不住缓存复用）。
+  current += 599999;
+  assert.equal(await service.getClientLatest("claude-desktop"), first);
 });
 
 it("reads the Codex desktop version from the Windows Store update manifest", async () => {

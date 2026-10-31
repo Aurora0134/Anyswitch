@@ -43,7 +43,6 @@ import {
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
-import { parseClaudeTierMappings } from "./claude-tier-mapping.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("relay-settings", () => {
@@ -123,10 +122,13 @@ describe("relay-settings", () => {
     const tmp = mkTestDir("anyswitch-settings-test-");
     const path = join(tmp, "settings.json");
     try {
-      writeFileSync(path, JSON.stringify({ followAgentLaunch: true, customKey: 123 }));
+      // followAgent (the agent-watcher auto-start switch) and customKey are
+      // both unknown to relay-settings.mjs: they must ride through raw
+      // untouched across loads and saves.
+      writeFileSync(path, JSON.stringify({ followAgent: true, customKey: 123 }));
 
       const loaded = loadSettings(path, {});
-      assert.equal(loaded.settings.followAgentLaunch, true);
+      assert.equal(loaded.settings.followAgent, true);
       assert.equal(loaded.settings.customKey, 123);
       assert.equal(loaded.keepAlive.enabled, true);
 
@@ -134,7 +136,7 @@ describe("relay-settings", () => {
       const saved = saveSettings(path, { keepAlive: { enabled: false } }, {});
       assert.equal(saved.keepAlive.enabled, false);
       assert.equal(saved.keepAlive.mode, "off");
-      assert.equal(saved.settings.followAgentLaunch, true);
+      assert.equal(saved.settings.followAgent, true);
       assert.equal(saved.settings.customKey, 123);
 
       // Re-read independently
@@ -142,10 +144,13 @@ describe("relay-settings", () => {
       assert.equal(reloaded.keepAlive.enabled, false);
       assert.equal(reloaded.keepAlive.mode, "off");
 
+      // A mode-only keepAlive patch must not clobber the neighbouring keys:
+      // assert on THIS save's return value, not on the earlier snapshot.
       const enhanced = saveSettings(path, { keepAlive: { mode: "enhanced" } }, {});
       assert.equal(enhanced.keepAlive.mode, "enhanced");
       assert.equal(enhanced.keepAlive.enabled, true);
-      assert.equal(reloaded.settings.followAgentLaunch, true);
+      assert.equal(enhanced.settings.followAgent, true);
+      assert.equal(enhanced.settings.customKey, 123);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -580,15 +585,9 @@ describe("legacy keepAlive keys", () => {
 });
 
 describe("claudeTierMappings", () => {
-  it("normalises to configured tiers only", () => {
-    assert.deepEqual(
-      parseClaudeTierMappings({ sonnet: "anthropic/a/m", opus: "", gpt: "x", haiku: 7 }),
-      { sonnet: "anthropic/a/m" },
-    );
-    for (const unusable of [undefined, null, "sonnet", 3, []]) {
-      assert.deepEqual(parseClaudeTierMappings(unusable), {});
-    }
-  });
+  // Normalisation itself is unit-tested in claude-tier-mapping.test.mjs; the
+  // tests below only cover what relay-settings.mjs adds on top (per-tier merge
+  // on save, read-path gating by claudeTierMappingsEnabled).
 
   it("merges per tier, because the panel saves one row at a time", () => {
     const tmp = mkTestDir("anyswitch-tier-mapping-");

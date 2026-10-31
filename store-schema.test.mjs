@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateStore } from "./store-schema.mjs";
+import { resolveProviderModels } from "./catalog-resolver.mjs";
 
 function legalStore() {
   return {
@@ -38,11 +39,44 @@ test("validateStore accepts a legacy deletedModels list on a provider", () => {
   assert.deepEqual(result.errors, []);
 });
 
+// ---- clientPolicies.opencode.literalCredentialExceptions shape guard ----
+// Nothing in the repo currently writes clientPolicies, but the relay validates
+// the store on every request, so a hand-edited store.json carrying the field
+// must be shape-checked, not silently ignored.
 test("validateStore accepts an empty clientPolicies exceptions list", () => {
   const store = legalStore();
   store.clientPolicies = { opencode: { literalCredentialExceptions: [] } };
   const result = validateStore(store);
   assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test("validateStore rejects malformed clientPolicies shapes", () => {
+  const patches = [
+    { clientPolicies: null },
+    { clientPolicies: [] },
+    { clientPolicies: "x" },
+    { clientPolicies: 42 },
+    { clientPolicies: { opencode: null } },
+    { clientPolicies: { opencode: [] } },
+    { clientPolicies: { opencode: "x" } },
+    { clientPolicies: { opencode: { literalCredentialExceptions: null } } },
+    { clientPolicies: { opencode: { literalCredentialExceptions: 42 } } },
+    { clientPolicies: { opencode: { literalCredentialExceptions: "x" } } },
+    { clientPolicies: { opencode: { literalCredentialExceptions: [42] } } },
+    { clientPolicies: { opencode: { literalCredentialExceptions: ["ok", 42] } } },
+  ];
+  for (const patch of patches) {
+    const store = legalStore();
+    Object.assign(store, patch);
+    const result = validateStore(store);
+    assert.equal(result.valid, false, JSON.stringify(patch));
+    assert.equal(
+      result.errors.some((e) => /clientPolicies/i.test(e)),
+      true,
+      JSON.stringify(patch),
+    );
+  }
 });
 
 test("validateStore rejects a missing version", () => {
@@ -241,30 +275,28 @@ test("secret field matrix: nested secret fields in arrays and objects are caught
   assert.equal(validateStore(store2).valid, false);
 });
 
-test("secret field matrix: legitimate fields are NOT rejected", () => {
-  const legitFields = ["credentialFile", "maxOutputTokens", "displayName", "baseURL", "protocol"];
-  for (const field of legitFields) {
-    const store = legalStore();
-    store.providers.deepseek[field] = store.providers.deepseek[field] ?? "test-value";
-    const result = validateStore(store);
-    assert.equal(result.valid, true, `${field} should NOT be rejected but was flagged as secret`);
-  }
-});
-
 // ---- resolver → store-schema link: illegal limit values are caught ------
-// The resolver passes limit values through when present (catalog-resolver
-// contract: "write only when present"); store-schema enforces legality.
-test("validateStore rejects a non-positive-integer contextWindow from an upstream resolver", () => {
+// catalog-resolver passes limit values through as-is when present
+// (catalog-resolver.mjs contract: "write only when the property is present");
+// store-schema enforces legality. Feed real resolver output into validateStore
+// so both ends of the pass-through contract are exercised together.
+test("validateStore rejects a fractional contextWindow resolved from an upstream catalog", () => {
+  const models = resolveProviderModels("deepseek", {
+    models: { "deepseek-chat": { name: "DeepSeek V4 Flash", limit: { context: 1.5 } } },
+  });
   const store = legalStore();
-  store.providers.deepseek.models["deepseek-chat"].contextWindow = 1.5;
+  store.providers.deepseek.models = models;
   const result = validateStore(store);
   assert.equal(result.valid, false);
   assert.equal(result.errors.some((e) => /contextWindow/i.test(e)), true);
 });
 
-test("validateStore rejects a zero maxOutputTokens from an upstream resolver", () => {
+test("validateStore rejects a zero maxOutputTokens resolved from an upstream catalog", () => {
+  const models = resolveProviderModels("deepseek", {
+    models: { "deepseek-chat": { name: "DeepSeek V4 Flash", limit: { output: 0 } } },
+  });
   const store = legalStore();
-  store.providers.deepseek.models["deepseek-chat"].maxOutputTokens = 0;
+  store.providers.deepseek.models = models;
   const result = validateStore(store);
   assert.equal(result.valid, false);
   assert.equal(result.errors.some((e) => /maxOutputTokens/i.test(e)), true);

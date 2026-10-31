@@ -48,9 +48,6 @@ function sseStream(chunks) {
   })();
 }
 
-// A stream that stays pending forever until the caller cancels it — models
-// how an upstream looks when the coding agent drops the connection first.
-
 function postChatStream(port, signal) {
   return fetch(`http://127.0.0.1:${port}/openai/test-prov/v1/chat/completions`, {
     method: "POST",
@@ -68,27 +65,23 @@ function postChatStream(port, signal) {
 
 describe("client disconnect detection (ask-user pause false-502 fix)", () => {
   it("(a) client aborting mid-stream records aborted, not a latched 502 fault", async () => {
-    let upstreamCancelled = false;
     const ac = new AbortController();
     const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
 
-    // pipeStream calls body.cancel() on client disconnect; surface that
-    // through the generator's pending promise.
+    // The abort arrives while upstream is still open: the generator parks
+    // forever after one chunk. An async generator has no cancel(), so
+    // pipeGuardedStream's cancelUpstream is a no-op here — the "upstream
+    // actually cancelled through the owning reader" claim is (e)'s job, on a
+    // real web ReadableStream. This fixture pins the accounting side: the
+    // res-close handler must settle the tracker as aborted (activeRequests
+    // back to 0) and latch nothing.
     const upstreamFetch = async () => ({
       ok: true,
       status: 200,
       body: (async function* () {
         const enc = new TextEncoder();
         yield enc.encode('data: {"id":"1","choices":[{"delta":{"content":"partial"}}]}\n\n');
-        yield await new Promise((resolve, reject) => {
-          // Park mid-stream: the abort arrives while upstream is still open.
-        }).then(
-          () => enc.encode("data: [DONE]\n\n"),
-          () => {
-            upstreamCancelled = true;
-            throw new Error("upstream cancelled");
-          },
-        );
+        await new Promise(() => {});
       })(),
     });
 
@@ -108,6 +101,12 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
       const zcode = status.find((a) => a.id === "zcode");
       assert.equal(zcode.errorActive, false, "client abort must not latch a panel fault");
       assert.ok(!zcode.lastError || zcode.lastError.status !== 502, "no phantom 502 recorded");
+      // The "records aborted" half of the title: the res-close handler ran
+      // tracker.recordEnd({aborted:true}) and the in-flight request settled.
+      // Without an abort (or with the aborted bookkeeping dropped) the tracker
+      // never sees an end and activeRequests stays 1 — this line is what makes
+      // the title observable.
+      assert.equal(zcode.metrics.activeRequests, 0, "abort must settle the in-flight request via recordEnd({aborted:true})");
     });
   });
 
@@ -164,7 +163,7 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
     }
   });
 
-  it("(b) healthy request that completes normally records success, close-after-end does not mark aborted", async () => {
+  it("(b) healthy request that completes normally records success and settles the tracker", async () => {
     const upstreamFetch = async () => ({
       ok: true,
       status: 200,
@@ -185,7 +184,14 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
       const status = await collector.getAgentsStatus();
       const zcode = status.find((a) => a.id === "zcode");
       assert.equal(zcode.errorActive, false);
-      assert.equal(zcode.metrics.totalRequests, 1, "request counted exactly once (no aborted double-record)");
+      // One request is counted exactly once — totalRequests only ever moves at
+      // request start, so this guards the request-start ledger, not the end
+      // bookkeeping.
+      assert.equal(zcode.metrics.totalRequests, 1);
+      // Healthy completion settles the in-flight request: the pass path ran
+      // recordEnd({usage}) before the response tail reached the client, so the
+      // tracker is back to zero. A dropped end bookkeeping would leave 1.
+      assert.equal(zcode.metrics.activeRequests, 0, "normal completion must settle the in-flight request");
     });
   });
 

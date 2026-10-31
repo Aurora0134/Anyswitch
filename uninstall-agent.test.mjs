@@ -2,7 +2,8 @@
 // an in-memory PATH store and a fake broadcast: ZERO real user config, ZERO
 // real registry, ZERO real PowerShell. The only real-machine touch is the
 // dsh endpoint's YAML module, resolved from the installed dsh package exactly
-// as dsh-merge-config.test.mjs already does (read-only).
+// as dsh-merge-config.test.mjs already does (read-only); cases that need it
+// skip when the package is absent — same guard as dsh-merge-config.test.mjs.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -21,6 +22,7 @@ import * as zcodePersonal from "./zcode-personal-config.mjs";
 import * as opencodeMerge from "./opencode-merge-config.mjs";
 import * as piMerge from "./pi-merge-models.mjs";
 import * as workbuddyMerge from "./workbuddy-merge-models.mjs";
+import { getYamlModule } from "./dsh-merge-config.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const FIXTURE_PORT = 47821;
@@ -84,6 +86,24 @@ function managedProviders() {
   return { chan1: { models: { m1: { contextWindow: 128000 } } } };
 }
 
+// writeDshProfilePatches/getYamlModule parse and emit cordis.patch.yml through
+// js-yaml, which this project does not declare: resolveYamlModule prefers the
+// copy vendored inside a global @deepseek-ai/dsh install and only then falls
+// back to a bare "js-yaml" — resolved from the real process env, outside every
+// injected handle. On a machine with neither, the whole dsh surface cannot
+// run — including uninstallAll, whose endpoint loop strips dsh too. Probe
+// read-only and skip with that reason instead of failing with an unrelated
+// MODULE_NOT_FOUND (same guard as dsh-merge-config.test.mjs).
+async function requireYamlModule(t) {
+  try {
+    await getYamlModule();
+    return false;
+  } catch (error) {
+    t.skip(`js-yaml is unavailable (${error.message}); install @deepseek-ai/dsh globally to run this test`);
+    return true;
+  }
+}
+
 test("the registry covers all ten integrated endpoints", () => {
   assert.deepEqual(
     [...UNINSTALL_ENDPOINT_IDS].sort(),
@@ -91,7 +111,8 @@ test("the registry covers all ten integrated endpoints", () => {
   );
 });
 
-test("uninstallAll on a pristine home is a complete no-op", async () => {
+test("uninstallAll on a pristine home is a complete no-op", async (t) => {
+  if (await requireYamlModule(t)) return; // the endpoint loop includes dsh
   const home = mkTestDir("uninstall-pristine-");
   const { driver, broadcasts } = testDriver(home);
   const result = await driver.uninstallAll();
@@ -268,9 +289,9 @@ test("codex: block, pointer, catalog file and sidecar are all removed", async ()
   const text = readFileSync(configPath, "utf8");
   assert.ok(!text.includes("anyswitch"), text);
   assert.ok(!text.includes("model_catalog_json"), text);
-  // the user's own [features] table survives — including the absorbed
-  // memories gate, which is documented residue (the original value is
-  // unrecoverable: every sync forces it false)
+  // the user's own [features] table survives untouched — the table is wholly
+  // user/codex-client owned (the once-managed memories gate is gone from the
+  // sync; there is no forced residue here any more)
   assert.ok(text.includes("my_feature = true"));
   assert.ok(!existsSync(catalogPath));
   assert.ok(!existsSync(join(sidecarRoot, "codex-sidecar.json")));
@@ -392,7 +413,7 @@ for (const withSidecar of [true, false]) {
 // opencode
 // ─────────────────────────────────────────────────────────────
 
-test("opencode: fingerprint sweep strips unprefixed managed providers", async () => {
+test("opencode: sidecar-recorded strip removes the managed providers and the sidecar", async () => {
   const home = mkTestDir("uninstall-opencode-");
   const { driver, sidecarRoot } = testDriver(home);
   const configPath = join(home, ".config", "opencode", "opencode.json");
@@ -412,6 +433,32 @@ test("opencode: fingerprint sweep strips unprefixed managed providers", async ()
   assert.ok(!existsSync(join(sidecarRoot, "opencode-sidecar.json")));
 });
 
+test("opencode: sidecar-lost residue is stripped by the relay fingerprint sweep", async () => {
+  const home = mkTestDir("uninstall-opencode-nosidecar-");
+  const { driver } = testDriver(home);
+  const configPath = join(home, ".config", "opencode", "opencode.json");
+  const managedEntry = opencodeMerge.buildOpencodeProviderEntry("chan1", managedProviders().chan1, FIXTURE_PORT, "{file:x}");
+  writeJson(configPath, {
+    provider: {
+      ...managedEntry,
+      mine: { npm: "@ai-sdk/openai-compatible", options: { baseURL: "https://api.example.com/v1" }, models: {} },
+    },
+  });
+
+  const result = await driver.uninstallEndpoint("opencode");
+  assert.equal(result.ok, true);
+  // No sidecar names the entry and the empty-set sync early-returned, so the
+  // sweep's relay fingerprint is the only identification left.
+  assert.equal(stepsByName(result)["config-sync"].changed, false);
+  const sweep = stepsByName(result)["marker-sweep"];
+  assert.equal(sweep.changed, true);
+  assert.deepEqual(sweep.removed, ["chan1"]);
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.deepEqual(Object.keys(config.provider), ["mine"]);
+  // user content survives, so the wholesale-managed husk removal must not fire
+  assert.ok(existsSync(configPath));
+});
+
 test("opencode: the wholesale-managed file is removed once nothing remains", async () => {
   const home = mkTestDir("uninstall-opencode-husk-");
   const { driver, sidecarRoot } = testDriver(home);
@@ -429,7 +476,7 @@ test("opencode: the wholesale-managed file is removed once nothing remains", asy
 // pi
 // ─────────────────────────────────────────────────────────────
 
-test("pi: underscore-prefixed relay providers are stripped, user providers stay", async () => {
+test("pi: sidecar-recorded strip removes managed providers, user providers stay", async () => {
   const home = mkTestDir("uninstall-pi-");
   const { driver, sidecarRoot } = testDriver(home);
   const modelsPath = join(home, ".pi", "agent", "models.json");
@@ -449,6 +496,32 @@ test("pi: underscore-prefixed relay providers are stripped, user providers stay"
   const config = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.deepEqual(Object.keys(config.providers).sort(), ["_mine", "userp"]);
   assert.ok(!existsSync(join(sidecarRoot, "pi-sidecar.json")));
+});
+
+test("pi: sidecar-lost residue carrying the reserved \"_\" prefix is swept by the relay fingerprint", async () => {
+  const home = mkTestDir("uninstall-pi-nosidecar-");
+  const { driver } = testDriver(home);
+  const modelsPath = join(home, ".pi", "agent", "models.json");
+  const managedEntry = piMerge.buildPiProviderEntry("chan1", managedProviders().chan1, FIXTURE_PORT, null, "tok");
+  writeJson(modelsPath, {
+    providers: {
+      ...managedEntry, // key "_chan1", baseURL at the loopback relay
+      // a "_"-named provider NOT pointing at the relay is the user's own —
+      // the prefix alone must not sink it
+      "_mine": { baseUrl: "https://api.example.com/v1", api: "openai-completions", models: [] },
+    },
+  });
+
+  const result = await driver.uninstallEndpoint("pi");
+  assert.equal(result.ok, true);
+  // No sidecar names the entry and the empty-set sync early-returned, so the
+  // sweep's reserved-prefix-plus-relay-fingerprint rule does the stripping.
+  assert.equal(stepsByName(result)["config-sync"].changed, false);
+  const sweep = stepsByName(result)["marker-sweep"];
+  assert.equal(sweep.changed, true);
+  assert.deepEqual(sweep.removed, ["_chan1"]);
+  const config = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(Object.keys(config.providers), ["_mine"]);
 });
 
 test("pi: sidecar-lost Anyswitch pseudo-channel is stripped by the relay fingerprint", async () => {
@@ -544,7 +617,8 @@ function seedDsh(home, sidecarRoot, { sidecar = true, credential = "legacy", pse
 
 for (const withSidecar of [true, false]) {
   for (const credential of ["legacy", "header"]) {
-    test(`dsh: managed providers spliced out, other rows and profiles untouched (sidecar ${withSidecar ? "present" : "lost"}, ${credential} credential)`, async () => {
+    test(`dsh: managed providers spliced out, other rows and profiles untouched (sidecar ${withSidecar ? "present" : "lost"}, ${credential} credential)`, async (t) => {
+      if (await requireYamlModule(t)) return;
       const home = mkTestDir(`uninstall-dsh-${withSidecar}-${credential}-`);
       const { driver, sidecarRoot } = testDriver(home);
       const { patchPath, p2PatchPath } = seedDsh(home, sidecarRoot, { sidecar: withSidecar, credential });
@@ -567,7 +641,8 @@ for (const withSidecar of [true, false]) {
   }
 }
 
-test("dsh: sidecar-lost sweep also recognizes the Anyswitch pseudo-channel key", async () => {
+test("dsh: sidecar-lost sweep also recognizes the Anyswitch pseudo-channel key", async (t) => {
+  if (await requireYamlModule(t)) return;
   const home = mkTestDir("uninstall-dsh-pseudo-");
   const { driver, sidecarRoot } = testDriver(home);
   const { patchPath } = seedDsh(home, sidecarRoot, { sidecar: false, pseudo: true });
@@ -778,7 +853,8 @@ test("shim retirement: per-endpoint dir removed, PATH entry dropped, broadcast s
   assert.equal(broadcasts.length, 1, "no second broadcast when nothing changed");
 });
 
-test("shared bin/: PATH entry survives a partial uninstall, is dropped with the last command", async () => {
+test("shared bin/: PATH entry survives a partial uninstall, is dropped with the last command", async (t) => {
+  if (await requireYamlModule(t)) return; // strips dsh directly and via uninstallAll
   const home = mkTestDir("uninstall-shim-bin-");
   const binDir = join(shimRoot({ USERPROFILE: home }), "bin");
   const { driver, shimManager, path, broadcasts } = testDriver(home, { pathValue: `C:\\x;${binDir}` });

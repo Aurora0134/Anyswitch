@@ -357,9 +357,12 @@ describe("writeGrokConfigTomlWithBackup", () => {
   it("writes atomically, backs up the previous file, and prunes to the newest 5 backups", () => {
     const dir = mkTestDir("grok-merge-test-");
     const filePath = join(dir, "config.toml");
-    for (let i = 1; i <= 6; i++) {
-      writeFileSync(join(dir, `config.backup.2020-01-0${i}T00-00-00-000Z.toml`), `old${i}`, "utf8");
-    }
+    // 夹具备份名从当前时钟往回推算，不用写死的年份：新备份（写入瞬间的
+    // now）恒排在全部夹具之后，用例不依赖「系统时钟晚于某个固定日期」。
+    const stamp = (daysAgo) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().replace(/[:.]/g, "-");
+    // names 按字典序即时间序：names[0] 最新、names[5] 最老。
+    const names = [1, 2, 3, 4, 5, 6].map((daysAgo) => `config.backup.${stamp(daysAgo)}.toml`);
+    for (const name of names) writeFileSync(join(dir, name), "old", "utf8");
     writeFileSync(filePath, "# old", "utf8");
     const result = writeGrokConfigTomlWithBackup(filePath, "# new");
     assert.equal(result.ok, true);
@@ -368,8 +371,10 @@ describe("writeGrokConfigTomlWithBackup", () => {
     assert.equal(readFileSync(filePath, "utf8"), "# new");
     const backups = readdirSync(dir).filter((n) => n.startsWith("config.backup.")).sort();
     assert.equal(backups.length, 5);
-    assert.equal(backups[0], "config.backup.2020-01-03T00-00-00-000Z.toml", "oldest backups pruned");
-    assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
+    assert.ok(!backups.includes(names[5]), "oldest backup pruned");
+    assert.ok(!backups.includes(names[4]), "second oldest backup pruned");
+    // 幸存序列 = 较新的 4 个夹具按原时间序 + 新鲜备份殿后。
+    assert.deepEqual(backups, [...names.slice(0, 4).reverse(), result.backupPath.split(/[\\/]/).pop()]);
   });
 
   it("reports unchanged without creating a backup", () => {
@@ -386,18 +391,20 @@ describe("writeGrokConfigTomlWithBackup", () => {
 });
 
 describe("grok sidecar", () => {
-  it("readSidecar returns empty list for missing file", () => {
+  // 共享 sidecar 契约（{providers:[…]}、排序、2 空格缩进、缺文件/坏文件
+  // fail-open）由 merge-common.test.mjs 钉死；这里只锁 grok 自己的接线：
+  // 包装函数必须落在字面 "grok-sidecar.json" 上——改名会让旧 sidecar 被
+  // 孤立（上次托管清单丢失、陈块无人清理）而无任何测试报警。
+  it("wires readSidecar/writeSidecar to the grok-sidecar.json file name", () => {
     const dir = mkTestDir("grok-sidecar-");
-    assert.deepEqual(readSidecar(dir), { providers: [] });
-  });
-
-  it("writeSidecar and readSidecar round-trip sorted in the shared format", () => {
-    const dir = mkTestDir("grok-sidecar-");
+    assert.equal(sidecarPath(dir), join(dir, "grok-sidecar.json"));
+    assert.deepEqual(readSidecar(dir), { providers: [] }, "missing file fails open through the wrapper");
     writeSidecar(dir, ["zeta", "alpha"]);
-    assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] });
-    assert.equal(
-      readFileSync(sidecarPath(dir), "utf8"),
-      '{\n  "providers": [\n    "alpha",\n    "zeta"\n  ]\n}\n',
+    assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] }, "wrapper reads back the same file");
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(dir, "grok-sidecar.json"), "utf8")),
+      { providers: ["alpha", "zeta"] },
+      "the write lands on the literal grok-sidecar.json",
     );
   });
 });
@@ -480,7 +487,9 @@ describe("writeGrokConfig", () => {
   });
 
   it("grokConfigPath resolves under USERPROFILE", () => {
-    assert.equal(grokConfigPath({ USERPROFILE: "/home/u" }), join("/home/u", ".grok", "config.toml"));
+    // 期望值是字面路径，不用与实现相同的 join 表达式自证：段序
+    // （USERPROFILE → .grok → config.toml）与分隔符形态一并被锁死。
+    assert.equal(grokConfigPath({ USERPROFILE: "C:\\Users\\u" }), "C:\\Users\\u\\.grok\\config.toml");
   });
 });
 
@@ -517,7 +526,9 @@ describe("grok reasoning_efforts injection", () => {
     const providers = { alpha: { models: { "gpt-5-thing": { contextWindow: 640000 } } } };
     const { text } = buildGrokManagedToml(providers, 47821, "tok");
     assert.match(text, /context_window = 640000/);
-    assert.doesNotMatch(text, /context_window = 272000/);
+    // "gpt-5-thing" 未命中 store 值时会走 gpt-5 关键词档（context-fallback.mjs
+    // 的 1050000 档）；断言该档位值没有出现，兜底才真正没抢在 store 前面。
+    assert.doesNotMatch(text, /context_window = 1050000/);
   });
 
   it("writeGrokConfig: no settings file → injection on, optimistic levels written", () => {

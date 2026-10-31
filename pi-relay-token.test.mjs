@@ -2,15 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { getTokenPath, loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
-describe("getTokenPath", () => {
-  it("returns path under root", () => {
-    const p = getTokenPath("C:\\root");
-    assert.equal(p, "C:\\root\\pi-relay-token");
-  });
-});
+// Note: the token filename contract ("pi-relay-token") is asserted directly by
+// these tests via existsSync/readFileSync/writeFileSync, which also covers the
+// exported getTokenPath used internally by loadOrGenerateToken.
 
 describe("loadOrGenerateToken", () => {
   it("generates and persists a token when none exists", () => {

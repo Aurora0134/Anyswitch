@@ -2,12 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CLIENT_ENTRY_FORMS, createEnvironmentService, probeExecutableVersion } from "./environment-service.mjs";
 
 function fixture(t) {
-  const parent = new URL("./.cptest/", import.meta.url);
+  // 临时目录放测试文件旁（.cptest 已 gitignore，与本文件同生共死）。URL.pathname
+  // 是百分号编码的，仓库路径含空格/中文时拿它拼 mkdtemp 会 ENOENT，须经
+  // fileURLToPath 解码成真实路径。
+  const parent = fileURLToPath(new URL("./.cptest/", import.meta.url));
   fs.mkdirSync(parent, { recursive: true });
-  const root = fs.mkdtempSync(join(parent.pathname.replace(/^\/(?=[A-Za-z]:)/, ""), "environment-"));
+  const root = fs.mkdtempSync(join(parent, "environment-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = { USERPROFILE: root, APPDATA: join(root, "roaming"), LOCALAPPDATA: join(root, "local"), PATH: "" };
   const put = (path, content = "MZ") => {
@@ -159,18 +163,21 @@ test("ZCode reads only the selected desktop package from ASAR, not Electron or P
   assert.equal(item.versionSource, "app.asar/package.json");
 });
 
-test("ZCode CLI row has no built-in default: unconfigured reports not_found", async (t) => {
+test("ZCode CLI row reports not_found, never error, when no CLI entry is configured", async (t) => {
   const f = fixture(t);
-  // 显式配置制：产品不内置任何默认路径，未配置 ZCODE_CLI_EXECUTABLE 时如实
-  // not_found（关于页不挂装不出的记录）。默认值若被重新引入，
-  // agent-discovery.test 的「unconfigured is null」钉点会先红。
-  const found = installation(await f.service().getState(), "zcode", 1);
-  assert.equal(found.kind, "cli");
-  // 无官方 release 渠道：remoteId 恒为 null，关于页不为它发查询。
-  assert.equal(found.remoteId, null);
-  assert.equal(found.status, "not_found");
-  assert.equal(found.path, null);
-  assert.equal(found.issue, "entry_missing");
+  // 显式配置制：产品不内置任何默认路径，未配置 ZCODE_CLI_EXECUTABLE 时
+  // resolveZcodeCliExecutable 返回 null——必须如实 not_found，不能把 null 交给
+  // isFile 炸成 error（关于页不挂装不出的记录）。默认值若被重新引入，
+  // agent-discovery.test 的「unconfigured is null」钉点会先红。无官方 release
+  // 渠道：remoteId 恒为 null，关于页不为它发查询。
+  const item = installation(await f.service().getState(), "zcode", 1);
+  assert.equal(item.kind, "cli");
+  assert.equal(item.remoteId, null);
+  assert.equal(item.status, "not_found");
+  assert.equal(item.path, null);
+  assert.equal(item.version, null);
+  assert.equal(item.versionSource, null);
+  assert.equal(item.issue, "entry_missing");
 });
 
 test("ZCode CLI row honors ZCODE_CLI_EXECUTABLE and degrades to version_unavailable without a manifest", async (t) => {
@@ -192,20 +199,6 @@ test("ZCode CLI row honors ZCODE_CLI_EXECUTABLE and degrades to version_unavaila
   assert.equal(degraded.version, null);
   assert.equal(degraded.versionSource, null);
   assert.equal(degraded.issue, "version_unavailable");
-});
-
-test("ZCode CLI row reports not_found, never error, when no CLI entry is configured", async (t) => {
-  const f = fixture(t);
-  // resolveZcodeCliExecutable 找不到候选时返回 null：必须如实 not_found，
-  // 不能把 null 交给 isFile 炸成 error。
-  const item = installation(await f.service().getState(), "zcode", 1);
-  assert.equal(item.kind, "cli");
-  assert.equal(item.remoteId, null);
-  assert.equal(item.status, "not_found");
-  assert.equal(item.path, null);
-  assert.equal(item.version, null);
-  assert.equal(item.versionSource, null);
-  assert.equal(item.issue, "entry_missing");
 });
 
 function installation(state, id, index = 0) {

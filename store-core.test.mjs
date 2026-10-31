@@ -234,15 +234,24 @@ test("mergeModelIds keeps surviving entries untouched and appends new ids with m
     "[渠]claude-opus-4-6": { displayName: "[渠] Claude Opus 4-6" },
     "gpt-5.5": { displayName: "GPT 5.5", contextWindow: 922000, maxOutputTokens: 65536 },
   };
+  const madeFrom = [];
   const merged = mergeModelIds({
     existing,
     upstreamIds: ["[渠]claude-opus-4-6", "gpt-5.5", "brand-new"],
     canPrune: true,
-    makeEntry: (id) => ({ displayName: id }),
+    // A shape an inline default could never produce: if merged carries the
+    // "made-by-callback" marker, the injected makeEntry really ran.
+    makeEntry: (id) => {
+      madeFrom.push(id);
+      return { displayName: `made:${id}`, madeBy: "makeEntry" };
+    },
   });
   assert.deepEqual(merged["[渠]claude-opus-4-6"], { displayName: "[渠] Claude Opus 4-6" });
   assert.deepEqual(merged["gpt-5.5"], { displayName: "GPT 5.5", contextWindow: 922000, maxOutputTokens: 65536 });
-  assert.deepEqual(merged["brand-new"], { displayName: "brand-new" });
+  // the callback's own return value lands in merged, keyed by the id it received
+  assert.deepEqual(merged["brand-new"], { displayName: "made:brand-new", madeBy: "makeEntry" });
+  // and it is invoked exactly once, only for the id absent from existing
+  assert.deepEqual(madeFrom, ["brand-new"]);
   assert.deepEqual(Object.keys(merged), ["[渠]claude-opus-4-6", "gpt-5.5", "brand-new"]);
   assert.notEqual(merged["gpt-5.5"], existing["gpt-5.5"]);
 });
@@ -292,8 +301,6 @@ test("computeMigrationSeed seeds discovered and modelFilter from the union so th
   assert.deepEqual(seed.discovered.shared, { displayName: "Shared" });
   assert.deepEqual(seed.discovered["config-only"], { displayName: "config-only" });
   assert.deepEqual(seed.modelFilter, ["gpt-5.5", "shared", "config-only"]);
-  const effective = seed.modelFilter.filter((id) => Object.hasOwn(seed.discovered, id));
-  assert.deepEqual(effective, ["gpt-5.5", "shared", "config-only"]);
   assert.equal(seed.drifted, true);
 });
 
@@ -536,9 +543,13 @@ test("planStoreRefresh enriches discovered entries with rawModels metadata", () 
   assert.equal(m1.displayName, "M1");
   assert.equal(m1.contextWindow, 128000);
   assert.equal(m1.maxOutputTokens, 8192);
-  // materializeModels deep-copies discovered → models
+  // materializeModels deep-copies discovered → models: models.m1 is its own
+  // object, so editing one shape never bleeds into the other
   const m1Model = alpha.models.m1;
   assert.equal(m1Model.contextWindow, 128000);
+  assert.notEqual(m1Model, m1);
+  m1Model.contextWindow = 1;
+  assert.equal(m1.contextWindow, 128000);
 });
 
 // Discovery does not collect reasoning fields from upstream /v1/models:

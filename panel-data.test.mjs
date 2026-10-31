@@ -91,11 +91,13 @@ describe("panel data routes", () => {
 
   it("export-pick 选完目录直接落包；用户取消则只回 cancelled", async () => {
     const spy = spyBundle();
-    let picked = null;
+    const base = { ANYSWITCH_DATA_TEST_BASE: "1" };
+    let pickArgs = null;
     const router = dataRouter({
       dataBundleService: spy.service,
+      base,
       pickFolderFn: async () => ({ cancelled: false, path: "C:/picked" }),
-      pickFileFn: async (arg) => { picked = arg; return { cancelled: true }; },
+      pickFileFn: async (arg) => { pickArgs = arg; return { cancelled: true }; },
     });
     const first = fakeReqRes("/panel/api/data/export-pick", "POST", {});
     await router.handle(first.req, first.res);
@@ -108,6 +110,9 @@ describe("panel data routes", () => {
     await router.handle(second.req, second.res);
     assert.deepEqual(json2(second), { ok: true, cancelled: true });
     assert.equal(spy.calls.length, 1, "取消后不应继续调用服务");
+    // 选择框收到的参数：路由要把自己的 base 和对话框标题都交出去。
+    assert.equal(pickArgs.base, base, "选择框拿到路由的 base 才能在正确目录打开");
+    assert.ok(pickArgs.title?.length > 0, "选择框要带上标题");
   });
 
   it("import-preview 回摘要与票据，import-apply 交票据与 Skills 落点决定", async () => {
@@ -155,15 +160,22 @@ describe("panel data routes", () => {
   it("服务抛错按 statusCode 落地，未知错 500", async () => {
     const router = dataRouter({
       dataBundleService: {
-        exportBundle: async () => { const e = new Error("bsdtar 退出码 1"); e.statusCode = 500; throw e; },
+        // 抛 503 而不是 500：兜底恰好也是 500，只有非 500 的码才能把
+        // 「尊重服务给的 statusCode」和「恒回兜底值」区分开。
+        exportBundle: async () => { const e = new Error("bsdtar 退出码 1"); e.statusCode = 503; throw e; },
+        // 不带 statusCode 的裸错：走未知错兜底。
         previewBundle: async () => { throw new Error("tar not found"); },
-        applyBundle: async () => ({ ok: true }),
       },
     });
-    const { req, res, json } = fakeReqRes("/panel/api/data/export", "POST", { targetDir: "C:/out" });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 500);
-    assert.match(json().error, /bsdtar/);
+    const explicit = fakeReqRes("/panel/api/data/export", "POST", { targetDir: "C:/out" });
+    await router.handle(explicit.req, explicit.res);
+    assert.equal(explicit.res.statusCode, 503, "服务给的 statusCode 要原样落地，不许被兜底吃掉");
+    assert.match(json2(explicit).error, /bsdtar/);
+
+    const unknown = fakeReqRes("/panel/api/data/import-preview", "POST", { zipPath: "C:/in/a.zip" });
+    await router.handle(unknown.req, unknown.res);
+    assert.equal(unknown.res.statusCode, 500, "没带 statusCode 的错按 500 落地");
+    assert.equal(json2(unknown).error, "tar not found");
   });
 
   it("未知 data 路径落 404，GET 不进变更通道", async () => {

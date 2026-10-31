@@ -39,9 +39,10 @@ test("resident probe hit returns the resident handle and never starts a relay", 
 
 test("probe miss starts the per-launch relay", async () => {
   let started = 0;
+  let residentCalls = 0;
   const deps = recording({
     probeRelay: async () => false,
-    residentRelay: async () => { throw new Error("must not be called"); },
+    residentRelay: async () => { residentCalls += 1; return perLaunchRelay; },
     startRelay: async () => { started += 1; return perLaunchRelay; },
   });
 
@@ -49,18 +50,21 @@ test("probe miss starts the per-launch relay", async () => {
 
   assert.equal(relay, perLaunchRelay);
   assert.equal(started, 1);
+  assert.equal(residentCalls, 0, "a probe miss must go straight to startRelay, never consult the resident handle");
 });
 
 test("a throwing probe falls through to the per-launch relay", async () => {
+  let residentCalls = 0;
   const deps = recording({
     probeRelay: async () => { throw new Error("connect ECONNREFUSED"); },
-    residentRelay: async () => { throw new Error("must not be called"); },
+    residentRelay: async () => { residentCalls += 1; return perLaunchRelay; },
     startRelay: async () => perLaunchRelay,
   });
 
   const relay = await acquireRelayOrNative(deps);
 
   assert.equal(relay, perLaunchRelay);
+  assert.equal(residentCalls, 0, "a throwing probe must not consult the resident handle");
   assert.ok(deps.logs.some((l) => l.includes("probe failed") && l.includes("falling back to per-launch relay")));
 });
 
@@ -78,9 +82,10 @@ test("a failing resident-handle build falls through to the per-launch relay", as
 });
 
 test("both levels failing returns null and logs the native launch instead of throwing", async () => {
+  let residentCalls = 0;
   const deps = recording({
     probeRelay: async () => false,
-    residentRelay: async () => { throw new Error("must not be called"); },
+    residentRelay: async () => { residentCalls += 1; return perLaunchRelay; },
     startRelay: async () => {
       throw Object.assign(new Error("port 47821 is in use by another process"), { code: "RELAY_PORT_FOREIGN" });
     },
@@ -89,6 +94,7 @@ test("both levels failing returns null and logs the native launch instead of thr
   const relay = await acquireRelayOrNative(deps);
 
   assert.equal(relay, null);
+  assert.equal(residentCalls, 0, "a probe miss must not consult the resident handle even when startRelay also fails");
   assert.ok(
     deps.logs.some((l) =>
       l.includes("Anyswitch relay unavailable") &&

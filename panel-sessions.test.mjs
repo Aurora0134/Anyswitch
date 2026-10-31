@@ -7,10 +7,13 @@ import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Sessions tab routes: the router is exercised with a mock session-scan
 // service so no real agent session store is touched. Covers the route
-// contract shapes: list degradation via endpointErrors,
-// messages query-param validation, per-item delete outcomes, and the roots
-// whitelist rejection surfaced from session-scan's delete. Mirrors the
-// fakeReqRes pattern from panel-stats.test.mjs.
+// contract shapes: worker offload of the list scan, list snapshot
+// TTL / in-flight dedup / ?refresh=1 escape hatch, delete-vs-refresh
+// generation, messages query-param validation + turns, and per-item
+// delete outcomes passed through verbatim in session-scan's real result
+// shape. The roots whitelist itself lives inside session-scan's delete
+// (see its own suite) — the router only validates the request shape.
+// Mirrors the fakeReqRes pattern from panel-stats.test.mjs.
 
 function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   const res = {
@@ -47,8 +50,6 @@ function sessionsRouter(sessionScanService, extra = {}) {
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
-    aliasResolver: null,
-    aliasPath: null,
     fetchRelayAgents: async () => null,
     sessionScanService,
     ...extra,
@@ -70,8 +71,12 @@ function mockSessionScan({ scanResult, scanError, messagesResult, deleteResult }
     },
     deleteSessions: async (items) => {
       calls.deleteSessions.push(items);
-      if (typeof deleteResult === "function") return deleteResult(items);
-      return deleteResult ?? { ok: items.map((it) => it.file), fail: [] };
+      // 默认结果对齐 session-scan.mjs deleteSessions 的真实逐项形状：
+      // ok.push({ endpoint, file })、fail.push({ endpoint, file, reason })。
+      return deleteResult ?? {
+        ok: items.map((it) => ({ endpoint: it.endpoint, file: it.file })),
+        fail: [],
+      };
     },
   };
 }
@@ -80,6 +85,10 @@ describe("panel router sessions routes", () => {
   // 回归钉（M1）：不注入 sessionScanService 时，列表扫描必须走扫描承载（worker
   // 线程），绝不许在面板进程里直接跑 session-scan 的同步 fs 扫描。修前这条路径
   // 就是 `scanAll: sessionScanAll`——一次 8s 的同步块，整个面板停摆。
+  // 活性探针跑满扫描全程（worker 忙等 400ms）：慢机/粗定时器只会让拍距变宽、
+  // 拍数随窗口长度照常累积，不会像固定墙钟窗口那样在慢机上把窗口截短而误红。
+  // 真回归（同步块在本进程跑）把整个 400ms 按成一个空档：拍数归零、空档≈忙等
+  // 时长，两条断言都会红。
   it("默认服务把列表扫描送进 worker（面板进程零阻塞）", async () => {
     const root = mkTestDir("anyswitch-sessions-offload-");
     // 临时扫描 worker：忙等 400ms 再回一份可识别的空表。
@@ -93,20 +102,27 @@ parentPort.on("message", (message) => {
 });
 `);
     const router = sessionsRouter(null, { sessionScanWorkerFile: workerFile });
-    const started = Date.now();
+    let finished = false;
+    let ticks = 0;
     let worstGap = 0;
     let last = Date.now();
-    let ticks = 0;
+    const probe = (async () => {
+      while (!finished) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (finished) break;
+        const now = Date.now();
+        worstGap = Math.max(worstGap, now - last - 5);
+        last = now;
+        ticks += 1;
+      }
+    })();
     const list = fakeReqRes("/panel/api/sessions/list", "GET");
-    const done = router.handle(list.req, list.res);
-    while (Date.now() - started < 250) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      const now = Date.now();
-      worstGap = Math.max(worstGap, now - last - 5);
-      last = now;
-      ticks += 1;
+    try {
+      await router.handle(list.req, list.res);
+    } finally {
+      finished = true;
+      await probe;
     }
-    await done;
     assert.equal(list.res.statusCode, 200);
     assert.ok(ticks > 10, `定时器链几乎没跑（${ticks} 拍），扫描把面板事件循环按住了`);
     assert.ok(worstGap < 150, `扫描期间事件循环空档 ${worstGap}ms`);
@@ -372,14 +388,16 @@ parentPort.on("message", (message) => {
   });
 
   it("POST /panel/api/sessions/delete forwards items and returns per-item outcomes", async () => {
+    // 夹具形状 = session-scan.mjs deleteSessions 的真实逐项结果：
+    // ok.push({ endpoint, file })，fail.push({ endpoint, file, reason })。
     const items = [
       { endpoint: "claude", file: "C:/s/a.jsonl" },
       { endpoint: "kimi", file: "C:/k/b/wire.jsonl" },
     ];
     const svc = mockSessionScan({
       deleteResult: {
-        ok: ["C:/s/a.jsonl"],
-        fail: [{ id: "C:/k/b/wire.jsonl", reason: "文件被占用" }],
+        ok: [{ endpoint: "claude", file: "C:/s/a.jsonl" }],
+        fail: [{ endpoint: "kimi", file: "C:/k/b/wire.jsonl", reason: "session file is locked" }],
       },
     });
     const router = sessionsRouter(svc);
@@ -387,30 +405,46 @@ parentPort.on("message", (message) => {
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(svc.calls.deleteSessions, [items]);
+    // 路由对逐项成败原样透传，不改写 reason、不重组条目。
     assert.deepEqual(json(), {
-      ok: ["C:/s/a.jsonl"],
-      fail: [{ id: "C:/k/b/wire.jsonl", reason: "文件被占用" }],
+      ok: [{ endpoint: "claude", file: "C:/s/a.jsonl" }],
+      fail: [{ endpoint: "kimi", file: "C:/k/b/wire.jsonl", reason: "session file is locked" }],
     });
   });
 
-  it("delete surfaces a roots-whitelist rejection as the item's fail reason", async () => {
-    // session-scan canonicalizes and rejects paths outside the adapter roots;
-    // the router must pass that per-item failure through untouched.
+  it("delete 的 ok 条目按 file 就地摘除快照行（session-scan 的真实对象形状）", async () => {
+    // panel.mjs 用 ok 条目的 file 匹配快照行（entry?.file）；这里用
+    // session-scan 真实回传的 { endpoint, file } 形状钉住这一支：删除落地后，
+    // TTL 内的列表立刻不再包含刚删的行。
     const svc = mockSessionScan({
-      deleteResult: (items) => ({
-        ok: [],
-        fail: items.map((it) => ({ id: it.file, reason: "路径不在该端点会话目录内" })),
-      }),
+      scanResult: {
+        sessions: [
+          { endpoint: "claude", id: "a", file: "C:/s/a.jsonl" },
+          { endpoint: "kimi", id: "b", file: "C:/k/b/wire.jsonl" },
+        ],
+        endpointErrors: [],
+      },
+      deleteResult: {
+        ok: [{ endpoint: "claude", file: "C:/s/a.jsonl" }],
+        fail: [],
+      },
     });
     const router = sessionsRouter(svc);
-    const { req, res, json } = fakeReqRes("/panel/api/sessions/delete", "POST", {
-      items: [{ endpoint: "claude", file: "C:/Windows/evil.jsonl" }],
+    const first = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(first.req, first.res);
+    assert.deepEqual(first.json().sessions.map((s) => s.file), ["C:/s/a.jsonl", "C:/k/b/wire.jsonl"]);
+    const del = fakeReqRes("/panel/api/sessions/delete", "POST", {
+      items: [{ endpoint: "claude", file: "C:/s/a.jsonl" }],
     });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(json().ok, []);
-    assert.equal(json().fail.length, 1);
-    assert.match(json().fail[0].reason, /会话目录/);
+    await router.handle(del.req, del.res);
+    assert.equal(del.res.statusCode, 200);
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    assert.deepEqual(
+      after.json().sessions.map((s) => s.file),
+      ["C:/k/b/wire.jsonl"],
+      "刚删的行必须被就地摘出快照，用户删完立刻刷新不该再看到它",
+    );
   });
 
   it("delete rejects a malformed body with 400 and never touches the service", async () => {

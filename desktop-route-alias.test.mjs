@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   DESKTOP_PICKER_BLOCKLIST,
   passesDesktopPickerFilter,
@@ -7,16 +8,22 @@ import {
   resolveDesktopAlias,
 } from "./desktop-route-alias.mjs";
 
-// 桌面拾取器的品牌黑名单，逐字取自 Claude Desktop 2.9939.2 app.asar
-// （.vite/build/index.chunk-6aZ703Pj.js，拾取器两道闸共用同一条）。这里把
-// source 整串钉死：官方一旦换表，这个测试红——别名层必须跟着重核，不能静默
-// 沿用过期黑名单给桌面发错的目录形状。
+// 桌面拾取器的品牌黑名单钉样（golden pin），字面逐字取自 Claude Desktop
+// 2.9939.2 app.asar（.vite/build/index.chunk-6aZ703Pj.js，拾取器两道闸共用
+// 同一条）。这个测试不读 asar，探不到官方换表——它锁的是模块常量：任何人
+// 改 DESKTOP_PICKER_BLOCKLIST 都必须同步更新这份手抄副本，改的时候按上面
+// 出处对照官方 asar 重核；官方真换表而模块没人动时，这里不会红（那种漂移
+// 靠升级 Claude Desktop 时对别名层的人工重核兜底）。
 const ASAR_BLOCKLIST_SOURCE =
   "ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\\bling\\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code|\\bunic\\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\\.nova|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\\d|\\bk2\\.|\\bm2\\.|jamba|arctic|solar|mercury|zamba|kat-coder|\\bds-|dpsk";
 
-test("品牌黑名单与桌面 asar 逐字一致（无标志位：过滤前先转小写）", () => {
+test("品牌黑名单钉样：模块正则锁死为钉样字面，且无 i 标志（过滤前先转小写）", () => {
   assert.equal(DESKTOP_PICKER_BLOCKLIST.flags, "", "模块按小写输入测试，正则本身不带 i 标志");
-  assert.equal(DESKTOP_PICKER_BLOCKLIST.source, ASAR_BLOCKLIST_SOURCE);
+  assert.equal(
+    DESKTOP_PICKER_BLOCKLIST.source,
+    ASAR_BLOCKLIST_SOURCE,
+    "黑名单字面被改动：按本文件头出处对照官方 asar 重核后，再同步这份钉样",
+  );
 });
 
 test("拾取器过滤正反例：档位名/家族词过，竞品品牌词滤", () => {
@@ -76,16 +83,17 @@ test("桌面视图：只有撞黑名单的条目换确定性单段别名，其�
     assert.equal(view.entries[i].displayName, entries[i].displayName, "显示名不受 id 过滤影响");
   }
 
-  // 撞黑名单的两条换成 anthropic/<6位> 单段别名：必过拾取器过滤、必不等于
-  // 任何真 wire id（真 id 双段）、彼此不同（表内单射）。
+  // 撞黑名单的两条换成 anthropic/<6位> 单段别名：必过拾取器过滤、彼此不同
+  // （表内单射）。本目录的真 id 要么多段、要么是 auto(尾4字符)/my-vm(尾5字
+  // 符) 这类短单段名，与 6 位码形状不可能相撞——形状断言已蕴含，不另设恒
+  // 真的 notEqual；真正可能撞的 6 位单段真名（虚拟模型）由保留字机制负责，
+  // 见下一个用例。
   assert.equal(view.aliases.size, 2);
   const aliased = [view.entries[1], view.entries[2]];
   const codes = new Set();
   for (const entry of aliased) {
     assert.match(entry.wireId, /^anthropic\/[a-z0-9]{6}$/, "确定性单段别名形状");
     assert.equal(passesDesktopPickerFilter(entry.wireId), true, "别名本身过拾取器过滤");
-    assert.notEqual(entry.wireId, "anthropic/north/kimi-k3");
-    assert.notEqual(entry.wireId, "anthropic/north/deepseek-v3");
     codes.add(entry.wireId);
   }
   assert.equal(codes.size, 2, "别名互不相同");
@@ -95,11 +103,6 @@ test("桌面视图：只有撞黑名单的条目换确定性单段别名，其�
   // 别名表：别名 → 真 id，与换出的 id 对得上。
   assert.equal(view.aliases.get(view.entries[1].wireId), "anthropic/north/kimi-k3");
   assert.equal(view.aliases.get(view.entries[2].wireId), "anthropic/north/deepseek-v3");
-  // auto 与已服务单段名是保留字：任何别名不得与之相撞。
-  for (const code of codes) {
-    assert.notEqual(code, "anthropic/auto");
-    assert.notEqual(code, "anthropic/my-vm");
-  }
 });
 
 test("确定性：同一目录两次构建结果完全一致（跨重启稳定）", () => {
@@ -119,6 +122,37 @@ test("单段虚拟模型撞黑名单时同样换别名（名字含竞品词的 v
   assert.match(view.entries[1].wireId, /^anthropic\/[a-z0-9]{6}$/);
   assert.equal(view.entries[1].displayName, "[Anyswitch] kimi-router");
   assert.equal(view.aliases.get(view.entries[1].wireId), "anthropic/kimi-router");
+});
+
+test("保留字：已服务单段名占住 6 位码空间时，别名换盐避让", () => {
+  // 真正可能与别名相撞的真 id 只有 6 位单段名（已服务的虚拟模型）。别名码
+  // 派生见 desktop-route-alias.mjs 的 aliasCodeFor：sha256(`${salt}:${tail}`)
+  // 首 4 字节大端 → base36 补零截 6 位。这里按同一派生算出失败条目的首选
+  // 码，并让同目录恰好已服务这个名字——保留字生效时模块必须换盐避让。
+  // （对派生方式是钉样式耦合：模块改派生则本用例的夹具前提会红，属有意。）
+  const codeOf = (tail, salt = 0) =>
+    createHash("sha256").update(`${salt}:${tail}`).digest().readUInt32BE(0).toString(36).padStart(6, "0").slice(0, 6);
+
+  const failingTail = "x/kimi-k3";
+  const occupied = codeOf(failingTail); // 无保留逻辑时 kimi-k3 会被发成这个名字
+  assert.equal(DESKTOP_PICKER_BLOCKLIST.test(occupied), false, "夹具前提：占用名不撞黑名单，才能作为已服务名过过滤");
+
+  const entries = [
+    { wireId: "anthropic/poke-api/claude-opus-5", displayName: "[poke-api] Claude Opus 5" },
+    { wireId: `anthropic/${occupied}`, displayName: `[Anyswitch] ${occupied}` },
+    { wireId: `anthropic/${failingTail}`, displayName: "[x] Kimi K3" },
+  ];
+  const view = buildDesktopCatalogView(entries);
+
+  assert.equal(view.aliases.size, 1, "只有撞黑名单的 kimi-k3 需要换名");
+  assert.equal(view.entries[1].wireId, `anthropic/${occupied}`, "已服务单段虚拟模型原样保留");
+  const alias = view.entries[2].wireId;
+  assert.notEqual(alias, `anthropic/${occupied}`, "保留字生效：首选码被占则换盐避让");
+  assert.match(alias, /^anthropic\/[a-z0-9]{6}$/);
+  assert.equal(passesDesktopPickerFilter(alias), true, "避让后的别名仍过拾取器过滤");
+  assert.equal(view.aliases.get(alias), `anthropic/${failingTail}`);
+  assert.equal(resolveDesktopAlias(`anthropic/${occupied}`, entries), null, "已服务名不在别名表，反解得 null");
+  assert.equal(resolveDesktopAlias(alias, entries), `anthropic/${failingTail}`);
 });
 
 test("别名反解：同一目录内回环，目录外/双段/未知名一律 null", () => {

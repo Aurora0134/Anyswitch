@@ -2,48 +2,36 @@
 // entries into the panel-host's logger so the 实时输出 window shows relay-side
 // events (keep-alive retries, stream faults) again after the process split.
 //
-// A real openai relay server (ephemeral port) with a real logger plays the
-// relay; the bridge's target URL is 127.0.0.1:47821, so this test patches
-// nothing — instead it checks the bridging logic by pointing the bridge at a
-// server we control. The bridge hardcodes the port, so the test instead
-// validates: (1) the bridge re-publishes SSE frames through logger.log, and
-// (2) the relay-side endpoint it consumes (/api/internal/logs) streams
-// history + live entries with token auth. The two halves compose in
-// production; unit-testing them separately keeps the test off port 47821.
+// The bridge hardcodes its target — http://127.0.0.1:47821/api/internal/logs?live=1
+// with a Bearer token read from the data root — so these tests fake fetch at
+// the global boundary: the fake records the outgoing request (pinning the URL,
+// live=1 and token contract) and answers with hand-built SSE frames. That
+// covers the bridge-side logic: the request contract, SSE frame parsing, level
+// handling, the legacy "[level] " prefix strip, retry-on-unreachable and
+// stop() teardown. The relay-side endpoint itself (token auth, history + live
+// streaming, live=1 skip-replay) is exercised against the real server in
+// openai-server.test.mjs ("streams relay log entries over /api/internal/logs
+// with token auth" and "skips history replay for /api/internal/logs?live=1").
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { join } from "node:path";
 import { createLogger } from "./logger.mjs";
-import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { startRelayLogBridge } from "./panel.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
-const STORE = {
-  version: 2,
-  providers: {},
-};
+// Yield past every pending microtask. The bridge's failure path (fetch
+// rejection → catch → scheduleRetry) settles within one microtask; setImmediate
+// stays real under mocked setTimeout, so this drains it without firing timers.
+async function flush() {
+  for (let i = 0; i < 2; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+}
 
 describe("relay log bridge", () => {
-  it("re-publishes relay SSE log entries through the panel logger and stops cleanly", async () => {
-    // Stand up the relay side: a real logger plus /api/internal/logs SSE.
-    const relayLogger = createLogger({ sink: () => {} });
-    const server = createOpenAIRelayServer({
-      token: "bridge-token",
-      loadStore: () => ({ ok: true, store: STORE }),
-      loadCredential: async () => ({ ok: true, value: "KEY" }),
-      upstreamFetch: async () => ({ ok: true, status: 200, body: null }),
-      recordGeneration: () => {},
-      readGeneration: () => null,
-      logger: relayLogger,
-    });
-    const { port, close } = await listenLoopback(server, 0);
-
-    // The bridge hardcodes 47821. For the test we reach into the same code
-    // path by faking fetch: one SSE connection built from the real endpoint's
-    // semantics (history replay + live frames), delivered as a ReadableStream.
+  it("re-publishes relay SSE log entries through the panel logger and stop() aborts the subscription", async () => {
     // Frames carry the level in the field only — the shape the relay emits since
     // the level contract landed (the legacy "[warn] " prefix is covered by its
     // own test below).
@@ -51,29 +39,39 @@ describe("relay log bridge", () => {
       `data: ${JSON.stringify({ ts: 1, level: "warn", message: "keep-alive: retrying request" })}\n\n`,
       `data: ${JSON.stringify({ ts: 2, level: "info", message: "keep-alive: recovered" })}\n\n`,
     ];
+    const liveFrame = `data: ${JSON.stringify({ ts: 3, level: "error", message: "live fault" })}\n\n`;
     const encoder = new TextEncoder();
-    let pushed = 0;
-    const stream = new ReadableStream({
-      start(controller) {
-        // History entries arrive immediately; the live entry after the test
-        // observes the first two.
-        controller.enqueue(encoder.encode(frames[0]));
-        controller.enqueue(encoder.encode(frames[1]));
-        const iv = setInterval(() => {
-          if (pushed > 0) {
+    const requests = [];
+    let aborted = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (url, init) => {
+      requests.push({ url, init });
+      const stream = new ReadableStream({
+        start(controller) {
+          // History entries arrive immediately; the live entry follows shortly.
+          controller.enqueue(encoder.encode(frames[0]));
+          controller.enqueue(encoder.encode(frames[1]));
+          let liveSent = false;
+          const iv = setInterval(() => {
+            if (!liveSent) {
+              liveSent = true;
+              controller.enqueue(encoder.encode(liveFrame));
+              return;
+            }
+            // The stream itself stays open until stop() aborts it, but this
+            // timer must die on its own: a broken stop() has to fail the run,
+            // not hang the process.
+            clearInterval(iv);
+          }, 20);
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
             clearInterval(iv);
             controller.close();
-          } else {
-            pushed += 1;
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ ts: 3, level: "error", message: "live fault" })}\n\n`),
-            );
-          }
-        }, 20);
-      },
-    });
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => new Response(stream, { status: 200 });
+          });
+        },
+      });
+      return Promise.resolve(new Response(stream, { status: 200 }));
+    };
 
     const panelLogger = createLogger({ sink: () => {} });
     const received = [];
@@ -82,7 +80,8 @@ describe("relay log bridge", () => {
     const root = mkTestDir("anyswitch-bridge-");
     let token;
     try {
-      // Token file the bridge reads; value irrelevant because fetch is faked.
+      // Token file the bridge reads; the fake records the request, so the auth
+      // header can be checked against this exact value.
       token = loadOrGenerateToken(root);
       const stop = startRelayLogBridge(panelLogger, root);
 
@@ -94,13 +93,25 @@ describe("relay log bridge", () => {
       stop();
       unsubscribe();
 
+      assert.equal(requests.length, 1, "the bridge opens exactly one SSE subscription");
+      assert.equal(
+        requests[0].url,
+        "http://127.0.0.1:47821/api/internal/logs?live=1",
+        "the bridge subscribes to the relay's live log endpoint",
+      );
+      assert.equal(
+        new Headers(requests[0].init.headers).get("authorization"),
+        `Bearer ${token}`,
+        "the bridge authenticates with the data root's relay token",
+      );
+      assert.ok(requests[0].init.signal instanceof AbortSignal, "the subscription is abortable");
       assert.ok(received.some((m) => m.includes("keep-alive: retrying request")), "relay entries re-publish through the panel logger");
       assert.ok(received.some((m) => m.includes("keep-alive: recovered")));
       assert.ok(received.some((m) => m.includes("live fault")), "live frames stream through");
+      assert.equal(aborted, true, "stop() aborts the in-flight subscription");
     } finally {
       globalThis.fetch = originalFetch;
       rmSync(root, { recursive: true, force: true });
-      await close();
     }
   });
 
@@ -145,7 +156,13 @@ describe("relay log bridge", () => {
     }
   });
 
-  it("survives the relay being unreachable and keeps retrying without throwing", async () => {
+  it("survives the relay being unreachable: retries on its timer and stop() ends the retries", async (t) => {
+    // The retry interval is 5s of wall clock — too slow to wait out in a unit
+    // test, so the retry timer runs under mocked timers. That actually
+    // exercises "keeps retrying" and "stop() ends the retries" instead of only
+    // the first connection attempt; an unhandled failure on the way still
+    // fails the test, so "without throwing" stays covered too.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const originalFetch = globalThis.fetch;
     let attempts = 0;
     globalThis.fetch = async () => {
@@ -157,9 +174,15 @@ describe("relay log bridge", () => {
     try {
       loadOrGenerateToken(root);
       const stop = startRelayLogBridge(panelLogger, root);
-      await new Promise((r) => setTimeout(r, 120));
+      assert.equal(attempts, 1, "the bridge attempts a connection immediately");
+      await flush(); // let the connection failure reach the bridge's retry scheduler
+      t.mock.timers.tick(5000); // one retry interval elapses
+      assert.ok(attempts >= 2, "the bridge keeps retrying while the relay is unreachable");
       stop();
-      assert.ok(attempts >= 1, "the bridge attempts a connection");
+      const atStop = attempts;
+      await flush();
+      t.mock.timers.runAll(); // no retry may survive stop(), however long the clock runs
+      assert.equal(attempts, atStop, "stop() ends the retry loop");
     } finally {
       globalThis.fetch = originalFetch;
       rmSync(root, { recursive: true, force: true });

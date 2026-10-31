@@ -32,6 +32,15 @@ const FAKE_HOME = join(tmpdir(), "anyswitch-codex-test-home");
 const FAKE_LOCAL = join(tmpdir(), "anyswitch-codex-test-local");
 const FAKE_BASE = { USERPROFILE: FAKE_HOME, LOCALAPPDATA: FAKE_LOCAL };
 
+// resolveCodexExecutable's npm-shim precheck probes %APPDATA%\npm\codex.cmd;
+// with APPDATA/USERPROFILE missing it falls back to the relative
+// "AppData\Roaming\npm" and runs a real existsSync against the process cwd,
+// so every discovery-path test pins both keys into the fixture dir (which
+// deliberately contains no npm/codex.cmd).
+function codexDiscoveryBase(dir, local) {
+  return { LOCALAPPDATA: local, USERPROFILE: join(dir, "home"), APPDATA: join(dir, "roaming") };
+}
+
 function recordingDeps(overrides = {}) {
   const calls = [];
   const logs = [];
@@ -123,7 +132,7 @@ test("resolveCodexExecutable glob-discovers codex.exe under the hash dir", () =>
     writeFileSync(join(staleDir, "rg.exe"), "MZ");
 
     assert.equal(
-      resolveCodexExecutable({ LOCALAPPDATA: local }),
+      resolveCodexExecutable(codexDiscoveryBase(dir, local)),
       join(hashDir, "codex.exe"),
     );
   } finally {
@@ -145,7 +154,7 @@ test("resolveCodexExecutable picks the newest codex.exe when several hash dirs l
     utimesSync(oldExe, new Date("2026-01-01"), new Date("2026-01-01"));
     utimesSync(newExe, new Date("2026-09-01"), new Date("2026-09-01"));
 
-    assert.equal(resolveCodexExecutable({ LOCALAPPDATA: local }), newExe);
+    assert.equal(resolveCodexExecutable(codexDiscoveryBase(dir, local)), newExe);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -155,7 +164,7 @@ test("resolveCodexExecutable throws a clear error when no codex.exe is installed
   const dir = mkTestDir("codex-exe-");
   try {
     assert.throws(
-      () => resolveCodexExecutable({ LOCALAPPDATA: join(dir, "local") }),
+      () => resolveCodexExecutable(codexDiscoveryBase(dir, join(dir, "local"))),
       /no codex\.exe found under/,
     );
   } finally {

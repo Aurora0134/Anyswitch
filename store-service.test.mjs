@@ -624,7 +624,7 @@ describe("store-service deleteProvider", () => {
     assert.deepEqual(journal.completed.map((e) => e.providerId), ["prov"]);
   });
 
-  it("refuses to delete through an unsafe credential path", async () => {
+  it("unsafe credential path: store entry already removed, journal left pending, only the credential retained", async () => {
     const paths = makeRoot();
     seedStore(paths, { prov: richEntry("prov", ["m1"]) });
     // A directory where the credential file should be: lstat says not-a-file.
@@ -633,7 +633,29 @@ describe("store-service deleteProvider", () => {
     const svc = makeService(paths);
     const result = await svc.deleteProvider("prov");
     assert.equal(result.ok, false);
-    assert.match(result.error, /unsafe|retained/);
+    // Pin the specific lstat refusal: "credential retained" is the suffix shared
+    // by every delete failure path, so matching it alone would not locate the
+    // unsafe branch.
+    assert.match(result.error, /Credential path is unsafe for prov/);
+    // Not a whole-transaction refusal — the delete transaction is forward-only:
+    // the store entry was already CAS-removed and the journal entry stays
+    // pending for resume; only the credential (the irreversible step) remains.
+    assert.equal(Object.hasOwn(readStore(paths).store.providers, "prov"), false);
+    const journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+    assert.equal(journal.pending.length, 1);
+    assert.equal(journal.pending[0].providerId, "prov");
+    assert.equal(journal.pending[0].credentialFile, "prov.dpapi");
+    assert.deepEqual(journal.completed, []);
+    assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), true, "credential retained");
+    // The half-done state is durable, not transient: a resume replay bypasses
+    // the not-managed gate (the entry is pending) but hits the same unsafe-path
+    // refusal, and the pending entry survives for the next attempt.
+    const resume = await svc.resumeDeletions();
+    assert.deepEqual(resume.resumed, []);
+    assert.equal(resume.failed.length, 1);
+    assert.match(resume.failed[0].reason, /unsafe/);
+    const journalAfter = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+    assert.equal(journalAfter.pending.length, 1, "failed replay must not clear the pending entry");
   });
 
   // Route chains demand every node exists (store-schema), so a provider (or
@@ -1010,7 +1032,7 @@ describe("store-service getBoardState", () => {
     assert.deepEqual(state.poolNames, {});
   });
 
-  it("triggers resumeDeletions fire-and-forget: 不进响应、不阻塞，但最终完成", async () => {
+  it("triggers resumeDeletions fire-and-forget: 结果不进响应，重放清掉残留凭据与 pending", async () => {
     const paths = makeRoot();
     seedStore(paths, { prov: richEntry("prov", ["m1"]) });
     writeCredential(paths, "prov");
@@ -1029,12 +1051,15 @@ describe("store-service getBoardState", () => {
     const state = await svc.getBoardState();
     assert.equal(state.ok, true);
     assert.equal("resumeResult" in state, false, "resume 结果不进响应");
-    const credentialPath = join(paths.credentialsDir, "prov.dpapi");
-    // Fire-and-forget: the response already returned; the resume finishes later.
-    for (let i = 0; i < 500 && existsSync(credentialPath); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(existsSync(credentialPath), false, "fire-and-forget resume 最终删除残留凭据");
+    // 重放链路（journal/markPending/store 写/lstat/remove/clearPending）全部是
+    // 同步 fs：void resumeDeletions() 在 getBoardState 返回前就已同步跑完，
+    // 所以返回后立即可断言。不做条件轮询——轮询对“是否阻塞”没有鉴别力，
+    // 实现改成 await resumeDeletions() 也照样通过；这里验证的是触发确实发生
+    // 且整个事务（凭据删除 + journal 结账）完成。
+    assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), false, "重放删除残留凭据");
+    const journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+    assert.deepEqual(journal.pending, []);
+    assert.deepEqual(journal.completed.map((e) => e.providerId), ["prov"]);
   });
 });
 

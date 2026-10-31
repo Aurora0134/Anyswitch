@@ -75,12 +75,17 @@ describe("buildOpencodeProviderEntry", () => {
     assert.deepEqual(alpha.models, { "model-1": { name: "Model 1" } });
   });
 
-  it("falls back to the ids when display names are missing, and never writes literal secrets", () => {
+  it("falls back to the ids when display names are missing, and keeps the apiKey a {file:} reference, never a literal secret", () => {
     const entry = buildOpencodeProviderEntry("alpha", { models: { "m-1": {} } }, 47821, "{file:C:/tok}");
     assert.equal(entry.alpha.name, "alpha");
     assert.equal(entry.alpha.models["m-1"].name, "m-1");
-    const text = JSON.stringify(entry);
-    assert.doesNotMatch(text, /Bearer /);
+    // The secret-handling property under test: the credential slot must hold
+    // the {file:...} reference form (opencode expands it at runtime), so a
+    // regression that inlines a literal token fails here. The Bearer scan
+    // additionally rules out the Authorization-header form the sibling merge
+    // modules write.
+    assert.match(entry.alpha.options.apiKey, /^\{file:[^}]+\}$/);
+    assert.doesNotMatch(JSON.stringify(entry), /Bearer /);
   });
 
   it("uses baseUrlSegment for the auto pseudo-channel instead of its own id", () => {
@@ -195,11 +200,19 @@ describe("readOpencodeConfig / writeOpencodeConfigWithBackup", () => {
     assert.deepEqual(readOpencodeConfig(join(tmpRoot, "opencode.json")), { provider: {} });
   });
 
-  it("fails closed on an unparseable config instead of overwriting it", () => {
+  it("throws UnparseableConfigError on an unparseable config so callers fail closed", () => {
     const configPath = join(tmpRoot, "opencode.json");
     writeFileSync(configPath, "{ not json", "utf8");
-    assert.throws(() => readOpencodeConfig(configPath), /refusing to overwrite unparseable opencode config/);
-    assert.equal(readFileSync(configPath, "utf8"), "{ not json");
+    // The launcher's sync discriminates on the error code (UNPARSEABLE_CONFIG)
+    // and reports instead of writing, so the error identity is load-bearing.
+    assert.throws(() => readOpencodeConfig(configPath), {
+      name: "UnparseableConfigError",
+      code: "UNPARSEABLE_CONFIG",
+      message: /refusing to overwrite unparseable opencode config/,
+    });
+    // "The file is left untouched" is pinned end to end in
+    // opencode-launcher.test.mjs ("fails closed on an unparseable existing
+    // config"); readOpencodeConfig itself is a pure read with no write path.
   });
 
   it("writes, short-circuits when unchanged, and keeps a timestamped backup on change", () => {

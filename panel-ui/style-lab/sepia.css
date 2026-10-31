@@ -333,7 +333,9 @@
   box-shadow: none;
 }
 
-/* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
+/* toggle：本主题不另加规则——滑轨选中色来自基座 `.toggle input:checked + .slider`
+   （即 --accent token），滑轨是胶囊形且本就是平滑物，方角语言不适用于它；
+   暗色下只反色滑块（见本段「暗色专属修正」）。 */
 
 /* seg-control / view-tabs：方角分段 */
 :root[data-style="sepia"] .seg-control,

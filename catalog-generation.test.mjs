@@ -41,8 +41,11 @@ test("shapes are keyed by provider id and hold no secret material", () => {
   assert.deepEqual(Object.keys(shapes).sort(), ["nvidia-nim", "poke-api"]);
   for (const [providerId, value] of Object.entries(shapes)) {
     assert.equal(typeof value, "string");
-    assert.ok(value.length > 0, providerId);
-    assert.ok(!value.includes("dpapi"), "the hash must not echo the credential file name");
+    // The shape is opaque by construction: a bare sha256 hex digest. A readable
+    // echo of any routing field — e.g. the credential file name — would carry
+    // non-hex characters and fail here, so the no-material claim is actually
+    // verified rather than vacuously true of any hex output.
+    assert.match(value, /^[0-9a-f]{64}$/, `${providerId}: shape must be a bare sha256 hex digest`);
   }
 });
 

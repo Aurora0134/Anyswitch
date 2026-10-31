@@ -23,7 +23,19 @@ function makeService() {
 }
 
 afterEach(() => {
-  while (tempDirs.length) rmSync(tempDirs.pop(), { recursive: true, force: true });
+  // Windows AV/indexers transiently hold a handle on files a test just wrote
+  // (same phenomenon atomic-write.mjs documents for rename), so rmSync here
+  // retries like test-helpers/tmp.mjs's exit sweep. A fixture still locked
+  // after the retries is best-effort: the process-exit sweep removes it, and
+  // a locked fixture must never turn a passing run red.
+  while (tempDirs.length) {
+    const dir = tempDirs.pop();
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    } catch {
+      // swept later by tmp.mjs's process-exit sweep
+    }
+  }
 });
 
 describe("agent-prompts data plane", () => {

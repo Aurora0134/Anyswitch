@@ -7,6 +7,12 @@ import { createEffortInjector } from "./effort-injection.mjs";
 
 const TOKEN = "test-token-123";
 
+// 不读机器状态的 effort 注入器。这些用例主张的是鉴权/路由/透传/重试边界，
+// 注入与否不是它们的主张；不注入时 handler 落回生产默认注入器，每请求现场读
+// 真实用户的 settings.json 与 thinking-efforts 库，用例结果随机器状态漂移。
+// isEnabled 钉死后请求体原样上行，且不碰任何磁盘文件。
+const makeOffEffortInjector = () => createEffortInjector({ isEnabled: () => false });
+
 function makeStore() {
   return {
     version: 2,
@@ -44,6 +50,7 @@ function makeHandler({ store = makeStore(), credential = "sk-test", upstream = n
         ? { ok: false, reason: "credential missing" }
         : { ok: true, value: credential },
     upstreamFetch: async () => upstream,
+    effortInjector: makeOffEffortInjector(),
     recordGeneration: (value) => {
       generation = value;
     },
@@ -155,6 +162,7 @@ describe("openai handler body passthrough", () => {
         sentBody = JSON.parse(init.body);
         return { ok: true, status: 200, json: async () => ({ choices: [{ message: { role: "assistant", content: "hi" } }] }) };
       },
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: () => {},
       readGeneration: () => null,
     });
@@ -178,6 +186,7 @@ describe("openai handler body passthrough", () => {
         authHeader = init.headers.authorization;
         return { ok: true, status: 200, json: async () => ({ choices: [] }) };
       },
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: () => {},
       readGeneration: () => null,
     });
@@ -207,6 +216,7 @@ describe("openai handler body passthrough", () => {
       upstreamFetch: async () => {
         throw new Error("network down");
       },
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: () => {},
       readGeneration: () => null,
     });
@@ -231,7 +241,10 @@ describe("openai handler body passthrough", () => {
     assert.match(result.body.error.message, /returned status 429/);
   });
 
-  it("uses a primary-first URL list for the retry boundary", async () => {
+  it("hands the default-built primary-first URL list to the upstream fetch", async () => {
+    // 不注入 buildUpstreamURLs：钉的是 handler 默认构造器的实际产物——
+    // primary 在前、尾斜杠收敛、fallback 依序跟上（构造器本身的语义已由
+    // launch.test.mjs 覆盖，这里钉的是 handler 转手交给 upstreamFetch 的东西）。
     const store = makeStore();
     store.providers["poke-api"].baseURL = "https://primary.example/v1/";
     store.providers["poke-api"].fallbackURLs = ["https://backup.example/v1"];
@@ -240,8 +253,7 @@ describe("openai handler body passthrough", () => {
       token: TOKEN,
       loadStore: () => ({ ok: true, store }),
       loadCredential: () => ({ ok: true, value: "sk" }),
-      buildUpstreamURLs: (provider, path) => [provider.baseURL, ...provider.fallbackURLs]
-        .map((baseURL) => `${baseURL.replace(/\/+$/, "")}${path}`),
+      effortInjector: makeOffEffortInjector(),
       upstreamFetch: async (urls) => {
         receivedURLs = urls;
         return success();
@@ -281,6 +293,7 @@ describe("openai handler body passthrough", () => {
         },
         { sleep: async () => {} },
       ),
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: () => {},
       readGeneration: () => null,
     });
@@ -315,6 +328,7 @@ describe("openai handler body passthrough", () => {
         },
         { sleep: async () => {} },
       ),
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: () => {},
       readGeneration: () => null,
     });
@@ -423,6 +437,7 @@ describe("openai handler models discovery", () => {
         upstreamCalls += 1;
         return { ok: true, status: 200, json: async () => ({ choices: [] }) };
       },
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: (value) => {
         generation = value;
       },
@@ -510,9 +525,12 @@ describe("openai handler thinking-depth injection", () => {
       loadCredential: () => ({ ok: true, value: "sk-test" }),
       upstreamFetch: async (urls, init) => {
         sent.push(JSON.parse(init.body));
+        // 槽位可以是 Response 实例或工厂：工厂每次调用都交出全新实例。handler
+        // 会把 2xx 响应的 body 读掉（upstream.json()），多轮请求若复用同一个
+        // 实例，第二次就会伪造成 502 malformed response。
         const next = responses[Math.min(index, responses.length - 1)];
         index += 1;
-        return next;
+        return typeof next === "function" ? next() : next;
       },
       recordGeneration: (value) => { generation = value; },
       readGeneration: () => generation,
@@ -544,7 +562,9 @@ describe("openai handler thinking-depth injection", () => {
       status: 400,
       headers: { "content-type": "application/json" },
     });
-    const { handler, sent } = makeInjectingHandler({ responses: [refusal, success()] });
+    // 第二个槽位给工厂而非实例：停注入后的后续请求拿到的必须是全新的成功响应，
+    // 否则复用已被读空的实例会把这一步伪造成 502，返回侧就没法断言了。
+    const { handler, sent } = makeInjectingHandler({ responses: [refusal, success] });
 
     const first = await ask(handler);
     assert.equal(first.status, 200, "the client sees the retry's result");
@@ -552,7 +572,8 @@ describe("openai handler thinking-depth injection", () => {
     assert.equal(sent[0].reasoning_effort, "high");
     assert.equal("reasoning_effort" in sent[1], false);
 
-    await ask(handler);
+    const second = await ask(handler);
+    assert.equal(second.status, 200, "later requests really succeed, not just leave the field out");
     assert.equal(sent.length, 3, "later requests go out clean, no refusal cycle again");
     assert.equal("reasoning_effort" in sent[2], false);
   });
@@ -583,6 +604,7 @@ describe("outbound history tool-call sanitization", () => {
         sentBody = JSON.parse(init.body);
         return success();
       },
+      effortInjector: makeOffEffortInjector(),
       recordGeneration: () => {},
       readGeneration: () => null,
     });
@@ -701,7 +723,9 @@ function imageGuardStore() {
     "claude-opus-5": { displayName: "Claude Opus 5" },
     "glm-5.3": { displayName: "GLM 5.3" },
     "declared-text": { displayName: "Declared Text", inputModalities: ["text"] },
-    "declared-vision": { displayName: "Declared Vision", inputModalities: ["text", "image"] },
+    // id 必须在内置纯文本名单里（CONFIRMED_TEXT_ONLY_MODELS），声明推翻名单
+    // 的冲突场景才搭得出来；「声明 image + 名单命中」用这一行。
+    "minimax-m2.7": { displayName: "Declared Vision", inputModalities: ["text", "image"] },
     "mystery-model": { displayName: "Mystery" },
   };
   return store;
@@ -729,9 +753,10 @@ describe("openai handler 图片降级", () => {
       loadCredential: () => ({ ok: true, value: "sk-test" }),
       upstreamFetch: async (_urls, init) => {
         sent.push(JSON.parse(init.body));
+        // 同 makeInjectingHandler：槽位可以是实例或工厂，工厂每次给出全新实例。
         const next = responses[Math.min(index, responses.length - 1)];
         index += 1;
-        return next;
+        return typeof next === "function" ? next() : next;
       },
       recordGeneration: (value) => { generation = value; },
       readGeneration: () => generation,
@@ -786,12 +811,28 @@ describe("openai handler 图片降级", () => {
   });
 
   it("预判：声明支持图片时，名单命中也被声明推翻", async () => {
-    const { handler, sent } = makeImageGuardHandler([success()], {
+    // 对照臂：同一 id 没有模态声明时确实被名单剥图——证明这个 id 真的命中
+    // 名单，冲突场景真实成立，而不是「名单本来就没命中」的恒真断言。
+    const plainStore = imageGuardStore();
+    plainStore.providers["poke-api"].models["minimax-m2.7"] = { displayName: "Minimax M2.7" };
+    const plain = makeImageGuardHandler([success()], {
+      gates: { imageHeuristicGate: () => true },
+      store: plainStore,
+    });
+    const plainResult = await ask(plain.handler, imageChatBody("minimax-m2.7"));
+    assert.equal(plainResult.status, 200);
+    assert.deepEqual(plain.sent[0].messages[0].content, [
+      { type: "text", text: "look at this" },
+      { type: "text", text: "[Unsupported Image]" },
+    ]);
+
+    // 主张臂：同一 id 换成声明 inputModalities 含 image 的行，声明胜出、图原样上行。
+    const declared = makeImageGuardHandler([success()], {
       gates: { imageHeuristicGate: () => true },
     });
-    const result = await ask(handler, imageChatBody("declared-vision"));
+    const result = await ask(declared.handler, imageChatBody("minimax-m2.7"));
     assert.equal(result.status, 200);
-    assert.deepEqual(sent[0].messages[0].content[1], IMAGE_URL_PART);
+    assert.deepEqual(declared.sent[0].messages[0].content[1], IMAGE_URL_PART);
   });
 
   it("兜底：漏判后上游报「只支持文本」，剥图重试一次并成功", async () => {
@@ -822,8 +863,10 @@ describe("openai handler 图片降级", () => {
   });
 
   it("兜底：措辞不是模态判决时不重试（单次发送）", async () => {
+    // 预判门也钉死：请求带图时 send 前的预判判定会调预判门，不注入就会落到
+    // 生产默认、现场读真实用户的 settings.json。
     const { handler, sent, lines } = makeImageGuardHandler([refusal(400, "Invalid API key")], {
-      gates: { imageFallbackGate: () => true },
+      gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
     });
     const result = await ask(handler, imageChatBody("mystery-model"));
     assert.equal(result.status, 400);

@@ -520,15 +520,17 @@ describe("panel.html skills change diff highlighting", () => {
     // row-changed 脉冲已整组移除（CSS + 标记 + 消费），渲染侧不得残留引用
     assert.doesNotMatch(renderList, /skillsFlashChanged|row-changed/);
     assert.match(renderList, /badge-flash/);
-    // 手动刷新走带反馈的包装：按钮禁用（吃 .btn:disabled 变暗）+ 整列 cascade + 串行动画时长
+    // 手动刷新走带反馈的包装：按钮禁用（吃 .btn:disabled 变暗）+ 整列 cascade；
+    // 串行动画时长是 runSkillsRefreshWithFeedback 的契约，在下方 manual refresh 用例里钉
     assert.match(panelJs, /\$\("skillsRefreshBtn"\)\.onclick = runSkillsRefreshWithFeedback/);
-    assert.match(panelJs, /setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)/);
   });
 
   it("card D uses the neutral scan glyph, not a warning triangle", () => {
     // 告警三角在全页只出现在卡 D 标题；换成中性的取景框后不得残留
     assert.doesNotMatch(panelHtml, /M10\.29 3\.86L1\.82 18/);
-    const head = panelHtml.match(/<h2 class="card-title">([\s\S]*?)Agent 条目与异常\s*<\/h2>/);
+    // 必须锚定到 skillsAnomalyCard 再取标题：整页第一张 card-title 在服务状态卡，
+    // 不锚的话非贪婪匹配会把 8 张卡一起圈进捕获窗，path 出现在窗口内任意位置都算过
+    const head = panelHtml.match(/id="skillsAnomalyCard"[\s\S]*?<h2 class="card-title">([\s\S]*?)Agent 条目与异常\s*<\/h2>/);
     assert.ok(head, "卡 D 标题必须存在");
     assert.match(head[1], /<path d="M3 7V5a2 2 0 0 1 2-2h2"\/>/);
     assert.match(head[1], /<path d="M17 3h2a2 2 0 0 1 2 2v2"\/>/);
@@ -871,7 +873,12 @@ describe("panel.html skills change diff highlighting", () => {
     assert.deepEqual(c.log, ["translateY(-55px)", ""]);
     // 缓动必须与入场动画同一条，否则让位行上缘与揭开前沿会错开几像素
     assert.equal(b.style.transition, "transform 1ms var(--ease-out)");
-    await new Promise((r) => setTimeout(r, 40));
+    // 收尾定时器在实现里是 ms+30=31ms。固定 sleep 40ms 只剩 9ms 余量、压测下被推迟
+    // 过到 46ms，改为带截止时间的轮询：只等「transition 被实现自己的定时器清掉」这一件事
+    const deadline = Date.now() + 1000;
+    while (b.style.transition !== "" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
     assert.equal(b.style.transition, "", "收尾要清掉内联 transition，交回基样式");
 
     // 容器滚过之后再 FLIP：内容坐标系让位移量与滚动位置无关
@@ -917,9 +924,11 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
     assert.match(panelCss, /#skillsAnomalyBody\[hidden\] \{ display: none; \}/);
     const selectors = [...panelCss.matchAll(/([^{}]*\.card-body[^{}]*)\{[^}]*display:/g)].map((m) => m[1].trim());
     assert.deepEqual(
-      selectors.filter((sel) => !/#settingsPanelAdvanced/.test(sel) && sel !== "#skillsAnomalyBody"),
+      selectors.filter((sel) => !/#settingsPanelAdvanced/.test(sel)),
       [],
-      "除设置页那张卡与本卡的 [hidden] 兜底外，不得再给 .card-body 写 display",
+      // 本卡兜底 #skillsAnomalyBody[hidden] 的选择器不含 .card-body，进不了这份清单，
+      // 由上一条 assert.match 单独钉住；这里只管「还有谁给 .card-body 写了 display」
+      "除设置页那张卡外，不得再给 .card-body 写 display",
     );
   });
 

@@ -220,7 +220,12 @@ export function realSpawnQoder({ env, args, onSpawned }) {
   });
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// `overrides` is an optional injection surface (same pattern as
+// runQoderLauncher's deps): it is spread last, so omitting it — the only form
+// the CLI entry point uses — keeps every default exactly the production
+// implementation, while tests can run main()'s wiring end-to-end without
+// touching the real relay, settings.json or a real spawn.
+export async function main(argv = process.argv.slice(2), overrides = {}) {
   const code = await runQoderLauncher({
     startRelay: () => startOpenAIRelay(),
     writeConfig: (store, port, token, sidecarRoot, settingsPath) =>
@@ -232,6 +237,7 @@ export async function main(argv = process.argv.slice(2)) {
     log: (line) => process.stderr.write(`${line}\n`),
     qoderArgs: argv,
     probeRelay: probeRelay,
+    ...overrides,
   });
   return code;
 }

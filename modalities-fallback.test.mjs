@@ -3,8 +3,6 @@ import assert from "node:assert/strict";
 import {
   fallbackModalities,
   modalitiesFromStoreModel,
-  TEXT_ONLY,
-  IMAGE_OUT,
 } from "./modalities-fallback.mjs";
 
 describe("fallbackModalities", () => {
@@ -28,27 +26,56 @@ describe("fallbackModalities", () => {
   });
 
   it("keeps embedding/tts/whisper text-only", () => {
-    assert.deepEqual(fallbackModalities("text-embedding-3-large").input, [...TEXT_ONLY.input]);
-    assert.deepEqual(fallbackModalities("whisper-1").output, [...TEXT_ONLY.output]);
-    assert.deepEqual(fallbackModalities("tts-1-hd").input, ["text"]);
+    // Pinned literals, not the exported constants: the rules table spreads
+    // TEXT_ONLY itself, so asserting against it could never catch a content
+    // regression in the constant.
+    assert.deepEqual(fallbackModalities("text-embedding-3-large"), {
+      input: ["text"],
+      output: ["text"],
+    });
+    assert.deepEqual(fallbackModalities("whisper-1"), {
+      input: ["text"],
+      output: ["text"],
+    });
+    assert.deepEqual(fallbackModalities("tts-1-hd"), {
+      input: ["text"],
+      output: ["text"],
+    });
   });
 
   it("treats image-generation families as image output", () => {
     assert.deepEqual(fallbackModalities("gpt-image-2"), {
-      input: [...IMAGE_OUT.input],
-      output: [...IMAGE_OUT.output],
+      input: ["text"],
+      output: ["image"],
     });
   });
 });
 
 describe("modalitiesFromStoreModel", () => {
   it("prefers store lists over the family fallback", () => {
+    // Store output must differ from the claude-opus-5 fallback (['text']) so
+    // the output half of this assertion actually proves the store value wins.
     assert.deepEqual(
       modalitiesFromStoreModel(
-        { inputModalities: ["text"], outputModalities: ["text"] },
+        { inputModalities: ["text"], outputModalities: ["text", "image"] },
         "claude-opus-5",
       ),
-      { input: ["text"], output: ["text"] },
+      { input: ["text"], output: ["text", "image"] },
+    );
+  });
+
+  it("falls back to family modalities when store omits or empties lists", () => {
+    assert.deepEqual(modalitiesFromStoreModel(null, "claude-opus-5"), {
+      input: ["text", "image"],
+      output: ["text"],
+    });
+    assert.deepEqual(modalitiesFromStoreModel({}, "claude-opus-5"), {
+      input: ["text", "image"],
+      output: ["text"],
+    });
+    assert.deepEqual(
+      modalitiesFromStoreModel({ inputModalities: [], outputModalities: [] }, "claude-opus-5"),
+      { input: ["text", "image"], output: ["text"] },
     );
   });
 });

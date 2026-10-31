@@ -62,6 +62,17 @@ describe("hasRunningCommand：锚优先＋根形态定证据层＋dsh 派生豁�
       [13, 12, "node.exe", "npm-cli.js install"],
     ]);
     assert.equal(hasRunningCommand(running, { rootPid: 10, anchorPid: 11 }), true, "锚下挂命令");
+
+    // 锚之上不算的钉子：包装壳下锚的兄弟进程不是证据——遍历从锚起（源码
+    // terminal-switch-guard.mjs:142 anchored ? anchorPid : rootPid），锚之上
+    // 根本不在走查范围。缺这条夹具时，实现退回「从根遍历、只跳锚子树」仍会绿。
+    const busyAboveAnchor = table([
+      ...CLAUDE_TREE,
+      [14, 10, "node.exe", "npm-cli.js install"], // 锚的兄弟：与锚同层、挂在包装壳下
+    ]);
+    assert.equal(hasRunningCommand(busyAboveAnchor, { rootPid: 10, anchorPid: 11 }), false,
+      "锚之上（兄弟层）的命令不算证据");
+
     assert.equal(hasRunningCommand(idle, { rootPid: 11, anchorPid: null }), false, "无锚时锚即根也光杆");
   });
 
@@ -264,10 +275,9 @@ describe("probeTerminalCommandTree：按需探测", () => {
     await probeTerminalCommandTree(10, { execFileFn: exec, timeoutMs: 1500 });
     assert.match(captured.args[3], /^Get-CimInstance /);
     assert.equal(captured.opts.timeout, SWITCH_GUARD_STARTUP_ALLOWANCE_MS + 1500);
-    // 两探拿到同一个查询窗（评审：复探名义 1200 实得 ≈950，比首探窄，负载下先倒）。
-    const queryWindow = (sleep, budget) => sleep + SWITCH_GUARD_STARTUP_ALLOWANCE_MS + budget - sleep - SWITCH_GUARD_STARTUP_ALLOWANCE_MS;
-    assert.equal(queryWindow(700, 1200), 1200);
-    assert.equal(queryWindow(0, 1200), 1200);
+    // 上面两条 timeout 断言已钉住「两探实得查询窗＝各自标称 timeoutMs」：
+    // 睡段与启动余量被整段补回（源码 terminal-switch-guard.mjs:204），复探的
+    // 查询窗不会比首探窄。
   });
 
   it("signal 透传给 execFile；被中止（AbortError）按 null 处置", async () => {

@@ -187,14 +187,12 @@ describe("launcher-only startup screen", () => {
     const firstScale = Number(firstTransform.match(/scale\(([\d.]+)\)/)[1]);
     assert.ok(firstScale > 1, "outer nodes start farther from the center via container scale");
     p.context.panelStartupController.ready();
-    p.elements.get("startupLogo").dispatch("load");
     p.advance(500);
     const midScale = Number(nodesG.getAttribute("transform").match(/scale\(([\d.]+)\)/)[1]);
     assert.ok(midScale < firstScale, "scale 随时间向 1 收敛");
     assert.equal(p.root.getAttribute("data-startup"), "playing");
     p.advance(1100);
     assert.equal(nodesG.getAttribute("transform"), "", "settle 后 transform 清空，几何回到算死的终值");
-    assert.equal(nodes[1].getAttribute("cy"), "121");
     assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled");
     // settle 无干等：ready 早已就位，定格帧画完隔一帧 leaving（防淡出被吞），240ms 后退场完毕。
     assert.equal(p.root.getAttribute("data-startup"), "playing");
@@ -247,10 +245,17 @@ describe("launcher-only startup screen", () => {
   it("does not block the exit chain on a PNG error", () => {
     const p = page();
     p.start();
-    p.advance(1100);
-    p.context.panelStartupController.ready();
+    p.advance(0);
+    // PNG 在动画中途加载失败：error 打 data-logo 标记（CSS 兜底挂点），但它
+    // 既不触发退场、也不是退场门槛——放行仍只看 settled && ready。error 派发
+    // 必须落在 done 之前：leave() 一旦提交（ready 后），handler 的 !done 守卫
+    // 会拦下标记，派发就成空操作了。
     p.elements.get("startupLogo").dispatch("error");
-    // PNG 失败只打 data-logo 标记，不阻塞退场：settled && ready 齐备即 leaving。
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-logo"), "failed", "PNG 失败打 data-logo 标记");
+    assert.equal(p.root.getAttribute("data-startup"), "playing", "error 本身不触发退场");
+    p.advance(1100);
+    assert.equal(p.root.getAttribute("data-startup"), "playing", "PNG 失败不改变退场门槛，仍等 ready");
+    p.context.panelStartupController.ready();
     p.advance(1101);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
     p.advance(1341);
@@ -277,7 +282,9 @@ describe("launcher-only startup screen", () => {
     p.start();
     p.advance(0);
     assert.equal(p.frames.size, 0);
-    assert.equal(p.elements.get("startupNodes").children[1].getAttribute("cy"), "121");
+    // cy 是创建时写死的常量、运行期从不回写，不足以证明「没在动」；有效证据是
+    // reduce 路径直接 settle()——容器 transform 清空，不从 scale(1.12) 重播收缩。
+    assert.equal(p.elements.get("startupNodes").getAttribute("transform"), "", "reduce 首帧即定格：容器不带 scale 变换");
     assert.equal(p.root.getAttribute("data-startup"), "playing");
     p.context.panelStartupController.ready();
     // reduce 路径 settle 立即 settled，ready 一就位触发 leave，leaving 隔一帧生效，removeTimer 为 0。
@@ -319,20 +326,28 @@ describe("launcher-only startup screen", () => {
       assert.equal(e.getAttribute("x1"), "256", "辐射线起点是中心点");
       assert.equal(e.getAttribute("y1"), "251", "辐射线起点是中心点");
     }
-    // t=0 的首个脉冲必然打点（lastBurst 初值 -Infinity），t=25 时距上一发 25ms < 50ms
-    // 不会再来一发：此刻恰有一条线处在 160ms 爬升窗内（age=25 → sin(25/160·π)·0.85 > 0），
-    // 与洗牌抽中哪条无关——断言不依赖随机结果。
+    // 行为化钉住发夹节奏（不比对源码字面量）：按 50ms 步进，t=50/100/150 同时
+    // 亮的线数恰为 1/2/3——发车间隔 50ms（t=50 才轮到第二发）与脉冲窗 160ms
+    // （窗内各发同屏叠亮）的联合结果，间隔或窗口一变序列即散架；发射帧 age=0
+    // （sin(0)=0）不亮。
+    const litCount = () => edges.filter((e) => Number(e.getAttribute("opacity")) > 0).length;
+    const litIndexes = new Set();
+    const sweep = (t) => {
+      p.advance(t);
+      edges.forEach((e, i) => { if (Number(e.getAttribute("opacity")) > 0) litIndexes.add(i); });
+      return litCount();
+    };
     p.advance(0);
-    p.advance(25);
-    const lit = edges.filter((e) => Number(e.getAttribute("opacity")) > 0);
-    assert.equal(lit.length, 1, "t=25 恰有一条脉冲线在爬升段");
-    // 窗口与间隔常数从源码字面量钉死，防调参漂移（行为断言受并发脉冲干扰不可靠）。
-    const src = html.match(/<script id="panelStartupAnimation">([\s\S]*?)<\/script>/)[1];
-    assert.ok(src.includes("time - lastBurst >= 50"), "burst 间隔 50ms");
-    assert.ok(src.includes("age < 160"), "脉冲窗口 160ms");
-    assert.ok(src.includes("age / 160 * Math.PI"), "脉冲缓动按 160ms 归一");
-    assert.ok(src.includes("reduce ? 0 : 240"), "退场重叠 240ms");
-    assert.ok(src.includes("pulseQueue = lines.map((_, i) => i)"), "脉冲池洗牌覆盖全部 21 条线（含辐射线）");
+    assert.equal(litCount(), 0, "发射帧 age=0，脉冲尚未爬升");
+    assert.equal(sweep(50), 1, "间隔 50ms：t=50 才发第二发，此刻仅首发在窗内");
+    assert.equal(sweep(100), 2, "相邻两发同窗叠亮");
+    assert.equal(sweep(150), 3);
+    // 脉冲期一路推进到 880ms 截止前：18 发（t=0 与 t=50..850）互不重复——洗牌
+    // 队列耗尽前不重灌；15 条边缘构对凑不满 18 发，亮过的线必然含辐射线。观测
+    // 止于 t=850：t≥880 起定格 lock 爬升，fixed 线改由 lock 点亮，会污染计数。
+    for (let t = 200; t <= 850; t += 50) sweep(t);
+    assert.equal(litIndexes.size, 17, "观测窗内 17 发两两不同（t=850 发射帧 age=0 尚未亮）");
+    assert.ok([...litIndexes].some((i) => i >= 15), "亮过的线含辐射线——脉冲池不豁免辐射线");
   });
 
   it("keeps page content visible under the acrylic and fades only the splash layer on leave", () => {
@@ -496,8 +511,9 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.root.getAttribute("data-startup"), "playing");
     assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), null);
     assert.equal(p.elements.get("startupNodes").children.length, 7);
-    p.advance(6_280);
-    assert.equal(nodes[1].getAttribute("cy"), "121");
+    // 第二轮 startedAt=5241：推进到 6341 恰满 1100ms 动画窗，复播应照常定格。
+    p.advance(6_341);
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled", "复播重走完整时序后照常定格");
     assert.equal(p.elements.get("panelStartup").removed, false);
   });
 

@@ -107,14 +107,20 @@ describe("runPanelLauncher", () => {
 
   it("returns 1 and does not open the panel if it never becomes ready", async () => {
     const calls = [];
+    // Fake clock: jumps past the deadline on the second read so the readiness
+    // loop terminates via the injected clock after a fixed number of polls.
+    // With the real Date.now and a synchronous sleep this test would busy-spin
+    // against the wall clock (iteration count depending on machine speed).
+    let time = 0;
     const code = await runPanelLauncher({
       probe: async () => false, // never answers
       spawnPanelHost: () => { calls.push("spawnPanelHost"); },
       openBrowser: async () => { calls.push("openBrowser"); },
       sleep: () => { calls.push("sleep"); },
       log: () => {},
-      timeoutMs: 100,
+      timeoutMs: 1000,
       intervalMs: 30,
+      now: () => { time += 5000; return time; },
     });
     assert.equal(code, 1);
     assert.ok(calls.includes("spawnPanelHost"), "should have spawned the panel host");

@@ -33,18 +33,29 @@ test("rejects parent traversal with forward slash", () => {
   assert.equal(result.valid, false);
 });
 
-test("rejects a bare .. segment", () => {
-  assert.equal(validateCredentialRef("..").valid, false);
+test("rejects bare dot segments via the traversal branch", () => {
+  for (const ref of [".", ".."]) {
+    const result = validateCredentialRef(ref);
+    assert.equal(result.valid, false);
+    // Only the dedicated directory-segment branch mentions traversal:
+    // without it ".." would still be rejected by the trailing-dot rule,
+    // so a valid===false check alone cannot pin this branch.
+    assert.match(result.reason, /traversal/);
+  }
 });
 
-test("rejects an absolute drive path", () => {
-  const result = validateCredentialRef("C:\\Users\\x\\cred.dpapi");
+test("rejects a drive-relative reference via the colon branch", () => {
+  const result = validateCredentialRef("C:cred.dpapi");
   assert.equal(result.valid, false);
-  assert.equal(/absolute|drive|separator/i.test(result.reason), true);
+  // Only the drive/stream branch produces this message; without it the
+  // colon would still trip the allowed-charset rule and hide the regression.
+  assert.match(result.reason, /drive letter/);
 });
 
-test("rejects a drive-relative reference", () => {
-  assert.equal(validateCredentialRef("C:cred.dpapi").valid, false);
+test("rejects an NTFS alternate data stream reference", () => {
+  const result = validateCredentialRef("cred.dpapi:ads");
+  assert.equal(result.valid, false);
+  assert.match(result.reason, /stream/);
 });
 
 test("rejects a UNC path", () => {
@@ -70,10 +81,6 @@ test("rejects any embedded backslash (no subdirectories)", () => {
 
 test("rejects a NUL byte", () => {
   assert.equal(validateCredentialRef("cred\u0000.dpapi").valid, false);
-});
-
-test("rejects a current-directory prefix", () => {
-  assert.equal(validateCredentialRef(".\\cred.dpapi").valid, false);
 });
 
 test("rejects a trailing dot or space (Windows name squashing)", () => {

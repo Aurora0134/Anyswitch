@@ -47,7 +47,10 @@ describe("unpackWireId pool awareness: qualified form", () => {
 
   it("checks pools before providers: a pool id that reuses a member id wins", () => {
     const store = makeStore();
-    // Pool id identical to a member provider id.
+    // Pool id identical to a member provider id. test-pool must go first: two
+    // pools may never share members, while a pool reusing its OWN member's id
+    // is the schema-legal collision this tie-break is about.
+    delete store.pools["test-pool"];
     store.pools["member-a"] = { displayName: "Same-name Pool", members: ["member-a", "member-b"] };
     const out = unpackWireId("anthropic/member-a/claude-pool", store);
     assert.equal(out.ok, true);
@@ -109,7 +112,19 @@ describe("unpackWireId pool awareness: unqualified scan", () => {
 
   it("a model carried by two pools is ambiguous", () => {
     const store = makeStore();
-    store.pools["other-pool"] = { displayName: "Other Pool", members: ["member-b"] };
+    // Two pools may not share members and each needs 2+ of its own, so the
+    // second pool gets disjoint members that both carry the model.
+    store.providers["member-c"] = {
+      displayName: "Member C",
+      baseURL: "http://c.invalid/v1",
+      models: { "claude-pool": { displayName: "Pool from C" } },
+    };
+    store.providers["member-d"] = {
+      displayName: "Member D",
+      baseURL: "http://d.invalid/v1",
+      models: { "claude-pool": { displayName: "Pool from D" } },
+    };
+    store.pools["other-pool"] = { displayName: "Other Pool", members: ["member-c", "member-d"] };
     const out = unpackWireId("claude-pool", store);
     assert.equal(out.ok, false);
     assert.equal(out.reason, UNPACK_REASON.AMBIGUOUS_UNQUALIFIED);

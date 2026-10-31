@@ -170,15 +170,24 @@ export function stripManagedBlock(text) {
     ? text.indexOf(MANAGED_BEGIN)
     : text.indexOf(LEGACY_MANAGED_BEGIN);
   if (begin === -1) return text.replace(/\s+$/, "") + (text.length ? "\n" : "");
+  // Cut off exactly the end marker that was found. The legacy apicred end
+  // marker is 2 chars shorter than MANAGED_END; slicing a legacy block at
+  // MANAGED_END.length ate the first 2 chars of whatever followed the block
+  // (e.g. "[p" of the next [providers.…] header), leaving broken TOML that
+  // kimi rejects wholesale.
+  let endMarker = MANAGED_END;
   let end = text.indexOf(MANAGED_END, begin);
-  if (end === -1) end = text.indexOf(LEGACY_MANAGED_END, begin);
+  if (end === -1) {
+    endMarker = LEGACY_MANAGED_END;
+    end = text.indexOf(LEGACY_MANAGED_END, begin);
+  }
   if (end === -1) {
     const err = new Error("refusing to overwrite kimi config.toml with a truncated Anyswitch managed block");
     err.code = "UNPARSEABLE_KIMI_CONFIG";
     throw err;
   }
   const before = text.slice(0, begin).replace(/\s+$/, "");
-  const after = text.slice(end + MANAGED_END.length).replace(/^\s+/, "");
+  const after = text.slice(end + endMarker.length).replace(/^\s+/, "");
   const parts = [];
   if (before) parts.push(before);
   if (after) parts.push(after);

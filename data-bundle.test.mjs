@@ -4,20 +4,40 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { ensureLayout, storePaths, writeStore } from "./store-io.mjs";
 import { assertSafeEntries, createDataBundleService, exportFileName, CREDENTIALS_NAME, TICKET_TTL_MS } from "./data-bundle.mjs";
 
-// 预览的暂存目录落在 %TEMP% 下、前缀固定，用调用前后的差集认出它——
-// 「密钥有没有留在盘上」这件事只能在真实文件系统上判，不能问返回值。
+// 预览的暂存目录由产品写死落在 os.tmpdir()（%TEMP%）下、前缀固定，用调用前后的
+// 差集认出它——「密钥有没有留在盘上」这件事只能在真实文件系统上判，不能问返回值。
 const importStagingDirs = () => readdirSync(tmpdir()).filter((n) => n.startsWith("anyswitch-import-"));
 function newStagingDir(before) {
   const fresh = importStagingDirs().filter((d) => !before.includes(d));
   assert.equal(fresh.length, 1, `一次预览应当只留一个暂存目录，实得 ${fresh.length} 个`);
   return join(tmpdir(), fresh[0]);
+}
+
+// 差集断言只许数到沙箱里的目录：本机面板就跑在同一台机器上，用户一次导入预览
+// 就会在真实 %TEMP% 里 mkdtemp 出同前缀目录，把「恰好一个」打成红的。os.tmpdir()
+// 逐次读 TEMP/TMP（node v24 实测非缓存），于是这几个用例把 TEMP 重定向到本用例
+// 私有的空目录，窗口结束即还原；node --test 默认串行且每文件独立进程，互不影响。
+async function inStagingSandbox(run) {
+  const sandbox = mkTestDir("anyswitch-staging-sandbox-");
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+  process.env.TEMP = sandbox;
+  process.env.TMP = sandbox;
+  delete process.env.TMPDIR;
+  try {
+    return await run(sandbox);
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }
 
 const FAKE_MARK = "enc:";
@@ -149,30 +169,37 @@ test("预览给出摘要、含明文密钥标记与来源主机", async () => {
   const m = fakeMachine();
   const service = m.service();
   const exp = await service.exportBundle({ targetDir: m.targetDir });
-  const before = importStagingDirs();
-  const preview = await service.previewBundle(exp.path);
-  assert.equal(preview.ok, true, preview.error);
-  assert.equal(preview.counts.providers, 1);
-  assert.equal(preview.counts.presets, 2);
-  assert.equal(preview.counts.skillDirs, 2);
-  assert.equal(preview.hasPlaintextKeys, true);
-  assert.equal(preview.includes.settings, true);
-  assert.equal(typeof preview.token, "string");
-  assert.ok(preview.skillsSourcePath.endsWith("skill-repo"));
-  assert.equal(preview.skillsRepoPath, m.repoPath, "预览带本机此刻的仓库路径，供落点 UI 用");
-  assert.equal(preview.skillsDefaultPath, join(m.homeDir, ".agents", "skills"), "预览带未配仓库时的默认落点");
+  await inStagingSandbox(async () => {
+    const before = importStagingDirs();
+    const preview = await service.previewBundle(exp.path);
+    assert.equal(preview.ok, true, preview.error);
+    assert.equal(preview.counts.providers, 1);
+    assert.equal(preview.counts.presets, 2);
+    assert.equal(preview.counts.skillDirs, 2);
+    assert.equal(preview.hasPlaintextKeys, true);
+    assert.equal(preview.includes.settings, true);
+    assert.equal(typeof preview.token, "string");
+    assert.ok(preview.skillsSourcePath.endsWith("skill-repo"));
+    assert.equal(preview.skillsRepoPath, m.repoPath, "预览带本机此刻的仓库路径，供落点 UI 用");
+    assert.equal(preview.skillsDefaultPath, join(m.homeDir, ".agents", "skills"), "预览带未配仓库时的默认落点");
 
-  // 用户看完摘要就走：暂存必须能被一次退出清理收走，测试也不往 %TEMP% 丢东西。
-  const stale = importStagingDirs().filter((n) => !before.includes(n));
-  service.dropAllTickets();
-  assert.equal(stale.length, 1, "预览留下一个暂存目录");
-  assert.equal(existsSync(join(tmpdir(), stale[0])), false);
+    // 用户看完摘要就走：暂存必须能被一次退出清理收走，测试也不往宿主 %TEMP% 丢东西。
+    const stale = importStagingDirs().filter((n) => !before.includes(n));
+    service.dropAllTickets();
+    assert.equal(stale.length, 1, "预览留下一个暂存目录");
+    assert.equal(existsSync(join(tmpdir(), stale[0])), false);
+  });
 });
 
 test("预览拒绝：非 zip、缺 manifest、格式版本不符、store 非法", async () => {
   const m = fakeMachine();
   const service = m.service();
-  assert.equal((await service.previewBundle(join(m.root, "notes.txt"))).ok, false);
+  // 非 zip 拒绝必须出自扩展名守卫本身：造一个真实存在的 .txt，存在性守卫不能替它挡。
+  const notZip = join(m.root, "notes.txt");
+  writeFileSync(notZip, "not a zip", "utf8");
+  const zipRefusal = await service.previewBundle(notZip);
+  assert.equal(zipRefusal.ok, false);
+  assert.match(zipRefusal.error, /\.zip/, "扩展名守卫要先于存在性守卫挡住非 zip 文件");
 
   const bad = mkTestDir("anyswitch-bundle-bad-");
   let badSeq = 0;
@@ -206,11 +233,9 @@ test("预览拒绝：非 zip、缺 manifest、格式版本不符、store 非法"
   await pack(badStore.staging, badStore.zip);
   assert.match((await service.previewBundle(badStore.zip)).error, /不合法|provider/);
 
-  const staleVersion = writeBadZip({ "manifest.json": JSON.stringify({ format: 1 }), "store.json": JSON.stringify({ ...validStore(), version: 1 }) });
-  await pack(staleVersion.staging, staleVersion.zip);
-  const stale = await service.previewBundle(staleVersion.zip);
-  assert.equal(stale.ok, false);
-  assert.match(stale.error, /不合法/);
+  // store 版本不是 2 不另设用例：validateStore 先报 "version: must be 2"（归
+  // store-schema.test.mjs 管），上面 badStore 已覆盖 inspectBundle 的"不合法"整包拒绝；
+  // inspectBundle 里专门的版本文案分支在其之前就被拦下，实际不可达。
   rmSync(bad, { recursive: true, force: true });
 });
 
@@ -275,7 +300,13 @@ test("换机往返：导出 → 清空 → 导入，数据回到原样且密钥�
   const preview = await service.previewBundle(exp.path);
   const applied = await service.applyBundle({ token: preview.token });
   assert.equal(applied.ok, true, applied.error);
-  assert.equal(readFileSync(src.paths.storeFile, "utf8"), before, "store.json 应逐字节回到导入前");
+  // 导出原样带上盘上文本、落定经 writeStore 重新序列化：契约是"数据回到原样"，
+  // 不是逐字节复刻——手改过缩进/换行的 store.json 合法地会被规范化。
+  assert.deepEqual(
+    JSON.parse(readFileSync(src.paths.storeFile, "utf8")),
+    JSON.parse(before),
+    "store.json 数据应回到导入前",
+  );
   assert.equal(existsSync(join(src.root, "prompts.json")), true);
   const plain = await fakeUnprotect(readFileSync(join(src.paths.credentialsDir, "alpha.dpapi"), "utf8"));
   assert.equal(plain.toString(), "sk-secret-alpha");
@@ -448,20 +479,22 @@ test("预览：明文密钥读出后立刻从暂存里摘掉，落定仍按票�
   const exp = await src.service().exportBundle({ targetDir: src.targetDir });
   const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
   const importer = dst.service();
-  const before = importStagingDirs();
-  const preview = await importer.previewBundle(exp.path);
-  assert.equal(preview.ok, true, preview.error);
-  assert.equal(preview.counts.credentials, 1, "摘要里的密钥计数按包内实数报");
+  await inStagingSandbox(async () => {
+    const before = importStagingDirs();
+    const preview = await importer.previewBundle(exp.path);
+    assert.equal(preview.ok, true, preview.error);
+    assert.equal(preview.counts.credentials, 1, "摘要里的密钥计数按包内实数报");
 
-  const staging = newStagingDir(before);
-  assert.equal(existsSync(join(staging, CREDENTIALS_NAME)), false, "明文密钥不该留在 %TEMP% 里");
-  assert.equal(existsSync(join(staging, "store.json")), true, "不含密钥的部分留着给落定用");
+    const staging = newStagingDir(before);
+    assert.equal(existsSync(join(staging, CREDENTIALS_NAME)), false, "明文密钥不该留在 %TEMP% 里");
+    assert.equal(existsSync(join(staging, "store.json")), true, "不含密钥的部分留着给落定用");
 
-  const applied = await importer.applyBundle({ token: preview.token });
-  assert.equal(applied.ok, true, applied.error);
-  assert.equal(applied.applied.credentials, 1, "落定取票据内存里那份，盘上删了也不影响");
-  assert.equal(readFileSync(join(dst.paths.credentialsDir, "alpha.dpapi"), "utf8").startsWith(FAKE_MARK), true);
-  assert.equal(existsSync(staging), false, "落定完暂存目录整个收走");
+    const applied = await importer.applyBundle({ token: preview.token });
+    assert.equal(applied.ok, true, applied.error);
+    assert.equal(applied.applied.credentials, 1, "落定取票据内存里那份，盘上删了也不影响");
+    assert.equal(readFileSync(join(dst.paths.credentialsDir, "alpha.dpapi"), "utf8").startsWith(FAKE_MARK), true);
+    assert.equal(existsSync(staging), false, "落定完暂存目录整个收走");
+  });
 });
 
 test("弃用的预览：过期后由下一次预览扫掉，旧票据同时失效", async () => {
@@ -470,23 +503,24 @@ test("弃用的预览：过期后由下一次预览扫掉，旧票据同时失�
   const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
   let clock = 1_700_000_000_000;
   const svc = createDataBundleService({ base: dst.base, protect: fakeProtect, unprotect: fakeUnprotect, now: () => clock });
+  await inStagingSandbox(async () => {
+    const before = importStagingDirs();
+    const first = await svc.previewBundle(exp.path);
+    const abandoned = newStagingDir(before);
 
-  const before = importStagingDirs();
-  const first = await svc.previewBundle(exp.path);
-  const abandoned = newStagingDir(before);
+    clock += TICKET_TTL_MS + 1;
+    const second = await svc.previewBundle(exp.path);
+    assert.equal(second.ok, true, second.error);
+    assert.equal(existsSync(abandoned), false, "过期暂存该被顺带扫掉，而不是等到有人拿同一张票再来");
+    assert.equal(first.token === second.token, false);
+    // 扫掉旧的之后，相对第一次之前只多出第二次这一个目录。
+    const secondStaging = newStagingDir(before);
 
-  clock += TICKET_TTL_MS + 1;
-  const second = await svc.previewBundle(exp.path);
-  assert.equal(second.ok, true, second.error);
-  assert.equal(existsSync(abandoned), false, "过期暂存该被顺带扫掉，而不是等到有人拿同一张票再来");
-  assert.equal(first.token === second.token, false);
-  // 扫掉旧的之后，相对第一次之前只多出第二次这一个目录。
-  const secondStaging = newStagingDir(before);
-
-  const stale = await svc.applyBundle({ token: first.token });
-  assert.equal(stale.ok, false);
-  assert.match(stale.error, /过期|无效/);
-  rmSync(secondStaging, { recursive: true, force: true });
+    const stale = await svc.applyBundle({ token: first.token });
+    assert.equal(stale.ok, false);
+    assert.match(stale.error, /过期|无效/);
+    rmSync(secondStaging, { recursive: true, force: true });
+  });
 });
 
 test("退出清理：dropAllTickets 把在用的暂存与内存副本一起丢", async () => {
@@ -494,26 +528,33 @@ test("退出清理：dropAllTickets 把在用的暂存与内存副本一起丢",
   const exp = await src.service().exportBundle({ targetDir: src.targetDir });
   const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
   const svc = dst.service();
-  const before = importStagingDirs();
-  const preview = await svc.previewBundle(exp.path);
-  const staging = newStagingDir(before);
-  svc.dropAllTickets();
-  assert.equal(existsSync(staging), false, "面板宿主退出时不该把解开的包留在 %TEMP%");
-  const late = await svc.applyBundle({ token: preview.token });
-  assert.equal(late.ok, false, "清完再拿票据来落定要被拒");
+  await inStagingSandbox(async () => {
+    const before = importStagingDirs();
+    const preview = await svc.previewBundle(exp.path);
+    const staging = newStagingDir(before);
+    svc.dropAllTickets();
+    assert.equal(existsSync(staging), false, "面板宿主退出时不该把解开的包留在 %TEMP%");
+    const late = await svc.applyBundle({ token: preview.token });
+    assert.equal(late.ok, false, "清完再拿票据来落定要被拒");
+  });
 });
 
 test("上次进程留下的过期暂存会在建服务时扫掉，正在用的动不到", () => {
-  const staleDir = join(tmpdir(), "anyswitch-import-stalecase");
-  const freshDir = join(tmpdir(), "anyswitch-import-freshcase");
-  for (const d of [staleDir, freshDir]) {
-    mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, "store.json"), "{}", "utf8");
+  // 目录名必须每次唯一（mkdtemp 随机后缀）：这个用例故意在真实 %TEMP% 里造夹具，
+  // 固定名撞上一次中断留下的残留时，Windows 重写同名文件不刷新父目录 mtime，
+  // "新"目录会一直顶着旧 mtime 被判定过期删掉，断言自己打自己的脸。
+  const staleDir = mkdtempSync(join(tmpdir(), "anyswitch-import-stalecase-"));
+  const freshDir = mkdtempSync(join(tmpdir(), "anyswitch-import-freshcase-"));
+  try {
+    writeFileSync(join(staleDir, "store.json"), "{}", "utf8");
+    writeFileSync(join(freshDir, "store.json"), "{}", "utf8");
+    const past = new Date(Date.now() - TICKET_TTL_MS - 60_000);
+    utimesSync(staleDir, past, past);
+    createDataBundleService({ base: fakeMachine().base });
+    assert.equal(existsSync(staleDir), false, "超过有效期的孤儿目录该收走");
+    assert.equal(existsSync(freshDir), true, "mtime 还新的是别人正在用的，不能动");
+  } finally {
+    // 断言失败也不能把夹具留给下一次运行。
+    for (const d of [staleDir, freshDir]) rmSync(d, { recursive: true, force: true });
   }
-  const past = new Date(Date.now() - TICKET_TTL_MS - 60_000);
-  utimesSync(staleDir, past, past);
-  createDataBundleService({ base: fakeMachine().base });
-  assert.equal(existsSync(staleDir), false, "超过有效期的孤儿目录该收走");
-  assert.equal(existsSync(freshDir), true, "mtime 还新的是别人正在用的，不能动");
-  rmSync(freshDir, { recursive: true, force: true });
 });

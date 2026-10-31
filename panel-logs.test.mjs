@@ -2,10 +2,12 @@ import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createPanelRouter } from "./panel.mjs";
 import { dayKey } from "./usage-journal.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // GET /panel/api/stats/logs（请求日志路由）：fakeReqRes + 注入 mock 模式与
 // panel-stats.test.mjs 同款，不碰真实 store/relay/usage 目录。journal 注入
-// readRequestsLog mock（捕获入参），渠道名经 storeService mock 的 board 名表解析。
+// readRequestsLog mock（捕获入参），渠道名经 storeService mock 的 board 名表解析；
+// storeService 一律注入（默认空名表），路由不会惰性建真服务去读磁盘。
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -33,13 +35,18 @@ function fakeReqRes(url, method = "GET") {
 
 function logsRouter(overrides = {}) {
   return createPanelRouter({
-    storePaths: { root: "C:/fake/anyswitch" },
+    // root 用本进程独享的临时目录当占位：下面所有真实读写面（journal/store/stats）
+    // 都注入了 mock，这个 root 不会被碰到——不与其他测试文件共享 C:/fake/anyswitch。
+    storePaths: { root: mkTestDir("anys-panel-logs-root-") },
     logger: null,
     metricsCollector: null,
-    aliasResolver: null,
-    aliasPath: null,
     fetchRelayAgents: async () => null,
     statsService: { getState: async () => ({ ok: true }) }, // 不触发真实聚合
+    // 渠道名解析走空名表 board mock（providerLabel 回退裸 id）：不给真 storeService
+    // 留惰性建服务读 <root>/store.json 的口子，裸 id 回退断言不依赖磁盘上「恰好没有」。
+    storeService: {
+      getBoardState: async () => ({ ok: true, providerNames: {}, poolNames: {} }),
+    },
     ...overrides,
   });
 }
@@ -60,10 +67,13 @@ function mockLogsJournal(result) {
   };
 }
 
-// 与路由同一套 range → [fromDay, toDay] 推算（日历运算，含当天往前推）
-function expectedRange(range) {
+// 与路由同一套 range → [fromDay, toDay] 推算（日历运算，含当天往前推）。
+// 时刻必须传路由自己那一次 Date.now()——响应体的 generatedAt 就是它（路由里
+// 同一个 nowTs 同时喂 todayKey 和 generatedAt）。断言侧另取当前时间的话，跨
+// 本地午夜时「今天」会与请求时刻算出的不一致，用例假红。
+function expectedRange(range, atTs) {
   const back = { today: 0, "7d": 6, "30d": 29, all: 89 }[range];
-  const toDay = dayKey(Date.now());
+  const toDay = dayKey(atTs);
   const [y, m, d] = toDay.split("-").map(Number);
   return { fromDay: dayKey(new Date(y, m - 1, d - back).getTime()), toDay };
 }
@@ -82,7 +92,7 @@ describe("panel router request-logs route", () => {
     assert.equal(body.pageSize, 20);
     assert.equal(typeof body.generatedAt, "number");
     const arg = journal.calls[0];
-    const { fromDay, toDay } = expectedRange("today");
+    const { fromDay, toDay } = expectedRange("today", body.generatedAt);
     assert.equal(arg.fromDay, fromDay);
     assert.equal(arg.toDay, toDay);
     assert.equal(arg.sortBy, "ts");
@@ -99,17 +109,20 @@ describe("panel router request-logs route", () => {
   it("range=7d/30d/all map to closed day windows; bogus range falls back to today", async () => {
     const journal = mockLogsJournal();
     const router = logsRouter({ usageJournal: journal });
+    const seen = [];
     for (const range of ["7d", "30d", "all", "bogus", "year"]) {
       const { req, res, json } = fakeReqRes(`/panel/api/stats/logs?range=${range}`);
       await router.handle(req, res);
       assert.equal(res.statusCode, 200);
       const expectKey = ["7d", "30d", "all"].includes(range) ? range : "today";
       assert.equal(json().range, expectKey, `range=${range} → ${expectKey}`);
+      // generatedAt 是路由本次请求用的 nowTs，期望窗由它推算才不会跨午夜漂移
+      seen.push([expectKey, json().generatedAt]);
     }
     assert.deepEqual(
       journal.calls.map((c) => [c.fromDay, c.toDay]),
-      ["7d", "30d", "all", "today", "today"].map((r) => {
-        const { fromDay, toDay } = expectedRange(r);
+      seen.map(([r, at]) => {
+        const { fromDay, toDay } = expectedRange(r, at);
         return [fromDay, toDay];
       }),
     );

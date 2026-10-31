@@ -367,8 +367,14 @@ describe("writeCodexConfigTomlWithBackup", () => {
   it("writes atomically, backs up the previous file, and prunes to the newest 5 backups", () => {
     const dir = mkTestDir("codex-merge-test-");
     const filePath = join(dir, "config.toml");
-    for (let i = 1; i <= 6; i++) {
-      writeFileSync(join(dir, `config.backup.2020-01-0${i}T00-00-00-000Z.toml`), `old${i}`, "utf8");
+    // 夹具备份名与源码 timestamp() 同格式（ISO，[:.]→"-"，字典序=时间序），但
+    // 落在真实时钟的过去（分钟级）：新备份由写入时刻的时钟生成，必然排在所有
+    // 夹具之后——不依赖运行机器的时钟晚于任何硬编码日期。名字只算一次存进数
+    // 组，断言时不能重算（时钟已前进，毫秒位会对不上）。
+    const fixtureNames = Array.from({ length: 6 }, (_, i) =>
+      `config.backup.${new Date(Date.now() - (6 - i) * 60_000).toISOString().replace(/[:.]/g, "-")}.toml`);
+    for (const [i, name] of fixtureNames.entries()) {
+      writeFileSync(join(dir, name), `old${i + 1}`, "utf8");
     }
     writeFileSync(filePath, "# old", "utf8");
     const result = writeCodexConfigTomlWithBackup(filePath, "# new");
@@ -378,8 +384,12 @@ describe("writeCodexConfigTomlWithBackup", () => {
     assert.equal(readFileSync(filePath, "utf8"), "# new");
     const backups = readdirSync(dir).filter((n) => n.startsWith("config.backup.")).sort();
     assert.equal(backups.length, 5);
-    assert.equal(backups[0], "config.backup.2020-01-03T00-00-00-000Z.toml", "oldest backups pruned");
-    assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
+    // 7 个备份裁到最新 5 个：最近 4 个夹具留，最旧 2 个被裁，新备份居末。
+    assert.deepEqual(
+      backups,
+      [...fixtureNames.slice(2), result.backupPath.split(/[\\/]/).pop()],
+      "newest 5 kept in name order: the four freshest fixtures plus the fresh backup",
+    );
   });
 
   it("reports unchanged without creating a backup", () => {
@@ -396,19 +406,15 @@ describe("writeCodexConfigTomlWithBackup", () => {
 });
 
 describe("codex sidecar", () => {
-  it("readSidecar returns empty list for missing file", () => {
+  // 读写语义（missing→空、排序、精确字节格式）是 merge-common 共享实现的契约，
+  // merge-common.test.mjs 已逐条覆盖；codex 侧唯一的本地契约是 sidecar 文件名
+  // ——卸载清理（uninstall-agent）按这个名字定位 codex 的 sidecar。这里钉住
+  // 文件名，并验证包装器确实经由这条路径读写（委托没接错地方）。
+  it("pins the codex-sidecar.json filename and round-trips through it", () => {
     const dir = mkTestDir("codex-sidecar-");
-    assert.deepEqual(readSidecar(dir), { providers: [] });
-  });
-
-  it("writeSidecar and readSidecar round-trip sorted in the shared format", () => {
-    const dir = mkTestDir("codex-sidecar-");
+    assert.equal(sidecarPath(dir), join(dir, "codex-sidecar.json"));
     writeSidecar(dir, ["zeta", "alpha"]);
     assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] });
-    assert.equal(
-      readFileSync(sidecarPath(dir), "utf8"),
-      '{\n  "providers": [\n    "alpha",\n    "zeta"\n  ]\n}\n',
-    );
   });
 });
 
@@ -433,19 +439,22 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(three.slug, "beta~m-one");
     assert.equal(three.display_name, "shadowed · beta", "the second channel's copy keeps its own metadata");
     for (const [index, entry] of catalog.models.entries()) {
-      assert.equal(entry.visibility, "list");
-      assert.equal(entry.supported_in_api, true);
+      // buildCodexModelCatalog 的承诺是模板逐字段 verbatim 透传（能力字段决定
+      // codex 的特性门控）。断言对齐模板本身而非钉死模板值：模板 asset 从
+      // upstream 刷新时合并逻辑没坏，这里不该红。
+      assert.equal(entry.visibility, CATALOG_TEMPLATE.visibility);
+      assert.equal(entry.supported_in_api, CATALOG_TEMPLATE.supported_in_api);
+      assert.deepEqual(entry.truncation_policy, CATALOG_TEMPLATE.truncation_policy);
+      assert.deepEqual(entry.model_messages, CATALOG_TEMPLATE.model_messages);
+      assert.deepEqual(entry.supported_reasoning_levels, CATALOG_TEMPLATE.supported_reasoning_levels, "no effort catalog passed in: the template's frozen set survives");
+      assert.equal(entry.default_reasoning_level, CATALOG_TEMPLATE.default_reasoning_level);
       assert.equal(entry.multi_agent_version, "v2", "without it codex disables the subagent tools");
       assert.equal(entry.priority, index + 1);
-      assert.ok(Array.isArray(entry.supported_reasoning_levels) && entry.supported_reasoning_levels.length > 0);
-      assert.equal(typeof entry.default_reasoning_level, "string");
-      assert.equal(entry.truncation_policy?.mode, "tokens");
-      assert.equal(typeof entry.model_messages?.instructions_template, "string");
-      assert.ok(entry.model_messages.instructions_template.length > 0, "catalog entries without instructions fail codex's config load");
       // request-shaping overrides for non-OpenAI upstreams
       assert.equal(entry.supports_search_tool, false);
       assert.equal(entry.prefer_websockets, false, "the relay has no WebSocket surface — codex must stay on HTTP");
       assert.equal(entry.support_verbosity, false);
+      assert.equal(entry.default_verbosity, null, "verbosity is an OpenAI-only knob the relay never forwards");
       assert.equal(entry.supports_image_detail_original, false);
     }
     assert.equal(buildCodexModelCatalog(new Map(), CATALOG_TEMPLATE), null, "empty model set builds no catalog");

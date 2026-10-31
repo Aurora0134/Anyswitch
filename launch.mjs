@@ -289,6 +289,11 @@ export function createProductionDeps({
   logger = null,
   agentId = "claude",
   credentialCacheEnabledGate,
+  // Optional fetch used ONLY for the session reporter's outbound POST to the
+  // panel's /panel/api/session/report endpoint. Default stays the global
+  // fetch; tests inject a no-op so a run never talks to the resident panel
+  // on 47821 (same injection-surface rule as runGrokLauncher's doors).
+  sessionReporterFetchFn,
 } = {}) {
   function loadStore() {
     const loaded = ioLoadStore(paths);
@@ -334,6 +339,7 @@ export function createProductionDeps({
     reportUrl: "http://127.0.0.1:47821/panel/api/session/report",
     journal: usageJournal,
     agentId,
+    ...(sessionReporterFetchFn ? { fetchFn: sessionReporterFetchFn } : {}),
   });
 
   return {

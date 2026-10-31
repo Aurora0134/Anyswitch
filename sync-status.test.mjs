@@ -50,13 +50,21 @@ describe("syncStatusFromResult 映射", () => {
   it("全部端点成功：ok=true、failed 为空、synced 全名单", () => {
     const synced = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok"];
     const result = { ok: true, code: 0, stdout: `${summaryLine({ ok: true, synced, failed: [] })}\n`, stderr: "" };
+    const beforeMs = Date.now();
     const status = syncStatusFromResult(result, "startup");
+    const afterMs = Date.now();
     assert.equal(status.ok, true);
     assert.deepEqual(status.failed, []);
     assert.deepEqual(status.synced, synced);
     assert.equal(status.source, "startup");
     assert.equal(status.error, undefined);
-    assert.ok(Number.isFinite(Date.parse(status.at)), "at 是可解析的 ISO 时间");
+    // at 是本次映射时刻的 ISO 时间戳，且逐次同步各不相同：前端拿它做失败
+    // toast 判重（字符串等值），读取侧只认 string。钉住「可解析 + 落在调用
+    // 前后窗口内」，写死或漏写 at 的实现都会在此失败（Date.parse 对按规格
+    // 序列化的毫秒级 ISO 串往返精确，窗口无需留容差）。
+    const atMs = Date.parse(status.at);
+    assert.ok(Number.isFinite(atMs), "at 是可解析的时间");
+    assert.ok(atMs >= beforeMs && atMs <= afterMs, `at 反映本次映射时刻，实际 ${status.at}`);
   });
 
   it("部分端点失败（退出码仍为 0）：ok=false、failed 点名、不带 error", () => {

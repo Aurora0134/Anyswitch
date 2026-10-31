@@ -67,7 +67,21 @@ function makeShimPsSpawn(execFn) {
 }
 
 function testCollector(opts) {
-  const patched = { loadSparkSettings: false, execFn: silentExec, ...opts };
+  const patched = {
+    // Hermetic defaults (census): a pid-form kimi fixture row would make every
+    // scan round read the REAL ~/.kimi-code/server/instances registry (the
+    // collector falls back to readKimiServerInstances with process.env when no
+    // kimiRegistryLookup is injected), so pin it to "no registrations" — the
+    // surface-promotion path has its own stubbed tests in agent-metrics.test.mjs.
+    kimiRegistryLookup: async () => new Map(),
+    // `false` was meant to disable spark-settings reads but falls through
+    // `options.loadSparkSettings || null` to the REAL loadSettings()
+    // (%LOCALAPPDATA%\Anyswitch\settings.json). A function returning null is
+    // the actual off switch (agent-metrics.mjs: typeof check → skip).
+    loadSparkSettings: () => null,
+    execFn: silentExec,
+    ...opts,
+  };
   if (!patched.spawnFn) patched.spawnFn = makeShimPsSpawn(patched.execFn);
   return createAgentMetricsCollector(patched);
 }
@@ -166,11 +180,13 @@ describe("per-instance aggregate tracking", () => {
     // 进程); qoder became instance-capable with the terminal-sidebar fix
     // (2026-10-15: qodercli.exe 的实例身份只能来自 socket 反查——它的 provider
     // 配置写不进自定义请求头，聚合-only 等于虚拟终端 Qoder 会话永远绑不上实例
-    // 行)。zcode keeps the aggregate-only shape. claude 也在这一组里，
-    // 但理由不同：它有一个 instanceBuckets.claude 承载常驻中继的流量，却**不**
-    // 下发 instances 数组——claude 卡是 per-session 报表，那些桶计数由
-    // getActiveClaudeSessions 按 PID 并进会话行（见 agent-instances.test.mjs 的
-    // 「常驻中继流量按连接属主进程落会话行」一组测试）。
+    // 行)。只有 zcode 仍是聚合-only 形状：它没有 instanceBuckets 桶，带
+    // instanceId 的请求也不会开出实例行。claude 则**会**下发 instances 数组，
+    // 但来源与本组不同——它就是 per-session 报表行本身（claudeSessionsFormatted
+    // 同时填入 sessions 与 instances），而不是 instanceSnapshots("claude")；
+    // instanceBuckets.claude 只承载常驻中继的流量，由 getActiveClaudeSessions
+    // 按 PID 并进会话行，自身不产生实例行（见本文件「claude 常驻中继流量按连接
+    // 属主进程落会话行」一组）。
     const zcodeAgent = status.find((a) => a.id === "zcode");
     assert.equal("instances" in zcodeAgent, false, "zcode must stay aggregate-only");
     const claude = status.find((a) => a.id === "claude");
@@ -894,7 +910,9 @@ describe("claude 常驻中继流量按连接属主进程落会话行", () => {
   }
 
   function claudeCollector(execFn, opts = {}) {
-    const patched = { loadSparkSettings: false, execFn, ...opts };
+    // loadSparkSettings: () => null，同 testCollector——false 会落回真实
+    // loadSettings()，每个用例都在偷读生产 settings.json。
+    const patched = { loadSparkSettings: () => null, execFn, ...opts };
     patched.spawnFn = makeShimPsSpawn(execFn);
     return createAgentMetricsCollector(patched);
   }

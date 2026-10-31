@@ -22,6 +22,66 @@ const STORE = {
   },
 };
 
+// ── 夹具级注入面 ────────────────────────────────────────────────────────────
+// handler 默认会按请求读真实 %LOCALAPPDATA%\Anyswitch 下的 settings.json 与
+// thinking-efforts.db.json（effort-injection.mjs 的 defaultEffortInjector、
+// relay-settings.mjs 的两个图片降级闸）。测试必须注入定值，转发体才不随开发机
+// 状态漂移。no-op 注入器与 createEffortInjector 同一接口（inject/withoutEffort/
+// noteRejected/isRejected），injected 恒 null 即永不触发拒绝重试路径。
+const NO_OP_EFFORT_INJECTOR = {
+  inject: ({ body }) => ({ body, injected: null }),
+  withoutEffort: (body) => body,
+  noteRejected: () => {},
+  isRejected: () => false,
+};
+// 闸值取生产默认（relay-settings.mjs DEFAULT_IMAGE_FALLBACK / DEFAULT_IMAGE_HEURISTIC
+// 均为 true），只去掉磁盘读，不改判定形状。
+const PINNED_IMAGE_GATES = { imageFallbackGate: () => true, imageHeuristicGate: () => true };
+// 传输层夹具显式钉住保活配置：与 stream-pipe.mjs 在 deps 未注入 getKeepAliveConfig
+// 时的回退对象同一形状（无 mode ⇒ 不做整轮扣留、不发 ping）。本文件主体断言的
+// 直通/结构化错误/502 状态行语义都以此为前提——per-launch 宿主（*-
+// launcher.mjs 的 createOpenAIProductionDeps 不转出该键）线上跑的正是这一形状；
+// 常驻宿主生产默认（mode:"enhanced" 整轮扣留）的对应行为由
+// openai-server-keepalive.test.mjs 专门覆盖，本文件下方 "enhanced keep-alive
+// mode" 一组补齐其状态行/SSE 语义的集成缺口。
+const PINNED_KEEPALIVE = { getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 500 }) };
+// enhanced 对应用例的配置：mode 与 maxRetries 取生产默认
+// （relay-settings.mjs DEFAULT_KEEPALIVE_CONFIG），仅把 backoffMs 缩短以提速。
+const ENHANCED_KEEPALIVE = { getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 2, backoffMs: 10 }) };
+const enhancedDeps = (upstreamBody) => ({ ...deps(upstreamBody), ...ENHANCED_KEEPALIVE });
+
+// A live deepseek-channel wire shape: choices + object only, no id/created/model.
+const ENVELOPELESS_SSE = [
+  'data: {"choices":[{"delta":{"content":"hi"},"index":0}],"object":"chat.completion.chunk"}\n\n',
+  'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"object":"chat.completion.chunk"}\n\n',
+  "data: [DONE]\n\n",
+];
+
+// 把 ENVELOPELESS_SSE 发过一回 chat/completions，带回客户端收到的字节。depsBuilder
+// 参数让直通配置与 enhanced 扣留配置共用同一条发送路径。
+async function fetchEnvelopelessAs(agentHeader, model, depsBuilder = deps) {
+  const upstreamBody = (async function* () {
+    const encoder = new TextEncoder();
+    for (const part of ENVELOPELESS_SSE) yield encoder.encode(part);
+  })();
+  let text = "";
+  await withServer(depsBuilder(upstreamBody), async (port) => {
+    const headers = {
+      authorization: TOKEN,
+      "content-type": "application/json",
+      ...(agentHeader === null ? {} : { "x-agent-id": agentHeader }),
+    };
+    const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hello" }] }),
+    });
+    assert.equal(res.status, 200);
+    text = await res.text();
+  });
+  return text;
+}
+
 function deps(upstreamBody) {
   return {
     token: TOKEN,
@@ -30,6 +90,9 @@ function deps(upstreamBody) {
     upstreamFetch: async () => ({ ok: true, status: 200, body: upstreamBody }),
     recordGeneration: () => {},
     readGeneration: () => null,
+    ...PINNED_KEEPALIVE,
+    ...PINNED_IMAGE_GATES,
+    effortInjector: NO_OP_EFFORT_INJECTOR,
   };
 }
 
@@ -37,11 +100,28 @@ async function withServer(deps, fn) {
   const server = createOpenAIRelayServer(deps);
   // Explicit port 0: listenLoopback's default is the production relay port
   // (47821); a test must never bind or probe the real relay.
-  const { port, close } = await listenLoopback(server, 0);
+  const { port, close } = await listenTestPort(server);
   try {
     return await fn(port);
   } finally {
     await close();
+  }
+}
+
+// 本机（Windows）动态端口范围是 1024-15000，覆盖了 fetch 规范的屏蔽端口表
+// （1719/2049/5060/6000/6566/6665-6669/6697/10080）。listenLoopback(server, 0)
+// 抽中这类端口时监听本身完全正常，但测试的 undici fetch 客户端拒绝向其发请求，
+// 整条用例以 "Error: bad port" 假红。绑定时换到非屏蔽端口，与断言无关。
+const FETCH_BLOCKED_PORTS = new Set([
+  1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566,
+  6665, 6666, 6667, 6668, 6669, 6697, 10080,
+]);
+
+async function listenTestPort(server) {
+  for (;;) {
+    const bound = await listenLoopback(server, 0);
+    if (!FETCH_BLOCKED_PORTS.has(bound.port)) return bound;
+    await bound.close();
   }
 }
 
@@ -208,7 +288,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await postChat(port);
       assert.equal(res.status, 200);
@@ -242,7 +322,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -267,7 +347,9 @@ describe("openai relay transport", () => {
     }
   });
 
-  it("routes requests with an opencode User-Agent to opencode metrics instead of the zcode fallback", async () => {
+  it("routes requests with an opencode User-Agent to opencode metrics", async () => {
+    // UA 识别是 opencode 未走 launcher 直连时的防线；识别不出时归属 null（无
+    // 兜底行）——「归属不明」语义由 "serves unidentified requests..." 用例专测。
     let startedMeta = null;
     const fakeCollector = {
       startRequest: (meta) => {
@@ -289,7 +371,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -329,8 +411,11 @@ describe("openai relay transport", () => {
       const server = createOpenAIRelayServer({
         ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
         metricsCollector: fakeCollector,
+        // 生产宿主（launch.mjs / relay-host.mjs）恒注入 socketOwner；不接桩的
+        // 夹具会让 socket pid 兜底静默失效，测出的是夹具自身的残缺而非产品行为。
+        socketOwner: { lookup: () => 4242, onRefresh: () => () => {} },
       });
-      const { port, close } = await listenLoopback(server, 0);
+      const { port, close } = await listenTestPort(server);
       try {
         const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
           method: "POST",
@@ -378,11 +463,12 @@ describe("openai relay transport", () => {
       assert.equal(meta.instanceId, "opencode-sess-ses_real");
     });
 
-    it("drops the tag when no session header rides along", async () => {
+    it("falls back to the connection owner pid when no session header rides along", async () => {
       // 无会话头（后台/内部请求或更早的版本）：服务继承来的标签已经过期，
-      // 不能当身份用；socket 未解析时就按无身份处理。
+      // 头值档被整体跳过（UNTRUSTED 集合），绝不能当身份用；但身份不是凭空
+      // 消失——生产里宿主恒接 socketOwner，连接属主进程合成 opencode-<pid>。
       const meta = await instanceMetaForChat({ "x-agent-instance": "anys-oc-probe-12760" });
-      assert.equal(meta.instanceId, null);
+      assert.equal(meta.instanceId, "opencode-4242", "stale tag dropped, connection owner names the row");
     });
 
     it("falls back to the x-opencode-session-id spelling", async () => {
@@ -419,7 +505,7 @@ describe("openai relay transport", () => {
       logger: { warn: (line) => warns.push(line), info: () => {} },
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await postChat(port);
       assert.equal(res.status, 200);
@@ -457,7 +543,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -506,7 +592,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     const chat = (segment, headers = {}) =>
       fetch(`http://127.0.0.1:${port}/openai/${segment}/v1/chat/completions`, {
         method: "POST",
@@ -539,7 +625,10 @@ describe("openai relay transport", () => {
     }
   });
 
-  it("normalizes a known x-agent-id value with stray case and whitespace", async () => {
+  it("maps a known x-agent-id value to its canonical id regardless of casing", async () => {
+    // 值域归一（openai-server.mjs explicitAgentId 的 toLowerCase）让大小写
+    // 拼写差异不产生幽灵端点。HTTP 头值在传输层已被 trim，用例里发带空格的
+    // 头只证明端到端不因脏写法而失败——服务端 trim 不在本用例可观察面上。
     let startedMeta = null;
     const fakeCollector = {
       startRequest: (meta) => {
@@ -561,7 +650,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -606,7 +695,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -651,7 +740,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -675,7 +764,10 @@ describe("openai relay transport", () => {
     }
   });
 
-  it("sniffs a grok-cli User-Agent as grok instead of the zcode fallback", async () => {
+  it("sniffs a grok-cli User-Agent as grok", async () => {
+    // UA 识别是无 x-agent-id 时的归属通道之一；四通道全落空记 null，不再有
+    // zcode 兜底（见 openai-server.mjs openaiAgentIdFrom 的注释与
+    // "serves unidentified requests..." 用例）。
     let startedMeta = null;
     const fakeCollector = {
       startRequest: (meta) => {
@@ -697,7 +789,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -770,35 +862,7 @@ describe("openai relay transport", () => {
   });
 
   describe("chunk-envelope repair is gated on grok alone", () => {
-    // A live deepseek-channel wire shape: choices + object only, no id/created/model.
-    const ENVELOPELESS_SSE = [
-      'data: {"choices":[{"delta":{"content":"hi"},"index":0}],"object":"chat.completion.chunk"}\n\n',
-      'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"object":"chat.completion.chunk"}\n\n',
-      "data: [DONE]\n\n",
-    ];
-
-    async function fetchAs(agentHeader, model) {
-      const upstreamBody = (async function* () {
-        const encoder = new TextEncoder();
-        for (const part of ENVELOPELESS_SSE) yield encoder.encode(part);
-      })();
-      let text = "";
-      await withServer(deps(upstreamBody), async (port) => {
-        const headers = {
-          authorization: TOKEN,
-          "content-type": "application/json",
-          ...(agentHeader === null ? {} : { "x-agent-id": agentHeader }),
-        };
-        const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hello" }] }),
-        });
-        assert.equal(res.status, 200);
-        text = await res.text();
-      });
-      return text;
-    }
+    const fetchAs = fetchEnvelopelessAs;
 
     it("injects id/created/model on every chunk for a grok request", async () => {
       const text = await fetchAs("grok", "claude-opus-5");
@@ -847,9 +911,11 @@ describe("openai relay transport", () => {
       },
       recordGeneration: () => {},
       readGeneration: () => null,
+      ...PINNED_IMAGE_GATES,
+      effortInjector: NO_OP_EFFORT_INJECTOR,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -909,9 +975,11 @@ describe("openai relay transport", () => {
       },
       recordGeneration: () => {},
       readGeneration: () => null,
+      ...PINNED_IMAGE_GATES,
+      effortInjector: NO_OP_EFFORT_INJECTOR,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -955,13 +1023,18 @@ describe("openai relay transport", () => {
       }),
     };
 
-    // Non-streaming request + upstream 502
+    // Non-streaming request + upstream 502。upstreamFetch 必须直接返回上游错误
+    // 形状（ok:false + status），让请求走 openai-handler 的状态码透传路径
+    // （!upstream.ok → "returned status 502"）；绝不能把错误对象塞进 body——
+    // 那会被当成 200 响应体、解析失败落进 "malformed response" 这条无关路径，
+    // 名字承诺的行为根本没被走到。
     const server = createOpenAIRelayServer({
-      ...deps({ ok: false, status: 502 }),
+      ...deps(null),
+      upstreamFetch: async () => ({ ok: false, status: 502 }),
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -969,7 +1042,10 @@ describe("openai relay transport", () => {
         body: JSON.stringify({ model: "claude-opus-5", messages: [{ role: "user", content: "hello" }] }),
       });
       assert.equal(res.status, 502);
-      await res.json();
+      const body = await res.json();
+      // 措辞是两条路径的唯一区分点：透传说 "returned status 502"，malformed
+      // 路径说 "malformed response"——钉住前者，夹具再错也糊弄不过去。
+      assert.match(body.error.message, /status 502/, "the upstream status itself must be passed through");
     } finally {
       await close();
     }
@@ -1001,10 +1077,12 @@ describe("openai relay transport", () => {
       }),
       recordGeneration: () => {},
       readGeneration: () => null,
+      ...PINNED_IMAGE_GATES,
+      effortInjector: NO_OP_EFFORT_INJECTOR,
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -1088,7 +1166,7 @@ describe("openai relay transport", () => {
     logger.info("relay-entry-1");
 
     const server = createOpenAIRelayServer({ ...deps(null), logger });
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       // No token: 401.
       const unauth = await fetch(`http://127.0.0.1:${port}/api/internal/logs`);
@@ -1137,7 +1215,7 @@ describe("openai relay transport", () => {
     logger.info("already-bridged-entry");
 
     const server = createOpenAIRelayServer({ ...deps(null), logger });
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/api/internal/logs?live=1`, {
         headers: { authorization: `Bearer ${TOKEN}` },
@@ -1192,6 +1270,8 @@ describe("openai relay upstream 5xx silent retry", () => {
       upstreamFetch,
       recordGeneration: () => {},
       readGeneration: () => null,
+      ...PINNED_IMAGE_GATES,
+      effortInjector: NO_OP_EFFORT_INJECTOR,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10 }),
     };
   }
@@ -1245,6 +1325,84 @@ describe("openai relay upstream 5xx silent retry", () => {
   });
 });
 
+// ── enhanced 整轮扣留（常驻宿主生产默认）的线上语义 ─────────────────────────
+// 主体传输套件钉在无 mode 的直通配置上（见 PINNED_KEEPALIVE 的注释）；常驻宿主
+// 默认注入 mode:"enhanced"（relay-settings.mjs DEFAULT_KEEPALIVE_CONFIG），字节
+// 在裁决前被整轮扣留、`: ping` 先行提交 SSE 头——首字前的失败从此不可能再以
+// 502 状态行表达，终局错误必须走 SSE 错误帧。这一组把该语义差异钉进集成面；
+// 扣留态的重试/恢复细节由 openai-server-keepalive.test.mjs 覆盖。
+describe("enhanced keep-alive mode (resident default) wire semantics", () => {
+  it("a tool call with no name ends the turn as an SSE error frame once pings committed the headers", async () => {
+    const upstreamBody = (async function* () {
+      const encoder = new TextEncoder();
+      yield encoder.encode(
+        'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"arguments":"{\\"cmd\\":"}}]}}]}\n\n',
+      );
+      yield encoder.encode(
+        'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      );
+      yield encoder.encode("data: [DONE]\n\n");
+    })();
+
+    await withServer(enhancedDeps(upstreamBody), async (port) => {
+      const res = await postChat(port);
+      // `: ping` 已提交 200 与 SSE 头，502 状态线在物理上不再可达。
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.startsWith(": ping"), "the hold's liveness ping must precede everything");
+      assert.ok(text.includes('"error"'), "the terminal error rides a data line after the pings");
+      assert.match(text, /tool call/i);
+      assert.equal(text.includes("data: [DONE]"), false, "a rejected turn must not look like a normal completion");
+      assert.equal(text.includes("SENTINEL-UPSTREAM-KEY"), false, "must never leak the upstream key");
+    });
+  });
+
+  it("an upstream death before any content also rides the SSE error line", async () => {
+    const upstreamBody = (async function* () {
+      throw new Error("upstream socket reset before first event");
+    })();
+
+    await withServer(enhancedDeps(upstreamBody), async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.startsWith(": ping"));
+      assert.match(text, /before any content was delivered/);
+      assert.equal(text.includes("data: [DONE]"), false, "no completion terminator after a failed turn");
+    });
+  });
+
+  it("the responses channel ends a pre-content upstream death with response.failed, bytes still held", async () => {
+    const upstreamBody = (async function* () {
+      const encoder = new TextEncoder();
+      yield encoder.encode('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"He"}}]}\n\n');
+      throw new Error("upstream socket reset");
+    })();
+
+    await withServer({ ...responsesDeps(upstreamBody), ...ENHANCED_KEEPALIVE }, async (port) => {
+      const res = await postResponses(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.startsWith(": ping"));
+      // 整轮扣留：上游已产出的字节在裁决前绝不落线。
+      assert.equal(text.includes("He"), false, "withheld bytes must never leak when the turn fails");
+      assert.ok(text.includes("event: response.failed"), "the turn ends with response.failed");
+      assert.equal(text.includes("data: [DONE]"), false, "no [DONE] may follow a failed response");
+    });
+  });
+
+  it("a healthy non-grok stream still delivers every upstream data frame verbatim between the pings", async () => {
+    const text = await fetchEnvelopelessAs("kimi", "claude-opus-5", enhancedDeps);
+    assert.ok(text.startsWith(": ping"), "the hold announces itself with a comment ping");
+    const dataFrames = (t) => t.split("\n").filter((l) => l.startsWith("data:"));
+    assert.equal(
+      dataFrames(text).join("\n"),
+      dataFrames(ENVELOPELESS_SSE.join("")).join("\n"),
+      "enhanced hold may interleave comment pings but must not rewrite any data frame",
+    );
+  });
+});
+
 
 describe("resident /v1/messages non-streaming usage mapping", () => {
   it("maps Anthropic-shaped usage to the OpenAI shape the aggregate tracker reads", async () => {
@@ -1273,10 +1431,12 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
       }),
       recordGeneration: () => {},
       readGeneration: () => null,
+      ...PINNED_IMAGE_GATES,
+      effortInjector: NO_OP_EFFORT_INJECTOR,
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
         method: "POST",
@@ -1340,10 +1500,12 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
       }),
       recordGeneration: () => {},
       readGeneration: () => null,
+      ...PINNED_IMAGE_GATES,
+      effortInjector: NO_OP_EFFORT_INJECTOR,
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       // 引擎噪声形状：非流式 + claude 身份（桌面端 UA）。
       const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
@@ -1378,10 +1540,12 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
         upstreamFetch: async () => ({ ok: true, status: 200, body: sse }),
         recordGeneration: () => {},
         readGeneration: () => null,
+        ...PINNED_IMAGE_GATES,
+        effortInjector: NO_OP_EFFORT_INJECTOR,
         metricsCollector: fakeCollector,
       });
       // 新的 startedMeta 会覆盖上一条——对照请求再经同一桩跑一遍。
-      const { port: port2, close: close2 } = await listenLoopback(streamServer, 0);
+      const { port: port2, close: close2 } = await listenTestPort(streamServer);
       try {
         const streamRes = await fetch(`http://127.0.0.1:${port2}/v1/messages`, {
           method: "POST",
@@ -1520,6 +1684,9 @@ function responsesDeps(upstreamBody, captured = null) {
     },
     recordGeneration: () => {},
     readGeneration: () => null,
+    ...PINNED_KEEPALIVE,
+    ...PINNED_IMAGE_GATES,
+    effortInjector: NO_OP_EFFORT_INJECTOR,
   };
 }
 
@@ -1642,7 +1809,7 @@ describe("openai relay /responses routes (codex)", () => {
       ...responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)),
       metricsCollector: fakeCollector,
     });
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await postResponses(port, "/v1/responses", headers);
       assert.equal(res.status, 200);
@@ -1684,7 +1851,7 @@ describe("openai relay /responses routes (codex)", () => {
       ...responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)),
       metricsCollector: fakeCollector,
     });
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       const res = await postResponses(port, tail, { "x-agent-id": "codex", ...headers }, body);
       assert.equal(res.status, 200);
@@ -1936,7 +2103,7 @@ describe("openai relay /responses routes (codex)", () => {
         onRefresh: () => { counters.subscriptions += 1; return () => {}; },
       },
     });
-    const { port, close } = await listenLoopback(server, 0);
+    const { port, close } = await listenTestPort(server);
     try {
       // 对照组先行：无标记用户流量照常走 socket pid 兜底，证明桩本身是通的。
       const userRes = await postResponses(port, "/v1/responses", { "x-agent-id": "codex" }, responsesBody());
@@ -2006,6 +2173,9 @@ function slugDeps(upstreamBody, captured) {
         return { recordFirstChunk: () => {}, recordEnd: () => {} };
       },
     },
+    ...PINNED_KEEPALIVE,
+    ...PINNED_IMAGE_GATES,
+    effortInjector: NO_OP_EFFORT_INJECTOR,
   };
 }
 
@@ -2113,21 +2283,34 @@ describe("channel-qualified model slugs (<channel>~<model>)", () => {
 });
 
 describe("agent activity stream (/api/internal/agents-activity)", () => {
+  // 夹具必须是生产真实形状（agent-metrics.mjs）：聚合端点 sessionMode 是
+  // "aggregate"；claude 是 "per_instance"，且 instances 与 sessions 是同一份
+  // claudeSessionsFormatted 的镜像。生产端从不产出 "per_session"——那个取值
+  // 只存在于快照转换的死分支里，用它造夹具等于给不存在的数据形状背书。
   const AGENTS_FIXTURE = [
     { id: "kimi", sessions: [{ activeRequests: 2 }], instances: [{ id: "kimi-1010", activeRequests: 1 }] },
-    { id: "claude", sessionMode: "per_session", sessions: [{ id: "sess_A", activeRequests: 1 }] },
+    { id: "claude", sessionMode: "per_instance", sessions: [{ id: "sess_A", activeRequests: 1 }], instances: [{ id: "sess_A", activeRequests: 1 }] },
     { id: "zcode", sessions: [{ activeRequests: 0 }] },
   ];
 
   function makeCollector(agents = AGENTS_FIXTURE) {
     const listeners = new Set();
+    // 退订信号：订阅数归零（服务端 close 路径调用了 unsubscribe）即 resolve，
+    // 让「客户端断开 → 服务端退订」的断言等事件而不是轮询墙钟。
+    let signalDrained;
+    const drained = new Promise((resolve) => { signalDrained = resolve; });
     return {
       listeners,
+      drained,
       publish: (frame) => { for (const l of listeners) l(frame); },
       getAgentsStatus: async () => agents,
       onActivity: (listener) => {
         listeners.add(listener);
-        return () => listeners.delete(listener);
+        return () => {
+          const removed = listeners.delete(listener);
+          if (listeners.size === 0) signalDrained();
+          return removed;
+        };
       },
       offActivity: (listener) => listeners.delete(listener),
     };
@@ -2172,15 +2355,18 @@ describe("agent activity stream (/api/internal/agents-activity)", () => {
 
       const snapshot = await readFrame(reader, box);
       assert.equal(snapshot.type, "snapshot");
+      // claude 走 per_instance 口径：聚合行读 sessions[0]（镜像数组首行，非
+      // 端点合计——agent-metrics 现行行为，快照如实转发），再加每条镜像实例行。
       assert.deepEqual(
         snapshot.instances.map((i) => [i.endpointId, i.instanceId, i.activeRequests]),
         [
           ["kimi", null, 2],
           ["kimi", "kimi-1010", 1],
+          ["claude", null, 1],
           ["claude", "sess_A", 1],
           ["zcode", null, 0],
         ],
-        "aggregate rows, instance rows and per-session rows all land in the snapshot",
+        "aggregate rows and instance rows (claude's session mirror included) all land in the snapshot",
       );
 
       assert.equal(collector.listeners.size, 1, "the stream subscribed exactly one listener");
@@ -2189,12 +2375,18 @@ describe("agent activity stream (/api/internal/agents-activity)", () => {
       assert.deepEqual(activity, { type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 0, at: 123 });
 
       await reader.cancel().catch(() => {});
-      // Client close must drop the subscription (no listener leak): poll up
-      // to 2s for the server-side close event to arrive.
-      const deadline = Date.now() + 2000;
-      while (collector.listeners.size > 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      // Client close must drop the subscription (no listener leak). The
+      // teardown rides the server-side socket close event, so wait on the
+      // collector's own unsubscribe signal — no wall-clock polling to time
+      // out on a slow machine. The race guard only turns a genuine leak into
+      // a loud failure instead of a hung test.
+      let leakTimer;
+      await Promise.race([
+        collector.drained,
+        new Promise((_, reject) => {
+          leakTimer = setTimeout(() => reject(new Error("listener was not unsubscribed after client close")), 10000);
+        }),
+      ]).finally(() => clearTimeout(leakTimer));
       assert.equal(collector.listeners.size, 0, "client close unsubscribed the listener");
     });
   });
@@ -2209,6 +2401,14 @@ describe("agent activity stream (/api/internal/agents-activity)", () => {
       const box = { decoder: new TextDecoder(), buffer: "" };
       const snapshot = await readFrame(reader, box);
       assert.deepEqual(snapshot, { type: "snapshot", instances: [] });
+      // "keeps streaming" 的实断言：无采集器就永远不会有第二帧，连接还活着
+      // 只能用「读不会以 done 结束」证明。本路由的心跳 15s 一跳，短窗口内
+      // 能让 read 完成的唯一事件就是服务端主动收尾——那正是要抓的回归。
+      const verdict = await Promise.race([
+        reader.read().then((r) => (r.done ? "closed" : "frame")),
+        new Promise((r) => setTimeout(() => r("open"), 150)),
+      ]);
+      assert.equal(verdict, "open", "the stream must stay open after the empty snapshot");
       await reader.cancel().catch(() => {});
     });
   });

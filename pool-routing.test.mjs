@@ -48,11 +48,6 @@ function makeStore() {
         displayName: "Test Pool",
         members: ["prov-a", "prov-b", "prov-c"],
       },
-      // A pool id may reuse the id of one of its own members.
-      "prov-a": {
-        displayName: "Same-name pool",
-        members: ["prov-a", "prov-b"],
-      },
     },
   };
 }
@@ -77,7 +72,40 @@ describe("isPoolFailoverStatus", () => {
 
 describe("resolvePool", () => {
   it("finds pools before providers and wins the same-name tie", () => {
-    const store = makeStore();
+    // Dedicated fixture: a pool id may reuse the id of one of its OWN members
+    // (schema-legal), but no provider may be claimed by two pools, so the
+    // same-name pool here claims prov-a + prov-d and prov-a/prov-d belong to
+    // no other pool. The tie rule must hold on a state the store validator
+    // accepts — makeStore's test-pool already claims every provider.
+    const store = {
+      version: 2,
+      providers: {
+        "prov-a": {
+          displayName: "Provider A",
+          baseURL: "https://a.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "a.dpapi",
+          models: {
+            "gpt-shared": { displayName: "Shared from A", contextWindow: 1000 },
+          },
+        },
+        "prov-d": {
+          displayName: "Provider D",
+          baseURL: "https://d.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "d.dpapi",
+          models: {
+            "gpt-shared": { displayName: "Shared from D", contextWindow: 4000 },
+          },
+        },
+      },
+      pools: {
+        "prov-a": {
+          displayName: "Same-name pool",
+          members: ["prov-a", "prov-d"],
+        },
+      },
+    };
     const pool = resolvePool(store, "prov-a");
     assert.ok(pool, "pool named prov-a must resolve even though a provider shares the id");
     assert.equal(pool.displayName, "Same-name pool");

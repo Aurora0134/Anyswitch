@@ -1,10 +1,24 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
 import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "./chain-routing.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const TOKEN = "test-token-chain";
+
+// anthropicToOpenAI 的会话缓存优化门控走 midSystemRewriteEnabled() 的磁盘现读
+// 缺省路径，没有 deps 注入面（handler.mjs 调用时不传 options）；把
+// LOCALAPPDATA 重定向到临时目录后，per-request 的 settings.json 现读全部落在
+// 空目录（缺文件 fail-open 取内置默认值），不再碰真实用户配置（与
+// anthropic-server-chain.test.mjs 顶部的隔离做法同一模式）。
+const prevLocalAppData = process.env.LOCALAPPDATA;
+process.env.LOCALAPPDATA = mkTestDir("anyswitch-openai-chain-relay-data-");
+after(() => {
+  if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+  else process.env.LOCALAPPDATA = prevLocalAppData;
+});
 
 // Chain routing (自动路由): body.model === "auto" walks the requesting
 // agent's route chain (store.routingChains[agentId].chain). Chain node ids:
@@ -83,6 +97,13 @@ function memberRouter(behaviors) {
   return { upstreamFetch, calls, bodies };
 }
 
+// effort 注入与图片降级两门钉死为关：不注入时 handler 回落 relay-settings 的
+// 磁盘现读默认（openai-handler.mjs `effortInjector ?? defaultEffortInjector`），
+// 逐请求读本机 %LOCALAPPDATA%\Anyswitch 下的 settings.json 与 thinking-efforts
+// 库，并按本机用户配置改写发往上游的请求体。isEnabled 短路在目录/开关读取
+// 之前，注入器全程不落盘（与 anthropic-server-chain.test.mjs 同一桩）。
+const OFF_EFFORT_INJECTOR = createEffortInjector({ isEnabled: () => false });
+
 function createMockDeps({ upstreamFetch, getKeepAliveConfig }) {
   return {
     token: TOKEN,
@@ -92,15 +113,40 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig }) {
     recordGeneration: () => {},
     readGeneration: () => null,
     getKeepAliveConfig,
+    effortInjector: OFF_EFFORT_INJECTOR,
+    // 两门是 thunk（每请求现读）；测试注入定值正是源码预留的注入面。
+    imageFallbackGate: () => false,
+    imageHeuristicGate: () => false,
   };
 }
 
+// Node 内置 fetch（undici）在建连之前就拒绝向受限端口发请求（"bad port"，
+// Chromium net/base/port_util.cc 的端口表）。Windows 默认动态端口区间
+// 1024-15000 与这张表相交，listen(0) 撞上时用例会与被测行为无关地随机挂掉。
+// 本机 Node v24.18.0 对 1-15000 全量探针实测，受限端口恰为下表 82 个（表内
+// 最大 10080），无论本机动态区间怎么配置，listen(0) 的结果必落在此表内外——
+// 命中就关掉换一个重来：约 1.4 万个候选端口里受限的是极少数，重试几乎总是
+// 立即成功。
+const UNDICI_BLOCKED_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995,
+  1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566,
+  6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+]);
+
 async function withServer(deps, fn) {
-  const server = createOpenAIRelayServer(deps);
-  const { port, close } = await listenLoopback(server, 0);
-  try {
-    return await fn(port);
-  } finally {
+  for (;;) {
+    const server = createOpenAIRelayServer(deps);
+    const { port, close } = await listenLoopback(server, 0);
+    if (!UNDICI_BLOCKED_PORTS.has(port)) {
+      try {
+        return await fn(port);
+      } finally {
+        await close();
+      }
+    }
     await close();
   }
 }
@@ -757,14 +803,20 @@ describe("chain enabled 开关（自动路由 per-endpoint 启用）", () => {
       });
       assert.equal(res.status, 200);
       const catalog = await res.json();
-      assert.ok(
-        !(catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL_ANTHROPIC_ID),
-        "kimi's chain is disabled, so the catalog must not carry auto",
-      );
-      assert.ok(
-        !(catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL),
-        "the bare auto id is never advertised on the anthropic path",
-      );
+      // 正向对照：真实 wire id 必须仍在列（池成员按可见渠道口径折入池伪渠道
+      // pool-x）。没有这条，目录整体为空时下面的反向断言会恒真。
+      // buildModelsResponse 恒返回 data 数组、行标识恒为 id，无需兜底形状。
+      const ids = catalog.data.map((m) => m.id);
+      for (const wireId of [
+        "anthropic/chan-a/model-a",
+        "anthropic/chan-b/model-b",
+        "anthropic/chan-c/model-c",
+        "anthropic/pool-x/model-p",
+      ]) {
+        assert.ok(ids.includes(wireId), `a disabled chain must not disturb the wire catalog (${wireId} still listed)`);
+      }
+      assert.ok(!ids.includes(AUTO_MODEL_ANTHROPIC_ID), "kimi's chain is disabled, so the catalog must not carry auto");
+      assert.ok(!ids.includes(AUTO_MODEL), "the bare auto id is never advertised on the anthropic path");
     });
   });
 
@@ -1190,13 +1242,8 @@ describe("virtual model routing (openai 路径，端点无关)", () => {
   };
   function createVmDeps({ upstreamFetch, store = VM_STORE } = {}) {
     return {
-      token: TOKEN,
+      ...createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY }),
       loadStore: () => ({ ok: true, store }),
-      loadCredential: async () => ({ ok: true, value: "TEST_SECRET" }),
-      upstreamFetch,
-      recordGeneration: () => {},
-      readGeneration: () => null,
-      getKeepAliveConfig: NO_RETRY,
     };
   }
 

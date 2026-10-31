@@ -2,7 +2,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   buildPiProviderEntry,
   mergeModelsJson,
@@ -10,9 +9,6 @@ import {
   writeModelsJsonWithBackup,
   extractManagedProviders,
   validatePiModelsConfig,
-  readSidecar,
-  writeSidecar,
-  sidecarPath,
   UnparseableModelsError,
   deriveAutoRouteChannel,
   DIRECT_INSTANCE_ID,
@@ -70,7 +66,10 @@ describe("buildPiProviderEntry", () => {
     assert.equal(p.models[1].contextWindow, 200_000);
   });
 
-  it("uses modelId as fallback name when no displayName", () => {
+  it("omits the model name when no displayName (id stays the modelId)", () => {
+    // No modelId-to-name fallback exists (pi-merge-models.mjs writes `name`
+    // only when the store carries a displayName) — the entry simply has no
+    // name field, and pi falls back to the model id on its own.
     const provider = {
       baseURL: "https://x.example/v1",
       protocol: "openai-compatible",
@@ -169,16 +168,30 @@ describe("mergeModelsJson", () => {
     assert.equal(managed.length, 0);
   });
 
-  it("does not remove non-managed providers during cleanup", () => {
-    const existing = { providers: { "my-custom": { models: [] } } };
+  it("cleanup only removes disk keys derived from previously-managed ids", () => {
+    // The cleanup loop deletes piProviderId(prevId) for prevId in
+    // previousManaged and nothing else (pi-merge-models.mjs). A managed-shaped
+    // entry — "_" key plus the pi fingerprint — that is NOT in
+    // previousManaged must therefore survive; a plain foreign key can never
+    // even be a cleanup candidate.
+    const existing = {
+      providers: {
+        "my-custom": { models: [] },
+        "_deepseek": { name: "deepseek", headers: { "x-agent-id": "pi" }, models: [] },
+      },
+    };
     const { config } = mergeModelsJson(existing, {}, 47821, ["poke-api"]);
     assert.ok(config.providers["my-custom"]);
+    assert.ok(config.providers["_deepseek"], "a _-prefixed entry outside previousManaged is not cleanup's to remove");
   });
 });
 
 describe("readModelsJson", () => {
   it("returns empty providers for missing file", () => {
-    assert.deepEqual(readModelsJson(join(tmpdir(), "nonexistent.json")), { providers: {} });
+    // Isolated fixture dir — a fixed name under the shared %TEMP% would go red
+    // the moment any other process drops a file with the same name there.
+    const dir = mkTestDir("pi-merge-test-");
+    assert.deepEqual(readModelsJson(join(dir, "models.json")), { providers: {} });
   });
 
   it("throws UnparseableModelsError for a corrupt file instead of treating it as empty", () => {
@@ -304,20 +317,15 @@ describe("validatePiModelsConfig", () => {
   });
 });
 
-describe("sidecar", () => {
-  it("readSidecar returns empty list for missing file", () => {
-    const dir = mkTestDir("pi-sidecar-");
-    assert.deepEqual(readSidecar(dir), { providers: [] });
-  });
+// Sidecar semantics are the shared merge-common implementation's contract and
+// are pinned there (merge-common.test.mjs: missing-file read-empty, sorted
+// round-trip, exact on-disk format). The pi-specific part — the wrapper's
+// pi-sidecar.json filename — is exercised end-to-end elsewhere:
+// pi-launcher.test.mjs "writes models.json with _ prefixed providers and
+// sidecar" drives the production writeSidecar path and asserts the literal
+// filename; uninstall-agent.test.mjs seeds/asserts pi-sidecar.json against the
+// sidecarPath-based cleanup.
 
-  it("writeSidecar and readSidecar round-trip", () => {
-    const dir = mkTestDir("pi-sidecar-");
-    writeSidecar(dir, ["deepseek", "poke-api"]);
-    const read = readSidecar(dir);
-    assert.deepEqual(read.providers, ["deepseek", "poke-api"]);
-    assert.ok(existsSync(sidecarPath(dir)));
-  });
-});
 describe("pool channels", () => {
   const POOL_STORE = {
     version: 2,

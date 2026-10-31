@@ -159,9 +159,15 @@ describe("agent-sync", () => {
       await watcher.trigger();
       assert.equal(changeCount, 1);
 
-      // File update triggering watcher (allow time for fs events & debounce)
+      // File update triggering watcher. Poll instead of one fixed sleep — the
+      // event rides real fs.watch delivery plus the debounce timer, both of
+      // which drift under full-suite load; a deadline can only wait longer,
+      // never assert less.
       writeFileSync(storeFile, JSON.stringify({ version: 2, providers: { a: {} } }), "utf8");
-      await new Promise((r) => setTimeout(r, 150));
+      const deadline = Date.now() + 2000;
+      while (changeCount < 2 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
       assert.ok(changeCount >= 2, `expected changeCount >= 2, got ${changeCount}`);
     } finally {
       watcher.close();
@@ -181,7 +187,12 @@ describe("agent-sync", () => {
     });
     try {
       atomicWriteFile(storeFile, JSON.stringify({ version: 2, providers: { b: {} } }));
-      await new Promise((r) => setTimeout(r, 200));
+      // Poll instead of one fixed sleep — same reason as above: fs event
+      // delivery + debounce is wall-clock bound, a deadline only waits longer.
+      const deadline = Date.now() + 2000;
+      while (changeCount < 1 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
       assert.ok(changeCount >= 1, `atomic replace must notify, got ${changeCount}`);
     } finally {
       watcher.close();
@@ -448,7 +459,7 @@ describe("agent-sync auto routing channel", () => {
   });
 });
 
-describe("agent-sync Anyswitch 渠道名（九端点回归闸）", () => {
+describe("agent-sync Anyswitch 渠道名（八端点回归闸）", () => {
   let tmpRoot;
 
   beforeEach(() => {
@@ -626,11 +637,16 @@ describe("agent-sync 同步结果摘要", () => {
   });
 
   it("home 变量缺失时全部端点判失败，绝不往进程 CWD 落盘", async () => {
-    const cwd = process.cwd();
-    const before = readdirSync(cwd);
-    let after = null;
+    // node --test 并行跑时各测试进程共享仓库目录作 CWD，直接对它做前后清单
+    // 会吃进并发进程的增删。把进程 CWD 切进本用例私有的夹具目录再观测：
+    // 断言语义不变（回归时相对路径落盘仍会被清单 diff 抓住），夹具由
+    // afterEach 统一清扫，也不会误删并发进程的文件。
+    const prevCwd = process.cwd();
+    const cwd = tmpRoot;
+    process.chdir(cwd);
     let res;
     try {
+      const before = readdirSync(cwd);
       res = await syncAllAgentConfigs({
         store: summaryStore(),
         port: 47821,
@@ -638,12 +654,10 @@ describe("agent-sync 同步结果摘要", () => {
         root: tmpRoot,
         base: {}, // USERPROFILE 缺失：各端点路径解析退化成相对路径
       });
-      after = readdirSync(cwd);
+      const after = readdirSync(cwd);
+      assert.deepEqual(after, before, "CWD 目录清单不变：没有任何新文件落盘");
     } finally {
-      // 修复前这些写入真的会落进 CWD（本测试红阶段运行）；无论红绿都清掉自证不留痕。
-      for (const entry of (after ?? []).filter((name) => !before.includes(name))) {
-        rmSync(join(cwd, entry), { recursive: true, force: true });
-      }
+      process.chdir(prevCwd);
     }
     assert.equal(res.ok, true, "home 缺失是端点级失败，不拖垮整次同步");
     for (const name of AGENT_ENDPOINTS) {
@@ -653,7 +667,6 @@ describe("agent-sync 同步结果摘要", () => {
       assert.equal(typeof entry.reason, "string", `${name} 带失败原因`);
       assert.ok(entry.reason.length > 0, `${name} 的失败原因非空`);
     }
-    assert.deepEqual(after, before, "CWD 目录清单不变：没有任何新文件落盘");
     const summary = buildSyncSummary(res);
     assert.deepEqual([...summary.failed].sort(), [...AGENT_ENDPOINTS].sort(), "九个端点全进失败名单");
     assert.deepEqual(summary.synced, [], "成功名单为空");

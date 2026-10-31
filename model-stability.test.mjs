@@ -9,8 +9,6 @@ import {
   BUCKET_MS,
   BUCKET_COUNT,
   WINDOW_MS,
-  RATE_GREEN,
-  RATE_YELLOW,
 } from "./model-stability.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
@@ -44,20 +42,32 @@ describe("createModelStabilityTracker", () => {
     assert.equal(snap.models[0].latencyMs, 2000);
   });
 
-  it("weights success rate by call count and paints a cell red below 70%", () => {
-    let t = bucketStart(1_000_000) + 1000;
+  it("weights success rate by call count across buckets and paints a cell red below 70%", () => {
+    const base = bucketStart(1_000_000);
+    let t = base + 1000;
     const tracker = createModelStabilityTracker({ nowFn: () => t });
-    tracker.record({ providerId: "acme", model: "gpt-5.2", ok: true, latencyMs: 100, at: t });
+    // Older bucket: the only call fails (cell rate 0). Newer bucket: three calls all succeed.
     tracker.record({ providerId: "acme", model: "gpt-5.2", ok: false, latencyMs: 100, at: t });
-    tracker.record({ providerId: "acme", model: "gpt-5.2", ok: false, latencyMs: 100, at: t });
+    t = base + BUCKET_MS + 1000;
+    for (let i = 0; i < 3; i++) {
+      tracker.record({ providerId: "acme", model: "gpt-5.2", ok: true, latencyMs: 100, at: t });
+    }
     const snap = tracker.snapshot(t);
     const m = snap.models[0];
-    assert.equal(m.successRate, 33.3);
-    assert.equal(m.status, "red");
-    const last = m.cells[m.cells.length - 1];
+    // Call-count weighting: (3 ok / 4 total) = 75 → yellow. A per-bucket simple
+    // average of cell rates would give (0 + 100) / 2 = 50 → red, so this
+    // assertion distinguishes the two.
+    assert.equal(m.total, 4);
+    assert.equal(m.successRate, 75);
+    assert.equal(m.status, "yellow");
+    const cells = m.cells;
+    assert.equal(cells[cells.length - 2].n, 1);
+    assert.equal(cells[cells.length - 2].rate, 0);
+    assert.equal(cells[cells.length - 2].status, "red");
+    const last = cells[cells.length - 1];
     assert.equal(last.n, 3);
-    assert.equal(last.status, "red");
-    assert.equal(last.rate, 33.3);
+    assert.equal(last.rate, 100);
+    assert.equal(last.status, "green");
   });
 
   it("drops buckets older than 8h from ranking", () => {
@@ -143,17 +153,28 @@ describe("createModelStabilityTracker", () => {
     const dir = mkTestDir("ms-ttft-");
     const path = join(dir, "model-stability.json");
     const t0 = bucketStart(5_000_000);
-    writeFileSync(path, JSON.stringify({
-      models: [{
-        provider: "p1",
-        model: "m-persist",
-        cells: [{ start: t0, n: 2, ok: 2, latencySum: 4000, prompt: 0, cached: 0, ttftSum: 2400, ttftN: 2 }],
-      }],
-    }));
     let t = t0 + 1000;
-    const tracker = createModelStabilityTracker({ nowFn: () => t, persistPath: path, persistEveryMs: 0 });
-    const snap = tracker.snapshot(t);
+    // Write side: record twice, then persist and inspect what lands on disk.
+    const writer = createModelStabilityTracker({ nowFn: () => t, persistPath: path, persistEveryMs: 0 });
+    writer.record({ providerId: "p1", model: "m-persist", ok: true, latencyMs: 2000, prompt: 100, cached: 25, ttftMs: 1000, at: t });
+    writer.record({ providerId: "p1", model: "m-persist", ok: true, latencyMs: 2000, prompt: 100, cached: 25, ttftMs: 1400, at: t });
+    writer.persist(t);
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    const cell = onDisk.models.find((m) => m.model === "m-persist").cells.find((c) => c.start === t0);
+    assert.equal(cell.n, 2);
+    assert.equal(cell.ok, 2);
+    assert.equal(cell.latencySum, 4000);
+    assert.equal(cell.prompt, 200);
+    assert.equal(cell.cached, 50);
+    assert.equal(cell.ttftSum, 2400);
+    assert.equal(cell.ttftN, 2);
+    // Read side: a fresh tracker reloads the file and keeps ttftMs / cacheHit.
+    const reader = createModelStabilityTracker({ nowFn: () => t, persistPath: path, persistEveryMs: 0 });
+    const snap = reader.snapshot(t);
+    assert.equal(snap.models[0].model, "m-persist");
+    assert.equal(snap.models[0].total, 2);
     assert.equal(snap.models[0].ttftMs, 1200);
+    assert.equal(snap.models[0].cacheHit, 25);
   });
 
   it("reloads persisted sidecar on create", () => {
@@ -175,7 +196,3 @@ describe("createModelStabilityTracker", () => {
     assert.equal(snap.models[0].cacheHit, 25);
   });
 });
-
-void RATE_GREEN;
-void RATE_YELLOW;
-void readFileSync;

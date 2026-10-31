@@ -7,19 +7,37 @@
 // handler-level tests for the intercept/catalog contract. Synthetic store,
 // mock upstream. No real credentials, no real network egress, no DPAPI.
 
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHandler } from "./handler.mjs";
 import { createRelayServer, listenLoopback } from "./server.mjs";
 import { createSessionReporter } from "./agent-metrics.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
 import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "./chain-routing.mjs";
 import { unpackWireId } from "./wire-id.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const TOKEN = "test-token-anthropic-chain";
 
+// handler 直调 anthropicToOpenAI 时走 midSystemRewriteEnabled() 的磁盘现读
+// 缺省路径，没有注入面；把 LOCALAPPDATA 重定向到临时目录后，per-request 的
+// settings.json 现读全部落在空目录（缺文件 fail-open 取默认值），不再碰真实
+// 用户配置。effort 注入另经各 deps 工厂显式关断，连 tmp 里的文件都不读。
+const prevLocalAppData = process.env.LOCALAPPDATA;
+process.env.LOCALAPPDATA = mkTestDir("anyswitch-chain-relay-data-");
+after(() => {
+  if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+  else process.env.LOCALAPPDATA = prevLocalAppData;
+});
+
+// 推理强度注入统一关断桩：isEnabled 短路在目录/开关读取之前，注入器全程不落盘。
+const OFF_EFFORT_INJECTOR = () => createEffortInjector({ isEnabled: () => false });
+
 // Chain under test: chan-a (channel) -> test-pool (member-a, member-b) ->
-// chan-b (channel). member-c carries no chain-bound model and only exists to
-// prove pool model filtering.
+// chan-b (channel). member-c carries a model no pool member has and sits
+// OUTSIDE test-pool: that is what makes the pool 404 case below prove pool
+// expansion filters by pool membership — an expansion that searched every
+// provider would find member-c and answer instead of 404ing.
 const STORE = {
   version: 2,
   providers: {
@@ -122,6 +140,7 @@ function createMockDeps({ upstreamFetch, store = STORE, getKeepAliveConfig } = {
     recordGeneration: () => {},
     readGeneration: () => null,
     getKeepAliveConfig,
+    effortInjector: OFF_EFFORT_INJECTOR(),
   };
 }
 
@@ -200,6 +219,7 @@ describe("handler planChainMessages (contract)", () => {
       upstreamFetch: async () => nonStreamJson("hi"),
       recordGeneration: () => {},
       readGeneration: () => null,
+      effortInjector: OFF_EFFORT_INJECTOR(),
     });
   }
 
@@ -261,7 +281,9 @@ describe("handler planChainMessages (contract)", () => {
       routingChains: { claude: { chain: [{ node: "test-pool", model: "claude-c-only" }] } },
     };
     const handler = makeHandler(store);
-    // member-c is not in test-pool, so no pool member carries claude-c-only.
+    // member-c 携带 claude-c-only 但不在 test-pool.members 里：按池成员过滤的
+    // 展开找不到任何绑定模型的成员，才落 404（若展开错成全库搜索，会命中
+    // member-c 并应答成功，用例即红）。
     const plan = await handler.planChainMessages({ authorization: TOKEN }, { model: "auto" }, "claude");
     assert.equal(plan.ok, false);
     assert.equal(plan.status, 404);
@@ -277,6 +299,7 @@ describe("handleModels auto catalog entry", () => {
       upstreamFetch: async () => nonStreamJson("hi"),
       recordGeneration: () => {},
       readGeneration: () => null,
+      effortInjector: OFF_EFFORT_INJECTOR(),
     });
   }
 
@@ -733,8 +756,9 @@ describe("per-launch claude usage journal（claude 端点进入按端点统计�
     assert.equal(lines.length, 1);
     assert.equal(lines[0].agentId, "claude");
     // "anthropic/" 前缀是端点身份伪装，不是统计维度：journal 只落裸模型名
-    //（与 openai 路径口径一致）；直连经典路径的 providerId 空串是既有口径，
-    // 由 usage-stats 读侧从 wire id 回填。
+    //（与 openai 路径口径一致）。直连经典路径没有链归因，providerId 由
+    // server.mjs startRequest 从 wire id 解出渠道 id（wireIdToTargetId）落行。
+    assert.equal(lines[0].providerId, "chan-a");
     assert.equal(lines[0].model, "claude-a");
     assert.equal(lines[0].ok, true);
   });
@@ -854,6 +878,7 @@ describe("virtual model routing (anthropic 路径）", () => {
       upstreamFetch: async () => nonStreamJson("hi"),
       recordGeneration: () => {},
       readGeneration: () => null,
+      effortInjector: OFF_EFFORT_INJECTOR(),
     });
   }
 
