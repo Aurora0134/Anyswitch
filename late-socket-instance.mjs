@@ -21,7 +21,10 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // Code still arrive on their own per-launch relay and keep their reporter rows;
 // a request whose owner cannot be resolved stays on the aggregate bucket, and
 // the card falls back to the process scan for liveness (unchanged behavior).
-const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "qoder", "claude"]);
+// WorkBuddy 与 kimi/pi/dsh 同一处境：GUI 双击启动不经过我们的 launcher，
+// 命令行也不注实例头（plan §1.3：身份走 URL 段前缀），所以连接属主进程是
+// 唯一的实例身份。行 id 形如 workbuddy-<pid>，与进程扫描的占位行同键。
+const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "qoder", "claude", "workbuddy"]);
 
 // pi 的 x-agent-instance 头值对折进程身份没有贡献：models.json 落静态值
 //（sync 写盘为 direct；launcher 拉起时改写成 <cwd>-<pid> 实例值、退出恢复——

@@ -97,6 +97,7 @@ const RUN_ANCHOR_SCOPE = {
   codex: "codexPids",
   opencode: "opencodePids",
   grok: "grokPids",
+  workbuddy: "workbuddyPids",
 };
 
 // Sliding window of recent successful requests. TPS is computed from this
@@ -523,6 +524,10 @@ const AGENT_IMAGE_BUCKETS = [
   // 没有任何 `kimi-code` 安装路径特征，下面 node.exe 分支的那套路径谓词永远匹配
   // 不到它（步 1 of kimi-desktop-integration-plan.md §3：桌面端在进程面全盲）。
   ["kimi code.exe", "kimi"],
+  // WorkBuddy 桌面端同样是 Electron 包，且一个实例起九个同镜像进程（主进程 /
+  // --type= 辅助 / daemon / sidecar / agent 运行时，真机 2026-10-31 取证）。
+  // 镜像名只负责把整族收进桶；谁是会话由 workbuddy 桶分支的命令行谓词裁决。
+  ["workbuddy.exe", "workbuddy"],
   // The official DSH desktop app is Electron too, but its image name must not
   // in itself make a DSH session: the app spawns itself as the harness host,
   // and the desktop branch claims only the child that carries the host flag
@@ -924,6 +929,71 @@ export function summarizeKimiSurfaces(procCounts) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// WorkBuddy 的分面（plan §1.4 / research §4）。
+//
+// 一个桌面实例起九个 `WorkBuddy.exe`：主进程（GUI 宿主，命令行无 `--type=`、
+// 无 CLI 入口）、四个 `--type=` 辅助子进程、daemon（`daemon-app-server-entry.js`）、
+// sidecar（`sidecar-entry.js`）与两个 agent 运行时（命令行含
+// `cli\bin\codebuddy`）。判据只认最后这一类：
+//   会话 = 镜像 workbuddy.exe && 命令行含 cli[\\/]bin[\\/]codebuddy && 无 --type=
+// 其余同镜像进程只进家族集（谱系 / 存活），永不计数——按镜像名计数会把一个
+// 客户端报成九次会话，这正是 kimi 桌面端踩过的坑。
+//
+// 面（surface）来自父链（扫描结果已收全 ppidByPid / imageByPid）：
+//   父链落在本实例 GUI 主进程 → Desktop（GUI 拉起的 agent 运行时）；
+//   父进程不在 WorkBuddy 家族内（终端 / 其它宿主）→ CLI；
+//   判不出（父指针缺席、链走出去、链上是家族内的非主进程）→ 不贴面，不回落
+//   成产品名。
+const WORKBUDDY_IMAGE = "workbuddy.exe";
+// 内置 CLI 入口的路径段。`/` 与 `\` 两种分隔符都认（真机命令行两种都出现过）。
+const WORKBUDDY_RUNTIME_RE = /cli[\\/]bin[\\/]codebuddy/;
+
+// 本实例的 GUI 主进程：同镜像、读得到命令行、无 `--type=`、且不是 CLI 入口。
+// 它拥有会话进程，但本身不是会话（kimi 的主进程是会话属主，这里不是）。
+function isWorkbuddyGuiMain(pid, counts) {
+  if (counts?.imageByPid?.get(pid) !== WORKBUDDY_IMAGE) return false;
+  const commandLine = counts?.cmdByPid?.get(pid) ?? null;
+  if (isCommandLineUnreadable(commandLine) || commandLine.includes("--type=")) return false;
+  return !WORKBUDDY_RUNTIME_RE.test(commandLine);
+}
+
+// 一个已计数的会话 pid 的面。族谱表缺失、父指针走空、或父链在家族内部
+// 却找不到 GUI 主进程时返回 null（读不出就不贴，宁可漏标不可误标）。
+export function workbuddySessionSurface(pid, procCounts) {
+  const ppidByPid = procCounts?.ppidByPid;
+  if (!(ppidByPid instanceof Map)) return null;
+  const imageByPid = procCounts?.imageByPid ?? null;
+  const seenPids = procCounts?.seenPids ?? null;
+  let current = pid;
+  const seen = new Set([current]);
+  for (let depth = 0; depth < INSTANCE_LINEAGE_MAX_DEPTH; depth += 1) {
+    const parent = ppidByPid.get(current);
+    if (parent === undefined || seen.has(parent)) return null;
+    // 父进程不在本轮扫描里：链走出去了，判不出（进程可能已退出）。
+    if (!(seenPids instanceof Set) || !seenPids.has(parent)) return null;
+    const image = imageByPid?.get(parent) ?? null;
+    if (image !== WORKBUDDY_IMAGE) {
+      // 直接父进程在扫描里、但不是 WorkBuddy 镜像 = 终端 / 其它宿主拉起。
+      // 隔了家族成员的链路再走出去则归属说不清，按判不出处理。
+      return depth === 0 ? "cli" : null;
+    }
+    if (isWorkbuddyGuiMain(parent, procCounts)) return "desktop";
+    seen.add(parent);
+    current = parent;
+  }
+  return null;
+}
+
+// 面是封闭集合，集合外的值只可能是我们自己读错了，如实落「未知」，不原样上屏
+// （与 kimi 同款；DSH 那里未知值是用户自己的 profile 名，语义不同）。
+const WORKBUDDY_SURFACE_LABELS = { desktop: "Desktop", cli: "CLI" };
+
+export function workbuddySurfaceLabel(surface) {
+  if (typeof surface !== "string" || !(surface in WORKBUDDY_SURFACE_LABELS)) return DSH_UNKNOWN_SURFACE_LABEL;
+  return WORKBUDDY_SURFACE_LABELS[surface];
+}
+
 // Terminal (console) liveness for TUI-profile DSH engines. Windows lets a
 // process outlive its terminal: when the console host dies abruptly
 // (terminal crash, taskkill) the attached harness is not notified and keeps
@@ -998,7 +1068,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -1333,6 +1403,24 @@ function parseTasklistCsv(stdout, priorCounted = null) {
         result.grok += 1;
         if (pid) result.grokPids.add(pid);
       }
+    } else if (bucket === "workbuddy") {
+      // 同名九进程（真机 2026-10-31 取证，plan §1.4）：主进程是 GUI 宿主，
+      // --type= 四个辅助、daemon、sidecar 都只是家族成员；只有 agent 运行时
+      // （命令行含 cli\bin\codebuddy、且无 --type=）算会话。镜像名只决定进桶，
+      // 计数必须过命令行谓词——否则一个客户端报九次。裸 --version 是环境检测
+      // 探针（grok 同款 isVersionProbeRow），不是常驻会话。命令行整行读不出时
+      // 只按连续性认（priorCountedIn：上一轮可信扫描已把它算成会话），绝不凭
+      // 镜像名直接计数——降级轮整轮没有命令行，九个同名进程会全被误算。
+      const isSession = !isVersionProbeRow(commandLine)
+        && !commandLine?.includes("--type=")
+        && WORKBUDDY_RUNTIME_RE.test(commandLine ?? "");
+      // 家族集：本镜像的每一行都进（谱系 / 行存活），含 helper / daemon /
+      // sidecar——它们永不计数，但要保住家族面的存活判定。
+      if (pid) result.workbuddyPids.add(pid);
+      if (isSession || (isCommandLineUnreadable(commandLine) && priorCountedIn(priorCounted, "workbuddy", pid))) {
+        result.workbuddy += 1;
+        if (pid) result.workbuddyEnginePids.add(pid);
+      }
     } else if (bucket === "pi") {
       // pi 原生形态：镜像名即会话进程，accept-by-name 直接计数（无命令列的
       // tasklist 降级轮同此，与其余端点的残差一致）。原生二进制的辅助子进程
@@ -1454,6 +1542,13 @@ function parseTasklistCsv(stdout, priorCounted = null) {
       result.pi += 1;
       if (nodePid !== null) result.piPids.add(nodePid);
     }
+  }
+
+  // WorkBuddy 会话面：父链要走 ppidByPid / imageByPid / cmdByPid，三张表在
+  // 循环里才收全（父行可能排在子行之后），所以与 pi 双计裁决同款放到循环后。
+  for (const wbPid of result.workbuddyEnginePids) {
+    const surface = workbuddySessionSurface(wbPid, result);
+    if (surface !== null) result.workbuddySurfaceByPid.set(wbPid, surface);
   }
 
   return result;
@@ -2721,20 +2816,24 @@ export function createAgentMetricsCollector(options = {}) {
     ["kimiDesktopPids", "set"],
     ["dshProfileByPid", "map"],
     ["dshDesktopHostPids", "set"],
+    ["workbuddySurfaceByPid", "map"],
+    ["workbuddyEnginePids", "set"],
     ["ppidByPid", "map"],
   ];
   let lastTrustedScan = null;
   let lastTrustedScanTime = 0;
 
-  // 上一轮可信扫描里两个探针端点各自的家族集，喂给本轮的「读不出命令行按连续性
+  // 上一轮可信扫描里各探针端点自己的会话集，喂给本轮的「读不出命令行按连续性
   // 判定」（priorCountedIn）。只读不搬：命中的 pid 是本轮真看见的进程号，集合仅
   // 用来回答「这个进程以前算不算这个端点的客户端」。可信轮与降级轮共用同一份
   // 来源——降级轮整轮没有命令行，正好靠它把探针挡在门外、把真会话留在门内。
+  // workbuddy 用引擎集而不是家族集：家族集含 helper/daemon/sidecar，拿它做
+  // 连续性判据等于凭镜像名计数。
   // 首轮（还没有可信快照）时为空：这一轮读不出命令行的行一律不计数，宁可少算
   // 一轮，也不能把一次环境检测变成一张悬空卡。
   const priorCountedPids = () => (lastTrustedScan === null
     ? null
-    : { qoder: lastTrustedScan.qoderPids ?? null, grok: lastTrustedScan.grokPids ?? null });
+    : { qoder: lastTrustedScan.qoderPids ?? null, grok: lastTrustedScan.grokPids ?? null, workbuddy: lastTrustedScan.workbuddyEnginePids ?? null });
 
   // 把可信轮的一份归属并进降级轮：先收本轮还活着的可信值，再补上可信轮根本没
   // 枚举过的进程号的本轮答案（后者通常为空——命令行读不出就没有归属可言）。
@@ -2999,7 +3098,8 @@ export function createAgentMetricsCollector(options = {}) {
   const claudeState = createAggregateState(sparkWindowPoints);
   const codexState = createAggregateState(sparkWindowPoints);
   const grokState = createAggregateState(sparkWindowPoints);
-  const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, qoder: qoderState, claude: claudeState };
+  const workbuddyState = createAggregateState(sparkWindowPoints);
+  const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, qoder: qoderState, claude: claudeState, workbuddy: workbuddyState };
 
   // 桌面稳定行的账目代际与生死结算（折叠路径与读取家务共用，所以挂工厂层，
   // 能同时够到 cachedProcessCounts / nowFn / 聚合桶）。语义细节见各函数注释。
@@ -3128,7 +3228,7 @@ export function createAgentMetricsCollector(options = {}) {
   // the late-attach mechanism and the PID housekeeping all work unmodified —
   // the desktop app points its gateway straight at the resident relay, so it
   // has no session reporter and the socket reverse lookup is its only identity.
-  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map() };
+  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map(), workbuddy: new Map() };
 
   // Consecutive trusted scan rounds in which a session row's endpoint family was
   // absent, keyed "<bucket>:<instId>". A session row names a conversation, not
@@ -3158,6 +3258,7 @@ export function createAgentMetricsCollector(options = {}) {
     codex: codexState,
     opencode: opencodeState,
     grok: grokState,
+    workbuddy: workbuddyState,
   };
   let metricsSnapshotDirty = false;
   let lastMetricsSnapshotAt = 0;
@@ -3422,7 +3523,7 @@ export function createAgentMetricsCollector(options = {}) {
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState, unattributedState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState, workbuddyState, unattributedState]) {
       applySparkWindowToState(state, keep);
     }
     // 实例行（dsh / kimi / opencode / pi / codex / grok，以及 claude 卡会话行
@@ -3518,6 +3619,21 @@ export function createAgentMetricsCollector(options = {}) {
     return false;
   }
 
+  // WorkBuddy 的身份主通道是 URL 段前缀（plan §1.3），relay 侧会把段解析成
+  // agentId "workbuddy"；UA 只是兜底——CLI 发自定义模型请求前会显式删掉
+  // user-agent，所以这条通道不可依赖，但未走配置的探针/旧版本可能还会带。
+  function isWorkbuddyRequest(meta = {}) {
+    if (typeof meta.agentId === "string") {
+      const id = meta.agentId.toLowerCase().trim();
+      if (id === "workbuddy") return true;
+    }
+    if (typeof meta.userAgent === "string") {
+      const ua = meta.userAgent.toLowerCase();
+      if (ua.includes("workbuddy")) return true;
+    }
+    return false;
+  }
+
   // ZCode aggregate bucket. agentId-only: real ZCode traffic arrives with the
   // x-agent-id header its merge config injects; there is deliberately no UA
   // branch — an unrecognized UA must become unattributed (null upstream), never
@@ -3571,6 +3687,9 @@ export function createAgentMetricsCollector(options = {}) {
     } else if (isGrokRequest(meta)) {
       targetState = grokState;
       bucketAgentId = "grok";
+    } else if (isWorkbuddyRequest(meta)) {
+      targetState = workbuddyState;
+      bucketAgentId = "workbuddy";
     } else if (isClaudeRequest(meta)) {
       targetState = claudeState;
       bucketAgentId = "claude";
@@ -4129,7 +4248,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
-    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState, workbuddyState]) {
       pruneStaleAggregateFaults(state, nowFn, faultIdleTtlMs);
     }
 
@@ -4215,6 +4334,7 @@ export function createAgentMetricsCollector(options = {}) {
       settleAndResetRunAccount("codex", procCounts.codex || 0);
       settleAndResetRunAccount("opencode", procCounts.opencode || 0);
       settleAndResetRunAccount("grok", procCounts.grok || 0);
+      settleAndResetRunAccount("workbuddy", procCounts.workbuddy || 0);
       settleAndResetRunAccount("claude", procCounts.claude || 0);
     }
 
@@ -4458,9 +4578,20 @@ export function createAgentMetricsCollector(options = {}) {
       return surface === null ? null : kimiSurfaceLabel(surface);
     };
 
+    // WorkBuddy row badge: the surface is decided by the process scan's parent
+    // chain (desktop GUI host vs terminal), never by the request plane. A row
+    // the scan could not classify stays unbadged.
+    const workbuddyInstanceSurface = (instId) => {
+      const pidMatch = instId.match(/^workbuddy-(\d+)$/);
+      if (pidMatch === null) return null;
+      const surface = procCounts.workbuddySurfaceByPid?.get(Number(pidMatch[1])) ?? null;
+      return surface === null ? null : workbuddySurfaceLabel(surface);
+    };
+
     const instanceSurfaceFor = (bucket, instId) => {
       if (bucket === "dsh") return dshInstanceSurface(instId);
       if (bucket === "kimi") return kimiInstanceSurface(instId);
+      if (bucket === "workbuddy") return workbuddyInstanceSurface(instId);
       return null;
     };
 
@@ -4800,7 +4931,19 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("grok"),
     });
 
-    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent, grokAgent];
+    // WorkBuddy Agent Status（汇总卡 + 实例桶；agent 运行时每进程一行，
+    // 行 id 由进程扫描占位或 socket 反查合成 workbuddy-<pid>，面由父链决定）
+    const workbuddyAgent = buildAggregateAgentStatus({
+      id: "workbuddy",
+      name: "WorkBuddy",
+      state: workbuddyState,
+      processCount: procCounts.workbuddy || 0,
+      tpsWindow: recentSampleWindow,
+      nowFn,
+      instances: instanceSnapshots("workbuddy"),
+    });
+
+    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent, grokAgent, workbuddyAgent];
   }
 
   return {

@@ -12,6 +12,7 @@ import {
   claudeSurfaceLabel,
   dshProfileNameFrom,
   kimiSurfaceLabel,
+  workbuddySurfaceLabel,
   summarizeKimiSurfaces,
   parseDshConsoleQueryOutput,
   findDescendantClientPid,
@@ -2290,7 +2291,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 9, "panel now exposes 9 endpoint cards including grok");
+    assert.equal(status.length, 10, "panel now exposes 10 endpoint cards including workbuddy");
     const opencode = status.find((a) => a.id === "opencode");
     assert.ok(opencode);
     assert.equal(opencode.status, "running");
@@ -2323,7 +2324,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 9, "panel exposes 9 endpoint cards including grok");
+    assert.equal(status.length, 10, "panel exposes 10 endpoint cards including workbuddy");
     const grok = status.find((a) => a.id === "grok");
     assert.ok(grok);
     assert.equal(grok.name, "Grok Build");
@@ -2438,7 +2439,7 @@ describe("createAgentMetricsCollector", () => {
     const status = await collector.getAgentsStatus();
     // The claude aggregate bucket stays internal: the panel keeps its fixed
     // cards and claude's card remains the per-session reporter one.
-    assert.equal(status.length, 9, "claude aggregate bucket must not add a panel card");
+    assert.equal(status.length, 10, "claude aggregate bucket must not add a panel card");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
@@ -5513,6 +5514,185 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
       assert.deepEqual(rowsOf(settled), [["kimi-desktop", "Desktop"]], "the cold pid row folds onto the stable row");
       assert.equal(settled.instances[0].requests, 1, "the old era's account was reopened");
       assert.equal(settled.instances[0].tokens.prompt, 50, "the new era's counts survive the refold merge");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
+  // 行形态与真机一致：WMIC 形状 <Node>,<CommandLine>,<Name>,<ParentProcessId>,<ProcessId>。
+  const INSTALL = "C:\\Users\\tester\\AppData\\Local\\Programs\\WorkBuddy";
+  const IMG = `${INSTALL}\\WorkBuddy.exe`;
+  const RUNTIME = `${INSTALL}\\resources\\app.asar.unpacked\\cli\\bin\\codebuddy`;
+  const wmic = (...rows) => `Node,CommandLine,Name,ParentProcessId,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+  const row = (pid, ppid, args = "") => `LAPTOP,"${IMG}"${args ? ` ${args}` : ""},workbuddy.exe,${ppid},${pid}`;
+  const agentRow = (pid, ppid) => row(pid, ppid, `--optimize-for-size --max-semi-space-size=2 ${RUNTIME} --resume 0198b8a6`);
+  const wb = (status) => status.find((a) => a.id === "workbuddy");
+
+  it("counts exactly the two agent runtimes in the nine-process sample", async () => {
+    // 一个桌面实例的真机形状：主进程 + 四个 --type= 辅助 + daemon + sidecar
+    // + 两个 agent 运行时。只有最后两个算会话；其余同镜像进程只进家族集。
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7001, 800), // GUI 主进程
+        row(7002, 7001, "--type=gpu-process"),
+        row(7003, 7001, "--type=renderer"),
+        row(7004, 7001, "--type=utility"),
+        row(7005, 7001, "--type=crashpad-handler"),
+        row(7006, 7001, "--daemon-app-server-entry.js"),
+        row(7007, 7001, "--sidecar-entry.js"),
+        agentRow(7008, 7001),
+        agentRow(7009, 7001),
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.status, "running", "有 agent 运行时就要点亮卡片");
+    assert.equal(card.name, "WorkBuddy");
+    assert.equal(card.processCount, 2, "九个同镜像进程只有两个 agent 运行时算会话");
+    assert.deepEqual(card.instances.map((i) => i.id).sort(), ["workbuddy-7008", "workbuddy-7009"]);
+    assert.deepEqual(card.instances.map((i) => i.surface), ["Desktop", "Desktop"], "父是本实例 GUI 主进程 → Desktop");
+  });
+
+  it("never counts --type= helpers, daemon or sidecar", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7101, 800),
+        row(7102, 7101, "--type=gpu-process"),
+        row(7103, 7101, "--type=renderer"),
+        row(7104, 7101, "--type=utility"),
+        row(7105, 7101, "--type=crashpad-handler"),
+        row(7106, 7101, "--daemon-app-server-entry.js"),
+        row(7107, 7101, "--sidecar-entry.js"),
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 0, "辅助/daemon/sidecar 一个都不算会话");
+    assert.deepEqual(card.instances, [], "没有会话进程就不起实例行");
+  });
+
+  it("does not inflate the count when the command line is unreadable", async () => {
+    // 降级轮/收尾窗口读不出命令行：镜像名不能当会话用，只有上一轮已认过的
+    // 会话才按连续性保留。
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7300, 800), // GUI 主进程
+        agentRow(7301, 7300), // 真会话
+        "LAPTOP,,workbuddy.exe,7300,7302", // 读不出命令行的同镜像行
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 1, "读不出命令行的行不得凭镜像名计数");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-7301"]);
+  });
+
+  it("keeps the session count on a tasklist fallback round (no image-name inflation)", async () => {
+    // 降级轮整轮没有命令行：九个同镜像行只凭上一轮可信扫描的会话集延续，
+    // 不能按镜像名把 helper/daemon/sidecar 一起算进来。
+    let t = 3000;
+    let trusted = true;
+    const tasklistRows = [
+      7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008, 7009,
+    ].map((pid) => `"WorkBuddy.exe","${pid}","Console","1","100,000 K"`).join("\r\n") + "\r\n";
+    const trustedScan = wmic(
+      row(7001, 800),
+      row(7002, 7001, "--type=gpu-process"),
+      row(7003, 7001, "--type=renderer"),
+      row(7004, 7001, "--type=utility"),
+      row(7005, 7001, "--type=crashpad-handler"),
+      row(7006, 7001, "--daemon-app-server-entry.js"),
+      row(7007, 7001, "--sidecar-entry.js"),
+      agentRow(7008, 7001),
+      agentRow(7009, 7001),
+    );
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? tasklistRows : (trusted ? trustedScan : "")),
+    });
+    await collector.scanProcesses();
+    trusted = false;
+    t += 3000;
+    await collector.scanProcesses();
+
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 2, "降级轮按上一轮会话集延续，不按镜像名");
+    assert.deepEqual(card.instances.map((i) => i.id).sort(), ["workbuddy-7008", "workbuddy-7009"]);
+  });
+
+  it("labels Desktop / CLI / unknown from the parent chain", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7400, 800), // GUI 主进程
+        agentRow(7401, 7400), // 父 = GUI 主进程 → Desktop
+        "LAPTOP,C:\\Windows\\System32\\cmd.exe,cmd.exe,800,7402", // 终端宿主
+        agentRow(7403, 7402), // 父 = 终端 → CLI
+        agentRow(7404, 9999), // 父不在扫描里 → 判不出，不贴面
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    const byId = Object.fromEntries(card.instances.map((i) => [i.id, i.surface ?? null]));
+    assert.equal(byId["workbuddy-7401"], "Desktop");
+    assert.equal(byId["workbuddy-7403"], "CLI");
+    assert.equal(byId["workbuddy-7404"], null, "判不出面时不回落成产品名");
+  });
+
+  it("maps surface labels and never shows the product name as a surface", () => {
+    assert.equal(workbuddySurfaceLabel("desktop"), "Desktop");
+    assert.equal(workbuddySurfaceLabel("cli"), "CLI");
+    assert.equal(workbuddySurfaceLabel("WorkBuddy"), "未知");
+    assert.equal(workbuddySurfaceLabel(undefined), "未知");
+  });
+
+  it("routes workbuddy traffic into the workbuddy card by agentId and UA", async () => {
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
+    const byId = collector.startRequest({ agentId: "workbuddy", model: "wb-1" });
+    byId.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    const byUa = collector.startRequest({ userAgent: "WorkBuddy/5.9.3", model: "wb-1" });
+    byUa.recordEnd({ status: 200, usage: { prompt_tokens: 4, completion_tokens: 2 } });
+
+    const status = await collector.getAgentsStatus();
+    const card = wb(status);
+    assert.equal(card.metrics.totalRequests, 2, "agentId 与 UA 两条通道都落 workbuddyState");
+    assert.equal(card.metrics.tokens.prompt, 14);
+    assert.equal(card.lastModel, "wb-1");
+    assert.equal(status.find((a) => a.id === "zcode").metrics.totalRequests, 0, "不得回落进 zcode 桶");
+  });
+
+  it("keeps the account continuous across a relay restart (snapshot restore)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-metrics-workbuddy-"));
+    const snapPath = join(dir, "metrics-snapshot.json");
+    try {
+      let t = 3000;
+      const scan = wmic(row(7500, 800), agentRow(7501, 7500));
+      const mk = () => testCollector({
+        nowFn: () => t,
+        metricsSnapshotPath: snapPath,
+        metricsSnapshotEveryMs: 30,
+        execFn: (cmd, opts, cb) => cb(null, scan),
+      });
+      const a = mk();
+      await a.scanProcesses();
+      const r1 = a.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-7501", model: "m1" });
+      r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+      t += 100;
+      await new Promise((resolve) => setTimeout(resolve, 80)); // 让快照定时器真正落一次盘
+
+      const b = mk();
+      await b.scanProcesses();
+      const r2 = b.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-7501", model: "m1" });
+      r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+      const card = wb(await b.getAgentsStatus());
+      assert.equal(card.metrics.totalRequests, 2, "同一会话进程跨 restart 续账");
+      assert.equal(card.metrics.tokens.prompt, 150);
+      const restored = card.instances.find((i) => i.id === "workbuddy-7501");
+      assert.ok(restored, "实例行 id 形如 workbuddy-<pid>");
+      assert.equal(restored.requests, 2);
+      assert.equal(restored.surface, "Desktop");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
