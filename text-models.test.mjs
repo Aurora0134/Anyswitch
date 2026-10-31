@@ -11,7 +11,18 @@ import {
 
 describe("isConfirmedTextOnlyModel", () => {
   it("matches the registry exactly, case-insensitively", () => {
-    for (const name of CONFIRMED_TEXT_ONLY_MODELS) {
+    // 名单内容在此独立钉死，不遍历实现自身的数组：误删/误增条目会在这里显式炸出。
+    const expected = [
+      "deepseek-chat",
+      "deepseek-reasoner",
+      "glm-5.1",
+      "glm-5.2",
+      "glm-5.3",
+      "mimo-v2.5-pro",
+      "minimax-m2.7",
+    ];
+    assert.deepEqual([...CONFIRMED_TEXT_ONLY_MODELS], expected);
+    for (const name of expected) {
       assert.equal(isConfirmedTextOnlyModel(name), true, name);
       assert.equal(isConfirmedTextOnlyModel(name.toUpperCase()), true, name);
     }
@@ -132,6 +143,16 @@ describe("requestModelIsTextOnly", () => {
     assert.equal(requestModelIsTextOnly({}, "kimi-k3", true), false);
     assert.equal(requestModelIsTextOnly({}, "", true), false);
     assert.equal(requestModelIsTextOnly({}, undefined, true), false);
+  });
+
+  it("declaration edge shapes are pinned on the request path too, not just the helper", () => {
+    // 非图片声明（如 ["audio"]）同样是事实声明：照判纯文本，不受开关约束。
+    assert.equal(requestModelIsTextOnly({ inputModalities: ["audio"] }, "whatever", false), true);
+    assert.equal(requestModelIsTextOnly({ inputModalities: ["text", "TEXT"] }, "whatever", true), true);
+    // 非数组声明视同未声明：落到名单层，受预判开关约束（与 modelDeclaresTextOnly 的语义对齐）。
+    assert.equal(requestModelIsTextOnly({ inputModalities: "text" }, "glm-5.3", true), true);
+    assert.equal(requestModelIsTextOnly({ inputModalities: "text" }, "glm-5.3", false), false);
+    assert.equal(requestModelIsTextOnly({ inputModalities: "text" }, "kimi-k3", true), false);
   });
 });
 
