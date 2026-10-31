@@ -1,22 +1,35 @@
 // WorkBuddy models.json 写入器测试：全部跑在临时目录，绝不触碰真实
 // ~/.workbuddy。覆盖对象/数组/坏 JSON 三态、托管项认领剔除、用户条目与未知
-// 顶层键保留、availableModels 的「仅既有键维护」、slug/伪渠道 id 与 url 拼接。
+// 顶层键保留、availableModels 的「仅既有键维护」、slug/伪渠道 id 与 url 拼接，
+// 以及并发抢写（GUI 把文件归一成数组）、CAS 冲突与写失败三条路径。
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  chmodSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import {
   buildWorkbuddyModels,
   buildWorkbuddyModelEntry,
   mergeWorkbuddyModels,
   writeWorkbuddyModels,
+  writeWorkbuddyModelsWithBackup,
   readWorkbuddyModels,
   selectManagedModels,
+  workbuddyConfigRoot,
   workbuddyModelsPath,
+  workbuddyModelsIo,
   workbuddyModelId,
   sidecarPath,
   readSidecar,
+  writeSidecar,
   extractManagedProviders,
   deriveAnyswitchChannel,
   isManagedModel,
@@ -38,7 +51,8 @@ const STORE = {
         "gpt-6-astra": {
           displayName: "GPT 6 Astra",
           contextWindow: 256000,
-          modalities: { input: ["text", "image"], output: ["text"] },
+          inputModalities: ["text", "image"],
+          outputModalities: ["text"],
           reasoningEffortLevels: ["low", "high"],
         },
         plain: {},
@@ -86,15 +100,44 @@ describe("workbuddy-merge-models", () => {
       supportsReasoning: true,
       maxInputTokens: 256000,
     });
-    // 无 contextWindow 的条目走共享 tier 兜底，modalities/reasoning 缺失即 false。
+    // 无 contextWindow 的条目走共享 tier 兜底；modalities 未声明时图像能力按
+    // modalitiesFromStoreModel 的兜底方向走（未声明的聊天模型默认允许图像输入），
+    // reasoning 缺失即 false。
     const plain = config.models[2];
     assert.equal(plain.id, "poke-api~plain");
     assert.equal(plain.name, "plain · Poke API");
-    assert.equal(plain.supportsImages, false);
+    assert.equal(plain.supportsImages, true);
     assert.equal(plain.supportsReasoning, false);
     assert.ok(Number.isInteger(plain.maxInputTokens) && plain.maxInputTokens > 0);
     assert.equal(plain.useCustomProtocol, true);
     assert.equal(plain.vendor, "Anyswitch");
+  });
+
+  it("reads image support from the store's real inputModalities field", () => {
+    const textOnly = buildWorkbuddyModelEntry(
+      "poke-api",
+      { models: {} },
+      "gpt-6-text",
+      { inputModalities: ["text"], outputModalities: ["text"] },
+      PORT,
+      TOKEN,
+    );
+    assert.equal(textOnly.supportsImages, false, "只声明 text 就不该报图像能力");
+    const imageIn = buildWorkbuddyModelEntry(
+      "poke-api",
+      { models: {} },
+      "gpt-6-astra",
+      { inputModalities: ["text", "image"], outputModalities: ["text"] },
+      PORT,
+      TOKEN,
+    );
+    assert.equal(imageIn.supportsImages, true);
+    // 未声明 → 共享 fallback 兜底（聊天模型默认允许图像输入）。
+    const undeclared = buildWorkbuddyModelEntry("poke-api", { models: {} }, "gpt-6-astra", {}, PORT, TOKEN);
+    assert.equal(undeclared.supportsImages, true);
+    // 明确的非聊天族（embedding）兜底为纯文本。
+    const embedding = buildWorkbuddyModelEntry("poke-api", { models: {} }, "text-embedding-3", {}, PORT, TOKEN);
+    assert.equal(embedding.supportsImages, false);
   });
 
   it("normalizes a top-level array into the object shape on write", () => {
@@ -219,15 +262,27 @@ describe("workbuddy-merge-models", () => {
     assert.equal(auto.url, "http://127.0.0.1:47821/openai/workbuddy~head-node/v1/chat/completions");
   });
 
-  it("respects WORKBUDDY_CONFIG_DIR when resolving the models path", () => {
+  it("resolves the config root from the two env vars, then the home directory", () => {
+    // 产品自己读模型配置的顺序：WORKBUDDY_CONFIG_DIR 优先，其次 CODEBUDDY_CONFIG_DIR。
+    assert.equal(workbuddyConfigRoot({ WORKBUDDY_CONFIG_DIR: " D:\\wb-home " }, "/home/me"), "D:\\wb-home");
     assert.equal(
-      workbuddyModelsPath({ USERPROFILE: "C:\\Users\\me" }),
-      join("C:\\Users\\me", ".workbuddy", "models.json"),
+      workbuddyConfigRoot({ WORKBUDDY_CONFIG_DIR: "D:\\wb-home", CODEBUDDY_CONFIG_DIR: "E:\\codebuddy" }, "/home/me"),
+      "D:\\wb-home",
     );
+    assert.equal(workbuddyConfigRoot({ CODEBUDDY_CONFIG_DIR: "E:\\codebuddy" }, "/home/me"), "E:\\codebuddy");
+    // 都没有（或只有空白）→ 回落 home。
+    assert.equal(workbuddyConfigRoot({}, "/home/me"), join("/home/me", ".workbuddy"));
+    assert.equal(
+      workbuddyConfigRoot({ WORKBUDDY_CONFIG_DIR: "   ", CODEBUDDY_CONFIG_DIR: "" }, "/home/me"),
+      join("/home/me", ".workbuddy"),
+    );
+    assert.equal(workbuddyModelsPath({}, "/home/me"), join("/home/me", ".workbuddy", "models.json"));
     assert.equal(
       workbuddyModelsPath({ WORKBUDDY_CONFIG_DIR: "D:\\wb-home" }),
       join("D:\\wb-home", "models.json"),
     );
+    // 默认 home 是进程真实主目录（不是注入 base 里的 USERPROFILE）。
+    assert.equal(workbuddyModelsPath({}), join(homedir(), ".workbuddy", "models.json"));
   });
 
   it("writes atomically with a backup, sidecar, and reports unchanged on re-sync", () => {
@@ -273,12 +328,183 @@ describe("workbuddy-merge-models", () => {
     assert.equal(readFileSync(filePath, "utf8"), "{broken");
   });
 
+  it("refuses to overwrite a models key that is not an array", () => {
+    const root = mkTestDir("workbuddy-merge-shape-");
+    const filePath = join(root, "models.json");
+    const original = '{"models":{}}\n';
+    writeFileSync(filePath, original);
+    assert.throws(() => buildWorkbuddyModels(original, {}, PORT, TOKEN), (error) => {
+      assert.ok(error instanceof UnparseableWorkbuddyModelsError);
+      return true;
+    });
+    const result = writeWorkbuddyModels(STORE, PORT, TOKEN, join(root, "Anyswitch"), filePath);
+    assert.equal(result.ok, false);
+    assert.equal(result.unchanged, true);
+    assert.match(result.reason, /unparseable/);
+    assert.equal(readFileSync(filePath, "utf8"), original, "原文件必须逐字节不变");
+  });
+
   it("reports unchanged when there are no channels and no pseudo-channel and an empty sidecar", () => {
     const root = mkTestDir("workbuddy-merge-empty-");
     const result = writeWorkbuddyModels({}, PORT, TOKEN, join(root, "Anyswitch"), join(root, "models.json"));
     assert.equal(result.ok, true);
     assert.equal(result.unchanged, true);
     assert.equal(existsSync(join(root, "models.json")), false);
+  });
+
+  it("does not revive a deleted config directory from a stale sidecar", () => {
+    const root = mkTestDir("workbuddy-merge-gone-");
+    const sidecarRoot = join(root, "Anyswitch");
+    const configRoot = join(root, ".workbuddy");
+    const filePath = join(configRoot, "models.json");
+    writeSidecar(sidecarRoot, ["gone-channel"]);
+
+    const result = writeWorkbuddyModels({}, PORT, TOKEN, sidecarRoot, filePath);
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, true);
+    assert.equal(existsSync(configRoot), false, "用户删掉的配置目录不许被 sidecar 复活");
+    assert.equal(existsSync(filePath), false);
+    assert.deepEqual(readSidecar(sidecarRoot).providers, [], "残留 sidecar 一并清空");
+  });
+
+  it("rewrites once when the GUI normalizes the file right after our write", () => {
+    const root = mkTestDir("workbuddy-merge-clobber-");
+    const filePath = join(root, "models.json");
+    let writes = 0;
+    const io = {
+      ...workbuddyModelsIo,
+      atomicWriteFile: (target, content) => {
+        writes += 1;
+        workbuddyModelsIo.atomicWriteFile(target, content);
+        if (writes === 1) writeFileSync(target, "[]\n"); // GUI 保存把文件归一成数组
+      },
+    };
+
+    const result = writeWorkbuddyModelsWithBackup(filePath, { models: [{ id: "ours" }] }, { io });
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, false);
+    assert.equal(writes, 2, "回读发现不是对象 → 重写一次");
+    assert.deepEqual(JSON.parse(readFileSync(filePath, "utf8")).models, [{ id: "ours" }]);
+  });
+
+  it("reports failure when the file is clobbered after every write", () => {
+    const root = mkTestDir("workbuddy-merge-clobber2-");
+    const filePath = join(root, "models.json");
+    let writes = 0;
+    const io = {
+      ...workbuddyModelsIo,
+      atomicWriteFile: (target, content) => {
+        writes += 1;
+        workbuddyModelsIo.atomicWriteFile(target, content);
+        writeFileSync(target, "[]\n");
+      },
+    };
+
+    const result = writeWorkbuddyModelsWithBackup(filePath, { models: [{ id: "ours" }] }, { io });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "models.json was rewritten concurrently");
+    assert.equal(writes, 2, "只重写一次，不无限循环");
+    assert.equal(readFileSync(filePath, "utf8"), "[]\n", "末态是抢写方的内容，不是半截");
+    assert.deepEqual(
+      readdirSync(root).filter((name) => name.endsWith(".tmp")),
+      [],
+      "不留临时文件",
+    );
+  });
+
+  it("re-reads and re-merges once when another writer wins the CAS", () => {
+    const root = mkTestDir("workbuddy-merge-cas-");
+    const filePath = join(root, "models.json");
+    const sidecarRoot = join(root, "Anyswitch");
+    const original = JSON.stringify({ models: [{ id: "user-1", url: "https://mine.example/v1" }] }) + "\n";
+    writeFileSync(filePath, original);
+
+    let casCalls = 0;
+    const io = {
+      ...workbuddyModelsIo,
+      casWriteFile: (target, content, options) => {
+        casCalls += 1;
+        // 第一次写前，另一个写者插进一条用户模型 → 读入快照的 hash 失效。
+        if (casCalls === 1) {
+          const current = JSON.parse(readFileSync(target, "utf8"));
+          current.models.push({ id: "racer-1", url: "https://racer.example/v1" });
+          writeFileSync(target, JSON.stringify(current, null, 2) + "\n");
+        }
+        return workbuddyModelsIo.casWriteFile(target, content, options);
+      },
+    };
+
+    const result = writeWorkbuddyModels(STORE, PORT, TOKEN, sidecarRoot, filePath, io);
+    assert.equal(result.ok, true);
+    assert.equal(casCalls, 2, "冲突后重读重合并，只重试一次");
+    const ids = JSON.parse(readFileSync(filePath, "utf8")).models.map((entry) => entry.id);
+    assert.ok(ids.includes("racer-1"), "并发写进来的用户条目不能被旧快照盖掉");
+    assert.ok(ids.includes("user-1"));
+    assert.ok(ids.includes("poke-api~gpt-6-astra"));
+  });
+
+  it("fails closed when the CAS keeps losing", () => {
+    const root = mkTestDir("workbuddy-merge-cas2-");
+    const filePath = join(root, "models.json");
+    const sidecarRoot = join(root, "Anyswitch");
+    writeFileSync(filePath, JSON.stringify({ models: [{ id: "user-1", url: "https://mine.example/v1" }] }) + "\n");
+
+    let casCalls = 0;
+    const io = {
+      ...workbuddyModelsIo,
+      casWriteFile: (target, content, options) => {
+        casCalls += 1;
+        const current = JSON.parse(readFileSync(target, "utf8"));
+        current.models.push({ id: `racer-${casCalls}`, url: "https://racer.example/v1" });
+        writeFileSync(target, JSON.stringify(current, null, 2) + "\n");
+        return workbuddyModelsIo.casWriteFile(target, content, options);
+      },
+    };
+
+    const result = writeWorkbuddyModels(STORE, PORT, TOKEN, sidecarRoot, filePath, io);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "models.json changed concurrently");
+    assert.equal(casCalls, 2);
+    const ids = JSON.parse(readFileSync(filePath, "utf8")).models.map((entry) => entry.id);
+    assert.deepEqual(ids, ["user-1", "racer-1", "racer-2"], "没写进去就不留托管残渣");
+    assert.equal(existsSync(sidecarPath(sidecarRoot)), false, "失败不更新 sidecar");
+  });
+
+  it("reports failure and keeps the file intact when the target is read-only", () => {
+    const root = mkTestDir("workbuddy-merge-readonly-");
+    const filePath = join(root, "models.json");
+    const original = JSON.stringify({ models: [{ id: "user-1", url: "https://mine.example/v1" }] }) + "\n";
+    writeFileSync(filePath, original);
+    chmodSync(filePath, 0o444);
+    try {
+      const result = writeWorkbuddyModels(STORE, PORT, TOKEN, join(root, "Anyswitch"), filePath);
+      assert.equal(result.ok, false);
+      assert.equal(result.unchanged, true, "没写进去就不能报改动过");
+      assert.ok(result.reason);
+      assert.equal(readFileSync(filePath, "utf8"), original, "原文件逐字节不变");
+      assert.equal(existsSync(sidecarPath(join(root, "Anyswitch"))), false);
+    } finally {
+      chmodSync(filePath, 0o666);
+    }
+  });
+
+  it("reports failure when the models path is a directory and touches no sibling", () => {
+    const root = mkTestDir("workbuddy-merge-dirtarget-");
+    const filePath = join(root, "models.json");
+    mkdirSync(filePath);
+    const sibling = join(root, "sibling.json");
+    writeFileSync(sibling, "keep-me");
+
+    const result = writeWorkbuddyModels(STORE, PORT, TOKEN, join(root, "Anyswitch"), filePath);
+    assert.equal(result.ok, false);
+    assert.ok(result.reason);
+    assert.equal(existsSync(filePath), true);
+    assert.equal(readdirSync(filePath).length, 0, "目标目录内容原样");
+    assert.equal(readFileSync(sibling, "utf8"), "keep-me", "兄弟文件不许被删");
+    assert.deepEqual(
+      readdirSync(root).filter((name) => name.startsWith("models.backup.")),
+      [],
+    );
   });
 
   it("selectManagedModels removes only relay-signed entries and keeps the rest", () => {

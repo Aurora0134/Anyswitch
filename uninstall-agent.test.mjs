@@ -52,8 +52,8 @@ function memoryPathStore(initial = "") {
   };
 }
 
-function testDriver(home, { pathValue = "" } = {}) {
-  const env = { USERPROFILE: home, LOCALAPPDATA: join(home, "AppData", "Local") };
+function testDriver(home, { pathValue = "", env: extraEnv = {} } = {}) {
+  const env = { USERPROFILE: home, LOCALAPPDATA: join(home, "AppData", "Local"), ...extraEnv };
   const sidecarRoot = join(home, "AppData", "Local", "Anyswitch");
   const path = memoryPathStore(pathValue);
   const broadcasts = [];
@@ -713,6 +713,46 @@ test("workbuddy: a models.json created by the strip itself is reclaimed", async 
   const result = await driver.uninstallEndpoint("workbuddy");
   assert.equal(result.ok, true, JSON.stringify(result.steps));
   assert.ok(!existsSync(modelsPath), "no models.json husk");
+});
+
+test("workbuddy: WORKBUDDY_CONFIG_DIR 只挪 models，提示词与 skills 仍按静态 home 清理", async () => {
+  const home = mkTestDir("uninstall-workbuddy-envroot-");
+  const envRoot = mkTestDir("uninstall-workbuddy-envroot-dir-");
+  const { driver, sidecarRoot } = testDriver(home, { env: { WORKBUDDY_CONFIG_DIR: envRoot } });
+  seedSidecar(sidecarRoot, "workbuddy-sidecar.json", ["chan1"]);
+
+  // models.json 落在写入器认的 env 目录里。
+  const modelsPath = join(envRoot, "models.json");
+  writeJson(modelsPath, {
+    models: [
+      { id: "user-1", name: "Mine", url: "https://mine.example/v1/chat/completions" },
+      workbuddyMerge.buildWorkbuddyModelEntry("chan1", { models: {} }, "m1", {}, FIXTURE_PORT, "tok"),
+    ],
+    theme: "dark",
+  });
+  // 提示词与 skills 落在注入/部署侧的静态 home 目录里。
+  const agentsMd = join(home, ".workbuddy", "AGENTS.md");
+  mkdirSync(dirname(agentsMd), { recursive: true });
+  writeFileSync(agentsMd, "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n");
+  const repo = mkTestDir("workbuddy-skills-repo-envroot-");
+  mkdirSync(join(repo, "my-skill"), { recursive: true });
+  writeFileSync(join(repo, "my-skill", "SKILL.md"), "---\nname: my-skill\n---\n");
+  const skillsDir = join(home, ".workbuddy", "skills");
+  mkdirSync(skillsDir, { recursive: true });
+  createJunction(join(skillsDir, "my-skill"), join(repo, "my-skill"));
+
+  const result = await driver.uninstallEndpoint("workbuddy");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+
+  const models = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(models.models.map((entry) => entry.id), ["user-1"], "env 目录的托管模型条目被清除");
+  assert.equal(models.theme, "dark");
+  assert.equal(readFileSync(agentsMd, "utf8"), "# My notes\n", "静态 home 的托管块被清除");
+  assert.ok(!existsSync(join(skillsDir, "my-skill")), "静态 home 的联接被撤销");
+  assert.ok(existsSync(join(repo, "my-skill", "SKILL.md")), "junction target intact");
+  assert.equal(stepsByName(result)["prompt-block"].changed, true);
+  assert.equal(stepsByName(result)["skill-junctions"].changed, true);
+  assert.ok(!existsSync(join(home, ".workbuddy", "models.json")), "不再去静态 home 清模型表");
 });
 
 // ─────────────────────────────────────────────────────────────

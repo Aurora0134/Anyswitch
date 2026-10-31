@@ -18,7 +18,15 @@ import {
 
 const FAKE_HOME = "C:\\Users\\fixture";
 const FAKE_LOCAL = join(FAKE_HOME, "AppData", "Local");
-const FAKE_BASE = { USERPROFILE: FAKE_HOME, LOCALAPPDATA: FAKE_LOCAL, PATH: "" };
+// 配置根显式钉在 fixture 上：没有 WORKBUDDY_CONFIG_DIR 时解析口径回落进程真实的
+// os.homedir()（产品行为），测试不能依赖真机的主目录。
+const FAKE_CONFIG_ROOT = join(FAKE_HOME, ".workbuddy");
+const FAKE_BASE = {
+  USERPROFILE: FAKE_HOME,
+  LOCALAPPDATA: FAKE_LOCAL,
+  WORKBUDDY_CONFIG_DIR: FAKE_CONFIG_ROOT,
+  PATH: "",
+};
 const FAKE_STORE = { providers: { "fake-channel": { models: {} } } };
 
 function fakeIo({ files = [], dirs = {} } = {}) {
