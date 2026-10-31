@@ -284,7 +284,7 @@ function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, t
   };
 }
 
-// 会话列表快照：GET /panel/api/sessions/list 是九家存档的全盘扫描（S2 实测
+// 会话列表快照：GET /panel/api/sessions/list 是十家存档的全盘扫描（S2 实测
 // 2927 条会话 2.7–8.0s / 1.6MB 响应）。修前每个请求都重扫一遍，面板进程的
 // 事件循环被整段按住——终端字节流、SSE 握手、1s 轮询一起停摆。
 // 现在：{ at, value } 快照 + 短 TTL + 在飞去重 + 过期先返回旧值、后台补一拍。
@@ -614,7 +614,7 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
 }
 
 // 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家（全量 scanAll
-// 要读九家存档，列表轮询路径用不起）。名单外与读盘失败降级为空表的纪律在
+// 要读十家存档，列表轮询路径用不起）。名单外与读盘失败降级为空表的纪律在
 // session-scan 的 scanEndpoint 里（匹配层拿到空表自然判不出，按「宁可不接」
 // 回落）。真正的执行位置由扫描承载决定——见 createPanelRouter 里的 scanHost：
 // 默认进 worker 线程，面板进程不被这段同步 fs 扫描按住。
@@ -1097,8 +1097,8 @@ export function createPanelRouter({
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
   const logLevelGate = createLogLevelGate(settingsFile, base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
-  // 扫描承载（session-scan-worker.mjs）：session-scan 的九个 adapter 全是同步 fs，
-  // 在哪调用就在哪按住事件循环。这里把「九家全量」与「单端点」两种扫描都送进
+  // 扫描承载（session-scan-worker.mjs）：session-scan 的十个 adapter 全是同步 fs，
+  // 在哪调用就在哪按住事件循环。这里把「十家全量」与「单端点」两种扫描都送进
   // 独立 worker 线程；worker 不可用时退回本进程（面板仍出列表，只那一拍会卡），
   // 降级路径在承载里按冷却窗收敛并记 warn。
   // fallback 可注入（sessionScanFallback）：单测要钉「降级那一拍会卡住事件循环」
@@ -1129,7 +1129,7 @@ export function createPanelRouter({
     return sessionListSnapshot;
   }
   // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描走扫描承载（worker
-  // 线程），九个 adapter 的同步 fs 不跑在面板进程的事件循环上。列表路由与启动预热
+  // 线程），十个 adapter 的同步 fs 不跑在面板进程的事件循环上。列表路由与启动预热
   // 共用这一定位点。
   function ensureSessionScanService() {
     if (!sessionScanService) {
@@ -2950,7 +2950,7 @@ export function createPanelRouter({
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
-  // kimi, qoder, codex, opencode, grok). Runs the standalone sync runner so the
+  // kimi, qoder, codex, opencode, grok, workbuddy). Runs the standalone sync runner so the
   // merge logic loads from disk — catalog-writer fixes apply here without a
   // panel/relay restart.
   async function handleAgentSync(res) {

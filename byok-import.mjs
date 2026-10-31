@@ -57,6 +57,7 @@ import { readOpencodeConfig } from "./opencode-merge-config.mjs";
 import { readModelsJson } from "./pi-merge-models.mjs";
 import { dshManagedKeys, dshProfilePatchPaths, getYamlModule, dshYamlSchema } from "./dsh-merge-config.mjs";
 import { readQoderSettings } from "./qoder-merge-config.mjs";
+import { workbuddyModelsPath } from "./workbuddy-merge-models.mjs";
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
 
@@ -514,8 +515,10 @@ function scanGrok(homeDir, sidecarIds) {
   return candidates;
 }
 
-// workbuddy: ~/.workbuddy/models.json。条目是扁平数组项（id/name/url/apiKey 同层，
-// url 是完整 /chat/completions 全路径 —— GUI 与 CLI 都按「整串直用」处理）。
+// workbuddy: <配置根>/models.json。配置根与写入器同一口径（workbuddyModelsPath：
+// WORKBUDDY_CONFIG_DIR / CODEBUDDY_CONFIG_DIR 可改根，默认 ~/.workbuddy）。条目是
+// 扁平数组项（id/name/url/apiKey 同层，url 是完整 /chat/completions 全路径 —— GUI
+// 与 CLI 都按「整串直用」处理）。
 // 文件形状两种都读：对象 {"models":[…]} 与裸数组（GUI 都认，CLI 只认对象），
 // 读不出来的文件按「没有候选」处理，不改写。
 // 托管项识别凭 url 里的 workbuddy~ 段（与写入侧同一签名），sidecar 只作补充——
@@ -541,8 +544,8 @@ function readWorkbuddyModels(modelsPath) {
   return [];
 }
 
-function scanWorkbuddy(homeDir, sidecarIds) {
-  const modelsPath = join(homeDir, ".workbuddy", "models.json");
+function scanWorkbuddy(homeDir, env, sidecarIds) {
+  const modelsPath = workbuddyModelsPath(env, homeDir);
   const candidates = [];
   for (const node of readWorkbuddyModels(modelsPath)) {
     if (!isRecord(node) || typeof node.id !== "string" || node.id.length === 0) continue;
@@ -678,7 +681,7 @@ export function createByokImportService({
     dsh: () => scanDsh(homeDir, readSidecarIds(paths.root, "dsh")),
     qoder: () => scanQoder(homeDir, readSidecarIds(paths.root, "qoder")),
     grok: () => scanGrok(homeDir, readSidecarIds(paths.root, "grok")),
-    workbuddy: () => scanWorkbuddy(homeDir, readSidecarIds(paths.root, "workbuddy")),
+    workbuddy: () => scanWorkbuddy(homeDir, env, readSidecarIds(paths.root, "workbuddy")),
   };
 
   async function scanLocalConfigs() {

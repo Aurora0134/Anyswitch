@@ -24,7 +24,7 @@ const panelJs = readFileSync(
   "utf8",
 );
 
-const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
 // 基准顺序（fixture 默认全为已启动空闲，即待命层的完整卡序）
 const BASE_ORDER = AGENT_IDS;
 
@@ -72,7 +72,7 @@ function buildSandbox(block) {
   };
 }
 
-// 全 9 卡的默认看板 payload：聚合卡已启动（status=running）空闲且从未活动
+// 全 10 卡的默认看板 payload：聚合卡已启动（status=running）空闲且从未活动
 // （无 sessions、无 lastSeen），claude 无会话——默认全部落待命层，用例按需
 // 覆盖个别端点（status 改 "stopped" 即落入底组）。
 function board(overrides = {}) {
@@ -109,7 +109,7 @@ describe("panel.html 端点卡待命下沉排序", () => {
     }));
     assert.deepEqual(t.appends[0], [
       "zcode",
-      "claude", "dsh", "kimi", "opencode", "qoder", "codex", "grok",
+      "claude", "dsh", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy",
       "pi",
     ], "生成中的 zcode 独占顶层；长待命与从未活动的已启动卡落待命层；未启动的 pi 垫底");
   });
@@ -133,7 +133,7 @@ describe("panel.html 端点卡待命下沉排序", () => {
     t.reorderAgentCards(agents());
     assert.deepEqual(t.appends[0], [
       "zcode", "dsh",
-      "claude", "pi", "kimi", "opencode", "qoder", "codex", "grok",
+      "claude", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy",
     ], "宽限期内的 dsh 与生成中的 zcode 同处顶层，长待命已启动卡居待命层");
     t.advance(1000);
     t.reorderAgentCards(agents());
@@ -143,7 +143,7 @@ describe("panel.html 端点卡待命下沉排序", () => {
     assert.equal(t.appends.length, 2, "跨过 5s 边界触发一次重排");
     assert.deepEqual(t.appends[1], [
       "zcode",
-      "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok",
+      "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy",
     ], "超时后 dsh 掉到待命层，且排在长待命的 claude 之后");
   });
 
@@ -162,7 +162,7 @@ describe("panel.html 端点卡待命下沉排序", () => {
     }));
     assert.deepEqual(t.appends[0], [
       "claude",
-      "zcode", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok",
+      "zcode", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy",
     ], "待命 2s 在宽限期内，claude 留顶层");
     t.reorderAgentCards(board({})); // 会话整行退出，payload 锚点消失
     assert.equal(t.appends.length, 1, "锚点消失不回退：仍按记忆锚点处于宽限期，顺序没变不动 DOM");
@@ -182,7 +182,7 @@ describe("panel.html 端点卡待命下沉排序", () => {
     }));
     assert.deepEqual(t.appends[0], [
       "zcode", "dsh",
-      "claude", "kimi", "opencode", "qoder", "codex", "grok",
+      "claude", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy",
       "pi",
     ], "生成中 zcode 与宽限内 dsh 居顶；长待命 claude 与空闲已启动卡居待命层；未启动 pi 垫底");
   });
@@ -195,7 +195,18 @@ describe("panel.html 端点卡待命下沉排序", () => {
     }));
     assert.deepEqual(t.appends[0], [
       "claude",
-      "zcode", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok",
+      "zcode", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy",
     ], "session 在途（status 口径）的 claude 排最前");
+  });
+
+  it("⑥ 第 10 张 workbuddy 同样待命下沉、恢复生成中立即回顶", () => {
+    const t = makeReorder();
+    t.reorderAgentCards(board({ workbuddy: aggGenerating("workbuddy") }));
+    assert.equal(t.appends[0][0], "workbuddy", "生成中的 workbuddy 居顶");
+    t.advance(6000);
+    t.reorderAgentCards(board({ workbuddy: aggIdleSince("workbuddy", 6000, t.now()) }));
+    assert.equal(t.appends[1].at(-1), "workbuddy", "待命超 5s 落待命层末位（基准序末）");
+    t.reorderAgentCards(board({ workbuddy: aggGenerating("workbuddy") }));
+    assert.equal(t.appends[2][0], "workbuddy", "再次生成中立刻回顶");
   });
 });

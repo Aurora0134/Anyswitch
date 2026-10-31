@@ -462,6 +462,18 @@ test("workbuddy: bare-array models.json is read too (GUI 两种形状都认)", a
   assert.equal(findEntry(scan, "workbuddy", "arr").baseURL, "https://arr.example.com/v1");
 });
 
+test("workbuddy: WORKBUDDY_CONFIG_DIR 改根后仍扫该根下的 models.json", async () => {
+  const fixture = makeFixture();
+  const configRoot = join(fixture.root, "wb-config");
+  writeJson(join(configRoot, "models.json"), [
+    { id: "rooted", name: "Rooted", url: "https://rooted.example.com/v1/chat/completions", apiKey: "r" },
+  ]);
+  const service = makeService(fixture, { env: { WORKBUDDY_CONFIG_DIR: configRoot } });
+  const scan = await service.scanLocalConfigs();
+  assert.deepEqual(agentKeys(scan, "workbuddy"), ["workbuddy::rooted"]);
+  assert.equal(findEntry(scan, "workbuddy", "rooted").baseURL, "https://rooted.example.com/v1");
+});
+
 // ── shared pipeline ─────────────────────────────────────────────
 test("empty scan: no endpoint configs → ticket null, no groups", async () => {
   const fixture = makeFixture();
