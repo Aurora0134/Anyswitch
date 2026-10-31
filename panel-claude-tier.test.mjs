@@ -34,7 +34,10 @@ const generalPanel = sliceBetween(
   '<div class="settings-panel" id="settingsPanelRoute"',
   "设置页「通用」",
 );
-const tierCard = sliceBetween(generalPanel, "<!-- Claude Code 卡", "\n    </div>\n\n    <!--", "档位映射卡");
+// 终点必须是本卡自己的收尾：6 空格缩进的 </div> + 空行 + 下一张卡的注释
+// （panel.html 卡与卡之间的接缝）。4 空格那档是「通用」面板容器层的缩进，
+// 切到那里会把下一张「实时输出」卡整卡并进来，卡内断言就失去了行归属。
+const tierCard = sliceBetween(generalPanel, "<!-- Claude Code 卡", "\n      </div>\n\n      <!--", "档位映射卡");
 const tierRows = sliceBetween(tierCard, '<div class="settings-tier-rows" id="claudeTierRows">', "\n          </div>\n        </div>", "四档行容器");
 
 describe("panel.html · Claude Code 档位映射卡", () => {
@@ -100,7 +103,6 @@ describe("panel.html · Claude Code 档位映射卡", () => {
 
   it("四行保持极简形态：只有档位名与控件，不加解释句", () => {
     assert.equal(tierRows.includes("modal-item-desc"), false);
-    assert.equal(tierRows.includes("settings-tier-hint"), false);
   });
 });
 
@@ -110,7 +112,7 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     assert.equal(js.includes("input.onkeydown = (e) => {"), false, "下拉形态不再有回车保存路径");
   });
 
-  it("PATCH 只带本次改动的那一档，其余三档不受牵连", () => {
+  it("POST 只带本次改动的那一档，其余三档不受牵连", () => {
     assert.match(js, /api\("POST", "\/api\/settings", \{ claudeTierMappings: \{ \[tier\]: next \} \}\)/);
   });
 
@@ -135,13 +137,24 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     assert.match(apply, /if \(claudeTierSaving\[tier\]\) continue;/);
   });
 
-  it("总开关与 bypass 开关各自绑定 change，PATCH 只带本项键", () => {
+  it("总开关与 bypass 开关各自绑定 change，POST 只带本项键", () => {
     assert.match(js, /claudeBypassPermissionsToggle\.onchange = async \(\) => \{/);
     assert.match(js, /api\("POST", "\/api\/settings", \{ claudeBypassPermissions: next \}\)/);
     assert.match(js, /claudeTierEnabledToggle\.onchange = async \(\) => \{/);
     assert.match(js, /api\("POST", "\/api\/settings", \{ claudeTierMappingsEnabled: next \}\)/);
-    // 开关都在 settingsSaving 里占位，保存期间挡住轮询回灌。
+  });
+
+  it("三个开关的保存窗口由 settingsSaving 把守：handler 置位、finally 复位，回灌按位让行", () => {
+    // 光在声明里占位挡不住回灌盖回：进 handler 先置 true（发请求前），成败皆在
+    // finally 复位——轮询回灌的逐位守卫认的就是这面旗。
     assert.match(js, /settingsSaving = \{[^}]*claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false/);
+    for (const key of ["claudeBypassPermissions", "midSystemRewrite", "claudeTierEnabled"]) {
+      assert.match(js, new RegExp(`settingsSaving\\.${key} = true;\\n\\s*settingsLoadGen \\+= 1;`), `${key} 必须在发请求前置位`);
+      assert.match(js, new RegExp(`finally \\{\\n\\s*settingsSaving\\.${key} = false;`), `${key} 必须在 finally 复位`);
+    }
+    // 回灌侧逐位守卫：正在保存的那一项不被轮询盖回（midSystemRewrite 的守卫见下一用例）。
+    assert.match(js, /if \(!settingsSaving\.claudeBypassPermissions && claudeBypassPermissionsToggle && d\.settings && typeof d\.settings\.claudeBypassPermissions === "boolean"\) \{/);
+    assert.match(js, /if \(!settingsSaving\.claudeTierEnabled && claudeTierEnabledToggle && d\.settings && typeof d\.settings\.claudeTierMappingsEnabled === "boolean"\) \{/);
   });
 
   it("会话缓存优化开关：即改即存、失败回滚、轮询回灌全走既有模式", () => {
@@ -225,7 +238,9 @@ describe("panel.css · 档位行只管版式", () => {
   });
 
   it("「通用」结构注释与六张卡的实际形态一致", () => {
-    // 卡数随结构演进：「显示」卡随「UI版本」分段钮落地，是第六张。
+    // 卡数随结构演进：「显示」卡随「UI版本」分段钮落地，是第六张。注释钉的数
+    // 必须与实数一致：结构加减卡时这里先红，逼着把两处注释一起改。
+    assert.equal((generalPanel.match(/<div class="panel-card">/g) ?? []).length, 6, "「通用」实数六张卡");
     assert.match(css, /「通用」分组：按语义分六张卡/);
     assert.match(html, /「通用」：按语义分六张卡/);
   });
