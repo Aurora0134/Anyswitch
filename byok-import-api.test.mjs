@@ -89,6 +89,9 @@ describe("panel byok-import routes", () => {
     assert.equal(spy.calls.length, 0);
   });
 
+  // scan 响应契约（entries 带选择用 key、不含明文 key 与内部路径）由下面的
+  // deepEqual(json(), okScan) 整体承担：strict deepEqual 遇任何多余/缺失字段即红，
+  // 路由若向 entries 注入 keyPlaintext/sourcePath/sourceId 这里必然失败。
   it("scan 无 body，调 scanLocalConfigs 并把结果原样回传", async () => {
     const spy = spyService();
     const router = byokRouter({ byokImportService: spy.service });
@@ -97,22 +100,6 @@ describe("panel byok-import routes", () => {
     assert.equal(res.statusCode, 200);
     assert.deepEqual(spy.calls, [["scan"]]);
     assert.deepEqual(json(), okScan);
-  });
-
-  it("scan 响应契约：entries 带选择用 key，但不含明文 key 与内部路径（服务保证，路由不添不加）", async () => {
-    const spy = spyService();
-    const router = byokRouter({ byokImportService: spy.service });
-    const { req, res, json } = fakeReqRes("/panel/api/byok-import/scan", "POST", null);
-    await router.handle(req, res);
-    assert.equal(json().ticket, "tk-1");
-    for (const group of json().groups) {
-      for (const entry of group.entries) {
-        assert.equal(typeof entry.key, "string", "前端勾选回传靠它");
-        assert.equal("keyPlaintext" in entry, false);
-        assert.equal("sourcePath" in entry, false);
-        assert.equal("sourceId" in entry, false);
-      }
-    }
   });
 
   it("apply 把 ticket / keys / deleteLocal 交给服务并原样回传结果", async () => {
