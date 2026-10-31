@@ -21,7 +21,7 @@ import { writeWorkbuddyModels, workbuddyModelsPath } from "./workbuddy-merge-mod
 
 // --- 同步结果的机器可读摘要 -----------------------------------------------
 // 同步子进程除了人看的日志，还在 stdout 上打一行定长前缀的 JSON 摘要，面板靠它
-// 区分「整次没做成」和「个别端点没写进去」：八个端点里挂掉一个，不该让同步按钮
+// 区分「整次没做成」和「个别端点没写进去」：九个端点里挂掉一个，不该让同步按钮
 // 整颗报红。端点名与字段名固定，前端按名字取用。
 export const AGENT_ENDPOINTS = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok", "workbuddy"];
 export const SYNC_RESULT_PREFIX = "__ANYSWITCH_SYNC_RESULT__";
@@ -301,7 +301,9 @@ export async function syncAllAgentConfigs({
 
   // 9. WorkBuddy models.json sync (~/.workbuddy/models.json, WORKBUDDY_CONFIG_DIR 可改根)
   try {
-    const workbuddyPath = workbuddyModelsPath(base);
+    // home 与其他端点同口径（base.USERPROFILE）：这里不是启动器，路径必须跟着
+    // 注入的 base 走；home 缺失时解析成相对路径，由上面的闸门判失败。
+    const workbuddyPath = workbuddyModelsPath(base, base.USERPROFILE ?? "");
     const workbuddyResult = isAbsolute(workbuddyPath)
       ? await writeWorkbuddyModels(store, port, token, root, workbuddyPath)
       : relativeHomeFailure(workbuddyPath);
