@@ -239,7 +239,18 @@ export function settingsEffortInjectionEnabled(base = process.env) {
   return loadSettings(defaultSettingsPath(base), base).injectThinkingEffort;
 }
 
-/** The injector every relay path should use unless it is handed one explicitly. */
-export function defaultEffortInjector({ logger = null, base = process.env } = {}) {
-  return createEffortInjector({ logger, isEnabled: () => settingsEffortInjectionEnabled(base) });
+/**
+ * The injector every relay path should use unless it is handed one explicitly.
+ *
+ * `dbPath` is the same door createEffortInjector opens, defaulted to the
+ * library inside `base` so a caller that redirects the data root (tests, a
+ * moved data directory) redirects the library with it — the switch and the
+ * levels must read from the same root.
+ */
+export function defaultEffortInjector({
+  logger = null,
+  base = process.env,
+  dbPath = defaultEffortDbPath(base),
+} = {}) {
+  return createEffortInjector({ logger, isEnabled: () => settingsEffortInjectionEnabled(base), dbPath });
 }

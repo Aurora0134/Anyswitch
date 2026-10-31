@@ -16,7 +16,10 @@ const CATALOG = {
   models: new Map([
     ["glm-5.3", reasoning(["medium", "high", "xhigh", "max"], "high")],
     ["claude-fable-5", reasoning(["xhigh", "max"], "xhigh")],
-    ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+    // The id must dodge the catalog's own non-text regex: otherwise the row is
+    // never consulted and the test only exercises the spelling-based fallback
+    // (already covered by effort-catalog.test.mjs's isNonTextModel suite).
+    ["silent-renderer", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
   ]),
 };
 
@@ -52,7 +55,11 @@ describe("createEffortInjector.inject", () => {
     assert.equal(kept.body[EFFORT_REQUEST_FIELD], "max");
     assert.equal(kept.injected, null);
     const off = { ...bodyFor("glm-5.3"), [EFFORT_REQUEST_FIELD]: null };
-    assert.equal(injector.inject({ providerId: "p", body: off }).injected, null);
+    const passedThrough = injector.inject({ providerId: "p", body: off });
+    assert.equal(passedThrough.injected, null);
+    // The explicit null IS the client's choice — it must reach the upstream,
+    // not be eaten and re-decided here.
+    assert.deepEqual(passedThrough.body, off);
   });
 
   it("forwards the level a client named in the Anthropic shape", () => {
@@ -107,7 +114,7 @@ describe("createEffortInjector.inject", () => {
 
   it("adds nothing for a model the library calls non-text", () => {
     const { injector } = makeInjector();
-    const result = injector.inject({ providerId: "p", body: bodyFor("agnes-image-2.0-flash") });
+    const result = injector.inject({ providerId: "p", body: bodyFor("silent-renderer") });
     assert.equal(result.injected, null);
     assert.equal(EFFORT_REQUEST_FIELD in result.body, false);
   });
@@ -159,9 +166,12 @@ describe("createEffortInjector.inject", () => {
     const result = injector.inject({
       providerId: "p",
       body: bodyFor("glm-5.3"),
-      model: { reasoningEffortLevels: ["low", "high"] },
+      model: { reasoningEffortLevels: ["medium", "max"] },
     });
-    assert.equal(result.injected, "high");
+    // medium ≠ the library's high (so the library branch would fail this) and
+    // ≠ the declared list's deepest entry (so "just take the last one" would
+    // fail too): the preference order, applied to the declared list, decides.
+    assert.equal(result.injected, "medium");
   });
 
   it("honors the store's defaultEffort when it is a declared level", () => {
@@ -255,6 +265,23 @@ describe("defaultEffortInjector", () => {
     try {
       const injector = defaultEffortInjector({ base });
       assert.equal(injector.inject({ providerId: "p", body: { model: "brand-new-model" } }).injected, "high");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the default from the effort library inside base, not the machine's real one", () => {
+    const { dir, base } = sandboxBase();
+    try {
+      // A row only the sandboxed library holds: if the injector ever reads
+      // past base to the real machine library, this id falls through to the
+      // optimistic "high" and the assertion fails.
+      writeFileSync(
+        join(base.LOCALAPPDATA, "Anyswitch", "thinking-efforts.db.json"),
+        JSON.stringify({ models: { "sandbox-only-model": { kind: "reasoning", levels: ["medium", "high"], default: "medium" } } }),
+      );
+      const injector = defaultEffortInjector({ base });
+      assert.equal(injector.inject({ providerId: "p", body: { model: "sandbox-only-model" } }).injected, "medium");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
