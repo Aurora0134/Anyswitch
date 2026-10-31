@@ -2,7 +2,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   readZcodeConfig,
   writeZcodeConfigWithBackup,
@@ -45,7 +44,10 @@ const STORE = {
 
 describe("readZcodeConfig", () => {
   it("returns empty provider for missing file", () => {
-    assert.deepEqual(readZcodeConfig(join(tmpdir(), "nonexistent.json")), { provider: {} });
+    // A fresh fixture directory guarantees absence; a fixed name in the shared
+    // temp dir only passed while nothing else happened to own that name.
+    const dir = mkTestDir("zcode-merge-test-");
+    assert.deepEqual(readZcodeConfig(join(dir, "absent.json")), { provider: {} });
   });
 
   it("throws UnparseableConfigError for a corrupt file instead of treating it as empty", () => {
@@ -183,15 +185,21 @@ describe("writeZcodeConfigWithBackup", () => {
   it("prunes backups down to the newest 5 after a write", () => {
     const dir = mkTestDir("zcode-merge-test-");
     const filePath = join(dir, "config.json");
+    // The write's own backup carries the wall clock (zcode-merge-config.mjs
+    // timestamp()), so the fixture names are anchored to the same clock rather
+    // than a hardcoded 2020 date — otherwise the expected prune order depends
+    // on the machine's date being later than the hardcoded stamps.
+    const now = Date.now();
+    const stamp = (msAgo) => new Date(now - msAgo).toISOString().replace(/[:.]/g, "-");
     for (let i = 1; i <= 6; i++) {
-      writeFileSync(join(dir, `config.backup.2020-01-0${i}T00-00-00-000Z.json`), `old${i}`, "utf8");
+      writeFileSync(join(dir, `config.backup.${stamp(i * 60_000)}.json`), `old${i}`, "utf8");
     }
     writeFileSync(filePath, JSON.stringify({ provider: {} }), "utf8");
     const result = writeZcodeConfigWithBackup(filePath, { provider: { new: true } });
     assert.equal(result.ok, true);
     const backups = readdirSync(dir).filter((n) => n.startsWith("config.backup.")).sort();
     assert.equal(backups.length, 5);
-    assert.equal(backups[0], "config.backup.2020-01-03T00-00-00-000Z.json", "oldest backups pruned");
+    assert.equal(backups[0], `config.backup.${stamp(4 * 60_000)}.json`, "oldest backups pruned");
     assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
   });
 
@@ -411,7 +419,6 @@ describe("zcode thinking effort levels", () => {
   const catalog = {
     models: new Map([
       ["glm-5.3", { kind: "reasoning", levels: ["medium", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
-      ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
     ]),
   };
   const entryOf = (entry) => entry["_poke-api"].models;
@@ -433,8 +440,38 @@ describe("zcode thinking effort levels", () => {
     });
   });
 
-  it("stays silent for a non-text model", () => {
-    const entry = buildZcodeProviderEntry("poke-api", PROVIDER, 47821, "tok", catalog);
+  // A library row is only load-bearing when the id does not already match the
+  // library's non-text name rules (NON_TEXT_RE in effort-catalog.mjs): an
+  // agnes-style id stays silent with or without its row, so a row for it would
+  // prove nothing. quiet-media-1 matches no name rule — the row is the only
+  // thing between it and the optimistic levels.
+  it("stays silent for a model the library marks non-text", () => {
+    const provider = {
+      channelName: "poke-api",
+      models: { "quiet-media-1": { displayName: "Quiet Media", contextWindow: 8192 } },
+    };
+    const row = { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null };
+    const withRow = buildZcodeProviderEntry(
+      "poke-api",
+      provider,
+      47821,
+      "tok",
+      { models: new Map([["quiet-media-1", row]]) },
+    );
+    assert.equal(withRow["_poke-api"].models["quiet-media-1"].reasoning, undefined);
+    // Counterfactual: without the row the optimistic fallback offers levels,
+    // so the assertion above genuinely depends on the row.
+    const withoutRow = buildZcodeProviderEntry("poke-api", provider, 47821, "tok", { models: new Map() });
+    assert.deepEqual(withoutRow["_poke-api"].models["quiet-media-1"].reasoning, {
+      enabled: true,
+      variants: ["high", "xhigh", "max"],
+      defaultVariant: "high",
+    });
+  });
+
+  // The name rules stay the backstop when the library holds no row at all.
+  it("stays silent for a non-text name even with an empty library", () => {
+    const entry = buildZcodeProviderEntry("poke-api", PROVIDER, 47821, "tok", { models: new Map() });
     assert.equal(entryOf(entry)["agnes-image-2.0-flash"].reasoning, undefined);
   });
 
