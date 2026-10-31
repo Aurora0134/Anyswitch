@@ -14,6 +14,8 @@ import {
   kimiSurfaceLabel,
   workbuddySurfaceLabel,
   summarizeKimiSurfaces,
+  summarizeWorkbuddySurfaces,
+  workbuddySessionIsIdlePrewarm,
   parseDshConsoleQueryOutput,
   findDescendantClientPid,
   getTtftColor,
@@ -29,6 +31,7 @@ import {
 } from "./agent-metrics.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { hasRunningCommand } from "./terminal-switch-guard.mjs";
+import { attributeTerminalSessions } from "./terminal-attribution.mjs";
 
 describe("getTtftColor", () => {
   it("returns green for ttft under 5s", () => {
@@ -5530,10 +5533,16 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   const agentRow = (pid, ppid) => row(pid, ppid, `--optimize-for-size --max-semi-space-size=2 ${RUNTIME} --resume 0198b8a6`);
   const wb = (status) => status.find((a) => a.id === "workbuddy");
 
+  // 这些用例不该碰真实家目录：注册表读到东西与读不到是两种结局，静默读用户的
+  // ~/.workbuddy 既不可重复也可能改变结论。缺省注入「没有注册表」，需要注册表
+  // 的用例自己传 workbuddySessionLookup。
+  const wbCollector = (opts = {}) => testCollector({ workbuddySessionLookup: () => null, ...opts });
+  const registryLookup = (sessions) => (pid) => sessions[pid] ?? null;
+
   it("counts exactly the two agent runtimes in the nine-process sample", async () => {
     // 一个桌面实例的真机形状：主进程 + 四个 --type= 辅助 + daemon + sidecar
     // + 两个 agent 运行时。只有最后两个算会话；其余同镜像进程只进家族集。
-    const collector = testCollector({
+    const collector = wbCollector({
       nowFn: () => 3000,
       execFn: (cmd, opts, cb) => cb(null, wmic(
         row(7001, 800), // GUI 主进程
@@ -5556,7 +5565,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   });
 
   it("never counts --type= helpers, daemon or sidecar", async () => {
-    const collector = testCollector({
+    const collector = wbCollector({
       nowFn: () => 3000,
       execFn: (cmd, opts, cb) => cb(null, wmic(
         row(7101, 800),
@@ -5576,7 +5585,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   it("does not inflate the count when the command line is unreadable", async () => {
     // 降级轮/收尾窗口读不出命令行：镜像名不能当会话用，只有上一轮已认过的
     // 会话才按连续性保留。
-    const collector = testCollector({
+    const collector = wbCollector({
       nowFn: () => 3000,
       execFn: (cmd, opts, cb) => cb(null, wmic(
         row(7300, 800), // GUI 主进程
@@ -5608,7 +5617,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       agentRow(7008, 7001),
       agentRow(7009, 7001),
     );
-    const collector = testCollector({
+    const collector = wbCollector({
       nowFn: () => t,
       execFn: (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? tasklistRows : (trusted ? trustedScan : "")),
     });
@@ -5623,7 +5632,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   });
 
   it("labels Desktop / CLI / unknown from the parent chain", async () => {
-    const collector = testCollector({
+    const collector = wbCollector({
       nowFn: () => 3000,
       execFn: (cmd, opts, cb) => cb(null, wmic(
         row(7400, 800), // GUI 主进程
@@ -5648,7 +5657,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   });
 
   it("routes workbuddy traffic into the workbuddy card by agentId and UA", async () => {
-    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
+    const collector = wbCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
     const byId = collector.startRequest({ agentId: "workbuddy", model: "wb-1" });
     byId.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
     const byUa = collector.startRequest({ userAgent: "WorkBuddy/5.9.3", model: "wb-1" });
@@ -5668,7 +5677,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     try {
       let t = 3000;
       const scan = wmic(row(7500, 800), agentRow(7501, 7500));
-      const mk = () => testCollector({
+      const mk = () => wbCollector({
         nowFn: () => t,
         metricsSnapshotPath: snapPath,
         metricsSnapshotEveryMs: 30,
@@ -5696,6 +5705,140 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // ---- 终端形态（R1）：launcher 用 process.execPath 再 spawn
+  // `node <install>\resources\app.asar.unpacked\cli\bin\codebuddy`，镜像名是
+  // node.exe。只认 WorkBuddy.exe 的判据对这条形态全盲。
+  const nodeRow = (pid, ppid, args = "") =>
+    `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" "${RUNTIME}"${args ? ` ${args}` : ""},node.exe,${ppid},${pid}`;
+
+  it("counts the terminal form: node.exe running cli\\bin\\codebuddy", async () => {
+    // 真机行样本：node.exe "…\cli\bin\codebuddy" --resume <id>，父是本机终端宿主。
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        "LAPTOP,C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,900,7600",
+        nodeRow(7601, 7600, "--resume 0198b8a6-4d2f-7c31-9a44-1b2c3d4e5f60"),
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 1, "终端形态的 CLI 运行时算一个会话");
+    const inst = card.instances.find((i) => i.id === "workbuddy-7601");
+    assert.ok(inst, "实例行 id 由引擎集占位合成 workbuddy-<pid>");
+    assert.equal(inst.surface, "CLI", "父链走进终端 → CLI 面");
+  });
+
+  it("never counts the launcher's own node row", async () => {
+    // launcher 自身：node 跑 workbuddy-launcher.mjs，路径不含 cli/bin/codebuddy。
+    const launcher = `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" "${INSTALL}\\resources\\app.asar.unpacked\\workbuddy-launcher.mjs" --port 9,node.exe,900,7700`;
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        "LAPTOP,C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,900,7600",
+        launcher,
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 0, "启动器不是会话");
+    assert.deepEqual(card.instances, []);
+  });
+
+  // ---- 面汇总（R2）：面板的面徽章只读这个字段。
+  it("summarizes Desktop and CLI surfaces for the card", async () => {
+    const desktop = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7001, 800),
+        agentRow(7008, 7001),
+        agentRow(7009, 7001),
+      )),
+    });
+    assert.deepEqual(wb(await desktop.getAgentsStatus()).surfaces,
+      [{ surface: "desktop", label: "Desktop", count: 2 }]);
+
+    const cli = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        "LAPTOP,C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,900,7600",
+        nodeRow(7601, 7600, "--resume 0198b8a6"),
+      )),
+    });
+    assert.deepEqual(wb(await cli.getAgentsStatus()).surfaces,
+      [{ surface: "cli", label: "CLI", count: 1 }]);
+
+    // 纯函数口径：副行加总 = 卡上进程数，读不出面的档落「未知」。
+    assert.deepEqual(summarizeWorkbuddySurfaces({
+      workbuddyEnginePids: new Set([1, 2]),
+      workbuddySurfaceByPid: new Map([[1, "desktop"]]),
+    }), [{ surface: "desktop", label: "Desktop", count: 1 }, { surface: null, label: "未知", count: 1 }]);
+  });
+
+  // ---- 预热池（R3）：空闲备用进程命令行与真会话同形，只有产品注册表能分辨。
+  const prewarmRow = (pid, ppid) => row(pid, ppid, `${RUNTIME} --prewarm --prewarm-id wb-pool-3f2a`);
+
+  it("drops idle prewarm-pool rows the registry marks as standing by", async () => {
+    const cases = [
+      ["kind=prewarm 且无 sessionId", { kind: "prewarm", sessionId: "" }],
+      ["kind=interactive 但 sessionId 为空", { kind: "interactive", sessionId: "" }],
+    ];
+    for (const [label, record] of cases) {
+      const collector = wbCollector({
+        nowFn: () => 3000,
+        workbuddySessionLookup: registryLookup({ 7801: record }),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(7800, 800), prewarmRow(7801, 7800))),
+      });
+      const card = wb(await collector.getAgentsStatus());
+      assert.equal(card.processCount, 0, `${label}：待命进程不是会话`);
+      assert.deepEqual(card.instances, [], `${label}：不起实例行`);
+    }
+  });
+
+  it("counts a registry-less row and the live --prewarm row that is serving a session", async () => {
+    // 没有注册表：按命令行判据照常计数（宁可多算，不静默漏）。
+    const noRegistry = wbCollector({
+      nowFn: () => 3000,
+      workbuddySessionLookup: () => null,
+      execFn: (cmd, opts, cb) => cb(null, wmic(row(7800, 800), prewarmRow(7801, 7800))),
+    });
+    assert.equal(wb(await noRegistry.getAgentsStatus()).processCount, 1, "读不出注册表 → 照旧计数");
+
+    // 真机那条 --prewarm 行注册表是 kind:"interactive" 且有 sessionId：正在服务。
+    const serving = wbCollector({
+      nowFn: () => 3000,
+      workbuddySessionLookup: registryLookup({ 7801: { kind: "interactive", sessionId: "0199c1a2-3b4d" } }),
+      execFn: (cmd, opts, cb) => cb(null, wmic(row(7800, 800), prewarmRow(7801, 7800))),
+    });
+    const card = wb(await serving.getAgentsStatus());
+    assert.equal(card.processCount, 1, "正在服务的 --prewarm 进程继续计数");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-7801"]);
+
+    assert.equal(workbuddySessionIsIdlePrewarm(null), false, "读不出注册表不等于待命");
+    assert.equal(workbuddySessionIsIdlePrewarm({ kind: "prewarm" }), true);
+    assert.equal(workbuddySessionIsIdlePrewarm({ kind: "interactive", sessionId: "s" }), false);
+  });
+
+  // ---- 终端归属（R4）：workbuddy 进 detected feed 后，终端页签才能绑定端点。
+  it("lets a terminal session bind the workbuddy endpoint and its pid row", async () => {
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        "LAPTOP,C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,900,7600",
+        nodeRow(7601, 7600, "--resume 0198b8a6"),
+      )),
+    });
+    const status = await collector.getAgentsStatus();
+    const detected = collector.getDetectedClientProcesses();
+    assert.deepEqual(
+      detected.map((d) => [d.agentId, d.pid, d.ancestors]),
+      [["workbuddy", 7601, [7600, 900]]],
+      "引擎集进 detected feed，祖链穿过终端宿主",
+    );
+    const [session] = attributeTerminalSessions([{ id: "t1", pid: 7600 }], detected, status);
+    assert.equal(session.agent.endpointId, "workbuddy");
+    assert.equal(session.agent.name, "WorkBuddy");
+    assert.equal(session.agent.pid, 7601);
+    assert.equal(session.agent.instanceId, "workbuddy-7601", "占位行在，pid 形行就能绑定");
   });
 });
 
