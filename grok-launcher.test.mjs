@@ -126,9 +126,15 @@ test("buildGrokLauncherEnv generates an instance id when none is passed", () => 
   assert.equal(sanitizeInstanceId(env.ANYSWITCH_INSTANCE_ID), env.ANYSWITCH_INSTANCE_ID);
 });
 
-test("buildGrokLauncherEnv keeps an explicit GROK_THEME instead of forcing auto", () => {
-  const env = buildGrokLauncherEnv({ base: { GROK_THEME: "auto" } });
-  assert.equal(env.GROK_THEME, "auto", "用户显式选择系统主题时原样保留");
+test("buildGrokLauncherEnv passes an explicit GROK_THEME through untouched", () => {
+  // GROK_THEME is a functional variable like GROK_HOME — the launcher has no
+  // opinion on grok's theme, so an explicit value must survive verbatim (it
+  // must be neither stripped nor rewritten). The sample is deliberately not
+  // "auto": an "auto" sample could not tell a genuine pass-through from a
+  // re-introduced "force auto when unset" rule. That absent-case injection is
+  // a different failure mode, pinned by the "GROK_THEME" in env check above.
+  const env = buildGrokLauncherEnv({ base: { GROK_THEME: "tokyonight" } });
+  assert.equal(env.GROK_THEME, "tokyonight", "用户的主题选择原样透传，启动器不剥除也不改写");
 });
 
 test("buildInstanceId follows the shared '<cwd basename>-<pid>' scheme", () => {
@@ -178,9 +184,13 @@ test("runGrokLauncher starts relay, writes config, spawns grok, reports session 
   assert.deepEqual(deps.calls, ["startRelay", "createTracker", "writeConfig", "spawnGrok", "reportEnd", "closeRelay"]);
   assert.deepEqual(deps.spawned.args, ["--resume", "sess-1"]);
   assert.match(deps.spawned.env.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
-  // The shared scheme is "<cwd basename>-<launcher pid>"; this process IS the
-  // launcher here, so the id ends with our own pid.
-  assert.ok(deps.spawned.env.ANYSWITCH_INSTANCE_ID.endsWith(`-${process.pid}`));
+  // The shared scheme is "<cwd basename>-<launcher pid>" and this process IS
+  // the launcher here, so the id must be exactly what buildInstanceId()
+  // computes for this process. Equality rather than a pid-suffix check: the
+  // 64-char cap (pinned in buildInstanceId's own test) can truncate the pid
+  // tail when the run directory's basename is long, and that must not depend
+  // on where the suite happens to run.
+  assert.equal(deps.spawned.env.ANYSWITCH_INSTANCE_ID, buildInstanceId());
   assert.equal(deps.spawned.env.NO_PROXY, "127.0.0.1,localhost");
   assert.equal("ANYSWITCH_RELAY_TOKEN" in deps.spawned.env, false, "token must not leak into the child env");
   // The child pid is bound on the tracker while grok runs; ended fires before
@@ -418,8 +428,12 @@ test("main() wires every machine-touching dep to its real implementation", async
   // if a wiring line is dropped the launcher stops syncing config.toml loudly,
   // so pin the wiring here rather than letting it rot silently.
   const source = readFileSync(fileURLToPath(new URL("./grok-launcher.mjs", import.meta.url)), "utf8");
-  const body = source.slice(source.indexOf("export async function main"));
-  assert.ok(body.length > 0, "main() must stay in grok-launcher.mjs");
+  // indexOf alone cannot guard main(): on a miss it returns -1 and slice(-1)
+  // hands back the final character, so a length check on that would be
+  // trivially true. Assert the anchor exists before slicing on it.
+  const at = source.indexOf("export async function main");
+  assert.notEqual(at, -1, "main() must stay in grok-launcher.mjs");
+  const body = source.slice(at);
   assert.match(body, /writeConfig: \([\s\S]{0,160}writeGrokConfig\(/);
   assert.match(body, /loadToken: \([\s\S]{0,80}loadOrGenerateToken\(/);
   assert.match(body, /createTracker: \([\s\S]{0,400}createSessionReporter\(/);
