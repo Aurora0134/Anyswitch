@@ -262,6 +262,12 @@ test("launch 一律 cmd /d /c 包装并前置 UTF-8 码页切换：归属链的�
       // ConPTY 下直接 spawn agent，父进程是 conhost（不在 agent-metrics 扫描
       // 名单），归属全丢；cmd 包装让 session.pid=cmd.exe 落在名单内。
       assert.equal(launch.launch.file, base.ComSpec, `${agentId} 经 cmd 启动`);
+      // 乱码根因：ConPTY 伪控制台跟随系统 ANSI 码页（简中机 936/GBK），agent 的
+      // UTF-8 色块字节在 PTY 入口就被按 GBK 解码成乱码，真实 terminal-host 抓包
+      // 验证过 `chcp 65001 >nul &` 形态乱码签名归零。下面的 deepEqual 同时钉死
+      // 六个裸 token 形态：node-pty 只给含空格参数套引号，任何人把前缀合成单个
+      // 字符串参数都会在这里爆红，而不是静默退回 GBK 乱码（详见
+      // agent-session-env.mjs 的 UTF8_CODEPAGE_PREFIX 注释）。
       assert.deepEqual(
         launch.launch.args.slice(0, 6),
         ["/d", "/c", "chcp", "65001", ">nul", "&"],
@@ -274,29 +280,6 @@ test("launch 一律 cmd /d /c 包装并前置 UTF-8 码页切换：归属链的�
       assert.ok(!commandLine.includes(TOKEN), `${agentId} 的命令行不含 relay 令牌`);
       assert.ok(JSON.stringify(launch.env).includes(TOKEN) || agentId === "codex" || agentId === "grok" || agentId === "zcode",
         `${agentId} 的令牌经 env 注入（codex/grok 的令牌在各自托管配置里，zcode 的由 launcher 落槽位 provider_config.json）`);
-    }
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("码页前置的六个 token 全部不含空格：带空格会被 node-pty 套引号，cmd 就不按原生语义解析了", () => {
-  // 乱码根因：ConPTY 伪控制台跟随系统 ANSI 码页（简中机 936/GBK），agent 的
-  // UTF-8 色块字节在 PTY 入口就被按 GBK 解码成中文乱码。修复是把整棵进程树
-  // 的伪控制台切到 65001；成立前提是 `chcp 65001 >nul &` 保持裸 token 形态
-  // 抵达 cmd（node-pty 只对含空格参数加引号），真实 terminal-host 抓包已验证
-  // 该形态乱码签名归零。任何人把这段合成单个字符串参数都会静默退回乱码。
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
-  try {
-    const base = fakeBase(root);
-    for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
-      const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
-      const prefix = launch.launch.args.slice(0, 6);
-      assert.deepEqual(prefix, ["/d", "/c", "chcp", "65001", ">nul", "&"], `${agentId} 的码页前置必须是六个裸 token`);
-      for (const token of prefix) {
-        assert.ok(!token.includes(" "), `${agentId} 的前置参数 "${token}" 不得含空格`);
-      }
-      assert.ok(launch.launch.args[3] === "65001", `${agentId} 切的是 UTF-8 码页`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
