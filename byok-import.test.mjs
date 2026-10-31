@@ -412,8 +412,57 @@ api_key = "grok-secret"
   assert.equal(entry.status, "ok");
 });
 
-// ── shared pipeline ─────────────────────────────────────────────
+test("workbuddy: one models.json entry = one candidate; workbuddy~ route and sidecar excluded", async () => {
+  const fixture = makeFixture();
+  writeJson(join(fixture.homeDir, ".workbuddy", "models.json"), {
+    models: [
+      {
+        id: "mychan",
+        name: "My Chan",
+        url: "https://wb.example.com/v1/chat/completions",
+        apiKey: "wb-secret",
+        useCustomProtocol: true,
+      },
+      // 托管项：url 命中 workbuddy~ 段（与写入侧同一签名），不依赖 sidecar
+      {
+        id: "chan~m2",
+        name: "m2 · 某渠道",
+        url: "http://127.0.0.1:47820/openai/workbuddy~chan/v1/chat/completions",
+        apiKey: "t",
+      },
+      // sidecar 列过的 id：即便 url 看着像用户条目也排除
+      { id: "sidecar-named", name: "S", url: "https://s.example.com/v1/chat/completions", apiKey: "s" },
+      { id: "no-url", name: "N" },
+    ],
+    // 顶层其它键不影响读取
+    availableModels: ["mychan"],
+  });
+  writeJson(join(fixture.storeRoot, "workbuddy-sidecar.json"), { providers: ["sidecar-named"] });
+  const service = makeService(fixture);
+  const scan = await service.scanLocalConfigs();
+  assert.deepEqual(agentKeys(scan, "workbuddy"), ["workbuddy::mychan"]);
+  assert.equal(scan.groups.find((g) => g.agentId === "workbuddy")?.agentName, "WorkBuddy");
+  const entry = findEntry(scan, "workbuddy", "mychan");
+  assert.equal(entry.displayName, "My Chan");
+  // 文件里存的是完整 /chat/completions 全路径，候选 base 去掉它（上游拼接时再加回）
+  assert.equal(entry.baseURL, "https://wb.example.com/v1");
+  assert.equal(entry.modelCount, 1);
+  assert.equal(entry.status, "ok");
+  assert.ok(!JSON.stringify(scan).includes("wb-secret"), "key 不进序列化输出");
+});
 
+test("workbuddy: bare-array models.json is read too (GUI 两种形状都认)", async () => {
+  const fixture = makeFixture();
+  writeJson(join(fixture.homeDir, ".workbuddy", "models.json"), [
+    { id: "arr", name: "Arr", url: "https://arr.example.com/v1/chat/completions", apiKey: "a" },
+  ]);
+  const service = makeService(fixture);
+  const scan = await service.scanLocalConfigs();
+  assert.deepEqual(agentKeys(scan, "workbuddy"), ["workbuddy::arr"]);
+  assert.equal(findEntry(scan, "workbuddy", "arr").baseURL, "https://arr.example.com/v1");
+});
+
+// ── shared pipeline ─────────────────────────────────────────────
 test("empty scan: no endpoint configs → ticket null, no groups", async () => {
   const fixture = makeFixture();
   const service = makeService(fixture);

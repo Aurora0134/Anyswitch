@@ -573,7 +573,7 @@ async function api(method, path, body) {
   // 这套分层只有取到 /api/agents 才算得出来，晚于首绘；刷新后取数落地前的那一帧
   // 由 panel.html 的 panelCardOrderPrepaint 按「上一次重排出来的卡序」画，真重排
   // 那一刻交棒回 DOM 顺序（见下方 reorderAgentCards 末段）。
-  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
   const STANDBY_SINK_MS = 5000;
 
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
@@ -904,6 +904,7 @@ async function api(method, path, body) {
         const opencode = res.agents.find(a => a.id === "opencode");
         const codex = res.agents.find(a => a.id === "codex");
         const grok = res.agents.find(a => a.id === "grok");
+        const workbuddy = res.agents.find(a => a.id === "workbuddy");
         if (zc) renderIfChanged("zcode", zc, () => renderZcode(zc));
         if (cc) renderIfChanged("claude", cc, () => renderClaude(cc));
         if (dsh) renderIfChanged("dsh", dsh, () => renderDsh(dsh));
@@ -913,6 +914,7 @@ async function api(method, path, body) {
         if (opencode) renderIfChanged("opencode", opencode, (agent) => renderOpencode(opencode));
         if (codex) renderIfChanged("codex", codex, () => renderCodex(codex));
         if (grok) renderIfChanged("grok", grok, () => renderGrok(grok));
+        if (workbuddy) renderIfChanged("workbuddy", workbuddy, () => renderWorkbuddy(workbuddy));
         // 左栏路由链卡：随 1s 轮询刷退避倒计时，结构指纹闸控 DOM 重建
         renderRouteChainBoard();
         // 看板内容已真实：通知设置页主题镜像补拍恢复路径下那张空壳快照（一次性）
@@ -2245,6 +2247,66 @@ async function api(method, path, body) {
       setInstanceCount("grok", 0);
       empty.hidden = false;
       metricsBlock.hidden = true;
+    }
+  }
+
+  // WorkBuddy：桌面壳 + 内置 CLI 两个入口共用一条 workbuddy 归属（身份走 URL 前缀），
+  // 面徽章（Desktop / CLI）与 DSH / Kimi 同口径由后端从进程命令行读、由
+  // renderInstanceRows 的 showSurface 贴到实例行。分面副行取 p.surfaces，指标侧
+  // 尚未补这个字段时按空数组渲染：副行隐藏，绝不自造汇总。
+  function renderWorkbuddy(p) {
+    const modelBadgesList = $("workbuddyModelBadgesList");
+    const errorBanner = $("workbuddyErrorBanner");
+    const empty = $("workbuddyEmpty");
+    const metricsBlock = $("workbuddyMetricsBlock");
+
+    if (modelBadgesList) renderModelBadges(modelBadgesList, "workbuddy", p);
+
+    applyFaultBanner(p, errorBanner, $("workbuddyErrorMsg"), $("workbuddyErrorTime"));
+    empty.closest(".panel-card").classList.toggle("card-collapsed", p.status !== "running");
+
+    if (p.status === "running") {
+      empty.hidden = true;
+      metricsBlock.hidden = false;
+      const isGenerating = (p.metrics && p.metrics.activeRequests > 0) || (p.activeRequests > 0);
+
+      const m = p.metrics || {};
+      const sess = (p.sessions && p.sessions[0]) || {};
+      const tokens = m.tokens || sess.tokens || {};
+
+      // 实例按行排列：无实例时用端点聚合量渲染一行「全局汇总」伪实例行，收起态不为空
+      const instances = Array.isArray(p.instances) ? p.instances : [];
+      setInstanceCount("workbuddy", instances.length);
+      renderInstanceRows({ prefix: "workbuddy", listEl: $("workbuddyInstancesList"), instances, showSurface: true, aggregateFallback: buildAggregateFallback(m, p, isGenerating) });
+      renderSurfaceSummary("workbuddy", p.surfaces);
+      $("workbuddySessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
+      $("workbuddySessionReqs").textContent = `${m.totalRequests || p.totalRequests || 0} 次请求`;
+
+      const activeTag = $("workbuddyActiveTag");
+      if (isGenerating) {
+        activeTag.hidden = false;
+      } else {
+        activeTag.hidden = true;
+      }
+
+      const activeList = p.activeModels || (p.currentModel ? [p.currentModel] : []);
+      const lastModelTag = $("workbuddyLastModelTag");
+      if (activeList.length > 0) {
+        lastModelTag.textContent = "模型: " + activeList.join(", ");
+      } else if (p.lastModel) {
+        lastModelTag.textContent = "模型: " + p.lastModel;
+      } else {
+        lastModelTag.textContent = "模型: 待命";
+      }
+      applyDetailFold("workbuddy");
+      gateAggregateRow("workbuddy", $("workbuddySessionRow"), instances.length);
+    } else {
+      empty.hidden = false;
+      metricsBlock.hidden = true;
+      setInstanceCount("workbuddy", 0);
+      // 停止态必须显式清掉副行：卡收起时 CSS 不藏徽标，脏值会一直挂到下一轮
+      // running 刷新（DSH / Kimi 同一处置）。
+      renderSurfaceSummary("workbuddy", []);
     }
   }
 
@@ -6201,7 +6263,7 @@ async function api(method, path, body) {
   }
 
   // 看板各端点的整卡渲染器：boardActivityApplyFrame 命中后按 id 调对应渲染器重渲。
-  // 覆盖全部九个端点；表外端点的帧照样改数据，只是不即时重渲（等下一拍轮询）。
+  // 覆盖全部十个端点；表外端点的帧照样改数据，只是不即时重渲（等下一拍轮询）。
   const BOARD_RENDERERS = {
     zcode: (a) => renderZcode(a),
     claude: (a) => renderClaude(a),
@@ -6212,6 +6274,7 @@ async function api(method, path, body) {
     opencode: (a) => renderOpencode(a),
     codex: (a) => renderCodex(a),
     grok: (a) => renderGrok(a),
+    workbuddy: (a) => renderWorkbuddy(a),
   };
 
   // 空壳防抖计数表的会话关闭清零：只清「两张会话表都不认」的 id——轮询重建是整表
@@ -8302,7 +8365,7 @@ async function api(method, path, body) {
 
   // 「+」新建菜单：先选一个已安装的 CLI Agent（或空白终端），再填工作目录。
   // agent 清单取自环境检测（60s 缓存）；拉取失败只留空白终端，不挡住新建。
-  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
+  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode", "workbuddy"];
   let terminalAddMenuAgents = [];
   let terminalAddMenuAgentsAt = 0;
   let terminalAddMenuSelection = "";
@@ -9100,7 +9163,7 @@ async function api(method, path, body) {
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DeepSeek Harness", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex", grok: "Grok Build" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DeepSeek Harness", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex", grok: "Grok Build", workbuddy: "WorkBuddy" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -16802,7 +16865,7 @@ async function api(method, path, body) {
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
   // node+model 组合不重复——同节点可绑定不同模型分别入链）。
-  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok"];
+  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok", "workbuddy"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
@@ -17917,7 +17980,7 @@ async function api(method, path, body) {
   const STATS_ENDPOINT_LABELS = {
     zcode: "ZCode", claude: "Claude Code", dsh: "DeepSeek Harness",
     opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code",
-    qoder: "Qoder", codex: "Codex", grok: "Grok Build",
+    qoder: "Qoder", codex: "Codex", grok: "Grok Build", workbuddy: "WorkBuddy",
   };
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";
 
@@ -19789,7 +19852,7 @@ async function api(method, path, body) {
     toast(tip);
   }
 
-  // 端点清单：真实 9 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS。
+  // 端点清单：真实 10 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS。
   // 圆点与徽标色是端点品牌色，取自 --ep-* token（亮暗各一套），与会话/统计
   // 两个视图无关——端点标识不能借用语义色，否则会被读成状态。未登记的新端点
   // 回落中性灰，不占用既有端点的色相。
@@ -19798,6 +19861,7 @@ async function api(method, path, body) {
     pi: "var(--ep-pi)", kimi: "var(--ep-kimi)",
     opencode: "var(--ep-opencode)", qoder: "var(--ep-qoder)",
     codex: "var(--ep-codex)", grok: "var(--ep-grok)",
+    workbuddy: "var(--ep-workbuddy)",
   };
   const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id) => ({
     id,

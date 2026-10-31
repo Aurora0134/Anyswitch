@@ -1348,6 +1348,150 @@ describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () 
   });
 });
 
+// WorkBuddy（第 10 端点）：桌面壳 + 内置 CLI 共用一个卡，面徽章由后端下发。
+// 结构断言之外跑一遍 renderWorkbuddy 本体：停/跑两态各自接线、p.surfaces 缺席时
+// 按空数组走（指标侧尚未补字段，缺了只能不显示副行，不能报错、更不能自造汇总）。
+describe("panel.html workbuddy endpoint card", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+    "utf8",
+  );
+
+  it("declares a workbuddy panel card with its own id prefix", () => {
+    assert.ok(panelHtml.includes('data-agent-id="workbuddy"'), "workbuddy card container exists");
+    for (const id of [
+      "workbuddyModelBadgesList",
+      "workbuddyErrorBanner",
+      "workbuddyErrorMsg",
+      "workbuddyErrorTime",
+      "workbuddyEmpty",
+      "workbuddyMetricsBlock",
+      "workbuddyInstanceCount",
+      "workbuddySurfaceSummary",
+      "workbuddyInstancesList",
+      "workbuddySessionRow",
+      "workbuddySessionReqs",
+      "workbuddySessionTokens",
+      "workbuddyActiveTag",
+      "workbuddyLastModelTag",
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+    // 卡序：紧跟 grok 之后（AGENT_CARD_ORDER 与静态卡序同尾）
+    assert.ok(panelHtml.indexOf('data-agent-id="grok"') < panelHtml.indexOf('data-agent-id="workbuddy"'),
+      "workbuddy card sits after the grok card");
+    // 文案只取已批准的句子
+    const card = panelHtml.slice(panelHtml.indexOf('data-agent-id="workbuddy"'));
+    assert.ok(card.includes("<h3>WorkBuddy</h3>"), "卡标题 WorkBuddy");
+    assert.ok(card.includes("未检测到运行中的 WorkBuddy 客户端"), "空态按批准句");
+    assert.ok(card.includes('class="agent-detail-fold" data-prefix="workbuddy"'), "折叠加走 data-prefix 委托");
+    assert.ok(card.includes('alt="WorkBuddy"'), "头像替代文本 WorkBuddy");
+    assert.ok(card.includes('src="data:image/png;base64,'), "品牌图标内联为 PNG data URI");
+  });
+
+  it("registers workbuddy on every shared table (order / renderer / labels / colour / menus)", () => {
+    const orderMatch = panelJs.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
+    assert.ok(orderMatch && orderMatch[1].includes('"workbuddy"'), "AGENT_CARD_ORDER contains workbuddy");
+    assert.ok(panelJs.includes('a.id === "workbuddy"'), "refreshAgents looks up the workbuddy agent");
+    assert.ok(panelJs.includes("renderWorkbuddy(workbuddy)"), "refreshAgents calls renderWorkbuddy");
+    assert.ok(panelJs.includes("function renderWorkbuddy(p)"), "renderWorkbuddy is defined");
+    assert.ok(panelJs.includes("workbuddy: (a) => renderWorkbuddy(a)"), "BOARD_RENDERERS maps workbuddy");
+    assert.ok(panelJs.includes('workbuddy: "WorkBuddy"'), "STATS_ENDPOINT_LABELS uses the approved display name");
+    assert.ok(panelJs.includes('workbuddy: "var(--ep-workbuddy)"'), "SESS_ENDPOINT_COLORS points at the brand token");
+    const chainMatch = panelJs.match(/ROUTE_CHAIN_ENDPOINTS\s*=\s*\[([^\]]+)\]/);
+    assert.ok(chainMatch && chainMatch[1].includes('"workbuddy"'), "ROUTE_CHAIN_ENDPOINTS contains workbuddy");
+    const menuMatch = panelJs.match(/TERMINAL_ADD_MENU_AGENT_IDS\s*=\s*\[([^\]]+)\]/);
+    assert.ok(menuMatch && menuMatch[1].includes('"workbuddy"'), "terminal add menu offers workbuddy");
+    // 三处首帧脚本的清单与运行时基准序同尾，否则首帧预画静默失效
+    const prepaintLists = [...panelHtml.matchAll(/const AGENT_IDS = \[([^\]]+)\];/g)].map((m) => m[1]);
+    assert.equal(prepaintLists.length, 3, "three prepaint scripts carry AGENT_IDS");
+    for (const list of prepaintLists) {
+      assert.ok(list.trim().endsWith('"workbuddy"'), "prepaint AGENT_IDS ends with workbuddy");
+    }
+  });
+
+  it("ships the brand colour in both themes", () => {
+    assert.ok(panelCss.includes("--ep-workbuddy: #0d9488;"), "亮色给 #0d9488");
+    assert.ok(panelCss.includes("--ep-workbuddy: #2dd4bf;"), "暗色给 #2dd4bf");
+    assert.equal((panelCss.match(/--ep-workbuddy:/g) || []).length, 2, "亮暗各一处，不重复定义");
+  });
+
+  it("renderWorkbuddy: 停态清副行、跑态按面汇总且缺少 surfaces 时不报错", () => {
+    const src = panelJs.match(/function renderWorkbuddy\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(src, "renderWorkbuddy found in panel.js");
+    assert.ok(src[0].includes('renderSurfaceSummary("workbuddy", p.surfaces)'), "卡头副行按面汇总");
+    assert.ok(src[0].includes('renderSurfaceSummary("workbuddy", [])'), "停止态显式清副行");
+    assert.ok(src[0].includes("showSurface: true"), "实例行贴面徽章（Desktop / CLI）");
+
+    function run(payload) {
+      const els = new Map();
+      const calls = { surface: [], instance: [], count: [], fold: [], gate: [] };
+      const get = (id) => {
+        if (!els.has(id)) {
+          els.set(id, {
+            id, hidden: false, textContent: "",
+            closest: () => ({ classList: { toggle() {} } }),
+          });
+        }
+        return els.get(id);
+      };
+      const fn = new Function(
+        "$", "renderModelBadges", "applyFaultBanner", "setInstanceCount", "renderInstanceRows",
+        "renderSurfaceSummary", "applyDetailFold", "gateAggregateRow", "buildAggregateFallback", "formatTokens",
+        `${src[0]}\nreturn renderWorkbuddy;`,
+      )(
+        get,
+        () => {},
+        () => {},
+        (prefix, n) => calls.count.push([prefix, n]),
+        (opts) => calls.instance.push(opts),
+        (prefix, surfaces) => calls.surface.push([prefix, surfaces]),
+        (prefix) => calls.fold.push(prefix),
+        (...args) => calls.gate.push(args),
+        () => ({ requests: 0 }),
+        (v) => String(v ?? 0),
+      );
+      fn(payload);
+      return { calls, els };
+    }
+
+    const stopped = run({ id: "workbuddy", status: "stopped" });
+    assert.deepEqual(stopped.calls.count, [["workbuddy", 0]], "停态清零实例计数");
+    assert.deepEqual(stopped.calls.surface, [["workbuddy", []]], "停态清副行");
+    assert.equal(stopped.els.get("workbuddyEmpty").hidden, false, "空态上屏");
+    assert.equal(stopped.els.get("workbuddyMetricsBlock").hidden, true, "指标块收起");
+
+    const surfaces = [{ label: "Desktop", count: 1 }, { label: "CLI", count: 1 }];
+    const running = run({
+      id: "workbuddy", status: "running", surfaces,
+      instances: [{ id: "workbuddy-1234", surface: "CLI", requests: 3 }],
+      metrics: { totalRequests: 3, tokens: { prompt: 10, completion: 20, cached: 5 } },
+    });
+    assert.deepEqual(running.calls.count, [["workbuddy", 1]], "实例计数按行数");
+    assert.equal(running.calls.instance[0].prefix, "workbuddy", "实例行用本卡前缀");
+    assert.equal(running.calls.instance[0].showSurface, true, "实例行贴面徽章");
+    assert.equal(running.calls.instance[0].instances[0].id, "workbuddy-1234", "实例原样下发");
+    assert.deepEqual(running.calls.surface, [["workbuddy", surfaces]], "副行取 p.surfaces");
+    assert.deepEqual(running.calls.fold, ["workbuddy"], "折叠态按本卡应用");
+    assert.equal(running.calls.gate.length, 1, "聚合行闸门按实例数放行");
+    assert.equal(running.els.get("workbuddySessionReqs").textContent, "3 次请求");
+    assert.ok(running.els.get("workbuddySessionTokens").textContent.includes("Prompt: 10"));
+    assert.equal(running.els.get("workbuddyLastModelTag").textContent, "模型: 待命");
+
+    // 指标侧还没补 surfaces：不抛、不自造汇总（如实按空数组走）
+    const noSurfaces = run({ id: "workbuddy", status: "running", instances: [] });
+    assert.deepEqual(noSurfaces.calls.surface, [["workbuddy", undefined]], "缺字段原样透传，由渲染器兜空");
+  });
+});
+
 describe("panel.html stats tab", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
@@ -4213,9 +4357,9 @@ describe("panel.html 结构完整性（超长行原样保留）", () => {
       "超长 base64 行一旦被占位文本替换，头像 img src 会损坏、监测卡标题会错乱");
   });
 
-  it("监测页九个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
-    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 9, "9 个 agent-avatar");
-    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 9, "9 个 agent-headings");
+  it("监测页十个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
+    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 10, "10 个 agent-avatar");
+    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 10, "10 个 agent-headings");
     // img 开标签必须在本行内闭合（不允许 > 落在数千字符之后吞掉后续结构）
     let idx2 = 0;
     let broken = 0;
@@ -5828,8 +5972,8 @@ describe("设置项「隐藏未运行的 Agent 卡」", () => {
     assert.deepEqual(runLivePrepaint({ on: null, list: '["zcode"]' }).painted, [], "缺省即关 → 不画");
     assert.deepEqual(runLivePrepaint({ on: "0", list: '["zcode"]' }).painted, [], "存档是 0 → 不画");
     const one = runLivePrepaint({ on: "1", list: '["zcode"]' });
-    assert.deepEqual(one.painted, ["claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"],
-      "只留 zcode，其余八张首帧就不上屏");
+    assert.deepEqual(one.painted, ["claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"],
+      "只留 zcode，其余九张首帧就不上屏");
     assert.equal(one.attrs[GATE], "1", "挂首帧属性，样式层才生效");
     assert.deepEqual(runLivePrepaint({ on: "1", list: null }).painted, [], "没有清单 → 宁可闪一次");
     assert.deepEqual(runLivePrepaint({ on: "1", list: "not-json" }).painted, [], "解析不了 → 不画");
@@ -5837,14 +5981,14 @@ describe("设置项「隐藏未运行的 Agent 卡」", () => {
     assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode","zcode"]' }).painted, [], "重复项 → 不画");
     assert.deepEqual(runLivePrepaint({ on: "1", list: '["nope"]' }).painted, [], "未登记 id → 不画");
     assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode",1]' }).painted, [], "非字符串项 → 不画");
-    assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode","claude","dsh","pi","kimi","opencode","qoder","codex","grok"]' }).painted,
+    assert.deepEqual(runLivePrepaint({ on: "1", list: '["zcode","claude","dsh","pi","kimi","opencode","qoder","codex","grok","workbuddy"]' }).painted,
       [], "全在跑 → 没有要藏的卡，不挂属性");
   });
 
   it("空清单是合法状态：一个都没在跑时首帧就是空看板（不是「未知」）", () => {
     const empty = runLivePrepaint({ on: "1", list: "[]" });
     assert.deepEqual(empty.painted,
-      ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"], "九张全藏");
+      ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"], "十张全藏");
     assert.equal(empty.attrs[GATE], "1");
   });
 
@@ -7540,7 +7684,7 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
   const panelHtml = readFileSync(join(here, "panel-ui", "panel.html"), "utf8");
   const panelCss = readFileSync(join(here, "panel-ui", "panel.css"), "utf8");
 
-  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
   const ORDER_KEY = "agent-card-order";
   const GATE = "data-prepaint-card-order";
   const STYLE_ID = "panelCardOrderPrepaintCss";
@@ -7600,9 +7744,10 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
       mk("opencode", "stopped", 0, now - 300_000),
       mk("codex", "stopped", 0, now - 60_000),
       mk("grok", "running", 1, now - 1_000),
+      mk("workbuddy", "stopped", 0, now - 300_000),
     ];
   }
-  const LIVE_ORDER = ["grok", "dsh", "qoder", "zcode", "claude", "pi", "kimi", "opencode", "codex"];
+  const LIVE_ORDER = ["grok", "dsh", "qoder", "zcode", "claude", "pi", "kimi", "opencode", "codex", "workbuddy"];
 
   function reorderSandbox() {
     const cards = {};
@@ -7685,13 +7830,13 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
       .split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
     assert.deepEqual(listOf(prepaintSrc, "AGENT_IDS"), listOf(panelJs, "AGENT_CARD_ORDER"),
       "绘制前脚本的端点清单必须与 panel.js 的基准序逐项同");
-    assert.deepEqual(listOf(prepaintSrc, "AGENT_IDS"), AGENT_IDS, "取样用的九个端点清单未过期");
+    assert.deepEqual(listOf(prepaintSrc, "AGENT_IDS"), AGENT_IDS, "取样用的十个端点清单未过期");
     // 清单对了还得对得上真实 DOM：首帧那层是按 data-agent-id 挂 order 的，
     // 卡容器里多一张少一张都会让那一格拿不到 order。
     const markupIds = [...panelHtml.matchAll(/^ {10}<div class="panel-card" data-agent-id="([a-z]+)">$/gm)]
       .map((m) => m[1]);
-    assert.deepEqual(markupIds, ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok"],
-      "panel.html 静态九张卡按缩进一层不落地取到（卡序接管靠这套 id 挂 order）");
+    assert.deepEqual(markupIds, ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok", "workbuddy"],
+      "panel.html 静态十张卡按缩进一层不落地取到（卡序接管靠这套 id 挂 order）");
     assert.deepEqual(new Set(markupIds), new Set(listOf(prepaintSrc, "AGENT_IDS")),
       "首帧脚本的清单与卡容器里的卡一一对应");
   });
@@ -12354,7 +12499,7 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
     assert.deepEqual(await vmFn("boardActivityApplyFrame", [null, agents], ["terminalActivityKey"]), []);
   });
 
-  it("端点级键缺失时不擅自归零；径路渲染器映射覆盖九端点", async () => {
+  it("端点级键缺失时不擅自归零；径路渲染器映射覆盖十端点", async () => {
     // 与按 at 取时效同源：端点级键没被点到 → 没有真值可写，metrics 原样留着；
     // 同一端点只由命中行上报一次，不会一帧把一张卡重渲两遍。
     const agents = mkBoardAgents();
@@ -12367,12 +12512,12 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
     assert.equal(agents[2].metrics.activeRequests, 2, "端点级键没点到 → 不改写（不擅自归零）");
     assert.equal(agents[2].instances[0].activeRequests, 0, "实例行按真值写");
 
-    // 帧改数据 → 调用方按 id 整卡重渲：九端点各有渲染器，键与卡 id 一一对应
+    // 帧改数据 → 调用方按 id 整卡重渲：十端点各有渲染器，键与卡 id 一一对应
     const rStart = panelJs.indexOf("const BOARD_RENDERERS = {");
     const rEnd = panelJs.indexOf("};", rStart);
     const renderers = rStart >= 0 ? panelJs.slice(rStart, rEnd) : "";
     assert.ok(renderers.length > 0, "BOARD_RENDERERS 映射表存在");
-    for (const id of ["zcode", "claude", "dsh", "pi", "kimi", "qoder", "opencode", "codex", "grok"]) {
+    for (const id of ["zcode", "claude", "dsh", "pi", "kimi", "qoder", "opencode", "codex", "grok", "workbuddy"]) {
       assert.ok(renderers.includes(`${id}: (a) => render`), `${id} 有对应渲染器`);
     }
     const sync = panelJs.match(/function syncTerminalActivityStream\(\) \{[\s\S]*?\n  \}/)?.[0];
@@ -13881,7 +14026,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let activeTerminalPreviewId = null;
       let terminalXterm = null;
       let terminalDefaultCwd = "C:\\\\Users\\\\fixture";
-      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
+      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode", "workbuddy"];
       const TERMINAL_ADD_AGENTS_KEY = "panel-terminal-add-agents";
       let terminalAddMenuAgents = [];
       let terminalAddMenuAgentsAt = 0;
@@ -14269,8 +14414,18 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const ids = panelJs.match(/const TERMINAL_ADD_MENU_AGENT_IDS = \[([^\]]+)\]/)?.[1];
     assert.ok(ids, "前端白名单可取样");
     const frontendIds = ids.split(",").map((s) => s.trim().replace(/"/g, ""));
-    assert.deepEqual(frontendIds, Object.keys(AGENT_TERMINAL_TARGETS),
-      "前端白名单与 agent-session-env 的 AGENT_TERMINAL_TARGETS 一一对应，禁漂移");
+    // workbuddy 的终端目标登记在 agent-session-env.mjs（feat/workbuddy-sessions 分支的
+    // 名下文件，不在本分支）：面板这一侧先登记，后端补齐前只允许这一项「前端先有」。
+    // 共有部分的顺序与全集仍然逐一比对——后端多登记而前端漏登、或顺序漂移，都会红。
+    const backendIds = Object.keys(AGENT_TERMINAL_TARGETS);
+    const frontendOnly = frontendIds.filter((id) => !backendIds.includes(id));
+    const backendOnly = backendIds.filter((id) => !frontendIds.includes(id));
+    assert.deepEqual(frontendIds.filter((id) => backendIds.includes(id)),
+      backendIds.filter((id) => frontendIds.includes(id)),
+      "前端白名单与 agent-session-env 的 AGENT_TERMINAL_TARGETS 同序，禁漂移");
+    assert.deepEqual(backendOnly, [], "后端已登记的端点前端必须同步登记");
+    assert.deepEqual(frontendOnly, ["workbuddy"].filter((id) => !backendIds.includes(id)),
+      "只允许 workbuddy 前端先登记（后端由 sessions 分支补）");
 
     assert.ok(panelHtml.includes('id="terminalAddMenu" hidden'), "菜单默认隐藏");
     for (const id of ["terminalAddMenuList", "terminalAddMenuNote", "terminalAddMenuCwd", "terminalAddMenuCancel", "terminalAddMenuConfirm"]) {
@@ -15022,11 +15177,11 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
     assert.equal(await verdict({ agents: [{ id: "kimi" }] }), true);
   });
 
-  it("首帧静态默认是加载态：九张卡都带骨架条，html 带 data-board=pending", () => {
+  it("首帧静态默认是加载态：十张卡都带骨架条，html 带 data-board=pending", () => {
     assert.ok(/<html lang="zh-CN" data-board="pending">/.test(panelHtml),
       "主脚本是 defer 外链，首绘早于第一拍取数——加载态只能由静态 HTML 自己带");
-    assert.equal((panelHtml.match(/class="board-card-loading"/g) ?? []).length, 9);
-    for (const id of ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok"]) {
+    assert.equal((panelHtml.match(/class="board-card-loading"/g) ?? []).length, 10);
+    for (const id of ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok", "workbuddy"]) {
       const at = panelHtml.indexOf(`<div class="panel-card" data-agent-id="${id}">`);
       assert.ok(at >= 0, `${id} 卡在册`);
       const topBar = panelHtml.indexOf('<div class="agent-top-bar">', at);
@@ -15088,8 +15243,8 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
   });
 
   it("骨架条取会话行剪影：两条（名称行 + tokens 行），不再砌段落三杠", () => {
-    assert.equal((panelHtml.match(/sessions-skel board-skel-bar/g) ?? []).length, 18,
-      "九卡各两条骨架");
+    assert.equal((panelHtml.match(/sessions-skel board-skel-bar/g) ?? []).length, 20,
+      "十卡各两条骨架");
     assert.ok(!panelHtml.includes("board-skel-c"), "第三条段落杠已从 HTML 移除");
     assert.ok(!panelCss.includes("board-skel-c"), "c 杠的 CSS 规则同步移除");
     assert.ok(panelCss.includes('html[data-board="pending"] .board-skel-a { width: 30%; height: 12px; }'),

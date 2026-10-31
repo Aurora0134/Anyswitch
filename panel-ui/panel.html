@@ -162,7 +162,7 @@ try {
   // 只在存档正好是这套端点的完整排列时介入：多一项、少一项、有重复一律不画——
   // 宁可仍闪一次基准序，也不画出一个首帧与运行时两边都不认的顺序。
   // order 生效的前提是卡容器为 flex，这条由 panel.test.mjs 钉住。
-  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
   let raw = null;
   try { raw = localStorage.getItem("agent-card-order"); } catch (e) { return; }
   if (typeof raw !== "string" || !raw) return;
@@ -189,13 +189,13 @@ try {
 (function () {
   // 看板未安装 Agent 卡的首帧隐藏。「机器上没装的 Agent 不上屏」只有主脚本取回
   // /api/environment 才算得出来（panel.js loadInstalledAgentIds），主脚本 defer，
-  // 首绘必然早于取数；不预画的话每次刷新都会先闪出全部 9 张卡再收掉没装的。
+  // 首绘必然早于取数；不预画的话每次刷新都会先闪出全部 10 张卡再收掉没装的。
   // 与上面 panelCardOrderPrepaint 同一形状的病、同一种解法：绘制前脚本读上次
   // 快照把那一帧直接画对，主脚本 applyAgentCardVisibility 挂 [hidden] 接棒后
   // 摘掉 <html> 属性，这层样式整体失效。
   // 快照只存「已安装」清单：非字符串数组、空集、含未登记 id 一律不画——
   // 宁可闪一次，也不把在装的卡藏掉（fail-open，与运行时同口径）。
-  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
   let raw = null;
   try { raw = localStorage.getItem("anyswitch.installed-agents"); } catch (e) { return; }
   if (typeof raw !== "string" || !raw) return;
@@ -229,7 +229,7 @@ try {
   // 清单缺失、非数组、含未登记 id 或重复一律不画——宁可闪一次，也不把在跑的卡藏掉；
   // 空数组是合法状态（一个都没在跑），照画：那正是开着这个开关时的空看板。
   // 运行时接棒：主脚本拿到可信帧后挂 [hidden] 并摘掉 <html> 属性，这层样式整体失效。
-  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
   let on = null;
   try { on = localStorage.getItem("panel-board-live-only"); } catch (e) { return; }
   if (on !== "1") return;
@@ -1456,6 +1456,66 @@ if (window.panelStartupController) panelStartupPlay();
                     <div class="session-tags-line">
                       <span class="tag-bubble" id="grokActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
                       <span class="tag-bubble" id="grokLastModelTag">模型: 未选择</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 11. WorkBuddy 模块 -->
+          <div class="panel-card" data-agent-id="workbuddy">
+            <div class="card-body">
+              <div class="agent-top-bar">
+                <div class="agent-brand">
+                  <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
+                    <img src="data:image/png;base64,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" width="32" height="32" alt="WorkBuddy" style="width:32px; height:32px; border-radius:8px; display:block; object-fit:contain;">
+                  </div>
+                  <div class="agent-headings">
+                    <h3>WorkBuddy</h3>
+                    <span class="instance-count-badge" id="workbuddyInstanceCount" hidden></span>
+                    <span class="badge badge-neutral" id="workbuddySurfaceSummary" hidden></span>
+                  </div>
+                </div>
+                <div class="agent-actions">
+                  <div id="workbuddyModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
+                  <button type="button" class="agent-detail-fold" data-prefix="workbuddy" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。-->
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+              </div>
+
+              <div class="alert-box danger" id="workbuddyErrorBanner" hidden>
+                <div class="left">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <span id="workbuddyErrorMsg">HTTP 502 · Upstream Error</span>
+                </div>
+                <div class="time" id="workbuddyErrorTime">刚刚</div>
+              </div>
+
+              <div id="workbuddyEmpty" class="empty-hint">未检测到运行中的 WorkBuddy 客户端</div>
+
+              <div id="workbuddyMetricsBlock" hidden>
+                <div class="session-table-wrapper">
+                  <div id="workbuddyInstancesList"></div>
+                  <div class="session-row detail-open-only" id="workbuddySessionRow">
+                    <div class="session-main">
+                      <div class="session-name-line">
+                        <span>全局汇总</span>
+                        <span class="badge badge-neutral" id="workbuddySessionReqs">0 次请求</span>
+                      </div>
+                      <div class="session-tokens-line" id="workbuddySessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
+                    </div>
+                    <div class="session-tags-line">
+                      <span class="tag-bubble" id="workbuddyActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
+                      <span class="tag-bubble" id="workbuddyLastModelTag">模型: 未选择</span>
                     </div>
                   </div>
                 </div>
