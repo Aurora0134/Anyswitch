@@ -61,6 +61,13 @@ async function assertXtermParity(name, cols, rows, steps) {
 }
 const CRLF = "\r\n";
 
+// 回放里是否真的带有某个 SGR 参数：只认以 m 结尾的 SGR 串并逐参数比对。
+// 不能用 /\[1;/ 这类松正则——回放每行都带绝对定位 \u001b[1;1H，粗体整体丢失也命中。
+function replayHasSgrParam(replay, param) {
+  return [...replay.matchAll(/\u001b\[([0-9;:]+)m/g)]
+    .some((m) => m[1].split(/[;:]/).includes(param));
+}
+
 // 把镜像吐出的回放再喂给一个干净的镜像（就是浏览器 xterm 的等价物），
 // 用来断言「回放自足」：不依赖任何前序状态就能得到同一张画面。
 function repaint(replay, cols, rows) {
@@ -264,7 +271,7 @@ test("SGR 与宽字符：颜色随回放保留，中日韩字不切碎行", () =
   mirror.write("\u001b[1;38;2;255;0;0m红色粗体\u001b[0m 普通\r\n");
   const replay = mirror.toReplay();
   assert.ok(/38;2;255;0;0/.test(replay), "真彩色 token 必须进回放");
-  assert.ok(/\[1;/.test(replay) || /;1m/.test(replay) || /\[1;38/.test(replay), "粗体 token 必须进回放");
+  assert.ok(replayHasSgrParam(replay, "1"), "粗体参数必须进回放（松正则会命中定位序列 [1;1H，粗体丢了也绿）");
   const again = repaint(replay, 20, 4);
   assert.equal(again.screenLines()[0].trim(), "红色粗体 普通", "宽字符回放后列位不能错位");
   assert.equal(terminalCharWidth("红"), 2);
@@ -599,7 +606,7 @@ test("冒号 58:2::r:g:b 归入 58 槽，不污染其它属性", () => {
   const replay = mirror.toReplay();
   assert.ok(replay.includes("58:2::40:90:30"), "冒号形态的下划线色整组入槽");
   assert.ok(replay.includes("38;2;171;178;194"), "前景色不得被冒号 token 清掉");
-  assert.ok(/[;[]1(;|m)/.test(replay), "粗体不得被冒号 token 误复位");
+  assert.ok(replayHasSgrParam(replay, "1"), "粗体不得被冒号 token 误复位");
   assert.equal(repaint(replay, 24, 2).screenAttrs()[0][0].bg, "", "冒号下划线色不得变成背景");
 
   // 未知冒号族安全忽略：7:3 不得被当成 7（反显），也不得拆成 7/3 入列
@@ -615,7 +622,7 @@ test("含冒号 token 不得触发 NaN→0 全复位", () => {
   mirror.write("\u001b[1;31;4:3mX");
   const replay = mirror.toReplay();
   assert.ok(/\b31\b/.test(replay), "冒号 token 之后的 31 必须生效且不被清零");
-  assert.ok(/[;[]1(;|m)/.test(replay), "冒号 token 不得把粗体一并复位");
+  assert.ok(replayHasSgrParam(replay, "1"), "冒号 token 不得把粗体一并复位");
   assert.ok(replay.includes("4:3"), "冒号样式本身要保留");
 });
 
@@ -711,7 +718,7 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
     ].join("");
   }
 
-  test("随机切块 × 随机预算，与整块 write 完全一致", () => {
+  test("随机切块 × 随机预算，与整块 write 完全一致", (t) => {
     // 语料重复到足够长：预算每 256 个字符才采样一次时钟，语料太短时每个块都会在
     // 第一次采样前就解析完，fuzz 就退化成「同步 write 的等价性测试」。
     const text = corpus().repeat(12);
@@ -721,8 +728,8 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
     const expectedLines = reference.screenLines();
     const expectedHistory = reference.historyLines();
 
-    // 覆盖率自检：必须真的走到「预算用尽、中途停下」这条路径，否则偏移错误抓不到。
-    let stalls = 0;
+    // 覆盖率自检：必须真的走到「预算用尽、中途停下」这条路径（见用例末尾的假时钟检查），
+    // 否则偏移错误抓不到。
     let carried = 0;
     for (let round = 0; round < 12; round += 1) {
       const rand = makeRandom(0x5eed + round);
@@ -737,8 +744,7 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
         // 预算从极小到不限：0 表示同步排空，极小值强制中途停下。
         const roll = rand();
         const budget = roll < 0.15 ? 0 : roll < 0.5 ? 0.001 : roll < 0.75 ? 0.5 : 4;
-        const first = mirror.writeSliced(chunk, budget);
-        if (!first.done) stalls += 1;
+        mirror.writeSliced(chunk, budget);
         while (!mirror.drain(budget).done) { /* 模拟 setImmediate 续排 */ }
         if (mirror.info().pendingChars > 0) carried += 1;
       }
@@ -748,7 +754,27 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
       assert.deepEqual(mirror.historyLines(), expectedHistory, `第 ${round} 轮历史必须一致`);
       assert.equal(mirror.info().pendingChars, 0, `第 ${round} 轮结束后不得残留待接续字节`);
     }
-    assert.ok(stalls > 20, `fuzz 必须真的走到中途停下（实际 ${stalls} 次）`);
+    // 覆盖自检（确定性）：「预算用尽、中途停下」的路径必须真的走到。旧实现统计真实
+    // 墙钟命中的 stalls 次数——同种子 3575 次观测分布只有 21..24、对门槛 20 的余量是
+    // 1，且命中依赖宿主 performance.now 的分辨率（粒度 1ms 级时 0.001/0.5ms 预算永不
+    // 命中，整桶塌掉、断言假红）。这里注入每次调用 +1000ms 的假时钟：deadline 在 drain
+    // 开头读、首个采样点（256 字符后）再读，两次读数必差 1000ms——正预算确定在采样点
+    // 停下、每轮 drain 只排一个量子，与真实墙钟快慢无关；切片续排的等价性照常全量断言。
+    let fakeNow = 0;
+    t.mock.method(performance, "now", () => (fakeNow += 1000));
+    const sliced = createScreenMirror({ cols: 40, rows: 12, historyLines: 200 });
+    let cut = 0;
+    while (cut < text.length) {
+      const chunk = text.slice(cut, cut + 1531); // 每块都跨过至少一个采样量子
+      cut += 1531;
+      const first = sliced.writeSliced(chunk, 0.001);
+      assert.equal(first.done, false, "假时钟下正预算必须在首个采样点确定性中途停下");
+      while (!sliced.drain(0.001).done) { /* 假时钟下每轮 drain 同样只排一个量子 */ }
+    }
+    sliced.flush();
+    assert.equal(sliced.toReplay(), expectedReplay, "假时钟下的切片续排必须与整块一致");
+    assert.deepEqual(sliced.screenLines(), expectedLines, "假时钟下的切片续排画面必须一致");
+    assert.deepEqual(sliced.historyLines(), expectedHistory, "假时钟下的切片续排历史必须一致");
     assert.ok(carried > 0, `fuzz 必须覆盖未终结序列暂留（实际 ${carried} 次）`);
   });
 
@@ -779,13 +805,19 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
     assert.equal(mirror.info().pendingChars, 0, "排空后不得残留字节");
   });
 
-  test("flush 与 info 先把待解析字节排空再回答", () => {
+  test("writeSliced 停半路后：info 只读不排空，flush 才排空落屏", () => {
+    // 旧用例断言「info 前必须排空」，那正是 1309227 撤掉的行为：info() 现在刻意不排空
+    // （返回值如实带 pending 余量，terminal-screen.mjs 的 info 注释明写），flush() 才负责
+    // 排空。旧夹具只有 83 字符，够不到首个预算采样点（每 256 字符采样一次时钟），预算
+    // 0.0001 也整段同步解析完，用例从未进入它声称的状态；夹具放大到 4096 字符后，旧的
+    // pendingChars===0 断言实测当场变红。此处按现行契约重钉。
     const mirror = createScreenMirror({ cols: 40, rows: 8 });
-    mirror.writeSliced("A".repeat(80) + "\r\nB", 0.0001);
-    // 预算极小，第一轮很可能没排完；不论排没排完，info 都必须给出排空后的结果。
-    const info = mirror.info();
-    assert.equal(info.pendingChars, 0, "info 前必须排空");
-    assert.equal(mirror.screenLines()[2], "B", "排空后 B 必须已经落到第三行");
+    const first = mirror.writeSliced("A".repeat(4096) + "\r\nB", 0.0001);
+    assert.equal(first.done, false, "4096 字符超出一个采样量子，预算 0.0001 必须中途停下");
+    assert.ok(mirror.info().pendingChars > 0, "info 必须如实报告待解析字节（只读，不排空）");
+    mirror.flush();
+    assert.equal(mirror.info().pendingChars, 0, "flush 之后才排空");
+    assert.ok(mirror.screenLines().some((line) => line.includes("B")), "flush 后 B 必须落到屏上");
   });
 
   test("discardPending 丢弃待解析字节，后续输出仍从干净状态继续", () => {
@@ -824,8 +856,13 @@ describe("回放缓存", () => {
     const mirror = createScreenMirror({ cols: 40, rows: 4 });
     mirror.write("AAA");
     assert.ok(mirror.toReplay().includes("AAA"));
-    // 只入队不排空（预算 0.0001 极可能停在半路），toReplay 仍须看到完整内容。
-    mirror.writeSliced("\r\nBBB", 0.0001);
+    // 夹具必须超过一个预算采样量子（每 256 字符才看一次时钟）：旧夹具只写 5 个字符，
+    // 无论预算多小都会在首个采样点前同步排完（实测 done=true、pendingChars=0），
+    // 「只入队不排空」的状态从未发生，toReplay 是否排空无从区分——toReplay 完全不
+    // flush 的实现照样绿。4096 字符下预算 0.0001 确定停半路（实测 done=false、
+    // pendingChars=3824），toReplay 仍须先排空再回放，丢 flush 的回归当场红。
+    const first = mirror.writeSliced("A".repeat(4096) + "\r\nBBB", 0.0001);
+    assert.equal(first.done, false, "夹具前置：4096 字符必须真的停在半路，否则本用例退化为恒真");
     assert.ok(mirror.toReplay().includes("BBB"), "回放必须先排空待解析字节");
   });
 });
@@ -905,8 +942,17 @@ describe("S2 宽字符语义与真 xterm 对账", () => {
     await assertXtermParity("ICH 插在宽字尾格前", 10, 3, ["A中B", "\u001b[1;3H\u001b[1@"]);
   });
 
-  test("IRM 插入宽字：右移后末列不留半字", async () => {
-    await assertXtermParity("IRM 宽字右移", 8, 3, ["\u001b[?4h1234567中"]);
+  test("IRM 插入宽字：行中插入整字右移，末列不留半字", async () => {
+    // 旧夹具 ?4h1234567中：?4h 是私有形态，镜像（setMode 私有分支不认 4，源码注释与
+    // 本文件 :397 都明写客户端对 ?4h 不动作）与真 xterm 都不动作，两侧同为 no-op、
+    // 对账恒过；且「1234567中」在 cols=8 的真实语义是末列放不下宽字折行，与上方
+    // assertXtermParity("末列宽字折行", 6, 3, ["12345中"]) 重复。这里改为行中已有内容、
+    // CUP 定位后以裸 4h 开 IRM 再插宽字：插入语义 = BCDEFG 整体右移、G 被挤出末列
+    // （两侧实测 A中BCDEF），覆盖语义会得 A中DEFG——精确值断言让任一侧退化当场红。
+    const { mirror, lines } = await compareXterm(8, 3, ["ABCDEFG", "\u001b[1;2H\u001b[4h中"]);
+    assert.deepEqual(mirror.screenLines()[0], "A中BCDEF", "IRM 开时按插入语义整字右移，不得覆盖（A中DEFG）");
+    assert.deepEqual(mirror.screenLines(), lines, "镜像必须与真 xterm 逐格一致");
+    assert.equal(mirror.info().col, 3, "插入的宽字占 2 列，光标落在其后续格上");
   });
 });
 
@@ -1067,13 +1113,20 @@ describe("渲染快照（跨宿主重启的恢复原料）", () => {
 
   test("往返一致：画面/属性/光标/回放/滚动区，恢复后续写不脱节", () => {
     const a = createScreenMirror({ cols: 30, rows: 5 });
-    a.write("普通行\r\n\x1b[1m粗\x1b[0m中文🏴‍☠️宽字\e[38;2;1;2;3m彩色\e[0m\r\n");
+    // 属性行必须最后写、不带换行地留在屏上：先写再被历史行滚出屏幕的话，断言时刻
+    // screenAttrs 比的是全空网格。夹具里的真彩段要用 \u001b——\e 在普通字符串里只是
+    // 字面 e，旧夹具实测真彩 SGR 以「宽字e[38;2;1;2;3m彩色」落屏、从未进过解析器。
+    // 底色用 48;2 真彩：screenAttrs 每格只回 {ch,bg}，前景真彩进不了比较，背景真彩
+    // 才能让「属性逐格一致」吃到真值。
     for (let i = 1; i <= 10; i += 1) a.write(`历史行 ${i}\r\n`);
+    a.write("普通行\r\n\x1b[1m粗\x1b[0m中文🏴‍☠️宽字\u001b[38;2;1;2;3m彩色\u001b[48;2;9;8;7m底\u001b[0m");
     a.write("\x1b[s\x1b[4;2HX\x1b[?2004h\x1b[?25l");
     const b = createScreenMirror({ cols: 30, rows: 5 });
     assert.equal(b.loadSnapshot(a.serializeSnapshot()), true, "合法快照必须重建成功");
     assert.deepEqual(a.screenLines(), b.screenLines(), "画面逐行一致");
     assert.deepEqual(a.screenAttrs(), b.screenAttrs(), "属性（含底色）逐格一致");
+    assert.ok(b.screenAttrs()[4].some((cell) => cell.bg === "48;2;9;8;7"),
+      "真彩背景必须随快照往返保留——前置属性行在屏上，这条才真的在比属性");
     assert.deepEqual(a.historyLines(), b.historyLines(), "滚动区逐行一致");
     assert.equal(a.toReplay(), b.toReplay(), "回放逐字节一致");
     assert.equal(a.info().row, b.info().row, "光标行一致");
@@ -1106,20 +1159,28 @@ describe("渲染快照（跨宿主重启的恢复原料）", () => {
   test("快照预算按 UTF-8 字节裁最旧历史行，保存光标绝对行同步上提", () => {
     const a = createScreenMirror({ cols: 20, rows: 3 });
     for (let i = 1; i <= 30; i += 1) a.write(`历史${i}汉字\r\n`); // CJK：字节≠字符
-    a.write("\x1b7"); // 保存光标（缓冲绝对行）
+    // 保存点必须放在屏首：直接 \x1b7 保存在屏底时，恢复被 min(height-1, abs-base)
+    // 夹到屏底，saved.abs 漏上提也落同一行（实测篡改 abs=28 与正确值 4 落点同为
+    // row 2），落点断言对「绝对行随裁剪上提」无鉴别力。屏首保存点下两者可区分。
+    a.write("\x1b[1;1H\x1b7"); // 保存光标在屏首（缓冲绝对行 = history.length + 0）
     const full = a.serializeSnapshot();
     const trimmed = a.serializeSnapshot({ historyBytes: 120 });
     assert.ok(trimmed.history.length < full.history.length, "预算生效：滚动区被裁");
-    const bytes = [...trimmed.history, ...trimmed.screen]
-      .reduce((total, row) => total + Buffer.byteLength(row.t), 0);
-    assert.ok(bytes <= 120 + 3 * (20 + 8), "预算按 UTF-8 字节计（屏幕行除外）");
-    // 裁剪后 saved.abs 已上提：恢复后的镜像与「历史更短」的语义一致，
-    // ESC 8 的落点必须与原镜像同屏同列
+    // 与实现同口径复算预算（serializeSnapshot 每行带 +8/+6 的行开销，只认
+    // Buffer.byteLength）：旧上界 120 + 3*(20+8) 的松弛项 84 比整个历史预算还宽，
+    // 实测「拿字符数当字节数」的回归保留 4 行、复算 158 也照样 ≤ 旧上界。收紧后：
+    // 正确实现 106 ≤ 120，字符数口径 158 当场红。
+    const budgeted = [...trimmed.history].reduce((sum, row) => sum + Buffer.byteLength(row.t) + 8, 0)
+      + [...trimmed.screen].reduce((sum, row) => sum + Buffer.byteLength(row.t) + 6, 0);
+    assert.ok(budgeted <= 120, `预算按 UTF-8 字节计（含每行开销）：实得 ${budgeted} > 120`);
+    // 裁剪后 saved.abs 已上提（28 → 2）：保存点在屏首，两边 ESC 8 都必须仍落屏首；
+    // 漏上提（abs 仍 28）实测 b 落 row 2，两条断言当场红。
     const b = createScreenMirror({ cols: 20, rows: 3 });
     b.loadSnapshot(trimmed);
     a.write("\x1b8");
     b.write("\x1b8");
-    assert.equal(a.info().row, b.info().row, "ESC 8 落点行一致（绝对行随裁剪上提）");
+    assert.equal(a.info().row, 0, "前置：原镜像保存点在屏首，ESC 8 落点应在第 0 行");
+    assert.equal(b.info().row, a.info().row, "ESC 8 落点行一致（绝对行随裁剪上提）");
     assert.equal(a.info().col, b.info().col, "ESC 8 落点列一致");
   });
 
