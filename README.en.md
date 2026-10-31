@@ -94,7 +94,7 @@ npm test
 
 ## Configure once, ten agents plug in
 
-Ten agents, ten wiring details — configure once and they are all here:
+Ten agents, eleven wiring details — configure once and they are all here:
 
 | Agent | Protocol surface | Launcher |
 | --- | --- | --- |
