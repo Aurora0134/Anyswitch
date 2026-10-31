@@ -64,9 +64,8 @@ test("claude: custom-title beats first user message", async () => {
     JSON.stringify({ type: "custom-title", customTitle: "我的自定义标题" }),
   ]);
   const { sessions, endpointErrors } = await claudeScanner(root).scanAll();
-  // sqlite adapters report their (empty) temp roots as endpoint errors — only
-  // claude must be clean here.
-  assert.deepEqual(endpointErrors.filter((e) => e.endpoint === "claude"), []);
+  // 其余八家的根目录都是空壳：没有会话就没有错误条目（缺库不算故障）。
+  assert.deepEqual(endpointErrors, []);
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].title, "我的自定义标题");
   assert.equal(sessions[0].endpoint, "claude");
@@ -1476,22 +1475,49 @@ test("sqlite tool blocks without a usable name fall back to [Tool: unknown]", as
 });
 
 test("sqlite adapters degrade to endpointErrors when the db cannot be opened", async () => {
-  const root = makeTmp();
-  mkdirSync(join(root, "cli", "db"), { recursive: true });
-  writeFileSync(join(root, "cli", "db", "db.sqlite"), "this is not a sqlite file", "utf8");
-  const scanner = testScanner({ zcode: [root] });
+  // 库文件在、内容不是 sqlite：这是真故障，必须照旧上报。
+  const zcodeRoot = makeTmp();
+  mkdirSync(join(zcodeRoot, "cli", "db"), { recursive: true });
+  writeFileSync(join(zcodeRoot, "cli", "db", "db.sqlite"), "this is not a sqlite file", "utf8");
+  const opencodeRoot = makeTmp();
+  writeFileSync(join(opencodeRoot, "opencode.db"), "this is not a sqlite file", "utf8");
+  const scanner = testScanner({ zcode: [zcodeRoot], opencode: [opencodeRoot] });
   const { sessions, endpointErrors } = await scanner.scanAll();
-  assert.deepEqual(sessions.filter((s) => s.endpoint === "zcode"), []);
+  assert.deepEqual(sessions, []);
   const zcodeError = endpointErrors.find((e) => e.endpoint === "zcode");
   assert.ok(zcodeError, "zcode must surface an endpoint error");
   assert.ok(zcodeError.reason.length > 0);
+  const opencodeError = endpointErrors.find((e) => e.endpoint === "opencode");
+  assert.ok(opencodeError, "opencode must surface an endpoint error");
+  assert.ok(opencodeError.reason.length > 0);
 });
 
-test("sqlite adapters degrade cleanly when the db file is missing", async () => {
-  const root = makeTmp();
-  const { sessions, endpointErrors } = await testScanner({ zcode: [root] }).scanAll();
-  assert.deepEqual(sessions.filter((s) => s.endpoint === "zcode"), []);
-  assert.ok(endpointErrors.some((e) => e.endpoint === "zcode"));
+test("sqlite 端点：库还没建出来＝没有会话，不是故障", async () => {
+  // 现场形态：客户端没装（数据目录整份不存在）或装了还没聊过（目录在、库文件不在）。
+  // 这两种都没有会话可列，报成「存档不可读」只会让会话页对未安装的 Agent 弹提示。
+  const missingRoot = makeTmp();
+  const emptyDirRoot = makeTmp();
+  const scanner = testScanner({
+    zcode: [emptyDirRoot],
+    opencode: [join(missingRoot, "no-such-store")],
+  });
+  const { sessions, endpointErrors } = await scanner.scanAll();
+  assert.deepEqual(sessions, []);
+  assert.deepEqual(endpointErrors, [], "缺库是「没有会话」，不该冒成端点异常");
+});
+
+test("sqlite 端点：全新装的空库（还没有会话表）按空列表处理", async () => {
+  const zcodeRoot = makeTmp();
+  mkdirSync(join(zcodeRoot, "cli", "db"), { recursive: true });
+  new DatabaseSync(join(zcodeRoot, "cli", "db", "db.sqlite")).close();
+  const opencodeRoot = makeTmp();
+  new DatabaseSync(join(opencodeRoot, "opencode.db")).close();
+  const { sessions, endpointErrors } = await testScanner({
+    zcode: [zcodeRoot],
+    opencode: [opencodeRoot],
+  }).scanAll();
+  assert.deepEqual(sessions, []);
+  assert.deepEqual(endpointErrors, [], "建了库但还没建表＝还没有会话，不是故障");
 });
 
 // --- orchestration ---------------------------------------------------------------
@@ -1513,8 +1539,11 @@ test("scanAll merges adapters, sorts by lastActive desc, isolates failures", asy
     ].join("\n") + "\n",
     "utf8",
   );
-  // zcode root without a db → endpoint error, must not affect the others.
+  // zcode 的库读不出来（内容不是 sqlite）→ endpoint error，必须不影响其它家。
+  // 缺库不再算失败（见「库还没建出来＝没有会话」），故这里要造一个真坏库。
   const zcodeRoot = makeTmp();
+  mkdirSync(join(zcodeRoot, "cli", "db"), { recursive: true });
+  writeFileSync(join(zcodeRoot, "cli", "db", "db.sqlite"), "this is not a sqlite file", "utf8");
   const scanner = testScanner({ claude: [claudeRoot], pi: [piRoot], zcode: [zcodeRoot] });
   const { sessions, endpointErrors } = await scanner.scanAll();
   const endpoints = sessions.map((s) => s.endpoint);

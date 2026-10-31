@@ -1727,6 +1727,20 @@ function openSqliteReadOnly(path) {
   return new DatabaseSync(uri);
 }
 
+// 会话库还没建出来＝这家客户端没装、或装了还没聊过：没有会话可列，不是故障。
+// 文件型适配器对缺失的根目录早就是「空表」口径（readdirSync 失败即跳过），sqlite
+// 这两家必须同一口径——否则「本机没装 opencode」也会在会话页顶出一条存档不可读的
+// 提示（2026-10-31 现场：未安装的 opencode 报 unable to open database file）。
+// 只有「库文件在、却打不开/读不出来」才是真故障，照旧冒到 endpointErrors。
+function sqliteStorePresent(dbPath) {
+  try {
+    return statSync(dbPath).isFile();
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return false;
+    throw error; // 权限/IO 类故障不许被当成「没有存档」吞掉
+  }
+}
+
 // Which tables a store actually carries. Clients add and retire tables across
 // versions (opencode 2.x moved sessions and messages into new ones), and an
 // older install has no trace of them — probing beats assuming.
@@ -1737,8 +1751,11 @@ function sqliteTableExists(db, name) {
 // Shared row shape for zcode/opencode `session` tables (same columns on both):
 // id / title / directory / time_created / time_updated (ms since epoch).
 function scanSessionTable({ endpoint, dbPath }) {
+  if (!sqliteStorePresent(dbPath)) return [];
   const db = openSqliteReadOnly(dbPath);
   try {
+    // 刚装好的客户端可能先建库、后建表：没有会话表就等于还没有会话。
+    if (!sqliteTableExists(db, "session")) return [];
     const rows = db
       .prepare(
         "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
@@ -1927,6 +1944,7 @@ function createZcodeAdapter(roots) {
 const OPENCODE_SESSION_COLUMNS = "id, title, directory, time_created, time_updated";
 
 function scanOpencodeSessions(dbPath) {
+  if (!sqliteStorePresent(dbPath)) return [];
   const db = openSqliteReadOnly(dbPath);
   try {
     const rows = [];
