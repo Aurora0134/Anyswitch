@@ -1349,8 +1349,8 @@ describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () 
 });
 
 // WorkBuddy（第 10 端点）：桌面壳 + 内置 CLI 共用一个卡，面徽章由后端下发。
-// 结构断言之外跑一遍 renderWorkbuddy 本体：停/跑两态各自接线、p.surfaces 缺席时
-// 按空数组走（指标侧尚未补字段，缺了只能不显示副行，不能报错、更不能自造汇总）。
+// 结构断言之外跑一遍 renderWorkbuddy 本体：停/跑两态各自接线；跑态按
+// p.surfaces 逐面汇总上屏；字段缺失或空数组只收起副行，不报错、不自造汇总。
 describe("panel.html workbuddy endpoint card", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
@@ -1424,53 +1424,64 @@ describe("panel.html workbuddy endpoint card", () => {
     assert.equal((panelCss.match(/--ep-workbuddy:/g) || []).length, 2, "亮暗各一处，不重复定义");
   });
 
-  it("renderWorkbuddy: 停态清副行、跑态按面汇总且缺少 surfaces 时不报错", () => {
-    const src = panelJs.match(/function renderWorkbuddy\(p\) \{[\s\S]*?\n  \}/);
-    assert.ok(src, "renderWorkbuddy found in panel.js");
-    assert.ok(src[0].includes('renderSurfaceSummary("workbuddy", p.surfaces)'), "卡头副行按面汇总");
-    assert.ok(src[0].includes('renderSurfaceSummary("workbuddy", [])'), "停止态显式清副行");
-    assert.ok(src[0].includes("showSurface: true"), "实例行贴面徽章（Desktop / CLI）");
+  const renderSrc = panelJs.match(/function renderWorkbuddy\(p\) \{[\s\S]*?\n  \}/);
+  const summarySrc = panelJs.match(/function renderSurfaceSummary\(prefix, surfaces\) \{[\s\S]*?\n  \}/);
 
-    function run(payload) {
-      const els = new Map();
-      const calls = { surface: [], instance: [], count: [], fold: [], gate: [] };
-      const get = (id) => {
-        if (!els.has(id)) {
-          els.set(id, {
-            id, hidden: false, textContent: "",
-            closest: () => ({ classList: { toggle() {} } }),
-          });
-        }
-        return els.get(id);
-      };
-      const fn = new Function(
-        "$", "renderModelBadges", "applyFaultBanner", "setInstanceCount", "renderInstanceRows",
-        "renderSurfaceSummary", "applyDetailFold", "gateAggregateRow", "buildAggregateFallback", "formatTokens",
-        `${src[0]}\nreturn renderWorkbuddy;`,
-      )(
-        get,
-        () => {},
-        () => {},
-        (prefix, n) => calls.count.push([prefix, n]),
-        (opts) => calls.instance.push(opts),
-        (prefix, surfaces) => calls.surface.push([prefix, surfaces]),
-        (prefix) => calls.fold.push(prefix),
-        (...args) => calls.gate.push(args),
-        () => ({ requests: 0 }),
-        (v) => String(v ?? 0),
-      );
-      fn(payload);
-      return { calls, els };
-    }
+  function runWorkbuddy(payload) {
+    const els = new Map();
+    const calls = { surface: [], instance: [], count: [], fold: [], gate: [] };
+    const get = (id) => {
+      if (!els.has(id)) {
+        els.set(id, {
+          id, hidden: false, textContent: "",
+          closest: () => ({ classList: { toggle() {} } }),
+        });
+      }
+      return els.get(id);
+    };
+    const renderSurfaceSummary = new Function("$", `${summarySrc[0]}\nreturn renderSurfaceSummary;`)(get);
+    const fn = new Function(
+      "$", "renderModelBadges", "applyFaultBanner", "setInstanceCount", "renderInstanceRows",
+      "renderSurfaceSummary", "applyDetailFold", "gateAggregateRow", "buildAggregateFallback", "formatTokens",
+      `${renderSrc[0]}\nreturn renderWorkbuddy;`,
+    )(
+      get,
+      () => {},
+      () => {},
+      (prefix, n) => calls.count.push([prefix, n]),
+      (opts) => calls.instance.push(opts),
+      (prefix, surfaces) => {
+        calls.surface.push([prefix, surfaces]);
+        renderSurfaceSummary(prefix, surfaces);
+      },
+      (prefix) => calls.fold.push(prefix),
+      (...args) => calls.gate.push(args),
+      () => ({ requests: 0 }),
+      (v) => String(v ?? 0),
+    );
+    fn(payload);
+    return { calls, els };
+  }
 
-    const stopped = run({ id: "workbuddy", status: "stopped" });
+  it("renderWorkbuddy: 停态清副行、跑态按面汇总（Desktop ×2 · CLI ×1）", () => {
+    assert.ok(renderSrc, "renderWorkbuddy found in panel.js");
+    assert.ok(summarySrc, "renderSurfaceSummary found in panel.js");
+    assert.ok(renderSrc[0].includes('renderSurfaceSummary("workbuddy", p.surfaces)'), "卡头副行按面汇总");
+    assert.ok(renderSrc[0].includes('renderSurfaceSummary("workbuddy", [])'), "停止态显式清副行");
+    assert.ok(renderSrc[0].includes("showSurface: true"), "实例行贴面徽章（Desktop / CLI）");
+
+    const stopped = runWorkbuddy({ id: "workbuddy", status: "stopped" });
     assert.deepEqual(stopped.calls.count, [["workbuddy", 0]], "停态清零实例计数");
     assert.deepEqual(stopped.calls.surface, [["workbuddy", []]], "停态清副行");
     assert.equal(stopped.els.get("workbuddyEmpty").hidden, false, "空态上屏");
     assert.equal(stopped.els.get("workbuddyMetricsBlock").hidden, true, "指标块收起");
+    assert.equal(stopped.els.get("workbuddySurfaceSummary").hidden, true, "停态副行收起");
 
-    const surfaces = [{ label: "Desktop", count: 1 }, { label: "CLI", count: 1 }];
-    const running = run({
+    const surfaces = [
+      { surface: "desktop", label: "Desktop", count: 2 },
+      { surface: "cli", label: "CLI", count: 1 },
+    ];
+    const running = runWorkbuddy({
       id: "workbuddy", status: "running", surfaces,
       instances: [{ id: "workbuddy-1234", surface: "CLI", requests: 3 }],
       metrics: { totalRequests: 3, tokens: { prompt: 10, completion: 20, cached: 5 } },
@@ -1479,16 +1490,36 @@ describe("panel.html workbuddy endpoint card", () => {
     assert.equal(running.calls.instance[0].prefix, "workbuddy", "实例行用本卡前缀");
     assert.equal(running.calls.instance[0].showSurface, true, "实例行贴面徽章");
     assert.equal(running.calls.instance[0].instances[0].id, "workbuddy-1234", "实例原样下发");
-    assert.deepEqual(running.calls.surface, [["workbuddy", surfaces]], "副行取 p.surfaces");
+    assert.deepEqual(running.calls.surface, [["workbuddy", surfaces]], "副行取 p.surfaces 原数组");
+    assert.equal(running.els.get("workbuddySurfaceSummary").hidden, false, "有面时副行上屏");
+    assert.equal(running.els.get("workbuddySurfaceSummary").textContent, "Desktop ×2 · CLI ×1",
+      "多面按既有模板拼接");
     assert.deepEqual(running.calls.fold, ["workbuddy"], "折叠态按本卡应用");
     assert.equal(running.calls.gate.length, 1, "聚合行闸门按实例数放行");
     assert.equal(running.els.get("workbuddySessionReqs").textContent, "3 次请求");
     assert.ok(running.els.get("workbuddySessionTokens").textContent.includes("Prompt: 10"));
     assert.equal(running.els.get("workbuddyLastModelTag").textContent, "模型: 待命");
 
-    // 指标侧还没补 surfaces：不抛、不自造汇总（如实按空数组走）
-    const noSurfaces = run({ id: "workbuddy", status: "running", instances: [] });
-    assert.deepEqual(noSurfaces.calls.surface, [["workbuddy", undefined]], "缺字段原样透传，由渲染器兜空");
+    const single = runWorkbuddy({
+      id: "workbuddy", status: "running", instances: [],
+      surfaces: [{ surface: "desktop", label: "Desktop", count: 2 }],
+    });
+    assert.deepEqual(single.calls.surface, [["workbuddy", [{ surface: "desktop", label: "Desktop", count: 2 }]]],
+      "单面同样原样透传给渲染器");
+    assert.equal(single.els.get("workbuddySurfaceSummary").hidden, false, "单面副行上屏");
+    assert.equal(single.els.get("workbuddySurfaceSummary").textContent, "Desktop ×2", "单面按既有模板拼接");
+  });
+
+  it("renderWorkbuddy: surfaces 缺失或空数组 → 副行收起、不抛", () => {
+    for (const payload of [
+      { id: "workbuddy", status: "running", instances: [] },
+      { id: "workbuddy", status: "running", instances: [], surfaces: [] },
+    ]) {
+      const result = runWorkbuddy(payload);
+      assert.equal(result.calls.surface.length, 1, "副行仍按本卡接线");
+      assert.equal(result.els.get("workbuddySurfaceSummary").hidden, true, "无面可汇总时收起副行");
+      assert.equal(result.els.get("workbuddySurfaceSummary").textContent, "", "不残留上一轮文案");
+    }
   });
 });
 
