@@ -4,11 +4,16 @@
 // endpoint + session token into a child Claude process, passes the terminal
 // through, and tears the relay down when Claude exits. Every dependency is
 // injected here, so these tests run with ZERO real spawn, ZERO real relay,
-// ZERO real credentials and ZERO real network egress or API cost.
+// ZERO real credentials and ZERO real network egress or API cost. The
+// version-probe tests additionally pin CLAUDE_EXECUTABLE for their duration,
+// so a bad override on the runner machine cannot decide their outcome.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 import {
   runLauncher,
   buildLauncherEnv,
@@ -17,7 +22,6 @@ import {
   VERIFIED_CLAUDE_MINOR,
   isVerifiedDiscoveryVersion,
   resolveClaudeExecutable,
-  defaultClaudeExecutable,
   realGetClaudeVersion,
   withClaudeBypassPermissions,
   CLAUDE_BYPASS_PERMISSIONS_ARG,
@@ -334,12 +338,10 @@ test("an inherited ANTHROPIC_API_KEY is stripped on the full runLauncher path, t
 });
 
 // --- CLAUDE_EXECUTABLE recursion guard -------------------------------------
-
-test("resolveClaudeExecutable returns the default install path when no override is set", () => {
-  const resolved = resolveClaudeExecutable({ APPDATA: "C:\\Users\\x\\AppData\\Roaming" });
-  assert.equal(resolved, defaultClaudeExecutable({ APPDATA: "C:\\Users\\x\\AppData\\Roaming" }));
-  assert.match(resolved, /claude\.exe$/i);
-});
+//
+// 「无覆盖时返回默认安装路径」不在这里重复断言：launcher 对该函数只是原样再导出
+// （launcher.mjs 无任何自有分支），分支本身由 agent-discovery.test.mjs 连同具体
+// 落盘路径一起覆盖。这里只覆盖 launcher 真正关心的覆盖校验与递归防护分支。
 
 test("resolveClaudeExecutable honours an absolute .exe override", () => {
   const abs = "C:\\custom\\path\\claude.exe";
@@ -383,6 +385,23 @@ test("resolveClaudeExecutable treats an empty override as unset", () => {
 // the existing unknown-version downgrade path. Children are fakes — no real
 // claude.exe is spawned.
 
+// realGetClaudeVersion 在调用注入的 spawnFn 之前，先用真实 process.env 解析执行
+// 体（launcher.mjs 的 claudeExecutable() 没有注入口）。宿主机若设了不合法的
+// CLAUDE_EXECUTABLE，解析直接 throw，三条探测用例就会随宿主机环境变红。用例期间
+// 把它钉到临时目录下的合法绝对 .exe 路径，结束后原样恢复（含原先未设的情形）。
+async function withPinnedClaudeExecutable(run) {
+  const original = process.env.CLAUDE_EXECUTABLE;
+  const pinned = join(mkTestDir("launcher-version-probe-"), "claude.exe");
+  writeFileSync(pinned, "fixture binary — spawnFn is injected, nothing really spawns");
+  process.env.CLAUDE_EXECUTABLE = pinned;
+  try {
+    return await run(pinned);
+  } finally {
+    if (original === undefined) delete process.env.CLAUDE_EXECUTABLE;
+    else process.env.CLAUDE_EXECUTABLE = original;
+  }
+}
+
 function fakeVersionChild({ hang = false, output = "", error = false } = {}) {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -402,27 +421,42 @@ function fakeVersionChild({ hang = false, output = "", error = false } = {}) {
 }
 
 test("realGetClaudeVersion resolves the semver token from the child's output", async () => {
-  const version = await realGetClaudeVersion({
-    spawnFn: () => fakeVersionChild({ output: "2.1.220 (Claude Code)\n" }),
-    timeoutMs: 5_000,
+  await withPinnedClaudeExecutable(async (pinned) => {
+    let spawnedExecPath;
+    const version = await realGetClaudeVersion({
+      spawnFn: (execPath) => {
+        spawnedExecPath = execPath;
+        return fakeVersionChild({ output: "2.1.220 (Claude Code)\n" });
+      },
+      timeoutMs: 5_000,
+    });
+    assert.equal(version, "2.1.220");
+    assert.equal(
+      spawnedExecPath,
+      pinned.replace(/\\/g, "/"),
+      "the probe spawns the executable resolved from the environment",
+    );
   });
-  assert.equal(version, "2.1.220");
 });
 
 test("realGetClaudeVersion resolves null when the child errors", async () => {
-  const version = await realGetClaudeVersion({
-    spawnFn: () => fakeVersionChild({ error: true }),
-    timeoutMs: 5_000,
+  await withPinnedClaudeExecutable(async () => {
+    const version = await realGetClaudeVersion({
+      spawnFn: () => fakeVersionChild({ error: true }),
+      timeoutMs: 5_000,
+    });
+    assert.equal(version, null);
   });
-  assert.equal(version, null);
 });
 
 test("realGetClaudeVersion kills a hung child at the deadline and resolves null", async () => {
-  const child = fakeVersionChild({ hang: true });
-  const version = await realGetClaudeVersion({
-    spawnFn: () => child,
-    timeoutMs: 50,
+  await withPinnedClaudeExecutable(async () => {
+    const child = fakeVersionChild({ hang: true });
+    const version = await realGetClaudeVersion({
+      spawnFn: () => child,
+      timeoutMs: 50,
+    });
+    assert.equal(version, null, "timeout must downgrade to the unknown-version path, never throw");
+    assert.equal(child.killed, true, "the hung child is killed at the deadline");
   });
-  assert.equal(version, null, "timeout must downgrade to the unknown-version path, never throw");
-  assert.equal(child.killed, true, "the hung child is killed at the deadline");
 });
