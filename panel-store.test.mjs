@@ -368,9 +368,12 @@ describe("panel router store routes", () => {
     assert.deepEqual(svc.calls, []);
   });
 
-  it("POST /panel/api/store/pool/create surfaces the >5 rejection as 200 + {ok:false}", async () => {
+  it("POST /panel/api/store/pool/create surfaces a business failure as 200 + {ok:false}", async () => {
+    // 路由层对业务失败只做透传：error 文案完全来自 service，因此 mock 用
+    // 人造哨兵字符串，exact 等值断言钉的是「原样透传」而非任何真实文案。
+    const mockError = "mock: pool business rejection";
     const svc = mockService({
-      createPool: async () => ({ ok: false, error: "一个号池最多联立 5 个渠道（至少 2 个）；当前 6 个" }),
+      createPool: async () => ({ ok: false, error: mockError }),
     });
     const router = storeRouter(svc);
     const { req, res, json } = fakeReqRes("/panel/api/store/pool/create", "POST", {
@@ -381,7 +384,7 @@ describe("panel router store routes", () => {
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.equal(json().ok, false);
-    assert.match(json().error, /最多联立 5 个渠道/);
+    assert.equal(json().error, mockError);
   });
 
   it("POST /panel/api/store/pool/delete forwards the pool id", async () => {
@@ -464,8 +467,10 @@ describe("panel router store routes", () => {
   });
 
   it("POST /panel/api/store/pool/members/update surfaces a business failure as 200 + {ok:false}", async () => {
+    // 同 pool/create：mock 哨兵文案 + exact 等值，钉透传契约而非真实文案。
+    const mockError = "mock: pool members business rejection";
     const svc = mockService({
-      updatePoolMembers: async () => ({ ok: false, error: "一个号池最多联立 5 个渠道（至少 2 个）；当前 6 个" }),
+      updatePoolMembers: async () => ({ ok: false, error: mockError }),
     });
     const router = storeRouter(svc);
     const { req, res, json } = fakeReqRes("/panel/api/store/pool/members/update", "POST", {
@@ -475,7 +480,7 @@ describe("panel router store routes", () => {
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.equal(json().ok, false);
-    assert.match(json().error, /最多联立 5 个渠道/);
+    assert.equal(json().error, mockError);
   });
 
   it("POST /panel/api/store/reorder forwards the order array to reorderProviders", async () => {
@@ -668,13 +673,8 @@ describe("panel router virtual-model routes（虚拟模型）", () => {
     assert.equal(renamed.res.statusCode, 200);
     assert.deepEqual(renamed.json(), { ok: true, name: "my-chain" });
     assert.deepEqual(svc.calls[0], { name: "saveVirtualModel", arg: ["new-name", chain, "old-name"] });
-
-    const plain = mockService();
-    const router2 = storeRouter(plain);
-    const noPrev = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: "new-name", chain });
-    await router2.handle(noPrev.req, noPrev.res);
-    assert.deepEqual(plain.calls[0], { name: "saveVirtualModel", arg: ["new-name", chain, undefined] },
-      "不带原名时第三参数为 undefined（普通 upsert 路径不变）");
+    // 不带 previousName 的普通 upsert（第三参数为 undefined）由本 describe 的
+    // 第一个用例覆盖，这里不再重复断言同一分支。
   });
 
   it("POST /panel/api/store/virtual-model/save is 400 on a non-string or blank previousName", async () => {
