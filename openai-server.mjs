@@ -1,6 +1,6 @@
 import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
-import { parseOpenAIPath, buildOpenAIPath } from "./openai-path.mjs";
+import { parseOpenAIPath, buildOpenAIPath, AGENT_SEGMENT_SEPARATOR } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
 import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel, appendFailoverContext } from "./stream-pipe.mjs";
 import { translateResponsesRequest } from "./responses-translate.mjs";
@@ -76,7 +76,7 @@ export function probeRelay(port) {
 // x-agent-id 只接受其中的已知值（trim + 小写归一）；未知值视为配置错误
 // 或非授权客户端，一律回落 UA 识别与兜底，杜绝幽灵端点 id 进入 journal、
 // 面板分桶和链路由查询。
-const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "qoder", "opencode", "claude", "codex", "grok"]);
+const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "qoder", "opencode", "claude", "codex", "grok", "workbuddy"]);
 
 function explicitAgentId(headers) {
   const raw = headers["x-agent-id"];
@@ -309,6 +309,11 @@ function openaiAgentIdFrom(headers, agentHint = null) {
   if (ua.includes("qoder")) return "qoder";
   if (ua.includes("codex_cli_rs") || ua.includes("codex-tui")) return "codex";
   if (ua.includes("grok-cli/")) return "grok";
+  // WorkBuddy 的主通道是 URL 段前缀（它的自定义模型 url 由本仓写手写成
+  // `/openai/workbuddy~<渠道>/v1`，GUI 双击也走同一条），UA 只是兜底：内置的
+  // CodeBuddy CLI 在发自定义模型请求前会 `delete user-agent`，这一档只对没走
+  // 托管配置的探针/旧版本有意义。
+  if (ua.includes("workbuddy")) return "workbuddy";
   return null;
 }
 
@@ -425,6 +430,13 @@ export function anthropicUsageToOpenAI(usage) {
 // 在入口，翻译、effort 注入、chain/pool 扇出、journal/stats 全部只见真实渠道
 // id 与干净模型名（qoder~ URL 前缀同一纪律）。未命中（裸模型 id、未知渠道、
 // store 暂不可读）返回 null，调用侧原样继续，行为与今天完全一致。
+//
+// 身份前缀必须随改写一起保留：workbuddy 这种端点的模型 id 天生带渠道
+// （`<channelId>~<modelId>`），客户端配置的 URL 段也天生带 `<agent>~` 前缀。
+// 若在此把前缀丢掉，下游 parseOpenAIPath 拿到的 agentHint 就是 null，归属只剩
+// UA 一档——而该客户端发请求前会删 user-agent，结果必然是 agentId: null（看板
+// 恒 0 请求、统计页无端点行）。所以段一律是 `<agentHint>~<channelId>`（无前缀
+// 时退化为裸 channelId），providerId 仍交给下游 parser 剥离。
 function resolveChannelModelSlug(path, body, deps) {
   if (typeof body?.model !== "string" || !body.model.includes(CHANNEL_MODEL_SEPARATOR)) return null;
   const loaded = deps.loadStore?.();
@@ -433,7 +445,10 @@ function resolveChannelModelSlug(path, body, deps) {
   if (!hit) return null;
   const parsed = parseOpenAIPath(path);
   if (!parsed.ok) return null;
-  return { path: buildOpenAIPath(hit.channelId, parsed.subpath), body: { ...body, model: hit.modelId } };
+  const segment = parsed.agentHint === null
+    ? hit.channelId
+    : `${parsed.agentHint}${AGENT_SEGMENT_SEPARATOR}${hit.channelId}`;
+  return { path: buildOpenAIPath(segment, parsed.subpath), body: { ...body, model: hit.modelId } };
 }
 
 // Derive the /api/internal/agents-activity snapshot rows from a getAgentsStatus
