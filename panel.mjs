@@ -1093,7 +1093,11 @@ export function createPanelRouter({
   readRemoteHeadRelationFn = readRemoteHeadRelationDefault,
   // 远端身份短缓存 TTL：进页自动检查吃缓存，refresh=1 的强制检查绕过。
   remoteIdentityTtlMs = 60_000,
- }) {
+  // Claude session-end 记账（journalSessionEnd）的时间源：firstSeen 与 endTs
+  // 都取这里。默认真实时钟，行为不变；单测注入可控时钟，startTs/durationMs
+  // 的跨度断言就不再依赖真实时间推进（消除墙钟 sleep 的不稳定模式）。
+  sessionNowFn = Date.now,
+}) {
   const settingsFile = defaultSettingsPath(base);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
@@ -3417,13 +3421,13 @@ export function createPanelRouter({
     if (!Number.isFinite(pid) || pid <= 0) return;
     const key = `${pid}:${token}`;
     if (body.ended !== true) {
-      if (!sessionFirstSeen.has(key)) sessionFirstSeen.set(key, Date.now());
+      if (!sessionFirstSeen.has(key)) sessionFirstSeen.set(key, sessionNowFn());
       return;
     }
     if (journaledSessions.has(key)) return;
     if (journaledSessions.size >= 4096) journaledSessions.clear(); // bound; ended fires once per session
     journaledSessions.add(key);
-    const endTs = Date.now();
+    const endTs = sessionNowFn();
     const startTs = sessionFirstSeen.get(key) ?? endTs;
     sessionFirstSeen.delete(key);
     const agentId = typeof body.agentId === "string" && body.agentId.trim() ? body.agentId.trim() : "claude";

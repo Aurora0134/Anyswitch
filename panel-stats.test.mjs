@@ -44,8 +44,6 @@ function statsRouter(overrides = {}) {
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
-    aliasResolver: null,
-    aliasPath: null,
     fetchRelayAgents: async () => null,
     ...overrides,
   });
@@ -199,9 +197,15 @@ describe("claude session-end journaling", () => {
   it("ignores non-ended reports and reports without a token or pid", async () => {
     const journal = fakeJournal();
     const router = statsRouter({ usageJournal: journal });
-    const post = (body, headers = { authorization: "Bearer tok-1" }) => {
-      const { req, res } = fakeReqRes("/panel/api/session/report", "POST", body, headers);
-      return router.handle(req, res);
+    const post = async (body, headers = { authorization: "Bearer tok-1" }) => {
+      const { req, res, json } = fakeReqRes("/panel/api/session/report", "POST", body, headers);
+      await router.handle(req, res);
+      // 200 {ok:true} proves the request got past the CSRF gate in front of
+      // /panel/api/* and was dropped inside handleSessionReport by the token
+      // / pid checks — a 403 {error:"csrf"} bounce would fail these asserts,
+      // so the empty-journal claim below cannot be satisfied by the wrong gate.
+      assert.equal(res.statusCode, 200);
+      assert.equal(json().ok, true);
     };
     await post({ ...endedReport, ended: false });
     await post({ ...endedReport, pid: 0 });
@@ -211,7 +215,8 @@ describe("claude session-end journaling", () => {
 
   it("spans startTs from the session's first seen report", async () => {
     const journal = fakeJournal();
-    const router = statsRouter({ usageJournal: journal });
+    let now = 1_700_000_000_000;
+    const router = statsRouter({ usageJournal: journal, sessionNowFn: () => now });
     const post = (body) => {
       const { req, res } = fakeReqRes("/panel/api/session/report", "POST", body, {
         authorization: "Bearer tok-1",
@@ -219,13 +224,13 @@ describe("claude session-end journaling", () => {
       return router.handle(req, res);
     };
     await post({ pid: 4321, requests: 1, promptTokens: 100 }); // first sighting
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    now += 50;
     await post(endedReport);
     assert.equal(journal.sessions.length, 1);
     const row = journal.sessions[0];
-    assert.ok(row.startTs < row.ts);
-    assert.ok(row.durationMs >= 10);
-    assert.equal(row.durationMs, row.ts - row.startTs);
+    assert.equal(row.startTs, 1_700_000_000_000);
+    assert.equal(row.ts - row.startTs, 50);
+    assert.equal(row.durationMs, 50);
   });
 
   it("still forwards reports to the metrics collector", async () => {
