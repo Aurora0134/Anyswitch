@@ -40,6 +40,9 @@ import { stopStaleTerminalHost, TERMINAL_PARENT_PID_ENV, TERMINAL_HOST_PORT } fr
 import { spawn } from "node:child_process";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+// 仓根（本文件在 src/relay/）。git anchor 维护的是安装树的 .git；传 __dirname
+// 会让它在 src/relay 下另写一个 gitfile（2026-11-01 分域重构漏改）。
+const APP_DIR = fileURLToPath(new URL("../..", import.meta.url));
 const RELAY_PORT = 47821;
 // The terminal host lives in src/terminal — a bare name here would resolve
 // against src/relay and spawn a path that does not exist (2026-11-01 分域重构).
@@ -652,7 +655,7 @@ export async function startResidentRelay(options = {}) {
     isEnabled: createLoggingEnabledGate(defaultSettingsPath(options.base ?? process.env)),
   });
   try {
-    logGitAnchorResult(logger, ensureGitAnchor(__dirname));
+    logGitAnchorResult(logger, ensureGitAnchor(APP_DIR));
   } catch {
     /* never block relay start */
   }

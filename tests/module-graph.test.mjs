@@ -57,3 +57,21 @@ test("the terminal host script and the app version both live where their importe
   assert.ok(readFileSync(worker, "utf8").includes('new URL("../../package.json"'), "client-update-worker must reach the repo-root package.json");
   assert.ok(existsSync(join(SRC_DIR, "..", "package.json")), "the repo-root package.json must stay put");
 });
+
+// git anchor 维护的是安装树根的 .git。分域重构后 relay-host / panel-host /
+// git-anchor-repair 三处仍把「本文件所在目录」当仓根传进去，于是在 src/relay、
+// src/panel 各写了一个 gitfile（2026-11-01 已清）。src 下出现 .git 就是这条又漏了。
+test("no stray .git inside src — git anchor must point at the repo root", () => {
+  const strays = [];
+  const walkDirs = (dir) => {
+    for (const name of readdirSync(dir)) {
+      if (name === ".git") continue;
+      const p = join(dir, name);
+      if (!statSync(p).isDirectory()) continue;
+      if (existsSync(join(p, ".git"))) strays.push(p.slice(SRC_DIR.length + 1));
+      walkDirs(p);
+    }
+  };
+  walkDirs(SRC_DIR);
+  assert.deepEqual(strays, [], `stray .git under src:\n  ${strays.join("\n  ")}`);
+});

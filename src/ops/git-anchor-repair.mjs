@@ -11,7 +11,6 @@
 //   so `rm -rf` of the parent fails while git can still write inside objects/
 
 import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
@@ -156,7 +155,9 @@ function isEntryModule(argv1, metaUrl) {
 const __filename = fileURLToPath(import.meta.url);
 if (isEntryModule(process.argv[1], __filename)) {
   const args = parseArgs(process.argv.slice(2));
-  const appDir = args.app ?? dirname(__filename);
+  // 默认仓根（本文件在 src/ops/）；dirname(__filename) 会把 anchor 指进 src/ops
+  // （2026-11-01 分域重构漏改）。
+  const appDir = args.app ?? fileURLToPath(new URL("../..", import.meta.url));
   const result = repairGitAnchor(appDir);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (!result.pointer?.ok) process.exit(1);

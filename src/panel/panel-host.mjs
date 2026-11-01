@@ -25,11 +25,13 @@ import { storePaths } from "../store/store-io.mjs";
 import { loadSettings, defaultSettingsPath, createLoggingEnabledGate } from "../relay/relay-settings.mjs";
 import { isWatchdogAutostartEnabled, enableWatchdogAutostart } from "../ops/autostart.mjs";
 import { spawnWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
-import { dirname } from "node:path";
 import { ensureGitAnchor, logGitAnchorResult } from "../ops/git-anchor.mjs";
 import { ensureTerminalHost } from "../terminal/terminal-process-manager.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
+// 仓根（本文件在 src/panel/）。git anchor 维护的是安装树的 .git；传 dirname(__filename)
+// 会让它在 src/panel 下另写一个 gitfile（2026-11-01 分域重构漏改）。
+const APP_DIR = fileURLToPath(new URL("../..", import.meta.url));
 export const PANEL_PORT = 47820;
 
 function isLoopback(remoteAddress) {
@@ -125,7 +127,7 @@ export async function discoverTerminalBackend(root, { ensureFn = ensureTerminalH
 export async function startPanelHost(options = {}) {
   const { server, logger, metricsCollector } = createPanelServer(options);
   try {
-    logGitAnchorResult(logger, ensureGitAnchor(dirname(__filename)));
+    logGitAnchorResult(logger, ensureGitAnchor(APP_DIR));
   } catch {
     /* never block panel start */
   }
