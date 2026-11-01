@@ -23,7 +23,7 @@ import { createLogger } from "../shared/logger.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { storePaths } from "../store/store-io.mjs";
 import { loadSettings, defaultSettingsPath, createLoggingEnabledGate } from "../relay/relay-settings.mjs";
-import { isWatchdogAutostartEnabled, enableWatchdogAutostart } from "../ops/autostart.mjs";
+import { isWatchdogAutostartEnabled, enableWatchdogAutostart, reconcileAutostart } from "../ops/autostart.mjs";
 import { spawnWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "../ops/git-anchor.mjs";
 import { ensureTerminalHost } from "../terminal/terminal-process-manager.mjs";
@@ -164,6 +164,25 @@ export async function startPanelHost(options = {}) {
     }
   } catch (err) {
     logger.warn(`followAgent migration check failed (non-fatal): ${err.message}`);
+  }
+
+  // Autostart tasks store an absolute path snapshot. When the source tree moves
+  // (the 2026-11 src/ split did), the task keeps pointing at the old location
+  // and the logon entry dies silently — wscript hides the console, so nothing
+  // reaches a log. The toggle only ever asked "does the task exist", so the
+  // panel went on claiming 开启. Reconcile once per start: correct the path
+  // when it drifted, leave absent tasks alone (that is the user's own 关闭).
+  try {
+    const reconciled = await reconcileAutostart();
+    if (!reconciled.ok) {
+      logger.warn(`autostart: could not read the scheduled tasks, leaving them alone (non-fatal): ${reconciled.error}`);
+    }
+    for (const task of reconciled.tasks) {
+      if (task.state === "healed") logger.info(`autostart: re-registered ${task.task} — stored action pointed at ${task.was}`);
+      if (task.state === "heal-failed") logger.warn(`autostart: ${task.task} points at a stale path and re-registering failed (non-fatal): ${task.error}`);
+    }
+  } catch (err) {
+    logger.warn(`autostart reconcile failed (non-fatal): ${err.message}`);
   }
 
   const shutdown = async (signal) => {

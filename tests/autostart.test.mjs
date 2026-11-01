@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   buildTaskXml,
   disableAutostart,
@@ -10,6 +12,8 @@ import {
   getAutostartCommand,
   isAutostartEnabled,
   isWatchdogAutostartEnabled,
+  reconcileAutostart,
+  taskAction,
   xmlEscape,
 } from "../src/ops/autostart.mjs";
 
@@ -39,8 +43,44 @@ function fakePS({ code = 0, stdout = "", stderr = "", error = null } = {}) {
   return { spawnFn, calls };
 }
 
+// Same shape, but each spawn replays the next scripted response — reconcile
+// probes once and may then re-register, so the two calls differ.
+function fakePSSeries(responses) {
+  const calls = [];
+  let index = 0;
+  const spawnFn = (cmd, args, opts) => {
+    const call = { cmd, args, opts, stdin: null };
+    calls.push(call);
+    const plan = responses[Math.min(index++, responses.length - 1)] ?? {};
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      end: (data) => {
+        call.stdin = data ?? "";
+      },
+    };
+    queueMicrotask(() => {
+      if (plan.stdout) child.stdout.emit("data", plan.stdout);
+      if (plan.stderr) child.stderr.emit("data", plan.stderr);
+      if (plan.error) child.emit("error", plan.error);
+      else child.emit("close", plan.code ?? 0);
+    });
+    return child;
+  };
+  return { spawnFn, calls };
+}
+
 function psCommandOf(call) {
   return call.args[call.args.length - 1];
+}
+
+// What the probe script prints for the given tasks — one TASK=/COMMAND=/ARGS=
+// trio each, absent tasks omitted (same as the real script).
+function probeOutput(entries) {
+  return Object.entries(entries)
+    .map(([name, action]) => `TASK=${name}\r\nCOMMAND=${action.command}\r\nARGS=${action.arguments}\r\n`)
+    .join("");
 }
 
 describe("xmlEscape", () => {
@@ -148,14 +188,19 @@ describe("disableAutostart", () => {
 });
 
 describe("isAutostartEnabled", () => {
-  it("is true when the task is PRESENT", async () => {
-    const { spawnFn, calls } = fakePS({ stdout: "PRESENT\r\n" });
+  it("is true when the task is present", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: probeOutput({ AnyswitchRelay: taskAction() }) });
     assert.equal(await isAutostartEnabled({ spawnFn }), true);
-    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName 'AnyswitchRelay'"));
+    assert.ok(psCommandOf(calls[0]).includes("$names = @('AnyswitchRelay')"));
+    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName $n"));
+    // An absent task is a non-terminating error, which alone makes powershell
+    // exit 1; without the forced 0 the whole probe reads as a failure.
+    assert.ok(psCommandOf(calls[0]).includes("exit 0"));
+    assert.ok(psCommandOf(calls[0]).includes("$ErrorActionPreference = 'Stop'"));
   });
 
-  it("is false when the task is ABSENT", async () => {
-    const { spawnFn } = fakePS({ stdout: "ABSENT\r\n" });
+  it("is false when the task is absent", async () => {
+    const { spawnFn } = fakePS({ stdout: "" });
     assert.equal(await isAutostartEnabled({ spawnFn }), false);
   });
 
@@ -164,6 +209,105 @@ describe("isAutostartEnabled", () => {
     assert.equal(await isAutostartEnabled({ spawnFn: failed.spawnFn }), false);
     const errored = fakePS({ error: new Error("spawn failed") });
     assert.equal(await isAutostartEnabled({ spawnFn: errored.spawnFn }), false);
+  });
+});
+
+describe("taskAction", () => {
+  it("names the vbs launcher and the relay script, both quoted", () => {
+    const action = taskAction();
+    assert.ok(action.command.toLowerCase().endsWith("wscript.exe"));
+    assert.match(action.arguments, /^".+silent-start\.vbs" ".+relay-host\.mjs"$/);
+  });
+
+  it("points at files that exist in this tree", () => {
+    // Same regression the 2026-11 src/ split produced: a task registered from
+    // a path this build no longer has. Both halves are covered here.
+    for (const path of taskAction().arguments.match(/"([^"]+)"/g).map((quoted) => quoted.slice(1, -1))) {
+      assert.ok(existsSync(path), `task action path must exist: ${path}`);
+    }
+    const watchdog = taskAction(join("..", "agents", "agent-watchdog.mjs"));
+    assert.match(watchdog.arguments, /agent-watchdog\.mjs"$/);
+  });
+});
+
+describe("reconcileAutostart", () => {
+  it("re-registers a task still pointing at the pre-refactor tree", async () => {
+    const stale = {
+      command: taskAction().command,
+      arguments: '"C:\\Anyswitch\\app\\silent-start.vbs" "C:\\Anyswitch\\app\\relay-host.mjs"',
+    };
+    const { spawnFn, calls } = fakePSSeries([
+      { stdout: probeOutput({ AnyswitchRelay: stale }) },
+      { stdout: "REGISTERED\r\n" },
+    ]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.equal(result.ok, true);
+    const relay = result.tasks.find((task) => task.task === "AnyswitchRelay");
+    assert.equal(relay.state, "healed");
+    assert.equal(relay.was, stale.arguments);
+    assert.equal(calls.length, 2);
+    assert.ok(psCommandOf(calls[1]).includes("Register-ScheduledTask -TaskName 'AnyswitchRelay'"));
+    assert.ok(calls[1].stdin.includes("relay-host.mjs"));
+    // The repair must write THIS tree's path, not the stale one.
+    assert.ok(calls[1].stdin.includes("src\\relay\\relay-host.mjs") || calls[1].stdin.includes("src/relay/relay-host.mjs"));
+  });
+
+  it("leaves a correct registration alone — one probe, no writes", async () => {
+    const { spawnFn, calls } = fakePSSeries([
+      { stdout: probeOutput({ AnyswitchRelay: taskAction(), AnyswitchWatchdog: taskAction(join("..", "agents", "agent-watchdog.mjs")) }) },
+    ]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "ok"]);
+    assert.equal(calls.length, 1);
+  });
+
+  it("ignores a path that differs only by case or separators", async () => {
+    const action = taskAction();
+    const shouty = { command: action.command.toUpperCase(), arguments: action.arguments.toUpperCase() };
+    const { spawnFn, calls } = fakePSSeries([{ stdout: probeOutput({ AnyswitchRelay: shouty }) }]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.equal(result.tasks[0].state, "ok");
+    assert.equal(calls.length, 1);
+  });
+
+  it("never creates a task that is absent — that is the user's own off switch", async () => {
+    const { spawnFn, calls } = fakePSSeries([{ stdout: "" }]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.deepEqual(result.tasks.map((task) => task.state), ["absent", "absent"]);
+    assert.equal(calls.length, 1);
+  });
+
+  it("reports a failed repair without throwing", async () => {
+    const stale = { command: taskAction().command, arguments: '"C:\\old\\silent-start.vbs" "C:\\old\\relay-host.mjs"' };
+    const { spawnFn } = fakePSSeries([
+      { stdout: probeOutput({ AnyswitchRelay: stale }) },
+      { code: 1, stderr: "Register-ScheduledTask : 拒绝访问\r\n" },
+    ]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.equal(result.ok, true);
+    const relay = result.tasks.find((task) => task.task === "AnyswitchRelay");
+    assert.equal(relay.state, "heal-failed");
+    assert.ok(relay.error.includes("拒绝访问"));
+  });
+
+  it("stays out of the way when the probe itself fails", async () => {
+    const { spawnFn, calls } = fakePSSeries([{ code: 1, stderr: "Get-ScheduledTask : boom\r\n" }]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.tasks, []);
+    assert.equal(calls.length, 1);
   });
 });
 
@@ -185,8 +329,8 @@ describe("watchdog autostart variants", () => {
   });
 
   it("probes the AnyswitchWatchdog task name", async () => {
-    const { spawnFn, calls } = fakePS({ stdout: "ABSENT\r\n" });
+    const { spawnFn, calls } = fakePS({ stdout: "" });
     assert.equal(await isWatchdogAutostartEnabled({ spawnFn }), false);
-    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName 'AnyswitchWatchdog'"));
+    assert.ok(psCommandOf(calls[0]).includes("$names = @('AnyswitchWatchdog')"));
   });
 });
