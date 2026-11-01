@@ -71,7 +71,7 @@ Screenshots live in [`docs/screenshots/`](docs/screenshots/) — open them after
 
 Three prerequisites: Windows (credential sealing uses DPAPI, autostart uses Task Scheduler); Node.js (`>=22.15.0 <23 || >=23.8.0`, 24 LTS recommended — that is the API floor, not a claim that every version in range was tested); and a fresh install directory (never overwrite a running one with new source).
 
-Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere.
+Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node src/panel/panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere.
 
 Four steps to your first working request:
 
