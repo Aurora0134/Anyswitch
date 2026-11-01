@@ -50,37 +50,37 @@ describe("relay-settings", () => {
     const cfg = parseKeepAliveConfig(undefined, {});
     assert.deepEqual(cfg, DEFAULT_KEEPALIVE_CONFIG);
     assert.equal(cfg.enabled, true);
-    assert.equal(cfg.mode, "enhanced");
+    assert.equal(cfg.mode, "on");
     assert.equal(cfg.maxRetries, 2);
   });
 
-  it("maps legacy enabled=false to mode=off and enabled=true to mode=enhanced", () => {
+  it("maps legacy enabled=false to mode=off and enabled=true to mode=on", () => {
     const off = parseKeepAliveConfig({ enabled: false }, {});
     assert.equal(off.mode, "off");
     assert.equal(off.enabled, false);
     const on = parseKeepAliveConfig({ enabled: true }, {});
-    assert.equal(on.mode, "enhanced");
+    assert.equal(on.mode, "on");
     assert.equal(on.enabled, true);
   });
 
   it("honors explicit mode and keeps enabled in sync", () => {
     const enhanced = parseKeepAliveConfig({ mode: "enhanced" }, {});
-    assert.equal(enhanced.mode, "enhanced");
+    assert.equal(enhanced.mode, "on");
     assert.equal(enhanced.enabled, true);
     const off = parseKeepAliveConfig({ mode: "off" }, {});
     assert.equal(off.mode, "off");
     assert.equal(off.enabled, false);
   });
 
-  it("migrates the retired basic mode to enhanced (config, env, and save patches)", () => {
-    // Two-tier keep-alive: "basic" is not a valid mode, so every surface that
-    // can still receive it must land on "enhanced".
+  it("migrates the retired basic/enhanced modes to on (config, env, and save patches)", () => {
+    // Two-tier keep-alive: "basic" and "enhanced" are not current modes, so
+    // every surface that can still receive them must land on "on".
     const fromConfig = parseKeepAliveConfig({ mode: "basic" }, {});
-    assert.equal(fromConfig.mode, "enhanced");
+    assert.equal(fromConfig.mode, "on");
     assert.equal(fromConfig.enabled, true);
 
     const fromEnv = parseKeepAliveConfig({}, { ANYSWITCH_KEEPALIVE_MODE: "basic" });
-    assert.equal(fromEnv.mode, "enhanced");
+    assert.equal(fromEnv.mode, "on");
     assert.equal(fromEnv.enabled, true);
 
     const tmp = mkTestDir("anyswitch-settings-migrate-");
@@ -89,15 +89,15 @@ describe("relay-settings", () => {
       // Production settings.json shape before the two-tier merge.
       writeFileSync(path, JSON.stringify({ keepAlive: { enabled: true, mode: "basic" } }));
       const loaded = loadSettings(path, {});
-      assert.equal(loaded.keepAlive.mode, "enhanced");
+      assert.equal(loaded.keepAlive.mode, "on");
       assert.equal(loaded.keepAlive.enabled, true);
 
       // An old client POSTing mode: "basic" is normalized on save too.
       const saved = saveSettings(path, { keepAlive: { mode: "basic" } }, {});
-      assert.equal(saved.keepAlive.mode, "enhanced");
+      assert.equal(saved.keepAlive.mode, "on");
       assert.equal(saved.keepAlive.enabled, true);
       const onDisk = JSON.parse(readFileSync(path, "utf8"));
-      assert.equal(onDisk.keepAlive.mode, "enhanced");
+      assert.equal(onDisk.keepAlive.mode, "on");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -147,7 +147,7 @@ describe("relay-settings", () => {
       // A mode-only keepAlive patch must not clobber the neighbouring keys:
       // assert on THIS save's return value, not on the earlier snapshot.
       const enhanced = saveSettings(path, { keepAlive: { mode: "enhanced" } }, {});
-      assert.equal(enhanced.keepAlive.mode, "enhanced");
+      assert.equal(enhanced.keepAlive.mode, "on");
       assert.equal(enhanced.keepAlive.enabled, true);
       assert.equal(enhanced.settings.followAgent, true);
       assert.equal(enhanced.settings.customKey, 123);
@@ -245,7 +245,7 @@ describe("relay-settings", () => {
       const saved = saveSettings(path, { keepAlive: { maxRetries: 3 } }, {});
       assert.equal(saved.keepAlive.maxRetries, 3);
       // mode untouched by a retries-only patch
-      assert.equal(saved.keepAlive.mode, "enhanced");
+      assert.equal(saved.keepAlive.mode, "on");
       assert.equal(loadSettings(path, {}).keepAlive.maxRetries, 3);
 
       const over = saveSettings(path, { keepAlive: { maxRetries: 42 } }, {});
@@ -547,7 +547,7 @@ describe("keepAlive per-endpoint switches", () => {
         claude: { enabled: true },
         kimi: { enabled: false },
       });
-      assert.equal(flipped.keepAlive.mode, "enhanced", "endpoint patches leave the master switch alone");
+      assert.equal(flipped.keepAlive.mode, "on", "endpoint patches leave the master switch alone");
 
       const untouched = saveSettings(path, { keepAlive: { maxRetries: 4 } }, {});
       assert.deepEqual(untouched.keepAlive.endpoints, {

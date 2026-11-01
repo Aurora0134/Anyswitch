@@ -934,6 +934,7 @@ export function createOpenAIRelayServer(deps) {
               deps,
               agentId: openaiAgentId,
               fillChunkEnvelope: chunkEnvelopeRepairFor(openaiAgentId, body?.model),
+              originalBody: body,
               ...(memberPlan
                 ? {
                     // One callable per candidate member; the keep-alive loop
@@ -945,7 +946,7 @@ export function createOpenAIRelayServer(deps) {
                     callUpstreams: memberPlan.members.map((member) => ({
                       memberId: member.memberId,
                       memberNoun: member.memberNoun,
-                      call: () => member.call({ signal: abortController.signal }),
+                      call: (options) => member.call({ signal: abortController.signal, ...options }),
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
                     onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
@@ -954,7 +955,7 @@ export function createOpenAIRelayServer(deps) {
                     onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
-                    callUpstream: () => handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal }),
+                    callUpstream: (options = {}) => handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal, ...options }),
                   }),
             }));
             return;
@@ -1119,6 +1120,9 @@ export function createOpenAIRelayServer(deps) {
             abortController,
             deps,
             agentId: openaiAgentId,
+            // A resume re-issues the chat body (that is what the upstream
+            // takes); the Responses request stays the translator's ctx below.
+            originalBody: chatBody,
             // The original Responses body is the translator's ctx: freeform
             // custom-tool names and the request fields echoed onto the
             // response object both come from it.
@@ -1128,14 +1132,14 @@ export function createOpenAIRelayServer(deps) {
                   callUpstreams: memberPlan.members.map((member) => ({
                     memberId: member.memberId,
                     memberNoun: member.memberNoun,
-                    call: () => member.call({ signal: abortController.signal }),
+                    call: (options) => member.call({ signal: abortController.signal, ...options }),
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
                   onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
                   onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
-                  callUpstream: () => handler.handleChatCompletions(routePath, req.headers, chatBody, { signal: abortController.signal }),
+                  callUpstream: (options = {}) => handler.handleChatCompletions(routePath, req.headers, chatBody, { signal: abortController.signal, ...options }),
                 }),
           }));
           return;
@@ -1258,13 +1262,15 @@ export function createOpenAIRelayServer(deps) {
           }
 
           if (body.stream === true) {
-            // Resident Anthropic channel: no keep-alive pings, and at
-            // exhaustion nothing more is written once headers are committed.
+            // Resident Anthropic channel: content streams as it arrives, and
+            // a turn that already reached the client ends on an event: error
+            // frame when the resume budget runs out.
             await runStreamWithKeepAlive(res, anthropicStreamChannel({
               res,
               tracker,
               abortController,
               deps,
+              originalBody: body,
               // Unidentified Anthropic traffic keeps the pre-existing
               // master-only behaviour: only an attributed endpoint id is
               // gated by its own switch.
@@ -1280,19 +1286,17 @@ export function createOpenAIRelayServer(deps) {
                     callUpstreams: memberPlan.members.map((member) => ({
                       memberId: member.memberId,
                       memberNoun: member.memberNoun,
-                      call: () => member.call({ signal: abortController.signal }),
+                      call: (options) => member.call({ signal: abortController.signal, ...options }),
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
                     onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
                     onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
-                    callUpstream: () => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId }),
+                    callUpstream: (options = {}) => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId, ...options }),
                   }),
               name: "anthropic",
               logLabel: "anthropic request",
-              pings: false,
-              writeFrameWhenHeadersSent: false,
             }));
             return;
           }

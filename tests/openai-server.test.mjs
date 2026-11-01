@@ -41,14 +41,14 @@ const PINNED_IMAGE_GATES = { imageFallbackGate: () => true, imageHeuristicGate: 
 // 时的回退对象同一形状（无 mode ⇒ 不做整轮扣留、不发 ping）。本文件主体断言的
 // 直通/结构化错误/502 状态行语义都以此为前提——per-launch 宿主（*-
 // launcher.mjs 的 createOpenAIProductionDeps 不转出该键）线上跑的正是这一形状；
-// 常驻宿主生产默认（mode:"enhanced" 整轮扣留）的对应行为由
-// openai-server-keepalive.test.mjs 专门覆盖，本文件下方 "enhanced keep-alive
+// 常驻宿主生产默认（mode:"on" 中游截断续接）的对应行为由
+// openai-server-keepalive.test.mjs 专门覆盖，本文件下方 "on tier keep-alive
 // mode" 一组补齐其状态行/SSE 语义的集成缺口。
 const PINNED_KEEPALIVE = { getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 500 }) };
-// enhanced 对应用例的配置：mode 与 maxRetries 取生产默认
+// on 档对应用例的配置：mode 与 maxRetries 取生产默认
 // （relay-settings.mjs DEFAULT_KEEPALIVE_CONFIG），仅把 backoffMs 缩短以提速。
-const ENHANCED_KEEPALIVE = { getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 2, backoffMs: 10 }) };
-const enhancedDeps = (upstreamBody) => ({ ...deps(upstreamBody), ...ENHANCED_KEEPALIVE });
+const ON_KEEPALIVE = { getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 2, backoffMs: 10 }) };
+const onTierDeps = (upstreamBody) => ({ ...deps(upstreamBody), ...ON_KEEPALIVE });
 
 // A live deepseek-channel wire shape: choices + object only, no id/created/model.
 const ENVELOPELESS_SSE = [
@@ -58,7 +58,7 @@ const ENVELOPELESS_SSE = [
 ];
 
 // 把 ENVELOPELESS_SSE 发过一回 chat/completions，带回客户端收到的字节。depsBuilder
-// 参数让直通配置与 enhanced 扣留配置共用同一条发送路径。
+// 参数让直通配置与 on 档配置共用同一条发送路径。
 async function fetchEnvelopelessAs(agentHeader, model, depsBuilder = deps) {
   const upstreamBody = (async function* () {
     const encoder = new TextEncoder();
@@ -1151,7 +1151,14 @@ describe("openai relay transport", () => {
       const res = await postChat(port);
       assert.equal(res.status, 200);
       const text = await res.text();
-      assert.ok(text.includes('"name":"bash"'), "already-delivered call metadata must survive");
+      // Per-call hold: the call's bytes stay with the guard until the args
+      // parse. On a silent truncation they never reach the client — the
+      // client only learns the call was cut from the error frame below.
+      assert.ok(!text.includes('"name":"bash"'), "a cut tool call must not leak its withheld bytes");
+      // The error frame now carries the numeric code so a downstream agent
+      // that retries on a status code can recognise the fault.
+      const errorPayload = (text.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).filter((payload) => payload && payload !== "[DONE]").map((payload) => { try { return JSON.parse(payload); } catch { return null; } }).find((parsed) => parsed?.error));
+      assert.equal(errorPayload?.error?.code, 502, "the truncation error frame carries the 502 code");
       assert.ok(text.includes('"error"'), "a structured error chunk must replace the normal ending");
       assert.equal(text.includes("data: [DONE]"), false, "a truncated stream must not look like a normal completion");
     });
@@ -1325,14 +1332,19 @@ describe("openai relay upstream 5xx silent retry", () => {
   });
 });
 
-// ── enhanced 整轮扣留（常驻宿主生产默认）的线上语义 ─────────────────────────
+// ── on 档（常驻宿主生产默认）的线上语义 ────────────────────────────────────
 // 主体传输套件钉在无 mode 的直通配置上（见 PINNED_KEEPALIVE 的注释）；常驻宿主
-// 默认注入 mode:"enhanced"（relay-settings.mjs DEFAULT_KEEPALIVE_CONFIG），字节
-// 在裁决前被整轮扣留、`: ping` 先行提交 SSE 头——首字前的失败从此不可能再以
-// 502 状态行表达，终局错误必须走 SSE 错误帧。这一组把该语义差异钉进集成面；
-// 扣留态的重试/恢复细节由 openai-server-keepalive.test.mjs 覆盖。
-describe("enhanced keep-alive mode (resident default) wire semantics", () => {
-  it("a tool call with no name ends the turn as an SSE error frame once pings committed the headers", async () => {
+// 默认注入 mode:"on"（relay-settings.mjs DEFAULT_KEEPALIVE_CONFIG）：正文与思考
+// 逐字即时下发，工具调用按 call 粒度扣留到参数闭合，中游截断交给续接。于是
+// 「首字前失败」仍是真实 502 状态行（扣留让一个字节都没落线），「已下发内容后
+// 失败」只能走错误帧。这一组把该语义差异钉进集成面；续接的重试/恢复细节由
+// openai-server-keepalive.test.mjs 覆盖。
+const ON_TIER_NO_RETRY = { getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 0, backoffMs: 10 }) };
+
+describe("on tier keep-alive mode (resident default) wire semantics", () => {
+  it("a tool call with no name is rejected before a single byte reaches the client", async () => {
+    // 每个 tool call 都被扣留到参数闭合；缺 name 的调用在下发前就被判死，
+    // 裁决落定时一个字节都没写，所以故障仍能走状态行。
     const upstreamBody = (async function* () {
       const encoder = new TextEncoder();
       yield encoder.encode(
@@ -1344,61 +1356,97 @@ describe("enhanced keep-alive mode (resident default) wire semantics", () => {
       yield encoder.encode("data: [DONE]\n\n");
     })();
 
-    await withServer(enhancedDeps(upstreamBody), async (port) => {
+    await withServer(onTierDeps(upstreamBody), async (port) => {
       const res = await postChat(port);
-      // `: ping` 已提交 200 与 SSE 头，502 状态线在物理上不再可达。
-      assert.equal(res.status, 200);
-      const text = await res.text();
-      assert.ok(text.startsWith(": ping"), "the hold's liveness ping must precede everything");
-      assert.ok(text.includes('"error"'), "the terminal error rides a data line after the pings");
-      assert.match(text, /tool call/i);
-      assert.equal(text.includes("data: [DONE]"), false, "a rejected turn must not look like a normal completion");
-      assert.equal(text.includes("SENTINEL-UPSTREAM-KEY"), false, "must never leak the upstream key");
+      assert.equal(res.status, 502, "nothing was committed, so the reject keeps its status line");
+      const body = await res.json();
+      assert.match(body.error.message, /tool call/i);
+      assert.equal(body.error.code, 502, "the reject carries the upstream-incomplete code");
+      assert.equal(JSON.stringify(body).includes("SENTINEL-UPSTREAM-KEY"), false, "must never leak the upstream key");
     });
   });
 
-  it("an upstream death before any content also rides the SSE error line", async () => {
+  it("an upstream death before any content still answers a real 502", async () => {
     const upstreamBody = (async function* () {
       throw new Error("upstream socket reset before first event");
     })();
 
-    await withServer(enhancedDeps(upstreamBody), async (port) => {
+    await withServer({ ...onTierDeps(upstreamBody), ...ON_TIER_NO_RETRY }, async (port) => {
       const res = await postChat(port);
-      assert.equal(res.status, 200);
-      const text = await res.text();
-      assert.ok(text.startsWith(": ping"));
-      assert.match(text, /before any content was delivered/);
-      assert.equal(text.includes("data: [DONE]"), false, "no completion terminator after a failed turn");
+      assert.equal(res.status, 502);
+      const body = await res.json();
+      assert.match(body.error.message, /before any content was delivered/);
+      assert.equal(body.error.code, 502);
     });
   });
 
-  it("the responses channel ends a pre-content upstream death with response.failed, bytes still held", async () => {
+  it("the responses channel forwards what already arrived, then fails the response", async () => {
     const upstreamBody = (async function* () {
       const encoder = new TextEncoder();
       yield encoder.encode('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"He"}}]}\n\n');
       throw new Error("upstream socket reset");
     })();
 
-    await withServer({ ...responsesDeps(upstreamBody), ...ENHANCED_KEEPALIVE }, async (port) => {
+    await withServer({ ...responsesDeps(upstreamBody), ...ON_TIER_NO_RETRY }, async (port) => {
       const res = await postResponses(port);
       assert.equal(res.status, 200);
       const text = await res.text();
-      assert.ok(text.startsWith(": ping"));
-      // 整轮扣留：上游已产出的字节在裁决前绝不落线。
-      assert.equal(text.includes("He"), false, "withheld bytes must never leak when the turn fails");
+      // 不再整轮扣留：已经吐出来的字节照常交付，失败只追加终局帧。
+      assert.ok(text.includes("He"), "content delivered before the cut must survive");
       assert.ok(text.includes("event: response.failed"), "the turn ends with response.failed");
       assert.equal(text.includes("data: [DONE]"), false, "no [DONE] may follow a failed response");
+      const failed = text.split("\n").find((line) => line.includes("\"response.failed\""));
+      assert.equal(JSON.parse(failed.slice(5)).response.error.code, 502, "the failed frame carries the 502 code");
     });
   });
 
-  it("a healthy non-grok stream still delivers every upstream data frame verbatim between the pings", async () => {
-    const text = await fetchEnvelopelessAs("kimi", "claude-opus-5", enhancedDeps);
-    assert.ok(text.startsWith(": ping"), "the hold announces itself with a comment ping");
+  it("a healthy non-grok stream still delivers every upstream data frame verbatim", async () => {
+    const text = await fetchEnvelopelessAs("kimi", "claude-opus-5", onTierDeps);
+    assert.equal(text.includes(": ping"), false, "no keep-alive ping may precede a healthy stream");
     const dataFrames = (t) => t.split("\n").filter((l) => l.startsWith("data:"));
     assert.equal(
       dataFrames(text).join("\n"),
       dataFrames(ENVELOPELESS_SSE.join("")).join("\n"),
-      "enhanced hold may interleave comment pings but must not rewrite any data frame",
+      "the guard must not rewrite any data frame of a healthy stream",
+    );
+  });
+
+  it("the responses channel resumes a cut inside one response", async () => {
+    // Responses 通道与 OpenAI 直通共用 chat 上游，但译文器要跨两次生成复用：
+    // response.created 只能出现一次，续接段落进同一个 output item。
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          body: chatSseStream(['data: {"id":"c1","choices":[{"delta":{"content":"He"}}]}\n\n']),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: chatSseStream([
+          'data: {"id":"c2","choices":[{"delta":{"content":"llo"}}]}\n\n',
+          'data: {"id":"c2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    await withServer(
+      { ...responsesDeps(null), upstreamFetch, getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 2, backoffMs: 10 }) },
+      async (port) => {
+        const res = await postResponses(port);
+        assert.equal(res.status, 200);
+        const text = await res.text();
+        assert.ok(text.includes('"He"') && text.includes('"llo"'), "both segments reach the client");
+        assert.equal((text.match(/event: response\.created/g) || []).length, 1, "one response only");
+        assert.equal(text.includes("response.failed"), false, "a resumed cut must not fail the response");
+        assert.ok(text.includes("response.completed"), "the resumed turn completes normally");
+        assert.equal(callCount, 2, "one resume");
+      },
     );
   });
 });

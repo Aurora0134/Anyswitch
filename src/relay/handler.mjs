@@ -59,8 +59,15 @@ import {
 
 // Anthropic-shaped error body. Never carries a key, ciphertext, token or raw
 // upstream response body (secret boundary).
-export function errorBody(type, message) {
-  return { type: "error", error: { type, message } };
+//
+// The Anthropic error object has no `code` field, so a numeric status code
+// rides as an extra key inside the error object. Anthropic clients ignore
+// unknown keys there; clients that compare a status code (auto-retry on
+// 502/503) read it.
+export function errorBody(type, message, code = null) {
+  const error = { type, message };
+  if (code !== null && code !== undefined) error.code = code;
+  return { type: "error", error };
 }
 
 const UNPACK_STATUS = {
@@ -479,7 +486,8 @@ export function createHandler(deps) {
       };
     }
 
-    const upstreamRequest = anthropicToOpenAI(body, modelId);
+    const sourceBody = options.overrideBody !== undefined ? options.overrideBody : body;
+    const upstreamRequest = anthropicToOpenAI(sourceBody, modelId);
     const urls = buildUpstreamURLs(provider, "/chat/completions");
     // Claude names its depth in the raw request and the translator has no
     // OpenAI field to carry it in, so the level is read off the raw body and
@@ -488,7 +496,7 @@ export function createHandler(deps) {
     const { body: injectedRequest, injected } = efforts.inject({
       providerId,
       body: upstreamRequest,
-      clientEffort: clientEffortFromAnthropic(body),
+      clientEffort: clientEffortFromAnthropic(sourceBody),
       // The store row rides along so a channel that states its own levels wins
       // over the library, same rule as the config face.
       model: provider.models?.[modelId],

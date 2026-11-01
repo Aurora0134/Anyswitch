@@ -205,6 +205,7 @@ export function createRelayServer(deps) {
             abortController,
             deps,
             agentId,
+            originalBody: body,
             ...(memberPlan
               ? {
                   // One callable per candidate member (pool members, or the
@@ -217,22 +218,21 @@ export function createRelayServer(deps) {
                   callUpstreams: memberPlan.members.map((member) => ({
                     memberId: member.memberId,
                     memberNoun: member.memberNoun,
-                    call: () => member.call({ signal: abortController.signal }),
+                    call: (options) => member.call({ signal: abortController.signal, ...options }),
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
                   onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
                   onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
-                  callUpstream: () => handler.handleMessages(req.headers, body, {
+                  callUpstream: (options = {}) => handler.handleMessages(req.headers, body, {
                     signal: abortController.signal,
                     agentId,
+                    ...options,
                   }),
                 }),
             name: agentId,
             logLabel: `${agentId} request`,
-            pings: true,
-            writeFrameWhenHeadersSent: true,
           }));
           return;
         } catch (err) {

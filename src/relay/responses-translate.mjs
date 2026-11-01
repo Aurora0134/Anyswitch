@@ -684,6 +684,25 @@ export function chatUsageToResponsesUsage(usage) {
   return result;
 }
 
+// Add a continued segment's tokens onto the baseline already reported. Used
+// only by the resume path: one logical response may be generated in several
+// upstream segments, and the client must see their sum, not the last one.
+function addResponsesUsage(base, segment) {
+  const sum = {
+    input_tokens: (base.input_tokens ?? 0) + (segment.input_tokens ?? 0),
+    output_tokens: (base.output_tokens ?? 0) + (segment.output_tokens ?? 0),
+    total_tokens: (base.total_tokens ?? 0) + (segment.total_tokens ?? 0),
+  };
+  const baseCached = base.input_tokens_details?.cached_tokens ?? 0;
+  const segCached = segment.input_tokens_details?.cached_tokens ?? 0;
+  if (baseCached + segCached > 0) sum.input_tokens_details = { cached_tokens: baseCached + segCached };
+  sum.output_tokens_details = {
+    reasoning_tokens:
+      (base.output_tokens_details?.reasoning_tokens ?? 0) + (segment.output_tokens_details?.reasoning_tokens ?? 0),
+  };
+  return sum;
+}
+
 function defaultResponsesUsage() {
   return { input_tokens: 0, output_tokens: 0, total_tokens: 0, output_tokens_details: { reasoning_tokens: 0 } };
 }
@@ -871,7 +890,16 @@ export class ResponsesSseTranslator {
     this.tools = new Map();
     this.outputItems = []; // [outputIndex, item]
     this.latestUsage = null;
+    // Token baseline carried in from the segments already reported: a resume
+    // is the same logical response, so the client sees the turn's total.
+    this.carriedUsage = null;
     this.finishReason = null;
+  }
+
+  // A resume re-enters the pipe with this translator: response.created must
+  // not repeat, and the previously reported tokens become the baseline.
+  markContinuing() {
+    this.carriedUsage = this.latestUsage === null ? null : { ...this.latestUsage };
   }
 
   start() {
@@ -894,7 +922,10 @@ export class ResponsesSseTranslator {
     if (num(parsed?.created) !== null) this.createdAt = parsed.created;
     let out = this.start();
 
-    if (isPlainObject(parsed?.usage)) this.latestUsage = chatUsageToResponsesUsage(parsed.usage);
+    if (isPlainObject(parsed?.usage)) {
+      const segment = chatUsageToResponsesUsage(parsed.usage);
+      this.latestUsage = this.carriedUsage === null ? segment : addResponsesUsage(this.carriedUsage, segment);
+    }
 
     const choice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
     if (!isPlainObject(choice)) return out;
@@ -1230,13 +1261,16 @@ export class ResponsesSseTranslator {
   }
 
   // An upstream failure mid-stream ends the turn with response.failed; no
-  // [DONE] follows a failed response.
-  fail(message, type) {
+  // [DONE] follows a failed response. `code` rides inside the error object
+  // (the Responses error schema has no code field of its own, but a numeric
+  // status code is what downstream agents that auto-retry compare against).
+  fail(message, type, code = null) {
     if (this.finished) return "";
     this.finished = true;
     const out = this.start();
     const error = { message: nonEmptyString(message) ? message : "upstream stream error" };
     if (nonEmptyString(type)) error.type = type;
+    if (code !== null && code !== undefined) error.code = code;
     const response = this.baseResponse("failed", this.completedOutputItems());
     response.error = error;
     return out + sseEvent("response.failed", { type: "response.failed", response });

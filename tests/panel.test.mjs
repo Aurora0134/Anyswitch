@@ -745,11 +745,12 @@ describe("panel router followAgent watchdog coordination", () => {
     assert.deepEqual(json().watchdog, { autostart: true, running: false });
   });
 
-  it("GET settings returns keepAlive.mode from disk, including enhanced", async () => {
+  it("GET settings returns keepAlive.mode from disk instead of the default", async () => {
     const { base, dir } = tempBase();
+    // 「off」是出厂默认的反面：读盘失败或回落默认时这里会变成 on。
     writeFileSync(join(dir, "Anyswitch", "settings.json"), JSON.stringify({
       followAgent: true,
-      keepAlive: { enabled: true, mode: "enhanced" },
+      keepAlive: { enabled: true, mode: "off" },
     }));
     const router = createPanelRouter({
       base,
@@ -766,13 +767,13 @@ describe("panel router followAgent watchdog coordination", () => {
     const { req, res, json } = fakeReqRes("/panel/api/settings", "GET");
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
-    assert.equal(json().keepAlive.mode, "enhanced");
-    assert.equal(json().keepAlive.enabled, true);
-    assert.equal(json().settings.keepAlive.mode, "enhanced");
+    assert.equal(json().keepAlive.mode, "off");
+    assert.equal(json().keepAlive.enabled, false, "off 档即停用");
+    assert.equal(json().settings.keepAlive.mode, "off");
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
 
-  it("GET settings migrates the retired basic mode to enhanced", async () => {
+  it("GET settings folds the retired basic mode into on", async () => {
     const { base, dir } = tempBase();
     // 旧版 settings.json 形状：keepAlive 仍带 mode 字段。
     writeFileSync(join(dir, "Anyswitch", "settings.json"), JSON.stringify({
@@ -793,9 +794,9 @@ describe("panel router followAgent watchdog coordination", () => {
     const { req, res, json } = fakeReqRes("/panel/api/settings", "GET");
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
-    assert.equal(json().keepAlive.mode, "enhanced");
+    assert.equal(json().keepAlive.mode, "on");
     assert.equal(json().keepAlive.enabled, true);
-    assert.equal(json().settings.keepAlive.mode, "enhanced");
+    assert.equal(json().settings.keepAlive.mode, "on");
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
 
@@ -881,7 +882,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const second = fakeReqRes("/panel/api/settings", "POST", { keepAlive: { endpoints: { kimi: { enabled: false } } } });
     await router.handle(second.req, second.res);
     assert.deepEqual(second.json().keepAlive.endpoints, { claude: { enabled: false }, kimi: { enabled: false } });
-    assert.equal(second.json().keepAlive.mode, "enhanced", "endpoint patches leave the master switch alone");
+    assert.equal(second.json().keepAlive.mode, "on", "endpoint patches leave the master switch alone");
 
     const getRes = fakeReqRes("/panel/api/settings", "GET");
     await router.handle(getRes.req, getRes.res);
@@ -3681,7 +3682,11 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(applyUi[1].includes('keepAliveEndpointsWrap.hidden = m === "off"'),
       "总开关 off 时收起整排端点图标");
     assert.ok(panelJs.includes("已启用 ✓，点击停用"), "tooltip 带 ✓ 状态词");
-    assert.ok(panelJs.includes("各 Agent 偏好保留，重新开启后生效"), "关态文案说明偏好保留（端点口径已改 Agent）");
+    assert.ok(
+      panelJs.includes(`const KEEP_ALIVE_DESC = "开启时将会在上游报错或截断时尝试自动续接，仅在续接次数用尽时才向下游报错。";`),
+      "开关说明收敛为一句，两档共用（逐字钉死已批文案）",
+    );
+    assert.ok(!panelJs.includes("各 Agent 偏好保留"), "旧的关态说明（偏好保留）随两档收口一并撤掉");
     assert.ok(!panelJs.includes("master-off") && !panelJs.includes("ep-off"),
       "JS 不再驱动 master-off / ep-off");
   });

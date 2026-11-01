@@ -55,7 +55,19 @@ export class StreamTranslator {
     this.toolBlocks = new Map();
     this.stopReason = "end_turn";
     this.usage = { input_tokens: 0, output_tokens: 0 };
+    // Per-attempt usage, kept field-wise (a chunk that omits a field keeps the
+    // last value seen in this attempt) and then added onto carriedUsage.
+    this.segmentUsage = { input_tokens: 0, output_tokens: 0 };
+    this.carriedUsage = { input_tokens: 0, output_tokens: 0 };
     this.finished = false;
+  }
+
+  // A resume re-enters the pipe with this translator: the response is already
+  // open on the client's side, so message_start must not repeat, and the
+  // tokens already reported become the baseline for the continued segment.
+  markContinuing() {
+    this.carriedUsage = { ...this.usage };
+    this.segmentUsage = { input_tokens: 0, output_tokens: 0 };
   }
 
   // Emitted once, lazily, so upstream usage/id is available if it arrived.
@@ -83,9 +95,15 @@ export class StreamTranslator {
 
     const usage = parsed?.usage;
     if (usage) {
+      this.segmentUsage = {
+        input_tokens: usage.prompt_tokens ?? this.segmentUsage.input_tokens,
+        output_tokens: usage.completion_tokens ?? this.segmentUsage.output_tokens,
+      };
+      // A resumed segment reports only its own tokens; the client must see the
+      // whole turn's total, so every segment adds onto the carried baseline.
       this.usage = {
-        input_tokens: usage.prompt_tokens ?? this.usage.input_tokens,
-        output_tokens: usage.completion_tokens ?? this.usage.output_tokens,
+        input_tokens: this.carriedUsage.input_tokens + this.segmentUsage.input_tokens,
+        output_tokens: this.carriedUsage.output_tokens + this.segmentUsage.output_tokens,
       };
     }
 
