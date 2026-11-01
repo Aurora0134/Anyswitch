@@ -15,17 +15,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+// 切源码共用带截断守卫的共享取样 helper（正则终点锚是首个「\n  }」，函数体内
+// 模板串/注释含该序列时由 helper 在提取处报半截，不再静默放行）。
+import { extractPanelFn as extractFn } from "../test-helpers/extract-panel-fn.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const panelJs = readFileSync(join(here, "../panel-ui", "panel.js"), "utf8");
 const panelCss = readFileSync(join(here, "../panel-ui", "panel.css"), "utf8");
-
-// 函数体不得出现提前闭合的「\n  }」，否则切出来的源码是半截——照既有取样惯例。
-function extractFn(name) {
-  const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-  assert.ok(src, `${name} found in panel.js`);
-  return src;
-}
 
 // 手动推进的 rAF/定时器队列：切源码后的代码只认注入的这两个入口，测试自己决定
 // 「下一帧」和「下一个任务」什么时候到——不靠 sleep。

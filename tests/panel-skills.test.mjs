@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createPanelRouter } from "../src/panel/panel.mjs";
+// 切源码共用带截断守卫的共享取样 helper：params 传参列表逐字串则钉死签名。
+import { extractPanelFn as extractFn } from "../test-helpers/extract-panel-fn.mjs";
 
 // Skills tab routes: the router is exercised with a mock skills service so no
 // real home directories, junctions, or PowerShell subprocesses are touched.
@@ -429,15 +431,6 @@ describe("panel.html skills change diff highlighting", () => {
     "utf8"
   );
 
-  // 顶层函数闭合花括号恒为 2 空格缩进、内部块更深，非贪婪匹配到首个 "\n  }" 即函数边界。
-  function extractFn(name, params) {
-    const m = panelJs.match(
-      new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
-    );
-    assert.ok(m, `panel.js must contain function ${name}`);
-    return m[0];
-  }
-
   const deployedSrc = extractFn("deployedEndpointsFor", "skill, state = skillsState");
   const diffFnSrc = extractFn("diffSkillsState", "prev, next");
   // 标记变量声明块（flashNew / flashCount 两个 let）
@@ -798,15 +791,33 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(multi, /await refreshAfterSkillsRemove\(removed\)/);
 
     const rm = extractFn("refreshAfterSkillsRemove", "relPaths");
-    // 失败路径传空集：行还在服务端，不退场，直接重渲与真实状态对齐
-    assert.match(rm, /if \(!relPaths\.length\) \{\s*\n\s*await refreshSkillsState\(\);\s*\n\s*return;/);
-    // 顺序：快照 → 退场 → 重渲（FLIP 在渲染内消费快照）
-    assert.match(rm, /const tops = skillsListTops\(\);\s*\n\s*await dissolveSkillsRows\(relPaths\);\s*\n\s*skillsFlipTops = tops;\s*\n\s*skillsFlipMs = SKILLS_DELETE_FLIP_MS;\s*\n\s*await refreshSkillsState\(\);/);
+    // 失败路径传空集：行还在服务端，不退场，直接重渲与真实状态对齐。
+    // 钉空集分支语义（分支内只刷状态并返回），不钉语句书写排布
+    const emptyBranch = rm.match(/!\s*relPaths\.length[^{]*\{([^}]*)\}/)?.[1];
+    assert.ok(emptyBranch, "empty-set guard present");
+    assert.match(emptyBranch, /await refreshSkillsState\(\)/);
+    assert.match(emptyBranch, /return/);
+    // 顺序：快照 → 退场 → FLIP 记录 → 重渲（FLIP 在渲染内消费快照）；钉调用次序，
+    // 不钉各语句的书写形态。重渲锚从退场之后取：空集分支里还有一次朴素重渲
+    const topsAt = rm.indexOf("skillsListTops()");
+    const dissolveAt = rm.indexOf("dissolveSkillsRows(");
+    const flipTopsAt = rm.indexOf("skillsFlipTops =");
+    const flipMsAt = rm.indexOf("skillsFlipMs =");
+    const refreshAt = rm.indexOf("refreshSkillsState()", dissolveAt);
+    assert.ok(topsAt !== -1 && topsAt < dissolveAt && dissolveAt !== -1
+      && dissolveAt < flipTopsAt && flipTopsAt !== -1 && flipTopsAt < flipMsAt
+      && flipMsAt !== -1 && flipMsAt < refreshAt && refreshAt !== -1,
+      "顺序：快照 → 退场 → FLIP 记录 → 重渲");
 
     // 退场只动 opacity/transform（高度交给重渲后的 FLIP，两处同时做会让邻行位移两次）；
-    // fill forwards 防退场结束到重渲之间闪回一帧
+    // fill forwards 防退场结束到重渲之间闪回一帧。关键帧行为契约：起帧原位不透明 →
+    // 终帧左移 8px 淡出（帧内键序与排布不钉，起止倒置即红）
     const dissolve = extractFn("dissolveSkillsRows", "relPaths");
-    assert.match(dissolve, /\[\{ opacity: 1, transform: "none" \}, \{ opacity: 0, transform: "translateX\(-8px\)" \}\]/);
+    assert.match(dissolve, /opacity:\s*1/);
+    assert.match(dissolve, /opacity:\s*0/);
+    assert.match(dissolve, /translateX\(-8px\)/);
+    assert.ok(dissolve.search(/opacity:\s*1/) < dissolve.search(/opacity:\s*0/),
+      "帧序：原位 → 淡出");
     assert.match(dissolve, /fill: "forwards"/);
     assert.match(dissolve, /prefers-reduced-motion/);
   });
@@ -898,13 +909,6 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
   const panelJs = read("panel.js");
   const panelCss = read("panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
 
-  function extractFn(name, params) {
-    const m = panelJs.match(
-      new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
-    );
-    assert.ok(m, `panel.js must contain function ${name}`);
-    return m[0];
-  }
   const escapeHtml = (s) => String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
@@ -1108,13 +1112,6 @@ describe("skills source wording: the global directory is not an Agent", () => {
   const read = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", name), "utf8");
   const panelJs = read("panel.js");
 
-  function extractFn(name, params) {
-    const m = panelJs.match(
-      new RegExp(`(?:async )?function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
-    );
-    assert.ok(m, `panel.js must contain function ${name}`);
-    return m[0];
-  }
   const escapeHtml = (s) => String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 

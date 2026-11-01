@@ -11,15 +11,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractPanelFn as extractFn } from "../test-helpers/extract-panel-fn.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const panelJs = readFileSync(join(here, "../panel-ui", "panel.js"), "utf8");
-
-function extractFn(name) {
-  const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-  assert.ok(src, `${name} found in panel.js`);
-  return src;
-}
 
 // 切出的两个函数引用模块级 let（查询/监听器句柄）并调用 debounceTerminalFit，
 // 在桩环境里以同名局部量补齐闭包后真跑。
