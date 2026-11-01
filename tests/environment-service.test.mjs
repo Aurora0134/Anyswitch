@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CLIENT_ENTRY_FORMS, createEnvironmentService, probeExecutableVersion } from "../src/ops/environment-service.mjs";
+import { CLIENT_ENTRY_FORMS, CLIENT_PACKAGE_NAMES, createEnvironmentService, probeExecutableVersion } from "../src/ops/environment-service.mjs";
+import { CLIENT_PACKAGES } from "../src/agents/client-lifecycle.mjs";
+import { CLIENTS } from "../src/ops/release-service.mjs";
 
 function fixture(t) {
   // 临时目录放测试文件旁（.cptest 已 gitignore，与本文件同生共死）。URL.pathname
@@ -684,4 +686,25 @@ test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", 
   const state = await f.service().getState();
   assert.deepEqual(Object.keys(CLIENT_ENTRY_FORMS).sort(), state.clients.map((client) => client.id).sort(),
     "注册表里每个客户端都有形态枚举，没有遗漏也没有多余");
+});
+
+test("CLIENT_PACKAGE_NAMES is frozen and value-pinned to the update-side and release-side tables", () => {
+  // 检测认包、更新装包、官方版本比对是同一份包名事实的三处书写；client-lifecycle
+  // 注释承诺「本地检测读的包与更新装的包两个方向口径一致」，这里把它变成测试
+  // 义务：任何一侧单独改包名，检测/更新/比对就会各认各的包，这里必须红。
+  assert.ok(Object.isFrozen(CLIENT_PACKAGE_NAMES));
+  // opencode 的清单身份走 packageVersion 的专用分支（平台变体包不声明 bin），
+  // 刻意不在这张表里；键集合增删都必须是有意识的改动。
+  assert.deepEqual(Object.keys(CLIENT_PACKAGE_NAMES).sort(), ["claude", "codex", "dsh", "dsh-tui", "kimi", "pi"].sort());
+  const npmName = (id) => {
+    const match = /^npm:(.+):latest$/.exec(CLIENTS[id]?.source ?? "");
+    assert.ok(match, `release-service 的 ${id} 条目不是 npm dist-tag 源`);
+    return match[1];
+  };
+  for (const [id, name] of Object.entries(CLIENT_PACKAGE_NAMES)) {
+    if (Object.hasOwn(CLIENT_PACKAGES, id)) {
+      assert.equal(CLIENT_PACKAGES[id], name, `${id} 的包名与更新侧 CLIENT_PACKAGES 漂移`);
+    }
+    assert.equal(npmName(id), name, `${id} 的包名与官方版本侧 CLIENTS 漂移`);
+  }
 });

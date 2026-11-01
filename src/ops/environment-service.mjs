@@ -42,8 +42,10 @@ export function resolveWorkbuddyDesktopExecutable(base = process.env) {
 // installs — the npm-global @openai/codex package. Detection therefore follows
 // the npm shim like the other npm-based clients, and resolveCodexExecutable
 // now prefers that same shim, so the terminal one-click launch and this card
-// agree on which file is installed.
-function resolveCodexShim(base = process.env) {
+// agree on which file is installed. Exported for the bilateral test that pins
+// this agreement (agent-discovery.test.mjs): the two resolvers keep separate
+// fallback semantics by design, but their preferred shim must stay one file.
+export function resolveCodexShim(base = process.env) {
   return join(base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"), "npm", "codex.cmd");
 }
 
@@ -156,6 +158,20 @@ export const CLIENT_ENTRY_FORMS = Object.freeze({
   // ZCode 桌面端是主形态；CLI 形态为显式配置制——没有官方发行渠道，仅在
   // 用户以 ZCODE_CLI_EXECUTABLE 指定入口时出现，不参团官方版本比对。
   zcode: Object.freeze(["Desktop", "CLI"]),
+});
+
+// 检测侧认包身份用的 npm 包名表：packageVersion 拿它把执行体上溯到的清单钉回
+// 具体客户端。与更新侧 client-lifecycle 的 CLIENT_PACKAGES、官方版本侧
+// release-service 的 CLIENTS 是同一份事实三处书写——client-lifecycle 注释承诺的
+// 「本地检测读的包与更新装的包两个方向口径一致」由 environment-service.test.mjs
+// 的值级互钉测试强制，改任何一侧的包名都要同步其余两侧。
+export const CLIENT_PACKAGE_NAMES = Object.freeze({
+  claude: "@anthropic-ai/claude-code",
+  codex: "@openai/codex",
+  pi: "@earendil-works/pi-coding-agent",
+  kimi: "@moonshot-ai/kimi-code",
+  dsh: "@deepseek-ai/dsh",
+  "dsh-tui": "@deepseek-harness-tui/dsh-tui",
 });
 
 function missing(error) {
@@ -294,14 +310,14 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         && dirname(resolve(path)).toLowerCase() === resolve(root, "bin").toLowerCase()
         && typeof pkg.version === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
     }
-    const names = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex", pi: "@earendil-works/pi-coding-agent", kimi: "@moonshot-ai/kimi-code", dsh: "@deepseek-ai/dsh", "dsh-tui": "@deepseek-harness-tui/dsh-tui" };
-    if (!names[id]) return null;
+    // opencode 的清单身份走上面的专用分支（平台变体包不声明 bin），不进这张表。
+    if (!CLIENT_PACKAGE_NAMES[id]) return null;
     let dir = dirname(path);
     for (let depth = 0; depth < 6; depth++, dir = dirname(dir)) {
       const text = readText(join(dir, "package.json"));
       if (!text) continue;
       const pkg = JSON.parse(text);
-      if (pkg.name !== names[id]) return null;
+      if (pkg.name !== CLIENT_PACKAGE_NAMES[id]) return null;
       const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[id];
       if (typeof bin !== "string" || resolve(dir, bin).toLowerCase() !== resolve(path).toLowerCase()) return null;
       return typeof pkg.version === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
