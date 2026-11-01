@@ -1883,11 +1883,13 @@
     transition: background 120ms var(--ease-out);
   }
   #settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }
-  /* 「显示」卡 UI版本分段钮：沿用 view-tabs 的胶囊语言（sunken 底 + 选中枚浮起带薄影），
+  /* 「显示」卡的分段钮：沿用 view-tabs 的胶囊语言（sunken 底 + 选中枚浮起带薄影），
      尺寸收小到设置行内档位。选中态只认 aria-checked——JS 回显与点击都写这个属性，
-     不另设类名，免得两处状态源漂移。 */
+     不另设类名，免得两处状态源漂移。
+     档位宽按各自文字走（max-content），不按最宽那一档拉齐成等宽块：三档里最长的是
+     4 字，等分后每个钮都比设置行里任何控件都宽，整排看着像一堵墙。 */
   .seg-switch {
-    display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px;
+    display: inline-grid; grid-auto-flow: column; grid-auto-columns: max-content; gap: 2px;
     padding: 3px; align-items: center; box-sizing: border-box;
     background: var(--surface-sunken); border: 1px solid var(--border);
     border-radius: var(--radius-md, 8px);
@@ -1896,7 +1898,7 @@
     appearance: none; border: 0; background: transparent; color: var(--text-3);
     font: inherit; font-size: 12.5px; font-weight: 650; line-height: 1;
     display: inline-flex; align-items: center; justify-content: center;
-    padding: 6px 12px; border-radius: var(--radius-sm, 6px); cursor: pointer; white-space: nowrap;
+    padding: 6px 10px; border-radius: var(--radius-sm, 6px); cursor: pointer; white-space: nowrap;
     transition: background 140ms var(--ease-out), color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
   }
   .seg-switch-btn:hover { color: var(--text); background: var(--surface-hover); }

@@ -6144,6 +6144,60 @@ describe("设置项「看板排布」", () => {
     assert.deepEqual(writes[1], [LIST_KEY, "[]"], "一个都没在跑也是真实状态，要落盘");
     assert.equal(applied.length, 2);
   });
+
+  it("分段钮按各自文字宽收窄，不等分拉齐成宽块", () => {
+    const rule = panelCss.match(/^\s*\.seg-switch \{([^}]*)\}/m);
+    assert.ok(rule, "有 .seg-switch 规则");
+    assert.ok(/grid-auto-columns:\s*max-content/.test(rule[1]),
+      "档位宽随各自文字走（max-content）；写回 1fr 就按最宽那一档等分，"
+      + "三档并排比设置行里任何控件都宽，行尾看着像一堵墙");
+    const btn = panelCss.match(/^\s*\.seg-switch-btn \{([^}]*)\}/m);
+    assert.ok(btn && /padding:\s*6px 10px/.test(btn[1]), "钮内边距收到 10px，与设置行内控件同档");
+  });
+
+  // ── 图标行视口的落位：卡序重排搬卡会把图标行顶到卡列前面 ──
+  // reorderAgentCards 是 container.append(...cards) 整批搬卡——搬完卡列落到图标行后头，
+  // 图标行成了容器的第一个子元素，屏幕上就是「图标在上面」。这条钉住补画前的钉回。
+  const stripFn = (panelJs.match(/function syncBoardIconStrip\(\) \{[\s\S]*?\n  \}/) || [])[0];
+  function stripSandbox({ lastIsStrip }) {
+    assert.ok(stripFn, "panel.js must contain syncBoardIconStrip");
+    const strip = { hidden: true, tag: "strip" };
+    const track = { innerHTML: "", children: [] };
+    const card = { tag: "card", getAttribute: (k) => (k === "data-agent-id" ? "zcode" : null) };
+    const appends = [];
+    const container = {
+      lastElementChild: lastIsStrip ? strip : card,
+      querySelectorAll: () => [card],
+      querySelector: () => null, // 卡上没有 .agent-avatar：走到「空行整行隐藏」分支即可
+      append(el) { appends.push(el.tag); this.lastElementChild = el; },
+    };
+    const document = {
+      querySelector: (sel) => (sel === ".agent-cards-container" ? container : null),
+      createElement: () => ({ setAttribute() {}, appendChild() {} }),
+    };
+    const prelude = `let installedAgentIds = null;`
+      + ` let boardLiveAgentIds = new Set(["grok"]);`
+      + ` let boardIconStripBound = true;`
+      + ` const AGENT_CARD_ORDER = ["zcode", "claude", "kimi", "grok"];`
+      + ` function $(id) {`
+      + `   if (id === "boardIconStrip") return strip;`
+      + `   if (id === "boardIconStripTrack") return track;`
+      + `   return null;`
+      + ` }`
+      + ` function updateBoardIconStripFades() {}`;
+    const sync = new Function("document", "strip", "track",
+      `${prelude}\n${stripFn}\nreturn syncBoardIconStrip;`)(document, strip, track);
+    sync();
+    return { appends, strip };
+  }
+
+  it("图标行钉在看板最下方：搬完卡再补画，视口仍排在所有卡之后", () => {
+    const moved = stripSandbox({ lastIsStrip: false });
+    assert.deepEqual(moved.appends, ["strip"],
+      "图标行不在容器末位时先钉回去——否则 reorderAgentCards 搬完卡，图标行就跑到全屏最上方");
+    const kept = stripSandbox({ lastIsStrip: true });
+    assert.deepEqual(kept.appends, [], "已在末位就不动 DOM：每次轮询补画都重排一次会打断滚动位置");
+  });
 });
 
 describe("设置项「UI版本」", () => {

@@ -723,6 +723,10 @@ async function api(method, path, body) {
     if (!strip || !track) return;
     const container = document.querySelector(".agent-cards-container");
     if (!container) { strip.hidden = true; return; }
+    // 图标行永远在看板最下方。卡序重排（reorderAgentCards）是 container.append(...cards)
+    // 整批搬卡：搬完卡列就落到图标行后面，图标行被顶到全屏最上方。这里每次补画前先把它
+    // 钉回容器末尾——卡序那一笔不必为图标行让路，别处再搬卡也照样自愈。
+    if (container.lastElementChild !== strip) container.append(strip);
     // 收集未运行的已安装端点（按容器里卡片当前 DOM 顺序，即跟随卡序）
     const ids = [];
     for (const card of container.querySelectorAll(".panel-card[data-agent-id]")) {
