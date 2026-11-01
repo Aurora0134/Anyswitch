@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveVirtualModelEntry } from "../src/channels/chain-routing.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(root, "../panel-ui", "panel.html"), "utf8").replace(/\r\n/g, "\n");
@@ -216,6 +217,36 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     const vmAt = render.indexOf("for (const vm of storeVirtualModels())");
     const rowAt = render.indexOf("for (const row of storeRows())");
     assert.ok(vmAt >= 0 && rowAt > vmAt, "虚拟模型选项必须排在渠道模型之前");
+  });
+
+  it("面板准入与中继查链入口行为同源：同一批虚拟模型逐一比对判定", () => {
+    // panel.js 无模块系统，运行时钉不了引用；这里把 renderClaudeTierOptions 的
+    // 准入段源码原样取出求值（continue → return false，走到取 wireId 即算收进），
+    // 与中继 resolveVirtualModelEntry 对同一批虚拟模型逐一比对。中继准入收紧而
+    // 面板没跟上时（候选里出现请求必败的模型），这条红。
+    const render = sliceBetween(js, "function renderClaudeTierOptions()", "\n    async function persistClaudeTier(", "renderClaudeTierOptions");
+    const at = render.indexOf("for (const vm of storeVirtualModels()) {");
+    assert.ok(at >= 0, "找不到面板虚拟模型准入循环");
+    const body = render.slice(at, render.indexOf("const wireId", at));
+    const admit = new Function(
+      "vm",
+      body.replace("for (const vm of storeVirtualModels()) {", "").replace(/\bcontinue;/g, "return false;") + "\n  return true;",
+    );
+    const store = {
+      virtualModels: [
+        { name: "vm-live", chain: [{ node: "p", model: "m" }] },
+        { name: "vm-off", enabled: false, chain: [{ node: "p", model: "m" }] },
+        { name: "vm-empty", chain: [] },
+        { name: "vm-noname" },
+      ],
+    };
+    for (const vm of store.virtualModels) {
+      assert.equal(
+        admit(vm),
+        resolveVirtualModelEntry(store, vm.name) !== null,
+        `${vm.name || "(无名条目)"}: 面板准入与中继准入判定不一致`,
+      );
+    }
   });
 
   it("进「通用」子页刷新 store 并在落地后重生成选项，拉取失败保留旧选项", () => {

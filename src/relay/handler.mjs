@@ -300,8 +300,9 @@ export function createHandler(deps) {
     // wire id 相撞、必过 Claude Code 的 /(claude|anthropic)/i 过滤，且
     // planChainMessages 在 unpackWireId 之前拦截它。
     for (const vm of Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : []) {
-      if (vm?.enabled === false) continue;
-      if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+      // 准入走 resolveVirtualModelEntry 单一收口：目录里列出的必须是请求路径真
+      // 认得的虚拟模型，判定收紧只改查链入口那一处，不再内联复制。
+      if (!resolveVirtualModelEntry(loaded.store, vm?.name)) continue;
       entries.push({
         wireId: `anthropic/${vm.name}`,
         providerId: agentId ?? "anyswitch",

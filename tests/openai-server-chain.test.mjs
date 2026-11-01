@@ -1,9 +1,12 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
 import { createAgentMetricsCollector } from "../src/agents/agent-metrics.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
-import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "../src/channels/chain-routing.mjs";
+import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID, resolveVirtualModelEntry } from "../src/channels/chain-routing.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 const TOKEN = "test-token-chain";
@@ -104,10 +107,10 @@ function memberRouter(behaviors) {
 // 之前，注入器全程不落盘（与 anthropic-server-chain.test.mjs 同一桩）。
 const OFF_EFFORT_INJECTOR = createEffortInjector({ isEnabled: () => false });
 
-function createMockDeps({ upstreamFetch, getKeepAliveConfig }) {
+function createMockDeps({ upstreamFetch, getKeepAliveConfig, store = STORE }) {
   return {
     token: TOKEN,
-    loadStore: () => ({ ok: true, store: STORE }),
+    loadStore: () => ({ ok: true, store }),
     loadCredential: async () => ({ ok: true, value: "TEST_SECRET" }),
     upstreamFetch,
     recordGeneration: () => {},
@@ -601,6 +604,48 @@ describe("chain routing: models and pre-flight", () => {
       );
       assert.deepEqual(calls, []);
     });
+  });
+
+  it("(models) 目录露出与请求路径准入同源：每个虚拟模型在目录里 ⇔ resolveVirtualModelEntry 认得它", async () => {
+    // 与 anthropic 通道的同名钉同一件事：openai 目录侧与查链入口必须对同一批
+    // 虚拟模型给出同一判定（启用、停用逐一比对）。中继准入收紧时目录自动跟随；
+    // 哪一侧另立口径，这条就红。空链形态进不了这条路径：loadValidStore 按
+    // schema 整店拒绝（存储层守卫），空链判定由 chain-routing 单元钉覆盖。
+    const vmStore = {
+      ...STORE,
+      virtualModels: [
+        { name: "my-vm", chain: [{ node: "chan-a", model: "model-a" }] },
+        { name: "off-vm", enabled: false, chain: [{ node: "chan-a", model: "model-a" }] },
+      ],
+    };
+    const { upstreamFetch, calls } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY, store: vmStore });
+
+    await withServer(deps, async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/chan-a/v1/models`, {
+        headers: { authorization: TOKEN, "x-agent-id": "zcode" },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(calls, [], "model listing must not call any upstream");
+      for (const vm of vmStore.virtualModels) {
+        const inCatalog = body.data.some((entry) => entry.id === vm.name);
+        assert.equal(
+          inCatalog,
+          resolveVirtualModelEntry(vmStore, vm.name) !== null,
+          `${vm.name}: 目录露出必须与请求路径准入一致`,
+        );
+      }
+    });
+  });
+
+  it("(models) 目录循环准入走 resolveVirtualModelEntry 单一收口（源码钉，收口不回退为内联复制）", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../src/relay/openai-handler.mjs"), "utf8");
+    const at = src.indexOf("for (const vm of Array.isArray(loaded.store.virtualModels)");
+    assert.ok(at >= 0, "找不到虚拟模型目录循环");
+    const loop = src.slice(at, src.indexOf("response.data.push", at));
+    assert.ok(loop.includes("resolveVirtualModelEntry(loaded.store"), "目录准入必须走 resolveVirtualModelEntry 收口");
+    assert.ok(!loop.includes("enabled === false"), "内联启用判定不得回潮");
   });
 });
 

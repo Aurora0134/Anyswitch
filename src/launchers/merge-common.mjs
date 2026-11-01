@@ -87,6 +87,11 @@ export function deriveAutoRouteChannel(store, endpointId) {
 // 自然移除托管块。
 export function deriveAnyswitchChannel(store, endpointId) {
   const auto = deriveAutoRouteChannel(store, endpointId);
+  // 虚拟模型准入口径与中继的 resolveVirtualModelEntry（chain-routing.mjs）同源：
+  // 启用中且链非空。名字合法性（字符集、保留名）由 store schema 在载入时把守，
+  // 不在这里重复；chain[0].node 非空是额外一层——合并写入器可能被绕过 schema
+  // 的调用方直调，这里按防御性超集收紧，有效 store 上与中继准入一致。中继准入
+  // 收紧时这里必须跟着改（模块图上不宜复用查链入口，注释即同步义务）。
   const vms = (Array.isArray(store?.virtualModels) ? store.virtualModels : []).filter(
     (vm) =>
       vm &&
