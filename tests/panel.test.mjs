@@ -13,6 +13,9 @@ import { AGENT_TERMINAL_TARGETS } from "../src/agents/agent-session-env.mjs";
 import { getTtftColor } from "../src/agents/agent-metrics.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 import { loadOrGenerateToken } from "../src/launchers/pi-relay-token.mjs";
+// 切源码共用带截断守卫的共享取样 helper（正则终点锚是首个「\n  }」，函数体内
+// 模板串/注释含该序列时由 helper 在提取处报半截，不再静默放行）。
+import { extractPanelFn as extractFn } from "../test-helpers/extract-panel-fn.mjs";
 
 // Minimal fake HTTP req/res pair. res captures the status code, headers, and
 // JSON body the router writes, so a test can assert on them. `body` (optional)
@@ -82,14 +85,17 @@ const panelJs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
   "utf8",
 );
+// 锚失配必须当场红，不许塌缩成空串/吞到文件尾让后续断言恒真。
+const sliceBetween = (src, startAnchor, endAnchor) => {
+  const start = src.indexOf(startAnchor);
+  const end = start >= 0 ? src.indexOf(endAnchor, start) : -1;
+  assert.ok(start >= 0 && end > start, `切片锚在册且有序：${startAnchor} → ${endAnchor}`);
+  return src.slice(start, end);
+};
 // ── M12 视口表（页签＝视口）的 vm 沙盒前置 ──
 // 单测按函数名切源码进 new Function，模块级符号不会跟着来。视口纯函数用生产实现，
 // 这里只补状态量与存档键；外部依赖（api / terminalSessionFor / renderer…）各沙盒自备。
-const panelFnSrc = (name) => {
-  const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-  assert.ok(src, `${name} found in panel.js`);
-  return src;
-};
+const panelFnSrc = extractFn;
 const VIEWPORT_FNS = [
   "terminalViewportNextId", "loadTerminalViewports", "saveTerminalViewports",
   "terminalViewportActive", "terminalViewportById", "terminalViewportForTerminal",
@@ -2789,10 +2795,12 @@ describe("panel.html stats tab 图表可读性（bar-fill 块级 / niceMax 密�
     const body = m[1];
     const replayIdx = body.indexOf("opts && opts.replay");
     assert.ok(replayIdx !== -1, "replay option parsed");
-    // 重置必须落在 renderStatsAll 之前（否则当次渲染已按旧标记走 morph/静默）
-    const resetIdx = body.indexOf('if (replay) { statsTrendPrev = null; statsUsageRevealed = false; }');
+    // 重置必须落在 renderStatsAll 之前（否则当次渲染已按旧标记走 morph/静默）。
+    // 钉「render 前两个标记都被清」这一行为不变量，不钉重置语句的书写排布
     const renderIdx = body.indexOf("renderStatsAll()");
-    assert.ok(resetIdx !== -1 && renderIdx !== -1 && resetIdx < renderIdx,
+    assert.ok(renderIdx !== -1, "renderStatsAll called");
+    const preRender = body.slice(replayIdx, renderIdx);
+    assert.ok(preRender.includes("statsTrendPrev = null") && preRender.includes("statsUsageRevealed = false"),
       "replay resets statsTrendPrev + statsUsageRevealed before renderStatsAll");
     // 30s 轮询仍是静默路径，不带 replay
     assert.ok(panelJs.includes("refreshStatsState({ silent: true })"), "poll stays silent (morph)");
@@ -5566,9 +5574,7 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("storeRefresh 累积本轮 diff 快照（含池合并与失败原因）", () => {
-    const fnStart = panelJs.indexOf("async function storeRefresh(");
-    assert.ok(fnStart >= 0, "storeRefresh 定义存在");
-    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const fn = sliceBetween(panelJs, "async function storeRefresh(", "// ── 新增渠道 modal");
     assert.ok(fn.length > 500, "storeRefresh 体必须真的被抓取到");
     assert.ok(fn.includes("refreshDiffUnits = []"), "每轮开始清空快照");
     assert.ok(fn.includes("refreshDiffUnits.push({"), "每单元刷完累积快照");
@@ -5579,15 +5585,13 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("「查看差异」小字仅完成态且本轮确有增减时挂出", () => {
-    const fnStart = panelJs.indexOf("async function storeRefresh(");
-    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const fn = sliceBetween(panelJs, "async function storeRefresh(", "// ── 新增渠道 modal");
     assert.ok(fn.includes("const hasDiff = storeDiffHasContent(refreshDiffUnits);"),
       "计算本轮是否有 diff");
     assert.ok(fn.includes('setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff)'),
       "done 路径把 hasDiff 传给状态小字");
     // setStoreRefreshStatus 第四参数控制 diff 小字显隐
-    const setStart = panelJs.indexOf("function setStoreRefreshStatus(");
-    const set = panelJs.slice(setStart, panelJs.indexOf("// 10s 淡出计时", setStart));
+    const set = sliceBetween(panelJs, "function setStoreRefreshStatus(", "function armStoreStatusTimer()");
     assert.ok(set.includes("showDiff"), "setStoreRefreshStatus 接收 showDiff 参数");
     assert.ok(set.includes("diff.hidden = !showDiff"), "按 showDiff 切换小字显隐");
   });
@@ -5616,23 +5620,19 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   it("弹窗打开期间暂停状态小字淡出计时，关闭时重新武装", () => {
     assert.ok(panelJs.includes("function armStoreStatusTimer()"), "计时武装函数存在");
     assert.ok(panelJs.includes("function disarmStoreStatusTimer()"), "计时暂停函数存在");
-    const openStart = panelJs.indexOf("function openStoreDiffModal()");
-    const open = panelJs.slice(openStart, panelJs.indexOf("function closeStoreDiffModal()", openStart));
+    const open = sliceBetween(panelJs, "function openStoreDiffModal()", "function closeStoreDiffModal()");
     assert.ok(open.includes("disarmStoreStatusTimer()"), "打开弹窗暂停计时");
-    const closeStart = panelJs.indexOf("function closeStoreDiffModal()");
-    const close = panelJs.slice(closeStart, panelJs.indexOf("// 刷新：全部刷新", closeStart));
+    const close = sliceBetween(panelJs, "function closeStoreDiffModal()", "// 刷新：全部刷新");
     assert.ok(close.includes('classList.contains("show")'), "关闭时判状态小字仍可见");
     assert.ok(close.includes("armStoreStatusTimer()"), "关闭时重新武装 10s");
   });
 
   it("弹窗按单元分组渲染左右分栏，失败渠道单列一区", () => {
-    const grpStart = panelJs.indexOf("function storeDiffGroupHtml(");
-    const grp = panelJs.slice(grpStart, panelJs.indexOf("function openStoreDiffModal()", grpStart));
+    const grp = sliceBetween(panelJs, "function storeDiffGroupHtml(", "function openStoreDiffModal()");
     assert.ok(grp.includes("diff-modal-group-title"), "组标题渲染渠道/池名");
     assert.ok(grp.includes("diff-modal-row"), "每行一个模型 id");
     assert.ok(grp.includes("diff-modal-empty"), "空态兜底");
-    const openStart = panelJs.indexOf("function openStoreDiffModal()");
-    const open = panelJs.slice(openStart, panelJs.indexOf("function closeStoreDiffModal()", openStart));
+    const open = sliceBetween(panelJs, "function openStoreDiffModal()", "function closeStoreDiffModal()");
     assert.ok(open.includes('refreshDiffUnits.filter((u) => u.failed)'), "失败单元单列");
     assert.ok(open.includes("storeDiffFails"), "失败区挂载点");
     assert.ok(open.includes('storeDiffGroupHtml(refreshDiffUnits, "added", "diff-added")'), "左栏新增绿底");
@@ -5650,18 +5650,13 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   // 逐渠道刷完即时上屏：后端本就是一渠道一请求、发现完即落盘，前端此前把唯一一次
   // 重渲压在整轮循环之外，行/详情卡要等全部渠道跑完才更新。
   it("逐渠道刷完即时上屏：内层循环里取最新状态重渲，不攒到整轮结束", () => {
-    const fnStart = panelJs.indexOf("async function storeRefresh(");
-    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
-    const innerStart = fn.indexOf("for (const id of unit.ids)");
-    assert.ok(innerStart >= 0, "逐渠道内层循环存在");
-    const inner = fn.slice(innerStart, fn.indexOf("refreshDiffUnits.push({", innerStart));
+    const fn = sliceBetween(panelJs, "async function storeRefresh(", "// ── 新增渠道 modal");
+    const inner = sliceBetween(fn, "for (const id of unit.ids)", "refreshDiffUnits.push({");
     assert.ok(inner.includes("await refreshStoreModelsView()"), "每个渠道刷完立刻上屏");
     assert.ok(inner.indexOf("markStoreNewModels(") < inner.indexOf("await refreshStoreModelsView()"),
       "先登记待读新增再上屏，高亮才带得出来");
     assert.ok(fn.includes("await refreshStoreState()"), "收尾仍走整轮全量重渲（列表行/路由链归位）");
-    const viewStart = panelJs.indexOf("function refreshStoreModelsView()");
-    assert.ok(viewStart >= 0, "轻量上屏函数存在");
-    const view = panelJs.slice(viewStart, panelJs.indexOf("// 渠道配置读不出来时的四种情形", viewStart));
+    const view = sliceBetween(panelJs, "function refreshStoreModelsView()", "// 渠道配置读不出来时的四种情形");
     assert.ok(view.includes('api("GET", "/api/store/state")'), "上屏只取渠道状态");
     assert.ok(view.includes("renderStoreOverview()") && view.includes("renderStoreDetail()"),
       "只重渲总览计数与详情卡模型列表");
@@ -5673,12 +5668,10 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("本轮在途不消费新增高光，收尾全量重渲才消费", () => {
-    const detailStart = panelJs.indexOf("function renderProviderDetail(");
-    const detail = panelJs.slice(detailStart, panelJs.indexOf("function bindStoreDetail(", detailStart));
+    const detail = sliceBetween(panelJs, "function renderProviderDetail(", "function bindStoreDetail(");
     assert.ok(detail.includes("if (highlight && !storeRefreshInFlight) consumeStoreNewModels(p.id)"),
       "在途期间只渲染不消费（逐渠道上屏反复重渲不会抹掉焦点渠道的高光）");
-    const fnStart = panelJs.indexOf("async function storeRefresh(");
-    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const fn = sliceBetween(panelJs, "async function storeRefresh(", "// ── 新增渠道 modal");
     const onAt = fn.indexOf("storeRefreshInFlight = true");
     const offAt = fn.indexOf("storeRefreshInFlight = false");
     const finalAt = fn.indexOf("await refreshStoreState()");
@@ -5688,10 +5681,8 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("号池刷新小字保持池粒度：刷期间不逐成员替换，池聚合落单元收尾", () => {
-    const fnStart = panelJs.indexOf("async function storeRefresh(");
-    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
-    const innerStart = fn.indexOf("for (const id of unit.ids)");
-    const inner = fn.slice(innerStart, fn.indexOf("refreshDiffUnits.push({", innerStart));
+    const fn = sliceBetween(panelJs, "async function storeRefresh(", "// ── 新增渠道 modal");
+    const inner = sliceBetween(fn, "for (const id of unit.ids)", "refreshDiffUnits.push({");
     assert.ok(inner.includes("await refreshStoreModelsView()"), "逐渠道上屏保留（行为逐成员，文案不逐成员）");
     assert.ok(!inner.includes("setStoreRefreshStatus"), "刷期间不逐成员替换小字");
     assert.ok(!inner.includes("lastTail"), "内层循环不更新 tail，池名持续到单元收尾");
@@ -5703,14 +5694,11 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("「手动添加」草稿跨重渲保留，换渠道丢弃", () => {
-    const start = panelJs.indexOf("function captureStoreManualDraft(");
-    assert.ok(start >= 0, "草稿存取函数存在");
-    const cap = panelJs.slice(start, panelJs.indexOf("function renderStoreDetail()", start));
+    const cap = sliceBetween(panelJs, "function captureStoreManualDraft(", "function renderStoreDetail()");
     assert.ok(cap.includes("storeDetailRenderedId"), "草稿记所属渠道");
     assert.ok(cap.includes("el.selectionStart") && cap.includes("document.activeElement === el"),
       "连光标与焦点一起存");
-    const detailStart = panelJs.indexOf("function renderStoreDetail()");
-    const detail = panelJs.slice(detailStart, panelJs.indexOf("function renderPoolDetail(", detailStart));
+    const detail = sliceBetween(panelJs, "function renderStoreDetail()", "function renderPoolDetail(");
     assert.ok(detail.indexOf("captureStoreManualDraft()") < detail.indexOf("renderPoolDetail(row)"),
       "渲染前先存草稿（池详情会先重建外层容器）");
     assert.ok(detail.includes("restoreStoreManualDraft(draft, storeDetailRenderedId)"), "渲染后按渠道恢复");
@@ -7866,9 +7854,7 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
 
   it("终态远离通报：置「等切回」标记、停淡出计时、弹带链接的 8s toast", () => {
     assert.ok(panelJs.includes("let storeStatusAwaitReturn = false;"), "一次性等切回标记存在");
-    const nStart = panelJs.indexOf("function notifyStoreRefreshAway(");
-    assert.ok(nStart >= 0, "远离通报函数存在");
-    const fn = panelJs.slice(nStart, panelJs.indexOf("// 渠道 diff 只摆增减数字", nStart));
+    const fn = sliceBetween(panelJs, "function notifyStoreRefreshAway(", "// 渠道 diff 只摆增减数字");
     assert.ok(fn.includes('if (currentView === "store") return;'), "人在渠道 tab 不通报");
     assert.ok(fn.includes("storeStatusAwaitReturn = true;"), "置等切回标记");
     assert.ok(fn.includes("disarmStoreStatusTimer()"), "停掉小字 10s 淡出计时等人切回");
@@ -7879,8 +7865,7 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   });
 
   it("storeRefresh 三个终态各接线一次通报：完成带聚合与 diff、失败无 diff", () => {
-    const fnStart = panelJs.indexOf("async function storeRefresh(");
-    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const fn = sliceBetween(panelJs, "async function storeRefresh(", "// ── 新增渠道 modal");
     assert.equal((fn.match(/notifyStoreRefreshAway\(/g) || []).length, 3,
       "完成/cas冲突/失败三处终态各通报一次（无可刷渠道的空操作不通报）");
     assert.ok(fn.includes('notifyStoreRefreshAway(`刷新完成：${totParts.length ? totParts.join(" ") : "无变化"}`, false, hasDiff)'),
@@ -7892,16 +7877,14 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   });
 
   it("切回渠道 tab 消费标记重计 10s；标记未消费时关弹窗不武装", () => {
-    const swStart = panelJs.indexOf("function switchView(");
-    const sw = panelJs.slice(swStart, panelJs.indexOf("// 看板变体入场", swStart));
+    const sw = sliceBetween(panelJs, "function switchView(", "// 看板变体入场");
     const consumeAt = sw.indexOf("if (store && storeStatusAwaitReturn)");
     assert.ok(consumeAt >= 0, "切回渠道 tab 时检查等切回标记");
     const consume = sw.slice(consumeAt);
     assert.ok(consume.includes("storeStatusAwaitReturn = false;"), "标记一次性消费（再切走不再暂停）");
     assert.ok(consume.includes('classList.contains("show")'), "仅小字仍可见时才重计");
     assert.ok(consume.includes("armStoreStatusTimer()"), "切回重新武装完整 10s");
-    const closeStart = panelJs.indexOf("function closeStoreDiffModal()");
-    const close = panelJs.slice(closeStart, panelJs.indexOf("// 刷新：全部刷新", closeStart));
+    const close = sliceBetween(panelJs, "function closeStoreDiffModal()", "// 刷新：全部刷新");
     assert.ok(close.includes("!storeStatusAwaitReturn"), "标记未消费（人未切回）时关弹窗不武装计时");
   });
 });
@@ -12914,12 +12897,6 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
 // 侧栏）与进页自动重试。判定键是就绪位本身，不是会话数（零会话是
 // 就绪下的合法空态，不是降级）；backend 中途死掉的轮询不动就绪位，仍保上一帧。
 describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）", () => {
-  function extractFn(name) {
-    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-    assert.ok(src, `${name} found in panel.js`);
-    return src;
-  }
-
   it("源钉死：初始化不再先渲 mock，fetch 失败分支必调空态渲染", () => {
     const init = extractFn("initTerminalPreview");
     const head = init.slice(init.indexOf("restoreTerminalFontSize()"), init.indexOf("connectTerminalBackend();"));
@@ -13503,11 +13480,14 @@ async function flushAsyncSideEffects() {
 
 describe("终端会话复活（revive 路由重组装凭据）", () => {
   function reviveRouter({ session, root, restartSession, fetchSession, scanAgentConversations, scheduleRefresh, base } = {}) {
+    // base 必须显式传入（照 qoder 用例形态罩 LOCALAPPDATA）：复活路径会读
+    // settings（claudeBypassPermissions），兜底 process.env 就是在真读真机环境。
+    assert.ok(base, "reviveRouter 需要显式传入隔离 base，不许兜底真实环境");
     const restarts = [];
     const scheduled = [];
     const router = createPanelRouter({
       storePaths: { root },
-      base: base ?? process.env,
+      base,
       logger: null, metricsCollector: null,
       fetchRelayAgents: async () => null,
       fetchTerminalSessionFn: fetchSession ?? (async (id) => ({ ...session, id })),
@@ -13540,6 +13520,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       const root = mkTestDir("anyswitch-revive-root-");
       const { router, restarts } = reviveRouter({
         root,
+        base: { ...process.env, LOCALAPPDATA: root },
         session: { id: "5e551234", agentId: "kimi", cwd, shell: "cmd" },
       });
       const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/5e551234/revive", "POST", {});
@@ -13562,6 +13543,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
     const root = mkTestDir("anyswitch-revive-shell-");
     const { router, restarts } = reviveRouter({
       root,
+      base: { ...process.env, LOCALAPPDATA: root },
       session: { id: "5e55a11c", cwd: root, shell: "powershell" },
     });
     const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55a11c/revive", "POST", {});
@@ -13572,7 +13554,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
 
   it("会话不存在返回 404，宿主不可达返回 503", async () => {
     const root = mkTestDir("anyswitch-revive-missing-");
-    const missing = reviveRouter({ root, fetchSession: async () => null });
+    const missing = reviveRouter({ root, base: { ...process.env, LOCALAPPDATA: root }, fetchSession: async () => null });
     const miss = fakeReqRes("/panel/api/terminal/sessions/deadbeef/revive", "POST", {});
     await missing.router.handle(miss.req, miss.res);
     assert.equal(miss.res.statusCode, 404);
@@ -13580,6 +13562,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
 
     const down = reviveRouter({
       root,
+      base: { ...process.env, LOCALAPPDATA: root },
       session: { id: "5e55c001", cwd: root, shell: "powershell" },
       restartSession: async () => null,
     });
@@ -13608,6 +13591,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       });
       const { router, restarts, scheduled } = reviveRouter({
         root,
+        base: { ...process.env, LOCALAPPDATA: root },
         session: { id: "5e55b001", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 8000 },
         scanAgentConversations: async () => [
           { endpoint: "kimi", id: "conv-42", project: cwd, file: "F:\\kimi\\conv-42", createdAt: null, lastActive: 9000 },
@@ -13635,6 +13619,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       let scanCalls = 0;
       const { router, scheduled } = reviveRouter({
         root,
+        base: { ...process.env, LOCALAPPDATA: root },
         session: { id: "5e55b002", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 8000 },
         scanAgentConversations: async () => {
           scanCalls += 1;
@@ -13667,6 +13652,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       });
       const { router, restarts } = reviveRouter({
         root,
+        base: { ...process.env, LOCALAPPDATA: root },
         session: { id: "5e55b003", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
         scanAgentConversations: async () => [
           { endpoint: "kimi", id: "conv-live", project: cwd, createdAt: 1500, lastActive: 4500 },
@@ -13688,6 +13674,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       const cwd = mkTestDir("anyswitch-revive-fallback-cwd-");
       const { router, restarts } = reviveRouter({
         root,
+        base: { ...process.env, LOCALAPPDATA: root },
         session: { id: "5e55b004", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
         scanAgentConversations: async () => [
           { endpoint: "kimi", id: "too-early", project: cwd, createdAt: 100, lastActive: 900 },
@@ -13713,6 +13700,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       const cwd = mkTestDir("anyswitch-revive-tie-cwd-");
       const tied = reviveRouter({
         root,
+        base: { ...process.env, LOCALAPPDATA: root },
         session: { id: "5e55b005", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
         scanAgentConversations: async () => [
           { endpoint: "kimi", id: "conv-a", project: cwd, createdAt: 1500, lastActive: 4500 },
@@ -13740,7 +13728,8 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
     let scanCalls = 0;
     const { router, restarts, scheduled } = reviveRouter({
       root,
-      base: { ...process.env, USERPROFILE: home },
+      // USERPROFILE 罩 qoder 安装探测，LOCALAPPDATA 罩 settings 读取（同 helper 隔离约定）。
+      base: { ...process.env, USERPROFILE: home, LOCALAPPDATA: root },
       session: { id: "5e55b006", agentId: "qoder", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
       scanAgentConversations: async () => {
         scanCalls += 1;
@@ -14272,12 +14261,6 @@ describe("内切杀前复核（switch-guard 双探）", () => {
 // 前端：「+」开菜单（已安装 CLI Agent 单选 + 工作目录）、createAgentTerminal
 // 走新路由、成功分支登记会话并渲染；空白终端保留原 POST 逻辑。
 describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
-  function extractFn(name) {
-    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-    assert.ok(src, `${name} found in panel.js`);
-    return src;
-  }
-
   // 纯函数在 vm 里真跑（同归属前科的取样式）；出口统一 JSON 往返，防跨原型误判。
   // terminalBackendSession 引用模块级默认目录变量，vm 域里补一份同值定义。
   const VM_TERMINAL_DEFAULT_CWD = 'let terminalDefaultCwd = "";';
@@ -15622,11 +15605,6 @@ describe("终端亮暗/颜色上报（agent match terminal 的面板半边）", 
     "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
   const LIGHT_PALETTE = ["#1f2937", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#d1d5db",
     "#6b7280", "#ef4444", "#22c55e", "#d97706", "#3b82f6", "#a855f7", "#0891b2", "#111827"];
-  function extractFn(name) {
-    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-    assert.ok(src, `${name} found in panel.js`);
-    return src;
-  }
   function extractConst(name) {
     const src = panelJs.match(new RegExp(`const ${name} = (?:\\{[\\s\\S]*?\\}|\\[[\\s\\S]*?\\]);`))?.[0];
     assert.ok(src, `${name} found in panel.js`);

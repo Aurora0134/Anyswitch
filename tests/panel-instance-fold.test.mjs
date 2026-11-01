@@ -355,9 +355,13 @@ describe("panel.js 陈旧实例行（lastSeen 超阈值）速率类隐藏", () =
 
 
 describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶）", () => {
-  const m = panelJs.match(/function claudeAggregateMetrics\(sessions, retired\) \{[\s\S]*?\n  \}/);
-  assert.ok(m, "claudeAggregateMetrics found in panel.js");
-  const claudeAggregateMetrics = new Function(`return (${m[0]});`)();
+  // 签名正则的守卫断言放进各用例体内执行：失配时每个 it 各自红、可报告，
+  // 不再让收集期抛错把整组静默带走。正则本身照旧钉死双参签名。
+  const claudeAggregateMetrics = (...args) => {
+    const m = panelJs.match(/function claudeAggregateMetrics\(sessions, retired\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "claudeAggregateMetrics found in panel.js");
+    return new Function(`return (${m[0]});`)()(...args);
+  };
 
   it("tokens/请求/工时累加，tps 求和，缓存按 prompt 加权，TTFT/lastSeen 取最近会话", () => {
     const agg = claudeAggregateMetrics([
