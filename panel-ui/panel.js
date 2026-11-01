@@ -11672,8 +11672,12 @@ async function api(method, path, body) {
   // 归档（dsh §1.4 / m6b §A）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
   // 平静会话单击即归档，无确认。本地先生效再落盘——POST 是本机回环，等它往返再
   // 动列表会出现「点了没反应」的半个节拍；落盘失败回退本地态并提示，不假装成功
-  // （刷新回来还在，比假成功更难理解）。归档与续接无关：不可续接的会话照样可归档；
-  // 打开中的终端在另一段，不受影响。动效（M13）走 AnimatedRows 同款：行克隆淡出、
+  // （刷新回来还在，比假成功更难理解）。归档与续接无关：不可续接的会话照样可归档。
+  // 打开中的终端不再豁免（2026-11-01 用户拍板）：会话只要还有终端开着（当屏或后台
+  // 保活都算），归档先弹二次确认，确认后「归档即杀」——走行内 × 同一条
+  // terminalCloseTerminal 链路（working 会再叠它自己的运行中确认），关掉才归档。
+  // 否则归档行从默认筛选消失、终端却在别处活着，终端一关会话即从视野彻底消失、
+  // 点击续接又被归档拦截。动效（M13）走 AnimatedRows 同款：行克隆淡出、
   // 下方行上移、隐藏池回填行淡入（terminalRailRerenderExitFlip）。恢复入口三件：
   // toast「撤销」＋行内取消归档钮＋段头「视图选项」筛选（m6b §A2 三入口齐备）。
   function terminalRailArchiveSession(id) {
@@ -11683,6 +11687,17 @@ async function api(method, path, body) {
     const key = terminalRailArchivedKey(session);
     if (!key) return;
     if (terminalRailPrefs.archived.some((row) => terminalRailArchivedKey(row) === key)) return;
+    const live = terminalRailFindOpenSession(session.endpoint, session.id);
+    if (live) {
+      // 文案 2026-11-01 用户批准，逐字。
+      if (typeof window === "undefined" || typeof window.confirm !== "function"
+        || !window.confirm("这条会话的终端还在运行，归档将同时关闭该终端。确定归档吗？")) return;
+      // 用户取消行内 × 自带的确认（working 终端）时关闭返回 false——归档一并放弃，
+      // 动作视作整体取消。
+      if (!terminalCloseTerminal(live.id)) return;
+      renderTerminalPreviewTabs();
+      if (typeof renderTerminalRail === "function") renderTerminalRail();
+    }
     terminalRailPrefs.archived.push(entry);
     terminalRailRerenderExitFlip();
     api("POST", "/api/terminal/rail/archive", entry)
