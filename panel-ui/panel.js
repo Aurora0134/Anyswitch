@@ -5625,7 +5625,12 @@ async function api(method, path, body) {
       && typeof window !== "undefined" && typeof window.confirm === "function"
       && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return false;
     if (session && session.backend) {
-      api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalId)}/close`).catch(() => {});
+      // /close 失败必须出声：本地登记随手已摘、视口随即销毁，服务端进程树却还活着
+      // （1s 轮询会让页签复活），确认框「将中断任务」在失败那一刻是假话。panelError
+      // 顺带把被折叠的服务端原文记进控制台与面板日志（宿主对持久化失败本就刻意回
+      // 500 供这里消费，不能弃收）。
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalId)}/close`)
+        .catch((err) => { toast(panelError(err, "无法关闭这个终端"), true); });
       delete terminalBackendSessions[terminalId];
     } else if (session) {
       delete terminalPreviewSessions[terminalId];
@@ -7301,6 +7306,23 @@ async function api(method, path, body) {
     screen.addEventListener("scroll", () => {
       if (Date.now() - terminalBottomAlignIntentAt <= TERMINAL_SCROLL_INTENT_MS) scheduleTrim();
     }, { passive: true });
+  }
+
+  // 五枚 xterm 资产（xterm.js / xterm.css / fit / unicode11 / webgl）由 panel.html
+  // 静态引用，本脚本同为 defer 且排在其后：走到这里四个脚本的全局与样式表都已定形，
+  // 缺哪枚在此可对账。此前缺失全链路无声——脚本标签无 onerror、下方消费闸静默跳过、
+  // 唯一的 WebGL 告警又包在 webgl 全局存在的分支里（资产缺失时恰好不可达）。这里
+  // 开屏对账一次，缺什么记什么（console 日志，不属界面文案）；降级行为原样保留，
+  // 服务端对同一缺失另有 404 日志（见 panel.mjs 的 servePanelFile）。
+  const missingXtermAssets = [
+    !window.Terminal && "xterm.js",
+    !window.FitAddon && "xterm-fit.js",
+    !window.Unicode11Addon && "xterm-unicode11.js",
+    !window.WebglAddon && "xterm-webgl.js",
+    !document.querySelector('link[href="/panel/assets/xterm.css"]')?.sheet && "xterm.css",
+  ].filter(Boolean);
+  if (missingXtermAssets.length) {
+    console.warn("[terminal] xterm assets missing, terminal runs degraded:", missingXtermAssets.join(", "));
   }
 
   function ensureTerminalXterm() {

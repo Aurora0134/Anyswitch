@@ -3486,6 +3486,9 @@ export function createPanelRouter({
       try {
         body = readFileSync(htmlPath, "utf8");
       } catch {
+        // 404 出声：资产缺失（典型是 node_modules 里 xterm 包没装上、或打包实物路径
+        // 再漂移）此前零日志，前端又只会静默降级，排障无从下手。
+        logger?.warn?.(`panel asset missing, serving 404: ${htmlPath}`);
         res.writeHead(404, { "content-type": "application/json" });
         return res.end(JSON.stringify({ error: "panel.html not found", path: htmlPath }));
       }
