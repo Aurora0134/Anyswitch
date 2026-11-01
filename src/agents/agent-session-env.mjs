@@ -53,6 +53,7 @@ import {
   resolveWorkbuddyExecutable,
 } from "./agent-discovery.mjs";
 import { RESUME_COMMAND } from "./session-scan.mjs";
+import { INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 
 // The resident relay on 47821 is the only credential route: the base URL is
 // always it (no per-launch relay is started for a terminal session).
@@ -60,9 +61,6 @@ export const AGENT_RELAY_PORT = 47821;
 
 // Copied from launcher.mjs:53 — loopback must never leave the machine.
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
-
-// Instance-id scheme caps, same as agent-metrics.mjs:158 (INSTANCE_ID_MAX_LEN).
-const INSTANCE_ID_MAX_LEN = 64;
 
 // zcode 终端条目的拉起目标：同目录的 zcode-cli-launcher.mjs，绝对路径在模块
 // 加载时静态算出（随安装树整体移动，不吃任何环境变量）。
