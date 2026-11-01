@@ -1,0 +1,578 @@
+import { readFileSync, existsSync, copyFileSync, mkdirSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
+import {
+  readSidecar as readSidecarFile,
+  writeSidecar as writeSidecarFile,
+  AUTO_CHANNEL_KEY,
+  ANYSWITCH_CHANNEL_NAME,
+  deriveAutoRouteChannel,
+  deriveAnyswitchChannel,
+} from "./merge-common.mjs";
+// Shared endpoint-aware derivation of the virtual auto-routing channel
+// (merge-common.mjs) — re-exported so the launcher/tests import one module.
+export { deriveAutoRouteChannel, deriveAnyswitchChannel, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME };
+import { fallbackContextWindow } from "../catalog/context-fallback.mjs";
+import { loadPiAiReasoningIndex, resolveKnowledgeReasoning } from "../catalog/reasoning-fallback.mjs";
+import { resolveModelEfforts, effortWireValue, intersectEffortVocabulary } from "../catalog/effort-catalog.mjs";
+import { extractManagedProviders } from "../channels/pool-providers.mjs";
+
+const SIDECAR_FILENAME = "dsh-sidecar.json";
+
+function resolveYamlModule() {
+  const dshYaml = join(
+    process.env.APPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Roaming"),
+    "npm",
+    "node_modules",
+    "@deepseek-ai",
+    "dsh",
+    "node_modules",
+    "js-yaml",
+  );
+  if (existsSync(dshYaml)) {
+    return dshYaml;
+  }
+  return "js-yaml";
+}
+
+let cachedYaml = null;
+export async function getYamlModule() {
+  if (!cachedYaml) {
+    const modPath = resolveYamlModule();
+    try {
+      cachedYaml = await import(modPath);
+    } catch {
+      // Fallback in case of CJS export wrapper
+      cachedYaml = (await import("node:module")).createRequire(import.meta.url)(modPath);
+    }
+  }
+  return cachedYaml.default ?? cachedYaml;
+}
+
+// dsh's own profile patches gate plugins on platform with cordis's !!js tag
+// (e.g. tool-bash gets `disabled: !!js process.platform === 'win32'`), and
+// js-yaml 4 dropped every js type for safety, so a plain load throws
+// "unknown tag" on an untouched vendor file. Parse the expression into a
+// wrapper and re-emit the tag on dump: the expression round-trips verbatim
+// instead of being evaluated or sinking the whole profile.
+export class JsExpression {
+  constructor(source) {
+    this.source = source;
+  }
+}
+
+let cachedSchema = null;
+let cachedSchemaYaml = null;
+export function dshYamlSchema(yaml) {
+  if (cachedSchema && cachedSchemaYaml === yaml) return cachedSchema;
+  const jsType = new yaml.Type("tag:yaml.org,2002:js", {
+    kind: "scalar",
+    instanceOf: JsExpression,
+    construct: (source) => new JsExpression(source),
+    represent: (value) => value.source,
+  });
+  cachedSchema = yaml.DEFAULT_SCHEMA.extend([jsType]);
+  cachedSchemaYaml = yaml;
+  return cachedSchema;
+}
+
+export function sidecarPath(root) {
+  return join(root, SIDECAR_FILENAME);
+}
+
+// Sidecar storage is shared (merge-common.mjs); only the filename is
+// module-specific.
+export function readSidecar(root) {
+  return readSidecarFile(sidecarPath(root));
+}
+
+export function writeSidecar(root, providerIds) {
+  writeSidecarFile(sidecarPath(root), providerIds);
+}
+
+function timestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+export function resolveModelReasoningLevels(model, provider, knowledge, catalog = null) {
+  if (model?.supportsReasoning === false) {
+    return { exempt: true, levels: null, wireValues: null, thinkingFormat: null, origin: null };
+  }
+  if (Array.isArray(model?.reasoningEffortLevels) && model.reasoningEffortLevels.length > 0) {
+    return { exempt: false, levels: model.reasoningEffortLevels, wireValues: null, thinkingFormat: null, origin: "store" };
+  }
+  if (Array.isArray(provider?.reasoningVariants) && provider.reasoningVariants.length > 0) {
+    return { exempt: false, levels: provider.reasoningVariants, wireValues: null, thinkingFormat: null, origin: "provider" };
+  }
+  // Tier 4: the pi-ai knowledge base entry for this model id — the same
+  // database DSH's own dispatch reads, so wire spellings match exactly.
+  // Gateway-prefixed ids ("go/mimo-v2.5-pro") fall back to the bare last
+  // segment, which is how the vendor's own entry is indexed.
+  if (knowledge) {
+    const id = modelIdOf(model);
+    const bare = typeof id === "string" && id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : null;
+    const resolved =
+      resolveKnowledgeReasoning(knowledge.get(id)) ??
+      (bare !== id ? resolveKnowledgeReasoning(knowledge.get(bare)) : null);
+    if (resolved) {
+      return { exempt: false, levels: resolved.levels, wireValues: resolved.wireValues, thinkingFormat: resolved.thinkingFormat, origin: "knowledge" };
+    }
+  }
+  // Tier 5: the hub's thinking-effort library. It reaches models no catalog
+  // describes — every gateway-private id — so a model never shows up with no
+  // levels at all. Its wire spellings come from the same source pi-ai would
+  // use, and a row that says the model is not a text model is an exemption.
+  if (catalog) {
+    const entry = resolveModelEfforts(modelIdOf(model), catalog);
+    // Clip to DSH's own level set before writing: dsh-llm-pi-ai validates
+    // reasoningEfforts keys against its fixed THINKING_LEVELS union and rejects
+    // the whole settings.yaml on an unknown key, so a library-only word
+    // ("light") must be dropped here rather than passed through.
+    const levels = intersectEffortVocabulary(entry.levels, "dsh");
+    if (entry.kind === "non-text" || levels.length === 0) {
+      return { exempt: true, levels: null, wireValues: null, thinkingFormat: null, origin: "library" };
+    }
+    const wireValues = {};
+    for (const level of levels) wireValues[level] = effortWireValue(entry, level);
+    return {
+      exempt: false,
+      levels,
+      wireValues,
+      thinkingFormat: entry.thinkingFormat,
+      origin: "library",
+    };
+  }
+  return { exempt: false, levels: null, wireValues: null, thinkingFormat: null, origin: null };
+}
+
+function modelIdOf(model) {
+  return typeof model?.id === "string" ? model.id : null;
+}
+
+export function buildReasoningEffortsMap(levels, wireValues) {
+  if (!levels || !Array.isArray(levels) || levels.length === 0) return undefined;
+  const map = { off: null };
+  for (const lvl of levels) {
+    if (typeof lvl === "string" && lvl.length > 0) {
+      // Wire values from the knowledge base win: they are what pi-ai's
+      // dispatch would send for this exact level (e.g. DSH "low" is zai
+      // "high"). Store-declared levels send the level verbatim.
+      const wire = wireValues?.[lvl];
+      map[lvl] = typeof wire === "string" && wire.length > 0 ? wire : lvl;
+    }
+  }
+  return map;
+}
+
+// The on-disk provider key of one channel. DSH's picker prints the raw key in
+// its "recently used" rows, the /model completion tree and the status detail
+// (only the provider tab strip honours displayName), so the pseudo channel's
+// key IS the channel name users see — it carries no "_" prefix. Real channels
+// keep the managed-id prefix.
+export function dshProviderKey(providerId) {
+  return providerId === AUTO_CHANNEL_KEY ? ANYSWITCH_CHANNEL_NAME : `_${providerId}`;
+}
+
+// Every on-disk key a managed id may be stored under: the current key plus the
+// pre-rename "_auto" of the pseudo channel. A sidecar written by the old
+// writer still names "auto", and the first sync after the rename has to retire
+// that key.
+export function dshManagedKeys(providerId) {
+  const id = String(providerId);
+  if (id === AUTO_CHANNEL_KEY || id === ANYSWITCH_CHANNEL_NAME) {
+    return [ANYSWITCH_CHANNEL_NAME, `_${AUTO_CHANNEL_KEY}`];
+  }
+  return [id.startsWith("_") ? id : `_${id}`];
+}
+
+// Our provider entries carry the dsh endpoint header; a user's own "_" channel
+// does not. Used only to retire the pseudo channel's pre-rename "_auto" key,
+// where no sidecar record may exist to prove ownership.
+function isManagedDshProvider(provider) {
+  return provider?.headers?.["x-agent-id"] === "dsh";
+}
+
+export function buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog = null, includeEfforts = true) {
+  const providerKey = dshProviderKey(providerId);
+  // Pseudo-channels (auto routing) name a different relay URL segment than
+  // their own id; real channels never set baseUrlSegment.
+  const segment = provider.baseUrlSegment ?? providerId;
+  const baseURL = `http://127.0.0.1:${port}/openai/${encodeURIComponent(segment)}/v1`;
+  const models = [];
+
+  let hasAnyReasoning = false;
+  let providerThinkingFormat = null;
+  for (const [modelId, m] of Object.entries(provider.models ?? {})) {
+    const entry = {
+      id: modelId,
+      name: m.displayName ?? modelId,
+      contextWindow: m.contextWindow ?? fallbackContextWindow(modelId),
+    };
+    if (m.maxOutputTokens !== undefined) {
+      entry.maxTokens = m.maxOutputTokens;
+    }
+
+    const resolved = includeEfforts
+      ? resolveModelReasoningLevels({ ...m, id: modelId }, provider, knowledge, catalog)
+      : { exempt: true, levels: null, wireValues: null, thinkingFormat: null, origin: null };
+    if (!resolved.exempt && resolved.levels && resolved.levels.length > 0) {
+      const reasoningEfforts = buildReasoningEffortsMap(resolved.levels, resolved.wireValues);
+      if (reasoningEfforts) {
+        entry.reasoningEfforts = reasoningEfforts;
+        // The library alone must not decide the route's dialect: it knows the
+        // levels, not which spelling this gateway speaks, and a wrong dialect
+        // breaks requests that worked before levels were offered at all.
+        if (resolved.origin !== "library") hasAnyReasoning = true;
+        // Per-model wire format from the knowledge base (zai/deepseek/openai
+        // …). A route-level format only makes sense when every reasoning
+        // model on the route agrees on one; mixed routes stay format-free
+        // (plain reasoning_effort) unless each model names its own.
+        if (resolved.thinkingFormat) {
+          entry.compat = { thinkingFormat: resolved.thinkingFormat };
+          providerThinkingFormat = providerThinkingFormat === null ? resolved.thinkingFormat : providerThinkingFormat;
+        }
+      }
+    }
+
+    models.push(entry);
+  }
+
+  // 凭据随 profile 走，不依赖启动环境变量。官方桌面端由自己的快捷方式直接拉起，
+  // 不经过任何 Anyswitch 启动器，因此进程环境里没有 ANYSWITCH_RELAY_TOKEN；而
+  // dsh 的 profile schema 里凭据只能是引用（没有字面 apiKey 字段），引用解析为空
+  // 又会先抛 MISSING_CREDENTIAL、根本轮不到 headers——所以令牌只能落在 headers
+  // 里，并且不能再写 apiKeyEnv，否则请求在解析引用时就死了。
+  const headers = { "x-agent-id": "dsh" };
+  // 没有令牌时不写这条头：native 回退启动（本机 relay 不可用）下读不到令牌，
+  // 写一个空 Bearer 只会让请求以 401 失败，profile 保持无密钥更诚实。
+  if (typeof token === "string" && token.length > 0) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const profile = {
+    displayName: provider.channelName ?? providerId,
+    api: "openai-completions",
+    baseURL,
+    headers,
+    models,
+  };
+
+  if (hasAnyReasoning) {
+    profile.compat = {
+      thinkingFormat: providerThinkingFormat ?? "deepseek",
+      supportsReasoningEffort: true,
+    };
+  }
+
+  return {
+    [providerKey]: profile,
+  };
+}
+
+export function mergeDshSettings(existingSettings, managedProviders, port, token, previousManaged = [], knowledge = null, autoChannel = null, catalog = null, includeEfforts = true) {
+  const settings = typeof existingSettings === "object" && existingSettings !== null ? { ...existingSettings } : {};
+  const llmPiAi = { ...(settings["llm-pi-ai"] ?? {}) };
+  const existingProviders = { ...(llmPiAi.providers ?? {}) };
+  // Append the virtual auto-routing channel outside the entry-builder system:
+  // it flows through the same cleanup/inject loops as any real channel, so
+  // deleting the endpoint's chain makes the next sync drop the pseudo channel
+  // via the ordinary previousManaged path.
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+
+  // 1. Clean up stale managed providers
+  for (const prevId of previousManaged) {
+    if (providers[prevId]) continue;
+    for (const key of dshManagedKeys(prevId)) {
+      if (existingProviders[key] !== undefined) delete existingProviders[key];
+    }
+  }
+  // Migration: before the pseudo channel was keyed by its display name it
+  // lived under the managed id "_auto". Retire that leftover so the picker
+  // never lists both groups; a user-written "_auto" without the dsh endpoint
+  // header is left alone.
+  const legacyAuto = existingProviders[`_${AUTO_CHANNEL_KEY}`];
+  if (legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
+    delete existingProviders[`_${AUTO_CHANNEL_KEY}`];
+  }
+
+  // 2. Inject current active providers
+  const currentManaged = [];
+  for (const [providerId, provider] of Object.entries(providers)) {
+    const entry = buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog, includeEfforts);
+    Object.assign(existingProviders, entry);
+    currentManaged.push(providerId);
+  }
+
+  llmPiAi.providers = existingProviders;
+  settings["llm-pi-ai"] = llmPiAi;
+
+  return { config: settings, managed: currentManaged };
+}
+
+export class UnparseableDshSettingsError extends Error {
+  constructor(filePath) {
+    super(`refusing to overwrite unparseable dsh settings: ${filePath}`);
+    this.name = "UnparseableDshSettingsError";
+    this.code = "UNPARSEABLE_DSH_SETTINGS";
+  }
+}
+
+function stripBom(text) {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+export function readDshSettings(filePath, yaml) {
+  if (!existsSync(filePath)) return {};
+  try {
+    const text = stripBom(readFileSync(filePath, "utf8"));
+    const parsed = yaml.load(text);
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    throw new UnparseableDshSettingsError(filePath);
+  }
+}
+
+// 0.1.7 retired ~/.dsh/settings.yaml: the first boot of a profile imports it
+// once into *that* profile's cordis.patch.yml and renames the file away. The
+// interactive surface (dsh-tui) never received the import, so writing the
+// retired file again cannot reach it. Each existing profile's own patch is
+// what that profile actually composes.
+export const DSH_LLM_ENTRY_ID = "llm-pi-ai";
+export const DSH_LLM_ENTRY_NAME = "@deepseek-ai/dsh-llm-pi-ai";
+
+// 读 profiles 目录就是在看 dsh 的 patch 面。读成功（哪怕一条 profile 都没有）说明
+// 真的就是「无 profile」；读失败说明 patch 面本身失联或不可读，同步必须把它报成
+// 失败而不是伪装成「no dsh profiles」。只罗列路径的消费方（byok 导入、卸载清理）
+// 经 dshProfilePatchPaths 继续拿普通数组。
+function readDshProfilePatchPaths(dshHome) {
+  const profilesDir = join(dshHome, "profiles");
+  try {
+    const entries = readdirSync(profilesDir, { withFileTypes: true });
+    return {
+      ok: true,
+      paths: entries
+        .filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
+        .map((entry) => join(profilesDir, entry.name, "cordis.patch.yml"))
+        .sort(),
+    };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+export function dshProfilePatchPaths(dshHome) {
+  const read = readDshProfilePatchPaths(dshHome);
+  return read.ok ? read.paths : [];
+}
+
+function loadPatchEntries(filePath, yaml) {
+  if (!existsSync(filePath)) return [];
+  const parsed = yaml.load(stripBom(readFileSync(filePath, "utf8")), { schema: dshYamlSchema(yaml) });
+  if (parsed == null) return [];
+  if (!Array.isArray(parsed)) throw new UnparseableDshSettingsError(filePath);
+  return parsed;
+}
+
+// The profile patch is a YAML array of rows. Re-dumping the whole array
+// rewrites every other row's comments, quotes and key order, so the write
+// splices only the llm-pi-ai row and leaves the surrounding text byte for byte.
+function spliceProfileRow(text, rowText) {
+  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const rowStart = /^([ \t]*)- id:[ \t]+llm-pi-ai[ \t]*(?:#.*)?$/;
+  let start = -1;
+  let indent = "";
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = rowStart.exec(lines[i]);
+    if (!match) continue;
+    start = i;
+    indent = match[1];
+    break;
+  }
+  const body = rowText.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n")
+    .map((line, index) => (index === 0 || line === "" ? line : `${indent}${line}`));
+  if (start < 0) {
+    const base = normalized.replace(/\n+$/, "");
+    const sep = base.length === 0 ? "" : "\n";
+    return `${base}${sep}${body.join("\n")}\n`;
+  }
+  let end = lines.length;
+  const sibling = new RegExp(`^${indent}- `);
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (sibling.test(lines[i])) { end = i; break; }
+  }
+  const next = [...lines.slice(0, start), ...body, ...lines.slice(end)];
+  return `${next.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+// Replace only the llm-pi-ai row's providers. Every other row, and any
+// provider the user added beside the managed ones, stays. A profile whose
+// patch is not a YAML array is left untouched and reported — one broken
+// profile must not sink the others.
+export function mergeDshProfilePatch(entries, providers, previousManaged = []) {
+  const next = entries.map((entry) => (entry && typeof entry === "object" ? { ...entry } : entry));
+  const index = next.findIndex((entry) => entry && entry.id === DSH_LLM_ENTRY_ID);
+  const row = index >= 0 ? { ...next[index] } : { id: DSH_LLM_ENTRY_ID };
+  if (typeof row.name !== "string" || row.name.length === 0) row.name = DSH_LLM_ENTRY_NAME;
+  const config = row.config && typeof row.config === "object" && !Array.isArray(row.config) ? { ...row.config } : {};
+  const existing = config.providers && typeof config.providers === "object" && !Array.isArray(config.providers)
+    ? { ...config.providers }
+    : {};
+  // Only the ids the previous sync wrote are removable. A provider the user
+  // added in DSH's own settings — even one whose name starts with "_" — stays.
+  // The pseudo channel contributes both its current key and the pre-rename
+  // "_auto" one, since a sidecar from the old writer still names it "auto".
+  const removable = new Set(previousManaged.flatMap((id) => dshManagedKeys(id)));
+  for (const key of Object.keys(existing)) {
+    if (removable.has(key) && !Object.hasOwn(providers, key)) delete existing[key];
+  }
+  // Sidecar-lost migration: the pseudo channel used to be written under the
+  // managed id "_auto". Retire that leftover (only with the dsh endpoint
+  // header) so the picker never lists both groups.
+  const legacyAuto = existing[`_${AUTO_CHANNEL_KEY}`];
+  if (legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
+    delete existing[`_${AUTO_CHANNEL_KEY}`];
+  }
+  Object.assign(existing, providers);
+  config.providers = existing;
+  row.config = config;
+  if (index >= 0) next[index] = row;
+  else next.push(row);
+  return next;
+}
+
+export function writeDshProfilePatches(store, port, token, sidecarRoot, dshHome, catalog = null, effortsEnabled = true, knowledge = null) {
+  return writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge);
+}
+
+async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge) {
+  const yaml = await getYamlModule();
+  const managedProviders = extractManagedProviders(store);
+  const autoChannel = deriveAnyswitchChannel(store, "dsh");
+  const previousManaged = readSidecar(sidecarRoot).providers;
+  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
+  }
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const built = {};
+  for (const [providerId, provider] of Object.entries(providers)) {
+    Object.assign(built, buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog, effortsEnabled));
+  }
+  const read = readDshProfilePatchPaths(dshHome);
+  if (!read.ok) {
+    // 失联不得伪装成功。家目录整个不在＝dsh 未装（卸载清掉家目录是正常状态），维持
+    // 正常跳过；家目录在而 profiles 读不出来时，ENOENT 只有在 sidecar 记着上次确实往
+    // profile 里写过渠道的情况下才算失联，否则可能只是装了 dsh 还没建 profile；其余读
+    // 错误（权限、profiles 被普通文件顶替等）一律按失联报失败，交给 agent-sync 的
+    // warn 日志与 failed 名单接管。
+    const homeMissing = !existsSync(dshHome);
+    const everManaged = previousManaged.length > 0;
+    if (!homeMissing && (read.error?.code !== "ENOENT" || everManaged)) {
+      const detail = read.error?.message ?? String(read.error);
+      return { ok: false, unchanged: true, reason: `dsh profiles directory is missing or unreadable: ${detail}` };
+    }
+    return { ok: true, unchanged: true, reason: "no dsh profiles" };
+  }
+  const paths = read.paths;
+  if (paths.length === 0) {
+    return { ok: true, unchanged: true, reason: "no dsh profiles" };
+  }
+  const staged = [];
+  const skipped = [];
+  let changed = false;
+  for (const filePath of paths) {
+    let entries;
+    try {
+      entries = loadPatchEntries(filePath, yaml);
+    } catch (error) {
+      if (error?.code === "UNPARSEABLE_DSH_SETTINGS") {
+        skipped.push(filePath);
+        continue;
+      }
+      throw error;
+    }
+    const merged = mergeDshProfilePatch(entries, built, previousManaged);
+    const row = merged.find((entry) => entry && entry.id === DSH_LLM_ENTRY_ID);
+    const rowText = yaml.dump([row], { indent: 2, lineWidth: -1, noRefs: true, schema: dshYamlSchema(yaml) });
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
+    const text = spliceProfileRow(current, rowText);
+    if (contentHash(current) !== contentHash(text)) changed = true;
+    staged.push({ filePath, text });
+  }
+  if (skipped.length === paths.length) {
+    return { ok: false, unchanged: true, reason: "every dsh profile patch is unparseable" };
+  }
+  if (!changed) {
+    writeSidecar(sidecarRoot, Object.keys(providers));
+    return { ok: true, unchanged: true, skipped };
+  }
+  for (const { filePath, text } of staged) {
+    const dir = dirname(filePath);
+    mkdirSync(dir, { recursive: true });
+    if (existsSync(filePath)) {
+      copyFileSync(filePath, join(dir, `cordis.patch.backup.${timestamp()}.yml`));
+      pruneBackups(dir, "cordis.patch.backup.");
+    }
+    atomicWriteFile(filePath, text);
+  }
+  writeSidecar(sidecarRoot, Object.keys(providers));
+  return { ok: true, unchanged: false, written: staged.map((item) => item.filePath), skipped };
+}
+
+export function writeDshSettingsWithBackup(filePath, data, yaml) {
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true });
+
+  const text = yaml.dump(data, { indent: 2, lineWidth: -1, noRefs: true });
+  const hash = contentHash(text);
+
+  if (existsSync(filePath)) {
+    const existing = readFileSync(filePath, "utf8");
+    if (contentHash(existing) === hash) return { ok: true, unchanged: true };
+  }
+
+  let backupPath;
+  if (existsSync(filePath)) {
+    backupPath = join(dir, `settings.backup.${timestamp()}.yaml`);
+    copyFileSync(filePath, backupPath);
+  }
+
+  atomicWriteFile(filePath, text);
+  // Trim to the newest 5 backups: unbounded retention accumulates
+  // token-bearing settings copies on disk.
+  pruneBackups(dir, "settings.backup.");
+  return { ok: true, unchanged: false, backupPath };
+}
+
+export { extractManagedProviders };
+
+export function validateDshSettings(settings) {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    return { valid: false, error: "settings must be a non-null object" };
+  }
+  const llmPiAi = settings["llm-pi-ai"];
+  if (llmPiAi !== undefined) {
+    if (typeof llmPiAi !== "object" || llmPiAi === null || Array.isArray(llmPiAi)) {
+      return { valid: false, error: "'llm-pi-ai' must be an object" };
+    }
+    if (llmPiAi.providers !== undefined) {
+      if (typeof llmPiAi.providers !== "object" || llmPiAi.providers === null || Array.isArray(llmPiAi.providers)) {
+        return { valid: false, error: "'llm-pi-ai.providers' must be an object" };
+      }
+      for (const [pId, p] of Object.entries(llmPiAi.providers)) {
+        if (typeof p !== "object" || p === null) {
+          return { valid: false, error: `provider "${pId}" must be an object` };
+        }
+        if (typeof p.baseURL !== "string" || p.baseURL.length === 0) {
+          return { valid: false, error: `provider "${pId}" must have a non-empty baseURL` };
+        }
+        if (typeof p.api !== "string" || p.api.length === 0) {
+          return { valid: false, error: `provider "${pId}" must have a non-empty api` };
+        }
+        if (!Array.isArray(p.models) || p.models.length === 0) {
+          return { valid: false, error: `provider "${pId}" must have a non-empty models array` };
+        }
+      }
+    }
+  }
+  return { valid: true };
+}

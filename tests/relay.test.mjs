@@ -1,0 +1,1512 @@
+// Relay unit tests. Synthetic data only: no real credentials, no DPAPI,
+// no real upstream, no network. All IO is injected.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "../src/relay/wire-id.mjs";
+import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "../src/relay/protocol.mjs";
+import { NARRATION_THINKING_SIGNATURE } from "../src/catalog/thinking-signature.mjs";
+import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
+import { createHandler, extractPresentedToken } from "../src/relay/handler.mjs";
+import { createServiceHealth } from "../src/shared/service-health.mjs";
+import { RETRY_UPSTREAM_MS } from "../src/channels/chain-routing.mjs";
+import { mkTestDir } from "../test-helpers/tmp.mjs";
+
+// ---- 环境隔离（模块体最前，先于任何用例执行）----
+// relay 的默认依赖面（settings.json、thinking-efforts.db.json、mid-system
+// rewrite 与图片降级两门）都是请求时经函数默认参数现读 process.env，导入链里
+// 没有 import 期捕获（relay-settings.mjs / effort-catalog.mjs / effort-injection.mjs
+// 逐一核对过）。这里把三个用户根整体重定向进本进程的临时根，用例从此读不到
+// 真实机器的 Anyswitch 配置；确需真开关行为的用例（mid-system rewrite 的
+// settings 回退）自行覆盖 LOCALAPPDATA 并在 finally 还原。
+const ISOLATED_ENV_ROOT = mkTestDir("anyswitch-relay-env-");
+for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
+  process.env[key] = ISOLATED_ENV_ROOT;
+}
+
+const TOKEN = "test-token-0123456789abcdef";
+
+function syntheticStore() {
+  return {
+    version: 2,
+    providers: {
+      "poke-api": {
+        displayName: "Poke API",
+        baseURL: "https://upstream.invalid/v1",
+        protocol: "openai-compatible",
+        credentialFile: "poke-api.dpapi",
+        models: {
+          "claude-opus-5": { displayName: "Claude Opus 5" },
+          "claude-sonnet-5": { displayName: "Claude Sonnet 5" },
+        },
+      },
+      "nvidia-nim": {
+        displayName: "NVIDIA NIM",
+        baseURL: "https://nim.invalid/v1",
+        protocol: "openai-compatible",
+        credentialFile: "nvidia-nim.dpapi",
+        models: {
+          "deepseek-ai/deepseek-v4-pro": { displayName: "DeepSeek V4 Pro" },
+        },
+      },
+    },
+  };
+}
+
+function makeDeps(overrides = {}) {
+  let generation = null;
+  // `store` 只用于构造 loadStore 的默认值；其余键全部透传给 createHandler。
+  // 此前这里只挑六个固定键，overrides 里的 effortInjector / buildUpstreamURLs
+  // 等注入面会被静默丢弃，用例便落到真实磁盘上的默认注入器与默认 URL 组装上。
+  const { store: storeOverride, ...passthrough } = overrides;
+  const store = storeOverride ?? syntheticStore();
+  return {
+    token: TOKEN,
+    loadStore: overrides.loadStore ?? (() => ({ ok: true, store })),
+    loadCredential: overrides.loadCredential ?? (async () => ({ ok: true, value: "synthetic-key" })),
+    upstreamFetch:
+      overrides.upstreamFetch ??
+      (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: "cmpl-1",
+          choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 1 },
+        }),
+      })),
+    recordGeneration: overrides.recordGeneration ?? ((g) => { generation = g; }),
+    readGeneration: overrides.readGeneration ?? (() => generation),
+    ...passthrough,
+  };
+}
+
+const AUTH = { authorization: TOKEN };
+
+function messageBody(model) {
+  return { model, max_tokens: 16, messages: [{ role: "user", content: "hello" }] };
+}
+
+// ---------- wire ID pack/unpack ----------
+
+test("packWireId prefixes canonical id", () => {
+  assert.equal(packWireId("poke-api", "claude-opus-5"), "anthropic/poke-api/claude-opus-5");
+});
+
+test("packWireId rejects a provider id containing a slash", () => {
+  assert.throws(() => packWireId("a/b", "m"), /wire-ID invariant/);
+});
+
+test("unpack round-trips ids with embedded slashes", () => {
+  const wire = packWireId("nvidia-nim", "deepseek-ai/deepseek-v4-pro");
+  const out = unpackWireId(wire);
+  assert.equal(out.ok, true);
+  assert.equal(out.providerId, "nvidia-nim");
+  assert.equal(out.modelId, "deepseek-ai/deepseek-v4-pro");
+});
+
+test("unpack strips the prefix exactly once", () => {
+  const out = unpackWireId("anthropic/anthropic/nested-model");
+  assert.equal(out.ok, true);
+  assert.equal(out.providerId, "anthropic");
+  assert.equal(out.modelId, "nested-model");
+});
+
+test("unpack rejects non-wire ids including bare Anthropic model names", () => {
+  for (const bad of ["claude-sonnet-5", "sonnet", "opus", "gpt-4"]) {
+    const out = unpackWireId(bad);
+    assert.equal(out.ok, false);
+    assert.equal(out.reason, UNPACK_REASON.NOT_WIRE_ID);
+  }
+});
+
+test("unpack resolves an unqualified model only against one relay provider", () => {
+  const store = syntheticStore();
+  const out = unpackWireId("claude-opus-5", store);
+  assert.equal(out.ok, true);
+  assert.equal(out.providerId, "poke-api");
+  assert.equal(out.modelId, "claude-opus-5");
+  assert.equal(out.legacy, true);
+});
+
+test("unpack maps a dated Claude preset to one registered relay model", () => {
+  const store = syntheticStore();
+  const out = unpackWireId("claude-haiku-4-5-20251001", {
+    ...store,
+    providers: {
+      "poke-api": {
+        ...store.providers["poke-api"],
+        models: { "claude-haiku-4-5": { displayName: "Claude Haiku 4.5" } },
+      },
+    },
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.modelId, "claude-haiku-4-5");
+});
+
+test("unpack refuses ambiguous unqualified relay models", () => {
+  const store = syntheticStore();
+  store.providers.other = { ...store.providers["poke-api"], models: { "claude-opus-5": { displayName: "Claude Opus 5" } } };
+  const out = unpackWireId("claude-opus-5", store);
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, UNPACK_REASON.AMBIGUOUS_UNQUALIFIED);
+});
+
+test("unpack is case sensitive on the prefix (no normalisation)", () => {
+  for (const bad of ["Anthropic/p/m", "ANTHROPIC/p/m"]) {
+    assert.equal(unpackWireId(bad).reason, UNPACK_REASON.NOT_WIRE_ID);
+  }
+});
+
+test("unpack rejects missing separator and empty segments", () => {
+  assert.equal(unpackWireId("anthropic/onlyprovider").reason, UNPACK_REASON.NO_SEPARATOR);
+  assert.equal(unpackWireId("anthropic//model").reason, UNPACK_REASON.EMPTY_PROVIDER);
+  assert.equal(unpackWireId("anthropic/provider/").reason, UNPACK_REASON.EMPTY_MODEL);
+});
+
+test("unpack rejects missing and non-string model", () => {
+  assert.equal(unpackWireId(undefined).reason, UNPACK_REASON.MISSING);
+  assert.equal(unpackWireId(null).reason, UNPACK_REASON.MISSING);
+  assert.equal(unpackWireId(42).reason, UNPACK_REASON.NOT_A_STRING);
+});
+
+test("buildWireCatalog covers every model", () => {
+  const entries = buildWireCatalog(syntheticStore());
+  assert.equal(entries.length, 3);
+  assert.ok(entries.some((e) => e.wireId === "anthropic/nvidia-nim/deepseek-ai/deepseek-v4-pro"));
+});
+
+test("catalog entries carry the provider display label", () => {
+  const entries = buildWireCatalog(syntheticStore());
+  const opus = entries.find((e) => e.wireId === "anthropic/poke-api/claude-opus-5");
+  assert.equal(opus.displayName, "[poke-api] Claude Opus 5");
+  const nim = entries.find((e) => e.wireId === "anthropic/nvidia-nim/deepseek-ai/deepseek-v4-pro");
+  assert.equal(nim.displayName, "[nvidia-nim] DeepSeek V4 Pro");
+});
+
+test("same model display name under two providers stays distinguishable", () => {
+  // The real store has 25 model display names shared across providers whose
+  // billing multipliers differ. The picker label must disambiguate them.
+  const store = syntheticStore();
+  store.providers["S3-claude"] = {
+    displayName: "S3 claude-0.08x",
+    baseURL: "https://s3.invalid/v1",
+    protocol: "openai-compatible",
+    credentialFile: "s3-claude.dpapi",
+    models: { "claude-opus-5": { displayName: "Claude Opus 5" } },
+  };
+  const labels = buildWireCatalog(store).map((e) => e.displayName);
+  assert.equal(new Set(labels).size, labels.length);
+  assert.ok(labels.includes("[poke-api] Claude Opus 5"));
+  assert.ok(labels.includes("[S3-claude] Claude Opus 5"));
+});
+
+test("model with no displayName falls back to the model id, still prefixed", () => {
+  const store = syntheticStore();
+  store.providers["poke-api"].models["bare-model"] = {};
+  const entry = buildWireCatalog(store).find((e) => e.wireId === "anthropic/poke-api/bare-model");
+  assert.equal(entry.displayName, "[poke-api] bare-model");
+});
+
+test("buildModelsResponse surfaces the prefixed label as display_name", () => {
+  const body = buildModelsResponse(buildWireCatalog(syntheticStore()));
+  const opus = body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5");
+  assert.equal(opus.display_name, "[poke-api] Claude Opus 5");
+});
+
+test("buildWireCatalog emits a pool as one unit with the members' union, absorbing members", () => {
+  const store = syntheticStore();
+  store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
+  const wireIds = buildWireCatalog(store).map((e) => e.wireId).sort();
+  assert.deepEqual(wireIds, [
+    "anthropic/poke-pool/claude-opus-5",
+    "anthropic/poke-pool/claude-sonnet-5",
+    "anthropic/poke-pool/deepseek-ai/deepseek-v4-pro",
+  ]);
+});
+
+test("every catalog entry unpacks back to a store hit", async () => {
+  const store = syntheticStore();
+  const handler = createHandler(makeDeps({ store }));
+  for (const entry of buildWireCatalog(store)) {
+    const out = await handler.handleMessages(AUTH, messageBody(entry.wireId));
+    assert.equal(out.status, 200, `${entry.wireId} should route`);
+  }
+});
+
+// ---------- thinking-depth injection on the Anthropic path ----------
+
+const EFFORT_CATALOG = {
+  models: new Map([
+    ["claude-opus-5", { kind: "reasoning", levels: ["high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+  ]),
+};
+
+function makeInjectingMessagesHandler(responses) {
+  const sent = [];
+  let index = 0;
+  const handler = createHandler(makeDeps({
+    upstreamFetch: async (urls, init) => {
+      sent.push(JSON.parse(init.body));
+      const next = responses[Math.min(index, responses.length - 1)];
+      index += 1;
+      return next;
+    },
+    effortInjector: createEffortInjector({ catalog: EFFORT_CATALOG }),
+  }));
+  return { handler, sent };
+}
+
+const okResponse = {
+  ok: true,
+  status: 200,
+  json: async () => ({
+    id: "cmpl-1",
+    choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 3, completion_tokens: 1 },
+  }),
+};
+
+test("anthropic path adds the library default when Claude named no depth", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(sent[0].reasoning_effort, "high");
+});
+
+test("a thinking block that names no depth still gets the library default", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), thinking: { type: "enabled", budget_tokens: 2048 } };
+  await handler.handleMessages(AUTH, body);
+  assert.equal(sent[0].reasoning_effort, "high");
+});
+
+test("the depth Claude named goes upstream in the field the channel takes", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const body = {
+    ...messageBody("anthropic/poke-api/claude-opus-5"),
+    thinking: { type: "adaptive" },
+    output_config: { effort: "xhigh" },
+  };
+  await handler.handleMessages(AUTH, body);
+  assert.equal(sent[0].reasoning_effort, "xhigh");
+  assert.equal("thinking" in sent[0], false);
+  assert.equal("output_config" in sent[0], false);
+});
+
+test("a level Claude sent itself is not replaced by the library default", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), reasoning_effort: "max" };
+  await handler.handleMessages(AUTH, body);
+  assert.equal(sent[0].reasoning_effort, "max");
+});
+
+test("a level the model does not list lands on the nearest one it does", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  // claude-opus-5 offers high/xhigh/max, so a medium request goes out as high —
+  // a value the model is known to take, never one it would refuse.
+  const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), effort: "medium" };
+  await handler.handleMessages(AUTH, body);
+  assert.equal(sent[0].reasoning_effort, "high");
+});
+
+test("Claude asking for no thinking is respected, default and all", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  for (const [round, off] of [{ thinking: { type: "disabled" } }, { effort: "off" }].entries()) {
+    const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), ...off };
+    await handler.handleMessages(AUTH, body);
+    // 每轮断言自己的那一次发送：off 这轮若被补上默认档位，这里必须红。
+    assert.equal(sent.length, round + 1, `round ${round}: exactly one upstream send`);
+    assert.equal("reasoning_effort" in sent[round], false, `round ${round}: ${JSON.stringify(off)}`);
+  }
+});
+
+test("anthropic path retries once without the field when the channel refuses it", async () => {
+  const refusal = { ok: false, status: 400, text: async () => 'Unsupported parameter: "reasoning_effort"' };
+  const { handler, sent } = makeInjectingMessagesHandler([refusal, okResponse]);
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].reasoning_effort, "high");
+  assert.equal("reasoning_effort" in sent[1], false);
+});
+
+// ---------- 图片降级（M13：纯文本模型预判 + 报错兜底） ----------
+
+const EMPTY_EFFORT_CATALOG = { models: new Map() };
+
+const TEXT_ONLY_REFUSAL = {
+  ok: false,
+  status: 400,
+  text: async () => '{"error":{"message":"Model only support text input Request id: 0217"}}',
+};
+
+function imageMessageBody(model, { imageOnly = false } = {}) {
+  const content = imageOnly
+    ? [{ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } }]
+    : [
+        { type: "text", text: "look at this" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+      ];
+  return { model, max_tokens: 16, messages: [{ role: "user", content }] };
+}
+
+function imageGuardStore() {
+  const store = syntheticStore();
+  store.providers["poke-api"].models = {
+    "claude-opus-5": { displayName: "Claude Opus 5" },
+    "glm-5.3": { displayName: "GLM 5.3" },
+    "declared-text": { displayName: "Declared Text", inputModalities: ["text"] },
+    "declared-vision": { displayName: "Declared Vision", inputModalities: ["text", "image"] },
+    "mystery-model": { displayName: "Mystery" },
+  };
+  return store;
+}
+
+function makeImageGuardHandler(responses, { gates = {}, store = imageGuardStore(), effortCatalog = EMPTY_EFFORT_CATALOG } = {}) {
+  const sent = [];
+  const lines = [];
+  let index = 0;
+  const handler = createHandler({
+    ...makeDeps({
+      store,
+      upstreamFetch: async (urls, init) => {
+        sent.push(JSON.parse(init.body));
+        const next = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        return next;
+      },
+    }),
+    logger: { info: (line) => lines.push(line) },
+    effortInjector: createEffortInjector({ catalog: effortCatalog }),
+    ...gates,
+  });
+  return { handler, sent, lines };
+}
+
+test("预判：store 声明纯文本时，send 前把图替换为占位标记（不受预判子开关控制）", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => false },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/declared-text"));
+  assert.equal(out.status, 200);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].messages[0].content, [
+    { type: "text", text: "look at this" },
+    { type: "text", text: "[Unsupported Image]" },
+  ]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /图片降级（预判）/);
+  assert.match(lines[0], /"declared-text"/);
+  assert.match(lines[0], /1 张图片/);
+});
+
+test("预判：内置名单命中时剥图，且单图 content 折叠为字符串形态", async () => {
+  const { handler, sent } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/glm-5.3", { imageOnly: true }));
+  assert.equal(out.status, 200);
+  assert.equal(sent[0].messages[0].content, "[Unsupported Image]");
+  // body 里的原图块没有被原地改动。
+  assert.equal(sent.length, 1);
+});
+
+test("预判：子开关关着时名单不再预判（fail-open，图原样上行）", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => false },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/glm-5.3"));
+  assert.equal(out.status, 200);
+  assert.deepEqual(sent[0].messages[0].content[1], {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,QUJD" },
+  });
+  assert.equal(lines.length, 0);
+});
+
+test("预判：声明支持图片时，名单命中也被声明推翻", async () => {
+  const { handler, sent } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/declared-vision"));
+  assert.equal(out.status, 200);
+  assert.deepEqual(sent[0].messages[0].content[1], {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,QUJD" },
+  });
+});
+
+test("兜底：漏判后上游报「只支持文本」，剥图重试一次并成功", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([TEXT_ONLY_REFUSAL, okResponse], {
+    gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 200, "客户端看到的是重试结果");
+  assert.equal(sent.length, 2);
+  // 第一次带图原样上行（漏判），第二次已替换为占位标记。
+  assert.deepEqual(sent[0].messages[0].content[1], {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,QUJD" },
+  });
+  assert.deepEqual(sent[1].messages[0].content, [
+    { type: "text", text: "look at this" },
+    { type: "text", text: "[Unsupported Image]" },
+  ]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /图片降级（兜底）/);
+  assert.match(lines[0], /"mystery-model"/);
+});
+
+test("兜底：总开关关着时不重试，错误原样透传", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([TEXT_ONLY_REFUSAL], {
+    gates: { imageHeuristicGate: () => false, imageFallbackGate: () => false },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 1);
+  assert.equal(lines.length, 0);
+});
+
+test("兜底：措辞不是模态判决时不重试（错误透传，单次发送）", async () => {
+  const apiKeyError = { ok: false, status: 400, text: async () => '{"error":{"message":"Invalid API key"}}' };
+  const { handler, sent, lines } = makeImageGuardHandler([apiKeyError], {
+    gates: { imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 1);
+  assert.equal(lines.length, 0);
+});
+
+test("兜底：重试仍失败时按重试结果透传，不再三发", async () => {
+  const { handler, sent } = makeImageGuardHandler([TEXT_ONLY_REFUSAL, TEXT_ONLY_REFUSAL], {
+    gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 2, "图片兜底只重试一次");
+});
+
+test("兜底：请求不带图时模态报错不触发重试", async () => {
+  const { handler, sent } = makeImageGuardHandler([TEXT_ONLY_REFUSAL], {
+    gates: { imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 1);
+});
+
+test("组合：effort 拒绝重试在前，图片兜底的基体不带刚被拒的 effort 字段", async () => {
+  const effortRefusal = { ok: false, status: 400, text: async () => 'Unsupported parameter: "reasoning_effort"' };
+  const { handler, sent } = makeImageGuardHandler(
+    [effortRefusal, TEXT_ONLY_REFUSAL, okResponse],
+    { gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true }, effortCatalog: EFFORT_CATALOG },
+  );
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[0].reasoning_effort, "high");
+  assert.deepEqual(sent[0].messages[0].content[1].type, "image_url");
+  // effort 重试：去字段、图仍在。
+  assert.equal("reasoning_effort" in sent[1], false);
+  assert.equal(sent[1].messages[0].content[1].type, "image_url");
+  // 图片兜底：基体是去 effort 的请求——不再把被拒的字段放回线上。
+  assert.equal("reasoning_effort" in sent[2], false);
+  assert.deepEqual(sent[2].messages[0].content, [
+    { type: "text", text: "look at this" },
+    { type: "text", text: "[Unsupported Image]" },
+  ]);
+});
+
+test("clientEffortFromAnthropic reads every way Claude names a depth", () => {
+  assert.deepEqual(clientEffortFromAnthropic({ output_config: { effort: "xhigh" } }), { stated: true, level: "xhigh" });
+  assert.deepEqual(clientEffortFromAnthropic({ reasoning_effort: "high" }), { stated: true, level: "high" });
+  assert.deepEqual(clientEffortFromAnthropic({ effort: "medium" }), { stated: true, level: "medium" });
+  // "think, at whatever depth you like" is not a level choice.
+  assert.deepEqual(clientEffortFromAnthropic({ thinking: { type: "adaptive" } }), { stated: false, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ thinking: { type: "enabled", budget_tokens: 2048 } }), { stated: false, level: null });
+  // Both explicit refusals: no thinking, and no default filled in behind it.
+  assert.deepEqual(clientEffortFromAnthropic({ thinking: { type: "disabled" } }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ reasoning_effort: null }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ effort: "off" }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ output_config: { effort: "none" } }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ max_tokens: 100 }), { stated: false, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ effort: "" }), { stated: false, level: null });
+  assert.deepEqual(clientEffortFromAnthropic(null), { stated: false, level: null });
+});
+
+test("buildWireCatalog rejects an illegal provider id instead of emitting a partial catalog", () => {
+  // "a" + "b/m" and "a/b" + "m" would collide on one wire id, but a provider id
+  // containing '/' is itself illegal (the packWireId invariant), so the
+  // collision branch of buildWireCatalog is unreachable: the catalog fails as a
+  // whole on the provider-id invariant first. The property under test is that
+  // it FAILS — no partial catalog escapes.
+  const store = {
+    version: 2,
+    providers: {
+      a: { models: { "b/m": {} } },
+      "a/b": { models: { m: {} } },
+    },
+  };
+  assert.throws(() => buildWireCatalog(store), /wire-ID invariant/);
+});
+
+// ---------- protocol translation ----------
+
+test("anthropicToOpenAI uses the bare model id and hoists system", () => {
+  const out = anthropicToOpenAI(
+    { system: "be terse", max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+    "claude-opus-5",
+  );
+  assert.equal(out.model, "claude-opus-5");
+  // System is hoisted to a leading OpenAI system message, passed through verbatim.
+  assert.equal(out.messages[0].role, "system");
+  assert.equal(out.messages[0].content, "be terse");
+  assert.equal(out.max_tokens, 8);
+});
+
+test("anthropicToOpenAI emits no system message when no system text", () => {
+  const out = anthropicToOpenAI(
+    { max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+    "claude-opus-5",
+  );
+  assert.equal(out.messages[0].role, "user");
+});
+
+test("anthropicToOpenAI converts tool_use and tool_result", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "read", input: { path: "a" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      ],
+    },
+    "m",
+  );
+  // The translated tool_use/tool_result messages lead the list directly.
+  assert.equal(out.messages[0].tool_calls[0].function.name, "read");
+  assert.equal(out.messages[1].role, "tool");
+  assert.equal(out.messages[1].tool_call_id, "t1");
+});
+
+test("anthropicToOpenAI drops Claude Code's fixed reasoning_effort", () => {
+  const out = anthropicToOpenAI(
+    { reasoning_effort: "high", messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  assert.ok(!("reasoning_effort" in out));
+});
+
+// ---------- mid-conversation system rewrite（会话缓存优化） ----------
+
+test("anthropicToOpenAI rewrites mid-conversation system to user under the gate, head system untouched", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: "head rules",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "<total_tokens>Infinite tokens left</total_tokens>" },
+        { role: "assistant", content: "hello" },
+        { role: "system", content: "# Environment update\nfresh" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: true },
+  );
+  // The top-level system (convertSystem product) stays the leading system
+  // message, verbatim — the gate never touches the prompt's real head.
+  assert.equal(out.messages[0].role, "system");
+  assert.equal(out.messages[0].content, "head rules");
+  // Every mid-conversation system becomes user one-for-one: no message is
+  // merged, split or dropped, and the content is carried through verbatim.
+  assert.deepEqual(out.messages.slice(1), [
+    { role: "user", content: "hi" },
+    { role: "user", content: "<total_tokens>Infinite tokens left</total_tokens>" },
+    { role: "assistant", content: "hello" },
+    { role: "user", content: "# Environment update\nfresh" },
+  ]);
+});
+
+test("anthropicToOpenAI keeps mid-conversation system as system when the gate is off", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: "head rules",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "marker" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: false },
+  );
+  assert.deepEqual(out.messages, [
+    { role: "system", content: "head rules" },
+    { role: "user", content: "hi" },
+    { role: "system", content: "marker" },
+  ]);
+});
+
+test("mid-system rewrite is role-only: block-array and string content convert exactly as a user message's would", () => {
+  const blockForm = [{ type: "text", text: "env update" }];
+  const rewritten = anthropicToOpenAI(
+    { messages: [{ role: "system", content: blockForm }, { role: "system", content: "plain" }] },
+    "m",
+    { midSystemRewrite: true },
+  );
+  // Control run with the roles already user and the gate off: identical
+  // content must produce identical messages — the gate swaps only the role.
+  const control = anthropicToOpenAI(
+    { messages: [{ role: "user", content: blockForm }, { role: "user", content: "plain" }] },
+    "m",
+    { midSystemRewrite: false },
+  );
+  assert.deepEqual(rewritten.messages, control.messages);
+  assert.equal(rewritten.messages.length, 2);
+});
+
+test("consecutive mid-system messages rewrite one-for-one without merging", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "system", content: "first" },
+        { role: "system", content: "second" },
+        { role: "system", content: "third" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: true },
+  );
+  assert.deepEqual(out.messages, [
+    { role: "user", content: "first" },
+    { role: "user", content: "second" },
+    { role: "user", content: "third" },
+  ]);
+});
+
+test("mid-system rewrite is idempotent: translating the same body twice yields identical messages", () => {
+  const body = {
+    system: "head",
+    messages: [
+      { role: "user", content: "q" },
+      { role: "system", content: "marker" },
+      { role: "assistant", content: "a" },
+      { role: "system", content: [{ type: "text", text: "blocks" }] },
+    ],
+  };
+  const first = anthropicToOpenAI(body, "m", { midSystemRewrite: true });
+  const second = anthropicToOpenAI(body, "m", { midSystemRewrite: true });
+  assert.deepEqual(first.messages, second.messages);
+  // head system + 4 源消息：改写只换 role，一条不多、一条不少。
+  assert.equal(first.messages.length, 5);
+});
+
+test("unpinned gate falls back to settings: absent key rewrites, a written false stops it", () => {
+  const tmp = mkTestDir("anyswitch-midsys-fallback-");
+  const settingsPath = join(tmp, "Anyswitch", "settings.json");
+  mkdirSync(join(tmp, "Anyswitch"), { recursive: true });
+  const prevLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = tmp;
+  try {
+    // 无 settings 文件：默认开（生产现状——键不存在，优化直接生效）。
+    const on = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(on.messages[0].role, "user");
+    assert.equal(on.messages[0].content, "marker");
+    // 面板写入 false 后下一请求即关闭，无需重启。
+    writeFileSync(settingsPath, JSON.stringify({ midSystemRewrite: false }));
+    const off = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(off.messages[0].role, "system");
+    // 写回 true（或删键）恢复改写。
+    writeFileSync(settingsPath, JSON.stringify({ midSystemRewrite: true }));
+    const back = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(back.messages[0].role, "user");
+  } finally {
+    if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = prevLocalAppData;
+  }
+});
+
+test("openAIToAnthropic echoes the wire ID and maps stop reasons", () => {
+  const out = openAIToAnthropic(
+    { id: "c1", choices: [{ message: { content: "x" }, finish_reason: "length" }], usage: {} },
+    "anthropic/poke-api/claude-opus-5",
+  );
+  assert.equal(out.model, "anthropic/poke-api/claude-opus-5");
+  assert.equal(out.stop_reason, "max_tokens");
+  assert.deepEqual(out.content, [{ type: "text", text: "x" }]);
+});
+
+test("openAIToAnthropic preserves unparsable tool arguments", () => {
+  const out = openAIToAnthropic(
+    {
+      choices: [
+        {
+          message: { tool_calls: [{ id: "t", function: { name: "f", arguments: "{not json" } }] },
+          finish_reason: "tool_calls",
+        },
+      ],
+    },
+    "w",
+  );
+  assert.equal(out.content[0].input.__unparsed_arguments, "{not json");
+  assert.equal(out.stop_reason, "tool_use");
+});
+
+test("openAIToAnthropic surfaces reasoning as a thinking block ahead of the answer", () => {
+  const out = openAIToAnthropic(
+    {
+      id: "c2",
+      choices: [{ message: { reasoning_content: "想一下", content: "你好" }, finish_reason: "stop" }],
+      usage: {},
+    },
+    "anthropic/poke-api/claude-opus-5",
+  );
+  assert.deepEqual(out.content, [
+    { type: "thinking", thinking: "想一下", signature: NARRATION_THINKING_SIGNATURE },
+    { type: "text", text: "你好" },
+  ]);
+});
+
+test("openAIToAnthropic recognizes every reasoning field alias", () => {
+  for (const field of ["reasoning_content", "reasoning", "thought", "thinking"]) {
+    const out = openAIToAnthropic(
+      { choices: [{ message: { [field]: "想", content: "答" }, finish_reason: "stop" }] },
+      "w",
+    );
+    assert.deepEqual(out.content[0], { type: "thinking", thinking: "想", signature: NARRATION_THINKING_SIGNATURE }, field);
+  }
+});
+
+test("openAIToAnthropic without reasoning emits no thinking block", () => {
+  const out = openAIToAnthropic(
+    { choices: [{ message: { content: "答" }, finish_reason: "stop" }] },
+    "w",
+  );
+  assert.deepEqual(out.content, [{ type: "text", text: "答" }]);
+});
+
+test("buildModelsResponse emits wire ids only, 1M rows gain a [1m] companion", () => {
+  const body = buildModelsResponse(buildWireCatalog(syntheticStore()));
+  // 三模型全部命中 1M 档（claude-opus / claude-sonnet-5 档位规则，deepseek
+  // 未命中落 1M 兜底），各带一条 [1m] 伴生行——Claude 系客户端的 1M 变体通道。
+  assert.equal(body.data.length, 6);
+  assert.ok(body.data.every((m) => m.id.startsWith("anthropic/")));
+  assert.equal(body.has_more, false);
+  const opus1m = body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5[1m]");
+  assert.equal(opus1m.display_name, "[poke-api] Claude Opus 5 1M");
+  assert.equal(opus1m.max_input_tokens, 1_000_000);
+  assert.equal(body.first_id, body.data[0].id);
+  assert.equal(body.last_id, body.data[body.data.length - 1].id);
+});
+
+test("store 真值 contextWindow 盖过档位兜底，sub-1M 行不带 [1m] 伴生", () => {
+  const store = syntheticStore();
+  store.providers["poke-api"].models["claude-opus-5"] = { displayName: "Claude Opus 5", contextWindow: 128_000 };
+  const body = buildModelsResponse(buildWireCatalog(store));
+  const opus = body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5");
+  assert.equal(opus.max_input_tokens, 128_000);
+  assert.equal(body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5[1m]"), undefined);
+});
+
+// ---------- auth ----------
+
+test("extractPresentedToken handles bare and Bearer forms", () => {
+  assert.equal(extractPresentedToken({ authorization: "abc" }), "abc");
+  assert.equal(extractPresentedToken({ authorization: "Bearer abc" }), "abc");
+  assert.equal(extractPresentedToken({}), null);
+});
+
+test("missing or wrong token is 401 and never reaches upstream", async () => {
+  let upstreamCalls = 0;
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); } }),
+  );
+  const noAuth = await handler.handleMessages({}, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(noAuth.status, 401);
+  const badAuth = await handler.handleMessages(
+    { authorization: "wrong-token-with-different-length" },
+    messageBody("anthropic/poke-api/claude-opus-5"),
+  );
+  assert.equal(badAuth.status, 401);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("a same-length wrong token is 401 via the constant-time path", async () => {
+  // Exercises the timingSafeEqual branch (the different-length case above
+  // short-circuits before it), so the buffer-wiping finally is covered too.
+  let upstreamCalls = 0;
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); } }),
+  );
+  const sameLength = `${TOKEN.slice(0, -1)}X`;
+  assert.equal(sameLength.length, TOKEN.length);
+  assert.notEqual(sameLength, TOKEN);
+
+  const out = await handler.handleMessages(
+    { authorization: sameLength },
+    messageBody("anthropic/poke-api/claude-opus-5"),
+  );
+  assert.equal(out.status, 401);
+  assert.equal(out.body.error.type, "authentication_error");
+  assert.equal(upstreamCalls, 0);
+
+  // The correct token still authorizes after the failed comparison.
+  assert.equal((await handler.handleModels(AUTH)).status, 200);
+});
+
+test("discovery also requires the token", async () => {
+  const handler = createHandler(makeDeps());
+  assert.equal((await handler.handleModels({})).status, 401);
+  assert.equal((await handler.handleModels(AUTH)).status, 200);
+});
+
+// ---------- Claude Desktop catalog view + inbound model normalization ----------
+
+// Claude Desktop 的拾取器按官方 3p 品牌黑名单只收长得像 Anthropic 模型的 id。
+// 撞黑名单的条目在目录响应里换成确定性路由别名（显示名不变），请求回来由
+// normalizeInboundModel 反解回真实 wire id；CLI 与其他端点拿原目录。
+function desktopStore() {
+  const store = syntheticStore();
+  store.providers["poke-api"].models["kimi-k3"] = { displayName: "Kimi K3" };
+  return store;
+}
+
+const DESKTOP_HEADERS = { authorization: TOKEN, "x-agent-id": "claude", "user-agent": "Claude/2.99 Electron/37" };
+const CLI_HEADERS = { authorization: TOKEN, "user-agent": "claude-cli/2.1.285 (Windows)" };
+
+test("handleModels 桌面请求发别名视图：撞黑名单的条目换别名，显示名照旧", async () => {
+  const handler = createHandler(makeDeps({ store: desktopStore() }));
+
+  const desktop = await handler.handleModels(DESKTOP_HEADERS, "claude");
+  assert.equal(desktop.status, 200);
+  const kimiRow = desktop.body.data.find((m) => m.display_name === "[poke-api] Kimi K3");
+  assert.match(kimiRow.id, /^anthropic\/[a-z0-9]{6}$/, "kimi 撞品牌黑名单：确定性单段别名");
+  assert.equal(desktop.body.data.find((m) => m.id === "anthropic/poke-api/kimi-k3"), undefined, "原 wire id 不出现在桌面视图");
+  assert.equal(desktop.body.data.find((m) => m.id === "anthropic/nvidia-nim/deepseek-ai/deepseek-v4-pro"), undefined);
+  assert.ok(desktop.body.data.some((m) => m.id === `${kimiRow.id}[1m]`), "1M 伴生行骑别名 id，同样过拾取器过滤");
+  assert.ok(desktop.body.data.some((m) => m.id === "anthropic/poke-api/claude-opus-5"), "过滤通过的条目原样保留");
+
+  const cli = await handler.handleModels(CLI_HEADERS, "claude");
+  assert.equal(cli.status, 200);
+  assert.ok(cli.body.data.some((m) => m.id === "anthropic/poke-api/kimi-k3"), "CLI 拿原 wire id 目录");
+  assert.ok(cli.body.data.some((m) => m.id === "anthropic/nvidia-nim/deepseek-ai/deepseek-v4-pro"));
+
+  // 判据双保险：CLI 即便开始发 x-agent-id 头，claude-cli 的 UA 仍把它排除在桌面视图外。
+  const cliWithHeader = await handler.handleModels({ ...CLI_HEADERS, "x-agent-id": "claude" }, "claude");
+  assert.ok(cliWithHeader.body.data.some((m) => m.id === "anthropic/poke-api/kimi-k3"));
+});
+
+test("normalizeInboundModel 剥 [1m] 变体标记并反解桌面别名，回程回显归一后的 id", async () => {
+  const handler = createHandler(makeDeps({ store: desktopStore() }));
+
+  // CLI 选中 1M 行：模型名带 [1m] 标记，真实模型是裸 id（服务层先归一再路由）。
+  const oneM = messageBody("anthropic/poke-api/kimi-k3[1m]");
+  assert.equal(await handler.normalizeInboundModel(CLI_HEADERS, oneM), "anthropic/poke-api/kimi-k3");
+  assert.equal(oneM.model, "anthropic/poke-api/kimi-k3");
+  const out = await handler.handleMessages(CLI_HEADERS, oneM);
+  assert.equal(out.status, 200);
+  assert.equal(out.body.model, "anthropic/poke-api/kimi-k3", "回程回显归一后的 wire id");
+
+  // 桌面选中别名行（1M 伴生行也骑别名 id）：变体标记与别名一步归一。
+  const desktop = await handler.handleModels(DESKTOP_HEADERS, "claude");
+  const kimiRow = desktop.body.data.find((m) => m.display_name === "[poke-api] Kimi K3");
+  const aliased = messageBody(`${kimiRow.id}[1m]`);
+  assert.equal(await handler.normalizeInboundModel(DESKTOP_HEADERS, aliased), "anthropic/poke-api/kimi-k3");
+  const aliasOut = await handler.handleMessages(DESKTOP_HEADERS, aliased);
+  assert.equal(aliasOut.status, 200);
+  assert.equal(aliasOut.body.model, "anthropic/poke-api/kimi-k3");
+
+  // 不需要归一的模型：返回 null 且 body 原样（裸别名查无、真 wire id、档位名）。
+  const noAlias = messageBody("anthropic/zzz999");
+  assert.equal(await handler.normalizeInboundModel(AUTH, noAlias), null);
+  assert.equal(noAlias.model, "anthropic/zzz999");
+  const plain = messageBody("anthropic/poke-api/claude-opus-5");
+  assert.equal(await handler.normalizeInboundModel(AUTH, plain), null);
+  const tier = messageBody("claude-sonnet-5");
+  assert.equal(await handler.normalizeInboundModel(AUTH, tier), null, "档位名留给档位接管处理");
+
+  // 未授权或坏 body：不归一也不抛。
+  const noAuth = messageBody("anthropic/poke-api/kimi-k3[1m]");
+  assert.equal(await handler.normalizeInboundModel({}, noAuth), null);
+  assert.equal(noAuth.model, "anthropic/poke-api/kimi-k3[1m]");
+  for (const bad of [null, "str", [1], {}, { model: 42 }]) {
+    assert.equal(await handler.normalizeInboundModel(AUTH, bad), null);
+  }
+});
+
+// ---------- error surface ----------
+
+test("non-object body is 400", async () => {
+  const handler = createHandler(makeDeps());
+  for (const bad of [null, "str", [1]]) {
+    assert.equal((await handler.handleMessages(AUTH, bad)).status, 400);
+  }
+});
+
+test("missing model is 400", async () => {
+  const handler = createHandler(makeDeps());
+  const out = await handler.handleMessages(AUTH, { max_tokens: 1, messages: [] });
+  assert.equal(out.status, 400);
+});
+
+test("unknown bare model is 400 with no official passthrough", async () => {
+  let upstreamCalls = 0;
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); } }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("claude-sonnet-999"));
+  assert.equal(out.status, 400);
+  assert.match(out.body.error.message, /use the full model id from \/v1\/models/);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("unknown provider is 404, unknown model is 404, neither hits upstream", async () => {
+  let upstreamCalls = 0;
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); } }),
+  );
+  const noProvider = await handler.handleMessages(AUTH, messageBody("anthropic/ghost/m"));
+  assert.equal(noProvider.status, 404);
+  const noModel = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/ghost"));
+  assert.equal(noModel.status, 404);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("no fuzzy matching: a near-miss model id is rejected, not corrected", async () => {
+  const handler = createHandler(makeDeps());
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-4"));
+  assert.equal(out.status, 404);
+});
+
+test("credential load failure is 502 and never reaches upstream", async () => {
+  let upstreamCalls = 0;
+  const handler = createHandler(
+    makeDeps({
+      loadCredential: async () => ({ ok: false, reason: "decrypt failed" }),
+      upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); },
+    }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 502);
+  assert.equal(upstreamCalls, 0);
+});
+
+// --- failure visibility (2026-10-05) ----------------------------------------
+//
+// The relay could not say WHY a credential load failed, and it could not say that
+// it was failing at all: the client saw a generic 502 and the relay's own log
+// stayed empty. One such fault ran for 70 minutes undetected.
+
+// Wire id 从 catalog 推出来，不写死：模型名会变，catalog 才是「什么能路由」的正源。
+function pokeWireId() {
+  const entry = buildWireCatalog(syntheticStore()).find((e) => e.providerId === "poke-api");
+  assert.ok(entry, "syntheticStore 必须产出一个 poke-api 的 catalog 条目");
+  return entry.wireId;
+}
+
+test("a credential failure is logged with its cause and counted toward degraded health", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 2 });
+  const logged = [];
+  const handler = createHandler({
+    ...makeDeps({ loadCredential: async () => ({ ok: false, reason: "the credential helper timed out" }) }),
+    serviceHealth,
+    logger: { info() {}, warn() {}, error: (m) => logged.push(m) },
+  });
+
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+  assert.equal(out.status, 502, "凭据取不到就是 502，客户端口径不变");
+  assert.equal(serviceHealth.snapshot().consecutiveFailures, 1);
+  assert.equal(logged.length, 1, "这类故障唯一的证据来源就是这一行");
+  assert.match(logged[0], /poke-api/);
+  assert.match(logged[0], /the credential helper timed out/);
+  assert.ok(!logged[0].includes("synthetic-key"), "日志不得带密钥材料");
+
+  await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+  assert.equal(serviceHealth.snapshot().degraded, true, "连续 2 次即越线");
+  assert.equal(serviceHealth.snapshot().lastFailureKind, "credential");
+});
+
+test("an unreadable store counts as a relay-side failure too", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 1 });
+  const handler = createHandler({
+    ...makeDeps({ loadStore: () => ({ ok: false }) }),
+    serviceHealth,
+  });
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+  assert.equal(out.status, 502);
+  assert.equal(serviceHealth.snapshot().degraded, true);
+  assert.equal(serviceHealth.snapshot().lastFailureKind, "store");
+});
+
+test("reaching the upstream clears the failure count", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 2 });
+  serviceHealth.recordFailure("credential");
+  const handler = createHandler({ ...makeDeps(), serviceHealth });
+
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+
+  assert.equal(out.status, 200);
+  assert.equal(serviceHealth.snapshot().consecutiveFailures, 0, "送达上游即证明中继自身是好的");
+});
+
+test("an upstream 429 does not count against relay health", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 2 });
+  const handler = createHandler({
+    ...makeDeps({
+      upstreamFetch: async () => ({
+        ok: false,
+        status: 429,
+        text: async () => "rate limited",
+        json: async () => ({ error: { message: "rate limited" } }),
+      }),
+    }),
+    serviceHealth,
+  });
+
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+
+  assert.equal(out.status, 429);
+  assert.equal(serviceHealth.snapshot().consecutiveFailures, 0, "上游限流是中继之外的问题，不该报成自己降级");
+});
+
+test("error bodies never contain the credential or the token", async () => {
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => { throw new Error("connect ECONNREFUSED secret-key-leak"); } }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 502);
+  const text = JSON.stringify(out.body);
+  assert.ok(!text.includes("synthetic-key"));
+  assert.ok(!text.includes(TOKEN));
+  assert.ok(!text.includes("secret-key-leak"));
+});
+
+test("unreadable or invalid store is 502", async () => {
+  const unreadable = createHandler(makeDeps({ loadStore: () => ({ ok: false }) }));
+  assert.equal((await unreadable.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"))).status, 502);
+
+  const invalid = createHandler(makeDeps({ loadStore: () => ({ ok: true, store: { version: 1 } }) }));
+  assert.equal((await invalid.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"))).status, 502);
+});
+
+test("upstream error status class is passed through without the raw body", async () => {
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => ({ ok: false, status: 429, json: async () => ({ secret: "leak" }) }) }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 429);
+  assert.ok(!JSON.stringify(out.body).includes("leak"));
+});
+
+test("handler supplies primary and fallback URLs in order to its retry boundary", async () => {
+  const store = syntheticStore();
+  store.providers["poke-api"].baseURL = "https://primary.invalid/v1///";
+  store.providers["poke-api"].fallbackURLs = ["https://backup-one.invalid/v1/", "https://backup-two.invalid/v1"];
+  const seen = {};
+  const handler = createHandler(
+    makeDeps({
+      store,
+      buildUpstreamURLs: (provider, path) => [provider.baseURL, ...provider.fallbackURLs]
+        .map((baseURL) => `${baseURL.replace(/\/+$/, "")}${path}`),
+      upstreamFetch: async (urls, init) => {
+        seen.urls = urls;
+        seen.init = init;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ choices: [{ message: { content: "fallback" }, finish_reason: "stop" }], usage: {} }),
+        };
+      },
+    }),
+  );
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.deepEqual(seen.urls, [
+    "https://primary.invalid/v1/chat/completions",
+    "https://backup-one.invalid/v1/chat/completions",
+    "https://backup-two.invalid/v1/chat/completions",
+  ]);
+  assert.equal(seen.init.method, "POST");
+  assert.equal(seen.init.headers.authorization, "Bearer synthetic-key");
+});
+
+test("handler returns terminal 4xx from the retry boundary without exposing raw content", async () => {
+  const calls = [];
+  const handler = createHandler(
+    makeDeps({
+      upstreamFetch: async (urls) => {
+        calls.push(urls);
+        return { ok: false, status: 429, json: async () => ({ secret: "leak" }) };
+      },
+    }),
+  );
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 429);
+  assert.equal(calls.length, 1);
+  assert.ok(!JSON.stringify(out.body).includes("leak"));
+});
+
+test("handler returns a generic 502 after the retry boundary exhausts every endpoint", async () => {
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => { throw new Error("primary-and-fallback-unavailable"); } }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 502);
+  assert.ok(!JSON.stringify(out.body).includes("primary-and-fallback-unavailable"));
+});
+
+test("malformed upstream JSON is 502", async () => {
+  const handler = createHandler(
+    makeDeps({ upstreamFetch: async () => ({ ok: true, status: 200, json: async () => { throw new Error("bad"); } }) }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 502);
+});
+
+// ---------- 409 on stale catalog ----------
+
+test("catalog change after discovery is 409 and never hits upstream", async () => {
+  let upstreamCalls = 0;
+  let store = syntheticStore();
+  let generation = null;
+  const handler = createHandler({
+    token: TOKEN,
+    loadStore: () => ({ ok: true, store }),
+    loadCredential: async () => ({ ok: true, value: "synthetic-key" }),
+    upstreamFetch: async () => {
+      upstreamCalls += 1;
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "x" }, finish_reason: "stop" }] }) };
+    },
+    recordGeneration: (g) => { generation = g; },
+    readGeneration: () => generation,
+  });
+
+  assert.equal((await handler.handleModels(AUTH)).status, 200);
+  assert.equal((await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"))).status, 200);
+  assert.equal(upstreamCalls, 1);
+
+  // Same provider id, different fallback endpoint: must NOT silently route.
+  const swapped = syntheticStore();
+  swapped.providers["poke-api"].fallbackURLs = ["https://attacker.invalid/v1"];
+  store = swapped;
+
+  const stale = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /re-run model discovery/);
+  assert.equal(upstreamCalls, 1);
+});
+
+test("requests before any discovery are allowed (--model / ANTHROPIC_MODEL path)", async () => {
+  // --model and ANTHROPIC_MODEL pass a wire ID through without a
+  // discovery round-trip, so a null recorded generation must not 409.
+  const handler = createHandler(makeDeps({ readGeneration: () => null }));
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+});
+
+// One handler bound to a mutable store, with the side-effect counters a gate
+// test needs: what the request reached, and whether a key was even decrypted.
+function gateFixture() {
+  const store = syntheticStore();
+  let snapshot = null;
+  const calls = { upstream: 0, credential: 0 };
+  const handler = createHandler({
+    token: TOKEN,
+    loadStore: () => ({ ok: true, store }),
+    loadCredential: async () => {
+      calls.credential += 1;
+      return { ok: true, value: "synthetic-key" };
+    },
+    upstreamFetch: async () => {
+      calls.upstream += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "c", choices: [{ message: { content: "x" }, finish_reason: "stop" }], usage: {} }),
+      };
+    },
+    recordGeneration: (value) => { snapshot = value; },
+    readGeneration: () => snapshot,
+  });
+  return { handler, store, calls, snapshotOf: () => snapshot };
+}
+
+test("a change to a channel this request never touches still routes (blast radius)", async () => {
+  // Refreshing or re-pointing some OTHER provider must not 409 every in-flight
+  // session in the process: the generation digest is scoped to what this
+  // request actually depends on.
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  store.providers["nvidia-nim"].baseURL = "https://elsewhere.invalid/v1";
+  store.providers["nvidia-nim"].credentialFile = "rotated.dpapi";
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+test("adding or refreshing models never invalidates a live session", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+
+  store.providers["poke-api"].models["glm-5.3"] = { displayName: "GLM 5.3" };
+  delete store.providers["nvidia-nim"].models["deepseek-ai/deepseek-v4-pro"];
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+test("a channel created after discovery routes", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  store.providers["brand-new"] = {
+    displayName: "Brand New",
+    baseURL: "https://new.invalid/v1",
+    protocol: "openai-compatible",
+    credentialFile: "brand-new.dpapi",
+    models: { "claude-opus-5": { displayName: "Claude Opus 5" } },
+  };
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/brand-new/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+test("a model the session uses going away is a 404, not a stale catalog", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  delete store.providers["poke-api"].models["claude-opus-5"];
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 404);
+  assert.equal(calls.upstream, 0);
+});
+
+test("the request's own channel being re-pointed is 409 with no key and no upstream", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  store.providers["poke-api"].baseURL = "https://attacker.invalid/v1";
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 409);
+  assert.equal(calls.credential, 0, "a refused request must never decrypt a credential");
+  assert.equal(calls.upstream, 0, "a refused request must never reach an upstream");
+  assert.match(out.body.error.message, /poke-api/);
+  assert.match(out.body.error.message, /re-run model discovery/);
+});
+
+test("a pool request gates over the members it can call", async () => {
+  const { handler, store } = gateFixture();
+  store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
+  await handler.handleModels(AUTH);
+
+  // Membership edited alone (which members, in what order) is not a re-point.
+  store.pools["poke-pool"].members = ["nvidia-nim", "poke-api"];
+  const reordered = await handler.planPoolMessages(AUTH, messageBody("anthropic/poke-pool/claude-opus-5"));
+  assert.equal(reordered.ok, true);
+
+  // The member this request can actually land on was re-pointed: refuse.
+  store.providers["poke-api"].baseURL = "https://attacker.invalid/v1";
+  const stale = await handler.planPoolMessages(AUTH, messageBody("anthropic/poke-pool/claude-opus-5"));
+  assert.equal(stale.ok, false);
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /poke-api/);
+});
+
+test("a pool member that cannot serve this model never gates the request", async () => {
+  // nvidia-nim has no claude-opus-5, so no request for that model can reach it.
+  const { handler, store } = gateFixture();
+  store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
+  await handler.handleModels(AUTH);
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+
+  const plan = await handler.planPoolMessages(AUTH, messageBody("anthropic/poke-pool/claude-opus-5"));
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.members.map((member) => member.memberId), ["poke-api"]);
+});
+
+test("an auto-route request gates over every node its chain can reach", async () => {
+  const { handler, store } = gateFixture();
+  store.providers["side-api"] = {
+    displayName: "Side API",
+    baseURL: "https://side.invalid/v1",
+    protocol: "openai-compatible",
+    credentialFile: "side-api.dpapi",
+    models: { "claude-opus-5": { displayName: "Claude Opus 5" } },
+  };
+  store.routingChains = {
+    claude: { chain: [{ node: "poke-api", model: "claude-opus-5" }, { node: "nvidia-nim", model: "deepseek-ai/deepseek-v4-pro" }] },
+  };
+  await handler.handleModels(AUTH, "claude");
+
+  // A channel the chain never mentions cannot receive this request.
+  store.providers["side-api"].baseURL = "https://attacker.invalid/v1";
+  const untouched = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  assert.equal(untouched.ok, true, "a channel outside the chain must not gate this request");
+
+  // Both chain nodes are reachable within one request, so either moving is stale.
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+  const stale = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  assert.equal(stale.ok, false);
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /nvidia-nim/);
+});
+
+test("a refused auto-route request spends no backoff probe", async () => {
+  const { handler, store } = gateFixture();
+  store.routingChains = { claude: { chain: [{ node: "poke-api", model: "claude-opus-5" }] } };
+  await handler.handleModels(AUTH, "claude");
+
+  // Stick the chain on the second node through the real demotion path: plan
+  // once to register the chain, latch poke-api with CHAIN_DEMOTE_AFTER_FAILURES
+  // consecutive failures, then let nvidia-nim's success move the position past
+  // it. The backoff anchor is placed OUTSIDE the retry window, so the next
+  // plan() would be the upstream probe (re-anchor + restart from the head) —
+  // which is exactly what a 409-refused request must NOT spend: the catalog
+  // gate refuses before chainState.plan() ever runs (handler.mjs gates first,
+  // precisely so a refused request doesn't spend the probe).
+  store.routingChains.claude.chain.push({ node: "nvidia-nim", model: "deepseek-ai/deepseek-v4-pro" });
+  await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  handler.chainState.noteFailure("claude", "poke-api", "claude-opus-5");
+  handler.chainState.noteFailure("claude", "poke-api", "claude-opus-5");
+  handler.chainState.noteSuccess("claude", "nvidia-nim", "deepseek-ai/deepseek-v4-pro", Date.now() - RETRY_UPSTREAM_MS - 60_000);
+  const position = handler.chainState.get("claude");
+  assert.ok(position, "setup: the demotion must actually pin the chain on nvidia-nim");
+  assert.equal(position.nodeId, "nvidia-nim");
+
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+  const stale = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /re-run model discovery/, "the refusal is the catalog gate's own");
+  assert.deepEqual(handler.chainState.get("claude"), position, "a refusal must not move or re-anchor the chain position");
+});
+
+test("another endpoint's discovery does not break this endpoint's live channel", async () => {
+  // The resident relay shares one snapshot across every endpoint: re-binding it
+  // for one client must not invalidate a channel another client is using.
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH, "claude");
+  store.providers["nvidia-nim"].displayName = "Kimi's channel";
+  await handler.handleModels(AUTH, "kimi");
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+// ---------- happy path ----------
+
+test("valid request reaches upstream with the bare model id and Bearer key", async () => {
+  const seen = {};
+  const handler = createHandler(
+    makeDeps({
+      upstreamFetch: async (url, init) => {
+        seen.url = url;
+        seen.headers = init.headers;
+        seen.body = JSON.parse(init.body);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "c", choices: [{ message: { content: "pong" }, finish_reason: "stop" }], usage: {} }),
+        };
+      },
+    }),
+  );
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.deepEqual(seen.url, ["https://upstream.invalid/v1/chat/completions"]);
+  assert.equal(seen.headers.authorization, "Bearer synthetic-key");
+  assert.equal(seen.body.model, "claude-opus-5");
+  assert.equal(out.body.model, "anthropic/poke-api/claude-opus-5");
+  assert.equal(out.body.content[0].text, "pong");
+});
+
+test("anthropicToOpenAI asks the upstream to report stream usage", () => {
+  const out = anthropicToOpenAI(
+    { stream: true, max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  assert.equal(out.stream, true);
+  assert.deepEqual(out.stream_options, { include_usage: true });
+});
+
+test("anthropicToOpenAI leaves non-stream requests without stream options", () => {
+  const out = anthropicToOpenAI(
+    { max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  assert.ok(!("stream_options" in out));
+});
+
+test("handleMessages forwards the caller abort signal to the upstream fetch", async () => {
+  let seenSignal = null;
+  const handler = createHandler(
+    makeDeps({
+      upstreamFetch: async (url, init) => {
+        seenSignal = init.signal ?? null;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "c", choices: [{ message: { content: "pong" }, finish_reason: "stop" }], usage: {} }),
+        };
+      },
+    }),
+  );
+  const controller = new AbortController();
+  const out = await handler.handleMessages(
+    AUTH,
+    messageBody("anthropic/poke-api/claude-opus-5"),
+    { signal: controller.signal },
+  );
+  assert.equal(out.status, 200);
+  assert.equal(seenSignal, controller.signal);
+});
+
+test("aborted upstream fetch surfaces as a throw, not a 502", async () => {
+  const handler = createHandler(
+    makeDeps({
+      upstreamFetch: async () => {
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      },
+    }),
+  );
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    handler.handleMessages(
+      AUTH,
+      messageBody("anthropic/poke-api/claude-opus-5"),
+      { signal: controller.signal },
+    ),
+    /abort/i,
+  );
+});
+
+test("every catalog entry unpacks back to a store hit when pools exist", async () => {
+  const store = syntheticStore();
+  store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
+  const handler = createHandler(makeDeps({ store }));
+  for (const entry of buildWireCatalog(store)) {
+    // Pool entries route through planPoolMessages (the server's pool branch);
+    // plain provider entries take the classic handleMessages path.
+    const plan = await handler.planPoolMessages(AUTH, messageBody(entry.wireId));
+    if (plan === null) {
+      const out = await handler.handleMessages(AUTH, messageBody(entry.wireId));
+      assert.equal(out.status, 200, `${entry.wireId} should route`);
+    } else {
+      assert.equal(plan.ok, true, `${entry.wireId} pool plan must succeed`);
+      assert.ok(plan.members.length >= 1, `${entry.wireId} must have a candidate member`);
+    }
+  }
+});

@@ -11,7 +11,7 @@
 Set ws = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
-launcher = fso.GetParentFolderName(WScript.ScriptFullName) & "\panel-launcher.mjs"
+launcher = fso.GetParentFolderName(WScript.ScriptFullName) & "\src\panel\panel-launcher.mjs"
 nodePath = ws.ExpandEnvironmentStrings("%ProgramFiles%") & "\nodejs\node.exe"
 
 If fso.FileExists(nodePath) Then

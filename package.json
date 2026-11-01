@@ -20,7 +20,7 @@
     "localhost"
   ],
   "scripts": {
-    "test": "node --test *.test.mjs"
+    "test": "node --test tests/*.test.mjs"
   },
   "repository": {
     "type": "git",
