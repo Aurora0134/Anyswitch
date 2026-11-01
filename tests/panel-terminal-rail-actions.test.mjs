@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractPanelFn as extractFn } from "../test-helpers/extract-panel-fn.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const panelHtml = readFileSync(join(here, "../panel-ui", "panel.html"), "utf8");
@@ -23,12 +24,6 @@ const railHtml = () => {
   assert.ok(m, "左栏在册");
   return m[0];
 };
-
-function extractFn(name) {
-  const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-  assert.ok(src, `${name} found in panel.js`);
-  return src;
-}
 
 // ── 视口表（M12：页签＝视口）的桩前置 ──
 // 单测按函数体抽取进 vm，模块级符号不会跟着来。视口纯函数直接用生产实现（这样断言

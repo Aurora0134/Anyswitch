@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractPanelFn as extractFn } from "../test-helpers/extract-panel-fn.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const panelHtml = readFileSync(join(here, "../panel-ui", "panel.html"), "utf8");
@@ -19,12 +20,6 @@ const railHtml = () => {
   assert.ok(m, "左栏在册");
   return m[0];
 };
-
-function extractFn(name) {
-  const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-  assert.ok(src, `${name} found in panel.js`);
-  return src;
-}
 
 // ── 视口表（M12：页签＝视口）的桩前置 ──
 // 函数按名抽进 vm 后，模块级状态量不会跟着来；视口纯函数直接用生产实现，只补状态量。
@@ -50,6 +45,14 @@ const cssRule = (selector) => {
   const at = panelCss.indexOf(selector);
   assert.ok(at >= 0, `样式规则 ${selector} 在册`);
   return panelCss.slice(at, panelCss.indexOf("}", at) + 1);
+};
+
+// 锚失配必须当场红，不许塌缩成空串/吞到文件尾让后续断言恒真。
+const sliceBetween = (src, startAnchor, endAnchor) => {
+  const start = src.indexOf(startAnchor);
+  const end = start >= 0 ? src.indexOf(endAnchor, start) : -1;
+  assert.ok(start >= 0 && end > start, `切片锚在册且有序：${startAnchor} → ${endAnchor}`);
+  return src.slice(start, end);
 };
 
 const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -88,7 +91,7 @@ describe("终端视图左栏换血（M4）", () => {
       }
       assert.ok(!panelHtml.includes("rail-term-agent-glyph"), "通用终端字形槽一并清净");
       assert.ok(!panelCss.includes(".rail-term-agent"), "身份行样式一并清净");
-      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const railBlock = sliceBetween(panelJs, "终端会话栏（M4 + M7 + M8）", "function initSkillsTab");
       for (const symbol of ["renderTerminalRailAgent", "terminalRailAgentGlyph", "terminalRailAgentLabel"]) {
         assert.ok(!railBlock.includes(symbol), `身份行函数 ${symbol} 已清净`);
       }
@@ -187,9 +190,9 @@ describe("终端视图左栏换血（M4）", () => {
       const menu = cssRule(".rail-term-menu {");
       assert.ok(menu.includes("position: fixed"), "菜单挂 body 下 fixed（不再吃栏内 absolute）");
       assert.ok(/z-index:\s*1200/.test(menu), "层级 1200：压过栏体 40 与终端页内容");
-      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
-      const groupOpen = railBlock.slice(railBlock.indexOf("function openTerminalRailGroupMenu"), railBlock.indexOf("function toggleTerminalRailGroupMenu"));
-      const viewOpen = railBlock.slice(railBlock.indexOf("function openTerminalRailViewMenu"), railBlock.indexOf("function applyTerminalRailViewChoice"));
+      const railBlock = sliceBetween(panelJs, "终端会话栏（M4 + M7 + M8）", "function initSkillsTab");
+      const groupOpen = sliceBetween(railBlock, "function openTerminalRailGroupMenu", "function toggleTerminalRailGroupMenu");
+      const viewOpen = sliceBetween(railBlock, "function openTerminalRailViewMenu", "function applyTerminalRailViewChoice");
       assert.ok(groupOpen.includes("document.body.append(menu)"), "组头菜单 append 到 body");
       assert.ok(viewOpen.includes("document.body.append(menu)"), "视图选项菜单 append 到 body");
       assert.ok(!groupOpen.includes("dir.append(menu)") && !viewOpen.includes("dir.append(menu)"),
@@ -1582,13 +1585,13 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("M8 显式不做：选工作区钮 / 身份行 / 真删除会话 / 置顶 / 组行拖拽 / 快捷键 / v1", () => {
-      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const railBlock = sliceBetween(panelJs, "终端会话栏（M4 + M7 + M8）", "function initSkillsTab");
       assert.ok(railBlock.length > 1000, "栏体代码段可取样");
       for (const forbidden of ["marquee", "contextmenu", "快捷键", "terminalRailPin"]) {
         assert.ok(!railBlock.includes(forbidden), `不做清单项「${forbidden}」不在栏体代码里`);
       }
       // 会话行拖拽随「手动排序」照搬（手序的唯一来源）；组行不可拖（组是目录派生）
-      const groupHeadHtml = railBlock.slice(railBlock.indexOf("rail-term-group-head"), railBlock.indexOf("rail-term-group-slot"));
+      const groupHeadHtml = sliceBetween(railBlock, "rail-term-group-head", "rail-term-group-slot");
       assert.ok(!groupHeadHtml.includes("draggable"), "组行不搬拖拽（我们的组无清单可持久化）");
       // 真删除会话文件不在栏体能力里（归档=标记+过滤，M7 口径不变）
       assert.ok(!railBlock.includes("sessionDelete") && !railBlock.includes("deleteSession"), "栏体不碰真删除");
@@ -2192,7 +2195,7 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
   });
 
   it("活动流 working 翻转同拍重渲会话栏（转圈不等 1s 轮询；源码钉死）", () => {
-    const block = panelJs.slice(panelJs.indexOf("function syncTerminalActivityStream"), panelJs.indexOf("function initTerminalPreview"));
+    const block = sliceBetween(panelJs, "function syncTerminalActivityStream", "function initTerminalPreview");
     assert.ok(/const statusBefore = new Map\(Object\.values\(terminalSessionMap\(\)\)/.test(block), "应用帧前快照各会话 working 态");
     assert.ok(block.includes("const flipped = Object.values(terminalSessionMap()).some((s) => statusBefore.get(s.id) !== s.status)"), "帧后比对翻转");
     assert.ok(/if \(flipped && typeof renderTerminalRail === "function"\)/.test(block), "只在实际翻转时重渲栏（不是每帧）");
