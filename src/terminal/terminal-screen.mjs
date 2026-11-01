@@ -369,15 +369,16 @@ const isBlankRow = (row) => row.chars.every((ch, index) => {
 
 // 回放要重放的应用态模式。收录规则（不再逐块打补丁）：凡是镜像内部追踪、且会改变
 // 渲染或转发语义的模式，必须三选一——①进这份清单（客户端重建＝RIS 后退回出厂默认，
-// 应用显式设置过而回放不带，两边对后续实时字节的理解就分叉；7/4/20 同此理）；②走
-// 专用回放（?25 光标可见性见 toReplay 末尾；备屏 1049/1047/47 见 inAlt 分支，须发
-// 应用实际使用的那只 API）；③在 setMode 的注释里写明不回放的理由（2026 是同帧批
-// 处理标记，回放只有单帧画面）。不得只追踪不回放。
-const REPLAYED_MODES = [7, 4, 20, 1000, 1002, 1003, 1006, 1015, 2004];
+// 应用显式设置过而回放不带，两边对后续实时字节的理解就分叉；7/4/20/1/1004 同此理）；
+// ②走专用回放（?25 光标可见性见 toReplay 末尾；备屏 1049/1047/47 见 inAlt 分支，须发
+// 应用实际使用的那只 API；滚动区 DECSTBM 也见 toReplay 末尾，必须排在帧绘制之后、
+// 光标停放之前——r 会改写回放自身的推史与光标定位）；③在 setMode 的注释里写明不回
+// 放的理由（2026 是同帧批处理标记，回放只有单帧画面）。不得只追踪不回放。
+const REPLAYED_MODES = [1, 7, 4, 20, 1000, 1002, 1003, 1004, 1006, 1015, 2004];
 // 上表里哪些属于私有模式（回放时要发 ? 形态）：4/20 是非私有模式（IRM/convertEol），
 // 必须发裸的 ESC[4h/ESC[20l——客户端 xterm 对 ?4h/?20l 不做任何动作，发私有形态会让
 // 重建后的 IRM/convertEol 状态丢失。
-const REPLAYED_PRIVATE_MODES = [7, 1000, 1002, 1003, 1006, 1015, 2004];
+const REPLAYED_PRIVATE_MODES = [1, 7, 1000, 1002, 1003, 1004, 1006, 1015, 2004];
 
 export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMINAL_HISTORY_LINES, historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
   let width = Math.max(1, cols | 0);
@@ -1030,11 +1031,11 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         else if (p === 7) { autoWrap = value; appModes[p] = value; }
         else if (p === 1049 || p === 1047 || p === 47) { if (value) altApi = p; setAlt(value, p); }
         else if (REPLAYED_PRIVATE_MODES.includes(p)) appModes[p] = value;
-        // 1 (cursor keys), 12 (blink), 6 (origin), 1004 (focus reporting):
-        // consumed, no grid effect, not tracked — replaying them would need new
-        // recording plus replay-ordering care (origin/scroll-region modes change
-        // how the replay's own absolute positioning and history pushes behave;
-        // see the REPLAYED_MODES rule comment). 2026 stays unreplayed per toReplay.
+        // 不追踪的私有模式与豁免理由（收录规则③）：6 origin——镜像与回放的光标编址全按
+        // 绝对位建模，回放只有在客户端同为绝对编址时才对得上，发 ?6h 会把回放自身的逐行
+        // 落位与光标停放改写成区内相对，支持它得先给镜像补 origin 建模；12 闪烁——纯客户
+        // 端观感，应用不借它交换语义。1/1004（光标键/焦点上报）改走 REPLAYED_PRIVATE_MODES
+        // 追踪回放，不再消费即弃。2026 stays unreplayed per toReplay.
       } else if (p === 4) { insertMode = value; appModes[p] = value; }
       else if (p === 20) { convertEol = value; appModes[p] = value; }
     }
@@ -1592,11 +1593,11 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     if (replayCache !== null) return replayCache;
     const parts = ["\u001b[0m\u001b[2J\u001b[H"];
     let bytes = 8;
-    // 画面前先回放记录过的应用态模式（autowrap/IRM/convertEol 开关、鼠标族、
-    // 括号粘贴），让客户端与应用的当前状态对齐。2026 同步标记不发：它是同帧批处理
-    // 标记，回放只有单帧画面，发了没有意义。备屏（1049/1047/47）只对「当下就在备屏」
-    // 的会话发（见下面的 inAlt 分支）——不在备屏的会话发备屏序列会把回放切进备用屏，
-    // 丢掉刻意保留的滚屏历史。
+    // 画面前先回放记录过的应用态模式（autowrap/IRM/convertEol 开关、光标键、鼠标族、
+    // 焦点上报、括号粘贴），让客户端与应用的当前状态对齐。2026 同步标记不发：它是
+    // 同帧批处理标记，回放只有单帧画面，发了没有意义。备屏（1049/1047/47）只对「当下
+    // 就在备屏」的会话发（见下面的 inAlt 分支）——不在备屏的会话发备屏序列会把回放
+    // 切进备用屏，丢掉刻意保留的滚屏历史。
     for (const p of REPLAYED_MODES) {
       if (!(p in appModes)) continue;
       // 私有模式发 ? 形态，非私有（IRM/convertEol）发裸形态：客户端两套模式空间分开认。
@@ -1647,6 +1648,19 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       parts.push(`\u001b[${r + 1};1H\u001b[2K${serialized}\u001b[0m`);
     }
     parts.push("\u001b[0m");
+    // 滚动区专用回放（收录规则②）：镜像把 top/bottom 当活状态追踪（换行/逆行/IL/DL
+    // 都按它滚动），客户端重建后退回整屏区——不回放，两边对后续换行的推法分叉。必须
+    // 排在帧绘制之后：推史换行与逐行落位都按客户端出厂的整屏区算，区域先到就会把它们
+    // 改写成分区内滚动；又必须在光标停放之前——客户端收 r 会把光标归位（xterm 的
+    // setScrollRegion 附带 _setCursor(0,0)），随后的绝对停放把它摆回镜像位置。区域就是
+    // 出厂默认（整屏）时不发：重建后的客户端本来就是整屏区。只回放活动缓冲的区：备屏
+    // 会话里主屏挂起的区不补——补发须退备屏改区再重进，1049 重进会存光标＋清备屏，
+    // 毁掉刚画好的帧。
+    if (top !== 0 || bottom !== height - 1) {
+      const seq = `\u001b[${top + 1};${bottom + 1}r`;
+      parts.push(seq);
+      bytes += seq.length;
+    }
     parts.push(`\u001b[${row + 1};${col + 1}H`);
     parts.push(cursorVisible ? "\u001b[?25h" : "\u001b[?25l");
     replayCache = parts.join("");

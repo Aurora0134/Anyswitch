@@ -391,7 +391,7 @@ test("鼠标族与括号粘贴：显式设置过的模式进回放，未记录�
   const legacy = createScreenMirror({ cols: 40, rows: 10 });
   legacy.write("旧会话\r\n");
   const legacyReplay = legacy.toReplay();
-  for (const p of [7, 4, 20, 1000, 1002, 1003, 1006, 1015, 2004]) {
+  for (const p of [1, 7, 4, 20, 1000, 1002, 1003, 1004, 1006, 1015, 2004]) {
     assert.ok(!legacyReplay.includes(`?${p}`), `未记录时回放不得含 ?${p}`);
   }
 });
@@ -429,6 +429,21 @@ test("autowrap/IRM 显式设置进回放：重建后客户端与镜像对后续�
   assert.ok(irm.toReplay().includes("\u001b[4l"), "显式关掉的 IRM 以 DECRST 回放");
 });
 
+test("光标键与焦点上报：显式设置过的模式进回放", () => {
+  // ?1 DECCKM 与 ?1004 焦点上报此前消费后即弃：客户端重建（RIS）后退回关闭，应用等的
+  // 键序（ESC O A vs ESC[A，客户端 xterm 的按键/滚轮编码都看它）与焦点上报（ESC[I/O）
+  // 就断流——与鼠标族同病，按收录规则①入清单，镜像侧只记录不建格上状态。
+  const mirror = createScreenMirror({ cols: 30, rows: 6 });
+  mirror.write("\u001b[?1h\u001b[?1004h正文\r\n");
+  let replay = mirror.toReplay();
+  assert.ok(replay.includes("\u001b[?1h"), "显式开着的 DECCKM 必须进回放，否则重建后退回光标键模式");
+  assert.ok(replay.includes("\u001b[?1004h"), "显式开着的焦点上报必须进回放，否则重建后应用收不到焦点事件");
+  mirror.write("\u001b[?1l\u001b[?1004l");
+  replay = mirror.toReplay();
+  assert.ok(replay.includes("\u001b[?1l"), "显式关掉的光标键以 DECRST 回放");
+  assert.ok(replay.includes("\u001b[?1004l"), "显式关掉的焦点上报以 DECRST 回放");
+});
+
 test("备屏 API 保真：?47h 进的备屏以 47h 回放，退出 47l 照常弹回", () => {
   // 旧实现回放只发 1049：用旧 API（47/1047）进备屏的应用，重建后客户端留在普通屏，
   // 应用在备屏语义下续写、客户端却画在普通屏。1049 附带存光标＋清备屏，不得擅自替换。
@@ -449,6 +464,37 @@ test("备屏 API 保真：?47h 进的备屏以 47h 回放，退出 47l 照常弹
   const restored = again.screenLines().join("\n");
   assert.ok(!restored.includes("备屏行"), "退备屏后不得残留备屏帧");
   assert.ok(restored.includes("主屏行"), "退备屏后普通屏的历史尾部可见（与 1049 测试同口径）");
+});
+
+test("DECSTBM：非默认滚动区进回放，排在帧绘制后、光标停放前", () => {
+  // case "r" 一直被镜像追踪（换行/逆行/IL/DL 的滚动范围都由它决定）却不回放——正是
+  // 收录规则明文禁止的「只追踪不回放」。区域序列必须排在帧绘制之后（推史换行与逐行
+  // 落位按客户端出厂的整屏区算），又必须在光标停放之前（客户端收 r 会把光标归位）。
+  const src = createScreenMirror({ cols: 12, rows: 5 });
+  src.write("AAAA\r\nBBBB\r\nCCCC\r\nDDDD\r\nEEEE");
+  src.write("\u001b[2;5r"); // 区＝第 2–5 行；r 顺带把光标归位
+  src.write("\u001b[5;1H\r\n\r\n"); // 在区底换行：只有区内滚动，区外的行不动
+  const lines = src.screenLines();
+  const replay = src.toReplay();
+  assert.ok(replay.includes("\u001b[2;5r"), "非默认滚动区必须进回放，否则重建后退回整屏区");
+  const iRegion = replay.indexOf("\u001b[2;5r");
+  assert.ok(iRegion > replay.indexOf("\u001b[1;1H"), "区域序列必须排在帧绘制之后");
+  assert.ok(iRegion < replay.indexOf("\u001b[?25"), "区域序列必须在光标停放之前（r 会把光标归位）");
+  const again = repaint(replay, 12, 5);
+  assert.deepEqual(again.screenLines(), lines, "回放必须还原同一张画面");
+  assert.equal(again.info().row, src.info().row, "区域序列之后光标要按镜像位置重新停放（行）");
+  assert.equal(again.info().col, src.info().col, "区域序列之后光标要按镜像位置重新停放（列）");
+  src.write("\r\n\r\n");
+  again.write("\r\n\r\n");
+  assert.deepEqual(again.screenLines(), src.screenLines(), "重建后两边对后续换行的推法必须一致");
+
+  // 默认整屏区不回放任何 r 序列（含显式设区后又用裸 r 重置回整屏的情况）
+  const plain = createScreenMirror({ cols: 12, rows: 5 });
+  plain.write("默认整屏\r\n");
+  assert.ok(!/\u001b\[[0-9;]*r/.test(plain.toReplay()), "默认整屏区不得回放 r 序列");
+  const reset = createScreenMirror({ cols: 12, rows: 5 });
+  reset.write("\u001b[2;4r\u001b[r正文");
+  assert.ok(!/\u001b\[[0-9;]*r/.test(reset.toReplay()), "重置回整屏后不得回放 r 序列");
 });
 
 test("换行语义与客户端一致：LF/VT/FF 都换行，convertEol 下连列一起归零", () => {
@@ -1092,6 +1138,34 @@ describe("回放链与真 xterm 对账", () => {
     assert.deepEqual(mirror.screenLines(), xtermViewport(fresh), "回放喂真 xterm 必须还原同一张画面");
     // 回放喂镜像：自足性不变
     assert.deepEqual(repaint(replay, 80, 12).screenLines(), mirror.screenLines(), "回放喂镜像必须还原同一张画面");
+  });
+
+  test("滚动区会话：回放带 DECSTBM，重建后真 xterm 与镜像推法一致", async () => {
+    // case "r" 被镜像追踪却不回放的历史欠账：重建后的客户端退回整屏区，对区底换行
+    // 的滚动范围与镜像分叉。回放的 r 必须排在帧绘制后（推史/落位按整屏区算）、光标
+    // 停放前（真 xterm 收 r 会把光标归位）。
+    const cols = 20; const rows = 6;
+    const mirror = createScreenMirror({ cols, rows });
+    const t = new Terminal({ cols, rows, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+    t.loadAddon(new Unicode11Addon());
+    t.unicode.activeVersion = "11";
+    for (const step of ["L0\r\nL1\r\nL2\r\nL3\r\nL4\r\nL5", "\u001b[2;5r", "\u001b[5;1H\r\n\r\n"]) {
+      mirror.write(step);
+      await new Promise((resolve) => t.write(step, resolve));
+    }
+    assert.deepEqual(mirror.screenLines(), xtermViewport(t), "实时字节：镜像必须与真 xterm 逐格一致");
+    const replay = mirror.toReplay();
+    assert.ok(replay.includes("\u001b[2;5r"), "非默认滚动区必须进回放");
+    assert.ok(replay.indexOf("\u001b[2;5r") < replay.indexOf("\u001b[?25"), "区域序列必须在光标停放之前");
+    const fresh = new Terminal({ cols, rows, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+    fresh.loadAddon(new Unicode11Addon());
+    fresh.unicode.activeVersion = "11";
+    await new Promise((resolve) => fresh.write(replay, resolve));
+    assert.deepEqual(mirror.screenLines(), xtermViewport(fresh), "回放喂真 xterm 必须还原同一张画面");
+    // 重建后的客户端与镜像对区底换行的滚动范围一致
+    mirror.write("\r\nL6\r\n");
+    await new Promise((resolve) => fresh.write("\r\nL6\r\n", resolve));
+    assert.deepEqual(mirror.screenLines(), xtermViewport(fresh), "重建后两边对区内换行的推法必须一致");
   });
 
   test("回放不得把宽字截碎：宽字行的回放在新 xterm 里不错位", async () => {
