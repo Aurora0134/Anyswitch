@@ -22,9 +22,75 @@ export function defaultClaudeExecutable(base = process.env) {
   return join(roamingNpm(base), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe").replace(/\\/g, "/");
 }
 
-export function resolveClaudeExecutable(base = process.env) {
+// 桌面托管引擎扫描：<根>\claude-code\ 的子目录以 semver 命名的才是引擎版本目录，
+// 版本目录里 claude.exe 直连（旧布局）或垫一层目录（构建哈希）两种落位都认，跨根
+// 取版本三元组最新的那份。非 semver 的条目与更深的嵌套不在已取证形状内，不认。
+function newestClaudeEngineExecutable(base, io) {
+  const local = base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local");
+  const roots = [
+    join(local, "Claude-3p"),
+    join(local, "Claude"),
+    join(base.USERPROFILE ?? "", ".claude"),
+  ];
+  const candidates = [];
+  for (const root of roots) {
+    let versions;
+    try {
+      versions = io.readdirSync(join(root, "claude-code"));
+    } catch (error) {
+      if (io.strictErrors && !["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
+      continue;
+    }
+    for (const version of versions) {
+      if (!/^\d+\.\d+\.\d+(?:[-+][0-9a-zA-Z.]+)?$/.test(version)) continue;
+      const versionDir = join(root, "claude-code", version);
+      const direct = join(versionDir, "claude.exe");
+      let exe = io.existsSync(direct) ? direct : null;
+      if (exe === null) {
+        let children;
+        try {
+          children = io.readdirSync(versionDir);
+        } catch (error) {
+          if (io.strictErrors && !["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
+          continue;
+        }
+        exe = children.map((child) => join(versionDir, child, "claude.exe"))
+          .find((nested) => io.existsSync(nested)) ?? null;
+      }
+      if (exe === null) continue;
+      candidates.push({ exe, triple: version.split(/[-+]/)[0].split(".").map(Number) });
+    }
+  }
+  candidates.sort((a, b) => {
+    for (let i = 0; i < 3; i += 1) {
+      if (a.triple[i] !== b.triple[i]) return b.triple[i] - a.triple[i];
+    }
+    return 0;
+  });
+  return candidates[0]?.exe ?? null;
+}
+
+// Claude Code 的执行体有两种官方落盘形态：npm 全局包（@anthropic-ai/claude-code，
+// bin 下是真身 claude.exe）与 Claude Desktop 托管引擎。npm 位优先——面板的安装/
+// 更新按钮装的就是那个包（与 kimi 的「npm shim 优先」同一优先序）；npm 位落空时
+// 扫桌面托管引擎：已知形状是 <根>\claude-code\<semver>\[至多一层]\claude.exe，根
+// 只认 %LOCALAPPDATA%\Claude-3p、%LOCALAPPDATA%\Claude 与 %USERPROFILE%\.claude
+// 三个，与 agent-metrics 的 claudeDesktopForm 白名单同源（同一份真机取证：旧布局
+// 零层，Desktop ≥2.37337 起在 semver 与 exe 之间垫一层构建哈希）。npm 位存在但不
+// 是 PE 也落引擎扫描——本机 npm claude.exe 曾是 500B 占位脚本，Windows 拒绝执行
+// 文本桩，与 opencode 的 bin 桩同病（故同样过 isPortableExecutable）。都落空时仍
+// 返回 npm 位：未安装的报法与历史口径一致，存在性由调用方判。
+export function resolveClaudeExecutable(
+  base = process.env,
+  io = { existsSync, readdirSync, openSync, readSync, closeSync },
+) {
   const override = base.CLAUDE_EXECUTABLE;
-  if (override === undefined || override === null || override === "") return defaultClaudeExecutable(base);
+  if (override === undefined || override === null || override === "") {
+    const npmPath = defaultClaudeExecutable(base);
+    if (io.existsSync(npmPath) && isPortableExecutable(npmPath, io)) return npmPath;
+    const engine = newestClaudeEngineExecutable(base, io);
+    return engine === null ? npmPath : engine.replace(/\\/g, "/");
+  }
   if (!isAbsolute(override)) {
     throw new Error(
       `CLAUDE_EXECUTABLE must be an absolute path to claude.exe, got "${override}". ` +

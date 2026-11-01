@@ -36,6 +36,76 @@ test("standalone discovery preserves all ten launcher installation choices", () 
   assert.equal(resolveGrokExecutable({ ...base, GROK_EXECUTABLE: "C:\\custom\\grok.exe" }), "C:\\custom\\grok.exe");
 });
 
+test("claude 解析优先 npm 全局包：npm 位在且是真执行体时，引擎在也用 npm 位", () => {
+  // 面板的安装/更新按钮装的是 npm 包（与 kimi 的「npm shim 优先」同一优先序）；
+  // 桌面托管引擎只在 npm 位落空或不是真执行体时才接手。
+  const dir = mkTestDir("claude-npm-first-");
+  try {
+    const roaming = join(dir, "roaming");
+    const local = join(dir, "local");
+    const npmExe = join(roaming, "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+    mkdirSync(dirname(npmExe), { recursive: true });
+    writeFileSync(npmExe, "MZ");
+    const engineExe = join(local, "Claude-3p", "claude-code", "2.1.295", "d2e29494ec83", "claude.exe");
+    mkdirSync(dirname(engineExe), { recursive: true });
+    writeFileSync(engineExe, "MZ");
+    assert.equal(
+      resolveClaudeExecutable({ APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: join(dir, "home") }),
+      npmExe.replace(/\\/g, "/"),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("claude npm 位落空时认桌面托管引擎：三根都扫，跨根取版本最新的一份", () => {
+  // 引擎形状照 agent-metrics 的 claudeDesktopForm 白名单真机取证写：semver 与 exe
+  // 之间旧布局零层、Desktop ≥2.37337 起垫一层构建哈希；非 semver 条目不认。
+  const dir = mkTestDir("claude-engine-");
+  try {
+    const base = { APPDATA: join(dir, "roaming"), LOCALAPPDATA: join(dir, "local"), USERPROFILE: dir };
+    const engineOf = (root, version, hash = null) => join(root, "claude-code", version, ...(hash ? [hash] : []), "claude.exe");
+    const engines = [
+      engineOf(join(base.LOCALAPPDATA, "Claude-3p"), "2.1.246"),
+      engineOf(join(base.LOCALAPPDATA, "Claude"), "2.1.295", "d2e29494ec83"),
+      engineOf(join(dir, ".claude"), "2.1.100"),
+      // 非 semver 目录（缓存、清单之类）里就算有同名 exe 也不在引擎形状内。
+      engineOf(join(base.LOCALAPPDATA, "Claude"), "cache"),
+    ];
+    for (const exe of engines) {
+      mkdirSync(dirname(exe), { recursive: true });
+      writeFileSync(exe, "MZ");
+    }
+    assert.equal(
+      resolveClaudeExecutable(base),
+      engines[1].replace(/\\/g, "/"),
+      "跨根取 2.1.295（构建哈希层形状）",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("claude npm 位是文本桩时不算数：引擎健在就解析到引擎", () => {
+  // 本机 npm claude.exe 曾是 500B 占位脚本（archive 有记录），Windows 拒绝执行
+  // 文本桩，与 opencode 的 bin 桩同病；桌面托管引擎还健在时，解析不能把启动器
+  // 指到桩上。
+  const dir = mkTestDir("claude-stub-");
+  try {
+    const roaming = join(dir, "roaming");
+    const local = join(dir, "local");
+    const stub = join(roaming, "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+    mkdirSync(dirname(stub), { recursive: true });
+    writeFileSync(stub, "export {};");
+    const engineExe = join(local, "Claude-3p", "claude-code", "2.1.295", "d2e29494ec83", "claude.exe");
+    mkdirSync(dirname(engineExe), { recursive: true });
+    writeFileSync(engineExe, "MZ");
+    assert.equal(resolveClaudeExecutable({ APPDATA: roaming, LOCALAPPDATA: local }), engineExe.replace(/\\/g, "/"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("codex 解析优先 npm 全局 shim，与面板检测同源", () => {
   // 两套安装形态必须解析到同一个文件：面板更新按钮装的是 npm 全局包，检测侧
   // （environment-service 的 resolveCodexShim）认的也是它；终端一键启动与
