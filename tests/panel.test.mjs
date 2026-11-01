@@ -6155,48 +6155,118 @@ describe("设置项「看板排布」", () => {
     assert.ok(btn && /padding:\s*6px 10px/.test(btn[1]), "钮内边距收到 10px，与设置行内控件同档");
   });
 
-  // ── 图标行视口的落位：卡序重排搬卡会把图标行顶到卡列前面 ──
-  // reorderAgentCards 是 container.append(...cards) 整批搬卡——搬完卡列落到图标行后头，
-  // 图标行成了容器的第一个子元素，屏幕上就是「图标在上面」。这条钉住补画前的钉回。
-  const stripFn = (panelJs.match(/function syncBoardIconStrip\(\) \{[\s\S]*?\n  \}/) || [])[0];
-  function stripSandbox({ lastIsStrip }) {
-    assert.ok(stripFn, "panel.js must contain syncBoardIconStrip");
-    const strip = { hidden: true, tag: "strip" };
-    const track = { innerHTML: "", children: [] };
-    const card = { tag: "card", getAttribute: (k) => (k === "data-agent-id" ? "zcode" : null) };
-    const appends = [];
-    const container = {
-      lastElementChild: lastIsStrip ? strip : card,
-      querySelectorAll: () => [card],
-      querySelector: () => null, // 卡上没有 .agent-avatar：走到「空行整行隐藏」分支即可
-      append(el) { appends.push(el.tag); this.lastElementChild = el; },
-    };
-    const document = {
-      querySelector: (sel) => (sel === ".agent-cards-container" ? container : null),
-      createElement: () => ({ setAttribute() {}, appendChild() {} }),
-    };
-    const prelude = `let installedAgentIds = null;`
-      + ` let boardLiveAgentIds = new Set(["grok"]);`
-      + ` let boardIconStripBound = true;`
-      + ` const AGENT_CARD_ORDER = ["zcode", "claude", "kimi", "grok"];`
-      + ` function $(id) {`
-      + `   if (id === "boardIconStrip") return strip;`
-      + `   if (id === "boardIconStripTrack") return track;`
-      + `   return null;`
-      + ` }`
-      + ` function updateBoardIconStripFades() {}`;
-    const sync = new Function("document", "strip", "track",
-      `${prelude}\n${stripFn}\nreturn syncBoardIconStrip;`)(document, strip, track);
-    sync();
-    return { appends, strip };
+  // ── 图标行不是卡：位置靠结构保证，出场靠它自己的那一拍 ──
+  // 2026-11-01 两次「把图标行钉回容器末位」都失效：卡序重排是 container.append(...cards)
+  // 整批搬卡，钉回只覆盖可见性重算那条路径，永远慢一拍。搬出容器是结构上不可能错的解。
+  function htmlBlockEnd(html, idx) {
+    const re = /<div\b|<\/div>/g;
+    re.lastIndex = idx;
+    let depth = 0;
+    let m;
+    while ((m = re.exec(html))) {
+      if (m[0] === "</div>") {
+        depth -= 1;
+        if (depth === 0) return m.index + m[0].length;
+      } else depth += 1;
+    }
+    return -1;
   }
 
-  it("图标行钉在看板最下方：搬完卡再补画，视口仍排在所有卡之后", () => {
-    const moved = stripSandbox({ lastIsStrip: false });
-    assert.deepEqual(moved.appends, ["strip"],
-      "图标行不在容器末位时先钉回去——否则 reorderAgentCards 搬完卡，图标行就跑到全屏最上方");
-    const kept = stripSandbox({ lastIsStrip: true });
-    assert.deepEqual(kept.appends, [], "已在末位就不动 DOM：每次轮询补画都重排一次会打断滚动位置");
+  it("图标行搬出卡容器：卡序重排搬不到容器外的节点", () => {
+    // 注释里也写 <div>，会干扰深度扫描：先摘掉注释再算
+    const html = panelHtml.replace(/<!--[\s\S]*?-->/g, "");
+    const containerStart = html.indexOf('<div class="agent-cards-container">');
+    const stripStart = html.indexOf('<div class="board-icon-strip"');
+    assert.ok(containerStart > 0 && stripStart > 0, "卡容器与图标行的标记都在 panel.html 里");
+    const containerEnd = htmlBlockEnd(html, containerStart);
+    assert.ok(containerEnd > 0, "卡容器的闭合位置可解析");
+    assert.ok(stripStart > containerEnd,
+      "图标行必须在 .agent-cards-container 之外——留在容器里，append 搬卡就会把它顶到卡列前面");
+    const between = html.slice(containerEnd, stripStart);
+    assert.ok(!between.includes("</section>"), "图标行与卡容器同属 .main-col，中间不跨节");
+    assert.ok(!between.includes("<div"), "两者紧邻，中间不插别的块：它就是卡列的下一行");
+    const rule = panelCss.match(/^\s*\.board-icon-strip \{([^}]*)\}/m);
+    assert.ok(rule, ".board-icon-strip 规则存在");
+    assert.ok(/padding:\s*0 0 2px/.test(rule[1]),
+      "纵向 padding 收成 0 0 2px：上间距由 .main-col 的 gap 给，别在 gap 之上再垫一层");
+  });
+
+  it("补画图标行不再搬 DOM：钉回那行会把它反塞回容器", () => {
+    const stripFn = (panelJs.match(/function syncBoardIconStrip\(\) \{[\s\S]*?\n  \}/) || [])[0];
+    assert.ok(stripFn, "panel.js must contain syncBoardIconStrip");
+    assert.ok(!/container\.append\(strip\)/.test(stripFn),
+      "结构已保证位置，补画时再 append 只会把图标行塞回卡容器末位，位置又跟着搬卡走");
+  });
+
+  // 假元素：只要 playBoardEnter 用到的那几样（类名、--board-delay、动画结束回调）
+  function mkBoardAnimEl() {
+    const classes = new Set();
+    const styleProps = {};
+    return {
+      hidden: false,
+      attrs: {},
+      classes,
+      styleProps,
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (...cs) => cs.forEach((c) => classes.delete(c)),
+        contains: (c) => classes.has(c),
+      },
+      style: { setProperty: (k, v) => { styleProps[k] = v; } },
+      getAttribute(k) { return this.attrs[k] ?? null; },
+      setAttribute(k, v) { this.attrs[k] = v; },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+  }
+  function boardEnterSandbox({ cardCount = 3, stripHidden = false, slotCount = 3 } = {}) {
+    const enterFn = (panelJs.match(/function playBoardEnter\(view\) \{[\s\S]*?\n  \}/) || [])[0];
+    assert.ok(enterFn, "playBoardEnter found in panel.js");
+    const cards = Array.from({ length: cardCount }, mkBoardAnimEl);
+    const slots = Array.from({ length: slotCount }, mkBoardAnimEl);
+    const strip = mkBoardAnimEl();
+    strip.hidden = stripHidden;
+    strip.querySelectorAll = (sel) => (sel === ".board-icon-slot" ? slots : []);
+    const view = mkBoardAnimEl();
+    view.querySelectorAll = (sel) => (sel === ".panel-card" ? cards : []);
+    view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
+    const doc = { documentElement: { getAttribute: () => null } };
+    new Function("view", "document", "getComputedStyle",
+      `${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
+    return { cards, strip, slots };
+  }
+
+  it("图标行接在最后一张卡之后 40ms，视口里逐枚再错 20ms", () => {
+    assert.ok(/\.board-strip-enter \{ animation: boardStripEnter 300ms cubic-bezier\(0\.42, 0, 0\.58, 1\) backwards/
+      .test(panelCss), "整行上浮与卡片同一套参数（10px / 300ms / 同一条 easeInOut）");
+    assert.ok(/\.board-icon-enter \{ animation: boardIconEnter 300ms cubic-bezier\(0\.42, 0, 0\.58, 1\) backwards/
+      .test(panelCss), "逐枚淡入同样接 300ms / 同一条曲线，只是延迟不同");
+    const { cards, strip, slots } = boardEnterSandbox({ cardCount: 3, slotCount: 4 });
+    assert.equal(cards[2].styleProps["--board-delay"], "190ms", "末卡延迟 150+(3-2)×40");
+    assert.equal(strip.styleProps["--board-delay"], "230ms",
+      "图标行接在末卡之后一格（40ms），不是另起一段");
+    assert.ok(strip.classList.contains("board-strip-enter"), "整行上浮那一段要挂上");
+    assert.ok(!strip.classList.contains("board-card-enter")
+      && !strip.classList.contains("board-card-enter-scale"),
+      "不着卡片的类：行不淡入（淡入交给图标）、也不走 hero 变奏");
+    assert.deepEqual(slots.map((s) => s.styleProps["--board-delay"]),
+      ["230ms", "250ms", "270ms", "290ms"], "逐枚 20ms 微阶梯");
+    slots.forEach((s, i) => {
+      assert.ok(s.classList.contains("board-icon-enter"), `第 ${i} 枚图标挂上淡入类`);
+      assert.ok(!s.classList.contains("board-card-enter"),
+        "图标不做位移：它待在 overflow-y:hidden 的视口里，translateY 会把下沿裁出硬边");
+    });
+  });
+
+  it("图标行隐藏时不占台阶，也不抢首卡", () => {
+    const hidden = boardEnterSandbox({ cardCount: 1, stripHidden: true, slotCount: 3 });
+    assert.ok(!hidden.strip.classList.contains("board-strip-enter"), "隐藏时不挂行动画");
+    assert.deepEqual(hidden.slots.map((s) => s.styleProps["--board-delay"]),
+      [undefined, undefined, undefined], "也不给图标发延迟");
+    assert.ok(hidden.cards[0].classList.contains("board-card-enter-scale"), "首卡仍是 hero 变奏");
+    const noCards = boardEnterSandbox({ cardCount: 0, slotCount: 1 });
+    assert.equal(noCards.strip.styleProps["--board-delay"], "150ms",
+      "一张卡都不在时从 150ms 起拍，不留负延迟");
   });
 });
 

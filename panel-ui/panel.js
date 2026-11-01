@@ -723,10 +723,9 @@ async function api(method, path, body) {
     if (!strip || !track) return;
     const container = document.querySelector(".agent-cards-container");
     if (!container) { strip.hidden = true; return; }
-    // 图标行永远在看板最下方。卡序重排（reorderAgentCards）是 container.append(...cards)
-    // 整批搬卡：搬完卡列就落到图标行后面，图标行被顶到全屏最上方。这里每次补画前先把它
-    // 钉回容器末尾——卡序那一笔不必为图标行让路，别处再搬卡也照样自愈。
-    if (container.lastElementChild !== strip) container.append(strip);
+    // 图标行是容器外的兄弟节点（panel.html 有注释）：卡序重排搬的是容器的孩子，
+    // 搬不到它头上。曾在这里「补画前钉回容器末位」，那是错的——一是只覆盖可见性
+    // 重算这一条路径，二是一旦结构变了它会反把图标行塞进容器。此处不再动 DOM。
     // 收集未运行的已安装端点（按容器里卡片当前 DOM 顺序，即跟随卡序）
     const ids = [];
     for (const card of container.querySelectorAll(".panel-card[data-agent-id]")) {
@@ -12640,6 +12639,34 @@ async function api(method, path, body) {
       el.classList.add(hero ? "board-card-enter-scale" : "board-card-enter");
       el.addEventListener("animationend", () => el.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
     });
+    // 图标行不是 .panel-card，上面那圈取样取不到它，于是它只会跟着 .board-enter 整块
+    // 淡入、没有自己那一拍——这就是「跟卡片对不上」的来源。这里把它接在最后一张可见卡
+    // 之后 40ms（与卡间距同一格），整行上浮、视口里逐枚图标再各错 20ms 淡入：合起来是
+    // 卡阶梯的下一级，而不是另起一段。图标本身不做位移——它待在 overflow-y:hidden 的
+    // 视口里，一 translate 下沿就会被裁出硬边。
+    const strip = view.querySelector(".board-icon-strip");
+    if (strip && !strip.hidden) {
+      const base = 150 + Math.max(cards.length - 1, 0) * 40;
+      strip.style.setProperty("--board-delay", `${base}ms`);
+      strip.classList.remove("board-strip-enter");
+      void getComputedStyle(strip).animationName; // 同上：只冲样式
+      strip.classList.add("board-strip-enter");
+      // animationend 会从图标冒泡上来：只认行自己那一次，否则行会在第一枚图标播完时
+      // 就被摘掉类名，行自己的上浮半途收场。
+      const onStripEnd = (e) => {
+        if (e.target !== strip) return;
+        strip.removeEventListener("animationend", onStripEnd);
+        strip.classList.remove("board-strip-enter");
+      };
+      strip.addEventListener("animationend", onStripEnd);
+      [...strip.querySelectorAll(".board-icon-slot")].forEach((slot, i) => {
+        slot.style.setProperty("--board-delay", `${base + i * 20}ms`);
+        slot.classList.remove("board-icon-enter");
+        void getComputedStyle(slot).animationName; // 同上：只冲样式
+        slot.classList.add("board-icon-enter");
+        slot.addEventListener("animationend", () => slot.classList.remove("board-icon-enter"), { once: true });
+      });
+    }
   }
 
   // 视图进入工作的让位调度：把目标视图的首次渲染排到「点击已画出高亮」之后。

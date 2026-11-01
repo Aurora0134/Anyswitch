@@ -1557,10 +1557,12 @@
 
   /* 看板「图标行」排布的视口行：未运行的已安装端点收进这里（32px 图标横排，
      悬浮+滚轮横滚，两侧虚化到边即隐）。运行中的端点保持完整卡片在上，此行只收
-     未运行的；空行整行隐藏（panel.js applyAgentCardVisibility 管显隐与填充）。 */
+     未运行的；空行整行隐藏（panel.js applyAgentCardVisibility 管显隐与填充）。
+     本行是 .agent-cards-container 的后一个兄弟（见 panel.html 注释），与卡列之间
+     的 20px 间距由 .main-col 的 gap 给，故纵向 padding 只留底部 2px 托底阴影。 */
   .board-icon-strip {
     display: flex; align-items: center; position: relative;
-    padding: 10px 0 2px; /* 上间距与卡列同 gap，下留 2px 让底部阴影不贴边 */
+    padding: 0 0 2px;
   }
   .board-icon-strip[hidden] { display: none; }
   .board-icon-strip-viewport {
@@ -2485,6 +2487,14 @@
   .board-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }
   .board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
   .board-card-enter-scale { animation: boardEnterScale 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
+  /* 图标行接在卡阶梯之后（panel.js playBoardEnter）：整行只做上浮、不淡入，淡入交给
+     视口里逐枚图标——一是行本身没有可见底衬，二是图标待在 overflow-y:hidden 的视口里
+     translateY 会把下沿裁出硬边。两段参数（10px / 300ms / 同一条 easeInOut）与卡片
+     同源，所以接上去像同一拍里的最后一级，而不是另起一段。 */
+  @keyframes boardStripEnter { from { transform: translateY(10px); } }
+  @keyframes boardIconEnter { from { opacity: 0; } }
+  .board-strip-enter { animation: boardStripEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
+  .board-icon-enter { animation: boardIconEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
 
   /* Skills 视图：左右分栏布局（左：主仓库+skill 列表；右：详情+异常聚合） */
   .skills-grid {
