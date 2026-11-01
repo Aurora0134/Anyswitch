@@ -11,11 +11,20 @@
 //      launcher drifting onto a port other than the one the resident relay owns.
 //   3. The copies of the number that still live outside openai-server.mjs:
 //      agent-session-env.mjs exports AGENT_RELAY_PORT (asserted directly);
-//      relay-process-manager.mjs and relay-host.mjs keep their constants
-//      module-private — each is surfaced at runtime through an exported
-//      function (getRelayStatus's injectable probe, describeRelayStartupFailure's
-//      foreign-port detail); agent-sync-run.mjs exports nothing at all, so its
-//      DEFAULT_PORT is pinned by source text.
+//      relay-process-manager.mjs re-exports the shared constant (panel.mjs
+//      builds from it); relay-host.mjs keeps its constant module-private —
+//      surfaced at runtime through an exported function (getRelayStatus's
+//      injectable probe, describeRelayStartupFailure's foreign-port detail);
+//      agent-sync-run.mjs exports nothing at all, so its DEFAULT_PORT is
+//      pinned by source text.
+//   4. The converged surfaces carry no bare literal at all: panel.mjs,
+//      launch.mjs and agent-metrics.mjs must build every relay-facing URL,
+//      origin and port from the shared constant (a negative pin turns any
+//      re-appearance of the hand-written literal red), uninstall-agent.mjs's
+//      strip placeholder aliases the constant by source text, and the
+//      module-free browser face carries exactly one mirror constant in
+//      panel-ui/panel.js while panel.html's static placeholders are pinned
+//      by source text.
 
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
@@ -31,7 +40,7 @@ import { RELAY_PORT as QODER_RELAY_PORT } from "../src/launchers/qoder-launcher.
 import { RELAY_PORT as CODEX_RELAY_PORT } from "../src/launchers/codex-launcher.mjs";
 import { RELAY_PORT as GROK_RELAY_PORT } from "../src/launchers/grok-launcher.mjs";
 import { AGENT_RELAY_PORT } from "../src/agents/agent-session-env.mjs";
-import { getRelayStatus } from "../src/relay/relay-process-manager.mjs";
+import { getRelayStatus, RELAY_PORT } from "../src/relay/relay-process-manager.mjs";
 import { describeRelayStartupFailure } from "../src/relay/relay-host.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -82,5 +91,48 @@ describe("relay port consistency", () => {
     // DEFAULT_PORT can only be pinned by source text.
     const source = readFileSync(new URL("../src/agents/agent-sync-run.mjs", import.meta.url), "utf8");
     assert.match(source, new RegExp(`const DEFAULT_PORT = ${DEFAULT_RELAY_PORT};`), "agent-sync-run.mjs drifted off the shared relay port");
+  });
+
+  it("relay-process-manager re-exports the shared port constant", () => {
+    assert.equal(RELAY_PORT, DEFAULT_RELAY_PORT, "relay-process-manager.mjs drifted off the shared relay port");
+  });
+
+  it("panel.mjs builds every relay-facing URL and port from the shared constant", () => {
+    // Converged surface: no bare literal anywhere (comments included), and the
+    // canonical build shapes must stay in place — the negative half is what
+    // turns a re-appearance of a hand-written port red.
+    const source = readFileSync(new URL("../src/panel/panel.mjs", import.meta.url), "utf8");
+    assert.ok(!source.includes(String(DEFAULT_RELAY_PORT)), "panel.mjs still carries a bare relay-port literal; build it from RELAY_PORT instead");
+    assert.match(source, /url\.port === String\(RELAY_PORT\)/, "panel.mjs's mutation-port check must compare against RELAY_PORT");
+    assert.match(source, /`http:\/\/127\.0\.0\.1:\$\{RELAY_PORT\}/, "panel.mjs's relay fetches must build URLs from RELAY_PORT");
+    assert.match(source, /port: RELAY_PORT[,}]/, "panel.mjs's status frame and sync spawns must carry RELAY_PORT");
+  });
+
+  it("launch.mjs builds the session report URL from the shared constant", () => {
+    const source = readFileSync(new URL("../src/launchers/launch.mjs", import.meta.url), "utf8");
+    assert.ok(!source.includes(String(DEFAULT_RELAY_PORT)), "launch.mjs still carries a bare relay-port literal");
+    assert.match(source, /reportUrl: `http:\/\/127\.0\.0\.1:\$\{DEFAULT_RELAY_PORT\}\/panel\/api\/session\/report`/, "launch.mjs drifted off the shared relay port");
+  });
+
+  it("uninstall-agent's strip placeholder aliases the shared port", () => {
+    const source = readFileSync(new URL("../src/ops/uninstall-agent.mjs", import.meta.url), "utf8");
+    assert.match(source, /const STRIP_PORT = DEFAULT_RELAY_PORT;/, "uninstall-agent.mjs drifted off the shared relay port");
+  });
+
+  it("agent-metrics derives the report origin from the report URL itself", () => {
+    const source = readFileSync(new URL("../src/agents/agent-metrics.mjs", import.meta.url), "utf8");
+    assert.ok(!source.includes(String(DEFAULT_RELAY_PORT)), "agent-metrics.mjs still carries a bare relay-port literal");
+    assert.match(source, /origin: new URL\(reportUrl\)\.origin/, "the session reporter's Origin header must be derived from reportUrl");
+  });
+
+  it("the browser face carries exactly one mirror constant and pinned HTML placeholders", () => {
+    // panel.js is a module-free browser script: it cannot import the shared
+    // constant, so it keeps a single mirror whose value this pin controls.
+    const panelJs = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
+    assert.equal(panelJs.split(String(DEFAULT_RELAY_PORT)).length - 1, 1, "panel-ui/panel.js must carry the relay port only as the RELAY_PORT mirror constant");
+    assert.match(panelJs, new RegExp(`const RELAY_PORT = ${DEFAULT_RELAY_PORT};`), "panel-ui/panel.js's RELAY_PORT mirror drifted off the shared relay port");
+    const panelHtml = readFileSync(new URL("../panel-ui/panel.html", import.meta.url), "utf8");
+    assert.match(panelHtml, new RegExp(`Relay 运行中 \\(${DEFAULT_RELAY_PORT}\\)`), "panel.html's relay status placeholder drifted off the shared relay port");
+    assert.match(panelHtml, new RegExp(`127\\.0\\.0\\.1:${DEFAULT_RELAY_PORT}`), "panel.html's host placeholder drifted off the shared relay port");
   });
 });
