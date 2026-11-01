@@ -7316,6 +7316,23 @@ async function api(method, path, body) {
     }, { passive: true });
   }
 
+  // 五枚 xterm 资产（xterm.js / xterm.css / fit / unicode11 / webgl）由 panel.html
+  // 静态引用，本脚本同为 defer 且排在其后：走到这里四个脚本的全局与样式表都已定形，
+  // 缺哪枚在此可对账。此前缺失全链路无声——脚本标签无 onerror、下方消费闸静默跳过、
+  // 唯一的 WebGL 告警又包在 webgl 全局存在的分支里（资产缺失时恰好不可达）。这里
+  // 开屏对账一次，缺什么记什么（console 日志，不属界面文案）；降级行为原样保留，
+  // 服务端对同一缺失另有 404 日志（见 panel.mjs 的 servePanelFile）。
+  const missingXtermAssets = [
+    !window.Terminal && "xterm.js",
+    !window.FitAddon && "xterm-fit.js",
+    !window.Unicode11Addon && "xterm-unicode11.js",
+    !window.WebglAddon && "xterm-webgl.js",
+    !document.querySelector('link[href="/panel/assets/xterm.css"]')?.sheet && "xterm.css",
+  ].filter(Boolean);
+  if (missingXtermAssets.length) {
+    console.warn("[terminal] xterm assets missing, terminal runs degraded:", missingXtermAssets.join(", "));
+  }
+
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;

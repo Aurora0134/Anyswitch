@@ -53,10 +53,10 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   return { req, res, json };
 }
 
-function routerWith({ relayStatus, relayResult, pulledAgents, metricsCollector } = {}) {
+function routerWith({ relayStatus, relayResult, pulledAgents, metricsCollector, logger = null } = {}) {
   return createPanelRouter({
     storePaths: { root: "C:/fake/anyswitch" },
-    logger: null,
+    logger,
     metricsCollector: metricsCollector ?? null,
     startTime: 123456,
     getRelayStatusFn: async () => relayStatus ?? { status: "stopped", pid: null, port: 47821 },
@@ -2288,11 +2288,18 @@ describe("panel router body limit + panel.html lookup chain", () => {
     const saved = process.env.ANYSWITCH_PANEL_HTML;
     process.env.ANYSWITCH_PANEL_HTML = join(tmpdir(), "anyswitch-panel-missing", "panel.html");
     try {
-      const router = routerWith();
+      // 缺失要落日志（资产 404 此前零日志、前端静默降级，排障无从下手）：钉住 warn
+      // 携带解析后的路径，缺失哪枚资产一眼可查。
+      const warnings = [];
+      const router = routerWith({ logger: { warn: (m) => warnings.push(String(m)) } });
       const { req, res, json } = fakeReqRes("/panel", "GET");
       await router.handle(req, res);
       assert.equal(res.statusCode, 404);
       assert.equal(json().error, "panel.html not found");
+      assert.ok(
+        warnings.some((m) => m.includes("404") && m.includes(process.env.ANYSWITCH_PANEL_HTML)),
+        "404 落 warn 日志且携带缺失资产的解析路径",
+      );
     } finally {
       if (saved !== undefined) process.env.ANYSWITCH_PANEL_HTML = saved;
       else delete process.env.ANYSWITCH_PANEL_HTML;
@@ -2382,40 +2389,66 @@ describe("panel router logo asset", () => {
   });
 });
 
-describe("panel router xterm unicode11 asset", () => {
-  // 文件名漂移回归钉：@xterm/addon-unicode11 打包后 lib/ 实物为 addon-unicode11.js
-  // （UMD，全局 window.Unicode11Addon.Unicode11Addon，与 panel.js 实例化处一致），
-  // 并非按包名推断的 unicode11.js。环境装了依赖（装机/开发机）就必须真 200；
-  // 包在而文件名再漂移时 readFileSync 抛错转红，不允许静默跳过。
-  const addonPkgDir = new URL("../node_modules/@xterm/addon-unicode11/", import.meta.url);
-  const addonFile = new URL("../node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js", import.meta.url);
-  const addonInstalled = existsSync(addonPkgDir);
+describe("panel router xterm assets", () => {
+  // 五枚 xterm 资产实物钉：静态路由必须与 node_modules 打包实物逐字节对上。环境装了
+  // 依赖（装机/开发机）就必须真 200；包在而路径或文件名再漂移时 readFileSync 抛错转红，
+  // 不允许静默跳过。起因是 unicode11 的文件名漂移：@xterm/addon-unicode11 打包后
+  // lib/ 实物为 addon-unicode11.js（UMD，全局 window.Unicode11Addon.Unicode11Addon，
+  // 与 panel.js 实例化处一致），并非按包名推断的 unicode11.js——其余四枚同享这道钉。
+  const assetPins = [
+    {
+      route: "/panel/assets/xterm.js", pkg: "../node_modules/@xterm/xterm/", file: "lib/xterm.js",
+      type: "text/javascript; charset=utf-8", marker: "Terminal",
+      markerNote: "UMD 包导出全局 Terminal（panel.js 以 window.Terminal 实例化）",
+    },
+    { route: "/panel/assets/xterm.css", pkg: "../node_modules/@xterm/xterm/", file: "css/xterm.css", type: "text/css; charset=utf-8" },
+    {
+      route: "/panel/assets/xterm-fit.js", pkg: "../node_modules/@xterm/addon-fit/", file: "lib/addon-fit.js",
+      type: "text/javascript; charset=utf-8", marker: "FitAddon",
+      markerNote: "UMD 包导出全局 FitAddon（panel.js 以 window.FitAddon.FitAddon 实例化）",
+    },
+    {
+      route: "/panel/assets/xterm-unicode11.js", pkg: "../node_modules/@xterm/addon-unicode11/", file: "lib/addon-unicode11.js",
+      type: "text/javascript; charset=utf-8", marker: "Unicode11Addon",
+      markerNote: "UMD 包导出全局 Unicode11Addon（panel.js 以 window.Unicode11Addon.Unicode11Addon 实例化）",
+    },
+    {
+      route: "/panel/assets/xterm-webgl.js", pkg: "../node_modules/@xterm/addon-webgl/", file: "lib/addon-webgl.js",
+      type: "text/javascript; charset=utf-8", marker: "WebglAddon",
+      markerNote: "UMD 包导出全局 WebglAddon（panel.js 以 window.WebglAddon.WebglAddon 实例化）",
+    },
+  ];
+  for (const pin of assetPins) {
+    const installed = existsSync(new URL(pin.pkg, import.meta.url));
 
-  it("GET /panel/assets/xterm-unicode11.js serves the packaged UMD bundle, including query params", { skip: !addonInstalled }, async () => {
-    const expected = readFileSync(addonFile, "utf8");
-    const router = routerWith();
-    for (const path of ["/panel/assets/xterm-unicode11.js", "/panel/assets/xterm-unicode11.js?startup=1&v=2"]) {
-      const { req, res } = fakeReqRes(path, "GET", null, { host: "127.0.0.1:47820" });
+    it(`GET ${pin.route} serves the packaged bundle, including query params`, { skip: !installed }, async () => {
+      const expected = readFileSync(new URL(pin.pkg + pin.file, import.meta.url), "utf8");
+      const router = routerWith();
+      for (const path of [pin.route, `${pin.route}?startup=1&v=2`]) {
+        const { req, res } = fakeReqRes(path, "GET", null, { host: "127.0.0.1:47820" });
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.headers["content-type"], pin.type);
+        assert.equal(res.headers["cache-control"], "no-cache");
+        assert.ok(res.headers.etag, "响应带 ETag（size-mtimeMs 派生）");
+        assert.equal(res.headers.location, undefined);
+        assert.equal(res.body, expected);
+        if (pin.marker) {
+          assert.ok(res.body.includes(pin.marker), pin.markerNote);
+        }
+      }
+    });
+
+    it(`HEAD ${pin.route} returns headers without redirect`, { skip: !installed }, async () => {
+      const router = routerWith();
+      const { req, res } = fakeReqRes(pin.route, "HEAD", null, { host: "127.0.0.1:47820" });
       await router.handle(req, res);
       assert.equal(res.statusCode, 200);
-      assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
+      assert.equal(res.headers["content-type"], pin.type);
       assert.equal(res.headers["cache-control"], "no-cache");
-      assert.ok(res.headers.etag, "响应带 ETag（size-mtimeMs 派生）");
       assert.equal(res.headers.location, undefined);
-      assert.equal(res.body, expected);
-      assert.ok(res.body.includes("Unicode11Addon"), "UMD 包导出全局 Unicode11Addon（panel.js 以 window.Unicode11Addon.Unicode11Addon 实例化）");
-    }
-  });
-
-  it("HEAD /panel/assets/xterm-unicode11.js returns JavaScript headers without redirect", { skip: !addonInstalled }, async () => {
-    const router = routerWith();
-    const { req, res } = fakeReqRes("/panel/assets/xterm-unicode11.js", "HEAD", null, { host: "127.0.0.1:47820" });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
-    assert.equal(res.headers["cache-control"], "no-cache");
-    assert.equal(res.headers.location, undefined);
-  });
+    });
+  }
 });
 
 describe("panel router route-chain runtime", () => {
