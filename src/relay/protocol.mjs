@@ -45,6 +45,41 @@ function convertContentToOpenAI(content) {
   return parts;
 }
 
+// Anthropic tool_result content -> OpenAI tool-message text + any images.
+//
+// Images must NOT ride the tool message: role:"tool" carries text only, so an
+// image embedded there could only go upstream as its JSON-serialized base64 —
+// as TEXT. That inflates each image roughly two orders of magnitude in tokens
+// (observed: a 270KB PNG ≈ 1.2K tokens as vision input vs ≈100K tokens of
+// base64 text) and pushes long tool-heavy sessions past the upstream's context
+// window, surfacing as a bare 400 on every model the client switches to.
+// Instead the images travel as a user message with real image_url parts right
+// after the tool message, so a vision-capable upstream actually sees them.
+//
+// Arrays without any image block keep the legacy whole-array JSON.stringify —
+// that shape is load-bearing for existing text-only sessions.
+function renderToolResultContent(content) {
+  if (typeof content === "string") return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: JSON.stringify(content ?? ""), images: [] };
+  if (!content.some((block) => block !== null && typeof block === "object" && block.type === "image")) {
+    return { text: JSON.stringify(content), images: [] };
+  }
+  const textParts = [];
+  const images = [];
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    if (block.type === "image") {
+      const converted = convertContentToOpenAI([block]);
+      if (Array.isArray(converted)) images.push(...converted);
+    } else if (block.type === "text") {
+      textParts.push(block.text ?? "");
+    } else {
+      textParts.push(JSON.stringify(block));
+    }
+  }
+  return { text: textParts.join("\n"), images };
+}
+
 // Anthropic tool_use / tool_result blocks map onto OpenAI tool_calls and
 // role:"tool" messages. Returns the list of OpenAI messages for one Anthropic
 // message, because a single Anthropic message can fan out into several.
@@ -65,16 +100,18 @@ function convertMessage(message, midSystemRewrite = false) {
   const out = [];
 
   // tool_result blocks become standalone role:"tool" messages and must precede
-  // any assistant content in the same turn.
+  // any assistant content in the same turn. Images found inside follow each
+  // tool message as their own user message (see renderToolResultContent).
   for (const result of toolResults) {
+    const rendered = renderToolResultContent(result.content);
     out.push({
       role: "tool",
       tool_call_id: result.tool_use_id,
-      content:
-        typeof result.content === "string"
-          ? result.content
-          : JSON.stringify(result.content ?? ""),
+      content: rendered.text,
     });
+    if (rendered.images.length > 0) {
+      out.push({ role: "user", content: rendered.images });
+    }
   }
 
   if (toolUses.length > 0) {

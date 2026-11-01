@@ -596,6 +596,141 @@ test("anthropicToOpenAI converts tool_use and tool_result", () => {
   assert.equal(out.messages[1].tool_call_id, "t1");
 });
 
+test("tool_result 含图片：图拆成紧随的 user 图片消息，文本留在 tool 消息", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: { path: "a.png" } }] },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+                { type: "text", text: "[read a.png]" },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    "m",
+  );
+  assert.equal(out.messages[0].role, "assistant");
+  assert.equal(out.messages[1].role, "tool");
+  assert.equal(out.messages[1].tool_call_id, "t1");
+  assert.equal(out.messages[1].content, "[read a.png]");
+  assert.ok(!JSON.stringify(out.messages[1]).includes("QUJD"));
+  assert.equal(out.messages[2].role, "user");
+  assert.deepEqual(out.messages[2].content, [
+    { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+  ]);
+});
+
+test("tool_result 纯文本数组维持 JSON 字符串形态（无图不走新路径）", () => {
+  const content = [
+    { type: "text", text: "a" },
+    { type: "text", text: "b" },
+  ];
+  const out = anthropicToOpenAI(
+    { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content }] }] },
+    "m",
+  );
+  assert.equal(out.messages.length, 1);
+  assert.equal(out.messages[0].role, "tool");
+  assert.equal(out.messages[0].content, JSON.stringify(content));
+});
+
+test("tool_result 只有图片：tool 消息文本留空，图片消息照常拆出", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [{ type: "image", source: { type: "url", url: "https://example.invalid/x.png" } }],
+            },
+          ],
+        },
+      ],
+    },
+    "m",
+  );
+  assert.equal(out.messages[1].role, "tool");
+  assert.equal(out.messages[1].content, "");
+  assert.deepEqual(out.messages[2].content, [
+    { type: "image_url", image_url: { url: "https://example.invalid/x.png" } },
+  ]);
+});
+
+test("tool_result 多个文本块与多张图：文本换行拼接，图全部进同一条紧随的 user 消息", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "text", text: "first" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "QQ==" } },
+                { type: "text", text: "second" },
+                { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "Qg==" } },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    "m",
+  );
+  assert.equal(out.messages[1].content, "first\nsecond");
+  assert.equal(out.messages[2].role, "user");
+  assert.deepEqual(out.messages[2].content, [
+    { type: "image_url", image_url: { url: "data:image/png;base64,QQ==" } },
+    { type: "image_url", image_url: { url: "data:image/jpeg;base64,Qg==" } },
+  ]);
+});
+
+test("tool_result 拆图后与同消息纯文本的顺序：tool → 图片消息 → 纯文本消息", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read", input: {} }] },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+                { type: "text", text: "done" },
+              ],
+            },
+            { type: "text", text: "next instruction" },
+          ],
+        },
+      ],
+    },
+    "m",
+  );
+  assert.deepEqual(
+    out.messages.map((m) => m.role),
+    ["assistant", "tool", "user", "user"],
+  );
+  assert.equal(out.messages[3].content, "next instruction");
+});
+
 test("anthropicToOpenAI drops Claude Code's fixed reasoning_effort", () => {
   const out = anthropicToOpenAI(
     { reasoning_effort: "high", messages: [{ role: "user", content: "hi" }] },
