@@ -5638,7 +5638,12 @@ async function api(method, path, body) {
       && typeof window !== "undefined" && typeof window.confirm === "function"
       && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return false;
     if (session && session.backend) {
-      api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalId)}/close`).catch(() => {});
+      // /close 失败必须出声：本地登记随手已摘、视口随即销毁，服务端进程树却还活着
+      // （1s 轮询会让页签复活），确认框「将中断任务」在失败那一刻是假话。panelError
+      // 顺带把被折叠的服务端原文记进控制台与面板日志（宿主对持久化失败本就刻意回
+      // 500 供这里消费，不能弃收）。
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalId)}/close`)
+        .catch((err) => { toast(panelError(err, "无法关闭这个终端"), true); });
       delete terminalBackendSessions[terminalId];
     } else if (session) {
       delete terminalPreviewSessions[terminalId];
