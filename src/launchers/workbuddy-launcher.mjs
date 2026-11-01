@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync, existsSync, readdirSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, createSessionReporter, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
@@ -140,8 +141,8 @@ export function buildWorkbuddyLauncherEnv({ instanceId = buildInstanceId(), base
   // Guarded like the grok launcher: an explicit null means "no instance tag",
   // and a null reaching child_process.spawn would become the literal "null".
   if (instanceId) env.ANYSWITCH_INSTANCE_ID = instanceId;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   for (const key of UPSTREAM_ENV_KEYS) delete env[key];
   return env;
 }

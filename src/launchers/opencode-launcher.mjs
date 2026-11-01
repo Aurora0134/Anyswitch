@@ -4,9 +4,10 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
-import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
+import { createAgentMetricsCollector, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
 import {
   readOpencodeConfig,
@@ -114,7 +115,8 @@ export { resolveOpencodeExecutable };
 
 // Unified per-instance id: `<cwd basename>-<launcher pid>`, basename scrubbed
 // to the relay's accepted charset [A-Za-z0-9._:-] and the whole id capped at
-// 64 chars; falls back to `<endpoint>-<pid>` when the basename scrubs to empty. The launcher process
+// INSTANCE_ID_MAX_LEN; falls back to `<endpoint>-<pid>` when the basename
+// scrubs to empty. The launcher process
 // maps 1:1 to a client instance, so its own pid is the discriminator.
 export function buildInstanceId({
   cwd = process.cwd(),
@@ -123,7 +125,7 @@ export function buildInstanceId({
 } = {}) {
   const base = basename(cwd).replace(/[^A-Za-z0-9._:-]/g, "-");
   const id = base ? `${base}-${pid}` : `${endpoint}-${pid}`;
-  return id.slice(0, 64);
+  return id.slice(0, INSTANCE_ID_MAX_LEN);
 }
 
 export function buildOpencodeLauncherEnv({ token, instanceId, base = {} }) {
@@ -136,8 +138,8 @@ export function buildOpencodeLauncherEnv({ token, instanceId, base = {} }) {
   // client was not started through the launcher: the header expands empty
   // and the relay drops it (sanitizeInstanceId), as before.
   if (instanceId) env.ANYSWITCH_AGENT_INSTANCE = instanceId;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return env;
 }
 

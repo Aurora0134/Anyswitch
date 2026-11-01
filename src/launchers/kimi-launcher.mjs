@@ -21,6 +21,8 @@ import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { startProductionRelay } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
+import { INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import {
   extractManagedProviders,
   deriveAnyswitchChannel,
@@ -32,8 +34,6 @@ import {
 } from "./kimi-merge-config.mjs";
 import { catalogForRoot } from "../catalog/effort-catalog.mjs";
 import { loadSettings } from "../relay/relay-settings.mjs";
-
-const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 
 export function kimiConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".kimi-code", "config.toml");
@@ -89,9 +89,10 @@ export async function writeKimiConfig(store, port, token, sidecarRoot, configPat
 
 // Unified per-instance id (same scheme as the other endpoint launchers):
 // `<cwd basename>-<launcher pid>`, basename scrubbed to the relay's accepted
-// charset [A-Za-z0-9._:-] and the whole id capped at 64 chars; falls back to
-// `<endpoint>-<pid>` when the basename scrubs to empty. The launcher process
-// maps 1:1 to a client instance, so its own pid is the discriminator.
+// charset [A-Za-z0-9._:-] and the whole id capped at INSTANCE_ID_MAX_LEN;
+// falls back to `<endpoint>-<pid>` when the basename scrubs to empty. The
+// launcher process maps 1:1 to a client instance, so its own pid is the
+// discriminator.
 export function buildInstanceId({
   cwd = process.cwd(),
   pid = process.pid,
@@ -99,7 +100,7 @@ export function buildInstanceId({
 } = {}) {
   const base = basename(cwd).replace(/[^A-Za-z0-9._:-]/g, "-");
   const id = base ? `${base}-${pid}` : `${endpoint}-${pid}`;
-  return id.slice(0, 64);
+  return id.slice(0, INSTANCE_ID_MAX_LEN);
 }
 
 // Build the child environment for kimi-code. Same pattern as Claude Code
