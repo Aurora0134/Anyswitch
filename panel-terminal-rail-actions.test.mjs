@@ -4,6 +4,8 @@
 // 取样惯例照 panel-terminal-rail.test.mjs：源码字符串断言 + 按函数名切源码进桩环境。
 // M13 追加：归档/撤销 FLIP（退场幽灵行＋flip 门＋armed 门）、toast 动效（入场/
 // 淡出/瞬时收场）与 toast 第二钮「筛选已归档会话」（文案逐字批准，全文件唯一新增文案）。
+// 2026-11-01 追加 live 闸（归档即杀）：会话有终端开着时归档先弹二次确认，确认后走行内
+// × 同一条 terminalCloseTerminal 链路关掉再归档；取消确认或关闭被拦都不归档。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -195,22 +197,32 @@ function rowHtmlSandbox(prefs) {
 }
 
 // 归档/撤销交互沙盒（S1 与 M13 共用）：归档两分支真跑——本地态、POST、toast opts。
-const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [] }, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} } } = {}) => {
-  const log = { posts: [], toasts: [], renders: 0, removed: [], flipModes: [], viewChoice: null };
-  const fn = new Function("session", "log", "apiImpl", "prefs", "viewPrefs", `
+// 2026-11-01 追加 live 闸：会话有终端开着时归档＝二次确认＋归档即杀（走行内 × 同一
+// 条 terminalCloseTerminal 链路）。沙盒默认无 live 会话（window 置 undefined，生产
+// 浏览器里 confirm 恒在）；live 三分支由 openSessions 注入、window 桩收 confirm。
+const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [] }, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, openSessions = null, windowImpl } = {}) => {
+  const log = { posts: [], toasts: [], renders: 0, removed: [], flipModes: [], viewChoice: null, confirms: [], closes: [], railRenders: 0, tabRenders: 0 };
+  const fn = new Function("session", "log", "apiImpl", "prefs", "viewPrefs", "openSessions", "windowImpl", `
     let terminalRailPrefs = prefs;
     let terminalRailHistory = { endpoint: "kimi", sessions: [session], fetchedAt: 1, error: null };
     let terminalRailFlipMode = "instant";
     const terminalRailMotionArmed = false;
     const terminalRailViewPrefs = viewPrefs;
+    const window = windowImpl;
     function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
     function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
     function panelError(err, fallback) { return fallback; }
-    function renderTerminalRail() { log.renders += 1; }
+    function renderTerminalRail() { log.renders += 1; log.railRenders += 1; }
     function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); }
+    function renderTerminalPreviewTabs() { log.tabRenders += 1; }
     function terminalRailAgentId() { return "kimi"; }
     function $(id) { return null; }
     function applyTerminalRailViewChoice(field, value) { log.viewChoice = { field, value }; }
+    function terminalRailFindOpenSession(endpoint, id) {
+      if (!openSessions) return null;
+      return openSessions.find((row) => row && row.resume && row.resume.endpoint === endpoint && row.resume.id === id) || null;
+    }
+    function terminalCloseTerminal(id) { log.closes.push(id); return true; }
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailMotionEnabled")}
     ${extractFn("terminalRailSnapshotMotion")}
@@ -223,7 +235,7 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
       unarchive: (endpoint, id) => terminalRailUnarchiveSession(endpoint, id),
       prefs: () => terminalRailPrefs,
     };
-  `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs);
+  `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs, openSessions, windowImpl);
   return { fn, log };
 };
 
@@ -322,7 +334,7 @@ describe("S1 会话归档（finding 1a）", () => {
       assert.deepEqual(fn.prefs().archived, [{ endpoint: "kimi", id: "s-1" }], "本地态先进清单（不等网络往返）");
       assert.ok(log.renders >= 1, "本地重渲一次（列表里瞬时消失）");
       assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/archive", body: { endpoint: "kimi", id: "s-1" } }],
-        "POST 归档，无确认、无二次交互");
+        "POST 归档（无 live 终端——平静会话单击即归档，无确认）");
       await flush();
       assert.equal(log.toasts.length, 1, "成功后一句 toast");
       assert.equal(log.toasts[0].msg, "会话已归档。", "文案逐字");
@@ -367,9 +379,12 @@ describe("S1 会话归档（finding 1a）", () => {
       const fn = new Function("log", `
         let terminalRailPrefs = { archived: [], removedGroups: [] };
         let terminalRailHistory = { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null };
+        const window = undefined;
         function api() { log.posts.push("boom"); return Promise.resolve(); }
         function toast() { log.toasts.push("boom"); }
         function renderTerminalRail() {}
+        function terminalRailFindOpenSession() { return null; }
+        function terminalCloseTerminal() { return true; }
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailArchiveSession")}
         return terminalRailArchiveSession;
@@ -379,6 +394,87 @@ describe("S1 会话归档（finding 1a）", () => {
       assert.deepEqual(log.posts, [], "找不到会话不发请求");
       assert.equal(log.toasts.length, 0, "也不提示");
       assert.equal(log.renders, 0, "不重渲");
+    });
+
+    // 2026-11-01 用户拍板：活会话归档＝二次确认（硬闸）＋归档即杀。文案逐字批准。
+    describe("live 会话归档闸（归档即杀）", () => {
+      const LIVE_SESSION = { id: "s-live", endpoint: "kimi", title: "在跑的会话", project: "C:\\dev\\alpha" };
+      const OPEN = { id: "t-9", resume: { endpoint: "kimi", id: "s-live" } };
+
+      it("确认＝先关终端再归档：确认文案逐字、关闭走行内 × 同一条链路", async () => {
+        const confirms = [];
+        const w = { confirm: (msg) => { confirms.push(msg); return true; } };
+        const { fn, log } = runArchive(LIVE_SESSION, { openSessions: [OPEN], windowImpl: w });
+        fn.archive();
+        assert.deepEqual(confirms, ["这条会话的终端还在运行，归档将同时关闭该终端。确定归档吗？"], "确认文案逐字");
+        assert.deepEqual(log.closes, ["t-9"], "关的是开着那条终端（归档即杀）");
+        assert.deepEqual(fn.prefs().archived, [{ endpoint: "kimi", id: "s-live" }], "关掉后才归档");
+        assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/archive", body: { endpoint: "kimi", id: "s-live" } }],
+          "POST 落盘照常");
+        assert.ok(log.tabRenders >= 1 && log.railRenders >= 1, "关终端后页签与栏各重渲一次（与行内 × 同拍）");
+        await flush();
+        assert.equal(log.toasts.length, 1, "归档成功 toast 照常");
+      });
+
+      it("取消确认＝不归档、不关终端、不发请求", async () => {
+        const log0 = { confirms: [] };
+        const w = { confirm: (msg) => { log0.confirms.push(msg); return false; } };
+        const { fn, log } = runArchive(LIVE_SESSION, { openSessions: [OPEN], windowImpl: w });
+        fn.archive();
+        await flush();
+        assert.equal(log0.confirms.length, 1, "确认弹了一次");
+        assert.deepEqual(log.closes, [], "终端不动");
+        assert.deepEqual(fn.prefs().archived, [], "不归档");
+        assert.deepEqual(log.posts, [], "不发请求");
+        assert.equal(log.toasts.length, 0, "无提示（取消即回到操作前）");
+      });
+
+      it("关闭被拦（× 自带的 working 确认被取消）＝归档一并放弃", async () => {
+        const w = { confirm: () => true };
+        const log = { posts: [], toasts: [], renders: 0, removed: [], flipModes: [], viewChoice: null, confirms: [], closes: [], railRenders: 0, tabRenders: 0 };
+        const fn = new Function("log", `
+          let terminalRailPrefs = { archived: [], removedGroups: [] };
+          let terminalRailHistory = { endpoint: "kimi", sessions: [{ id: "s-live", endpoint: "kimi", title: "t" }], fetchedAt: 1, error: null };
+          let terminalRailFlipMode = "instant";
+          const terminalRailMotionArmed = false;
+          const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+          const window = { confirm: () => true };
+          function api(method, path, body) { log.posts.push({ method, path, body }); return Promise.resolve(); }
+          function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
+          function panelError(err, fallback) { return fallback; }
+          function renderTerminalRail() { log.renders += 1; }
+          function renderTerminalRailHistory() { log.renders += 1; }
+          function renderTerminalPreviewTabs() { log.tabRenders += 1; }
+          function terminalRailAgentId() { return "kimi"; }
+          function $(id) { return null; }
+          function applyTerminalRailViewChoice() {}
+          function terminalRailFindOpenSession() { return { id: "t-9", resume: { endpoint: "kimi", id: "s-live" } }; }
+          function terminalCloseTerminal() { return false; } // 用户在 × 的 working 确认上点了取消
+          ${extractFn("terminalRailArchivedKey")}
+          ${extractFn("terminalRailMotionEnabled")}
+          ${extractFn("terminalRailSnapshotMotion")}
+          ${extractFn("terminalRailMountExitGhosts")}
+          ${extractFn("terminalRailRerenderExitFlip")}
+          ${extractFn("terminalRailArchiveSession")}
+          return { archive: () => terminalRailArchiveSession("s-live"), prefs: () => terminalRailPrefs };
+        `)(log);
+        fn.archive();
+        await flush();
+        assert.deepEqual(fn.prefs().archived, [], "终端没关成就归档——归档即杀不许只杀一半");
+        assert.deepEqual(log.posts, [], "不发请求");
+        assert.equal(log.tabRenders, 0, "什么都没发生，不重渲页签");
+      });
+
+      it("无 live 终端＝旧行为：不弹确认、直接归档", async () => {
+        const log0 = { confirms: [] };
+        const w = { confirm: (msg) => { log0.confirms.push(msg); return true; } };
+        const { fn, log } = runArchive(SESSION, { openSessions: [], windowImpl: w });
+        fn.archive();
+        await flush();
+        assert.equal(log0.confirms.length, 0, "平静会话单击即归档（既有口径不动）");
+        assert.deepEqual(log.closes, [], "没有可关的终端");
+        assert.deepEqual(fn.prefs().archived, [{ endpoint: "kimi", id: "s-1" }], "归档照常");
+      });
     });
   });
 
@@ -413,7 +509,7 @@ describe("S1 会话归档（finding 1a）", () => {
       assert.ok(panelCss.includes(".rail-term-row-history:hover .rail-term-row-time { display: none; }"),
         "hover 时时间让位动作钮（dsh 同款取舍，见既有注释）");
       assert.ok(!panelCss.includes(".rail-term-row-open:hover .rail-term-row-archive"),
-        "「打开的终端」行没有归档钮（打开中的终端不受归档影响）");
+        "「打开的终端」行没有归档钮");
     });
 
     it("文案清单逐字：归档会话 / 会话已归档。/ 撤销，不新造", () => {
@@ -3512,6 +3608,10 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       function panelError(err, fallback) { return fallback; }
       function terminalRailAgentId() { return "kimi"; }
       function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); swap(); }
+      // live 闸桩（2026-11-01）：FLIP 沙盒只演归档视图动效，终端全不开着——归档无确认直落。
+      function terminalRailFindOpenSession() { return null; }
+      function terminalCloseTerminal() { return true; }
+      function renderTerminalPreviewTabs() {}
       ${extractFn("terminalRailMotionKey")}
       ${extractFn("terminalRailMotionEntries")}
       ${extractFn("terminalRailArchivedKey")}
