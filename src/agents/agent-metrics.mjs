@@ -451,6 +451,15 @@ export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 export const WORKBUDDY_SESSION_ROW_PREFIX = "workbuddy-sess-";
 const WORKBUDDY_SESSION_ROW_IDLE_TTL_MS = 30 * 60 * 1000;
 
+// WB 会话行的注册表缺席宽限。行的生死正源与身份正源同为注册表：GUI 内核删掉
+// 该会话的 <pid>.json（用户关会话/暂停）＝「注册表不再列出」；但 runtime 池
+// 换代时旧 <pid>.json 已删、新 <pid>.json 未写（同一 sessionId 的换代空窗，
+// 真机 2026-11-01 实测 181–284s），缺席判定必须盖过它，否则活会话的行会在
+// 每次换代之间闪没、账随行蒸发（a9aee08 的跨 pid 保账倒退）。6 分钟＝实测
+// 最大空窗 284s ＋ 注册表快照 15s 缓存 ＋ 扫描抖动的两倍余量。真正关闭的
+// 会话（注册行删了不再回来）持续缺席过线即收行；期间行保留（待命态）。
+const WORKBUDDY_SESSION_ROW_REGISTRY_GRACE_MS = 6 * 60 * 1000;
+
 // Session-granular row ids, keyed by the endpoint that mints them. Both declare
 // no owning PID: liveness is the endpoint's process family (plus, for codex
 // only, an idle TTL).
@@ -468,9 +477,9 @@ const SESSION_ROW_PREFIXES = Object.freeze({
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
   opencode: null,
-  // WB 会话行的空闲档：会话可被用户暂停（runtime 被池回收、注册表行被内核删
-  // 除），之后随一条新请求复活到新 pid 上。30 分钟覆盖「暂停后闲着」的常见窗
-  // 而不把昨天的会话一直挂着；期间行保留（待命态），数据不清零。
+  // WB 会话行的空闲档现在只是兜底：注册表说会话还开着（wbSessionOpen）的行
+  // 不吃空闲淘汰，生死改由注册表缺席宽限判（见上）；只有注册表读不出
+  // （fail-open 判不了生死）的轮次才退回这条 30 分钟档，防止孤儿行永挂。
   workbuddy: WORKBUDDY_SESSION_ROW_IDLE_TTL_MS,
 });
 
@@ -1070,17 +1079,19 @@ const WORKBUDDY_SESSIONS_DIRNAME = "sessions";
 
 // WB 注册表全目录扫描（loadSessionInfo("workbuddy") 的默认实现）：每个
 // <pid>.json 一条 {id: sessionId, title: cwd 基名}。同 sessionId 多个 pid（换代
-// 窗口）以最新的为准；读不出的文件跳过，扫描失败向上抛由调用方落空表。
+// 窗口）以最新的为准；读不出的文件跳过。返回 null ＝ 目录读不出（未知态，
+// 调用方 fail-open，不等于「没有会话」）；返回数组（可为空）＝ 扫描成功。
 async function listWorkbuddySessionMetas(configRoot) {
-  if (typeof configRoot !== "string" || configRoot.length === 0) return [];
+  if (typeof configRoot !== "string" || configRoot.length === 0) return null;
   const { readdirSync } = await import("node:fs");
   const metas = [];
   const dir = join(configRoot, WORKBUDDY_SESSIONS_DIRNAME);
   let names;
   try {
     names = readdirSync(dir);
-  } catch {
-    return [];
+  } catch (err) {
+    // 目录不存在（还没写过任何注册行）＝合法空表；其余读不出＝未知。
+    return err && err.code === "ENOENT" ? [] : null;
   }
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
@@ -3251,14 +3262,22 @@ export function createAgentMetricsCollector(options = {}) {
     if (cached !== undefined && now - cached.at < SESSION_LOOKUP_TTL_MS) return cached.byId;
     const injected = sessionLookups[agentId] ?? null;
     let sessions = [];
+    // WB 通道多记一位「这轮扫描到底成没成」：空表（全部会话已关）与读不出
+    // 是两回事——生死判死只信前者。其余 agent 维持原契约（失败落空表）。
+    let scanOk = true;
     try {
       if (agentId === "workbuddy") {
         // WB 会话标题：注册表全目录 → {id: sessionId, title: cwd 基名}。注入的
         // workbuddySessionDirectory 返回同形数组；默认扫 workbuddySessionRoot
-        // 的 sessions/ 目录（与逐 pid 注册表同一棵树）。
-        sessions = injected !== null
+        // 的 sessions/ 目录（与逐 pid 注册表同一棵树）。null ＝ 读不出（未知）。
+        const metas = injected !== null
           ? await injected()
           : await listWorkbuddySessionMetas(workbuddySessionRoot);
+        if (metas === null) {
+          scanOk = false;
+        } else {
+          sessions = metas;
+        }
       } else {
         sessions = injected !== null
           ? await injected()
@@ -3266,13 +3285,24 @@ export function createAgentMetricsCollector(options = {}) {
       }
     } catch {
       sessions = []; // a scan failure must never break the status read
+      if (agentId === "workbuddy") scanOk = false;
     }
     const byId = new Map();
     for (const meta of Array.isArray(sessions) ? sessions : []) {
       if (meta && typeof meta.id === "string") byId.set(meta.id, meta);
     }
-    sessionInfoCache.set(agentId, { at: now, byId });
+    sessionInfoCache.set(agentId, { at: now, byId, ok: scanOk });
     return byId;
+  }
+
+  // WB 注册表快照（会话行生死判死专用，标题读取不需要区分读出/读不出）。
+  // ok=false ＝ 本轮目录读不出（fail-open，该轮不判生死）；ok=true 时 byId
+  // 允许是空 Map（全部会话已关＝合法缺席）。与标题读取共用 loadSessionInfo
+  // 的 15s 缓存，一轮至多一次目录扫描。
+  async function loadWorkbuddyRegistrySnapshot() {
+    const byId = await loadSessionInfo("workbuddy");
+    const cached = sessionInfoCache.get("workbuddy");
+    return { ok: cached !== undefined && cached.ok === true, byId };
   }
 
   // Terminal-join feed for the session-granular instance identities. The
@@ -3444,6 +3474,13 @@ export function createAgentMetricsCollector(options = {}) {
   // existed. Two consecutive trusted zero rounds is the verdict; any round that
   // sees the family clears the streak.
   const sessionRowFamilyMisses = new Map();
+
+  // WB 会话行的注册表缺席起点，keyed "<bucket>:<instId>"。注册表（行的身份
+  // 正源）不再列出该 sessionId ＝ 内核已删该会话的注册行；缺席持续过宽限
+  // （WORKBUDDY_SESSION_ROW_REGISTRY_GRACE_MS，盖过 runtime 换代空窗）才收
+  // 行。注册表重新列出（复活/换代完成）即清零重计；快照读不出的轮既不推进
+  // 也不清零，缺席计时按墙钟走、不受读盘抖动重置。
+  const sessionRowRegistryAbsentSince = new Map();
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -4564,6 +4601,17 @@ export function createAgentMetricsCollector(options = {}) {
     // Remaining custom ids (no numeric tail —
     // normalizeInstanceId already had its say at ingest) keep the idle TTL; an
     // instance with in-flight requests never expires on that path.
+    // WB 会话行的注册表生死判据要先拿到本轮注册表快照（15s 缓存，与标题读取
+    // 共享同一次目录扫描）。卡上没有 WB 行时不扫；读不出落 null——该轮对 WB
+    // 行 fail-open，缺席计时既不推进也不清零。
+    let wbRegistrySnapshot = null;
+    if (instanceBuckets.workbuddy.size > 0) {
+      try {
+        wbRegistrySnapshot = await loadWorkbuddyRegistrySnapshot();
+      } catch {
+        wbRegistrySnapshot = null;
+      }
+    }
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
       // Endpoints with an ENGINE subset reconcile their canonical rows against
@@ -4589,6 +4637,23 @@ export function createAgentMetricsCollector(options = {}) {
         const pidMatch = instId.match(pidIdRe);
         const sessionRowPrefix = SESSION_ROW_PREFIXES[bucket] ?? null;
         const isSessionRow = sessionRowPrefix !== null && instId.startsWith(sessionRowPrefix);
+        // WB 会话行的注册表生死三态：true＝注册表列着（会话开着）、false＝
+        // 没列着（缺席）、null＝本轮判不了（没快照/快照读不出/不是 WB 行）。
+        // 「列着」只依赖注册表文件本身，不完整轮也算数；「缺席」的收行判定
+        // 要核注册行 pid 的死活（内核崩溃残留的孤儿文件按缺席处理），只信
+        // 可信轮——不完整轮的 pid 集不全，核不了就不判缺席。
+        let wbSessionOpen = null;
+        if (bucket === "workbuddy" && isSessionRow && wbRegistrySnapshot !== null && wbRegistrySnapshot.ok) {
+          const meta = wbRegistrySnapshot.byId.get(instId.slice(WORKBUDDY_SESSION_ROW_PREFIX.length)) ?? null;
+          if (meta === null) {
+            wbSessionOpen = countsTrusted ? false : null;
+          } else if (!countsTrusted) {
+            wbSessionOpen = true;
+          } else {
+            const metaPid = typeof meta.pid === "number" ? meta.pid : null;
+            wbSessionOpen = metaPid === null || livePids.size === 0 || livePids.has(metaPid);
+          }
+        }
         // 冷缓存收敛：启动器注入的 "<cwd>-<launcher pid>" 在扫描缓存没赶上
         // 会话启动（或看板关闭期间缓存不刷新——请求路径只同步读缓存、从
         // 不触发扫描）时折不进规范形，落成自定义 id 行；缓存跟上后后续请
@@ -4666,6 +4731,20 @@ export function createAgentMetricsCollector(options = {}) {
             evict = misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
           } else {
             sessionRowFamilyMisses.delete(missKey);
+            if (bucket === "workbuddy" && wbSessionOpen !== null) {
+              // 家族活着时的 WB 会话行生死：注册表说了算。开着＝清缺席计时；
+              // 缺席＝计时推进（墙钟），持续过宽限且无在途请求才收行——
+              // 在途请求本身就是会话还在被服务的证据，等它收尾再判。判不了
+              // ＝不动计时，既不推进也不清零。
+              if (wbSessionOpen) {
+                sessionRowRegistryAbsentSince.delete(missKey);
+              } else {
+                const absentSince = sessionRowRegistryAbsentSince.get(missKey) ?? now;
+                sessionRowRegistryAbsentSince.set(missKey, absentSince);
+                evict = entry.state.activeRequests === 0
+                  && now - absentSince >= WORKBUDDY_SESSION_ROW_REGISTRY_GRACE_MS;
+              }
+            }
           }
         } else if (countsTrusted && bucket === "codex") {
           const tail = instId.match(/-(\d+)$/);
@@ -4687,6 +4766,7 @@ export function createAgentMetricsCollector(options = {}) {
           settleLeakedInstanceRequests(bucket, entry.state, now);
           instMap.delete(instId);
           sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
+          sessionRowRegistryAbsentSince.delete(`${bucket}:${instId}`);
           continue;
         }
         // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
@@ -4703,10 +4783,14 @@ export function createAgentMetricsCollector(options = {}) {
           const idleTtlMs = isSessionRow ? SESSION_ROW_IDLE_TTL_MS[bucket] : INSTANCE_IDLE_TTL_MS;
           // 空闲 TTL 只管剩下这档「声明不了属主、判不了进程生死」的自定义行
           // （启动器注入的临时 id 等）；codex 会话行用自己的 5 分钟档。稳定
-          // 桌面行的生死走上面的进程家族判据，与空闲时长无关。
-          if (idleTtlMs !== null && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
+          // 桌面行的生死走上面的进程家族判据，与空闲时长无关。WB 会话行在
+          // 注册表说「开着」时整条跳过（生死归注册表缺席宽限管，开着就不该
+          // 按静默收行）；TTL 只兜注册表读不出/判不了生死那档的场。
+          if (idleTtlMs !== null && wbSessionOpen !== true
+            && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
             sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
+            sessionRowRegistryAbsentSince.delete(`${bucket}:${instId}`);
           }
         }
       }
