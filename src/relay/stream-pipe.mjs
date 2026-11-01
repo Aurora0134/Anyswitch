@@ -23,7 +23,7 @@ import { StreamTranslator, SSEParser, sseEvent } from "./stream.mjs";
 import { ResponsesSseTranslator } from "./responses-translate.mjs";
 import { computeRetryDelay } from "../shared/keepalive-backoff.mjs";
 import { resolveKeepAliveEnabled } from "./relay-settings.mjs";
-import { openAIError } from "./openai-handler.mjs";
+import { openAIError, buildResumeBody } from "./openai-handler.mjs";
 import { errorBody } from "./handler.mjs";
 
 const SSE_HEADERS = {
@@ -57,6 +57,20 @@ export function sleepWithAbort(ms, signal) {
   });
 }
 
+// 一次续接只报告「这一段」产出的内容；下一次发往上游的请求必须带上客户端至
+// 今为止看到的全部输出，否则第二次续接只会把最后一段拼进 messages——模型会从
+// 半截处重新开始，而不是接着写。文本直接相连（上一段正是断在字中），工具调用
+// 按顺序累积。
+export function mergeResumeShadow(prev, segment) {
+  if (prev === null || prev === undefined) return segment ?? null;
+  if (segment === null || segment === undefined) return prev;
+  return {
+    text: `${prev.text ?? ""}${segment.text ?? ""}`,
+    reasoning: `${prev.reasoning ?? ""}${segment.reasoning ?? ""}`,
+    calls: [...(prev.calls ?? []), ...(segment.calls ?? [])],
+  };
+}
+
 // 全灭上下文：请求跨多个上游扇出、全部失败时，客户端只拿到末位上游的原始报错
 // ——常是某个死号的 401，读起来像「密钥坏了」，把排查引向换号。这里给末位报错
 // 文本追加尝试数；只动 message 不动错误体结构（服务端无按 message 内容分支的
@@ -88,25 +102,42 @@ export function appendFailoverContext(result, attemptedMembers) {
 //   responsesCtx: Responses channel only — the original Responses request
 //            body, the translator's ctx (tool-name classification, response
 //            field echo)
-//   enhanced: whole-turn hold (Plan A anti-truncation)
-//   pings:   emit ": ping" SSE comments while the turn is held (OpenAI and
-//            per-launch Anthropic channels; the resident Anthropic channel
-//            sends no pings)
+//   onTier:  the keep-alive "on" tier — a mid-response cut is resumed by
+//            re-issuing the request with the shadow appended. Off tier hands
+//            the truncation to the client as a coded error frame instead.
 //   fillChunkEnvelope: OpenAI passthrough only — grok's strict chunk struct
 //            needs id/created/model on every chunk, so the guard repairs
 //            genuine gaps before forwarding. null (default) leaves the
 //            stream byte-identical for every other client.
-export async function pipeGuardedStream(res, upstreamBody, { format, wireId, responsesCtx, enhanced = false, pings = false, tracker = null, abortController = null, fillChunkEnvelope = null }) {
+export async function pipeGuardedStream(res, upstreamBody, { format, wireId, responsesCtx, onTier = false, tracker = null, abortController = null, fillChunkEnvelope = null, resumeState = null }) {
   const isOpenAI = format === "openai";
   const isResponses = format === "responses";
-  const guard = new OpenAIStreamGuard({ holdEntireTurn: enhanced, fillChunkEnvelope });
-  const translator = isOpenAI ? null : isResponses ? new ResponsesSseTranslator(responsesCtx) : new StreamTranslator(wireId);
+  // A resume re-enters this function for the same logical response. The
+  // translator carries the client's view across the seam: reusing it keeps
+  // message_start / response.created from being emitted twice and lets a
+  // continued text delta land in the content block that is already open.
+  // The guard's chunk envelope likewise survives, so the upstream's second
+  // generation cannot change id/created/model mid-stream.
+  const guard = new OpenAIStreamGuard({
+    fillChunkEnvelope,
+    envelopeSeed: resumeState?.envelope ?? null,
+    // Calls the client already has from earlier segments: the guard drops a
+    // replayed copy instead of letting the tool run twice.
+    priorCalls: resumeState?.priorCalls ?? [],
+  });
+  const translator = isOpenAI
+    ? null
+    : resumeState?.translator ?? (isResponses ? new ResponsesSseTranslator(responsesCtx) : new StreamTranslator(wireId));
+  if (resumeState?.translator) translator.markContinuing?.();
   const parser = isOpenAI ? null : new SSEParser();
   const decoder = new TextDecoder();
   let committed = false; // real content bytes were sent (pings do not count)
   let firstChunkObserved = false;
   let usageExtracted = null;
   let clientAborted = false;
+  // Set when the verdict is "resume": the response stays open so the next
+  // upstream attempt can append its output to the same SSE stream.
+  let heldOpenForResume = false;
   let sseBuffer = ""; // OpenAI passthrough: raw-line buffer for usage extraction
 
   // Take the stream lock ourselves: the pipe reads through this reader, and a
@@ -160,7 +191,7 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
   };
 
   // OpenAI passthrough: forward guarded text verbatim. firstChunk is marked by
-  // the caller before emit, never inside it — under whole-turn hold the pass
+  // the caller before emit, never inside it — on the pre-content hold the pass
   // verdict flushes the turn through emit without a recordFirstChunk, exactly
   // as the original copy did.
   const emit = (text) => {
@@ -183,29 +214,6 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
       }
     }
   };
-
-  // Plan A (enhanced anti-truncation): the whole turn is withheld until the
-  // guard's verdict, so the client would otherwise see dead air for the
-  // entire generation. SSE comment pings keep the connection observably
-  // alive; they commit the headers, so any terminal fault after this point
-  // must ride an SSE error frame instead of a 5xx status line.
-  let pingTimer = null;
-  if (pings) {
-    const ping = () => {
-      if (clientAborted || res.destroyed || res.writableEnded) return;
-      try {
-        if (!res.headersSent) {
-          res.writeHead(200, SSE_HEADERS);
-        }
-        res.write(": ping\n\n");
-      } catch {
-        // client socket already gone
-      }
-    };
-    ping();
-    pingTimer = setInterval(ping, 5000);
-    pingTimer.unref?.();
-  }
 
   // OpenAI passthrough only: scan raw decoded lines for a usage payload,
   // including bytes the guard still holds.
@@ -238,18 +246,10 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
         processSseLine(line);
       }
       const safe = guard.chunk(text);
-      // Enhanced hold: the bytes stay withheld (safe stays empty), but the
-      // upstream first token must still timestamp the tracker — TPS divides
-      // by the generation segment, not the whole request.
       if (safe) markFirstChunk();
-      else if (enhanced && guard.hasProvenContent()) markFirstChunk();
       emit(safe);
     } else {
       const guarded = guard.chunk(text);
-      // Enhanced hold: the bytes stay withheld, but the upstream first token
-      // must still timestamp the tracker — TPS divides by the generation
-      // segment, not the whole request.
-      if (enhanced && guard.hasProvenContent()) markFirstChunk();
       feed(guarded);
     }
   };
@@ -277,11 +277,9 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
         sseBuffer += flushTail;
         const safeTail = guard.chunk(flushTail);
         if (safeTail) markFirstChunk();
-        else if (enhanced && guard.hasProvenContent()) markFirstChunk();
         emit(safeTail);
       } else {
         const guarded = guard.chunk(flushTail);
-        if (enhanced && guard.hasProvenContent()) markFirstChunk();
         feed(guarded);
       }
     }
@@ -298,7 +296,7 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     const verdict = guard.finish();
 
     // 1/2. The stream ended while still holding (incomplete tool call,
-    // mid-turn cut under whole-turn hold, or a clean but provably empty
+    // mid-turn cut on the pre-content hold, or a clean but provably empty
     // stream) -> retryable candidate, as long as no content was delivered.
     // The Anthropic copies asked the guard only — holding implies uncommitted
     // there — while the OpenAI copy also tested !committed explicitly; both
@@ -334,6 +332,45 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
       return { outcome: "ok", committed, usage: usageExtracted };
     }
 
+    // Mid-response truncation. Two tiers:
+    //
+    //   - off tier: surface the fault. The error frame replaces [DONE]
+    //     client-side, the panel latches a 502, and the retry is the
+    //     caller's problem. The numeric code (502) rides along so a
+    //     downstream agent that retries on a status code can recognise it.
+    //   - on tier: resume. The pipe returns the shadow (what the client
+    //     has already seen) so the keep-alive loop can re-issue the same
+    //     request with the partial output appended. No error frame, no
+    //     terminal verdict — the client never learns the stream was cut.
+    //
+    // A cut before any content was forwarded is a clean retry, not a
+    // resume: there is nothing to continue from. The on tier is the only one
+    // that resumes — the off tier hands the fault to the client.
+    const canResume =
+      onTier === true &&
+      verdict.truncated === true &&
+      (verdict.action === "error" || verdict.action === "reject") &&
+      guard.resumeShadow() !== null;
+    if (canResume) {
+      heldOpenForResume = true;
+      return {
+        outcome: "resume",
+        reason: verdict.reason,
+        committed,
+        // The shadow is what the caller appends to the original request:
+        // assistant text, reasoning, and every completed tool call.
+        shadow: guard.resumeShadow(),
+        // Everything the next attempt must inherit to look like the same
+        // response: the translator (open content blocks, no second
+        // message_start) and the guard's chunk envelope.
+        resumeState: { translator, envelope: guard.envelope },
+        usage: usageExtracted,
+        // The verdict's three-slot error is unused while the resume succeeds,
+        // but if the budget runs out it is what the client ends up reading.
+        error: verdict.error,
+      };
+    }
+
     // Malformation only surfaced after content was already delivered. A
     // truncated=true verdict (mid-word cut, or tool args that never parse)
     // is an upstream fault: the error frame replaces [DONE] / message_stop
@@ -365,12 +402,18 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     const errorType = verdict.error?.error?.type || "api_error";
     const errorMessage = verdict.error?.error?.message
       || "the upstream stream was truncated after content was delivered";
-    // The numeric code (502) rides along so downstream agents that
-    // auto-retry on a status code can recognise this as an upstream fault
-    // instead of aborting the turn on an uncoded error.
-    const errorCode = verdict.truncated
-      ? (verdict.error?.error?.code ?? UPSTREAM_INCOMPLETE_CODE)
-      : null;
+      // The numeric code (502) rides along so downstream agents that
+      // auto-retry on a status code can recognise this as an upstream fault
+      // instead of aborting the turn on an uncoded error.
+      const errorCode = verdict.truncated
+        ? (verdict.error?.error?.code ?? UPSTREAM_INCOMPLETE_CODE)
+        : null;
+      // A truncation that could have been resumed but wasn't (off tier, or
+      // the budget is spent) is still an upstream fault — the caller latches
+      // the 502 so the panel sees it.
+      if (verdict.truncated) {
+        tracker?.recordEnd?.({ status: 502, error: { status: 502, message: errorMessage }, usage: usageExtracted });
+      }
     res.write(isResponses
       ? translator.fail(errorMessage, errorType, errorCode)
       : sseEvent("error", errorBody(errorType, errorMessage, errorCode)));
@@ -410,13 +453,16 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
       : sseEvent("error", errorBody("api_error", "the upstream stream failed mid-response", UPSTREAM_INCOMPLETE_CODE)));
     return { outcome: "terminal", committed, error: "the upstream stream failed mid-response", usage: usageExtracted };
   } finally {
-    if (pingTimer) clearInterval(pingTimer);
     res.removeListener("close", onResClose);
     // Belt-and-braces upstream teardown for early exits (client abort, stream
     // error). On normal completion the stream is already closed and this
     // resolves as a no-op.
     cancelUpstream();
-    if (committed) {
+    // A resume hands the still-open response back to the keep-alive loop: the
+    // client's connection must survive so the continued output can be appended
+    // to the same SSE stream. Every other path (ok / terminal / retryable)
+    // closes the response here, exactly as before.
+    if (committed && !heldOpenForResume) {
       res.end();
     }
   }
@@ -505,6 +551,12 @@ export async function runStreamWithKeepAlive(res, channel) {
   // and the exhausted counter below must not claim a spent retry budget when
   // none was configured (keep-alive off tier or maxRetries 0).
   let attemptsUsed = 0;
+  // The resume path's accumulated shadow: everything the client has already
+  // seen, re-appended to the original request on every resume attempt.
+  let resumeShadow = null;
+  // Translator + chunk envelope carried across resume attempts, so the
+  // continued generation lands inside the response the client already sees.
+  let resumeState = null;
 
   // A member's definitive failure before the last member: count the failed
   // attempt against the actual member and log the failover, then advance.
@@ -535,7 +587,11 @@ export async function runStreamWithKeepAlive(res, channel) {
 
       let result;
       try {
-        result = await member.call();
+        // Resume: the previous attempt's shadow is re-appended to the
+        // original request, so the upstream continues from the partial
+        // output instead of starting over.
+        const callOptions = resumeShadow !== null ? { overrideBody: buildResumeBody(channel.originalBody, resumeShadow) } : {};
+        result = await member.call(callOptions);
       } catch (err) {
         if (abortController.signal.aborted) {
           tracker?.recordEnd({ aborted: true });
@@ -587,17 +643,43 @@ export async function runStreamWithKeepAlive(res, channel) {
       }
 
       // Stream received; attempt to forward via the channel's pipe
-      const outcome = await pipe(result, keepAliveConfig);
+      const outcome = await pipe(result, keepAliveConfig, resumeState);
       if (outcome.outcome !== "retryable" || outcome.reason !== "empty_stream" || attempt === 0) {
         lastOutcome = outcome;
       }
 
-      if (outcome.outcome !== "retryable") {
+      if (outcome.outcome !== "retryable" && outcome.outcome !== "resume") {
         // Success or already committed/aborted/terminal. A committed stream
         // (real content bytes written) never fails over to another member.
         if (outcome.outcome === "ok") channel.onMemberSuccess?.(member);
         channel.onSettled(outcome, attempt);
         return;
+      }
+
+      // Resume: the client has already seen some content, but the stream was
+      // cut. The loop re-issues the same upstream with the partial output
+      // appended — the client never learns the stream was cut. The budget is
+      // shared with the empty-stream retry above.
+      if (outcome.outcome === "resume") {
+        // The shadow is the client's view so far. A null shadow means the
+        // client saw nothing, so this is a clean retry, not a resume.
+        resumeShadow = mergeResumeShadow(resumeShadow, outcome.shadow ?? null);
+        resumeState = {
+          ...(outcome.resumeState ?? {}),
+          priorCalls: resumeShadow?.calls ?? [],
+        };
+        if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
+          tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
+          logger?.warn?.(`keep-alive: resuming ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
+          try {
+            await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
+          } catch {
+            tracker?.recordEnd({ aborted: true });
+            return;
+          }
+          continue;
+        }
+        // Budget spent: fall through to the exhaustion path below.
       }
 
       // Retryable failure detected before any content was delivered — unless the
@@ -651,7 +733,25 @@ export async function runStreamWithKeepAlive(res, channel) {
     return;
   }
   const lastMember = callUpstreams[callUpstreams.length - 1];
-  const retryCtx = { mode: keepAliveConfig?.mode ?? "enhanced", maxRetries, attemptsUsed };
+  const retryCtx = { mode: keepAliveConfig?.mode ?? "on", maxRetries, attemptsUsed };
+  // A resume that exhausted its budget ends the turn with the same 502 a
+  // never-resumed cut would have carried — the client saw the partial output,
+  // and the error frame tells it the rest never came. Each attempt past the
+  // first was one resume, so the count in the message is attemptsUsed - 1;
+  // with no resume attempted (maxRetries 0) the guard's own mid-cut wording
+  // stands, which is why the verdict error is carried through the resume
+  // outcome in the first place.
+  const resumeAttempts = Math.max(0, attemptsUsed - 1);
+  if (lastOutcome?.outcome === "resume" && resumeAttempts > 0) {
+    lastOutcome = {
+      ...lastOutcome,
+      error: openAIError(
+        "api_error",
+        `上游响应在输出中途中断，续接 ${resumeAttempts} 次仍未完成，内容可能不完整`,
+        UPSTREAM_INCOMPLETE_CODE,
+      ),
+    };
+  }
   const message = channel.exhaustedMessage(lastOutcome, retryCtx);
   tracker?.recordEnd?.({
     status: 502,
@@ -675,7 +775,7 @@ export async function runStreamWithKeepAlive(res, channel) {
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, fillChunkEnvelope = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
+export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, fillChunkEnvelope = null, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -683,14 +783,17 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
     tracker,
     abortController,
     callUpstream,
+    // The request body as the client sent it. A resume re-issues it with the
+    // partial output appended (see buildResumeBody); the loop reads it here.
+    originalBody,
     callUpstreams,
     shouldFailover,
     onMemberSuccess,
     onMemberFault,
     logLabel: "request",
-    pipe: (result, keepAliveConfig) => {
-      const enhanced = keepAliveConfig?.mode === "enhanced";
-      return pipeGuardedStream(res, result.stream, { format: "openai", enhanced, pings: enhanced, tracker, abortController, fillChunkEnvelope });
+    pipe: (result, keepAliveConfig, resumeState = null) => {
+      const onTier = keepAliveConfig?.mode === "on";
+      return pipeGuardedStream(res, result.stream, { format: "openai", onTier, tracker, abortController, fillChunkEnvelope, resumeState });
     },
     onCallError: (err) => {
       tracker?.recordEnd({ status: 500, error: { status: 500, message: err.message } });
@@ -748,12 +851,16 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
       logger?.warn?.(`${head} (${lastOutcome?.reason ?? "empty_stream"}): ${message}`);
     },
     sendExhausted: (message, lastOutcome) => {
-      // Under whole-turn hold the SSE headers were already committed by the
-      // keep-alive pings, so the definitive error must ride an SSE data line,
-      // not a 5xx status line the wire can no longer carry.
+      // Once content has been delivered the SSE headers are long gone, so the
+      // definitive error must ride an SSE data line, not a 5xx status line the
+      // wire can no longer carry.
       if (res.headersSent) {
+        // A spent resume budget still reports the upstream-incomplete code:
+        // the client holds partial output and must be able to tell this fault
+        // apart from a generic upstream error.
+        const code = lastOutcome?.error?.error?.code ?? null;
         try {
-          res.write(`data: ${JSON.stringify(openAIError("api_error", message))}\n\n`);
+          res.write(`data: ${JSON.stringify(openAIError("api_error", message, code))}\n\n`);
         } catch {
           // socket already gone
         }
@@ -767,7 +874,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
         sendJson(
           res,
           502,
-          openAIError("api_error", "the upstream stream failed before any content was delivered"),
+          openAIError("api_error", "the upstream stream failed before any content was delivered", UPSTREAM_INCOMPLETE_CODE),
         );
       } else {
         // The final branch is exactly the empty-stream set of exhaustedMessage,
@@ -790,7 +897,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
 // frame instead of a status line the wire can no longer carry.
 // Pool routing (phase 2): same callUpstreams / shouldFailover /
 // onMemberSuccess contract as the other channels.
-export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
+export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
   const logger = deps?.logger;
   const writeFailedFrame = (message, type) => {
     try {
@@ -806,14 +913,17 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
     tracker,
     abortController,
     callUpstream,
+    // The request body as the client sent it. A resume re-issues it with the
+    // partial output appended (see buildResumeBody); the loop reads it here.
+    originalBody,
     callUpstreams,
     shouldFailover,
     onMemberSuccess,
     onMemberFault,
     logLabel: "responses request",
-    pipe: (result, keepAliveConfig) => {
-      const enhanced = keepAliveConfig?.mode === "enhanced";
-      return pipeGuardedStream(res, result.stream, { format: "responses", responsesCtx, enhanced, pings: enhanced, tracker, abortController });
+    pipe: (result, keepAliveConfig, resumeState = null) => {
+      const onTier = keepAliveConfig?.mode === "on";
+      return pipeGuardedStream(res, result.stream, { format: "responses", responsesCtx, onTier, tracker, abortController, resumeState });
     },
     onCallError: (err) => {
       tracker?.recordEnd({ status: 500, error: { status: 500, message: err.message } });
@@ -881,7 +991,7 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
         sendJson(
           res,
           502,
-          openAIError("api_error", "the upstream stream failed before any content was delivered"),
+          openAIError("api_error", "the upstream stream failed before any content was delivered", UPSTREAM_INCOMPLETE_CODE),
         );
       } else {
         // The final branch is exactly the empty-stream set of exhaustedMessage,
@@ -894,15 +1004,14 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
 }
 
 // Anthropic channels (resident relay /v1/messages and per-launch relay).
-// name/logLabel carry the two variants' log wording; the resident channel
-// sends no keep-alive pings and stays silent once headers are committed at
-// exhaustion, while the per-launch channel pings and rides an `event: error`
-// frame — the two variants differ on purpose; do not unify them.
+// name/logLabel carry the two variants' log wording; everything else is
+// shared. A turn whose output already reached the client ends on an
+// `event: error` frame — silence would leave the client waiting forever.
 // Pool routing: the server passes callUpstreams (one callable per
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, name, logLabel, pings, writeFrameWhenHeadersSent }) {
+export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, name, logLabel }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -910,14 +1019,17 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ag
     tracker,
     abortController,
     callUpstream,
+    // The request body as the client sent it. A resume re-issues it with the
+    // partial output appended (see buildResumeBody); the loop reads it here.
+    originalBody,
     callUpstreams,
     shouldFailover,
     onMemberSuccess,
     onMemberFault,
     logLabel,
-    pipe: (result, keepAliveConfig) => {
-      const enhanced = keepAliveConfig?.mode === "enhanced";
-      return pipeGuardedStream(res, result.stream, { format: "anthropic", wireId: result.wireId, enhanced, pings: pings && enhanced, tracker, abortController });
+    pipe: (result, keepAliveConfig, resumeState = null) => {
+      const onTier = keepAliveConfig?.mode === "on";
+      return pipeGuardedStream(res, result.stream, { format: "anthropic", wireId: result.wireId, onTier, tracker, abortController, resumeState });
     },
     onCallError: (err) => {
       tracker?.recordEnd({ error: { status: 500, message: err?.message || "relay error" } });
@@ -973,20 +1085,22 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ag
         : `${name} relay: keep-alive empty upstream (no retry configured)`;
       logger?.warn?.(`${head} (${lastOutcome?.reason ?? "empty_stream"}): ${message}`);
     },
-    sendExhausted: (message) => {
+    sendExhausted: (message, lastOutcome) => {
+      // A spent resume budget still reports the upstream-incomplete code: the
+      // client holds partial output and must be able to tell this fault apart
+      // from a generic upstream error.
+      const code = lastOutcome?.error?.error?.code ?? null;
       if (res.headersSent) {
-        if (!writeFrameWhenHeadersSent) return;
-        // Whole-turn hold committed the headers via keep-alive pings; the
-        // definitive error must ride an `event: error` SSE frame instead of a
-        // 5xx status line the wire can no longer carry.
+        // The headers are already on the wire, so the definitive error must
+        // ride an `event: error` SSE frame instead of a 5xx status line.
         try {
-          res.write(sseEvent("error", errorBody("api_error", message)));
+          res.write(sseEvent("error", errorBody("api_error", message, code)));
         } catch {
           // socket already gone
         }
         res.end();
       } else {
-        sendJson(res, 502, errorBody("api_error", message));
+        sendJson(res, 502, errorBody("api_error", message, code));
       }
     },
   };
@@ -1002,7 +1116,9 @@ function anthropicExhaustedMessage(lastOutcome, retryCtx) {
   if (
     (lastOutcome?.reason === "incomplete_tool_call" ||
       lastOutcome?.reason === "truncated_tool_args" ||
-      lastOutcome?.reason === "mid_word_truncation") &&
+      lastOutcome?.reason === "mid_word_truncation" ||
+      lastOutcome?.reason === "malformed_json_chunk" ||
+      lastOutcome?.reason === "think_only_incomplete") &&
     lastOutcome.error
   ) {
     exhaustedMessage = lastOutcome.error.error?.message || lastOutcome.error.message || exhaustedMessage;

@@ -50,12 +50,12 @@ describe("OpenAIStreamGuard", () => {
     assert.equal(emitted + verdict.tail, sse, "a healthy stream must be byte-identical");
   });
 
-  it("under whole-turn hold a late-arriving tool name does not release the stream; held bytes flush at finish", () => {
-    // Under whole-turn hold a pure tool-call stream
-    // stays held even once the call has id + name + parseable args: the name
-    // arriving late no longer releases mid-stream, but the stream still
-    // passes at finish with all bytes flushed verbatim.
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+  it("a late-arriving tool name releases the stream once the call is complete", () => {
+    // A call proves the stream usable only at id + name. Until then the
+    // pre-content hold keeps its bytes; once complete, the whole call is
+    // released as one frame (per-call hold), so the client never sees a
+    // half-formed call.
+    const guard = new OpenAIStreamGuard();
     const before = pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a"}]}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}\n\n',
@@ -65,17 +65,12 @@ describe("OpenAIStreamGuard", () => {
     const after = guard.chunk(
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"read"}}]}}]}\n\n',
     );
-    assert.equal(after, "", "a complete tool call no longer releases the hold mid-stream");
+    assert.ok(after.includes('"id":"call_a"'), "a complete call is released");
+    assert.ok(after.includes('"name":"read"'));
 
-    const tail = pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-      "data: [DONE]\n\n",
-    ]);
-    assert.equal(tail, "", "held until the verdict");
     const verdict = guard.finish();
-    assert.equal(verdict.action, "pass");
-    assert.ok(verdict.tail.includes('"id":"call_a"'), "the held bytes flush at finish");
-    assert.ok(verdict.tail.includes('"name":"read"'));
+    assert.equal(guard.finish().action, "error");
+    assert.equal(verdict.reason, "mid_word_truncation", "no terminator ever arrived");
   });
 
   it("converts a nameless tool call after forwarded text into an error event and withholds [DONE]", () => {
@@ -169,18 +164,19 @@ describe("OpenAIStreamGuard", () => {
     // Shape observed against a live upstream: a complete tool call, then a
     // second tool-call index that only ever receives an argument fragment --
     // no id, no name. Strict clients validate accumulated tool calls at
-    // flush and abort on exactly this. Under whole-turn hold the
-    // whole turn stays held, so the verdict is a retryable reject.
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+    // flush and abort on exactly this. The complete call is already on the
+    // wire (per-call hold releases it whole), so the verdict is a terminal
+    // error, never a silent completion.
+    const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"TodoWrite","arguments":""}}]}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\\"x\\":"}}]}}]}\n\n',
       "data: [DONE]\n\n",
     ]);
-    assert.equal(emitted, "", "nothing is forwarded while the verdict is unknown");
+    assert.ok(emitted.includes('"name":"TodoWrite"'), "the complete call reaches the client");
 
     const verdict = guard.finish();
-    assert.equal(verdict.action, "reject", "the orphaned fragment must not pass as a completion");
+    assert.equal(verdict.action, "error", "the orphaned fragment must not pass as a completion");
     assert.equal(verdict.reason, "incomplete_tool_call");
   });
 
@@ -244,7 +240,8 @@ describe("OpenAIStreamGuard", () => {
     const verdict = guard.finish();
     assert.equal(verdict.action, "error");
     assert.equal(verdict.truncated, true);
-    assert.match(verdict.error.error.message, /截断|truncat/i);
+    assert.match(verdict.error.error.message, /中断|截断|truncat/i);
+    assert.equal(verdict.error.error.code, 502, "the cut carries the upstream-incomplete code");
     assert.match(verdict.errorLine, /^data: \{"error":/, "the cut ends in a structured error event, not a terminator line");
   });
 
@@ -273,19 +270,21 @@ describe("OpenAIStreamGuard", () => {
   it("flags silent truncation: stream ends cleanly but a tool call's arguments are not valid JSON", () => {
     // The "静默截断" shape: [DONE] and finish_reason present, the stream looks
     // perfectly healthy — but the accumulated argument string was cut midway,
-    // so it never parses. Under whole-turn hold a pure tool-call
-    // turn stays held, so this is a retryable reject — nothing was sent.
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+    // so it never parses. The call never completed, so its bytes stayed with
+    // the per-call hold — the client saw no broken call, only a turn that
+    // ended in a truncation verdict.
+    const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\\"comma"}}]}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"nd\\":\\"ls -"}}]}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
       "data: [DONE]\n\n",
     ]);
-    assert.equal(emitted, "", "a pure tool-call turn stays held to the end");
+    assert.equal(emitted.includes("bash"), false, "an unparseable call is withheld to the end");
+    assert.equal(emitted.includes("{\"comma"), false, "no argument fragment leaks");
 
     const verdict = guard.finish();
-    assert.equal(verdict.action, "reject", "held bytes were never sent, so the turn is retryable");
+    assert.equal(verdict.action, "error", "the incomplete call never reached the client");
     assert.equal(verdict.reason, "truncated_tool_args");
     assert.equal(verdict.truncated, true);
     assert.match(verdict.error.error.message, /JSON|参数/);
@@ -311,23 +310,23 @@ describe("OpenAIStreamGuard", () => {
     assert.match(verdict.error.error.message, /JSON|参数/);
   });
 
-  it("rejects a held pure tool-call turn that ends with no terminator (mid-turn cut)", () => {
-    // The tool calls parse but [DONE] and finish_reason never arrived:
-    // anything after the last delta may have been lost. Held to the end, so
-    // reject — retryable.
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+  it("flags a complete tool call that ends with no terminator (mid-turn cut)", () => {
+    // The tool call parses but [DONE] and finish_reason never arrived:
+    // anything after the last delta may have been lost. The call itself was
+    // forwarded whole, so this is a post-content truncation verdict.
+    const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}\n\n',
     ]);
-    assert.equal(emitted, "");
+    assert.ok(emitted.includes('"name":"bash"'), "the complete call was released");
     const verdict = guard.finish();
-    assert.equal(verdict.action, "reject");
+    assert.equal(verdict.action, "error");
     assert.equal(verdict.reason, "mid_word_truncation");
     assert.equal(verdict.truncated, true);
   });
 
   it("multi-chunk tool arguments that assemble into valid JSON pass cleanly", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+    const guard = new OpenAIStreamGuard();
     pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\\"comma"}}]}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"nd\\":\\"ls -la\\""}}]}}]}\n\n',
@@ -340,7 +339,7 @@ describe("OpenAIStreamGuard", () => {
   });
 
   it("empty tool arguments (no argument string at all) are valid and pass", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+    const guard = new OpenAIStreamGuard();
     pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"ping","arguments":""}}]}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
@@ -350,104 +349,43 @@ describe("OpenAIStreamGuard", () => {
     assert.equal(verdict.action, "pass");
   });
 
-  it("basic mode releases a complete tool call immediately (empty-stream retry only)", () => {
+  it("per-call hold keeps an open tool call until its arguments parse; truncation still errors", () => {
     const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"bash","arguments":"{\\"c\\":"}}]}}]}\n\n',
     ]);
-    assert.ok(emitted.includes('"name":"bash"'), "basic mode must stream tool calls live");
+    // The call's args do not parse yet, so the frame is withheld — the
+    // client never sees a call's deltas one at a time.
+    assert.ok(!emitted.includes('"name":"bash"'), "an open tool call is withheld until it closes");
     const verdict = guard.finish();
     assert.equal(verdict.action, "error");
     assert.equal(verdict.truncated, true);
   });
 });
 
-describe("holdEntireTurn (plan A: whole-turn hold in enhanced mode)", () => {
-  it("reasoning first does NOT release the hold; healthy turn flushes byte-identical at finish", () => {
-    const sse = [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"let me think"}}]}\n\n',
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"Hel"}}]}\n\n',
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"lo"}}]}\n\n',
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
-      "data: [DONE]\n\n",
-    ].join("");
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
-    const emitted = pump(guard, [sse.slice(0, 40), sse.slice(40)]);
-    assert.equal(emitted, "", "nothing is forwarded before the verdict");
-    const verdict = guard.finish();
-    assert.equal(verdict.action, "pass");
-    assert.equal(emitted + verdict.tail, sse, "a healthy turn must flush byte-identical");
-  });
-
-  it("mid-word truncation after reasoning is retryable, not terminal", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
-    pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"thinking..."}}]}\n\n',
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"partial answ"}}]}\n\n',
-    ]);
-    const verdict = guard.finish();
-    assert.equal(verdict.action, "reject");
-    assert.equal(verdict.reason, "mid_word_truncation");
-    assert.equal(verdict.truncated, true);
-  });
-
-  it("tool-arg truncation after reasoning is retryable", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
-    pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"plan"}}]}\n\n',
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\\"cmd\\":\\"ls"}}]}}]}\n\n',
-    ]);
-    const verdict = guard.finish();
-    assert.equal(verdict.action, "reject");
-    assert.equal(verdict.reason, "truncated_tool_args");
-  });
-
-  it("basic mode is untouched: reasoning still releases the hold live", () => {
-    const guard = new OpenAIStreamGuard();
-    const emitted = pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}\n\n',
-    ]);
-    assert.ok(emitted.includes("reasoning_content"), "basic mode must stream live");
-  });
-
+describe("malformed JSON chunk", () => {
   it("rejects a truncated JSON data line even when later chunks terminate cleanly", () => {
     // Production: glm-5.3 cut a reasoning chunk mid-object (missing closing
     // braces). JSON.parse failed at the client (AI_JSONParseError) because
     // the guard treated the malformed line as a no-op ping and flushed it
-    // verbatim once finish_reason / [DONE] arrived.
+    // verbatim once finish_reason / [DONE] arrived. The line is now dropped on
+    // sight; the turn still ends as a truncation, never as a clean completion.
     const truncated =
       'data: {"choices":[{"delta":{"reasoning_content":" DNS","role":"assistant"},"index":0}],"created":1787675299,"id":"9fd0847c-f8a8-4b7a-b499-c8c8e95306ba","model":"glm-5.3","object":"chat.completion.chunk"\n\n';
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
+    const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [
       truncated,
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
       "data: [DONE]\n\n",
     ]);
-    assert.equal(emitted, "", "whole-turn hold must not emit until finish");
+    assert.equal(emitted.includes("chat.completion.chunk"), false, "the malformed line never reaches the client");
+    assert.ok(emitted.includes("hello"), "clean lines around it still flow");
     const verdict = guard.finish();
-    assert.equal(verdict.action, "reject");
+    assert.equal(verdict.action, "error");
     assert.equal(verdict.reason, "malformed_json_chunk");
     assert.equal(verdict.truncated, true);
     assert.equal(JSON.stringify(verdict).includes("chat.completion.chunk"), false, "the malformed line's bytes must not appear anywhere in the verdict, especially not as a flushable tail");
-  });
-
-  it("hasProvenContent: the upstream first token is observable while whole-turn hold keeps bytes withheld", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
-    assert.equal(guard.hasProvenContent(), false, "an empty stream proves nothing");
-    const emitted = pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n',
-    ]);
-    assert.equal(emitted, "", "whole-turn hold must not emit");
-    assert.equal(guard.hasProvenContent(), true, "text must prove usability even when held");
-  });
-
-  it("hasProvenContent: a complete tool call (id + name) proves content under whole-turn hold", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true });
-    pump(guard, [
-      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"bash","arguments":""}}]}}]}\n\n',
-    ]);
-    assert.equal(guard.hasProvenContent(), true, "a complete tool call must prove usability even when held");
   });
 });
 
@@ -533,7 +471,24 @@ describe("tool-call delta normalization (upstream repeats empty strings on conti
     const emitted = pump(guard, [sse]);
     const verdict = guard.finish();
     assert.equal(verdict.action, "pass");
-    assert.equal(emitted + (verdict.tail || ""), sse, "canonical streams must stay byte-identical");
+    // The per-call hold releases a completed call's withheld bytes verbatim
+    // in one go, so the concatenated output is the canonical stream — just
+    // not in the same chunk order the upstream produced it in. Compare
+    // frame payloads, not raw bytes.
+    const framePayloads = (text) =>
+      text
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .filter((payload) => payload && payload !== "[DONE]")
+        .map((payload) => JSON.stringify(JSON.parse(payload)));
+    const expected = framePayloads(sse);
+    const actual = framePayloads(emitted + (verdict.tail || ""));
+    assert.deepEqual(
+      actual.sort(),
+      expected.sort(),
+      "canonical streams must produce the same frames (order may differ under per-call hold)",
+    );
   });
 });
 
@@ -622,13 +577,12 @@ describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struc
     assert.equal(typeof f.created, "number");
   });
 
-  it("repairs under whole-turn hold too (enhanced keep-alive mode)", () => {
-    const guard = new OpenAIStreamGuard({ holdEntireTurn: true, fillChunkEnvelope: { model: "m" } });
+  it("repairs the whole stream, including the frames the guards hold back", () => {
+    const guard = new OpenAIStreamGuard({ fillChunkEnvelope: { model: "m" } });
     const emitted = pump(guard, capturedFrames);
-    assert.equal(emitted, "", "nothing releases the hold in enhanced mode");
     const verdict = guard.finish();
     assert.equal(verdict.action, "pass");
-    const parsed = frames(verdict.tail);
+    const parsed = frames(emitted + (verdict.tail || ""));
     assert.equal(parsed.length, 4);
     for (const f of parsed) assert.ok(f.id.length > 0 && f.model.length > 0 && typeof f.created === "number");
   });

@@ -160,8 +160,8 @@ describe("openai relay keep-alive anti-truncation", () => {
   // 夹具故意不带 mode：这是 per-launch 兜底中继的现役配置形状——8 个
   // *-launcher.mjs 的 createOpenAIProductionDeps() 都不转发 getKeepAliveConfig，
   // 运行时落到 stream-pipe.mjs 的内置兜底 {enabled:true,maxRetries:1,backoffMs:500}
-  // （同样无 mode）→ enhanced=false → 不打 ping、SSE 头未提交，耗尽走 502 JSON。
-  // 面板常驻链路的 parseKeepAliveConfig 产物恒带 mode，同一场景走 (A4) 的
+  // （同样无 mode）→ 非 on 档、不续接，首字前耗尽走 502 JSON。
+  // 面板常驻链路的 parseKeepAliveConfig 产物恒带 mode:"on"，同一场景走 (A4) 的
   // 200+SSE。两条分支都是现役行为，各有用例钉住，502 与 SSE 并不自相矛盾。
   it("(b) exhausts retries when all attempts return empty stream, returns 502 and keeps fault latched", async () => {
     let callCount = 0;
@@ -287,7 +287,7 @@ describe("openai relay keep-alive anti-truncation", () => {
   });
 
   // 无 mode 夹具同 (b)：per-launch 兜底中继的现役配置形状，耗尽契约是 502 JSON
-  // 而非 enhanced 档的 200+SSE。逐端点开关的语义由 callCount 断言独立承载，
+  // 而非 on 档续接后的 200+SSE。逐端点开关的语义由 callCount 断言独立承载，
   // 在任一档位下都成立；状态断言只负责钉住这条分支的客户端可见契约。
   it("(c2) does NOT retry on an endpoint switched off in the panel, while other endpoints keep retrying", async () => {
     let callCount = 0;
@@ -325,7 +325,6 @@ describe("openai relay keep-alive anti-truncation", () => {
   // 逐块下发（字节真会中途提交），且 maxRetries 照常生效，所以「已提交压过重试
   // 预算」在这里是可区分的真语义：bytes 已到客户端后再炸，不重试，客户端拿到
   // partial content + mid-response 错误帧（stream-pipe.mjs 的 committed 分支）。
-  // enhanced 档整轮持有一个字节都不下发，永远走不到这条路。
   it("(d) does NOT retry when stream was already committed (bytes delivered mid-response)", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
@@ -450,8 +449,8 @@ describe("openai relay keep-alive anti-truncation", () => {
   });
 });
 
-describe("plan A: whole-turn hold in enhanced mode", () => {
-  it("(A1) retries a mid-word truncation after reasoning and delivers the healthy retry verbatim", async () => {
+describe("on tier: mid-response truncation is resumed, not held", () => {
+  it("(A1) resumes a mid-word cut after reasoning; the client sees one continuous turn", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -481,7 +480,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
 
@@ -489,9 +488,12 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       const res = await postChat(port);
       assert.equal(res.status, 200);
       const text = await res.text();
-      assert.ok(!text.includes("partial answ"), "the truncated attempt must never reach the client");
-      assert.ok(text.includes("full answer"), "the retried turn is delivered");
-      assert.ok(text.includes("[DONE]"), "the retried turn terminates cleanly");
+      // 抗截断不再整段扣住：第一段照常下发，续接段接在后面，客户端看到的是
+      // 一条带接缝的完整回复——这与「手动截断后发继续」是同一形状。
+      assert.ok(text.includes("partial answ"), "the first segment reaches the client as it streams");
+      assert.ok(text.includes("full answer"), "the resumed segment is appended");
+      assert.ok(!text.includes('"error"'), "a resumed turn carries no error frame");
+      assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1, "exactly one terminator");
       assert.equal(callCount, 2);
 
       const status = await collector.getAgentsStatus();
@@ -502,7 +504,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     });
   });
 
-  it("(A2) exhausts retries on repeated mid-word truncation; delivers a structured SSE error, not a silent close", async () => {
+  it("(A2) exhausts the resume budget on repeated truncation; the error frame carries 502", async () => {
     const upstreamFetch = async () => ({
       ok: true,
       status: 200,
@@ -515,21 +517,21 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
 
     await withServer(deps, async (port) => {
       const res = await postChat(port);
-      assert.equal(res.status, 200, "headers were already committed by pings; the error must ride SSE");
+      assert.equal(res.status, 200, "content was already streaming; the error must ride SSE");
       const text = await res.text();
-      assert.ok(!text.includes("cut mid"), "truncated bytes must not leak");
-      assert.ok(text.includes('"error"'), "a structured error event replaces the turn");
+      assert.ok(text.includes("cut mid"), "the first segment legitimately reached the client");
+      assert.ok(text.includes('"error"'), "a structured error event ends the turn");
       assert.ok(!/\ndata: \[DONE\]/.test(text), "no bare [DONE] terminator line may ride along");
-      // 管道开跑即同步打首个 ping（stream-pipe.mjs `if (pings) { ping(); … }`），
-      // 所以首字节必是 ': ping'——这才真正钉住了「ping 提交了 SSE 头、错误帧
-      // 只能 ride SSE」的机制；原来的三支析取式被任意 data: 帧满足，恒真。
-      assert.ok(text.startsWith(": ping"), "keep-alive pings committed the SSE headers (first bytes are the ping)");
+      const errorPayload = JSON.parse(
+        text.split("\n").find((line) => line.startsWith("data:") && line.includes('"error"')).slice(5),
+      );
+      assert.equal(errorPayload.error.code, 502, "the terminal frame names the upstream-incomplete code");
 
       const status = await collector.getAgentsStatus();
       const zcode = status.find((a) => a.id === "zcode");
@@ -538,7 +540,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     });
   });
 
-  it("(A3) healthy reasoning-first turn passes through with content intact (no regression in enhanced mode)", async () => {
+  it("(A3) healthy reasoning-first turn passes through with content intact", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -557,7 +559,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
 
@@ -575,7 +577,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     });
   });
 
-  it("(A1b) enhanced mode retries a truncated JSON data line and does not forward it", async () => {
+  it("(A1b) a malformed JSON data line is dropped and the turn is resumed", async () => {
     let callCount = 0;
     const truncated =
       'data: {"choices":[{"delta":{"reasoning_content":" DNS","role":"assistant"},"index":0}],"created":1,"id":"x","model":"glm-5.3","object":"chat.completion.chunk"\n\n';
@@ -605,7 +607,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
     await withServer(deps, async (port) => {
@@ -618,7 +620,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     });
   });
 
-  it("(A3b) enhanced-mode empty stream still retries and recovers despite ping-committed headers", async () => {
+  it("(A3b) an empty stream still retries and recovers", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -644,7 +646,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
     await withServer(deps, async (port) => {
@@ -652,7 +654,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       assert.equal(res.status, 200);
       const text = await res.text();
       assert.ok(text.includes("recovered text"), "client must receive the retried healthy payload");
-      assert.equal(callCount, 2, "ping-committed headers must not block keep-alive retry");
+      assert.equal(callCount, 2);
       const status = await collector.getAgentsStatus();
       const zcode = status.find((a) => a.id === "zcode");
       assert.equal(zcode.metrics.keepAlive.retries, 1);
@@ -660,10 +662,9 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     });
   });
 
-  it("(A4) enhanced-mode empty_stream exhaustion rides SSE error (headers committed by pings)", async () => {
-    // Plan-A semantics: in enhanced mode the SSE headers are committed by the
-    // first keep-alive ping, so even an empty-stream exhaustion can no longer
-    // return a 5xx JSON body — the definitive error rides an SSE data line.
+  it("(A4) an empty-stream exhaustion returns a real HTTP 502, not a 200 with an error frame", async () => {
+    // 整段扣住取消后，空流耗尽时 SSE 头还没发出去——这正是「off 档能发真实
+    // 状态码」的同一条性质在 on 档的延续：能发状态码就不要只发错误帧。
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -679,25 +680,22 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector();
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
     await withServer(deps, async (port) => {
       const res = await postChat(port);
-      assert.equal(res.status, 200, "ping-committed headers force SSE delivery");
+      assert.equal(res.status, 502, "nothing was committed, so the status line can still carry the fault");
       const text = await res.text();
-      assert.ok(text.includes('"error"'));
       assert.match(text, /模型未返回任何内容/);
       assert.equal(callCount, 2);
     });
   });
 
-  it("(A5) enhanced mode timestamps the upstream first token so TPS measures the generation segment", async () => {
-    // Whole-turn hold defers the client delivery to the verdict flush, but the
-    // tracker must still timestamp the upstream first token: TPS = completion
-    // over the generation segment (first token → end), not over the whole
-    // request (which would fold the TTFT into the denominator and understate
-    // the speed by the TTFT share).
+  it("(A5) timestamps the upstream first token so TPS measures the generation segment", async () => {
+    // TPS = completion over the generation segment (first token → end), not
+    // over the whole request (which would fold the TTFT into the denominator
+    // and understate the speed by the TTFT share).
     let fakeNow = 1000;
     const upstreamFetch = async () => ({
       ok: true,
@@ -716,7 +714,7 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
     const collector = createIsolatedCollector({ nowFn: () => fakeNow });
     const deps = createMockDeps({
       upstreamFetch,
-      getKeepAliveConfig: () => ({ enabled: true, mode: "enhanced", maxRetries: 1, backoffMs: 10 }),
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
       metricsCollector: collector,
     });
     await withServer(deps, async (port) => {
@@ -729,6 +727,229 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       // the whole 700ms request instead would give 28.6, so the two are separable.
       assert.ok(Math.abs(zcode.metrics.tps - 66.7) < 1, `tps must reflect the generation segment, got ${zcode.metrics.tps}`);
       assert.ok(Math.abs(zcode.metrics.lastTtftMs - 400) < 5, `ttft must reflect the upstream first token, got ${zcode.metrics.lastTtftMs}`);
+    });
+  });
+});
+describe("keep-alive resume (mid-response truncation, on tier)", () => {
+  it("resumes a mid-word cut: the client sees one SSE stream with no error frame", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        // First attempt: partial output, then the TCP stream dies mid-word.
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream([
+            'data: {"id":"cmpl-1","choices":[{"delta":{"content":"partial output that got cut "}}]}\n\n',
+          ]),
+        };
+      }
+      // Resume attempt: the relay re-issued the request with the partial
+      // output appended; the upstream continues from it.
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"cmpl-2","choices":[{"delta":{"content":"and here is the rest"}}]}\n\n',
+          'data: {"id":"cmpl-2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const collector = createIsolatedCollector();
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 2, backoffMs: 10 }),
+      metricsCollector: collector,
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+
+      // The client sees one continuous stream: the first part, then the
+      // resumed part, then exactly one [DONE].
+      assert.ok(text.includes("partial output that got cut"), "the first part must survive");
+      assert.ok(text.includes("and here is the rest"), "the resumed part must be appended");
+      assert.ok(!text.includes('"error"'), "no error frame may appear mid-stream");
+      const doneCount = (text.match(/data: \[DONE\]/g) || []).length;
+      assert.equal(doneCount, 1, "exactly one terminator");
+      assert.equal(callCount, 2, "upstream was called twice (1 resume)");
+    });
+  });
+
+  it("a think-only turn is resumed: the client sees reasoning, then the answer", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream([
+            'data: {"id":"cmpl-1","choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n',
+            'data: {"id":"cmpl-1","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"cmpl-2","choices":[{"delta":{"content":"the answer"}}]}\n\n',
+          'data: {"id":"cmpl-2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("thinking"), "reasoning must survive");
+      assert.ok(text.includes("the answer"), "the resumed answer must be appended");
+      assert.ok(!text.includes('"error"'));
+      const doneCount = (text.match(/data: \[DONE\]/g) || []).length;
+      assert.equal(doneCount, 1, "exactly one terminator");
+      assert.equal(callCount, 2, "upstream was called twice (1 resume)");
+    });
+  });
+
+  it("budget exhausted: the error frame carries 502 and no [DONE] follows", async () => {
+    const upstreamFetch = async () => ({
+      ok: true,
+      status: 200,
+      body: sseStream([
+        'data: {"id":"cmpl-1","choices":[{"delta":{"content":"partial output"}}]}\n\n',
+      ]),
+    });
+
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("partial output"), "the first part must survive");
+      assert.ok(text.includes('"error"'), "budget exhaustion must end in an error frame");
+      assert.ok(!text.split("\n").some((line) => line.trim() === "data: [DONE]"), "no terminator after a failed resume");
+      const errorPayload = JSON.parse(
+        text.split("\n").find((line) => line.startsWith("data:") && line.includes('"error"')).slice(5),
+      );
+      assert.match(errorPayload.error.message, /续接 1 次仍未完成/, "the message names how many resumes were spent");
+    });
+  });
+
+  it("a second cut resumes from everything the client has seen, not just the last segment", async () => {
+    // Three attempts: two cuts then a clean finish. Each resume request must
+    // carry the accumulated output; carrying only the last segment would
+    // restart the model mid-sentence.
+    const bodies = [];
+    let callCount = 0;
+    const upstreamFetch = async (_urls, init) => {
+      callCount += 1;
+      bodies.push(JSON.parse(init.body));
+      if (callCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream(['data: {"id":"c1","choices":[{"delta":{"content":"part one "}}]}\n\n']),
+        };
+      }
+      if (callCount === 2) {
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream(['data: {"id":"c2","choices":[{"delta":{"content":"part two "}}]}\n\n']),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"c3","choices":[{"delta":{"content":"end"}}]}\n\n',
+          'data: {"id":"c3","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 2, backoffMs: 10 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      const text = await res.text();
+      assert.ok(text.includes("part one "), "first segment survives");
+      assert.ok(text.includes("part two "), "second segment appended");
+      assert.ok(text.includes("end"), "third segment appended");
+      assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1, "exactly one terminator");
+      assert.equal(callCount, 3, "two resumes");
+
+      // 末条是续写指令（user），assistant 预填在它前面。
+      const secondPrefill = bodies[1].messages.at(-2);
+      assert.equal(secondPrefill.role, "assistant");
+      assert.equal(secondPrefill.content, "part one ", "the first resume carries the first segment");
+      const thirdPrefill = bodies[2].messages.at(-2);
+      assert.equal(thirdPrefill.content, "part one part two ", "the second resume carries both segments");
+    });
+  });
+
+  it("drops a tool call the resumed segment replays verbatim", async () => {
+    // 模型偶尔会把切断前已经做完的调用再发一遍。第二次下发会让工具跑两遍。
+    // 第一个调用由第二个调用的起始帧闭合（已下发），截断落在第二个调用的参数
+    // 中途；续接段重放第一个调用时必须被丢掉。
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream([
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\\"path\\":\\"a.txt\\"}"}}]}}]}\n\n',
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"read","arguments":"{\\"path\\":\\"b"}}]}}]}\n\n',
+          ]),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"c2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"read","arguments":"{\\"path\\":\\"a.txt\\"}"}}]}}]}\n\n',
+          'data: {"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      const text = await res.text();
+      const frames = text.split("\n").filter((line) => line.includes("call_a"));
+      assert.equal(frames.length, 1, "the replayed call is dropped, not forwarded twice");
+      assert.equal(callCount, 2, "one resume");
+      assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1, "exactly one terminator");
     });
   });
 });

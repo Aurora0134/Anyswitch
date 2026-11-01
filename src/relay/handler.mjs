@@ -486,7 +486,8 @@ export function createHandler(deps) {
       };
     }
 
-    const upstreamRequest = anthropicToOpenAI(body, modelId);
+    const sourceBody = options.overrideBody !== undefined ? options.overrideBody : body;
+    const upstreamRequest = anthropicToOpenAI(sourceBody, modelId);
     const urls = buildUpstreamURLs(provider, "/chat/completions");
     // Claude names its depth in the raw request and the translator has no
     // OpenAI field to carry it in, so the level is read off the raw body and
@@ -495,7 +496,7 @@ export function createHandler(deps) {
     const { body: injectedRequest, injected } = efforts.inject({
       providerId,
       body: upstreamRequest,
-      clientEffort: clientEffortFromAnthropic(body),
+      clientEffort: clientEffortFromAnthropic(sourceBody),
       // The store row rides along so a channel that states its own levels wins
       // over the library, same rule as the config face.
       model: provider.models?.[modelId],

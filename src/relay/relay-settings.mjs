@@ -19,23 +19,25 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-// Two-tier keep-alive: "off" or "enhanced" (whole-turn hold). The retired
-// "basic" tier is normalized to "enhanced" everywhere it can still arrive
-// (old settings.json, old API clients, ANYSWITCH_KEEPALIVE_MODE).
-export const KEEPALIVE_MODES = Object.freeze(["off", "enhanced"]);
+// Two-tier keep-alive: "off" or "on". The "on" tier resumes a mid-response
+// cut; "off" hands it to the client as a coded 502 frame. The retired
+// "basic" and "enhanced" tiers both fold into "on" everywhere they can still
+// arrive (old settings.json, old API clients, ANYSWITCH_KEEPALIVE_MODE) —
+// "enhanced" was the whole-turn hold, now replaced by the resume path.
+export const KEEPALIVE_MODES = Object.freeze(["off", "on"]);
 
 export const DEFAULT_KEEPALIVE_CONFIG = Object.freeze({
   enabled: true,
-  mode: "enhanced",
+  mode: "on",
   maxRetries: 2,
   backoffMs: 500,
 });
 
 export function normalizeKeepAliveMode(rawMode, enabled) {
   if (rawMode === "off") return "off";
-  if (rawMode === "enhanced" || rawMode === "basic") return "enhanced";
+  if (rawMode === "on" || rawMode === "enhanced" || rawMode === "basic") return "on";
   if (enabled === false) return "off";
-  return "enhanced";
+  return "on";
 }
 
 /** Sparkline is a last-N request window, not a wall-clock TTL. */
@@ -277,10 +279,10 @@ export function parseKeepAliveConfig(rawKeepAlive, env = process.env) {
   // Environment variable override for troubleshooting / diagnostics
   if (env.ANYSWITCH_KEEPALIVE_MODE !== undefined) {
     const m = String(env.ANYSWITCH_KEEPALIVE_MODE).toLowerCase();
-    if (m === "off" || m === "basic" || m === "enhanced") cfg.mode = normalizeKeepAliveMode(m);
+    if (m === "off" || m === "on" || m === "basic" || m === "enhanced") cfg.mode = normalizeKeepAliveMode(m);
   } else if (env.ANYSWITCH_KEEPALIVE_ENABLED !== undefined) {
     const on = env.ANYSWITCH_KEEPALIVE_ENABLED === "1" || env.ANYSWITCH_KEEPALIVE_ENABLED === "true";
-    cfg.mode = on ? "enhanced" : "off";
+    cfg.mode = on ? "on" : "off";
   }
   if (env.ANYSWITCH_KEEPALIVE_RETRIES !== undefined) {
     const parsed = Number.parseInt(env.ANYSWITCH_KEEPALIVE_RETRIES, 10);
@@ -411,7 +413,7 @@ export function saveSettings(settingsPath, patch, env = process.env) {
   // source of truth — when the patch carries it, `enabled` is recomputed as
   // mode !== "off"; a legacy client sending only `enabled` gets `mode` derived
   // instead. Both directions are needed: `enabled` alone cannot express the
-  // retired "basic" mode, which normalizeKeepAliveMode folds into "enhanced".
+  // retired "basic" tier, which normalizeKeepAliveMode folds into "on".
   if (patch.keepAlive && typeof patch.keepAlive === "object") {
     const merged = {
       ...(current.raw.keepAlive || {}),
@@ -421,7 +423,7 @@ export function saveSettings(settingsPath, patch, env = process.env) {
       merged.mode = normalizeKeepAliveMode(patch.keepAlive.mode, patch.keepAlive.enabled);
       merged.enabled = merged.mode !== "off";
     } else if (typeof patch.keepAlive.enabled === "boolean" && patch.keepAlive.mode === undefined) {
-      merged.mode = patch.keepAlive.enabled ? "enhanced" : "off";
+      merged.mode = patch.keepAlive.enabled ? "on" : "off";
     }
     if (Object.prototype.hasOwnProperty.call(patch.keepAlive, "maxRetries")) {
       merged.maxRetries = parseKeepAliveMaxRetries(patch.keepAlive.maxRetries);

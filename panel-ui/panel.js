@@ -4248,7 +4248,7 @@ async function api(method, path, body) {
     const claudeTierEnabledToggle = $("claudeTierEnabledToggle");
     const sparkWindowInput = $("sparkWindowInput");
     const keepAliveRetriesInput = $("keepAliveRetriesInput");
-    const KEEP_ALIVE_MODES = ["off", "enhanced"];
+    const KEEP_ALIVE_MODES = ["off", "on"];
     const DEFAULT_KEEPALIVE_RETRIES = 2;
     const MIN_KEEPALIVE_RETRIES = 0;
     const MAX_KEEPALIVE_RETRIES = 10;
@@ -4258,16 +4258,17 @@ async function api(method, path, body) {
       if (!Number.isInteger(parsed) || parsed < MIN_KEEPALIVE_RETRIES) return DEFAULT_KEEPALIVE_RETRIES;
       return Math.min(MAX_KEEPALIVE_RETRIES, parsed);
     }
+    const KEEP_ALIVE_DESC = "开启时将会在上游报错或截断时尝试自动续接，仅在续接次数用尽时才向下游报错。";
     const KEEP_ALIVE_COPY = {
-      off: { title: "抗截断", desc: "不做防截断处理，输出即时；各 Agent 偏好保留，重新开启后生效。", toast: "已停用抗截断" },
-      enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
+      off: { title: "抗截断", desc: KEEP_ALIVE_DESC, toast: "已停用抗截断" },
+      on: { title: "抗截断", desc: KEEP_ALIVE_DESC, toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
     const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
-    let keepAliveMode = "enhanced";
+    let keepAliveMode = "on";
     let keepAliveEndpoints = {};
     // 需要描边环托底的端点（pi 的白、zcode 的黑在某一侧底色上隐形）——与会话管理
     // 圆点的 SESS_EP_RINGED 同一判据，见面板调色 --ep-ring 说明
@@ -4292,7 +4293,7 @@ async function api(method, path, body) {
       }
     }
     function applyKeepAliveUi(mode) {
-      const m = KEEP_ALIVE_MODES.includes(mode) ? mode : "enhanced";
+      const m = KEEP_ALIVE_MODES.includes(mode) ? mode : "on";
       keepAliveMode = m;
       const copy = KEEP_ALIVE_COPY[m];
       if (keepAliveToggle) keepAliveToggle.checked = m !== "off";
@@ -4566,7 +4567,7 @@ async function api(method, path, body) {
         if (gen !== settingsLoadGen) return;
         if (!settingsSaving.keepAlive && !settingsSaving.keepAliveEndpoints && d.keepAlive) {
           if (d.keepAlive.endpoints) keepAliveEndpoints = d.keepAlive.endpoints;
-          applyKeepAliveUi(d.keepAlive.mode ?? (d.keepAlive.enabled === false ? "off" : "enhanced"));
+          applyKeepAliveUi(d.keepAlive.mode ?? (d.keepAlive.enabled === false ? "off" : "on"));
         }
         if (!settingsSaving.keepAliveRetries && d.keepAlive) {
           keepAliveMaxRetries = clampKeepAliveRetries(d.keepAlive.maxRetries ?? keepAliveMaxRetries);
@@ -4698,7 +4699,7 @@ async function api(method, path, body) {
     if (keepAliveToggle) {
       keepAliveToggle.onchange = () => {
         const previous = keepAliveMode;
-        const next = keepAliveToggle.checked ? "enhanced" : "off";
+        const next = keepAliveToggle.checked ? "on" : "off";
         if (next === previous) return;
         persistKeepAliveMode(next, previous);
       };

@@ -22,6 +22,95 @@ export function openAIError(type, message, code = null) {
   return { error };
 }
 
+// The body the keep-alive loop re-issues when a truncated turn is resumed.
+// Everything the client has already seen goes back upstream as the
+// assistant's partial output: text, reasoning, and every completed tool
+// call. The resume instruction names the shape so the model does not start
+// over.
+//
+// The shape is chosen per wire: Anthropic gets a native assistant prefill
+// (the model continues from the partial turn), OpenAI-compatible upstreams
+// get an assistant turn plus a continuation hint. The caller passes the
+// original request body and the shadow; the result is a body the upstream
+// sees as one continued turn.
+export function buildResumeBody(originalBody, shadow) {
+  if (shadow === null || shadow === undefined) return originalBody;
+
+  const text = typeof shadow.text === "string" ? shadow.text : "";
+  const reasoning = typeof shadow.reasoning === "string" ? shadow.reasoning : "";
+  const calls = Array.isArray(shadow.calls) ? shadow.calls : [];
+
+  // A cut with nothing the client saw is a clean retry, not a resume.
+  if (!text && !reasoning && calls.length === 0) return originalBody;
+
+  const original = originalBody === null || typeof originalBody !== "object" ? {} : originalBody;
+  const messages = Array.isArray(original.messages) ? original.messages.slice() : [];
+
+  // Anthropic wire: assistant prefill. The partial output is the last
+  // assistant message, and the model continues from it. No continuation
+  // instruction is needed — the prefill IS the continuation.
+  if (original.system !== undefined || messages.some((m) => m?.role === "user" && Array.isArray(m?.content))) {
+    // Build the prefill content: text blocks for text, tool_use blocks for
+    // completed calls. Reasoning is folded into the first text block (the
+    // Anthropic wire has no separate reasoning content type on input).
+    const content = [];
+    if (text) content.push({ type: "text", text: reasoning ? reasoning + text : text });
+    else if (reasoning) content.push({ type: "text", text: reasoning });
+    for (const call of calls) {
+      if (call === null || typeof call !== "object") continue;
+      let args;
+      try {
+        args = JSON.parse(call.args);
+      } catch {
+        args = {};
+      }
+      content.push({
+        type: "tool_use",
+        id: call.id,
+        name: call.name,
+        input: args,
+      });
+    }
+    if (content.length === 0) return originalBody;
+    return {
+      ...original,
+      messages: [...messages, { role: "assistant", content }],
+    };
+  }
+
+  // OpenAI-compatible wire: an assistant turn carrying the partial output,
+  // followed by a continuation hint. The hint names what has already been
+  // emitted so the model does not repeat it.
+  const assistantMessage = { role: "assistant" };
+  if (reasoning) assistantMessage.reasoning_content = reasoning;
+  if (text) assistantMessage.content = text;
+  if (calls.length > 0) {
+    assistantMessage.tool_calls = calls.map((call) => ({
+      id: call.id,
+      type: "function",
+      function: { name: call.name, arguments: call.args },
+    }));
+  }
+  if (text || reasoning || calls.length > 0) {
+    messages.push(assistantMessage);
+  }
+  // The continuation hint: tell the model what was already emitted so it
+  // continues instead of restarting. "已输出" 是给模型看的，不是给用户看的。
+  const alreadyEmitted = [];
+  if (text) alreadyEmitted.push(`正文「${text.slice(0, 50)}${text.length > 50 ? "…" : ""}」`);
+  if (reasoning) alreadyEmitted.push("一段思考");
+  if (calls.length > 0) alreadyEmitted.push(`${calls.length} 个已完成的工具调用`);
+  messages.push({
+    role: "user",
+    content:
+      alreadyEmitted.length > 0
+        ? `上一段输出中${alreadyEmitted.join("、")}已发给用户。请从被打断处继续输出，不要重复已输出内容，也不要重新执行已完成的工具调用。`
+        : "请从被打断处继续输出，不要重复已输出内容。",
+  });
+
+  return { ...original, messages };
+}
+
 function tokenMatches(presented, expected) {
   if (typeof presented !== "string" || typeof expected !== "string") return false;
   const a = Buffer.from(presented, "utf8");
@@ -318,7 +407,12 @@ export function createOpenAIHandler(deps) {
 
     const urls = buildUpstreamURLs(provider, "/chat/completions");
 
-    const normalizedBody = normalizeToolCallArguments(stripUnusableToolCalls(body));
+    // options.overrideBody replaces the request body wholesale — the keep-alive
+    // loop's resume path re-issues the same upstream with the partial output
+    // appended (see runStreamWithKeepAlive), and must not re-run this
+    // function's own input-body plumbing on the stitched body.
+    const sourceBody = options.overrideBody !== undefined ? options.overrideBody : body;
+    const normalizedBody = normalizeToolCallArguments(stripUnusableToolCalls(sourceBody));
     const withUsage = normalizedBody.stream === true
       ? {
           ...normalizedBody,
