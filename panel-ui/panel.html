@@ -148,7 +148,7 @@ try {
 </script>
 <style id="panelCardOrderPrepaintCss"></style>
 <style id="panelHiddenAgentsPrepaintCss"></style>
-<style id="panelBoardLiveOnlyPrepaintCss"></style>
+<style id="panelBoardLayoutPrepaintCss"></style>
 <script id="panelCardOrderPrepaint">
 (function () {
   // 看板端点卡的首帧卡序落位——与上面「首帧视图落位」同一形状的病、同一种解法。
@@ -218,21 +218,22 @@ try {
   document.documentElement.setAttribute("data-prepaint-hidden-agents", "1");
 })();
 </script>
-<script id="panelBoardLiveOnlyPrepaint">
+<script id="panelBoardLayoutPrepaint">
 (function () {
-  // 看板「隐藏未运行的 Agent 卡」（设置→显示，本机浏览器偏好）的首帧落位——与上面两张
-  // 首帧脚本同一形状的病、同一种解法：某张卡该不该上屏只有主脚本取回 /api/agents
-  // 才算得出来，主脚本 defer，首绘必然早于取数；不预画的话每次刷新都会先闪出全部
-  // 占位卡再收掉，而这个开关的全部意义就是不看见它们。
-  // 两个存档：开关 panel-board-live-only（"1" = 开；缺省/其它值一律不画）与上一帧
-  // 运行中的端点 id 集 anyswitch.board-live-agents（由 refreshAgents 写）。
+  // 看板排布（设置→显示，本机浏览器偏好）的首帧落位——与上面两张首帧脚本同一形状的病、
+  // 同一种解法：某张卡该不该上屏、以什么形态上屏，只有主脚本取回 /api/agents 才算得出来，
+  // 主脚本 defer，首绘必然早于取数；不预画的话每次刷新都会先闪出全部占位卡再收掉。
+  // 存档两份：排布 panel-board-layout（"all" / "compact" / "live-only"，缺省即 "all"）与
+  // 上一帧运行中的端点 id 集 anyswitch.board-live-agents（由 refreshAgents 写）。
   // 清单缺失、非数组、含未登记 id 或重复一律不画——宁可闪一次，也不把在跑的卡藏掉；
-  // 空数组是合法状态（一个都没在跑），照画：那正是开着这个开关时的空看板。
+  // 空数组是合法状态（一个都没在跑），照画：那正是开着「仅运行中」时的空看板。
+  // 「图标行」档的首帧：把「不在运行中集合」的卡整卡藏掉，由运行时补画图标行——
+  // 首帧不画图标行（DOM 结构只有主脚本知道），宁可首帧少一点，也不画错。
   // 运行时接棒：主脚本拿到可信帧后挂 [hidden] 并摘掉 <html> 属性，这层样式整体失效。
   const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok", "workbuddy"];
-  let on = null;
-  try { on = localStorage.getItem("panel-board-live-only"); } catch (e) { return; }
-  if (on !== "1") return;
+  let mode = null;
+  try { mode = localStorage.getItem("panel-board-layout"); } catch (e) { return; }
+  if (mode !== "live-only" && mode !== "compact") return;
   let raw = null;
   try { raw = localStorage.getItem("anyswitch.board-live-agents"); } catch (e) { return; }
   if (typeof raw !== "string" || !raw) return;
@@ -244,15 +245,15 @@ try {
   }
   const hidden = AGENT_IDS.filter((id) => ids.indexOf(id) < 0);
   if (!hidden.length) return;
-  const css = document.getElementById("panelBoardLiveOnlyPrepaintCss");
+  const css = document.getElementById("panelBoardLayoutPrepaintCss");
   if (!css) return;
   let text = "";
   for (const id of hidden) {
-    text += "html[data-prepaint-live-only] .agent-cards-container>.panel-card"
+    text += "html[data-prepaint-board-layout] .agent-cards-container>.panel-card"
       + '[data-agent-id="' + id + '"]{display:none}';
   }
   css.textContent = text;
-  document.documentElement.setAttribute("data-prepaint-live-only", "1");
+  document.documentElement.setAttribute("data-prepaint-board-layout", mode);
 })();
 </script>
 </head>
@@ -780,7 +781,6 @@ if (window.panelStartupController) panelStartupPlay();
       <!-- 右侧：Agent 观测主网格 (Main Content) -->
       <section class="main-col">
         <div class="agent-cards-container">
-
           <!-- 1. ZCode 模块 -->
           <div class="panel-card" data-agent-id="zcode">
             <div class="card-body">
@@ -1527,6 +1527,16 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
+          <!-- 看板「图标行」排布的视口行：未运行的已安装端点收进这里（32px 图标横排，
+               悬浮+滚轮横滚，两侧虚化到边即隐）。运行中的端点保持完整卡片在上，此行只收
+               未运行的；空行整行隐藏。由 panel.js 的 applyAgentCardVisibility 填充与显隐。 -->
+          <div class="board-icon-strip" id="boardIconStrip" hidden>
+            <div class="board-icon-strip-fade board-icon-strip-fade--left" aria-hidden="true"></div>
+            <div class="board-icon-strip-viewport" id="boardIconStripViewport">
+              <div class="board-icon-strip-track" id="boardIconStripTrack"></div>
+            </div>
+            <div class="board-icon-strip-fade board-icon-strip-fade--right" aria-hidden="true"></div>
+          </div>
         </div>
       </section>
     </div>
@@ -2172,19 +2182,22 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="slider"></span>
             </label>
           </div>
-          <!-- 隐藏未运行的 Agent 卡：本机浏览器偏好，存档在 localStorage 的 panel-board-live-only
-               （"1" = 开，缺省即关），不 POST、不进 settingsSaving。看板卡显隐由 panel.js
-               的 applyAgentCardVisibility 一处出口合并（与「未安装」过滤同一把闸）；
-               同一份存档还被 head 里的 panelBoardLiveOnlyPrepaint 读去画首帧。 -->
+          <!-- 看板排布：本机浏览器偏好，存档在 localStorage 的 panel-board-layout
+               （"all" / "compact" / "live-only"，缺省即 "all"），不 POST、不进 settingsSaving。
+               看板卡显隐由 panel.js 的 applyAgentCardVisibility 一处出口合并（与「未安装」过滤
+               同一把闸）；同一份存档还被 head 里的 panelBoardLayoutPrepaint 读去画首帧。
+               三档：全部 = 所有已安装 Agent 卡纵向铺开；图标行 = 运行中的保持完整卡片、未运行的
+               收进底部图标行（横向滚动）；仅运行中 = 只留运行中的完整卡片。 -->
           <div class="modal-item">
             <div>
-              <div class="modal-item-title">隐藏未运行的 Agent 卡</div>
-              <div class="modal-item-desc">开启后，看板只保留检测到运行中客户端的 Agent 卡。</div>
+              <div class="modal-item-title">看板排布</div>
+              <div class="modal-item-desc" id="boardLayoutDesc">全部已安装端点以完整卡片纵向铺开。</div>
             </div>
-            <label class="toggle">
-              <input type="checkbox" id="boardLiveOnlyToggle">
-              <span class="slider"></span>
-            </label>
+            <div class="seg-switch" id="boardLayoutSeg" role="radiogroup" aria-label="看板排布">
+              <button type="button" class="seg-switch-btn" data-board-layout-choice="all" role="radio" aria-checked="true">全部</button>
+              <button type="button" class="seg-switch-btn" data-board-layout-choice="compact" role="radio" aria-checked="false">图标行</button>
+              <button type="button" class="seg-switch-btn" data-board-layout-choice="live-only" role="radio" aria-checked="false">仅运行中</button>
+            </div>
           </div>
           <div class="modal-item">
             <div>

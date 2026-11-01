@@ -666,22 +666,34 @@ async function api(method, path, body) {
   function writeInstalledAgentsSnapshot(ids) {
     try { localStorage.setItem(INSTALLED_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
   }
-  // ── 看板「隐藏未运行的 Agent 卡」（设置→显示，本机浏览器偏好）───────────────
-  // 开启后看板只留运行中的端点卡（生成中与待命），未运行的占位卡不上屏。
+  // ── 看板排布（设置→显示，本机浏览器偏好）───────────────────────────────
+  // 三档：全部 = 所有已安装端点以完整卡片纵向铺开；图标行 = 运行中的保持完整卡片，
+  // 未运行的收进底部图标行（横向滚动）；仅运行中 = 只留运行中的完整卡片。
   // 与「未安装」过滤共用一个出口：两条件任一成立即 hidden（见 applyAgentCardVisibility）。
   // 不合并会互相盖掉——装着的死卡被这里藏掉后，环境检测那一轮若只按「未安装」重算，
   // 又会把死卡放出来。
-  // 存档两份：开关 panel-board-live-only（"1" = 开，缺省即关）；最近一帧里
-  // status==="running" 的端点 id 集 anyswitch.board-live-agents，供 panel.html 的
-  // panelBoardLiveOnlyPrepaint 画首帧。
-  const BOARD_LIVE_ONLY_LS_KEY = "panel-board-live-only";
+  // 存档两份：排布 panel-board-layout（"all" / "compact" / "live-only"，缺省即 "all"）；
+  // 最近一帧里 status==="running" 的端点 id 集 anyswitch.board-live-agents，供 panel.html
+  // 的 panelBoardLayoutPrepaint 画首帧。
+  const BOARD_LAYOUT_LS_KEY = "panel-board-layout";
   const BOARD_LIVE_AGENTS_LS_KEY = "anyswitch.board-live-agents";
-  let boardLiveOnly = readBoardLiveOnly();
+  // 旧存档兼容：panel-board-live-only="1" 视为 live-only，读一次即迁到新键。
+  let boardLayoutMode = readBoardLayoutMode();
   // null = 还不知道谁在跑 → 不按活卡过滤（fail-open：宁可多显示一张占位卡，
   // 也不把在跑的卡藏掉，与环境检测同口径）
   let boardLiveAgentIds = readBoardLiveAgentsSnapshot();
-  function readBoardLiveOnly() {
-    try { return localStorage.getItem(BOARD_LIVE_ONLY_LS_KEY) === "1"; } catch { return false; }
+  function readBoardLayoutMode() {
+    try {
+      const v = localStorage.getItem(BOARD_LAYOUT_LS_KEY);
+      if (v === "all" || v === "compact" || v === "live-only") return v;
+      // 旧版开关存档迁移：开过「隐藏未运行的 Agent 卡」的落 live-only
+      const legacy = localStorage.getItem("panel-board-live-only");
+      if (legacy === "1") {
+        try { localStorage.setItem(BOARD_LAYOUT_LS_KEY, "live-only"); localStorage.removeItem("panel-board-live-only"); } catch {}
+        return "live-only";
+      }
+      return "all";
+    } catch { return "all"; }
   }
   function readBoardLiveAgentsSnapshot() {
     try {
@@ -699,7 +711,72 @@ async function api(method, path, body) {
     if (same) return;
     boardLiveAgentIds = ids;
     try { localStorage.setItem(BOARD_LIVE_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
-    if (boardLiveOnly) applyAgentCardVisibility(installedAgentIds);
+    if (boardLayoutMode !== "all") applyAgentCardVisibility(installedAgentIds);
+  }
+  // ── 图标行视口 ──
+  // 未运行的已安装端点收进底部图标行（32px 图标横排，悬浮+滚轮横滚，两侧虚化到边即隐）。
+  // 空行整行隐藏；运行中的端点不进视口（去重：视口+上屏=全部已安装）。
+  let boardIconStripBound = false;
+  function syncBoardIconStrip() {
+    const strip = $("boardIconStrip");
+    const track = $("boardIconStripTrack");
+    if (!strip || !track) return;
+    const container = document.querySelector(".agent-cards-container");
+    if (!container) { strip.hidden = true; return; }
+    // 收集未运行的已安装端点（按容器里卡片当前 DOM 顺序，即跟随卡序）
+    const ids = [];
+    for (const card of container.querySelectorAll(".panel-card[data-agent-id]")) {
+      const id = card.getAttribute("data-agent-id");
+      const hiddenByInstall = installedAgentIds !== null && !installedAgentIds.has(id);
+      const running = boardLiveAgentIds !== null && boardLiveAgentIds.has(id);
+      if (!hiddenByInstall && !running) ids.push(id);
+    }
+    // 按卡序（AGENT_CARD_ORDER）排序，与看板卡顺序一致
+    ids.sort((a, b) => {
+      const ia = AGENT_CARD_ORDER.indexOf(a);
+      const ib = AGENT_CARD_ORDER.indexOf(b);
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+    });
+    if (ids.length === 0) { strip.hidden = true; return; }
+    // 填充图标：克隆看板卡的 .agent-avatar（各家自带底衬/描边/圆角整体带过来）
+    track.innerHTML = "";
+    for (const id of ids) {
+      const src = container.querySelector('.panel-card[data-agent-id="' + id + '"] .agent-avatar');
+      if (!src) continue;
+      const slot = document.createElement("div");
+      slot.className = "board-icon-slot";
+      slot.setAttribute("data-agent-id", id);
+      slot.appendChild(src.cloneNode(true));
+      track.appendChild(slot);
+    }
+    if (track.children.length === 0) { strip.hidden = true; return; }
+    strip.hidden = false;
+    // 绑定滚轮横滚（只绑一次）
+    if (!boardIconStripBound) {
+      boardIconStripBound = true;
+      const viewport = $("boardIconStripViewport");
+      if (viewport) {
+        viewport.addEventListener("wheel", (e) => {
+          if (e.deltaY !== 0) {
+            e.preventDefault();
+            viewport.scrollLeft += e.deltaY;
+          }
+        }, { passive: false });
+        viewport.addEventListener("scroll", updateBoardIconStripFades);
+      }
+      window.addEventListener("resize", updateBoardIconStripFades);
+    }
+    updateBoardIconStripFades();
+  }
+  function updateBoardIconStripFades() {
+    const viewport = $("boardIconStripViewport");
+    const fadeL = document.querySelector(".board-icon-strip-fade--left");
+    const fadeR = document.querySelector(".board-icon-strip-fade--right");
+    if (!viewport || !fadeL || !fadeR) return;
+    const { scrollLeft, scrollWidth, clientWidth } = viewport;
+    const canScroll = scrollWidth > clientWidth + 1;
+    fadeL.style.opacity = canScroll && scrollLeft > 1 ? "1" : "0";
+    fadeR.style.opacity = canScroll && scrollLeft < scrollWidth - clientWidth - 1 ? "1" : "0";
   }
   function applyAgentCardVisibility(ids) {
     const container = document.querySelector(".agent-cards-container");
@@ -711,18 +788,33 @@ async function api(method, path, body) {
       // 测试所钉，勿再翻回。只看活卡同口径：运行中集合未知（null）不参与过滤。
       const id = card.getAttribute("data-agent-id");
       const hiddenByInstall = ids !== null && !ids.has(id);
-      const hiddenByLiveOnly = boardLiveOnly && boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
-      card.hidden = hiddenByInstall || hiddenByLiveOnly;
+      let hiddenByLayout = false;
+      if (boardLayoutMode === "live-only") {
+        hiddenByLayout = boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
+      } else if (boardLayoutMode === "compact") {
+        // 图标行档：未运行的卡整卡藏掉，由图标行视口收编
+        hiddenByLayout = boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
+      }
+      card.hidden = hiddenByInstall || hiddenByLayout;
+    }
+    // 图标行视口：只在图标行档且运行中集合已知时才填充/显示
+    const strip = $("boardIconStrip");
+    if (strip) {
+      if (boardLayoutMode === "compact" && boardLiveAgentIds !== null) {
+        syncBoardIconStrip();
+      } else {
+        strip.hidden = true;
+      }
     }
     // 运行时接管即摘首帧属性，prepaint CSS 层整体失效（与 panelCardOrderPrepaint
     // 的交棒同款手法）。无条件摘：null（fail-open 全显示）时若不摘，过期快照
     // 画的 CSS 层会压住本该显示的卡——首帧属性只在「首绘到本脚本执行之间」
     // 有意义，此后运行时是唯一真值源。
     document.documentElement.removeAttribute("data-prepaint-hidden-agents");
-    // 只看活卡的首帧属性多一道门：运行中集合还未知时不摘——这一刻摘掉，预画藏好的
+    // 排布首帧属性多一道门：运行中集合还未知时不摘——这一刻摘掉，预画藏好的
     // 占位卡会原样弹回来闪一下，等下一帧知道谁在跑再交棒。
-    if (!boardLiveOnly || boardLiveAgentIds !== null) {
-      document.documentElement.removeAttribute("data-prepaint-live-only");
+    if (boardLayoutMode === "all" || boardLiveAgentIds !== null) {
+      document.documentElement.removeAttribute("data-prepaint-board-layout");
     }
   }
   // 可见集变化时由 initSettingsView 注册重建入口：buildKeepAliveEndpoints 嵌在
@@ -4142,7 +4234,8 @@ async function api(method, path, body) {
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
     const startupAnimationToggle = $("startupAnimationToggle");
-    const boardLiveOnlyToggle = $("boardLiveOnlyToggle");
+    const boardLayoutSeg = $("boardLayoutSeg");
+    const boardLayoutDesc = $("boardLayoutDesc");
     const uiVersionSeg = $("uiVersionSeg");
     const injectEffortToggle = $("injectEffortToggle");
     const credentialCacheToggle = $("credentialCacheToggle");
@@ -4859,20 +4952,43 @@ async function api(method, path, body) {
       };
     }
 
-    if (boardLiveOnlyToggle) {
-      // 与开屏动画同口径的本机浏览器偏好：点一下即时写存档、不 POST（看板卡的显隐
+    if (boardLayoutSeg) {
+      // 与开屏动画同口径的本机浏览器偏好：点选即时写存档、不 POST（看板卡的显隐
       // 只发生在这一页，没有服务端要知道它）。不同处是即时生效——写档的同时把看板
-      // 卡的显隐按新开关重算一遍，不必等下一帧轮询。
-      boardLiveOnlyToggle.checked = boardLiveOnly;
-      boardLiveOnlyToggle.onchange = () => {
-        boardLiveOnly = boardLiveOnlyToggle.checked;
-        try {
-          if (boardLiveOnly) localStorage.setItem(BOARD_LIVE_ONLY_LS_KEY, "1");
-          else localStorage.removeItem(BOARD_LIVE_ONLY_LS_KEY);
-        } catch {}
-        applyAgentCardVisibility(installedAgentIds);
-        toast(boardLiveOnly ? "已隐藏未运行的 Agent 卡" : "已恢复显示全部 Agent 卡");
+      // 卡的显隐按新排布重算一遍，不必等下一帧轮询。
+      // 差分文案：行说明随选中档切换，各档描述各自布局方式。
+      const BOARD_LAYOUT_DESCS = {
+        "all": "全部已安装端点以完整卡片纵向铺开。",
+        "compact": "运行中的端点保持完整卡片；未运行的端点收为一行图标，横向滚动浏览。",
+        "live-only": "只保留检测到运行中客户端的 Agent 卡。",
       };
+      const BOARD_LAYOUT_TOASTS = {
+        "all": "已恢复显示全部 Agent 卡",
+        "compact": "已切换为图标行排布",
+        "live-only": "已隐藏未运行的 Agent 卡",
+      };
+      const segBtns = Array.from(boardLayoutSeg.querySelectorAll("[data-board-layout-choice]"));
+      const reflectBoardLayout = () => {
+        for (const b of segBtns) {
+          b.setAttribute("aria-checked", String(b.dataset.boardLayoutChoice === boardLayoutMode));
+        }
+        if (boardLayoutDesc) boardLayoutDesc.textContent = BOARD_LAYOUT_DESCS[boardLayoutMode] || BOARD_LAYOUT_DESCS["all"];
+      };
+      for (const b of segBtns) {
+        b.onclick = () => {
+          const next = b.dataset.boardLayoutChoice;
+          if (next === boardLayoutMode) return;
+          boardLayoutMode = next;
+          try {
+            if (next === "all") localStorage.removeItem(BOARD_LAYOUT_LS_KEY);
+            else localStorage.setItem(BOARD_LAYOUT_LS_KEY, next);
+          } catch {}
+          reflectBoardLayout();
+          applyAgentCardVisibility(installedAgentIds);
+          toast(BOARD_LAYOUT_TOASTS[next] || "");
+        };
+      }
+      reflectBoardLayout();
     }
 
     if (uiVersionSeg) {
