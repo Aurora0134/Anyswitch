@@ -773,7 +773,17 @@ export async function runStreamWithKeepAlive(res, channel) {
       ),
     };
   }
-  const message = channel.exhaustedMessage(lastOutcome, retryCtx);
+  let message = channel.exhaustedMessage(lastOutcome, retryCtx);
+  // 全灭上下文：多成员全灭走到 exhausted 时客户端只拿末位成员的原始报错，与
+  // b76010c 修掉的终局/非流式路径同病（该笔未覆盖流式通道）。后缀文案与「单上
+  // 游不加」守卫都复用 appendFailoverContext，不另持一份。出口有两个，都要带：
+  // message（三通道错误帧/tracker/日志文案）与 lastOutcome.error（sendExhausted
+  // 的 JSON 分支发的是原体）。
+  const attemptedMembers = callUpstreams.length;
+  message = appendFailoverContext({ status: 502, body: { error: { message } } }, attemptedMembers).body.error.message;
+  if (lastOutcome?.error) {
+    lastOutcome = { ...lastOutcome, error: appendFailoverContext({ status: 502, body: lastOutcome.error }, attemptedMembers).body };
+  }
   tracker?.recordEnd?.({
     status: 502,
     error: { status: 502, message },
@@ -892,10 +902,13 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
       if (retryableReason && retryableReason !== "empty_stream" && retryableReason !== "stream_error_before_content" && lastOutcome.error) {
         sendJson(res, 502, lastOutcome.error);
       } else if (retryableReason === "stream_error_before_content") {
+        // Same-source rule above: the wording (plus the failover context the
+        // keep-alive loop appended) must come from `message`, not a private
+        // copy — exhaustedMessage returns exactly this wording for this reason.
         sendJson(
           res,
           502,
-          openAIError("api_error", "the upstream stream failed before any content was delivered", UPSTREAM_INCOMPLETE_CODE),
+          openAIError("api_error", message, UPSTREAM_INCOMPLETE_CODE),
         );
       } else {
         // The final branch is exactly the empty-stream set of exhaustedMessage,
@@ -1009,10 +1022,13 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
       if (retryableReason && retryableReason !== "empty_stream" && retryableReason !== "stream_error_before_content" && lastOutcome.error) {
         sendJson(res, 502, lastOutcome.error);
       } else if (retryableReason === "stream_error_before_content") {
+        // Same-source rule above: the wording (plus the failover context the
+        // keep-alive loop appended) must come from `message`, not a private
+        // copy — exhaustedMessage returns exactly this wording for this reason.
         sendJson(
           res,
           502,
-          openAIError("api_error", "the upstream stream failed before any content was delivered", UPSTREAM_INCOMPLETE_CODE),
+          openAIError("api_error", message, UPSTREAM_INCOMPLETE_CODE),
         );
       } else {
         // The final branch is exactly the empty-stream set of exhaustedMessage,
