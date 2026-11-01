@@ -1554,6 +1554,48 @@
      显式写死 display 防任何卡片形态规则把它顶回可见（首帧由 panel.html 的
      panelHiddenAgentsPrepaint CSS 层负责，运行时归这条）。 */
   .agent-cards-container > .panel-card[hidden] { display: none; }
+
+  /* 看板「图标行」排布的视口行：未运行的已安装端点收进这里（32px 图标横排，
+     悬浮+滚轮横滚，两侧虚化到边即隐）。运行中的端点保持完整卡片在上，此行只收
+     未运行的；空行整行隐藏（panel.js applyAgentCardVisibility 管显隐与填充）。 */
+  .board-icon-strip {
+    display: flex; align-items: center; position: relative;
+    padding: 10px 0 2px; /* 上间距与卡列同 gap，下留 2px 让底部阴影不贴边 */
+  }
+  .board-icon-strip[hidden] { display: none; }
+  .board-icon-strip-viewport {
+    flex: 1; overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE/Edge */
+  }
+  .board-icon-strip-viewport::-webkit-scrollbar { display: none; }
+  .board-icon-strip-track {
+    display: flex; gap: 10px; align-items: center;
+    width: max-content; /* 内容多宽就多宽，超出由 viewport 滚动 */
+    padding: 2px 0;
+  }
+  .board-icon-slot {
+    width: 32px; height: 32px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-xs);
+    line-height: 0;
+  }
+  .board-icon-slot .agent-avatar { flex: none; transform: scale(0.875); transform-origin: center; }
+  /* 两侧虚化：渐变遮罩提示可滚动，到边即隐（opacity 由 JS 按 scrollLeft 实时切） */
+  .board-icon-strip-fade {
+    position: absolute; top: 0; bottom: 0; width: 48px; z-index: 2;
+    pointer-events: none; opacity: 0; transition: opacity 200ms var(--ease-out);
+  }
+  .board-icon-strip-fade--left {
+    left: 0; background: linear-gradient(to right, var(--surface-sunken) 0%, transparent 100%);
+  }
+  .board-icon-strip-fade--right {
+    right: 0; background: linear-gradient(to left, var(--surface-sunken) 0%, transparent 100%);
+  }
+
   .agent-top-bar {
     display: flex; align-items: center; justify-content: space-between;
     margin-bottom: 14px; flex-wrap: wrap; gap: 10px;
