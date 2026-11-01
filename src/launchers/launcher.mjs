@@ -56,7 +56,9 @@ export function isVerifiedDiscoveryVersion(version) {
   return `${m[1]}.${m[2]}` === VERIFIED_CLAUDE_MINOR;
 }
 
-const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
+// Single source for every launcher env: relay traffic must never leave the
+// machine through an inherited proxy (see the security notes above).
+export const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 
 // Claude Code 的 bypassPermissions 启动参数：设置页开关打开时，由本启动器与
 // 面板终端一键启动两条路径注入；用户自己已在命令行带上时不重复添加。

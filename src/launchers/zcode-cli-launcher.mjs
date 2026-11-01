@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, realpathSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
@@ -139,8 +140,8 @@ export function buildZcodeCliLauncherEnv({ base = {}, personalConfigPath, builti
   const env = { ...base };
   env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE = personalConfigPath;
   env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE = builtinConfigPath;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return env;
 }
 

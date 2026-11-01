@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync, existsSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
@@ -84,8 +85,8 @@ export { resolveQoderExecutable };
 export function buildQoderLauncherEnv({ token, base = {} }) {
   const env = { ...base };
   env.ANYSWITCH_RELAY_TOKEN = token;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return env;
 }
 

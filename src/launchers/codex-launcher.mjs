@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync, readdirSync, existsSync, statSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
@@ -94,8 +95,8 @@ export function buildCodexLauncherEnv({ instanceId = buildInstanceId(), base = {
   // Consumed by codex's env_http_headers expansion of the x-agent-instance
   // placeholder that codex-merge-config writes into config.toml.
   env.ANYSWITCH_INSTANCE_ID = instanceId;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return env;
 }
 

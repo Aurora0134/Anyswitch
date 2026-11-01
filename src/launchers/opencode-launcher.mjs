@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
@@ -137,8 +138,8 @@ export function buildOpencodeLauncherEnv({ token, instanceId, base = {} }) {
   // client was not started through the launcher: the header expands empty
   // and the relay drops it (sanitizeInstanceId), as before.
   if (instanceId) env.ANYSWITCH_AGENT_INSTANCE = instanceId;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return env;
 }
 

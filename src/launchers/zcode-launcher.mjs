@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync, existsSync, readFileSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore, storePaths } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createLogger } from "../shared/logger.mjs";
@@ -237,8 +238,8 @@ export { resolveZcodeExecutable };
 export function buildZcodeLauncherEnv({ port, token, base = {} }) {
   const env = { ...base };
   env.ANYSWITCH_RELAY_TOKEN = token;
-  env.NO_PROXY = "127.0.0.1,localhost";
-  env.no_proxy = "127.0.0.1,localhost";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return env;
 }
 

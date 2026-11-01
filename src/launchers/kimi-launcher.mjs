@@ -21,6 +21,7 @@ import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { startProductionRelay } from "./launch.mjs";
+import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import {
   extractManagedProviders,
@@ -33,8 +34,6 @@ import {
 } from "./kimi-merge-config.mjs";
 import { catalogForRoot } from "../catalog/effort-catalog.mjs";
 import { loadSettings } from "../relay/relay-settings.mjs";
-
-const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 
 export function kimiConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".kimi-code", "config.toml");
