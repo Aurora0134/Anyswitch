@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readSidecar, writeSidecar, deriveAutoRouteChannel, deriveAnyswitchChannel } from "../src/launchers/merge-common.mjs";
+import { resolveVirtualModelEntry } from "../src/channels/chain-routing.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 describe("merge-common sidecar", () => {
@@ -167,5 +168,23 @@ describe("deriveAnyswitchChannel（Anyswitch 分组：auto + 虚拟模型）", (
   it("链为空的虚拟模型不出组；缺 helpers 的脏数据不至于抛", () => {
     const dirty = { providers: store.providers, virtualModels: [{ name: "empty", chain: [] }, "oops", null, { chain: [{ node: "nim", model: "m2" }] }] };
     assert.equal(deriveAnyswitchChannel(dirty, "kimi"), null);
+  });
+
+  it("虚拟模型准入与中继查链入口行为同源：合并侧收进的 ⇔ resolveVirtualModelEntry 认得的", () => {
+    // 准入收口的合并侧钉：合并进端点配置的虚拟模型集合必须与中继请求路径
+    // （resolveVirtualModelEntry）的准入集合一致。中继收紧而合并没跟上时，
+    // 端点配置里会留下请求必败的模型，这条红（有 auto 链与无 auto 链两个
+    // 端点各比一遍，models 表两种形状都覆盖）。
+    for (const endpointId of ["zcode", "kimi"]) {
+      const channel = deriveAnyswitchChannel(store, endpointId);
+      const merged = new Set(Object.keys(channel?.models ?? {}).filter((name) => name !== "auto"));
+      for (const vm of store.virtualModels) {
+        assert.equal(
+          merged.has(vm.name),
+          resolveVirtualModelEntry(store, vm.name) !== null,
+          `${endpointId}/${vm.name}: 合并准入必须与中继准入一致`,
+        );
+      }
+    }
   });
 });

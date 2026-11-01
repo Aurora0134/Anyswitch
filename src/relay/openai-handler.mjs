@@ -343,8 +343,9 @@ export function createOpenAIHandler(deps) {
     // 虚拟模型：不绑定端点，任何可识别的请求方都能看到（agentId 缺失也照列
     // ——这正是与 auto 的区别）。裸 id 即模型名，拦截优先于一切 provider 解析。
     for (const vm of Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : []) {
-      if (vm?.enabled === false) continue;
-      if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+      // 准入走 resolveVirtualModelEntry 单一收口：目录里列出的必须是请求路径真
+      // 认得的虚拟模型，判定收紧只改查链入口那一处，不再内联复制。
+      if (!resolveVirtualModelEntry(loaded.store, vm?.name)) continue;
       response.data.push({ id: vm.name, object: "model" });
     }
 

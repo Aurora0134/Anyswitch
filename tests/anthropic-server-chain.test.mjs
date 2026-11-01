@@ -9,11 +9,14 @@
 
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHandler } from "../src/relay/handler.mjs";
 import { createRelayServer, listenLoopback } from "../src/relay/server.mjs";
 import { createSessionReporter } from "../src/agents/agent-metrics.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
-import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "../src/channels/chain-routing.mjs";
+import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID, resolveVirtualModelEntry } from "../src/channels/chain-routing.mjs";
 import { unpackWireId } from "../src/relay/wire-id.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -901,6 +904,38 @@ describe("virtual model routing (anthropic 路径）", () => {
     assert.equal(result.status, 200);
     assert.ok(result.body.data.find((entry) => entry.id === "anthropic/my-vm"), "dsh 无链，虚拟模型照列");
     assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined, "auto 仍按端点链控制");
+  });
+
+  it("目录露出与请求路径准入同源：每个虚拟模型在目录里 ⇔ resolveVirtualModelEntry 认得它", async () => {
+    // 准入单一收口的端到端钉：目录侧（handleModels）与请求侧（查链入口）必须
+    // 对同一批虚拟模型给出同一判定——启用、停用两种形态逐一比对。中继准入收紧
+    // （改 resolveVirtualModelEntry），目录自动跟随，这条仍然绿；哪一侧另立口径，
+    // 这条就红。空链形态进不了这条路径：loadValidStore 按 schema 整店拒绝
+    // （存储层守卫），空链判定由 chain-routing 的单元钉与合并/面板侧钉覆盖。
+    const store = { ...VM_STORE };
+    const handler = makeVmHandler(store);
+    const result = await handler.handleModels({ authorization: TOKEN }, "claude");
+    assert.equal(result.status, 200);
+    for (const vm of store.virtualModels) {
+      const inCatalog = result.body.data.some((entry) => entry.id === `anthropic/${vm.name}`);
+      assert.equal(
+        inCatalog,
+        resolveVirtualModelEntry(store, vm.name) !== null,
+        `${vm.name}: 目录露出必须与请求路径准入一致`,
+      );
+    }
+  });
+
+  it("目录循环准入走 resolveVirtualModelEntry 单一收口（源码钉，收口不回退为内联复制）", () => {
+    // 虚拟模型目录准入曾与请求路径各持一份内联判定（停用、空链两行逐字复制），
+    // 中继收紧时目录不会跟着红。现在收口到 resolveVirtualModelEntry，这里钉住
+    // 循环体确实走查链入口、内联判定不再回潮。
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../src/relay/handler.mjs"), "utf8");
+    const at = src.indexOf("for (const vm of Array.isArray(loaded.store.virtualModels)");
+    assert.ok(at >= 0, "找不到虚拟模型目录循环");
+    const loop = src.slice(at, src.indexOf("entries.push({", at));
+    assert.ok(loop.includes("resolveVirtualModelEntry(loaded.store"), "目录准入必须走 resolveVirtualModelEntry 收口");
+    assert.ok(!loop.includes("enabled === false"), "内联启用判定不得回潮");
   });
 
   it("per-launch /v1/messages（非流式）：model=anthropic/<名字> 走虚拟模型自己的链，先节点 5xx 后退避", async () => {

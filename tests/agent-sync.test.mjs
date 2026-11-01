@@ -597,6 +597,31 @@ describe("agent-sync 同步结果摘要", () => {
     };
   }
 
+  it("登记了端点但没有写手：完整性守卫把它点名进失败名单，不再静默缺席", async () => {
+    // results 键从 AGENT_ENDPOINTS 单源派生；往清单里塞一个没有写手块的端点
+    // （即「加端点忘写手」的漂移现场），该端点必须以端点级失败回到 results 并
+    // 进 failed 名单——面板看到的同步面不得虚报。测完从清单上摘掉。
+    AGENT_ENDPOINTS.push("ghost");
+    try {
+      const res = await syncAllAgentConfigs({
+        store: summaryStore(),
+        port: 47821,
+        token: "test-token",
+        root: tmpRoot,
+        base: base(),
+      });
+      assert.equal(res.ok, true);
+      assert.deepEqual(Object.keys(res.results), AGENT_ENDPOINTS, "results 键单源派生自 AGENT_ENDPOINTS");
+      assert.equal(res.results.ghost.ok, false, "无写手端点按端点级失败点名");
+      assert.ok(typeof res.results.ghost.reason === "string" && res.results.ghost.reason.length > 0, "带失败原因");
+      const summary = buildSyncSummary(res);
+      assert.ok(summary.failed.includes("ghost"), "缺口端点进失败名单");
+      assert.ok(!summary.synced.includes("ghost"), "不进成功名单");
+    } finally {
+      AGENT_ENDPOINTS.pop();
+    }
+  });
+
   it("单个端点写不进去时整体仍算成功，失败名单列出该端点", async () => {
     // 拿目录顶住 codex 的配置文件：只有 codex 这一步读不出来，其余端点照常写。
     mkdirSync(join(tmpRoot, ".codex", "config.toml"), { recursive: true });
