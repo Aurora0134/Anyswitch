@@ -1096,11 +1096,32 @@ async function listWorkbuddySessionMetas(configRoot) {
     const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
     if (sessionId.length === 0 || sessionId.startsWith("prewarm")) continue;
     let title = null;
+    let cwd = null;
     if (typeof record.cwd === "string" && record.cwd.length > 0) {
+      cwd = record.cwd;
       const base = record.cwd.split(/[\\/]/).filter(Boolean).pop();
       if (base) title = base;
     }
-    metas.push({ id: sessionId, title, pid: Number(pidText), startedAt: record.startedAt ?? null });
+    // 终端归属桥的匹配面与 codex/opencode 同形：cwd（project）做目录匹配、
+    // lastActive 做最近活跃判定、originator 标桌面来源（注册表 kind/parent 可判
+    // 时给 "desktop"，CLI 起的会话不给——桥侧据此排除 GUI 会话抢绑）。
+    // lastActive 用 lastHeartbeat：注册表的心跳虽非周期（活进程可 stale 600s+，
+    // 只能当「活着」不能当「死了」），但作为「最近活跃」的排序键仍然单调可靠
+    // ——换代窗口里新 pid 的心跳必然晚于旧 pid 的。
+    let lastActive = typeof record.lastHeartbeat === "number" && Number.isFinite(record.lastHeartbeat)
+      ? record.lastHeartbeat : null;
+    if (lastActive === null && typeof record.updatedAt === "number" && Number.isFinite(record.updatedAt)) {
+      lastActive = record.updatedAt;
+    }
+    const originator = typeof record.originator === "string" ? record.originator : null;
+    // 桌面来源判据：GUI 双击起的会话注册表带本地 server 端点（url/endpoint/
+    // mode:"local"），终端 CLI 起的没有——据此把 GUI 会话从 CLI 终端的绑定
+    // 候选里排除（与 codex 桥排除 originator 含 desktop 同向）。判不出就是
+    // CLI（不排除），宁可不排除也不误排除。
+    const isDesktop = typeof record.url === "string" && record.url.length > 0
+      || typeof record.endpoint === "string" && record.endpoint.length > 0
+      || record.mode === "local";
+    metas.push({ id: sessionId, title, project: cwd, lastActive, originator, isDesktop, pid: Number(pidText), startedAt: record.startedAt ?? null });
   }
   // 同 sessionId 取 startedAt 最大（或最后读到）的那条——换代窗口里旧 pid 的
   // 注册表行可能还在盘上，标题以当前代为准。
@@ -3292,6 +3313,15 @@ export function createAgentMetricsCollector(options = {}) {
     return [...(await loadSessionInfo("opencode")).values()];
   }
 
+  // WB 与 codex/opencode 同处境：实例行已是 workbuddy-sess-<sessionId>，pid 形
+  // 终端归属（shell pid × 祖先链）对 GUI 双击会话永远判不出（不经终端壳），
+  // CLI 会话判得出 pid 但行 id 对不上（行是会话粒度）。桥的 feed 与那两家同形
+  //（loadSessionInfo("workbuddy") 即注册表全目录，含 project/lastActive/originator
+  // 匹配面），由 openai-server 的 detected-processes 出口统一塑形成行 id。
+  async function getWorkbuddySessionsForTerminalJoin() {
+    return [...(await loadSessionInfo("workbuddy")).values()];
+  }
+
   // Aggregate metrics state
   const zcodeState = createAggregateState(sparkWindowPoints);
   const dshState = createAggregateState(sparkWindowPoints);
@@ -4510,8 +4540,42 @@ export function createAgentMetricsCollector(options = {}) {
           }
         }
       }
+      if (id === "workbuddy") {
+        // WB 与 claude 同处境的另一半：runtime 是池化的（进程数说 0 只说明
+        // 「此刻没有在跑的引擎」，GUI 宿主可能还活着、会话可能只是暂停——
+        // 池随时可能起新 pid 领养同一会话）。端点账的生死因此不能只听
+        // 「家族全灭」：会话行还在保留窗（30 分钟 TTL）内就说明这条运行还
+        // 没结束，账得留着；行被自己的 TTL 收走后，端点账才轮得到家族全灭
+        // 判决清零。判据与行的淘汰判据同源（同一套 TTL 与同一份行锚），
+        // 免得两套窗口各说各话——行在即账在，行走即账清。
+        const sessMap = instanceBuckets.workbuddy;
+        if (sessMap !== undefined && sessMap.size > 0) {
+          let rowAnchor = null;
+          for (const entry of sessMap.values()) {
+            const rowIdle = entry.state?.lastRequestAt ?? entry.firstSeen;
+            if (typeof rowIdle === "number" && (rowAnchor === null || rowIdle > rowAnchor)) {
+              rowAnchor = rowIdle;
+            }
+          }
+          // 行锚比端点锚新就以行为准（会话行的流量不进端点聚合态，端点锚
+          // 可能停在更早的时刻）；行锚同样比端点锚旧时以端点锚为准（端点
+          // 自己有更近的活动）。
+          if (rowAnchor !== null && (idleSince === null || rowAnchor > idleSince)) {
+            idleSince = rowAnchor;
+          }
+          // 行还在保留窗内 → 账不清（宽限按「距行锚还有多久到 TTL」计，
+          // 行走到 TTL 时端点账才判决清零；两个判据用同一个 TTL 与同一个
+          // 锚，不会出现「行没了账还在」或「行在账没了」的错位）。
+          if (rowAnchor !== null && now - rowAnchor <= WORKBUDDY_SESSION_ROW_IDLE_TTL_MS) {
+            return;
+          }
+        }
+      }
       if (idleSince === null) idleSince = now;
-      if (now - idleSince <= PROCESS_GONE_ACTIVE_REQUEST_TTL_MS) return;
+      // WB 专用宽限：会话行保留窗（30 分钟 TTL）内不清端点账。落在 TTL 判据
+      // 之外时退回通用 3s 宽限语义（家族全灭即运行终结）。
+      const graceMs = PROCESS_GONE_ACTIVE_REQUEST_TTL_MS;
+      if (now - idleSince <= graceMs) return;
       // 幂等闸：全零态重跑一整圈重置是浪费（多数轮看板读起来端点都静止）。
       const hadAccount = state.totalRequests > 0 || state.activeRequests > 0
         || state.lastRequestAt !== null || state.lastModel !== null;
@@ -4749,14 +4813,26 @@ export function createAgentMetricsCollector(options = {}) {
         // 的假象）。注册表给出 sessionId 的引擎 pid 起 workbuddy-sess-<id> 行——
         // 换代换 pid 不换行；读不出注册表（读写不到 ≠ 不存在）时保守起 pid 形
         // 占位，宁可短暂出现一行也不把所有引擎藏掉。
+        // 存活闸：注册表是实时读的、扫描快照可能还是 2.5s TTL 缓存的旧轮——
+        // 两者错拍（进程已回收、引擎集还是旧值）时照旧起行就是起死人行，只能
+        // 靠 10 分钟自定义行 TTL / pid 存活判定兜底收走，期间看板闪零请求幽灵
+        // 行。占位行的语义本来就是「扫描看见了一个在跑的引擎」，所以用本轮
+        // 全量进程表（seenPids，降级轮也有）过一遍：不在表里 = 扫描已看不见
+        // 这个进程，注册表读出 sessionId 也只是纯注册表侧残影，不起行。
+        const seenThisRound = procCounts.seenPids instanceof Set ? procCounts.seenPids : null;
         for (const pid of placeholderPids) {
+          if (seenThisRound !== null && !seenThisRound.has(pid)) continue;
           const record = workbuddySessionLookup(pid);
           const sessionId = typeof record?.sessionId === "string" ? record.sessionId.trim() : "";
-          const placeholderId = sessionId.length > 0
-            ? (sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`) ?? `${bucket}-${pid}`)
-            : `${bucket}-${pid}`;
-          if (!instMap.has(placeholderId)) {
-            instMap.set(placeholderId, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
+          if (sessionId.length > 0) {
+            const placeholderId = sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`) ?? `${bucket}-${pid}`;
+            if (!instMap.has(placeholderId)) {
+              instMap.set(placeholderId, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
+            }
+          } else {
+            if (!instMap.has(`${bucket}-${pid}`)) {
+              instMap.set(`${bucket}-${pid}`, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
+            }
           }
         }
       }
@@ -5220,6 +5296,7 @@ export function createAgentMetricsCollector(options = {}) {
     // by the exposure layer.
     getCodexSessionsForTerminalJoin,
     getOpencodeSessionsForTerminalJoin,
+    getWorkbuddySessionsForTerminalJoin,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of
     // accounting exactly when a restart is about to need it.

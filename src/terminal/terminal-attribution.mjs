@@ -15,10 +15,13 @@
 // read command lines, null when it could not (degraded round) — never a guess.
 
 // Endpoints whose instance rows are session-granular (see sessionRowInstanceIdFor).
-const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode"]);
+const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode", "workbuddy"]);
 // Of those, the endpoints whose session row beats a pid-shaped row when both
 // exist (see the priority note in attributeTerminalSessions).
-const SESSION_ROW_FIRST_AGENT_IDS = new Set(["opencode"]);
+// workbuddy 同 opencode：它的 pid 形行是 socket 兜底合成（runtime 是池化的，
+// 同一会话换 pid 不换行），pid 形行的语义是「某个 runtime 进程」，而会话行
+// 才是「哪条对话」——会话行是更准的答案，优先。
+const SESSION_ROW_FIRST_AGENT_IDS = new Set(["opencode", "workbuddy"]);
 
 // Windows-path key for cwd matching: lowercase, one separator, no trailing
 // slash. A terminal session's cwd and a codex rollout's project cwd name the

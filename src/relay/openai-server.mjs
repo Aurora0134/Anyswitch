@@ -205,6 +205,30 @@ function sessionJoinRows(metas, toRowId) {
     .filter(Boolean);
 }
 
+// WB 会话注册表 → 桥 feed 行。通用 sessionJoinRows 的形状够用（id/cwd/
+// lastActive/originator），但 WB 的 originator 判据不同：注册表没有 originator
+// 字段，桌面来源靠「该 pid 的 runtime 带本地 server 端点」判（GUI 双击起的
+// 会话注册表带 url/endpoint/mode:local，终端 CLI 起的没有）——桌面会话不该抢
+// CLI 终端的绑定，与 codex 桥排除 desktop 同向。判不出就是 CLI（不排除）。
+function workbuddySessionJoinRows(metas, toRowId) {
+  return (Array.isArray(metas) ? metas : [])
+    .map((meta) => {
+      if (!meta || typeof meta.id !== "string") return null;
+      const rowId = toRowId(meta.id);
+      if (rowId === null || typeof meta.project !== "string" || meta.project === "") return null;
+      const originator = typeof meta.originator === "string" && meta.originator.length > 0
+        ? meta.originator
+        : (meta.isDesktop === true ? "desktop" : null);
+      return {
+        id: rowId,
+        cwd: meta.project,
+        lastActive: typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : null,
+        originator,
+      };
+    })
+    .filter(Boolean);
+}
+
 // codex 后台/内部请求判定（记忆流水线、guardian 审批、缓存预热、GUI 线程
 // 标题/摘要生成等由引擎或桌面端自己发起的模型请求，不是用户对话流量）。
 // codex 核心客户端给这类请求带线上标记，命中其一即后台请求：
@@ -647,7 +671,14 @@ export function createOpenAIRelayServer(deps) {
             (id) => sessionRowId(OPENCODE_SESSION_PREFIX, id),
           );
         }
-        sendJson(res, 200, { ok: true, processes, codexSessions, opencodeSessions });
+        let workbuddySessions = [];
+        if (typeof deps.metricsCollector.getWorkbuddySessionsForTerminalJoin === "function") {
+          workbuddySessions = workbuddySessionJoinRows(
+            await deps.metricsCollector.getWorkbuddySessionsForTerminalJoin(),
+            (id) => sessionRowId(WORKBUDDY_SESSION_PREFIX, id),
+          );
+        }
+        sendJson(res, 200, { ok: true, processes, codexSessions, opencodeSessions, workbuddySessions });
       } catch (err) {
         sendJson(res, 500, openAIError("api_error", `failed to get detected client processes: ${err.message}`));
       }

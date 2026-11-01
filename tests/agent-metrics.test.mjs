@@ -5904,6 +5904,68 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       assert.equal(wb(await collector.getAgentsStatus()).instances.length, 0,
         "空闲超 TTL：行收走，不留永久幽灵");
     });
+
+    it("keeps the endpoint account while a paused session row is still within its TTL", async () => {
+      // 端点级整账清零（家族全灭 + 3s 宽限）与会话行保留窗（30 分钟 TTL）是两
+      // 套判据：会话行还在（暂停待命），端点卡却先被清零——卡上的请求数、折线
+      // 一起归零，用户看到「明明刚跑过几十轮，数字全没了」。修法：端点宽限锚
+      // 参考会话行的最近活动，行在即账在。
+      let t = 3000;
+      let registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      // 扫描输出可变：暂停时 runtime 那一行消失（GUI 宿主 60 还在，它不是会话
+      // 进程——命令行只有镜像路径，没有 runtime 路径）。
+      let procs = () => wmic(row(60, 800), agentRow(100, 60));
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [],
+        execFn: (cmd, opts, cb) => cb(null, procs()),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+      const base = wb(await collector.getAgentsStatus());
+      assert.equal(base.metrics.totalRequests, 1, "基线：端点账有请求");
+
+      // 暂停：runtime 全回收（GUI 宿主 60 还在，它不算会话进程）、注册表删净。
+      registry = {};
+      procs = () => wmic(row(60, 800));
+      t += 60 * 1000; // 暂停 1 分钟：远大于 3s 通用宽限，远小于 30 分钟行 TTL
+      await collector.scanProcesses();
+      await new Promise((resolve) => setImmediate(resolve)); // 等新一轮扫描落地
+      await collector.scanProcesses();
+      const paused = wb(await collector.getAgentsStatus());
+      assert.equal(paused.processCount, 0, "会话进程已回收：端点进程数为 0");
+      assert.equal(paused.metrics.totalRequests, 1, "暂停窗内端点账不清零");
+      assert.equal(paused.metrics.sparkHistory.ttft.length, 1, "暂停窗内端点折线不清零");
+
+      // 超出行 TTL：行先被收走，随后端点账轮得到家族全灭判决，清零。
+      t += 31 * 60 * 1000;
+      await collector.scanProcesses();
+      const after = wb(await collector.getAgentsStatus());
+      assert.equal(after.instances.length, 0, "超 TTL：会话行收走");
+      assert.equal(after.metrics.totalRequests, 0, "超 TTL 后端点账才清零");
+    });
+
+    it("does not spawn a placeholder row for a pid the scan no longer sees", async () => {
+      // 注册表是实时读的、扫描快照可能还是旧轮（2.5s TTL 缓存）。错拍时（进程
+      // 已回收、注册表行还在）占位逻辑会起一条零账 pid 行——面板闪一条幽灵
+      // 卡。占位行的语义是「扫描看见了一个在跑的引擎」，所以要过本轮全量进程
+      // 表这一闸。
+      let t = 3000;
+      const registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [],
+        // 扫描只看见 GUI 宿主，注册表却还留着 runtime pid 100 的行
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800))),
+      });
+      await collector.scanProcesses();
+      const card = wb(await collector.getAgentsStatus());
+      assert.deepEqual(card.instances, [], "扫描没见过的 pid 不起占位行（注册表残影不算）");
+      assert.equal(card.processCount, 0);
+    });
   });
 
   it("counts a registry-less row and the live --prewarm row that is serving a session", async () => {

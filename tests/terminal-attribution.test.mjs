@@ -424,6 +424,76 @@ describe("attributeTerminalSessions", () => {
     );
     assert.equal(out[0].agent, undefined);
   });
+
+  // WB 的实例行已是会话粒度（workbuddy-sess-<sessionId>，runtime 池化换 pid 不
+  // 换行），pid 形 socket 兜底行对不上——终端归属要靠会话 feed 桥，与 codex/
+  // opencode 同形。
+  describe("workbuddy session bridge (session-granular instance ids)", () => {
+    const wbAgents = (rows) => [{ id: "workbuddy", name: "WorkBuddy", instances: rows.map((id) => ({ id })) }];
+    const cwdSession = { ...baseSession, cwd: "D:\\dev\\bridge" };
+    const detected = [{ agentId: "workbuddy", pid: 5120, ancestors: [8888] }];
+
+    it("binds the latest same-cwd workbuddy-sess row when the pid shape misses", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        wbAgents(["workbuddy-sess-old", "workbuddy-sess-new", "workbuddy-sess-other"]),
+        { workbuddy: [
+          { id: "workbuddy-sess-old", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null },
+          { id: "workbuddy-sess-new", cwd: "d:/dev/bridge/", lastActive: 2000, originator: null },
+          { id: "workbuddy-sess-other", cwd: "E:\\elsewhere", lastActive: 3000, originator: null },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "workbuddy-sess-new",
+        "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
+    });
+
+    it("the session row wins over a pid-shaped row (the pid names a runtime, not a conversation)", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        wbAgents(["workbuddy-5120", "workbuddy-sess-x"]),
+        { workbuddy: [{ id: "workbuddy-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null }] },
+      );
+      assert.equal(out[0].agent.instanceId, "workbuddy-sess-x",
+        "runtime 是池化的：pid 行只说「某个 runtime 进程」，会话行才说「哪条对话」");
+    });
+
+    it("excludes desktop-originated sessions from the bridge", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        wbAgents(["workbuddy-sess-tui", "workbuddy-sess-desktop"]),
+        { workbuddy: [
+          { id: "workbuddy-sess-tui", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null },
+          { id: "workbuddy-sess-desktop", cwd: "D:\\dev\\bridge", lastActive: 9000, originator: "desktop" },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "workbuddy-sess-tui",
+        "桌面 GUI 会话更近也不能抢走终端会话的绑定");
+    });
+
+    it("bridge only binds rows present in the agents payload", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        wbAgents([]),
+        { workbuddy: [{ id: "workbuddy-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null }] },
+      );
+      assert.equal(out[0].agent.instanceId, null, "行不存在不绑，与 pid 路同一判据");
+    });
+
+    it("an old relay without the workbuddy feed still attributes by pid", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        wbAgents(["workbuddy-5120"]),
+        { codex: [], opencode: [] },
+      );
+      assert.equal(out[0].agent.instanceId, "workbuddy-5120", "没有会话 feed 时回落 pid 形行");
+      assert.equal(out[0].agent.pid, 5120);
+    });
+  });
 });
 
 describe("filterTerminalRequestRows", () => {

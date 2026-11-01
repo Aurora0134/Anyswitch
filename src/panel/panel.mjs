@@ -482,8 +482,10 @@ async function defaultFetchRelayChainRuntime(root, token) {
 // joining terminal-host sessions by shell pid — plus each session-granular
 // endpoint's session metas (row-id-shaped ids with cwd/lastActive/originator):
 // codex-sess-* and opencode-sess-* are the bridge data for those two endpoints,
-// whose instance rows name a conversation rather than a process. Returns
-// { processes, codexSessions, opencodeSessions }, or null on failure — the
+// whose instance rows name a conversation rather than a process;
+// workbuddy-sess-* is the third (WB 的 runtime 是池化的，同一会话换 pid 不换行）。
+// Returns
+// { processes, codexSessions, opencodeSessions, workbuddySessions }, or null on failure — the
 // caller degrades to unannotated sessions rather than erroring the whole
 // session list. An old relay without a given field yields an empty list (that
 // bridge then simply never binds, same as before).
@@ -501,6 +503,7 @@ async function defaultFetchRelayDetectedProcesses(root, token) {
         processes: data.processes,
         codexSessions: Array.isArray(data.codexSessions) ? data.codexSessions : [],
         opencodeSessions: Array.isArray(data.opencodeSessions) ? data.opencodeSessions : [],
+        workbuddySessions: Array.isArray(data.workbuddySessions) ? data.workbuddySessions : [],
       };
     }
     return null;
@@ -1221,7 +1224,7 @@ export function createPanelRouter({
   // tasklist 兜底轮）时允许回退到的上一份好 feed 的最大年龄。比拉取失败路
   // 径宽——兜底轮之后要等下一整轮探针扫描好谱系才回来。
   const PULLED_DETECTED_SUSPECT_STALE_MAX_MS = 10000;
-  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions, opencodeSessions }
+  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions, opencodeSessions, workbuddySessions }
 
   // 谱系盲判定：processes 为空数组，或非空但每行 ancestors 都是空数组——
   // tasklist 兜底轮的 feed 形状（谱系表为空但 relay 有应答）。空 ancestors
@@ -1273,6 +1276,7 @@ export function createPanelRouter({
           processes,
           codexSessions: await pull("getCodexSessionsForTerminalJoin"),
           opencodeSessions: await pull("getOpencodeSessionsForTerminalJoin"),
+          workbuddySessions: await pull("getWorkbuddySessionsForTerminalJoin"),
         };
       } catch {
         return null;
@@ -1332,6 +1336,7 @@ export function createPanelRouter({
     const sessionFeeds = {
       codex: feed && Array.isArray(feed.codexSessions) ? feed.codexSessions : [],
       opencode: feed && Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
+      workbuddy: feed && Array.isArray(feed.workbuddySessions) ? feed.workbuddySessions : [],
     };
     sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, sessionFeeds) });
   }
@@ -1710,6 +1715,7 @@ export function createPanelRouter({
           const [joined] = attributeTerminalSessions([session], detected, agents, {
             codex: Array.isArray(feed.codexSessions) ? feed.codexSessions : [],
             opencode: Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
+            workbuddy: Array.isArray(feed.workbuddySessions) ? feed.workbuddySessions : [],
           });
           const pid = joined && joined.agent && joined.agent.pid;
           if (Number.isInteger(pid) && pid > 0) anchorPid = pid;

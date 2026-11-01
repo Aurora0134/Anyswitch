@@ -1217,6 +1217,33 @@ describe("terminal attribution feed endpoint (/api/internal/detected-processes)"
     });
   });
 
+  it("shapes workbuddy session metas into row ids and marks desktop origin", async () => {
+    // WB 的实例行是 workbuddy-sess-<sessionId>（runtime 池化，同会话换 pid 不换
+    // 行）——终端归属桥要靠这个 feed。塑形必须与请求路径的
+    // workbuddySessionInstanceId 同一个 shaper（同前缀、同清洗）。
+    const feed = [{ agentId: "workbuddy", pid: 5120, ancestors: [8888] }];
+    const metas = [
+      { id: "6d2cccfc-7b7d-4d27-b58b-6c532ef2d74b", project: "C:\\dev\\bridge", lastActive: 2000, isDesktop: false },
+      { id: "gui-session", project: "C:\\dev\\bridge", lastActive: 9000, isDesktop: true },
+      { id: "noiddir", project: null, lastActive: 3000, isDesktop: false },
+    ];
+    const { upstreamFetch } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+    deps.metricsCollector = {
+      getDetectedClientProcesses: () => feed,
+      getWorkbuddySessionsForTerminalJoin: async () => metas,
+    };
+    await withServer(deps, async (port) => {
+      const res = await getProcesses(port);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(body.workbuddySessions, [
+        { id: "workbuddy-sess-6d2cccfc-7b7d-4d27-b58b-6c532ef2d74b", cwd: "C:\\dev\\bridge", lastActive: 2000, originator: null },
+        { id: "workbuddy-sess-gui-session", cwd: "C:\\dev\\bridge", lastActive: 9000, originator: "desktop" },
+      ], "缺 cwd 的丢弃；桌面来源标 desktop（不抢 CLI 终端的绑定）");
+    });
+  });
+
   it("serves an empty feed when the collector lacks the surface", async () => {
     const { upstreamFetch } = memberRouter({});
     const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
