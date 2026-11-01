@@ -17,9 +17,12 @@ import { existsSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { probeRelay, probeRelayHealth } from "./openai-server.mjs";
+import { probeRelay, probeRelayHealth, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
 
-const RELAY_PORT = 47821;
+// Re-export of the shared constant (openai-server.mjs is the single source of
+// truth): panel.mjs builds its relay-facing URLs and status frame from this,
+// so a coordinated renumber cannot leave the panel process behind.
+export const RELAY_PORT = DEFAULT_RELAY_PORT;
 const RELAY_HOST_SCRIPT = fileURLToPath(new URL("relay-host.mjs", import.meta.url));
 // Directory every Anyswitch relay process is spawned from — the resident
 // relay-host.mjs AND the per-launch endpoint launchers all run scripts located

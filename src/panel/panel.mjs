@@ -2,7 +2,7 @@
 //   - panel-host.mjs (127.0.0.1:47820) — the desktop control plane; stays up
 //     when the relay is stopped. This is the ONLY place the panel page is
 //     served, and the only place that owns panel-host lifecycle.
-//   - relay-host.mjs (127.0.0.1:47821) — data plane. It mounts the same router
+//   - relay-host.mjs — data plane. It mounts the same router
 //     for its API surface (per-launch relays POST session/report here), but its
 //     `/panel` document 302s to 47820: two live copies of the page on two ports
 //     would mean lifecycle buttons acting on whichever process happens to serve
@@ -10,8 +10,8 @@
 //
 // Authentication: NONE. Loopback binding is the network boundary (non-127
 // peers already 403). Writes (start/stop/restart, settings, autostart,
-// session report) additionally require Origin/Referer on :47820 or
-// :47821 plus header X-AnySwitch-Panel: 1, so a random page on this machine
+// session report) additionally require Origin/Referer on the panel or relay
+// port plus header X-AnySwitch-Panel: 1, so a random page on this machine
 // cannot POST those routes. Credentials are never echoed. The relay Bearer
 // token still guards /v1/* and /openai/* and is not pasted into the browser.
 
@@ -27,7 +27,7 @@ import { spawnWatchdog, stopWatchdog, probeWatchdog } from "../agents/agent-watc
 import { loadSettings, saveSettings, defaultSettingsPath, createLogLevelGate } from "../relay/relay-settings.mjs";
 import { logLevelAllows } from "../shared/logger.mjs";
 import { loadOrGenerateToken } from "../launchers/pi-relay-token.mjs";
-import { getRelayStatus, startRelay, stopRelay, restartRelay } from "../relay/relay-process-manager.mjs";
+import { getRelayStatus, startRelay, stopRelay, restartRelay, RELAY_PORT } from "../relay/relay-process-manager.mjs";
 import { spawnAgentSync } from "../agents/agent-sync-spawn.mjs";
 import { readSyncStatus, writeSyncStatus, syncStatusFromResult } from "../shared/sync-status.mjs";
 import { createSkillsService, pickFile, pickFolder } from "../agents/agent-skills.mjs";
@@ -386,7 +386,7 @@ export function isTrustedPanelOrigin(origin, hostHeader) {
     const hostUrl = loopbackHttpOrigin(`http://${host}`);
     if (hostUrl && hostUrl.host === url.host) return true;
   }
-  return url.port === "47820" || url.port === "47821";
+  return url.port === "47820" || url.port === String(RELAY_PORT);
 }
 
 export function isTrustedPanelMutation(req) {
@@ -408,7 +408,7 @@ export function isTrustedPanelMutation(req) {
 }
 
 // Pull-mode telemetry: fetch the relay's authoritative live agent metrics from
-// its internal loopback endpoint (47821/api/internal/agents). Returns the agents
+// its internal loopback endpoint (/api/internal/agents). Returns the agents
 // array, or null if the relay is down/unreachable so the caller can fall back.
 // Loopback-only and Bearer pi-relay-token guarded on the relay side.
 //
@@ -422,7 +422,7 @@ export function isTrustedPanelMutation(req) {
 async function defaultFetchRelayAgents(root, token) {
   if (!token) return null;
   try {
-    const response = await fetch("http://127.0.0.1:47821/api/internal/agents", {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/agents`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(1500),
     });
@@ -443,7 +443,7 @@ async function defaultFetchRelayAgents(root, token) {
 async function defaultFetchRelayStability(root, token) {
   if (!token) return null;
   try {
-    const response = await fetch("http://127.0.0.1:47821/api/internal/model-stability", {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/model-stability`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(1500),
     });
@@ -464,7 +464,7 @@ async function defaultFetchRelayStability(root, token) {
 async function defaultFetchRelayChainRuntime(root, token) {
   if (!token) return null;
   try {
-    const response = await fetch("http://127.0.0.1:47821/api/internal/route-chain-runtime", {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/route-chain-runtime`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(1500),
     });
@@ -478,7 +478,7 @@ async function defaultFetchRelayChainRuntime(root, token) {
 }
 
 // Pull-mode terminal attribution: the relay's live agent client processes,
-// each with its ancestor chain (47821/api/internal/detected-processes), for
+// each with its ancestor chain (/api/internal/detected-processes), for
 // joining terminal-host sessions by shell pid — plus each session-granular
 // endpoint's session metas (row-id-shaped ids with cwd/lastActive/originator):
 // codex-sess-* and opencode-sess-* are the bridge data for those two endpoints,
@@ -492,7 +492,7 @@ async function defaultFetchRelayChainRuntime(root, token) {
 async function defaultFetchRelayDetectedProcesses(root, token) {
   if (!token) return null;
   try {
-    const response = await fetch("http://127.0.0.1:47821/api/internal/detected-processes", {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/detected-processes`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(1500),
     });
@@ -620,14 +620,14 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
   }
 }
 
-// Terminal-host lifecycle pull: the relay (47821) owns the host child and
+// Terminal-host lifecycle pull: the relay owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
 // /api/internal/*). Returns the parsed payload, or null when the relay is
 // unreachable so callers degrade instead of erroring.
 async function defaultFetchTerminalHostStatus(root, token) {
   if (!token) return null;
   try {
-    const response = await fetch("http://127.0.0.1:47821/terminal-host/status", {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/terminal-host/status`, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(1500),
     });
@@ -648,7 +648,7 @@ async function defaultFetchTerminalHostStatus(root, token) {
 async function defaultCallTerminalHostAction(action, body, { token } = {}) {
   if (!token) return null;
   try {
-    const response = await fetch(`http://127.0.0.1:47821/terminal-host/${action}`, {
+    const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/terminal-host/${action}`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
@@ -677,7 +677,7 @@ function normalizeTerminalHostStatus(data) {
   };
 }
 
-// Bridge the relay's logger (a separate process on 47821) into this panel
+// Bridge the relay's logger (a separate process) into this panel
 // process's log bus. The 实时输出 window subscribes to the panel-host's own
 // logger, so after the panel/relay split relay-side entries (keep-alive
 // retries, stream faults) stopped appearing. This opens a long-lived SSE
@@ -717,7 +717,7 @@ export function startRelayLogBridge(logger, relayRoot) {
     try {
       // live=1: entries already bridged into this bus must not re-arrive as
       // duplicates whenever the relay restarts and this bridge reconnects.
-      const response = await fetch("http://127.0.0.1:47821/api/internal/logs?live=1", {
+      const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/logs?live=1`, {
         headers: { authorization: `Bearer ${token}` },
         signal: controller.signal,
       });
@@ -768,7 +768,7 @@ export function startRelayLogBridge(logger, relayRoot) {
   };
 }
 
-// Bridge the relay's agent-activity stream (47821 /api/internal/agents-activity,
+// Bridge the relay's agent-activity stream (/api/internal/agents-activity,
 // same pi-relay-token guard as the agents pull) into this panel process. The
 // relay pushes absolute activeRequests states for (endpointId, instanceId)
 // pairs: a snapshot frame first, then activity frames only on 0↔N transitions,
@@ -869,7 +869,7 @@ export function startRelayActivityBridge(relayRoot) {
     }
     controller = new AbortController();
     try {
-      const response = await fetch("http://127.0.0.1:47821/api/internal/agents-activity", {
+      const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/agents-activity`, {
         headers: { authorization: `Bearer ${token}` },
         signal: controller.signal,
       });
@@ -922,8 +922,8 @@ export function createPanelRouter({
   base = process.env,
   startTime = Date.now(),
   appInfo = APP_INFO,
-  // Relay lifecycle is owned by relay-process-manager (a separate process on
-  // 47821). These default to the real supervisor but are injectable so the
+  // Relay lifecycle is owned by relay-process-manager (a separate process).
+  // These default to the real supervisor but are injectable so the
   // router is unit-testable without spawning processes or binding sockets.
   //
   // The agent-config sync spawner gets the same treatment: the reasoning-level
@@ -938,7 +938,7 @@ export function createPanelRouter({
   restartRelayFn = (root) => restartRelay(root),
   // Which process owns this router copy: "panel-host" = the control plane on
   // 47820 (serves the page, owns panel lifecycle), "relay-host" = the data
-  // plane on 47821 (API surface only; its /panel document redirects).
+  // plane (API surface only; its /panel document redirects).
   hostKind = "panel-host",
   // Panel-host restart: fire the detached one-shot that waits for 47820 to be
   // released and brings the replacement up. Both this and the self-exit are
@@ -956,7 +956,7 @@ export function createPanelRouter({
   stopWatchdogFn = stopWatchdog,
   probeWatchdogFn = probeWatchdog,
   // Pull-mode telemetry: where handleAgents fetches live metrics from. Kept
-  // injectable so tests don't need a real relay bound on 47821.
+   // injectable so tests don't need a real relay bound.
    fetchRelayAgents = defaultFetchRelayAgents,
    fetchRelayStability = defaultFetchRelayStability,
    fetchRelayChainRuntime = defaultFetchRelayChainRuntime,
@@ -1016,7 +1016,7 @@ export function createPanelRouter({
      timer.unref?.();
      return timer;
    },
-   // Terminal-host lifecycle against the relay (47821 /terminal-host/*): the
+   // Terminal-host lifecycle against the relay (/terminal-host/*): the
    // relay owns the host child, so status/start/stop all live there behind the
    // same pi-relay-token guard as /api/internal/*. Injectable so tests never
    // touch a live relay.
@@ -1024,7 +1024,7 @@ export function createPanelRouter({
    callTerminalHostAction = defaultCallTerminalHostAction,
   // Agent-activity push bridge (startRelayActivityBridge): this process's
   // subscription to the relay's agents-activity SSE plus its latest-state
-  // cache. Injectable so tests never touch 47821; `null` lazily builds the
+  // cache. Injectable so tests never touch a live relay; `null` lazily builds the
   // real bridge on the first browser subscription, so a panel-host nobody is
   // watching does not hold a relay connection open.
   agentsActivityBridge = null,
@@ -2127,10 +2127,10 @@ export function createPanelRouter({
       // store-io is part of the same app dir; a failure here is "store unreadable",
       // surfaced as storeOk:false rather than a crash.
     }
-    // Relay lifecycle is owned by relay-process-manager (a separate process on
-    // 47821). The panel (this process, 47820) reports its own PID + the relay's
+    // Relay lifecycle is owned by relay-process-manager (a separate process).
+    // The panel (this process, 47820) reports its own PID + the relay's
     // live status so the UI can render running/stopped/starting + a start button.
-    let relay = { status: "stopped", pid: null, port: 47821 };
+    let relay = { status: "stopped", pid: null, port: RELAY_PORT };
     try {
       relay = await getRelayStatusFn(relayRoot);
     } catch (err) {
@@ -2149,7 +2149,7 @@ export function createPanelRouter({
       running: relay.status === "running",
       panelPort: 47820,
       pid: process.pid,
-      port: 47821,
+      port: RELAY_PORT,
       startTime,
       storeOk,
       providers: providerCount,
@@ -2981,7 +2981,7 @@ export function createPanelRouter({
             error: (message) => logger.error?.(message),
           }
         : null;
-      const result = await spawnAgentSyncFn({ port: 47821, logger: uiLogger });
+      const result = await spawnAgentSyncFn({ port: RELAY_PORT, logger: uiLogger });
       // 失败上屏的落盘点（source "manual"）：结果写进 sync-status.json，面板轮询
       // 渲染「上次同步未成功」。运行日志关掉时日志行会被活闸门丢弃，这份文件是
       // 失败最后剩下的可见面。落盘失败不影响本路由的响应。
@@ -3297,7 +3297,7 @@ export function createPanelRouter({
 
   async function handleAgents(res) {
     // PULL mode: when the panel runs as a separate process (panel-host, 47820),
-    // the authoritative live metrics live INSIDE the relay process (47821). So
+    // the authoritative live metrics live INSIDE the relay process. So
     // first try to fetch them cross-process via the relay's internal telemetry
     // endpoint. On failure, serve the last pull while it is still young, and only
     // then fall back to this process's own collector — which keeps the UI from
@@ -3518,8 +3518,8 @@ export function createPanelRouter({
     // The panel page is served to any loopback peer. No login box. Writes are
     // gated above; GETs stay tokenless. Only the control plane serves it: two
     // byte-identical pages on two ports would put every lifecycle button at the
-    // mercy of whichever process happens to answer, and on 47821 that process is
-    // the relay — which cannot restart itself without dying mid-request.
+    // mercy of whichever process happens to answer, and on the relay port that
+    // process is the relay — which cannot restart itself without dying mid-request.
     if (path === "/panel" && (method === "GET" || method === "HEAD")) {
       if (hostKind !== "panel-host") {
         res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
@@ -3796,7 +3796,7 @@ export function createPanelRouter({
         // sync just leaves the endpoints as they were until the next one.
         if (typeof body.injectThinkingEffort === "boolean") {
           try {
-            const syncResult = await spawnAgentSyncFn({ port: 47821, logger });
+            const syncResult = await spawnAgentSyncFn({ port: RELAY_PORT, logger });
             // 与启动/监视器两处同口径落盘（source "settings"），让这条路径的
             // 失败同样能上屏；落盘失败不影响设置保存的既有行为。
             try {

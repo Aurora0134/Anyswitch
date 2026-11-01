@@ -8,6 +8,9 @@
   // 基础状态与工具
   // ═══════════════════════════════════════════════
   const API_BASE = window.location.origin + "/panel";
+  // 常驻 relay 的端口（后端唯一真源在 openai-server.mjs 的 DEFAULT_RELAY_PORT，
+  // 浏览器脚本无法 import，此镜像由 relay-port-consistency.test.mjs 互钉）。
+  const RELAY_PORT = 47821;
   let agentsInFlight = false;
   let es = null;
 
@@ -535,13 +538,13 @@ async function api(method, path, body) {
 
       // 四态呈现由 relayStatusPresentation 决定（含「服务异常」——在跑但每个请求
       // 都在失败），这里只负责落到 DOM 上。
-      const presentation = relayStatusPresentation(relay, 47821);
+      const presentation = relayStatusPresentation(relay, RELAY_PORT);
       dot.className = presentation.dotClass;
       statusText.textContent = presentation.statusText;
       sbState.className = presentation.badgeClass;
       sbState.textContent = presentation.badgeText;
       if (relay.status === "running") {
-        hostEl.textContent = `127.0.0.1:${relay.port || 47821}`;
+        hostEl.textContent = `127.0.0.1:${relay.port || RELAY_PORT}`;
         if (res && res.startTime) {
           uptimeEl.textContent = formatDurationSeconds(Date.now() - res.startTime);
         }
@@ -9391,8 +9394,8 @@ async function api(method, path, body) {
       if (titleText) titleText.textContent = isRestart ? "重启 Relay 与面板服务" : "停止 Relay 服务";
       if (stopConfirmBtn) stopConfirmBtn.textContent = isRestart ? "确认重启" : "确认停止";
       let summary = isRestart
-        ? `<p style="margin:0 0 8px;">确定要重启 Relay 代理服务与面板服务吗？重启期间所有指向 <code>127.0.0.1:47821</code> 的本地 Agent 请求将中断。</p>`
-        : `<p style="margin:0 0 8px;">确定要停止 Relay 代理服务吗？停止后所有指向 <code>127.0.0.1:47821</code> 的本地 Agent 请求将中断。</p>`;
+        ? `<p style="margin:0 0 8px;">确定要重启 Relay 代理服务与面板服务吗？重启期间所有指向 <code>127.0.0.1:${RELAY_PORT}</code> 的本地 Agent 请求将中断。</p>`
+        : `<p style="margin:0 0 8px;">确定要停止 Relay 代理服务吗？停止后所有指向 <code>127.0.0.1:${RELAY_PORT}</code> 的本地 Agent 请求将中断。</p>`;
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];

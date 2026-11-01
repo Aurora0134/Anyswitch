@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { loadStore as ioLoadStore, readCiphertext, storePaths } from "../store/store-io.mjs";
 import { unprotect, DPAPI_CODES } from "../ops/dpapi.mjs";
 import { createRelayServer, generateToken, listenLoopback } from "../relay/server.mjs";
+import { DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createSessionReporter } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
 import { loadSettings, defaultSettingsPath, createCredentialCacheEnabledGate } from "../relay/relay-settings.mjs";
@@ -292,7 +293,7 @@ export function createProductionDeps({
   // Optional fetch used ONLY for the session reporter's outbound POST to the
   // panel's /panel/api/session/report endpoint. Default stays the global
   // fetch; tests inject a no-op so a run never talks to the resident panel
-  // on 47821 (same injection-surface rule as runGrokLauncher's doors).
+  // (same injection-surface rule as runGrokLauncher's doors).
   sessionReporterFetchFn,
 } = {}) {
   function loadStore() {
@@ -313,7 +314,7 @@ export function createProductionDeps({
 
   // Per-launch session reporter: pushes cumulative per-session metrics to the
   // panel's /panel/api/session/report endpoint. The report URL targets the
-  // resident panel relay on 47821. The token is bound after generateToken()
+  // resident panel relay. The token is bound after generateToken()
   // runs in startProductionRelay. Failure to reach the panel is silent —
   // metrics are best-effort and must never break the relay's primary job.
   //
@@ -336,7 +337,7 @@ export function createProductionDeps({
     usageJournal = null;
   }
   const sessionTracker = createSessionReporter({
-    reportUrl: "http://127.0.0.1:47821/panel/api/session/report",
+    reportUrl: `http://127.0.0.1:${DEFAULT_RELAY_PORT}/panel/api/session/report`,
     journal: usageJournal,
     agentId,
     ...(sessionReporterFetchFn ? { fetchFn: sessionReporterFetchFn } : {}),

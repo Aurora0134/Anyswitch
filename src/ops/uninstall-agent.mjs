@@ -39,6 +39,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, rmdirSync } f
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { relayDataRoot } from "../relay/relay-settings.mjs";
+import { DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
 import { createPromptsInjector, applyManagedBlock } from "../agents/agent-prompts-inject.mjs";
 import { createShimManager, SHIM_SPECS } from "../agents/shim-manager.mjs";
@@ -63,7 +64,7 @@ import * as workbuddyMerge from "../launchers/workbuddy-merge-models.mjs";
 // Placeholder port/token for the strip syncs: with an empty managed set no
 // provider entry is ever built, so neither value reaches a file. They exist
 // only to satisfy the write-function signatures.
-const STRIP_PORT = 47821;
+const STRIP_PORT = DEFAULT_RELAY_PORT;
 const STRIP_TOKEN = "";
 
 // Every managed entry an Anyswitch sync writes points at the loopback relay's

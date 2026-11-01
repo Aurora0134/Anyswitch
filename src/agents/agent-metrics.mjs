@@ -5598,7 +5598,9 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       const headers = {
         "content-type": "application/json",
         "x-anyswitch-panel": "1",
-        origin: "http://127.0.0.1:47821",
+        // Derived from the POST target itself so the Origin header can never
+        // drift off the relay port the report URL already carries.
+        origin: new URL(reportUrl).origin,
       };
       if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
       const res = await fetchFn(reportUrl, {
