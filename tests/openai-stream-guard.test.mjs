@@ -193,6 +193,25 @@ describe("OpenAIStreamGuard", () => {
     ]);
     assert.ok(emitted.includes("step 1 thinking"), "reasoning_content must release the stream immediately");
 
+    // The turn thought but never answered and never called a tool: the
+    // reasoning was released, yet the agent has nothing to act on. That is
+    // the think-only verdict, not a clean completion (see the think-only
+    // suite below).
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "error");
+    assert.equal(verdict.reason, "think_only_incomplete");
+  });
+
+  it("passes a reasoning-then-answer turn (reasoning alone never makes a turn incomplete)", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"the answer"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    assert.ok(emitted.includes("the answer"));
+
     const verdict = guard.finish();
     assert.equal(verdict.action, "pass");
   });
@@ -636,5 +655,99 @@ describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struc
     const verdict = guard.finish();
     const [f] = frames(emitted + (verdict.tail || ""));
     assert.equal(f.model, "unknown");
+  });
+});
+
+// The think-only verdict and the numeric error code.
+//
+// A turn that carries reasoning but neither answer text nor a tool call
+// terminates cleanly and looks healthy to every other check — yet for the
+// agent loop it delivers nothing to act on. kimi-cli classifies the same
+// shape as an incomplete response and retries it (1.31.0).
+//
+// Every incomplete-upstream verdict carries the numeric code 502 so
+// downstream agents that auto-retry on a status code can recognise it
+// instead of aborting the turn on an uncoded error.
+describe("think-only turn and the 502 error code", () => {
+  it("rejects a held think-only turn as incomplete", () => {
+    const guard = new OpenAIStreamGuard();
+    pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"let me think"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    // Reasoning releases the hold (the bytes were forwarded), so the verdict
+    // lands in the post-content path: the turn ends with an error frame
+    // rather than a terminator.
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "error");
+    assert.equal(verdict.reason, "think_only_incomplete");
+    assert.equal(verdict.truncated, true);
+    assert.equal(verdict.error.error.code, 502);
+  });
+
+  it("rejects a think-only turn whose terminator is [DONE] alone", () => {
+    const guard = new OpenAIStreamGuard();
+    pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"thinking":"pondering"}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.reason, "think_only_incomplete");
+  });
+
+  it("does not flag a turn cut by the token budget (finish_reason length)", () => {
+    // A budget stop is a different fault class: the Responses translator
+    // reports it as an "incomplete" response and codex reads that as a
+    // normal completion. Flagging it here would turn it into a retry.
+    const guard = new OpenAIStreamGuard();
+    pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+  });
+
+  it("does not flag a turn that thought and then called a tool", () => {
+    const guard = new OpenAIStreamGuard();
+    pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"ls","arguments":"{}"}}]}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+  });
+
+  it("carries the 502 code on every post-content truncation verdict", () => {
+    const cases = [
+      {
+        name: "mid-word truncation",
+        parts: [
+          'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n',
+        ],
+      },
+      {
+        name: "truncated tool args",
+        parts: [
+          'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"ls","arguments":"{\\"x\\":"}}]}}]}\n\n',
+          'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        ],
+      },
+    ];
+    for (const { name, parts } of cases) {
+      const guard = new OpenAIStreamGuard();
+      pump(guard, parts);
+      const verdict = guard.finish();
+      assert.equal(verdict.action, "error", name);
+      assert.equal(verdict.error.error.code, 502, `${name} must carry the 502 code`);
+      const parsed = JSON.parse(verdict.errorLine.slice("data: ".length));
+      assert.equal(parsed.error.code, 502, `${name} error line must carry the 502 code`);
+      assert.equal(parsed.error.type, "api_error", `${name} must keep the api_error type`);
+      assert.ok(parsed.error.message.length > 0, `${name} must keep a readable message`);
+    }
   });
 });

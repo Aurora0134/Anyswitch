@@ -51,6 +51,17 @@ import { randomUUID } from "node:crypto";
 import { REASONING_FIELDS } from "./stream.mjs";
 
 const ERROR_TYPE = "api_error";
+// Numeric error code for an upstream response that arrived incomplete. 502 is
+// the closest semantic fit: RFC-wise it means "the gateway received an invalid
+// or incomplete response from the upstream", which is exactly a mid-stream
+// truncation (or a turn that produced nothing usable). 500 is too broad, 504
+// is a timeout, 503 is the gateway's own overload. The relay already records
+// this fault class as 502 internally (tracker.recordEnd({status:502})), so the
+// wire code and the panel metric now speak the same vocabulary. Downstream
+// agents that retry on 502/503 can recognise it; those that only read the
+// message still have a Chinese text.
+const UPSTREAM_INCOMPLETE_CODE = 502;
+export { UPSTREAM_INCOMPLETE_CODE };
 const INCOMPLETE_TOOL_CALL_MESSAGE =
   "the upstream stream contained an incomplete tool call (missing id or function name); the response was aborted";
 const MID_WORD_TRUNCATION_MESSAGE =
@@ -59,17 +70,21 @@ const TRUNCATED_TOOL_ARGS_MESSAGE =
   "上游工具调用的参数不是合法 JSON（疑似在参数中途被静默截断），内容可能不完整";
 const MALFORMED_JSON_CHUNK_MESSAGE =
   "上游流包含无法解析的 JSON 数据行（疑似 SSE 块在对象中途被截断），内容可能不完整";
+const THINK_ONLY_MESSAGE =
+  "上游响应只有思考内容，没有正文也没有工具调用（不完整响应）";
 
-function streamError(message) {
-  return { error: { type: ERROR_TYPE, message } };
+function streamError(message, code = null) {
+  const error = { type: ERROR_TYPE, message };
+  if (code !== null && code !== undefined) error.code = code;
+  return { error };
 }
 
 function toolCallError() {
   return streamError(INCOMPLETE_TOOL_CALL_MESSAGE);
 }
 
-function streamErrorLine(message) {
-  return `data: ${JSON.stringify(streamError(message))}\n\n`;
+function streamErrorLine(message, code = null) {
+  return `data: ${JSON.stringify(streamError(message, code))}\n\n`;
 }
 
 function toolCallErrorLine() {
@@ -175,6 +190,9 @@ export class OpenAIStreamGuard {
     this.sawDone = false; // a [DONE] terminator line was seen
     this.sawFinishReason = false; // a choice carried a finish_reason
     this.sawContent = false; // some text/reasoning was proven mid-stream
+    this.sawText = false; // the stream carried actual answer text
+    this.sawReasoning = false; // the stream carried reasoning/thinking text
+    this.sawLengthFinish = false; // a choice carried finish_reason "length"
     this.sawMalformedJson = false; // a data: line looked like JSON but failed to parse
     this.finished = false;
     // enhanced keep-alive (plan A): nothing releases the hold — the whole turn
@@ -242,6 +260,7 @@ export class OpenAIStreamGuard {
     }
 
     this.trackToolCalls(parsed);
+    this.trackContent(parsed);
     const forward = rewriteDataLine(line, parsed, this.envelope);
     if (!this.holding) return forward;
     this.held += forward;
@@ -261,9 +280,23 @@ export class OpenAIStreamGuard {
     return "";
   }
 
+  // Answer text and reasoning are tracked separately: the think-only verdict
+  // needs to tell "the model thought and stopped" from "the model answered".
+  trackContent(parsed) {
+    for (const choice of parsed.choices ?? []) {
+      const delta = choice?.delta;
+      if (!delta) continue;
+      if (typeof delta.content === "string" && delta.content.length > 0) this.sawText = true;
+      for (const field of REASONING_FIELDS) {
+        if (typeof delta[field] === "string" && delta[field].length > 0) this.sawReasoning = true;
+      }
+    }
+  }
+
   trackToolCalls(parsed) {
     for (const choice of parsed.choices ?? []) {
       if (choice?.finish_reason) this.sawFinishReason = true;
+      if (choice?.finish_reason === "length") this.sawLengthFinish = true;
       const calls = choice?.delta?.tool_calls;
       if (!Array.isArray(calls)) continue;
       for (const call of calls) {
@@ -305,6 +338,32 @@ export class OpenAIStreamGuard {
       }
     }
     return false;
+  }
+
+  // A turn that terminated cleanly but produced nothing the agent can act on:
+  // reasoning text only, no answer text and no tool call. The stream looks
+  // perfectly healthy — it carries a finish_reason and a [DONE] — so every
+  // other check passes it, yet for an agent the turn is empty. kimi-cli
+  // classifies the same shape as an incomplete response and retries it
+  // (1.31.0: "fix the agent loop silently stopping when the model response
+  // contains only thinking content"); this guard learned it from there.
+  //
+  // A reasoning-only turn is not necessarily a fault: a model asked to think
+  // without answering produces exactly this. But for the agent loop it
+  // delivers nothing to act on, and the caller decides whether to retry
+  // (on tier) or surface it (off tier) — the guard only classifies.
+  hasThinkOnlyTurn() {
+    if (this.sawText) return false;
+    if (this.calls.size > 0) return false;
+    if (!this.sawReasoning) return false;
+    // A turn cut by the token budget is a different fault class: the
+    // Responses translator already reports it as an "incomplete" response
+    // (finish_reason "length"), and codex reads that as a normal
+    // completion — flagging it here would turn a budget stop into a retry.
+    if (this.sawLengthFinish) return false;
+    // A turn with no terminator at all is a mid-word cut, not a think-only
+    // turn — the truncation verdict owns that case.
+    return this.sawDone || this.sawFinishReason;
   }
 
   hasIncompleteToolCall() {
@@ -362,7 +421,7 @@ export class OpenAIStreamGuard {
           action: "reject",
           reason: "malformed_json_chunk",
           truncated: true,
-          error: streamError(MALFORMED_JSON_CHUNK_MESSAGE),
+          error: streamError(MALFORMED_JSON_CHUNK_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
         };
       }
       if (this.holdEntireTurn && (this.calls.size > 0 || this.sawContent)) {
@@ -371,7 +430,7 @@ export class OpenAIStreamGuard {
             action: "reject",
             reason: "truncated_tool_args",
             truncated: true,
-            error: streamError(TRUNCATED_TOOL_ARGS_MESSAGE),
+            error: streamError(TRUNCATED_TOOL_ARGS_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
           };
         }
         if (!this.sawDone && !this.sawFinishReason) {
@@ -379,22 +438,34 @@ export class OpenAIStreamGuard {
             action: "reject",
             reason: "mid_word_truncation",
             truncated: true,
-            error: streamError(MID_WORD_TRUNCATION_MESSAGE),
+            error: streamError(MID_WORD_TRUNCATION_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
           };
         }
         return { action: "pass", tail };
       }
+      // A turn that thought but never answered and never called a tool: the
+      // stream is over and healthy-looking, yet the agent has nothing to act
+      // on. Same shape kimi-cli retries as an incomplete response.
+      if (this.hasThinkOnlyTurn()) {
+        return {
+          action: "reject",
+          reason: "think_only_incomplete",
+          truncated: true,
+          error: streamError(THINK_ONLY_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
+        };
+      }
       return { action: "empty", tail };
     }
     if (this.hasIncompleteToolCall()) {
-      return { action: "error", errorLine: toolCallErrorLine() };
+      return { action: "error", reason: "incomplete_tool_call", errorLine: toolCallErrorLine() };
     }
     if (this.sawMalformedJson) {
       return {
         action: "error",
+        reason: "malformed_json_chunk",
         truncated: true,
-        error: streamError(MALFORMED_JSON_CHUNK_MESSAGE),
-        errorLine: streamErrorLine(MALFORMED_JSON_CHUNK_MESSAGE),
+        error: streamError(MALFORMED_JSON_CHUNK_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
+        errorLine: streamErrorLine(MALFORMED_JSON_CHUNK_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
         tail,
       };
     }
@@ -406,9 +477,10 @@ export class OpenAIStreamGuard {
     if (!this.sawDone && !this.sawFinishReason) {
       return {
         action: "error",
+        reason: "mid_word_truncation",
         truncated: true,
-        error: streamError(MID_WORD_TRUNCATION_MESSAGE),
-        errorLine: streamErrorLine(MID_WORD_TRUNCATION_MESSAGE),
+        error: streamError(MID_WORD_TRUNCATION_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
+        errorLine: streamErrorLine(MID_WORD_TRUNCATION_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
         tail,
       };
     }
@@ -417,9 +489,22 @@ export class OpenAIStreamGuard {
     if (this.hasTruncatedToolArgs()) {
       return {
         action: "error",
+        reason: "truncated_tool_args",
         truncated: true,
-        error: streamError(TRUNCATED_TOOL_ARGS_MESSAGE),
-        errorLine: streamErrorLine(TRUNCATED_TOOL_ARGS_MESSAGE),
+        error: streamError(TRUNCATED_TOOL_ARGS_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
+        errorLine: streamErrorLine(TRUNCATED_TOOL_ARGS_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
+        tail,
+      };
+    }
+    // The stream terminated cleanly and carried a terminator, but the turn
+    // held nothing but reasoning: the agent got no answer and no tool call.
+    if (this.hasThinkOnlyTurn()) {
+      return {
+        action: "error",
+        reason: "think_only_incomplete",
+        truncated: true,
+        error: streamError(THINK_ONLY_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
+        errorLine: streamErrorLine(THINK_ONLY_MESSAGE, UPSTREAM_INCOMPLETE_CODE),
         tail,
       };
     }

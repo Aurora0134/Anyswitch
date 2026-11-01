@@ -11,8 +11,15 @@ import { requestModelIsTextOnly, looksLikeTextOnlyRejection } from "../catalog/t
 import { requestHasImages, stripImages, noteImageFallback } from "./media-strip.mjs";
 import { imageFallbackEnabled, imageHeuristicEnabled } from "./relay-settings.mjs";
 
-export function openAIError(type, message) {
-  return { error: { type, message } };
+// The optional `code` rides inside the error object. OpenAI's own error
+// schema types `code` as a string, but the numeric form (e.g. 429, 502) is
+// common in the wild and is what downstream agents that auto-retry on a
+// status code actually compare against. The value is therefore passed
+// through unchanged: a number stays a number, a string stays a string.
+export function openAIError(type, message, code = null) {
+  const error = { type, message };
+  if (code !== null && code !== undefined) error.code = code;
+  return { error };
 }
 
 function tokenMatches(presented, expected) {

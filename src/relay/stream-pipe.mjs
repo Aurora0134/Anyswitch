@@ -18,7 +18,7 @@
 //   - The retry loop latches the 502 fault exactly once, at exhaustion; a
 //     departed client records an abort instead of a fault.
 
-import { OpenAIStreamGuard } from "./openai-stream-guard.mjs";
+import { OpenAIStreamGuard, UPSTREAM_INCOMPLETE_CODE } from "./openai-stream-guard.mjs";
 import { StreamTranslator, SSEParser, sseEvent } from "./stream.mjs";
 import { ResponsesSseTranslator } from "./responses-translate.mjs";
 import { computeRetryDelay } from "../shared/keepalive-backoff.mjs";
@@ -365,7 +365,15 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     const errorType = verdict.error?.error?.type || "api_error";
     const errorMessage = verdict.error?.error?.message
       || "the upstream stream was truncated after content was delivered";
-    res.write(isResponses ? translator.fail(errorMessage, errorType) : sseEvent("error", errorBody(errorType, errorMessage)));
+    // The numeric code (502) rides along so downstream agents that
+    // auto-retry on a status code can recognise this as an upstream fault
+    // instead of aborting the turn on an uncoded error.
+    const errorCode = verdict.truncated
+      ? (verdict.error?.error?.code ?? UPSTREAM_INCOMPLETE_CODE)
+      : null;
+    res.write(isResponses
+      ? translator.fail(errorMessage, errorType, errorCode)
+      : sseEvent("error", errorBody(errorType, errorMessage, errorCode)));
     if (verdict.truncated) {
       // The content was cut (mid-word, or tool args that never parse). The
       // error event above replaces message_stop client-side; surface the
@@ -385,11 +393,12 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     }
 
     // Upstream died mid-stream after content was already delivered -> emit an
-    // error frame and terminate
+    // error frame and terminate. A dropped connection mid-response is the
+    // same fault class as a truncated stream, so it carries the same 502.
     if (isOpenAI) {
       tracker?.recordEnd({ status: 502, error: { status: 502, message: streamErr?.message || "upstream stream error" }, usage: usageExtracted });
       try {
-        res.write(`data: ${JSON.stringify(openAIError("api_error", "the upstream stream failed mid-response"))}\n\n`);
+        res.write(`data: ${JSON.stringify(openAIError("api_error", "the upstream stream failed mid-response", UPSTREAM_INCOMPLETE_CODE))}\n\n`);
       } catch {
         // socket already gone
       }
@@ -397,8 +406,8 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     }
     commit();
     res.write(isResponses
-      ? translator.fail("the upstream stream failed mid-response", "api_error")
-      : sseEvent("error", errorBody("api_error", "the upstream stream failed mid-response")));
+      ? translator.fail("the upstream stream failed mid-response", "api_error", UPSTREAM_INCOMPLETE_CODE)
+      : sseEvent("error", errorBody("api_error", "the upstream stream failed mid-response", UPSTREAM_INCOMPLETE_CODE)));
     return { outcome: "terminal", committed, error: "the upstream stream failed mid-response", usage: usageExtracted };
   } finally {
     if (pingTimer) clearInterval(pingTimer);

@@ -1230,13 +1230,16 @@ export class ResponsesSseTranslator {
   }
 
   // An upstream failure mid-stream ends the turn with response.failed; no
-  // [DONE] follows a failed response.
-  fail(message, type) {
+  // [DONE] follows a failed response. `code` rides inside the error object
+  // (the Responses error schema has no code field of its own, but a numeric
+  // status code is what downstream agents that auto-retry compare against).
+  fail(message, type, code = null) {
     if (this.finished) return "";
     this.finished = true;
     const out = this.start();
     const error = { message: nonEmptyString(message) ? message : "upstream stream error" };
     if (nonEmptyString(type)) error.type = type;
+    if (code !== null && code !== undefined) error.code = code;
     const response = this.baseResponse("failed", this.completedOutputItems());
     response.error = error;
     return out + sseEvent("response.failed", { type: "response.failed", response });
