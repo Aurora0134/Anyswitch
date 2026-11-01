@@ -84,11 +84,11 @@ Claude Code / Codex / 其他 agent
 
 ```bat
 node --version
-node --check panel-host.mjs
+node --check src/panel/panel-host.mjs
 npm test
 ```
 
-`npm test` 是仓库自带的全量测试（141 个测试文件，与实现文件同目录放）；它需要一次 `npm install`，因为虚拟终端测试会碰终端宿主。
+`npm test` 是仓库自带的全量测试（150 个测试文件，全在 `tests/`，与 `src/` 下的实现分开放）；它需要一次 `npm install`，因为虚拟终端测试会碰终端宿主。
 
 ---
 
@@ -98,17 +98,17 @@ npm test
 
 | agent | 协议面 | 启动方式 |
 | --- | --- | --- |
-| Claude Code | Anthropic Messages | `node launcher.mjs [claude 参数]` |
-| Kimi Code | Anthropic Messages | `node kimi-launcher.mjs [kimi 参数]` |
-| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex 参数]` |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` |
-| Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` |
-| ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` |
-| ZCode CLI | OpenAI | `node zcode-cli-launcher.mjs [zcode 参数]` |
-| DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh 参数]` |
-| Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` |
-| Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` |
-| WorkBuddy | OpenAI | `node workbuddy-launcher.mjs [codebuddy 参数]` |
+| Claude Code | Anthropic Messages | `node src/launchers/launcher.mjs [claude 参数]` |
+| Kimi Code | Anthropic Messages | `node src/launchers/kimi-launcher.mjs [kimi 参数]` |
+| Codex CLI | OpenAI Responses | `node src/launchers/codex-launcher.mjs [codex 参数]` |
+| OpenCode | OpenAI | `node src/launchers/opencode-launcher.mjs [opencode 参数]` |
+| Pi | OpenAI | `node src/launchers/pi-launcher.mjs [pi 参数]` |
+| ZCode | OpenAI | `node src/launchers/zcode-launcher.mjs [zcode 参数]` |
+| ZCode CLI | OpenAI | `node src/launchers/zcode-cli-launcher.mjs [zcode 参数]` |
+| DeepSeek Harness | OpenAI | `node src/launchers/dsh-launcher.mjs [dsh 参数]` |
+| Qoder | OpenAI | `node src/launchers/qoder-launcher.mjs [qoder 参数]` |
+| Grok Build | OpenAI | `node src/launchers/grok-launcher.mjs [grok 参数]` |
+| WorkBuddy | OpenAI | `node src/launchers/workbuddy-launcher.mjs [codebuddy 参数]` |
 
 ZCode CLI 是显式配置制：需自备 zcode CLI 发行物，并以环境变量 `ZCODE_CLI_EXECUTABLE` 指向其入口文件（`bin\zcode.mjs`）；未配置时该启动器不可用。
 
@@ -239,23 +239,23 @@ Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills �
 └── app\             本仓库：relay、面板、启动器
 ```
 
-- **`store.json` 不放秘密。** schema 内置词表（apikey、token、secret、password……）逐段匹配字段名，命中即拒绝写入；key 只以 `credentialFile` 引用的形式连到凭据目录。复算：`grep -n "SECRET_WORDS" store-schema.mjs`。
+- **`store.json` 不放秘密。** schema 内置词表（apikey、token、secret、password……）逐段匹配字段名，命中即拒绝写入；key 只以 `credentialFile` 引用的形式连到凭据目录。复算：`grep -n "SECRET_WORDS" src/store/store-schema.mjs`。
 - **key 只在请求那一刻解密。** DPAPI 用当前用户作用域，密文按渠道隔离。解出的明文默认在本进程内按密文哈希做短时复用（设置里可关，关掉即用后即焚、每个请求重新解密）；轮换密文会立即失效。
 - **四个进程，四个端口，全部只监听环回。** 面板 `127.0.0.1:47820`、relay `127.0.0.1:47821`、watchdog 标记 `47822`、终端宿主 `127.0.0.1:47823`。
 - **终端宿主是独立进程。** 页面只是浏览器客户端：刷新或重开面板不丢 PTY，历史从宿主渲染镜像回放；宿主归 relay 托管并自动重启。
-- **业务代码零第三方运行依赖。** 5 个直接依赖全部属于虚拟终端；全部 `.mjs` 里 import 第三方包的只有一处：`terminal-host.mjs` 的 node-pty。复算：
+- **业务代码零第三方运行依赖。** 5 个直接依赖全部属于虚拟终端；`src/` 下全部 `.mjs` 里 import 第三方包的只有一处：`src/terminal/terminal-host.mjs` 的 node-pty。复算：
 
   ```bat
   node -e "console.log(Object.keys(require('./package.json').dependencies).join(' '))"
-  node -e "const fs=require('fs');for(const f of fs.readdirSync('.').filter(x=>x.endsWith('.mjs')))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f+': '+l.trim())"
+  node -e "const fs=require('fs'),path=require('path');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):e.name.endsWith('.mjs')?[path.join(d,e.name)]:[]);for(const f of walk('src'))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f.split(path.sep).join('/')+': '+l.trim())"
   ```
 
-  第二条只应打印 `terminal-host.mjs: import * as pty from "node-pty";`。
+  第二条递归扫 `src/`（重构后实现已不在仓库根，扫根目录一个都扫不到），只应打印 `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`。
 
 - **写面有并发保护。** 面板写 store 走内容哈希 CAS 加文件锁；路由目录带 generation 摘要，配置在请求中途变化时拒绝用旧目录。
 - **面板写接口只认本地面板。** `POST /panel/api/*` 要过 Origin/Referer 可信校验；relay 用数据根里的本地 token 鉴权，终端宿主同样。
 
-规模不是卖点，但可以复算：仓库根 256 个 `.mjs`（115 个实现 + 141 个测试），实现代码约 52,200 行；面板前端三件套 `panel.js` / `panel.html` / `panel.css` 共约 28,300 行。
+规模不是卖点，但可以复算：`src/` 下 118 个实现 `.mjs`、`tests/` 下 150 个测试 `.mjs`，合计 268 个；实现代码约 55,600 行，测试代码约 106,100 行；面板前端三件套 `panel.js` / `panel.html` / `panel.css` 共约 29,800 行。
 
 ---
 
@@ -299,22 +299,19 @@ Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills �
 
 ```text
 Anyswitch/
-├── panel-host.mjs              # 47820 面板宿主
-├── relay-host.mjs              # 47821 常驻 relay 宿主（同时托管终端宿主）
-├── panel.mjs                   # 面板 API 与静态页面路由
+├── src/                        # 运行代码，按域分十个目录
+│   ├── panel/                  # 47820 面板宿主；面板 API 与静态页面路由；桌面入口
+│   ├── relay/                  # 47821 常驻 relay 宿主（同时托管终端宿主）；协议转换与请求转发
+│   ├── launchers/              # relay 生产装配；各端点启动器（ZCode 桌面与 CLI 各一）与各家配置合并
+│   ├── agents/                 # 托管渠道同步到各 agent 配置；进程、请求、实例和看板读数；会话读取；Skills 部署
+│   ├── terminal/               # 47823 终端宿主：PTY 与会话状态、渲染镜像与回放、会话归属
+│   ├── store/                  # store 读写与 CAS 写保护、秘密字段校验、从各 agent 本地配置导入渠道
+│   ├── channels/               # 号池与路由链
+│   ├── catalog/                # 模型目录、上下文窗口与思考挡位兜底
+│   ├── ops/                    # 开机自启、自更新、git 锚点、DPAPI 桥
+│   └── shared/                 # 日志总线、用量流水与统计、保活退避
+├── tests/                      # node:test 套件，与 src/ 下的实现分开放
 ├── panel-ui/                   # 面板页面、样式和脚本
-├── launch.mjs                  # relay 生产装配与请求转发
-├── launcher.mjs                # Claude Code 启动器
-├── *-launcher.mjs              # 其他端点的启动器（ZCode 桌面与 CLI 各一）
-├── agent-sync.mjs              # 托管渠道同步到各 agent 配置
-├── byok-import.mjs             # 从各 agent 本地配置导入渠道
-├── agent-metrics.mjs           # 进程、请求、实例和看板读数
-├── terminal-host.mjs           # 47823 终端宿主：PTY 与会话状态
-├── terminal-screen.mjs         # 终端渲染镜像与回放
-├── terminal-attribution.mjs    # 终端会话与实例的归属连接
-├── agent-session-env.mjs       # 启动 agent 时的 launch 与环境变量组装
-├── session-scan.mjs            # 各 agent 的会话读取与适配
-├── agent-skills.mjs            # Skills 主仓库与部署
 ├── skills/anyswitch-preset/    # 可选的预设管理技能
 ├── docs/                       # 架构文档与真实截图
 ├── package.json                # 版本、Node 范围、虚拟终端依赖

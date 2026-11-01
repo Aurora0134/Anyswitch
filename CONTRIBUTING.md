@@ -10,15 +10,15 @@
   npm test
   ```
 
-  This runs `node --test *.test.mjs`. The glob is expanded by Node's own test runner, so it works even though Windows npm scripts don't expand wildcards. Use **Node.js 24 LTS** for development. The required API range in `package.json` is `>=22.15.0 <23 || >=23.8.0`, accounting for the built-in SQLite and zstd APIs used by session reading; it does not claim that every matching Node version has been tested. The relay and panel are dependency-free, but the suite exercises the virtual terminal's terminal host, so run `npm install` once before the first run.
+  This runs `node --test tests/*.test.mjs`. The glob is expanded by Node's own test runner, so it works even though Windows npm scripts don't expand wildcards. Use **Node.js 24 LTS** for development. The required API range in `package.json` is `>=22.15.0 <23 || >=23.8.0`, accounting for the built-in SQLite and zstd APIs used by session reading; it does not claim that every matching Node version has been tested. The relay and panel are dependency-free, but the suite exercises the virtual terminal's terminal host, so run `npm install` once before the first run.
 
 - Single file:
 
   ```bat
-  node --test <file>.test.mjs
+  node --test tests/<file>.test.mjs
   ```
 
-  e.g. `node --test autostart.test.mjs`.
+  e.g. `node --test tests/autostart.test.mjs`.
 
 - Environment notes:
   - `dpapi.test.mjs` exercises real Windows DPAPI (CurrentUser scope, via `dpapi.ps1`) and must run in a Windows interactive logon session; in non-interactive/service sessions without a user context the DPAPI probe fails and the affected cases report as skipped instead of failing.
@@ -27,7 +27,7 @@
 ### Code style
 
 - Plain Node.js ESM (`.mjs`). The relay, panel and launchers use the standard library only — do not add npm packages there. `package.json` declares dependencies for the experimental virtual terminal (the terminal host binding, renderer and add-ons); keep new ones out of that list.
-- Tests use the built-in `node:test` runner; keep new tests in the same `*.test.mjs` flat layout.
+- Tests use the built-in `node:test` runner; keep new tests under `tests/` as `*.test.mjs`, separate from the implementation in `src/`.
 - Match the surrounding code's naming, comment density, and idioms.
 
 ### Spec co-update conventions
@@ -58,15 +58,15 @@ Release notes are the changelog a user reaches from the About page, so their aud
   npm test
   ```
 
-  即 `node --test *.test.mjs`。通配符由 Node 自带的 test runner 展开，Windows npm script 不展开通配符也没关系。开发推荐 **Node.js 24 LTS**。`package.json` 的 API 下限范围为 `>=22.15.0 <23 || >=23.8.0`，涵盖会话读取所需的内置 SQLite 与 zstd API，不表示范围内每个 Node 版本均已实测。relay 与面板本身零依赖，但套件覆盖虚拟终端的终端宿主，首次运行前先执行一次 `npm install`。
+  即 `node --test tests/*.test.mjs`。通配符由 Node 自带的 test runner 展开，Windows npm script 不展开通配符也没关系。开发推荐 **Node.js 24 LTS**。`package.json` 的 API 下限范围为 `>=22.15.0 <23 || >=23.8.0`，涵盖会话读取所需的内置 SQLite 与 zstd API，不表示范围内每个 Node 版本均已实测。relay 与面板本身零依赖，但套件覆盖虚拟终端的终端宿主，首次运行前先执行一次 `npm install`。
 
 - 单文件：
 
   ```bat
-  node --test <file>.test.mjs
+  node --test tests/<file>.test.mjs
   ```
 
-  如 `node --test autostart.test.mjs`。
+  如 `node --test tests/autostart.test.mjs`。
 
 - 环境依赖说明：
   - `dpapi.test.mjs` 走真实 Windows DPAPI（CurrentUser 作用域，经 `dpapi.ps1`），需要在 Windows 交互登录会话下运行；非交互/无用户上下文的服务会话中 DPAPI 探测不可用，相关用例报告为 skipped 而非失败。
@@ -75,7 +75,7 @@ Release notes are the changelog a user reaches from the About page, so their aud
 ### 代码风格
 
 - 纯 Node.js ESM（`.mjs`）。relay、面板与各启动器只用标准库——不要给它们引入 npm 包。`package.json` 里声明的是实验性虚拟终端所需的依赖（终端宿主绑定、渲染器与附加组件），不要再往这份清单里加东西。
-- 测试用内置 `node:test`；新测试保持根目录平铺的 `*.test.mjs` 布局。
+- 测试用内置 `node:test`；新测试放在 `tests/` 下、以 `*.test.mjs` 命名，与 `src/` 下的实现分开。
 - 命名、注释密度与写法与周围代码保持一致。
 
 ### 规格同笔更新约定

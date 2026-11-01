@@ -84,11 +84,11 @@ Post-install self-check:
 
 ```bat
 node --version
-node --check panel-host.mjs
+node --check src/panel/panel-host.mjs
 npm test
 ```
 
-`npm test` runs the repo's full suite (141 test files, colocated with the implementation); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
+`npm test` runs the repo's full suite (150 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
 
 ---
 
@@ -98,17 +98,17 @@ Ten agents, eleven wiring details — configure once and they are all here:
 
 | Agent | Protocol surface | Launcher |
 | --- | --- | --- |
-| Claude Code | Anthropic Messages | `node launcher.mjs [claude args]` |
-| Kimi Code | Anthropic Messages | `node kimi-launcher.mjs [kimi args]` |
-| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex args]` |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` |
-| Pi | OpenAI | `node pi-launcher.mjs [pi args]` |
-| ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` |
-| ZCode CLI | OpenAI | `node zcode-cli-launcher.mjs [zcode args]` |
-| DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh args]` |
-| Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` |
-| Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` |
-| WorkBuddy | OpenAI | `node workbuddy-launcher.mjs [codebuddy args]` |
+| Claude Code | Anthropic Messages | `node src/launchers/launcher.mjs [claude args]` |
+| Kimi Code | Anthropic Messages | `node src/launchers/kimi-launcher.mjs [kimi args]` |
+| Codex CLI | OpenAI Responses | `node src/launchers/codex-launcher.mjs [codex args]` |
+| OpenCode | OpenAI | `node src/launchers/opencode-launcher.mjs [opencode args]` |
+| Pi | OpenAI | `node src/launchers/pi-launcher.mjs [pi args]` |
+| ZCode | OpenAI | `node src/launchers/zcode-launcher.mjs [zcode args]` |
+| ZCode CLI | OpenAI | `node src/launchers/zcode-cli-launcher.mjs [zcode args]` |
+| DeepSeek Harness | OpenAI | `node src/launchers/dsh-launcher.mjs [dsh args]` |
+| Qoder | OpenAI | `node src/launchers/qoder-launcher.mjs [qoder args]` |
+| Grok Build | OpenAI | `node src/launchers/grok-launcher.mjs [grok args]` |
+| WorkBuddy | OpenAI | `node src/launchers/workbuddy-launcher.mjs [codebuddy args]` |
 
 ZCode CLI is explicit-configuration only: bring your own zcode CLI distribution and point `ZCODE_CLI_EXECUTABLE` at its entry file (`bin\zcode.mjs`); without it, that launcher is unavailable.
 
@@ -239,23 +239,23 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
 └── app\             this repo: relay, panel, launchers
 ```
 
-- **`store.json` holds no secrets.** The schema has a built-in word list (apikey, token, secret, password, …) matched against field names segment by segment; a hit rejects the write. Keys connect to the credentials directory only as `credentialFile` references. Verify: `grep -n "SECRET_WORDS" store-schema.mjs`.
+- **`store.json` holds no secrets.** The schema has a built-in word list (apikey, token, secret, password, …) matched against field names segment by segment; a hit rejects the write. Keys connect to the credentials directory only as `credentialFile` references. Verify: `grep -n "SECRET_WORDS" src/store/store-schema.mjs`.
 - **Keys decrypt only at request time.** DPAPI under the current user scope, ciphertext isolated per channel. Decrypted plaintext is reused short-term keyed by the ciphertext hash (a setting can disable this for burn-after-use: every request decrypts fresh); rotating the ciphertext invalidates it immediately.
 - **Four processes, four ports, loopback only.** Panel `127.0.0.1:47820`, relay `127.0.0.1:47821`, watchdog marker `47822`, terminal host `127.0.0.1:47823`.
 - **The terminal host is a separate process.** The page is just a browser client: refreshing or reopening the panel keeps the PTYs alive; history replays from the host render mirror; the host is owned and restarted by the relay.
-- **Zero third-party runtime dependencies in the business code.** All 5 direct dependencies belong to the virtual terminal; across every `.mjs` there is exactly one third-party import: node-pty in `terminal-host.mjs`. Verify:
+- **Zero third-party runtime dependencies in the business code.** All 5 direct dependencies belong to the virtual terminal; across every `.mjs` under `src/` there is exactly one third-party import: node-pty in `src/terminal/terminal-host.mjs`. Verify:
 
   ```bat
   node -e "console.log(Object.keys(require('./package.json').dependencies).join(' '))"
-  node -e "const fs=require('fs');for(const f of fs.readdirSync('.').filter(x=>x.endsWith('.mjs')))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f+': '+l.trim())"
+  node -e "const fs=require('fs'),path=require('path');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):e.name.endsWith('.mjs')?[path.join(d,e.name)]:[]);for(const f of walk('src'))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f.split(path.sep).join('/')+': '+l.trim())"
   ```
 
-  The second command should print only `terminal-host.mjs: import * as pty from "node-pty";`.
+  The second command walks `src/` recursively (after the refactor no implementation sits at the repo root, so scanning the root finds nothing) and should print only `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`.
 
 - **The write path is concurrency-safe.** Panel writes to the store go through content-hash CAS with a file lock; the routing catalog carries a generation digest so a config changed mid-request is never served stale.
 - **Write endpoints trust only the local panel.** `POST /panel/api/*` passes Origin/Referer validation; the relay authenticates with a local token from the data root, as does the terminal host.
 
-Scale is not the selling point, but it is verifiable: 256 `.mjs` files at the repo root (115 implementation + 141 test), roughly 52,200 lines of implementation code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 28,300 lines.
+Scale is not the selling point, but it is verifiable: 118 implementation `.mjs` files under `src/` and 150 test `.mjs` files under `tests/`, 268 in total; roughly 55,600 lines of implementation code and 106,100 lines of test code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 29,800 lines.
 
 ---
 
@@ -299,22 +299,19 @@ This is the first stable release on the 0.7 line, not a 1.0 product: every line 
 
 ```text
 Anyswitch/
-├── panel-host.mjs              # 47820 panel host
-├── relay-host.mjs              # 47821 resident relay host (owns the terminal host)
-├── panel.mjs                   # panel API and static page routing
+├── src/                        # runtime code, split into ten domains
+│   ├── panel/                  # 47820 panel host; panel API and static page routing; desktop entry
+│   ├── relay/                  # 47821 resident relay host (owns the terminal host); protocol translation and forwarding
+│   ├── launchers/              # relay production assembly; per-endpoint launchers (ZCode desktop and CLI each) and config merges
+│   ├── agents/                 # managed-channel sync into agent configs; process/request/instance readouts; session reading; skills deployment
+│   ├── terminal/               # 47823 terminal host: PTY and session state, render mirror and replay, session attribution
+│   ├── store/                  # store read/write and CAS protection, secret-field validation, channel import from agent local configs
+│   ├── channels/               # pools and route chains
+│   ├── catalog/                # model catalog, context-window and thinking-effort fallbacks
+│   ├── ops/                    # autostart, self-update, git anchor, DPAPI bridge
+│   └── shared/                 # log bus, usage journal and stats, keepalive backoff
+├── tests/                      # node:test suite, kept apart from the implementation in src/
 ├── panel-ui/                   # panel pages, styles and scripts
-├── launch.mjs                  # relay production assembly and request forwarding
-├── launcher.mjs                # Claude Code launcher
-├── *-launcher.mjs              # launchers for the other endpoints (ZCode desktop and CLI each)
-├── agent-sync.mjs              # syncs managed channels into agent configs
-├── byok-import.mjs             # imports channels from agent local configs
-├── agent-metrics.mjs           # processes, requests, instances and dashboard readouts
-├── terminal-host.mjs           # 47823 terminal host: PTY and session state
-├── terminal-screen.mjs         # terminal render mirror and replay
-├── terminal-attribution.mjs    # terminal-session-to-instance attribution
-├── agent-session-env.mjs       # launch and env assembly when starting agents
-├── session-scan.mjs            # per-agent session reading and adaptation
-├── agent-skills.mjs            # skills main repo and deployment
 ├── skills/anyswitch-preset/    # optional preset-management skill
 ├── docs/                       # architecture docs and real screenshots
 ├── package.json                # version, Node range, virtual-terminal deps
