@@ -7,7 +7,9 @@ import { compareVersions } from "../ops/version-check.mjs";
 import { executeClientUpdate, readClientUpdateRun } from "./client-update-journal.mjs";
 import { readFileSync } from "node:fs";
 
-const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+// package.json stays at the repo root — this file sits in src/agents
+// (2026-11-01 分域重构).
+const APP_VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 
 const runId = process.argv[2];
 const journalDir = process.argv[3];

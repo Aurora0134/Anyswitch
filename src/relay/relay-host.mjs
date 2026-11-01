@@ -41,7 +41,9 @@ import { spawn } from "node:child_process";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const RELAY_PORT = 47821;
-const TERMINAL_HOST_SCRIPT = fileURLToPath(new URL("terminal-host.mjs", import.meta.url));
+// The terminal host lives in src/terminal — a bare name here would resolve
+// against src/relay and spawn a path that does not exist (2026-11-01 分域重构).
+const TERMINAL_HOST_SCRIPT = fileURLToPath(new URL("../terminal/terminal-host.mjs", import.meta.url));
 const LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024;
 // Mirrors TERMINAL_STATE_FILE in terminal-host.mjs. Duplicated instead of
 // imported: importing terminal-host.mjs here would drag node-pty's native

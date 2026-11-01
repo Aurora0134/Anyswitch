@@ -167,6 +167,7 @@ test("createTerminalHostSupervisor spawns a non-detached child carrying the rela
   const { file, args, options } = calls[0];
   assert.equal(file, process.execPath);
   assert.ok(args[0].endsWith("terminal-host.mjs"), `expected the terminal host script, got ${args[0]}`);
+  assert.ok(existsSync(args[0]), `the terminal host script must exist on disk, got ${args[0]}`);
   assert.equal(options.stdio, "ignore");
   assert.equal(options.windowsHide, true);
   assert.ok(!("detached" in options), "the child must stay in the relay's process tree — no detached flag");
