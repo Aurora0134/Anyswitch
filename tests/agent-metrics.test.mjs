@@ -8184,6 +8184,146 @@ describe("进程扫描降级轮（tasklist 回落）不得销毁实例状态", (
   });
 });
 
+// ---------------------------------------------------------------------------
+// node 桶失配行兜底与第三道护栏（2026-11-01）。
+//
+// node 桶的五组安装路径谓词都认不出的 npm 形 node 行（上游改包名后的会话行形状）
+// 此前静默归零：计数没有去处，读侧还把它当「事实零」淘汰实例行、清在途账。修复
+// 后：失配行以 unclaimedNodeRows 计数（不进任何端点桶，整轮可信位也不动）；读侧
+// 的实例行淘汰与零值结算在该计数非零时挂上全表生死联动（scanPidLiveness）——
+// pid 活着就留行，确实死了照删。自进程与裸 node 脚本（命令行无 node_modules）
+// 不入计数，护栏对该计数为零的轮次逐位等价于不存在（既有用例全部照旧）。
+describe("node 桶失配行兜底与第三道护栏", () => {
+  const OLD_PID = 41000;
+  const RENAMED_PID = 41376;
+  const noSurfaces = async () => new Map();
+  // 常驻探针的真实行形状：<pid>,<ppid>,<name>,<command line>——带父进程列，
+  // 全表生死判定（scanPidLiveness）才有据可依；WMIC 旧形状没有 ppid，判不了
+  // 生死时护栏按既有口径保守留行，测不出「确实死了的照删」。
+  const psScan = (rows) => rows.join("\r\n") + "\r\n";
+  // 健康形状：旧包名的 kimi 会话行（isKimiNode 认领）。
+  const claimedKimiRow = (pid) =>
+    `${pid},500,node.exe,C:\\Tools\\node.exe C:\\x\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs`;
+  // 上游改包名后的形状：五组谓词全失配，但命令行带 node_modules。
+  const renamedNodeRow = (pid) =>
+    `${pid},7000,node.exe,C:\\u\\AppData\\Roaming\\npm\\node_modules\\@moonshot-ai\\kimi-code-next\\lib\\start.mjs`;
+  const unrelatedRow = "9001,100,explorer.exe,C:\\Windows\\explorer.exe";
+  const settleRound = async (collector) => {
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  const kimiCard = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+  // 直取扫描快照的同款节奏：落地前的读者一律服务上一轮，先踢一轮再取。
+  const scanRound = async (collector) => {
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+    return collector.scanProcesses();
+  };
+
+  it("失配的 npm 形 node 行有计数去处，但不进任何端点桶、整轮可信位不动", async () => {
+    let t = 3000;
+    let psAnswer = psScan([renamedNodeRow(RENAMED_PID)]);
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? "" : psAnswer),
+      nowFn: () => t,
+      kimiRegistryLookup: noSurfaces,
+    });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.unclaimedNodeRows, 1, "失配行入兜底计数，不再静默");
+    assert.equal(procs.kimi, 0, "不凭镜像名或路径猜归属，端点桶不动");
+    assert.equal(procs.kimiPids.size, 0);
+    assert.equal(procs.countsAuthoritative, true, "整轮可信位不动（自进程与无关 node 工具每轮常在，整轮降级等于可信模式常关）");
+    assert.ok(procs.seenPids.has(RENAMED_PID), "行本身仍进全表 pid，生死判定有据");
+
+    // 认领命中的行、自进程与裸脚本（命令行无 node_modules）都不入兜底计数。
+    psAnswer = psScan([
+      claimedKimiRow(OLD_PID),
+      '1001,1000,node.exe,"C:\\Program Files\\nodejs\\node.exe"  "C:\\Users\\u\\AppData\\Local\\Anyswitch\\app\\src\\relay\\relay-host.mjs"',
+      "1002,1000,node.exe,C:\\tools\\srv.js",
+    ]);
+    t += 10_000;
+    const procs2 = await scanRound(collector);
+    assert.equal(procs2.unclaimedNodeRows, 0, "认领命中行、自进程、裸脚本都不算失配行");
+    assert.equal(procs2.kimi, 1);
+  });
+
+  it("降级轮（无命令行）不产生失配计数：盲轮语义仍归 50a41fc 管", async () => {
+    let t = 3000;
+    let psAnswer = "";
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? `"node.exe","${RENAMED_PID}","Console","1","120,000 K"\r\n` : psAnswer),
+      nowFn: () => t,
+      kimiRegistryLookup: noSurfaces,
+    });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.countsAuthoritative, false, "确认走的是降级轮");
+    assert.equal(procs.unclaimedNodeRows, 0, "没有命令行就没有形状可判，计数不入场");
+  });
+
+  it("改名会话的实例行不再被事实零淘汰：pid 活着就留行，确实死了照删", async () => {
+    let t = 3000;
+    let psAnswer = psScan([claimedKimiRow(OLD_PID)]);
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? "" : psAnswer),
+      nowFn: () => t,
+      kimiRegistryLookup: noSurfaces,
+    });
+    let kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances.map((i) => i.id), [`kimi-${OLD_PID}`], "前置：健康轮占位行在");
+
+    // 旧会话（认领形状）退出、改名行进轮；等这一轮落地后再给改名会话起在途
+    // 请求（先起会被「服务上一轮快照」的读按旧 pid 集当轮删掉，测不到护栏）。
+    psAnswer = psScan([renamedNodeRow(RENAMED_PID)]);
+    t += 10_000;
+    await settleRound(collector);
+    const inflight = collector.startRequest({ agentId: "kimi", instanceId: `kimi-${RENAMED_PID}`, providerId: "p1", model: "m1", stream: true, path: "openai" });
+    inflight.recordFirstChunk();
+    kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances.map((i) => i.id), [`kimi-${RENAMED_PID}`],
+      "修复前：桶内 pid 集为空 + 可信轮 → 在途的改名会话行当轮被删");
+    assert.equal(kimi.instances[0].activeRequests, 1, "行级在途不被零值结算清掉");
+    assert.equal(kimi.metrics.activeRequests, 1, "端点聚合的账面与行同进退，不得按假零清算");
+    assert.equal(kimi.processCount, 0, "桶内计数语义不动：认不出就是不计入");
+
+    // 改名进程确实退出（全表无此 pid）：护栏退位，照常即时淘汰并结算。
+    psAnswer = psScan([unrelatedRow]);
+    t += 10_000;
+    await settleRound(collector);
+    kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances, [], "确实死了的照删");
+    assert.equal(kimi.metrics.activeRequests, 0, "泄漏的在途照常结算");
+  });
+
+  it("claude 会话行同理：改名窗口内不被 ended 闩收走", async () => {
+    let t = 3000;
+    let psAnswer = psScan([renamedNodeRow(RENAMED_PID)]);
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? "" : psAnswer),
+      nowFn: () => t,
+      kimiRegistryLookup: noSurfaces,
+    });
+    collector.reportSession("token_claude_renamed", {
+      pid: RENAMED_PID,
+      requests: 3,
+      activeRequests: 1,
+      activeDurationMs: 15000,
+      promptTokens: 2000,
+      completionTokens: 300,
+    });
+    const claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.equal(claude.sessions.length, 1, "修复前：pid 不在 claudePids → 行被闩成 ended 当轮消失");
+    assert.equal(claude.sessions[0].id, `claude-${RENAMED_PID}`);
+    assert.equal(claude.sessions[0].requests, 3);
+
+    // 进程确实退出（全表无此 pid）：ended 闩照常工作。
+    psAnswer = psScan([unrelatedRow]);
+    t += 10_000;
+    await settleRound(collector);
+    const claudeAfter = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.equal(claudeAfter.sessions.length, 0, "确实死了的照常闩 ended");
+  });
+});
+
 // 降级轮不得把一个桌面端拆成一排「CLI 实例」（2026-10-05 用户报障：只开一个
 // Claude Desktop，claude 卡却出现十几个带 CLI 徽标的实例行，刷新页面后又好了）。
 // 根因：桌面形态的分型与折叠都以命令行为唯一依据，而回落 tasklist 的那一轮每一
