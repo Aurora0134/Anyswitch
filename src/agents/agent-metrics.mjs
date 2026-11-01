@@ -1240,8 +1240,18 @@ export function parseDshConsoleQueryOutput(out) {
 // 请求永远为空」那一串症状的共同根因。seenPids 是这一轮探针报上来的全部 pid
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
+//
+// - 第三道护栏（2026-11-01）：常驻探针「能认全」的前提是 node 桶五组安装路径谓词
+//   认得出。上游改包名后，会话行会变成「五组全失配、但命令行带 node_modules」的
+//   node 行，结果对象以 unclaimedNodeRows 计数。这种行在轮里时，node 形态端点
+//   （claude/dsh/pi/kimi/workbuddy）的 0 与「pid 不在桶里」都不再是「不在了」的
+//   证据：读侧的实例行淘汰与零值结算挂上 scanPidLiveness 联动（行 pid 全表还
+//   见得到就留行），桶内计数与 pid 集本身不动，整轮可信位也不动——自进程
+//   （relay/panel/terminal-host 等）与无关 node 工具每轮常在，整轮降级等于把
+//   可信模式常关。自进程与裸 node 脚本的命令行不带 node_modules，不入计数；
+//   unclaimedNodeRows === 0 的轮次，护栏逐位等价于不存在。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, unclaimedNodeRows: 0, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -1713,6 +1723,17 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
           result.workbuddy += 1;
           if (pid) result.workbuddyEnginePids.add(pid);
         }
+      }
+      // 兜底可观测位：五组谓词全失配、但命令行带 npm 安装路径形状（node_modules）
+      // 的 node 行（口径见 createEmptyProcessScan 上方第三道护栏）。既有计数语义
+      // 不动——镜像名 node.exe 不构成任何端点的会话证据（本注释块开头的 npm view
+      // 例子就是反证），失配行照旧不计数、不进任何桶；这个计数只回答「本轮有没有
+      // 认不出的 npm 形 node 行」，上游改包名的会话行正是这个形状，静默归零从此
+      // 有处可查，读侧护栏也以此为闸。自进程与裸 node 脚本不带 node_modules，
+      // 不入计数。
+      if (!isClaudeNode && !isDshNode && !isPiNode && !isKimiNode && !isWorkbuddyNode
+        && lower.includes("node_modules")) {
+        result.unclaimedNodeRows += 1;
       }
     }
   }
@@ -3111,7 +3132,10 @@ export function createAgentMetricsCollector(options = {}) {
       if (typeof psOut === "string" && psOut.trim().length > 0) {
         const counts = parseTasklistCsv(psOut, priorCountedPids(), workbuddySessionLookup);
         // 常驻探针这一路带命令行与父进程列，是唯一能认全 node 型客户端的
-        // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。
+        // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。「认全」
+        // 以五组谓词认得出为前提，认不出的 npm 形 node 行由读侧第三道护栏
+        // 接住（unclaimedNodeRows），不在此降整轮可信位：自进程与无关 node
+        // 工具每轮常在，整轮降级等于把可信模式常关。
         counts.countsAuthoritative = true;
         // 折叠在落地前：同步纯计算不占探针预算，首读与 lastTrustedScan 拿到的
         // 都是折过的形态（降级轮的形态延续也就自带折叠结果）。
@@ -4442,13 +4466,18 @@ export function createAgentMetricsCollector(options = {}) {
 
     for (const [key, s] of claudeSessions.entries()) {
       if (s.ended) {
-        if (livePids.has(s.pid)) {
+        if (livePids.has(s.pid)
+          || (procCounts.unclaimedNodeRows > 0 && scanPidLiveness(s.pid, procCounts) !== false)) {
           // The PID is alive again: either a stale scan-cache read latched
           // this session ended while its process was still starting, or the
           // OS recycled the PID for a new claude.exe. Revive the row — a live
           // process must not stay hidden behind an ended latch (the latch
           // also blocked placeholder recreation above, which pinned the panel
-          // at fewer session rows than running claude processes).
+          // at fewer session rows than running claude processes). The third
+          // guardrail (see createEmptyProcessScan) extends the same rule to
+          // rounds with unclaimed npm-shaped node rows: a renamed claude
+          // session's row must not stay buried under a latch from a blind
+          // window.
           s.ended = false;
           s.lastSeen = now;
         } else {
@@ -4463,8 +4492,13 @@ export function createAgentMetricsCollector(options = {}) {
           continue;
         }
       }
-      if (!livePids.has(s.pid)) {
-        // Process is gone — mark ended (covers both normal exit and forced kill)
+      if (!livePids.has(s.pid)
+        && !(procCounts.unclaimedNodeRows > 0 && scanPidLiveness(s.pid, procCounts) !== false)) {
+        // Process is gone — mark ended (covers both normal exit and forced
+        // kill). The third guardrail (see createEmptyProcessScan) holds the
+        // latch while the round carries unclaimed npm-shaped node rows and
+        // the pid is still visible to the full-table liveness check: a
+        // renamed claude session is alive, just unrecognizable.
         s.ended = true;
         continue;
       }
@@ -4559,8 +4593,34 @@ export function createAgentMetricsCollector(options = {}) {
     // 的生死机制（pid 规则、desktopGen 代际、家族连失判定），且 run 判决
     //（resolvePendingRunVerdicts）路径上「新代流量先到、判决后到」时新代行
     // 必须存活；恢复的旧实例行（无活 pid）由既有逐行淘汰自行收走。
+    // 有「node.exe 跑包路径」形态的端点（node 桶五组谓词的认领面，见
+    // createEmptyProcessScan 上方）：它们读零时第三道护栏要复核。
+    const NODE_FORM_ENDPOINTS = new Set(["claude", "dsh", "pi", "kimi", "workbuddy"]);
+    // 端点名下还有没有活 pid 的实例行：pid 形行看全表生死（scanPidLiveness），
+    // claude 另计 claudeSessions 活行——reporter 建的会话行不走实例桶。
+    function endpointHasLivePidRow(bucket) {
+      const rows = instanceBuckets[bucket];
+      if (rows !== undefined) {
+        const pidRe = new RegExp(`^${bucket}-(\\d+)$`);
+        for (const instId of rows.keys()) {
+          const m = instId.match(pidRe);
+          if (m !== null && scanPidLiveness(Number(m[1]), procCounts) !== false) return true;
+        }
+      }
+      if (bucket === "claude") {
+        for (const s of claudeSessions.values()) {
+          if (!s.ended && scanPidLiveness(s.pid, procCounts) !== false) return true;
+        }
+      }
+      return false;
+    }
     function settleAndResetRunAccount(id, processCount) {
       if (processCount > 0) return;
+      // 第三道护栏（见 createEmptyProcessScan 上方）：node 形态端点读零、但名下
+      // 还有活 pid 的实例行时，这个 0 可能是「行在、认不出」（上游改包名的会话
+      // 行）——账面与行同进退（与下面 WB 会话行的保留判据同构），不结算也不重
+      // 置累计，等行被认领或确实死了再清算。
+      if (procCounts.unclaimedNodeRows > 0 && NODE_FORM_ENDPOINTS.has(id) && endpointHasLivePidRow(id)) return;
       const state = endpointStates[id];
       let idleSince = state.activeWallStart ?? state.lastRequestAt;
       if (idleSince === null && id === "claude" && claudeSessions.size > 0) {
@@ -4778,7 +4838,14 @@ export function createAgentMetricsCollector(options = {}) {
           // 不判归属，进程真死了照样即时淘汰。快照里没有全量 pid（外部注入的
           // 旧形状）时不淘汰，宁可留一行也不误删。
           if (countsTrusted) {
-            evict = !livePids.has(Number(pidMatch[1]));
+            // 第三道护栏（见 createEmptyProcessScan 上方）：本轮存在认不出的
+            // npm 形 node 行时，「不在桶里」不足以淘汰——行 pid 全表还见得到
+            // 就留行（上游改包名的会话行正是这个形状），确实死了的照删；
+            // unclaimedNodeRows === 0 时与原判据逐位等价。
+            evict = !livePids.has(Number(pidMatch[1]))
+              && (procCounts.unclaimedNodeRows > 0
+                ? scanPidLiveness(Number(pidMatch[1]), procCounts) === false
+                : true);
           } else {
             const seenPids = procCounts.seenPids;
             evict = seenPids instanceof Set && !seenPids.has(Number(pidMatch[1]));
@@ -4832,7 +4899,12 @@ export function createAgentMetricsCollector(options = {}) {
           continue;
         }
         // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
-        if (countsTrusted) settleAbandonedAggregateState(entry.state, count);
+        // 第三道护栏在位时（见 createEmptyProcessScan 上方），活着的 pid 形行
+        // 不参与零值结算——行还在而生成为真，零计数是「认不出」不是「全灭」。
+        if (countsTrusted
+          && !(procCounts.unclaimedNodeRows > 0 && count === 0 && pidMatch !== null)) {
+          settleAbandonedAggregateState(entry.state, count);
+        }
         pruneStaleAggregateFaults(entry.state, nowFn, faultIdleTtlMs);
         if (pidMatch === null && instId !== DSH_DESKTOP_INSTANCE_ID && instId !== KIMI_DESKTOP_INSTANCE_ID) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
