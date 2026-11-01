@@ -449,16 +449,10 @@ export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 // 实证：内部头无条件注入，CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即该
 // 会话 id——请求侧与扫描侧两个入口都收敛到同一行 id。
 export const WORKBUDDY_SESSION_ROW_PREFIX = "workbuddy-sess-";
-const WORKBUDDY_SESSION_ROW_IDLE_TTL_MS = 30 * 60 * 1000;
-
-// WB 会话行的注册表缺席宽限。行的生死正源与身份正源同为注册表：GUI 内核删掉
-// 该会话的 <pid>.json（用户关会话/暂停）＝「注册表不再列出」；但 runtime 池
-// 换代时旧 <pid>.json 已删、新 <pid>.json 未写（同一 sessionId 的换代空窗，
-// 真机 2026-11-01 实测 181–284s），缺席判定必须盖过它，否则活会话的行会在
-// 每次换代之间闪没、账随行蒸发（a9aee08 的跨 pid 保账倒退）。6 分钟＝实测
-// 最大空窗 284s ＋ 注册表快照 15s 缓存 ＋ 扫描抖动的两倍余量。真正关闭的
-// 会话（注册行删了不再回来）持续缺席过线即收行；期间行保留（待命态）。
-const WORKBUDDY_SESSION_ROW_REGISTRY_GRACE_MS = 6 * 60 * 1000;
+// WB 会话行的空闲档只是兜底（见 SESSION_ROW_IDLE_TTL_MS 处的语义说明）。档值
+// 对齐 codex 的 5 分钟：注册表判生死的常态路径用不到它，只有注册表读不出
+// （fail-open）的轮次才靠它防孤儿行永挂。
+const WORKBUDDY_SESSION_ROW_IDLE_TTL_MS = 5 * 60 * 1000;
 
 // Session-granular row ids, keyed by the endpoint that mints them. Both declare
 // no owning PID: liveness is the endpoint's process family (plus, for codex
@@ -477,9 +471,11 @@ const SESSION_ROW_PREFIXES = Object.freeze({
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
   opencode: null,
-  // WB 会话行的空闲档现在只是兜底：注册表说会话还开着（wbSessionOpen）的行
-  // 不吃空闲淘汰，生死改由注册表缺席宽限判（见上）；只有注册表读不出
-  // （fail-open 判不了生死）的轮次才退回这条 30 分钟档，防止孤儿行永挂。
+  // WB 会话行的生死正源是注册表：注册表列着（环境活着）的行不吃空闲淘汰，
+  // 注册表不再列出的行走缺席轮次确认（数秒级，与家族缺席同口径）。环境语义：
+  // 每次发请求才给会话起新环境，请求间隔里环境本就不在——不存在「暂停待命」
+  // 窗，行不需要替离线会话保账（a9aee08 的 30 分钟待命窗据此推翻）。这条档
+  // 只兜注册表读不出（fail-open 判不了生死）的轮次，防孤儿行永挂。
   workbuddy: WORKBUDDY_SESSION_ROW_IDLE_TTL_MS,
 });
 
@@ -3505,12 +3501,11 @@ export function createAgentMetricsCollector(options = {}) {
   // sees the family clears the streak.
   const sessionRowFamilyMisses = new Map();
 
-  // WB 会话行的注册表缺席起点，keyed "<bucket>:<instId>"。注册表（行的身份
-  // 正源）不再列出该 sessionId ＝ 内核已删该会话的注册行；缺席持续过宽限
-  // （WORKBUDDY_SESSION_ROW_REGISTRY_GRACE_MS，盖过 runtime 换代空窗）才收
-  // 行。注册表重新列出（复活/换代完成）即清零重计；快照读不出的轮既不推进
-  // 也不清零，缺席计时按墙钟走、不受读盘抖动重置。
-  const sessionRowRegistryAbsentSince = new Map();
+  // WB 会话行的注册表缺席轮次，keyed "<bucket>:<instId>"。注册表（行的身份
+  // 正源）不再列出该 sessionId ＝ 内核已删该会话的注册行；连续缺席满
+  // SESSION_ROW_FAMILY_MISS_ROUNDS 轮（与家族缺席同一确认口径，数秒级）才
+  // 收行。注册表重新列出即清零重计；快照读不出的轮既不推进也不清零。
+  const sessionRowRegistryMisses = new Map();
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -4579,12 +4574,11 @@ export function createAgentMetricsCollector(options = {}) {
       }
       if (id === "workbuddy") {
         // WB 与 claude 同处境的另一半：runtime 是池化的（进程数说 0 只说明
-        // 「此刻没有在跑的引擎」，GUI 宿主可能还活着、会话可能只是暂停——
-        // 池随时可能起新 pid 领养同一会话）。端点账的生死因此不能只听
-        // 「家族全灭」：会话行还在保留窗（30 分钟 TTL）内就说明这条运行还
-        // 没结束，账得留着；行被自己的 TTL 收走后，端点账才轮得到家族全灭
-        // 判决清零。判据与行的淘汰判据同源（同一套 TTL 与同一份行锚），
-        // 免得两套窗口各说各话——行在即账在，行走即账清。
+        // 「此刻没有在跑的引擎」，GUI 宿主可能还活着）。端点账的生死因此不能
+        // 只听「家族全灭」：会话行还挂在卡上就说明这条运行还有帐面，账得留
+        // 着；行被收走（注册表缺席 2 轮确认／兜底 TTL）后，端点账才轮得到
+        // 家族全灭判决清零。判据与行的淘汰判据同源（同一份行锚），免得两套
+        // 窗口各说各话——行在即账在，行走即账清。
         const sessMap = instanceBuckets.workbuddy;
         if (sessMap !== undefined && sessMap.size > 0) {
           let rowAnchor = null;
@@ -4602,14 +4596,16 @@ export function createAgentMetricsCollector(options = {}) {
           }
           // 行还在保留窗内 → 账不清（宽限按「距行锚还有多久到 TTL」计，
           // 行走到 TTL 时端点账才判决清零；两个判据用同一个 TTL 与同一个
-          // 锚，不会出现「行没了账还在」或「行在账没了」的错位）。
+          // 锚，不会出现「行没了账还在」或「行在账没了」的错位）。注意行的
+          // 常态出路是注册表缺席 2 轮确认（秒级），走得比这条 TTL 档早——
+          // 账清的时点跟着行走，不自己另设窗口。
           if (rowAnchor !== null && now - rowAnchor <= WORKBUDDY_SESSION_ROW_IDLE_TTL_MS) {
             return;
           }
         }
       }
       if (idleSince === null) idleSince = now;
-      // WB 专用宽限：会话行保留窗（30 分钟 TTL）内不清端点账。落在 TTL 判据
+      // WB 专用宽限：会话行还在（兜底 TTL 窗内）不清端点账。落在 TTL 判据
       // 之外时退回通用 3s 宽限语义（家族全灭即运行终结）。
       const graceMs = PROCESS_GONE_ACTIVE_REQUEST_TTL_MS;
       if (now - idleSince <= graceMs) return;
@@ -4796,17 +4792,19 @@ export function createAgentMetricsCollector(options = {}) {
           } else {
             sessionRowFamilyMisses.delete(missKey);
             if (bucket === "workbuddy" && wbSessionOpen !== null) {
-              // 家族活着时的 WB 会话行生死：注册表说了算。开着＝清缺席计时；
-              // 缺席＝计时推进（墙钟），持续过宽限且无在途请求才收行——
-              // 在途请求本身就是会话还在被服务的证据，等它收尾再判。判不了
-              // ＝不动计时，既不推进也不清零。
+              // 家族活着时的 WB 会话行生死：注册表说了算。开着＝清缺席计数；
+              // 缺席＝轮次推进，连续满 SESSION_ROW_FAMILY_MISS_ROUNDS 轮且无
+              // 在途请求才收行——在途请求本身就是会话还在被服务的证据，等它
+              // 收尾再判。判不了＝不动计数，既不推进也不清零。环境语义：每次
+              // 发请求才起新环境，请求间隔里注册行本就不在，缺席即真缺席，
+              // 无需宽限窗。
               if (wbSessionOpen) {
-                sessionRowRegistryAbsentSince.delete(missKey);
+                sessionRowRegistryMisses.delete(missKey);
               } else {
-                const absentSince = sessionRowRegistryAbsentSince.get(missKey) ?? now;
-                sessionRowRegistryAbsentSince.set(missKey, absentSince);
+                const misses = (sessionRowRegistryMisses.get(missKey) ?? 0) + 1;
+                sessionRowRegistryMisses.set(missKey, misses);
                 evict = entry.state.activeRequests === 0
-                  && now - absentSince >= WORKBUDDY_SESSION_ROW_REGISTRY_GRACE_MS;
+                  && misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
               }
             }
           }
@@ -4830,7 +4828,7 @@ export function createAgentMetricsCollector(options = {}) {
           settleLeakedInstanceRequests(bucket, entry.state, now);
           instMap.delete(instId);
           sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
-          sessionRowRegistryAbsentSince.delete(`${bucket}:${instId}`);
+          sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
           continue;
         }
         // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
@@ -4848,13 +4846,13 @@ export function createAgentMetricsCollector(options = {}) {
           // 空闲 TTL 只管剩下这档「声明不了属主、判不了进程生死」的自定义行
           // （启动器注入的临时 id 等）；codex 会话行用自己的 5 分钟档。稳定
           // 桌面行的生死走上面的进程家族判据，与空闲时长无关。WB 会话行在
-          // 注册表说「开着」时整条跳过（生死归注册表缺席宽限管，开着就不该
+          // 注册表说「开着」时整条跳过（生死归注册表缺席轮次管，开着就不该
           // 按静默收行）；TTL 只兜注册表读不出/判不了生死那档的场。
           if (idleTtlMs !== null && wbSessionOpen !== true
             && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
             sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
-            sessionRowRegistryAbsentSince.delete(`${bucket}:${instId}`);
+            sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
           }
         }
       }

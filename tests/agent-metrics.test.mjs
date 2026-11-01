@@ -5878,42 +5878,52 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       }
     });
 
-    it("expires a paused session row only after the idle TTL", async () => {
-      // 用户暂停会话：runtime 回收、注册表行删。行保留待命 30 分钟，之后收走。
+    it("reaps a closed session row after two confirmed absent rounds (no pause window)", async () => {
+      // 环境退场：runtime 回收、注册表行删。新语义（推翻 a9aee08 的 30 分钟
+      // 待命窗）：每次发请求才给会话起新环境，请求间隔里注册行本就不在，
+      // 缺席即真缺席——连续 2 轮确认收行，1 轮不成判决（防读盘抖动），不再
+      // 有「暂停待命、替离线会话保账」的保留窗。
       let t = 3000;
       let pid = 100;
       let registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      // 扫描输出可变：环境退场后 runtime 行消失（GUI 宿主 60 还在，它不是会话
+      // 进程）——count 两轮稳定为 0，缺席判据稳定落在家族分支上。
+      let procs = () => wmic(row(60, 800), agentRow(pid, 60));
       const collector = wbCollector({
         nowFn: () => t,
         workbuddySessionLookup: (p) => registry[p] ?? null,
         workbuddySessionDirectory: async () => [],
-        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(pid, 60))),
+        execFn: (cmd, opts, cb) => cb(null, procs()),
       });
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
       r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
       pid = -1; registry = {}; // 全家死绝 + 注册表删净
-      t += 60 * 1000; // 暂停 1 分钟：行须在
+      procs = () => wmic(row(60, 800));
+      t += 60 * 1000;
+      // 扫描快照有实时钟缓存：setImmediate 等内部刷新落地再扫一拍，确保
+      // 本轮读吃到退场后的进程表（否则第一拍还在用旧表，判据分支漂移）。
+      await collector.scanProcesses();
+      await new Promise((resolve) => setImmediate(resolve));
       await collector.scanProcesses();
       assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
-        "暂停 1 分钟：会话行保留（待命）");
+        "缺席第 1 轮：行还在（1 轮不成判决）");
 
-      t += 31 * 60 * 1000; // 超过 30 分钟 TTL
+      t += 5 * 1000;
       await collector.scanProcesses();
       assert.equal(wb(await collector.getAgentsStatus()).instances.length, 0,
-        "空闲超 TTL：行收走，不留永久幽灵");
+        "缺席第 2 轮：行收走（数秒级，不再等 30 分钟待命 TTL）");
     });
 
-    it("keeps the endpoint account while a paused session row is still within its TTL", async () => {
-      // 端点级整账清零（家族全灭 + 3s 宽限）与会话行保留窗（30 分钟 TTL）是两
-      // 套判据：会话行还在（暂停待命），端点卡却先被清零——卡上的请求数、折线
-      // 一起归零，用户看到「明明刚跑过几十轮，数字全没了」。修法：端点宽限锚
-      // 参考会话行的最近活动，行在即账在。
+    it("keeps the endpoint account while the session row survives, zeroes it once the row is reaped", async () => {
+      // 端点级整账清零（家族全灭 + 3s 宽限）与会话行的生死是两套判据，但锚
+      // 同源：行还在（缺席确认未满 2 轮）端点账不清；行被收走后端点账才轮到
+      // 家族全灭判决清零——行在即账在，行走即账清。
       let t = 3000;
       let registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
-      // 扫描输出可变：暂停时 runtime 那一行消失（GUI 宿主 60 还在，它不是会话
-      // 进程——命令行只有镜像路径，没有 runtime 路径）。
+      // 扫描输出可变：环境退场后 runtime 那一行消失（GUI 宿主 60 还在，它不是
+      // 会话进程——命令行只有镜像路径，没有 runtime 路径）。
       let procs = () => wmic(row(60, 800), agentRow(100, 60));
       const collector = wbCollector({
         nowFn: () => t,
@@ -5927,24 +5937,26 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       const base = wb(await collector.getAgentsStatus());
       assert.equal(base.metrics.totalRequests, 1, "基线：端点账有请求");
 
-      // 暂停：runtime 全回收（GUI 宿主 60 还在，它不算会话进程）、注册表删净。
+      // 环境退场：runtime 回收（GUI 宿主 60 还在，它不算会话进程）、注册表删净。
       registry = {};
       procs = () => wmic(row(60, 800));
-      t += 60 * 1000; // 暂停 1 分钟：远大于 3s 通用宽限，远小于 30 分钟行 TTL
+      t += 60 * 1000; // 远大于 3s 通用宽限
       await collector.scanProcesses();
       await new Promise((resolve) => setImmediate(resolve)); // 等新一轮扫描落地
       await collector.scanProcesses();
       const paused = wb(await collector.getAgentsStatus());
       assert.equal(paused.processCount, 0, "会话进程已回收：端点进程数为 0");
-      assert.equal(paused.metrics.totalRequests, 1, "暂停窗内端点账不清零");
-      assert.equal(paused.metrics.sparkHistory.ttft.length, 1, "暂停窗内端点折线不清零");
+      assert.equal(paused.metrics.totalRequests, 1, "缺席第 1 轮：行还在，端点账不清零");
+      assert.equal(paused.metrics.sparkHistory.ttft.length, 1, "行还在：端点折线不清零");
 
-      // 超出行 TTL：行先被收走，随后端点账轮得到家族全灭判决，清零。
-      t += 31 * 60 * 1000;
+      // 缺席第 2 轮：行被收走；端点账的清零判据在读路径上先于行淘汰求值，
+      // 行走当拍账还在，下一拍（数秒后的一次看板轮询）落判清零。
+      t += 5 * 1000;
       await collector.scanProcesses();
       const after = wb(await collector.getAgentsStatus());
-      assert.equal(after.instances.length, 0, "超 TTL：会话行收走");
-      assert.equal(after.metrics.totalRequests, 0, "超 TTL 后端点账才清零");
+      assert.equal(after.instances.length, 0, "缺席第 2 轮：会话行收走");
+      const settled = wb(await collector.getAgentsStatus());
+      assert.equal(settled.metrics.totalRequests, 0, "行走后下一拍端点账清零");
     });
 
     it("does not spawn a placeholder row for a pid the scan no longer sees", async () => {
@@ -5967,11 +5979,11 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       assert.equal(card.processCount, 0);
     });
 
-    it("reaps a closed session row after the registry stops listing it, past the grace window", async () => {
+    it("reaps a closed session row after the registry stops listing it, two rounds later", async () => {
       // 用户关会话：注册表行删（目录扫描成功但没这个 sessionId）、该会话的
       // runtime 退场，但家族活着（另一条会话的 runtime 撑着 count>0）——
-      // 家族缺席判据管不到，旧机制只能等 30 分钟空闲 TTL。新判据：缺席计时
-      // 从第一拍判出缺席起走，持续过宽限（盖过换代空窗）收行。
+      // 家族缺席判据管不到，旧机制只能等 30 分钟空闲 TTL。新判据：注册表
+      // 缺席连续 2 轮确认收行（1 轮不成判决），数秒级，无宽限窗。
       let t = 3000;
       let registry = {
         100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" },
@@ -6003,17 +6015,12 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       dir = () => [{ id: "bbbb", title: "other", pid: 200, startedAt: 2000 }];
       await collector.scanProcesses();
       assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
-        "关了但宽限未过：行保留，缺席计时从这一拍起");
+        "缺席第 1 轮：行还在（1 轮不成判决，防读盘抖动）");
 
-      t += 60 * 1000; // 缺席 1 分钟 < 6 分钟宽限
-      await collector.scanProcesses();
-      assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
-        "缺席未过宽限：行还在（换代空窗误杀防线）");
-
-      t += 5 * 60 * 1000; // 缺席累计 6 分钟 = 宽限到线
+      t += 5 * 1000;
       await collector.scanProcesses();
       assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
-        "缺席过宽限：半死空行收走（不再等满 30 分钟）");
+        "缺席第 2 轮：半死空行收走（数秒级，不再等 30 分钟）");
       assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-bbbb"),
         "还开着的那条不受牵连");
     });
@@ -6043,7 +6050,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
 
     it("holds a registry-absent row while its request is still in flight", async () => {
       // runtime 崩在请求中间：注册行没了但在途请求还在。在途＝会话还在被
-      // 服务的证据，缺席宽限到线也不收，等它落定再判。
+      // 服务的证据，缺席轮次确认到线也不收，等它落定再判。
       let t = 3000;
       let registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
       let dir = () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }];
@@ -6056,7 +6063,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
 
-      t += 7 * 60 * 1000; // 注册行删 + 缺席已过宽限，但请求在途
+      t += 60 * 1000; // 注册行删，缺席计轮中，但请求在途
       registry = {};
       dir = () => [];
       await collector.scanProcesses();
@@ -6064,14 +6071,15 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
         "在途请求压着：行不收");
 
       r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
-      t += 6 * 60 * 1000; // 缺席计时早已从判出缺席那拍起走，再过 6 分钟到线
+      t += 5 * 1000; // 缺席第 2 轮：在途已落定
       await collector.scanProcesses();
       assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
-        "请求落定后缺席已远超宽限：下一拍收行");
+        "请求落定后缺席满 2 轮：下一拍收行");
     });
 
     it("falls open when the registry directory cannot be read (TTL fallback intact)", async () => {
-      // 目录读不出 ≠ 没有会话：fail-open 不判生死，行按旧 30 分钟兜底 TTL 走。
+      // 目录读不出 ≠ 没有会话：fail-open 不判生死，行按 5 分钟兜底 TTL 走
+      //（判不了生死就不按缺席收，只按静默收）。
       let t = 3000;
       const collector = wbCollector({
         nowFn: () => t,
@@ -6083,12 +6091,12 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
       r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
-      t += 7 * 60 * 1000; // 过注册表宽限：判不了生死，不按缺席收
+      t += 60 * 1000; // 静置 1 分钟 < 5 分钟兜底 TTL
       await collector.scanProcesses();
       assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
         "注册表读不出：fail-open，行保留");
 
-      t += 31 * 60 * 1000; // 超过 30 分钟兜底 TTL
+      t += 5 * 60 * 1000; // 超过 5 分钟兜底 TTL
       await collector.scanProcesses();
       assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
         "兜底 TTL 仍在：判不了生死的孤儿行不永挂");
@@ -6096,7 +6104,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
 
     it("treats a registry row whose pid died as absent (crash orphan files)", async () => {
       // 内核崩溃没清注册文件：文件还在但 pid 早死了，家族由另一条活会话撑着。
-      // 孤儿注册行按缺席处理，过宽限收行，不给半死行留永挂后门。
+      // 孤儿注册行按缺席处理，2 轮确认收行，不给半死行留永挂后门。
       let t = 3000;
       const collector = wbCollector({
         nowFn: () => t,
@@ -6110,10 +6118,10 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
         "孤儿文件在场：第一拍行还在，缺席计时从这一拍起走");
 
-      t += 7 * 60 * 1000;
+      t += 5 * 1000;
       await collector.scanProcesses();
       assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
-        "孤儿注册行（pid 死）按缺席处理，过宽限收行");
+        "孤儿注册行（pid 死）按缺席处理，第 2 轮收行");
     });
   });
 
