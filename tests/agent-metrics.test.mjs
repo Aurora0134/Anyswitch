@@ -5525,8 +5525,13 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
 
   // 这些用例不该碰真实家目录：注册表读到东西与读不到是两种结局，静默读用户的
   // ~/.workbuddy 既不可重复也可能改变结论。缺省注入「没有注册表」，需要注册表
-  // 的用例自己传 workbuddySessionLookup。
-  const wbCollector = (opts = {}) => testCollector({ workbuddySessionLookup: () => null, ...opts });
+  // 的用例自己传 workbuddySessionLookup。会话文件活跃快照同理：缺省注入「读不
+  // 出」（fail-open，不判活跃），需要活动判据的用例自己传 workbuddySessionActivity。
+  const wbCollector = (opts = {}) => testCollector({
+    workbuddySessionLookup: () => null,
+    workbuddySessionActivity: async () => null,
+    ...opts,
+  });
   const registryLookup = (sessions) => (pid) => sessions[pid] ?? null;
 
   it("counts exactly the two agent runtimes in the nine-process sample", async () => {
@@ -6122,6 +6127,165 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       await collector.scanProcesses();
       assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
         "孤儿注册行（pid 死）按缺席处理，第 2 轮收行");
+    });
+
+    it("reaps a registry-open row whose conversation file has gone quiet (pre-acquired runtime)", async () => {
+      // 产品侧的过渡态 runtime（预取给下一回合/待释放）：注册表列着、pid 活着，
+      // 但会话文件早不写了、也没有在途或扛流量的 pid——「活跃会话数+1」的幽灵
+      // 卡正是它。行连续 2 轮不活跃即收（与注册表缺席同一确认口径，数秒级）。
+      let t = 3000;
+      let fileAgeMs = 10 * 1000; // 回合刚跑完：文件还在活跃窗内
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({ 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } }),
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => new Map([["6d2c", t - fileAgeMs]]),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+      });
+      await collector.scanProcesses();
+      assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+        "会话文件在写：行在");
+
+      t += 60 * 1000;
+      fileAgeMs = 3 * 60 * 1000; // 文件静默 3 分钟（预取 runtime 挂着，会话不在跑）
+      await collector.scanProcesses();
+      assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+        "不活跃第 1 轮：行还在（1 轮不成判决）");
+
+      t += 5 * 1000;
+      fileAgeMs = 3 * 60 * 1000 + 5 * 1000;
+      await collector.scanProcesses();
+      assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+        "不活跃满 2 轮：幽灵行收走（注册表还列着也收）");
+    });
+
+    it("keeps a quiet-file row while the runtime that carried its traffic lives (long tool run)", async () => {
+      // 长工具调用：会话文件静默、无在途请求，但扛过这条会话流量的引擎进程还
+      // 在跑（回合没结束）——行不能闪没。预取态 runtime 从未扛过流量，拿不到
+      // 这条保护，与上一条用例合成幽灵/活会话的分界。
+      let t = 3000;
+      let fileAgeMs = 10 * 1000;
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({ 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } }),
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => new Map([["6d2c", t - fileAgeMs]]),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+      });
+      await collector.scanProcesses();
+      // 流量走 pid 形再折进会话行（socket 兜底的真实形态）：行上记下扛流量的 pid。
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-100", model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+      assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+        "pid 形流量折进会话行");
+
+      for (let round = 0; round < 4; round += 1) {
+        t += 60 * 1000;
+        fileAgeMs += 60 * 1000; // 文件静默越滚越旧，早已超过活跃窗
+        await collector.scanProcesses();
+        assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+          `扛流量的 runtime 还活着：第 ${round + 1} 轮行不收`);
+      }
+    });
+
+    it("keeps a quiet-file row while its request is in flight", async () => {
+      // 在途请求本身就是会话在被服务的证据：文件静默也不收（覆盖「回合刚起、
+      // 首个事件还没落盘」的窗口）。
+      let t = 3000;
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({ 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } }),
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => new Map([["6d2c", t - 5 * 60 * 1000]]),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-100", model: "m1" });
+      for (let round = 0; round < 3; round += 1) {
+        t += 60 * 1000;
+        await collector.scanProcesses();
+        assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+          `在途请求压着：第 ${round + 1} 轮行不收`);
+      }
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    });
+
+    it("does not spawn a session placeholder for a runtime whose conversation file is quiet", async () => {
+      // 预取/待释放的 runtime：注册表列着 interactive、pid 活着，但它的会话文件
+      // 早不写了——占位行不再为它起行。对照组：会话文件在写的 runtime 照常起行。
+      // （这也是标题生成等一次性会话不入卡的同一道闸：它们没有会话文件。）
+      let t = 3000;
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({
+          100: { kind: "interactive", sessionId: "ghost1", cwd: "C:\\proj\\bridge" },
+          200: { kind: "interactive", sessionId: "live1", cwd: "C:\\proj\\bridge" },
+        }),
+        workbuddySessionDirectory: async () => [
+          { id: "ghost1", title: "bridge", pid: 100, startedAt: 1000 },
+          { id: "live1", title: "bridge", pid: 200, startedAt: 2000 },
+        ],
+        workbuddySessionActivity: async () => new Map([
+          ["ghost1", t - 5 * 60 * 1000],
+          ["live1", t - 10 * 1000],
+        ]),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60), agentRow(200, 60))),
+      });
+      await collector.scanProcesses();
+      const card = wb(await collector.getAgentsStatus());
+      assert.ok(!card.instances.some((i) => i.id === "workbuddy-sess-ghost1"),
+        "文件静默的预取 runtime 不起会话行");
+      assert.ok(card.instances.some((i) => i.id === "workbuddy-sess-live1"),
+        "文件在写的会话照常起行");
+    });
+
+    it("card process count and surface badges follow the active session set", async () => {
+      // 卡面三处数字一个真值：行数、进程计数、Desktop ×N 徽章都只数活跃会话的
+      // runtime，预取 runtime 不进数——否则「实例 1 行、徽章 Desktop ×2」对不上。
+      let t = 3000;
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({
+          100: { kind: "interactive", sessionId: "ghost1", cwd: "C:\\proj\\bridge" },
+          200: { kind: "interactive", sessionId: "live1", cwd: "C:\\proj\\bridge" },
+        }),
+        workbuddySessionDirectory: async () => [
+          { id: "ghost1", title: "bridge", pid: 100, startedAt: 1000 },
+          { id: "live1", title: "bridge", pid: 200, startedAt: 2000 },
+        ],
+        workbuddySessionActivity: async () => new Map([
+          ["ghost1", t - 5 * 60 * 1000],
+          ["live1", t - 10 * 1000],
+        ]),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60), agentRow(200, 60))),
+      });
+      await collector.scanProcesses();
+      const card = wb(await collector.getAgentsStatus());
+      assert.equal(card.processCount, 1, "只数活跃会话的 runtime");
+      assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
+        "面徽章同口径：预取 runtime 不进 Desktop ×N");
+    });
+
+    it("fails open when the conversation-activity scan cannot read", async () => {
+      // 会话文件读不出 ≠ 会话不在跑：该轮不按「不活跃」收行、占位照旧——与
+      // 注册表读不出的 fail-open 同一口径。
+      let t = 3000;
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({ 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } }),
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => null,
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-100", model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+      for (let round = 0; round < 3; round += 1) {
+        t += 60 * 1000;
+        await collector.scanProcesses();
+        assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+          `活动快照读不出：fail-open，第 ${round + 1} 轮行保留`);
+      }
     });
   });
 

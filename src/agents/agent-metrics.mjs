@@ -1,5 +1,5 @@
 import { exec, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "../relay/relay-settings.mjs";
@@ -449,6 +449,15 @@ export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 // 实证：内部头无条件注入，CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即该
 // 会话 id——请求侧与扫描侧两个入口都收敛到同一行 id。
 export const WORKBUDDY_SESSION_ROW_PREFIX = "workbuddy-sess-";
+
+// WB 会话行活跃窗：会话文件（~/.workbuddy/projects/<slug>/<sessionId>.jsonl）最近
+// 一次写入距今多久内算「会话在跑」。跑回合时每事件一行持续追加，回合一停文件
+// 即静默——这是「会话真的在跑」的外部真值（注册表与进程存活都分不出预取/待释放
+// 的过渡态 runtime，2026-11-01 实测「活跃会话数+1」幽灵卡）。2 分钟档：覆盖事件
+// 间隔（含普通工具往返）；长工具的深度静默期由「扛过流量的引擎 pid 还活着」那条
+// 保行（见行生命周期处的活跃三选一）。
+const WORKBUDDY_SESSION_ACTIVE_FILE_MS = 2 * 60 * 1000;
+const WORKBUDDY_PROJECTS_DIRNAME = "projects";
 // WB 会话行的空闲档只是兜底（见 SESSION_ROW_IDLE_TTL_MS 处的语义说明）。档值
 // 对齐 codex 的 5 分钟：注册表判生死的常态路径用不到它，只有注册表读不出
 // （fail-open）的轮次才靠它防孤儿行永挂。
@@ -1058,8 +1067,11 @@ export function workbuddySurfaceLabel(surface) {
 // 父链判定，请求面上 Desktop 与 CLI 同像（同一条 workbuddy agentId），只有扫描
 // 能在此之前分辨。读不出面的那一档由 workbuddySurfaceLabel 落「未知」，副行
 // 加总仍等于卡上进程数。
-export function summarizeWorkbuddySurfaces(procCounts) {
-  const enginePids = procCounts?.workbuddyEnginePids instanceof Set ? procCounts.workbuddyEnginePids : [];
+export function summarizeWorkbuddySurfaces(procCounts, activePids = null) {
+  // activePids：可选的活跃引擎子集（卡面同口径过滤——预取/待释放的 runtime
+  // 不进 Desktop ×N）。null / 非 Set ＝ 全量，旧调用与单测的既有行为不变。
+  const allPids = procCounts?.workbuddyEnginePids instanceof Set ? procCounts.workbuddyEnginePids : [];
+  const enginePids = activePids instanceof Set ? [...allPids].filter((pid) => activePids.has(pid)) : allPids;
   return groupSurfaceCounts(enginePids, procCounts?.workbuddySurfaceByPid).map(
     ([surface, count]) => ({ surface, label: workbuddySurfaceLabel(surface), count }),
   );
@@ -1134,6 +1146,45 @@ async function listWorkbuddySessionMetas(configRoot) {
   // 注册表行可能还在盘上，标题以当前代为准。
   metas.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   return metas;
+}
+
+// WB 会话文件活跃快照（行活跃判据的真值源）：扫 projects/*/<sessionId>.jsonl 的
+// mtime，只 stat 不解析——要回答的只有「这个会话最近有没有在写」。扫的是产品
+// 的目录实况而不是自己转写 cwd-slug，避免与 session-scan 各养一份转写规则。
+// 三态与注册表同款：projects 根不存在＝合法空表（Map，从没开过会话）；其余读
+// 不出＝null（未知，调用方 fail-open）；单文件 stat 不出按无文件跳过。同名
+// 会话文件理论上只会在唯一的项目目录（cwd 唯一决定目录），万一撞名取更新的。
+function listWorkbuddyConversationActivity(configRoot) {
+  if (typeof configRoot !== "string" || configRoot.length === 0) return null;
+  const root = join(configRoot, WORKBUDDY_PROJECTS_DIRNAME);
+  let projectDirs;
+  try {
+    projectDirs = readdirSync(root, { withFileTypes: true });
+  } catch (err) {
+    return err && err.code === "ENOENT" ? new Map() : null;
+  }
+  const activity = new Map();
+  for (const projectDir of projectDirs) {
+    if (!projectDir.isDirectory()) continue;
+    let entries;
+    try {
+      entries = readdirSync(join(root, projectDir.name), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      try {
+        const mtimeMs = statSync(join(root, projectDir.name, entry.name)).mtimeMs;
+        const sessionId = entry.name.slice(0, -6);
+        const prev = activity.get(sessionId);
+        if (prev === undefined || mtimeMs > prev) activity.set(sessionId, mtimeMs);
+      } catch {
+        // 单文件 stat 不出：按无文件处理，不炸整轮。
+      }
+    }
+  }
+  return activity;
 }
 
 // 配置根与写入器共用一份（workbuddy-merge-models.workbuddyConfigRoot 认
@@ -2873,6 +2924,12 @@ export function createAgentMetricsCollector(options = {}) {
   const workbuddySessionLookup = typeof options.workbuddySessionLookup === "function"
     ? options.workbuddySessionLookup
     : (pid) => readWorkbuddySessionRecord(pid, workbuddySessionRoot);
+  // 会话文件活跃快照的注入口（行活跃判据的真值源，见
+  // listWorkbuddyConversationActivity）。默认扫产品自己的 projects/ 目录；测试
+  // 注入纯函数即可覆盖三态（Map＝读到 / null＝读不出），不碰真实家目录。
+  const workbuddySessionActivity = typeof options.workbuddySessionActivity === "function"
+    ? options.workbuddySessionActivity
+    : null;
   // 会话行归一反查（resolveInstanceId 的 WB 折叠通道读这个）。注册表行没有
   // sessionId（预热待命、字段缺失）时返回 null——这类 pid 折不成会话行，维持
   // pid 形（它们本来就不计数，行也不会起）。
@@ -3322,6 +3379,32 @@ export function createAgentMetricsCollector(options = {}) {
     return { ok: cached !== undefined && cached.ok === true, byId };
   }
 
+  // WB 会话文件活跃快照（行活跃判据的文件臂）。15s 缓存、与注册表快照同拍；
+  // ok=false ＝ 读不出（该轮 fail-open：不按「不活跃」收行、占位照旧）。
+  // 注入的 workbuddySessionActivity 出错或返回非 Map 同样落 ok=false。
+  let wbActivitySnapshotCache = null; // { at, map, ok }
+  async function loadWorkbuddyActivitySnapshot() {
+    const now = nowFn();
+    if (wbActivitySnapshotCache !== null && now - wbActivitySnapshotCache.at < SESSION_LOOKUP_TTL_MS) {
+      return { map: wbActivitySnapshotCache.map, ok: wbActivitySnapshotCache.ok };
+    }
+    let map = null;
+    let ok = false;
+    if (workbuddySessionActivity !== null) {
+      try {
+        map = await workbuddySessionActivity();
+      } catch {
+        map = null;
+      }
+      ok = map instanceof Map;
+    } else {
+      map = listWorkbuddyConversationActivity(workbuddySessionRoot);
+      ok = map !== null;
+    }
+    wbActivitySnapshotCache = { at: now, map: ok ? map : null, ok };
+    return { map: wbActivitySnapshotCache.map, ok: wbActivitySnapshotCache.ok };
+  }
+
   // Terminal-join feed for the session-granular instance identities. The
   // pid-shaped join in terminal-attribution can never bind them (their rows are
   // <agent>-sess-<id>, and the process behind the traffic is shared across
@@ -3506,6 +3589,11 @@ export function createAgentMetricsCollector(options = {}) {
   // SESSION_ROW_FAMILY_MISS_ROUNDS 轮（与家族缺席同一确认口径，数秒级）才
   // 收行。注册表重新列出即清零重计；快照读不出的轮既不推进也不清零。
   const sessionRowRegistryMisses = new Map();
+  // WB 会话行的活跃缺席轮次，keyed "<bucket>:<instId>"。注册表说开着、但会话
+  // 文件静默且无在途/流量锚（预取或待释放的过渡态 runtime）＝ 不活跃，连续
+  // SESSION_ROW_FAMILY_MISS_ROUNDS 轮确认收行。活动快照读不出的轮既不推进
+  // 也不清零（fail-open，与注册表缺席同款纪律）。
+  const sessionRowActivityMisses = new Map();
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -3651,6 +3739,10 @@ export function createAgentMetricsCollector(options = {}) {
             shellPids: [...entry.desktopGen.shellPids],
           };
         }
+        // WB 会话行的流量锚随行落盘：relay 重启后长工具静默期的保行判定不失忆。
+        if (Number.isFinite(entry.wbTrafficPid)) {
+          row.wbTrafficPid = entry.wbTrafficPid;
+        }
         return row;
       });
     }
@@ -3738,6 +3830,11 @@ export function createAgentMetricsCollector(options = {}) {
                 ? row.desktopGen.shellPids.filter((pid) => Number.isFinite(pid))
                 : []),
             };
+          }
+          // WB 流量锚容忍缺字段（旧版快照没写它）：缺了就没有深度静默期的保行
+          // 判据，下一笔流量落上即重建。
+          if (Number.isFinite(row.wbTrafficPid)) {
+            entry.wbTrafficPid = row.wbTrafficPid;
           }
           instMap.set(row.id, entry);
         }
@@ -4031,6 +4128,12 @@ export function createAgentMetricsCollector(options = {}) {
         markMetricsDirty();
       }
       if (norm.label !== null) entry.label = norm.label;
+      if (bucketAgentId === "workbuddy" && norm.clientPid !== null) {
+        // 行活跃三选一之三的锚：记下扛过本行流量的引擎 pid。长工具调用期间会话
+        // 文件与在途都静默，这条保住正跑的会话；预取/待释放的过渡态 runtime 从未
+        // 扛过流量，永远拿不到它——幽灵行与活会话行的分界就在这。
+        entry.wbTrafficPid = norm.clientPid;
+      }
       const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId,
         (count) => publishActivity(bucketAgentId, instanceId, count));
       instanceAttached = true;
@@ -4672,6 +4775,19 @@ export function createAgentMetricsCollector(options = {}) {
         wbRegistrySnapshot = null;
       }
     }
+    // 会话文件活跃快照：有 WB 行或已计数 runtime 时才扫（15s 缓存）。占位闸在
+    // 行集为空的轮也要用，所以条件比注册表快照宽一档（引擎在、行未起）。
+    let wbActivitySnapshot = null;
+    if (instanceBuckets.workbuddy.size > 0 || (procCounts.workbuddy || 0) > 0) {
+      try {
+        wbActivitySnapshot = await loadWorkbuddyActivitySnapshot();
+      } catch {
+        wbActivitySnapshot = null;
+      }
+    }
+    // 卡面同口径的活跃引擎集（行数/进程计数/面徽章三处一个真值，见 workbuddy
+    // 桶分支末尾的收集处）。null ＝ 本轮没走 WB 分支（不可能发生，防御性初值）。
+    let wbActiveEnginePids = null;
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
       // Endpoints with an ENGINE subset reconcile their canonical rows against
@@ -4712,6 +4828,28 @@ export function createAgentMetricsCollector(options = {}) {
           } else {
             const metaPid = typeof meta.pid === "number" ? meta.pid : null;
             wbSessionOpen = metaPid === null || livePids.size === 0 || livePids.has(metaPid);
+          }
+        }
+        // WB 会话行活跃三选一：①会话文件近期有写入（真值：跑回合时每事件一行）
+        // ②行上有在途请求 ③扛过本行流量的引擎 pid 本轮还活着（长工具深度静默
+        // 期的保行通道）。null＝活动快照读不出（fail-open：该轮不判不活跃）。
+        // 注册表「开着」只说明有个 runtime 挂在这个会话名下——预取给下一回合/
+        // 待释放的过渡态 runtime 也满足它，这正是「活跃会话数+1」幽灵卡的来源；
+        // 活跃与否由这三条裁决。
+        let wbSessionActive = null;
+        if (bucket === "workbuddy" && isSessionRow) {
+          if (entry.state.activeRequests > 0) {
+            wbSessionActive = true;
+          } else if (wbActivitySnapshot !== null && wbActivitySnapshot.ok) {
+            const fileMtime = wbActivitySnapshot.map.get(instId.slice(WORKBUDDY_SESSION_ROW_PREFIX.length));
+            if (typeof fileMtime === "number" && now - fileMtime <= WORKBUDDY_SESSION_ACTIVE_FILE_MS) {
+              wbSessionActive = true;
+            } else if (typeof entry.wbTrafficPid === "number") {
+              const seen = procCounts.seenPids;
+              wbSessionActive = seen instanceof Set && seen.has(entry.wbTrafficPid);
+            } else {
+              wbSessionActive = false;
+            }
           }
         }
         // 冷缓存收敛：启动器注入的 "<cwd>-<launcher pid>" 在扫描缓存没赶上
@@ -4762,9 +4900,11 @@ export function createAgentMetricsCollector(options = {}) {
               }
               if (refold.id.startsWith(WORKBUDDY_SESSION_ROW_PREFIX)) {
                 // WB pid 行折会话行同样并账：冷缓存窗口里 pid 形行攒的当前会话
-                // 计数并入会话行，否则换代那一下又是「数据清零」。
+                // 计数并入会话行，否则换代那一下又是「数据清零」。流量锚随账
+                // 并入——那些请求就是这个 pid 扛的。
                 absorbAggregateState(target.state, entry.state,
                   Math.max(recentSampleWindow, target.state.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS));
+                if (refold.clientPid !== null) target.wbTrafficPid = refold.clientPid;
               }
               instMap.delete(instId);
               continue;
@@ -4800,6 +4940,17 @@ export function createAgentMetricsCollector(options = {}) {
               // 无需宽限窗。
               if (wbSessionOpen) {
                 sessionRowRegistryMisses.delete(missKey);
+                // 活跃闸：注册表说开着只是前提，会话真在跑才算活。预取给下一
+                // 回合/待释放的过渡态 runtime（文件静默、无在途、无流量锚）
+                // 连续 2 轮确认后照收——与注册表缺席同一确认口径，数秒级。
+                // 在途请求在 wbSessionActive 里已算活跃，到不了这里。
+                if (wbSessionActive === true) {
+                  sessionRowActivityMisses.delete(missKey);
+                } else if (wbSessionActive === false) {
+                  const misses = (sessionRowActivityMisses.get(missKey) ?? 0) + 1;
+                  sessionRowActivityMisses.set(missKey, misses);
+                  evict = misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
+                }
               } else {
                 const misses = (sessionRowRegistryMisses.get(missKey) ?? 0) + 1;
                 sessionRowRegistryMisses.set(missKey, misses);
@@ -4829,6 +4980,7 @@ export function createAgentMetricsCollector(options = {}) {
           instMap.delete(instId);
           sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
           sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
+          sessionRowActivityMisses.delete(`${bucket}:${instId}`);
           continue;
         }
         // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
@@ -4853,6 +5005,7 @@ export function createAgentMetricsCollector(options = {}) {
             instMap.delete(instId);
             sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
             sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
+            sessionRowActivityMisses.delete(`${bucket}:${instId}`);
           }
         }
       }
@@ -4907,15 +5060,41 @@ export function createAgentMetricsCollector(options = {}) {
           const record = workbuddySessionLookup(pid);
           const sessionId = typeof record?.sessionId === "string" ? record.sessionId.trim() : "";
           if (sessionId.length > 0) {
-            const placeholderId = sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`) ?? `${bucket}-${pid}`;
-            if (!instMap.has(placeholderId)) {
-              instMap.set(placeholderId, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
+            // 活跃闸（与行淘汰同判据的文件臂）：会话文件近期在写才起行——预取/
+            // 待释放的 runtime 起零账行就是「活跃会话数+1」的幽灵卡，标题生成
+            // 这类一次性会话（没有会话文件）也过不了这道闸。活动快照读不出
+            //（fail-open）照旧起行：读不出 ≠ 不活跃。会话真在跑而行已被收走
+            // 时，下一笔流量/文件写入会立刻把行带回来。
+            const fileMtime = wbActivitySnapshot !== null && wbActivitySnapshot.ok
+              ? wbActivitySnapshot.map.get(sessionId) : undefined;
+            const fileFresh = wbActivitySnapshot !== null && wbActivitySnapshot.ok
+              ? typeof fileMtime === "number" && now - fileMtime <= WORKBUDDY_SESSION_ACTIVE_FILE_MS
+              : true;
+            if (fileFresh) {
+              const placeholderId = sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`) ?? `${bucket}-${pid}`;
+              if (!instMap.has(placeholderId)) {
+                instMap.set(placeholderId, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
+              }
             }
           } else {
             if (!instMap.has(`${bucket}-${pid}`)) {
               instMap.set(`${bucket}-${pid}`, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
             }
           }
+        }
+        // 卡面同口径收齐：行数、进程计数、面徽章（Desktop ×N）三处一个真值——
+        // 只数「会话行还活着」的 runtime。注册表读不出的 pid fail-open 计入
+        //（读不出 ≠ 不活跃）；会话行已被活跃闸收走的预取 runtime 不进数。
+        wbActiveEnginePids = new Set();
+        for (const pid of placeholderPids) {
+          const record = workbuddySessionLookup(pid);
+          const sessionId = typeof record?.sessionId === "string" ? record.sessionId.trim() : "";
+          if (sessionId.length === 0) {
+            wbActiveEnginePids.add(pid);
+            continue;
+          }
+          const rowId = sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`);
+          if (rowId !== null && instMap.has(rowId)) wbActiveEnginePids.add(pid);
         }
       }
     }
@@ -5334,17 +5513,19 @@ export function createAgentMetricsCollector(options = {}) {
     // 行 id 由进程扫描占位或 socket 反查合成 workbuddy-<pid>，面由父链决定）
     // 卡内分面汇总（"Desktop ×2 · CLI ×1"）：Desktop 的 GUI 运行时与终端拉起的
     // CLI 共用同一个 agentId，请求面同像，只有进程扫描能在第一条请求之前分辨。
+    // processCount 与面徽章走活跃引擎集（wbActiveEnginePids，与行同一真值），
+    // 不是扫描计数——预取 runtime 会被扫描数到但不该上卡。
     const workbuddyAgent = {
       ...buildAggregateAgentStatus({
         id: "workbuddy",
         name: "WorkBuddy",
         state: workbuddyState,
-        processCount: procCounts.workbuddy || 0,
+        processCount: wbActiveEnginePids !== null ? wbActiveEnginePids.size : (procCounts.workbuddy || 0),
         tpsWindow: recentSampleWindow,
         nowFn,
         instances: instanceSnapshots("workbuddy"),
       }),
-      surfaces: summarizeWorkbuddySurfaces(procCounts),
+      surfaces: summarizeWorkbuddySurfaces(procCounts, wbActiveEnginePids),
     };
 
     return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent, grokAgent, workbuddyAgent];
