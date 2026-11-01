@@ -193,9 +193,11 @@ export async function executeClientUpdate({
         } else if (leg.noUpgrade) {
           legOutcome = "unchanged";
           legMessage = `${label} 已是最新`;
-        } else if (leg.form === "cli" && before && legAfter && before === legAfter && comparison === "update_available") {
+        } else if (leg.form === "cli" && before && legAfter && before === legAfter && (comparison === "update_available" || comparison === "unknown")) {
           // 在案保护（grok 条目）：镜像源滞后时 npm 退出码 0 但版本原地踏步，
           // 必须如实报「未变化」，与下方单腿分支同口径，不许谎报「已更新」。
+          // latest 查询失败（unknown）同样不算成功：版本没动又没有官方结论
+          // 可依，按「已更新到 X」报出去正是这条守卫要防的谎报。
           legOutcome = "unchanged";
           legMessage = `${label} 更新已完成，但本地版本未变化，可能仍有旧版本在生效`;
         } else {
@@ -229,7 +231,10 @@ export async function executeClientUpdate({
       result = { outcome: "installed_not_runnable", message: "已安装但无法运行，请先检查运行环境（如 Node 版本）" };
     } else if (!afterVersion) {
       result = { outcome: "not_found_after", message: "命令已执行，但仍未找到该客户端，请重新检测确认" };
-    } else if (beforeVersion && beforeVersion === afterVersion && comparison === "update_available") {
+    } else if (beforeVersion && beforeVersion === afterVersion && (comparison === "update_available" || comparison === "unknown")) {
+      // 版本原地踏步且官方比对没有给出「已是最新」的结论（确有新版，或 latest
+      // 查询失败拿不到结论）一律报「未变化」：latest 查询失败不代表更新成功，
+      // 落进下面「已更新到 X」正是这条守卫要防的谎报。
       result = { outcome: "unchanged", message: "更新已完成，但本地版本未变化，可能仍有旧版本在生效" };
     } else {
       result = { outcome: "updated", message: `已更新到 ${afterVersion}` };

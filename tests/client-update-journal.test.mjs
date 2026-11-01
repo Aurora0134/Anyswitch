@@ -89,6 +89,63 @@ test("安装跑完后记录带上新版本与比对结论，面板进程不参�
   }
 });
 
+test("latest 查询失败落 unknown 且版本原地踏步：如实报未变化，不谎报已更新", async () => {
+  const dir = scratch();
+  try {
+    // release-service 对 404/429/网络错误一律 catch 返 error，comparison 落
+    // unknown。命令退出码 0 而版本没动时，这里必须与 update_available 同待遇。
+    writeClientUpdateRun(dir, running({ beforeVersion: "1.0.0" }));
+    const result = await executeClientUpdate({
+      runId: running().runId,
+      journalDir: dir,
+      runLifecycle: async () => ({ ok: true, output: "" }),
+      environment: {
+        async getState() {
+          return { clients: [{ id: "claude", installations: [{ version: "1.0.0", path: "C:/fixture/claude", issue: null }] }] };
+        },
+      },
+      releases: { async getClientLatest() { return { state: "error", version: null, errorCode: "network_error" }; } },
+      compareVersions: (left, right) => (left === right ? 0 : -1),
+      alive: () => true,
+      now: () => "2026-09-26T00:02:00.000Z",
+    });
+    assert.equal(result.outcome, "unchanged");
+    assert.equal(result.message, "更新已完成，但本地版本未变化，可能仍有旧版本在生效");
+    assert.equal(result.comparison, "unknown");
+    assert.equal(result.latestVersion, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("latest 查询失败但版本确实前进了：unknown 不拦真实更新，仍报已更新", async () => {
+  const dir = scratch();
+  try {
+    // 守卫只咬「版本原地踏步」：比对渠道失灵时把真实前进的更新也压成未变化，
+    // 是另一方向的谎报，同样不许发生。
+    writeClientUpdateRun(dir, running({ beforeVersion: "1.0.0" }));
+    const result = await executeClientUpdate({
+      runId: running().runId,
+      journalDir: dir,
+      runLifecycle: async () => ({ ok: true, output: "" }),
+      environment: {
+        async getState() {
+          return { clients: [{ id: "claude", installations: [{ version: "1.1.0", path: "C:/fixture/claude", issue: null }] }] };
+        },
+      },
+      releases: { async getClientLatest() { return { state: "error", version: null, errorCode: "network_error" }; } },
+      compareVersions: (left, right) => (left === right ? 0 : -1),
+      alive: () => true,
+      now: () => "2026-09-26T00:02:00.000Z",
+    });
+    assert.equal(result.outcome, "updated");
+    assert.equal(result.message, "已更新到 1.1.0");
+    assert.equal(result.comparison, "unknown");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("拉起安装进程时脱离父进程并丢掉管道", () => {
   const calls = [];
   const pid = spawnClientUpdateWorker({
@@ -125,13 +182,13 @@ function codexEnvironment(cliAfter, desktopAfter) {
   };
 }
 
-function codexHarness(dir, legs, environment) {
+function codexHarness(dir, legs, environment, releases = { async getClientLatest() { return { state: "ok", version: "0.158.0" }; } }) {
   return executeClientUpdate({
     runId: running().runId,
     journalDir: dir,
     runLifecycle: async () => ({ ok: legs.every((leg) => leg.ok), output: "", legs }),
     environment,
-    releases: { async getClientLatest() { return { state: "ok", version: "0.158.0" }; } },
+    releases,
     compareVersions: (left, right) => (left === right ? 0 : -1),
     alive: () => true,
     now: () => "2026-09-28T00:02:00.000Z",
@@ -223,6 +280,23 @@ test("多腿 CLI 腿版本原地踏步但官方同版（已是真最新）：与
     assert.equal(result.outcome, "updated");
     assert.equal(result.legs[0].outcome, "updated");
     assert.equal(result.message, "CLI 已更新到 0.158.0；Desktop 已是最新");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("多腿 CLI 腿版本原地踏步且 latest 查询失败：与 update_available 同口径报未变化", async () => {
+  const dir = scratch();
+  try {
+    // 两分支必须一起收紧：latest 查询失败（unknown）对多腿 CLI 腿同样不算成功。
+    writeClientUpdateRun(dir, running({ clientId: "codex", beforeVersion: "0.150.0", beforeByForm: { cli: "0.150.0", desktop: "26.900.0" } }));
+    const result = await codexHarness(dir,
+      [{ form: "cli", ok: true }, { form: "desktop", ok: true, noUpgrade: true }],
+      codexEnvironment("0.150.0", "26.900.0"),
+      { async getClientLatest() { return { state: "error", version: null, errorCode: "network_error" }; } });
+    assert.equal(result.outcome, "unchanged");
+    assert.equal(result.legs[0].outcome, "unchanged");
+    assert.equal(result.message, "CLI 更新已完成，但本地版本未变化，可能仍有旧版本在生效；Desktop 已是最新");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

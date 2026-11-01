@@ -311,3 +311,32 @@ it("pins the panel /latest whitelist to the full CLIENTS table — 加客户端�
   assert.ok(match, "panel.mjs 的 /latest 路由里存在白名单数组字面量");
   assert.deepEqual(JSON.parse(match[1]).sort(), Object.keys(CLIENTS).sort());
 });
+
+it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改一侧即红", () => {
+  // 关于页 safeLink 只放行 products 里登记的仓库与 npm 包名：CLIENTS 改了包名
+  // 或官方链接而 products 没跟上，前端会静默拒掉后端给出的官方链接、测试照绿
+  // （products 与 CLIENTS 的注释都自称同源，却是同类配对里唯一漏钉的一对）。
+  // 照上一条白名单的钉法读 panel.js 源码，把 products 逐条取出对值。
+  const panelSource = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
+  const block = panelSource.match(/const products = \{[\s\S]*?\n    \};/);
+  assert.ok(block, "panel.js 里存在 products 表字面量");
+  const products = {};
+  for (const [, rawKey, rawValue] of block[0].matchAll(/("[\w/-]+"|[\w-]+)\s*:\s*\[([^\]]*)\]/g)) {
+    products[JSON.parse(rawKey.startsWith('"') ? rawKey : `"${rawKey}"`)] = JSON.parse(`[${rawValue}]`);
+  }
+  assert.ok(Object.keys(products).length >= 10, "products 表应逐条取出而不是匹配到空壳");
+  for (const [id, [repo, pkg]] of Object.entries(products)) {
+    assert.ok(CLIENTS[id], `products 里的 ${id} 在 CLIENTS 已不存在`);
+    if (pkg) {
+      const entry = /^npm:(.+):latest$/.exec(CLIENTS[id].source ?? "");
+      assert.ok(entry, `${id} 的 CLIENTS 条目不是 npm dist-tag 源`);
+      assert.equal(entry[1], pkg, `${id} 的 npm 包名与 products 登记的 ${pkg} 漂移`);
+    }
+    if (repo) {
+      assert.ok(
+        CLIENTS[id].url === `https://github.com/${repo}` || CLIENTS[id].url === `https://github.com/${repo}/releases`,
+        `${id} 的官方仓库链接与 products 登记的 ${repo} 漂移`,
+      );
+    }
+  }
+});

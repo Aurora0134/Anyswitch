@@ -10,6 +10,7 @@ import {
   resolveQoderCliExecutable, resolveGrokExecutable, resolveWorkbuddyExecutable,
 } from "../src/agents/agent-discovery.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { resolveCodexShim } from "../src/ops/environment-service.mjs";
 
 test("standalone discovery preserves all ten launcher installation choices", () => {
   const base = { USERPROFILE: "C:\\Users\\fixture", APPDATA: "C:\\roaming", LOCALAPPDATA: "C:\\local" };
@@ -136,6 +137,23 @@ test("codex 两种安装形态都没有时如实抛错，两个位置都写进�
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("codex shim 路径双侧互比：launcher 首选与环境卡检测解析到同一个文件", () => {
+  // resolveCodexExecutable（终端一键启动/launcher）与 environment-service 的
+  // resolveCodexShim（环境卡）是两份实现，回退语义有意不同、不能复用整个
+  // resolver，但首选 shim 必须是同一个文件——两侧注释与上一个测试名共同承诺
+  // 的「同源」由这里强制，任一侧的路径字面量漂移即红。
+  for (const base of [
+    { APPDATA: "C:\\Users\\fixture\\AppData\\Roaming" },
+    { USERPROFILE: "C:\\Users\\fixture" },
+  ]) {
+    assert.equal(
+      resolveCodexExecutable(base, { existsSync: () => true }),
+      resolveCodexShim(base),
+      "launcher 与环境卡必须认同一个 codex.cmd",
+    );
   }
 });
 

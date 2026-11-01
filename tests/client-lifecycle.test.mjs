@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { CLIENT_PACKAGES, CLIENT_ACTIONS, NATIVE_CLIENTS, WINGET_CLIENTS, OFFICIAL_MSIX_CLIENTS, OFFICIAL_FEED_CLIENTS, clientLifecycleKind, clientLifecycleActions, clientLifecycleLegs, resolveNpmCli, runClientLifecycle } from "../src/agents/client-lifecycle.mjs";
+import { CLIENTS } from "../src/ops/release-service.mjs";
 import { createHash } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 
@@ -39,6 +40,24 @@ test("前端关于页的按钮清单与服务端两张表一致", () => {
   };
   assert.deepEqual(listed("updatableClients"), [...Object.keys(CLIENT_PACKAGES), ...Object.keys(NATIVE_CLIENTS)].sort());
   assert.deepEqual(listed("installableClients"), Object.keys(CLIENT_PACKAGES).sort());
+});
+
+test("npm 包名值级互钉：client-lifecycle 与 release-service CLIENTS 同名", () => {
+  // 上一条钉住键集合，这里再钉值：上游给包改名有先例（opencode 1.x opencode-ai
+  // → 2.x @opencode/cli），官方版本查询渠道（CLIENTS）与安装/降级命令
+  // （CLIENT_PACKAGES / NATIVE_CLIENTS）各认各的包名时，测试照样全绿，重演
+  // 「检测认得出、更新装死包」的半截状态——任何一侧单独改名这里必须红。
+  const npmName = (id) => {
+    const match = /^npm:(.+):latest$/.exec(CLIENTS[id]?.source ?? "");
+    assert.ok(match, `release-service 的 ${id} 条目不是 npm dist-tag 源`);
+    return match[1];
+  };
+  for (const [id, pkg] of Object.entries(CLIENT_PACKAGES)) {
+    assert.equal(npmName(id), pkg, `${id} 的 npm 包名在两张表间漂移`);
+  }
+  for (const [id, spec] of Object.entries(NATIVE_CLIENTS)) {
+    if (spec.package) assert.equal(npmName(id), spec.package, `${id} 的 npm 包名在两张表间漂移`);
+  }
 });
 
 test("动作白名单只有安装与更新", () => {
