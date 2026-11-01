@@ -139,17 +139,10 @@ export async function syncAllAgentConfigs({
     store = loaded.store;
   }
 
-  const results = {
-    zcode: null,
-    dsh: null,
-    pi: null,
-    kimi: null,
-    qoder: null,
-    codex: null,
-    opencode: null,
-    grok: null,
-    workbuddy: null,
-  };
+  // 键从 AGENT_ENDPOINTS 单源派生：端点清单加一项，这里自动跟着有键，不再
+  // 另立一份手抄键名单。值留 null 表示「本轮没有写手给出结果」，return 前的
+  // 完整性守卫会把这种缺口点名成端点级失败，不再静默。
+  const results = Object.fromEntries(AGENT_ENDPOINTS.map((name) => [name, null]));
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
   try {
@@ -316,6 +309,16 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.workbuddy = { ok: false, error: err.message };
     logger?.warn?.(`workbuddy config sync skipped: ${err.message}`);
+  }
+
+  // 完整性守卫：AGENT_ENDPOINTS 登记的每个端点都必须有写手结果。写手块漏写
+  // 某端点时该键停在 null，曾会静默缺席 synced/failed，面板对用户虚报同步面；
+  // 这里把缺口按端点级失败点名（reason 只进日志，摘要名单只带端点名），整体
+  // 成败语义与退出码契约不变。
+  for (const name of AGENT_ENDPOINTS) {
+    if (results[name] !== null) continue;
+    results[name] = { ok: false, reason: `sync writer did not run for "${name}"` };
+    logger?.error?.(`syncAllAgentConfigs: "${name}" is listed in AGENT_ENDPOINTS but no writer ran for it`);
   }
 
   return { ok: true, results };
