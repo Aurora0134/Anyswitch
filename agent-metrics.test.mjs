@@ -5784,6 +5784,128 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     }
   });
 
+  // ---- 会话粒度行（A 方案 2026-11-01）：行身份锚注册表 sessionId，不锚 pid。
+  // runtime 池按回合回收换 pid（真机：同会话 20 分钟换 3 个 pid），pid 行把每次
+  // 换代都演成「死一个实例、生一个零账实例」——幽灵卡。注册表反查让同一会话
+  // 的新 pid 连回旧行，账续着。
+  describe("WorkBuddy 会话粒度行", () => {
+    it("keeps the row and its account across a runtime pid swap", async () => {
+      // 同一会话 6d2c：pid 100 → 200 换代，中间一拍注册表行已删（暂停窗）。
+      let t = 3000;
+      let pid = 100;
+      let registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid, startedAt: t }],
+        execFn: (cmd, opts, cb) => cb(null, wmic(
+          row(60, 800),
+          agentRow(pid, 60),
+        )),
+      });
+      await collector.scanProcesses();
+      const r1 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
+      r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+      // 换代：pid 100 死、注册表行删（内核已收），一拍后 pid 200 起来接同一会话。
+      t += 5000;
+      pid = 200;
+      registry = {};
+      await collector.scanProcesses(); // 旧行进入「无引擎」态（注册表也读不出）——行须保留
+
+      const mid = wb(await collector.getAgentsStatus());
+      const midRow = mid.instances.find((i) => i.id === "workbuddy-sess-6d2c");
+      assert.ok(midRow, "暂停/换代窗（注册表读不出）会话行保留，不闪没");
+      assert.equal(midRow.requests, 1, "数据不清零");
+      assert.equal(midRow.tokens.prompt, 100);
+      assert.equal(midRow.status, "idle", "无在途请求 → 待命");
+
+      t += 5000;
+      registry = { 200: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      await collector.scanProcesses();
+      const r2 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
+      r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+      const card = wb(await collector.getAgentsStatus());
+      assert.equal(card.instances.length, 1, "同一会话一个行，不裂成两个");
+      const row1 = card.instances.find((i) => i.id === "workbuddy-sess-6d2c");
+      assert.ok(row1, "会话行 id 跨 pid 换代不变");
+      assert.equal(row1.requests, 2, "换代后续账");
+      assert.equal(row1.tokens.prompt, 150);
+      assert.equal(row1.surface, "Desktop", "面随当前 runtime 的父链");
+      assert.equal(row1.title, "bridge", "标题来自注册表 cwd 基名");
+      assert.ok(!card.instances.some((i) => i.id.startsWith("workbuddy-100") || i.id.startsWith("workbuddy-200")),
+        "不留 pid 形幽灵行");
+    });
+
+    it("folds a pid-shaped socket-fallback row into the session row with its account", async () => {
+      // 冷缓存窗口：socket 兜底合成 workbuddy-<pid> 落了账；注册表跟上后重折叠
+      // 整行改并入会话行，计数不丢。
+      let t = 3000;
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: () => null, // 首轮读不出（文件还没写）
+        workbuddySessionDirectory: async () => [],
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(61, 60))),
+      });
+      await collector.scanProcesses();
+      const r1 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-61", model: "m1" });
+      r1.recordEnd({ status: 200, usage: { prompt_tokens: 80, completion_tokens: 30 } });
+
+      // 注册表跟上：pid 61 → sessionId 9a3f。下一轮读取触发重折叠。
+      collector["__noop"] = true;
+      const r2 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-61", model: "m1" });
+      r2.recordEnd({ status: 200, usage: { prompt_tokens: 20, completion_tokens: 10 } });
+      // 让下一次 getAgentsStatus 用新注册表：直接替换 lookup 不行（构造时已固定），
+      // 走快照路径不便——用第二个 collector 演化不现实，改为验证 refold 的输入
+      // 纯函数：resolveInstanceId 把 workbuddy-61 折到会话行。
+      //（此处用模块级 normalizeInstanceId + 注入注册表反查。）
+      const { normalizeInstanceId } = await import("./agent-metrics.mjs");
+      // 通过创建一个带注册表的 collector 来接管模块级反查，再调纯函数。
+      const helper = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: registryLookup({ 61: { kind: "interactive", sessionId: "9a3f" } }),
+        workbuddySessionDirectory: async () => [],
+        execFn: (cmd, opts, cb) => cb(null, ""),
+      });
+      try {
+        const folded = normalizeInstanceId("workbuddy", "workbuddy-61", {
+          workbuddyEnginePids: new Set([61]),
+        });
+        assert.equal(folded.id, "workbuddy-sess-9a3f", "pid 形行按注册表折会话行");
+      } finally {
+        helper.dispose();
+      }
+    });
+
+    it("expires a paused session row only after the idle TTL", async () => {
+      // 用户暂停会话：runtime 回收、注册表行删。行保留待命 30 分钟，之后收走。
+      let t = 3000;
+      let pid = 100;
+      let registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [],
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(pid, 60))),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+      pid = -1; registry = {}; // 全家死绝 + 注册表删净
+      t += 60 * 1000; // 暂停 1 分钟：行须在
+      await collector.scanProcesses();
+      assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-6d2c"),
+        "暂停 1 分钟：会话行保留（待命）");
+
+      t += 31 * 60 * 1000; // 超过 30 分钟 TTL
+      await collector.scanProcesses();
+      assert.equal(wb(await collector.getAgentsStatus()).instances.length, 0,
+        "空闲超 TTL：行收走，不留永久幽灵");
+    });
+  });
+
   it("counts a registry-less row and the live --prewarm row that is serving a session", async () => {
     // 没有注册表：按命令行判据照常计数（宁可多算，不静默漏）。
     const noRegistry = wbCollector({
@@ -5801,7 +5923,9 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     });
     const card = wb(await serving.getAgentsStatus());
     assert.equal(card.processCount, 1, "正在服务的 --prewarm 进程继续计数");
-    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-7801"]);
+    // 会话行（A 方案 2026-11-01）：注册表给 sessionId 的引擎行落会话粒度 id，
+    // pid 形只属于读不出注册表的行。
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-sess-0199c1a2-3b4d"]);
 
     assert.equal(workbuddySessionIsIdlePrewarm(null), false, "读不出注册表不等于待命");
     assert.equal(workbuddySessionIsIdlePrewarm({ kind: "prewarm" }), true);

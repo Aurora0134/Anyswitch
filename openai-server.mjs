@@ -117,10 +117,14 @@ function explicitInstanceId(headers) {
 // 本已规范，归一对它是恒等映射。
 function instanceIdForRequest(req, agentId, deps) {
   const id = agentId ?? "";
-  // 会话头优先于一切：opencode 的实例身份只能是会话粒度（见
-  // opencodeSessionInstanceId）。
+  // 会话头优先于一切：opencode 与 workbuddy 的实例身份只能是会话粒度
+  // （见 opencodeSessionInstanceId / workbuddySessionInstanceId）。
   if (id === "opencode") {
     const sessionId = opencodeSessionInstanceId(req.headers);
+    if (sessionId !== null) return sessionId;
+  }
+  if (id === "workbuddy") {
+    const sessionId = workbuddySessionInstanceId(req.headers);
     if (sessionId !== null) return sessionId;
   }
   // override 端点（pi）与头值不可信的端点（opencode 的环境标签被共用服务冻住，
@@ -169,6 +173,18 @@ function opencodeSessionInstanceId(headers) {
     if (id !== null) return id;
   }
   return null;
+}
+
+// WorkBuddy 会话粒度的实例身份正源。CLI 内核把 X-Conversation-ID 无条件带在每个
+// 模型请求上（bundle 实证：prepare_http 头注入链无自定义模型豁免，设
+// CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即产品会话 id——与
+// ~/.workbuddy/sessions/<pid>.json 的 sessionId 同源。pid 粒度对它不成立：runtime
+// 是池化的，同一会话在一次运行里可换多个 pid（真机 2026-11-01：同会话 20 分钟
+// 换 3 个 pid），进程扫描侧的会话行归一（agent-metrics 的
+// WORKBUDDY_SESSION_ROW_PREFIX）与这条请求通道共用同一行 id 形状。
+const WORKBUDDY_SESSION_PREFIX = "workbuddy-sess-";
+function workbuddySessionInstanceId(headers) {
+  return sessionRowId(WORKBUDDY_SESSION_PREFIX, headers?.["x-conversation-id"]);
 }
 
 // 会话扫描结果 → 终端归属桥的 feed 行：与请求路径同一套行 id 形状（join 两端

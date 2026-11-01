@@ -280,8 +280,8 @@ function opencodeServeAncestorPid(tailPid, agentId, clientPids, procSnapshot) {
 function resolveInstanceId(agentId, rawId, procSnapshot = null) {
   const id = sanitizeInstanceId(rawId);
   if (id === null || typeof agentId !== "string" || agentId.length === 0) return null;
-  // 会话粒度行（codex-sess- / opencode-sess-）声明不了属主 pid：id 里的数字
-  // 尾巴是会话 id 的一部分而不是进程号，归一对它们是恒等映射。
+  // 会话粒度行（codex-sess- / opencode-sess- / workbuddy-sess-）声明不了属主
+  // pid：id 里的数字尾巴是会话 id 的一部分而不是进程号，归一对它们是恒等映射。
   if (isSessionRowId(id)) return { id, label: null, clientPid: null };
   const tail = id.match(/-(\d+)$/);
   if (tail === null) return { id, label: null, clientPid: null };
@@ -315,9 +315,25 @@ function resolveInstanceId(agentId, rawId, procSnapshot = null) {
     && procSnapshot.kimiDesktopPids.has(clientPid)) {
     return { id: KIMI_DESKTOP_INSTANCE_ID, label: null, clientPid };
   }
+  // WorkBuddy：pid 尾解析到活引擎时再问一次注册表——sessionId 存在就折会话行
+  //（workbuddy-sess-<id>，行身份跨 pid 换代稳定）；注册表读不出（读写不到 ≠
+  // 会话不存在）维持 pid 形，淘汰判据照旧由进程存活兜底。注册表查询只在
+  // countsTrusted 轮的重折叠/归一化路径上发生（请求侧的 instanceId 走头通道，
+  // 不进这里），读盘频率与预热池判据同量级。
+  if (agentId === "workbuddy" && clientPid !== null
+    && typeof workbuddySessionRowIdForPid === "function") {
+    const sessionRowId = workbuddySessionRowIdForPid(clientPid);
+    if (sessionRowId !== null) return { id: sessionRowId, label: null, clientPid };
+  }
   const prefix = id.slice(0, tail.index);
   return { id: `${agentId}-${clientPid}`, label: prefix.length > 0 && prefix !== agentId ? prefix : null, clientPid };
 }
+
+// WB pid → 会话行 id 的注册表反查。collector 作用域里把它接到
+// workbuddySessionLookup（见 createAgentMetricsCollector）；模块顶层是占位
+//（resolveInstanceId 也被模块级导出的 normalizeInstanceId 调用，那时没有注册
+// 表可读，返回 null 走 pid 形，语义与今天一致）。
+let workbuddySessionRowIdForPid = () => null;
 
 export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
   const resolved = resolveInstanceId(agentId, rawId, procSnapshot);
@@ -377,6 +393,16 @@ function opencodeSessionRowTitle(instId, sessionById) {
   return instId;
 }
 
+// WB 会话行标题：注册表 meta 的 cwd 基名（loadSessionInfo("workbuddy") 从
+// sessions/<pid>.json 读出），无匹配则短 id 占位——与 codex 同形，但占位带
+// 前缀词「WorkBuddy 会话」以区分卡片语境。
+function workbuddySessionRowTitle(instId, sessionById) {
+  const sessionId = instId.slice(WORKBUDDY_SESSION_ROW_PREFIX.length);
+  const meta = sessionById?.get(sessionId) ?? null;
+  if (typeof meta?.title === "string" && meta.title.trim() !== "") return meta.title;
+  return `WorkBuddy 会话 ${sessionId.slice(0, 8)}`;
+}
+
 // How long an idle instance stays listed after its last request. Only custom
 // ids rely on this TTL: an id of the strict "<agentId>-<pid>" form (socket-
 // fallback synthesized, launcher-injected and then folded by
@@ -416,16 +442,36 @@ const CODEX_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
 // TTL).
 export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 
+// WorkBuddy 会话行（id "workbuddy-sess-<产品会话 id>"）。身份正源是产品自己的
+// 进程注册表（~/.workbuddy/sessions/<pid>.json 的 sessionId）：runtime 是池化的
+// （一个会话在一次运行里可换多个 pid），pid 锚不住行，注册表才是把「同一会话
+// 的新 pid」连回「旧行」的钥匙。CLI 发请求会带 X-Conversation-ID 头（bundle
+// 实证：内部头无条件注入，CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即该
+// 会话 id——请求侧与扫描侧两个入口都收敛到同一行 id。
+export const WORKBUDDY_SESSION_ROW_PREFIX = "workbuddy-sess-";
+const WORKBUDDY_SESSION_ROW_IDLE_TTL_MS = 30 * 60 * 1000;
+
 // Session-granular row ids, keyed by the endpoint that mints them. Both declare
 // no owning PID: liveness is the endpoint's process family (plus, for codex
 // only, an idle TTL).
 const SESSION_ROW_PREFIXES = Object.freeze({
   codex: CODEX_SESSION_ID_PREFIX,
   opencode: OPENCODE_SESSION_ID_PREFIX,
+  // WorkBuddy 的行身份是产品自己的会话注册表（~/.workbuddy/sessions/<pid>.json
+  // 的 sessionId），不是 pid：CLI 内核是池化 runtime，同一会话在一次运行里可以
+  // 换任意多个 pid（回合间回收、预热池领养，真机 2026-11-01：同会话 20 分钟走
+  // 过 3 个 pid），pid 行会把每次换代都当成「死一个实例、生一个零账实例」——
+  // 面板上就是幽灵卡。注册表由内核自己写，sessionId 跨 pid 稳定，是唯一能当
+  // 行身份的锚。
+  workbuddy: WORKBUDDY_SESSION_ROW_PREFIX,
 });
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
   opencode: null,
+  // WB 会话行的空闲档：会话可被用户暂停（runtime 被池回收、注册表行被内核删
+  // 除），之后随一条新请求复活到新 pid 上。30 分钟覆盖「暂停后闲着」的常见窗
+  // 而不把昨天的会话一直挂着；期间行保留（待命态），数据不清零。
+  workbuddy: WORKBUDDY_SESSION_ROW_IDLE_TTL_MS,
 });
 
 // How many consecutive trusted scan rounds must report the endpoint's family as
@@ -437,7 +483,8 @@ const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
 const SESSION_ROW_FAMILY_MISS_ROUNDS = 2;
 
 function isSessionRowId(id) {
-  return id.startsWith(CODEX_SESSION_ID_PREFIX) || id.startsWith(OPENCODE_SESSION_ID_PREFIX);
+  return id.startsWith(CODEX_SESSION_ID_PREFIX) || id.startsWith(OPENCODE_SESSION_ID_PREFIX)
+    || id.startsWith(WORKBUDDY_SESSION_ROW_PREFIX);
 }
 
 export function getTtftColor(ttftMs) {
@@ -1020,6 +1067,46 @@ export function summarizeWorkbuddySurfaces(procCounts) {
 // 面板上挂一条 0 流量的幽灵行。判据因此收窄成「注册表说它在待命」才不计数：
 // 文件不存在 / 读不出 / 字段缺失一律按命令行判据照常计数（宁可多算，不静默漏）。
 const WORKBUDDY_SESSIONS_DIRNAME = "sessions";
+
+// WB 注册表全目录扫描（loadSessionInfo("workbuddy") 的默认实现）：每个
+// <pid>.json 一条 {id: sessionId, title: cwd 基名}。同 sessionId 多个 pid（换代
+// 窗口）以最新的为准；读不出的文件跳过，扫描失败向上抛由调用方落空表。
+async function listWorkbuddySessionMetas(configRoot) {
+  if (typeof configRoot !== "string" || configRoot.length === 0) return [];
+  const { readdirSync } = await import("node:fs");
+  const metas = [];
+  const dir = join(configRoot, WORKBUDDY_SESSIONS_DIRNAME);
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const pidText = name.slice(0, -5);
+    if (!/^\d+$/.test(pidText)) continue;
+    let record;
+    try {
+      record = JSON.parse(readFileSync(join(dir, name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (record === null || typeof record !== "object") continue;
+    const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+    if (sessionId.length === 0 || sessionId.startsWith("prewarm")) continue;
+    let title = null;
+    if (typeof record.cwd === "string" && record.cwd.length > 0) {
+      const base = record.cwd.split(/[\\/]/).filter(Boolean).pop();
+      if (base) title = base;
+    }
+    metas.push({ id: sessionId, title, pid: Number(pidText), startedAt: record.startedAt ?? null });
+  }
+  // 同 sessionId 取 startedAt 最大（或最后读到）的那条——换代窗口里旧 pid 的
+  // 注册表行可能还在盘上，标题以当前代为准。
+  metas.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  return metas;
+}
 
 // 配置根与写入器共用一份（workbuddy-merge-models.workbuddyConfigRoot 认
 // WORKBUDDY_CONFIG_DIR / CODEBUDDY_CONFIG_DIR 两个变量）——扫描读的必须是写入器
@@ -2758,6 +2845,16 @@ export function createAgentMetricsCollector(options = {}) {
   const workbuddySessionLookup = typeof options.workbuddySessionLookup === "function"
     ? options.workbuddySessionLookup
     : (pid) => readWorkbuddySessionRecord(pid, workbuddySessionRoot);
+  // 会话行归一反查（resolveInstanceId 的 WB 折叠通道读这个）。注册表行没有
+  // sessionId（预热待命、字段缺失）时返回 null——这类 pid 折不成会话行，维持
+  // pid 形（它们本来就不计数，行也不会起）。
+  const saveWbSessionRowIdForPid = workbuddySessionRowIdForPid;
+  workbuddySessionRowIdForPid = (pid) => {
+    const record = workbuddySessionLookup(pid);
+    const sessionId = typeof record?.sessionId === "string" ? record.sessionId.trim() : "";
+    if (sessionId.length === 0) return null;
+    return sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`) ?? null;
+  };
   const stability = options.stability ?? createModelStabilityTracker({
     nowFn,
     persistPath: options.stabilityPath ?? (persistRoot ? join(persistRoot, STABILITY_FILENAME) : null),
@@ -3141,6 +3238,9 @@ export function createAgentMetricsCollector(options = {}) {
   const sessionLookups = {
     codex: options.codexSessionLookup ?? null,
     opencode: options.opencodeSessionLookup ?? null,
+    // WB 会话行的标题正源：产品注册表全目录（cwd 基名当标题），不是逐 pid 查。
+    // 默认实现直接扫 sessions/ 目录；测试注入 workbuddySessionDirectory 遮蔽。
+    workbuddy: options.workbuddySessionDirectory ?? null,
   };
   const SESSION_LOOKUP_TTL_MS = 15000;
   const sessionInfoCache = new Map(); // agentId -> { at, byId }
@@ -3152,9 +3252,18 @@ export function createAgentMetricsCollector(options = {}) {
     const injected = sessionLookups[agentId] ?? null;
     let sessions = [];
     try {
-      sessions = injected !== null
-        ? await injected()
-        : await (await import("./session-scan.mjs")).defaultScanner.adapters.get(agentId).scan();
+      if (agentId === "workbuddy") {
+        // WB 会话标题：注册表全目录 → {id: sessionId, title: cwd 基名}。注入的
+        // workbuddySessionDirectory 返回同形数组；默认扫 workbuddySessionRoot
+        // 的 sessions/ 目录（与逐 pid 注册表同一棵树）。
+        sessions = injected !== null
+          ? await injected()
+          : await listWorkbuddySessionMetas(workbuddySessionRoot);
+      } else {
+        sessions = injected !== null
+          ? await injected()
+          : await (await import("./session-scan.mjs")).defaultScanner.adapters.get(agentId).scan();
+      }
     } catch {
       sessions = []; // a scan failure must never break the status read
     }
@@ -4499,7 +4608,7 @@ export function createAgentMetricsCollector(options = {}) {
         // 行（归一化的上折，目标行就是 pid 形占位行）。
         // 对 TUI/web 的 pid 行，归一化是恒等映射，重折叠空转。
         if (countsTrusted && !isSessionRow
-          && (pidMatch === null || bucket === "dsh" || bucket === "kimi" || bucket === "opencode")) {
+          && (pidMatch === null || bucket === "dsh" || bucket === "kimi" || bucket === "opencode" || bucket === "workbuddy")) {
           const refold = resolveInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
             const target = instMap.get(refold.id);
@@ -4523,6 +4632,12 @@ export function createAgentMetricsCollector(options = {}) {
                 // 期时临时行可能攒了大量当前代计数，直接丢弃等于重演「历史凭空
                 // 消失」；并账对同代合并同样成立（relay 重启还原 + 冷缓存继续跑）。
                 settleDesktopGenerationOnFold(bucket, target, refold.clientPid, procCounts);
+                absorbAggregateState(target.state, entry.state,
+                  Math.max(recentSampleWindow, target.state.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS));
+              }
+              if (refold.id.startsWith(WORKBUDDY_SESSION_ROW_PREFIX)) {
+                // WB pid 行折会话行同样并账：冷缓存窗口里 pid 形行攒的当前会话
+                // 计数并入会话行，否则换代那一下又是「数据清零」。
                 absorbAggregateState(target.state, entry.state,
                   Math.max(recentSampleWindow, target.state.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS));
               }
@@ -4607,7 +4722,7 @@ export function createAgentMetricsCollector(options = {}) {
       // `serve --service` — never spawn placeholder rows. A placeholder there
       // would sit beside the session row with a permanent 0 请求, and the
       // terminal panel (which reads its row by id) would show the empty one.
-      if (bucket !== "codex" && bucket !== "opencode") {
+      if (bucket !== "codex" && bucket !== "opencode" && bucket !== "workbuddy") {
         for (const pid of placeholderPids) {
           // 桌面宿主（dsh 宿主引擎 / kimi 桌面主进程）的占位行挂稳定 id：起进
           // 程即可见的那一行，就是请求将要落的那一行——换代换 pid 不换行。其
@@ -4628,13 +4743,29 @@ export function createAgentMetricsCollector(options = {}) {
             instMap.set(placeholderId, placeholder);
           }
         }
+      } else if (bucket === "workbuddy") {
+        // WB 的占位行走会话粒度：pid 形占位在这里就是幽灵卡的制造机（runtime 池
+        // 化换代后，新 pid 的零账占位行与被淘汰的旧 pid 行拼成「实例死了又生」
+        // 的假象）。注册表给出 sessionId 的引擎 pid 起 workbuddy-sess-<id> 行——
+        // 换代换 pid 不换行；读不出注册表（读写不到 ≠ 不存在）时保守起 pid 形
+        // 占位，宁可短暂出现一行也不把所有引擎藏掉。
+        for (const pid of placeholderPids) {
+          const record = workbuddySessionLookup(pid);
+          const sessionId = typeof record?.sessionId === "string" ? record.sessionId.trim() : "";
+          const placeholderId = sessionId.length > 0
+            ? (sanitizeInstanceId(`${WORKBUDDY_SESSION_ROW_PREFIX}${sessionId}`) ?? `${bucket}-${pid}`)
+            : `${bucket}-${pid}`;
+          if (!instMap.has(placeholderId)) {
+            instMap.set(placeholderId, { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null });
+          }
+        }
       }
     }
 
     // Session-granular rows get user-readable titles from the endpoint's own
     // session scan (codex rollouts / opencode's db). Worth the walk only when
     // such a row is actually listed.
-    const sessionRowTitles = { codex: null, opencode: null };
+    const sessionRowTitles = { codex: null, opencode: null, workbuddy: null };
     for (const agentId of Object.keys(sessionRowTitles)) {
       const prefix = SESSION_ROW_PREFIXES[agentId];
       for (const instId of instanceBuckets[agentId].keys()) {
@@ -4677,6 +4808,17 @@ export function createAgentMetricsCollector(options = {}) {
     // chain (desktop GUI host vs terminal), never by the request plane. A row
     // the scan could not classify stays unbadged.
     const workbuddyInstanceSurface = (instId) => {
+      // 会话行的面：该会话注册表当前指向的 runtime pid 的面（父链判定的
+      // workbuddySurfaceByPid）。注册表行已删（暂停窗）时读不到 pid，行不贴面
+      // ——面是会话当下的运行形态，不是行的固有属性，读不出就不猜。
+      if (instId.startsWith(WORKBUDDY_SESSION_ROW_PREFIX)) {
+        for (const [pid, surface] of procCounts.workbuddySurfaceByPid ?? []) {
+          if (surface === null) continue;
+          const rowId = workbuddySessionRowIdForPid(pid);
+          if (rowId === instId) return workbuddySurfaceLabel(surface);
+        }
+        return null;
+      }
       const pidMatch = instId.match(/^workbuddy-(\d+)$/);
       if (pidMatch === null) return null;
       const surface = procCounts.workbuddySurfaceByPid?.get(Number(pidMatch[1])) ?? null;
@@ -4726,7 +4868,9 @@ export function createAgentMetricsCollector(options = {}) {
                 ? codexSessionRowTitle(instId, sessionRowTitles.codex)
                 : bucket === "opencode" && instId.startsWith(OPENCODE_SESSION_ID_PREFIX)
                   ? opencodeSessionRowTitle(instId, sessionRowTitles.opencode)
-                  : instId),
+                  : bucket === "workbuddy" && instId.startsWith(WORKBUDDY_SESSION_ROW_PREFIX)
+                    ? workbuddySessionRowTitle(instId, sessionRowTitles.workbuddy)
+                    : instId),
             // DSH and Kimi rows carry the surface they belong to, which the row
             // number cannot express: a web server, a TUI terminal and the
             // desktop app are all one endpoint id. Other buckets never set it.
@@ -5082,6 +5226,11 @@ export function createAgentMetricsCollector(options = {}) {
     persistMetricsSnapshot,
     setSparkWindowPoints: applySparkWindow,
     getSparkWindowPoints: () => sparkWindowPoints,
+    // 撤掉本 collector 对模块级 WB 注册表反查的接管（测试同进程建多个 collector
+    // 会互相覆盖；谁最后创建谁生效，销毁时恢复前一个，防泄漏）。
+    dispose: () => {
+      workbuddySessionRowIdForPid = saveWbSessionRowIdForPid;
+    },
   };
 }
 
