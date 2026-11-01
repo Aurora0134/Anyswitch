@@ -90,7 +90,7 @@ describe("workbuddy-merge-models", () => {
     assert.equal(config.theme, "dark");
     assert.deepEqual(config.models[1], {
       id: "poke-api~gpt-6-astra",
-      name: "GPT 6 Astra · Poke API",
+      name: "poke-api~gpt-6-astra",
       vendor: "Anyswitch",
       url: managedUrl(),
       apiKey: TOKEN,
@@ -105,7 +105,7 @@ describe("workbuddy-merge-models", () => {
     // reasoning 缺失即 false。
     const plain = config.models[2];
     assert.equal(plain.id, "poke-api~plain");
-    assert.equal(plain.name, "plain · Poke API");
+    assert.equal(plain.name, "poke-api~plain");
     assert.equal(plain.supportsImages, true);
     assert.equal(plain.supportsReasoning, false);
     assert.ok(Number.isInteger(plain.maxInputTokens) && plain.maxInputTokens > 0);
@@ -235,8 +235,11 @@ describe("workbuddy-merge-models", () => {
     assert.ok(byId.has("poke-api~gpt-6-astra"));
     assert.ok(byId.has("auto"), "auto 是链路由触发词，id 必须是裸名");
     assert.ok(byId.has("vm-a"), "虚拟模型 id 必须是裸名");
-    assert.equal(byId.get("auto").name, "auto · Anyswitch");
-    assert.equal(byId.get("vm-a").name, "vm-a · Anyswitch");
+    // 显示名必须与 id 逐字相同：WorkBuddy 对自定义模型按 `${name}:${id}` 拼
+    // 下拉标签，name !== id 会把含渠道的 id 再念一遍（2026-11-01 报障）。
+    assert.equal(byId.get("auto").name, "auto");
+    assert.equal(byId.get("vm-a").name, "vm-a");
+    for (const entry of config.models) assert.equal(entry.name, entry.id);
     assert.equal(workbuddyModelId("auto", "vm-a"), "vm-a");
     assert.equal(workbuddyModelId("chan", "m"), "chan~m");
   });

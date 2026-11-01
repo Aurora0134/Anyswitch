@@ -1,5 +1,5 @@
 // WorkBuddy 自定义模型写入器 —— 把 Anyswitch 渠道/模型写进
-// ~/.workbuddy/models.json，让 WorkBuddy 的模型选择器出现「渠道 · 模型」条目，
+// ~/.workbuddy/models.json，让 WorkBuddy 的模型选择器出现「<渠道>~<模型>」条目，
 // 请求按条目里的 url 直连本地 relay 的 OpenAI chat/completions 面
 // （POST /openai/workbuddy~<segment>/v1/chat/completions）。
 //
@@ -103,25 +103,23 @@ export function workbuddyModelId(channelId, modelId) {
   return packChannelModelSlug(channelId, modelId);
 }
 
-function modelLabel(model, modelId) {
-  return typeof model?.displayName === "string" && model.displayName.length > 0 ? model.displayName : modelId;
-}
-
-function channelLabel(providerId, provider) {
-  return provider?.channelName ?? provider?.displayName ?? providerId;
-}
-
 // 条目模板逐字固定（plan §1.2）：字段顺序也是模板的一部分，别顺手重排。
 export function buildWorkbuddyModelEntry(providerId, provider, modelId, model, port, token) {
   const segment = provider?.baseUrlSegment ?? providerId;
   const url = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(WORKBUDDY_AGENT_ID, segment)}/v1/chat/completions`;
+  const id = workbuddyModelId(providerId, modelId);
   const contextWindow =
     Number.isInteger(model?.contextWindow) && model.contextWindow > 0
       ? model.contextWindow
       : fallbackContextWindow(modelId);
   return {
-    id: workbuddyModelId(providerId, modelId),
-    name: `${modelLabel(model, modelId)} · ${channelLabel(providerId, provider)}`,
+    id,
+    // 显示名必须与 id 逐字相同：WorkBuddy 的模型下拉对自定义模型按
+    // `${name}:${id}` 拼标签（getModelDisplayName——name 与 id 不等就再追加
+    // 一段 id），而 id 里已含渠道（<渠道>~<模型>），于是每行把渠道和模型各念
+    // 两遍（2026-11-01 报障「供应商重复两遍」）。name === id 时只输出 id，
+    // GUI 的 `!e.name || e.name === n` 分支不再拼接。
+    name: id,
     vendor: VENDOR,
     url,
     apiKey: token,

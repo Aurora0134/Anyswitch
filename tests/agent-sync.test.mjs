@@ -132,7 +132,9 @@ describe("agent-sync", () => {
     assert.equal(Array.isArray(workbuddy), false);
     assert.deepEqual(workbuddy.models.map((model) => model.id), ["alpha~model-1"]);
     const workbuddyEntry = workbuddy.models[0];
-    assert.equal(workbuddyEntry.name, "model-1 · Alpha");
+    // name 与 id 逐字相同：WorkBuddy 对自定义模型按 `${name}:${id}` 拼下拉
+    // 标签，name 写「模型 · 渠道」会让含渠道的 id 再被念一遍。
+    assert.equal(workbuddyEntry.name, "alpha~model-1");
     assert.equal(workbuddyEntry.vendor, "Anyswitch");
     assert.equal(workbuddyEntry.url, "http://127.0.0.1:47821/openai/workbuddy~alpha/v1/chat/completions");
     assert.equal(workbuddyEntry.apiKey, "test-token");
@@ -556,12 +558,13 @@ describe("agent-sync Anyswitch 渠道名（八端点回归闸）", () => {
     assert.match(grokText, /\[model\."anyswitch-auto"\]\nmodel = "auto"[\s\S]*?name = "auto · Anyswitch"/);
     assert.match(grokText, /\[model\."anyswitch-auto~vm-a"\]\nmodel = "vm-a"[\s\S]*?name = "vm-a · Anyswitch"/);
 
-    // WorkBuddy：模型条目行读 name，伪渠道的显示名就是 Anyswitch；id 用裸模型名
-    // （链拦截按 body.model 字面匹配），url 段带 workbuddy~ 身份前缀。
+    // WorkBuddy：条目行读 name，显示名与 id 逐字相同（WorkBuddy 对自定义模型
+    // 按 `${name}:${id}` 拼下拉标签，name 与 id 不等就把含渠道的 id 再念一遍）；
+    // id 用裸模型名（链拦截按 body.model 字面匹配），url 段带 workbuddy~ 身份前缀。
     const workbuddy = JSON.parse(readFileSync(join(tmpRoot, ".workbuddy", "models.json"), "utf8"));
     const workbuddyById = new Map(workbuddy.models.map((model) => [model.id, model]));
-    assert.equal(workbuddyById.get("auto").name, "auto · Anyswitch");
-    assert.equal(workbuddyById.get("vm-a").name, "vm-a · Anyswitch");
+    assert.equal(workbuddyById.get("auto").name, "auto");
+    assert.equal(workbuddyById.get("vm-a").name, "vm-a");
     assert.equal(workbuddyById.get("auto").url, "http://127.0.0.1:47821/openai/workbuddy~alpha/v1/chat/completions");
   });
 });
