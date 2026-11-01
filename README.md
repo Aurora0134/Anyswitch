@@ -88,7 +88,7 @@ node --check src/panel/panel-host.mjs
 npm test
 ```
 
-`npm test` 是仓库自带的全量测试（150 个测试文件，全在 `tests/`，与 `src/` 下的实现分开放）；它需要一次 `npm install`，因为虚拟终端测试会碰终端宿主。
+`npm test` 是仓库自带的全量测试（151 个测试文件，全在 `tests/`，与 `src/` 下的实现分开放）；它需要一次 `npm install`，因为虚拟终端测试会碰终端宿主。
 
 ---
 
@@ -255,7 +255,7 @@ Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills �
 - **写面有并发保护。** 面板写 store 走内容哈希 CAS 加文件锁；路由目录带 generation 摘要，配置在请求中途变化时拒绝用旧目录。
 - **面板写接口只认本地面板。** `POST /panel/api/*` 要过 Origin/Referer 可信校验；relay 用数据根里的本地 token 鉴权，终端宿主同样。
 
-规模不是卖点，但可以复算：`src/` 下 118 个实现 `.mjs`、`tests/` 下 150 个测试 `.mjs`，合计 268 个；实现代码约 55,600 行，测试代码约 106,100 行；面板前端三件套 `panel.js` / `panel.html` / `panel.css` 共约 29,800 行。
+规模不是卖点，但可以复算：`src/` 下 118 个实现 `.mjs`、`tests/` 下 151 个测试 `.mjs`，合计 269 个；实现代码约 55,600 行，测试代码约 106,100 行；面板前端三件套 `panel.js` / `panel.html` / `panel.css` 共约 29,800 行。
 
 ---
 

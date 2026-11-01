@@ -88,7 +88,7 @@ node --check src/panel/panel-host.mjs
 npm test
 ```
 
-`npm test` runs the repo's full suite (150 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
+`npm test` runs the repo's full suite (151 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
 
 ---
 
@@ -255,7 +255,7 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
 - **The write path is concurrency-safe.** Panel writes to the store go through content-hash CAS with a file lock; the routing catalog carries a generation digest so a config changed mid-request is never served stale.
 - **Write endpoints trust only the local panel.** `POST /panel/api/*` passes Origin/Referer validation; the relay authenticates with a local token from the data root, as does the terminal host.
 
-Scale is not the selling point, but it is verifiable: 118 implementation `.mjs` files under `src/` and 150 test `.mjs` files under `tests/`, 268 in total; roughly 55,600 lines of implementation code and 106,100 lines of test code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 29,800 lines.
+Scale is not the selling point, but it is verifiable: 118 implementation `.mjs` files under `src/` and 151 test `.mjs` files under `tests/`, 269 in total; roughly 55,600 lines of implementation code and 106,100 lines of test code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 29,800 lines.
 
 ---
 
