@@ -73,6 +73,17 @@ const THINK_ONLY_MESSAGE =
 // guard therefore keeps an open call's deltas until its arguments parse as
 // JSON, then releases the whole call as one frame. Answer text and reasoning
 // are never held by this path.
+//
+// A withheld frame takes its blank separator with it. This state machine works
+// line by line, so a data line and the blank line that ends its SSE event are
+// two separate decisions; withholding only the data line leaks the blank out
+// immediately and leaves the released block with N data lines and no
+// separator between them. An event carrying two data lines is legal SSE but
+// fatal in practice: clients join an event's data lines with "\n" (openai-node
+// does exactly that) and then hand two JSON objects to JSON.parse, which kills
+// the whole turn with "Unexpected non-whitespace character after JSON". So a
+// withheld frame is stored with its separator attached, and the physical blank
+// line is swallowed instead of forwarded.
 const PER_CALL_HOLD_TOOL_ARGS = true;
 
 function streamError(message, code = null) {
@@ -100,6 +111,15 @@ function parsesAsJson(text) {
   } catch {
     return false;
   }
+}
+
+// Re-attach the blank separator a withheld data line carries in the upstream
+// stream. Released blocks are written back to back, so without this every
+// frame after the first would arrive as a second `data:` line of the previous
+// event (see the header note).
+function withFrameSeparator(line) {
+  if (line.endsWith("\n\n")) return line;
+  return line.endsWith("\n") ? `${line}\n` : `${line}\n\n`;
 }
 
 function looksLikeJsonObjectOrArray(payload) {
@@ -225,6 +245,10 @@ export class OpenAIStreamGuard {
     // that interleaves two open calls is malformed upstream behaviour, and
     // the guard treats the second one as a new open call.
     this.openCall = null; // { index, id, name, args, withheld, sawFinish }
+    // The blank separator of the last withheld frame has not been seen yet:
+    // the next blank line belongs to that frame and must not be forwarded on
+    // its own (the separator is re-attached on release).
+    this.frameBlankHeld = false;
     // The last open call that was dropped for being incomplete: the verdict
     // needs to know a call was cut even though its bytes never left the guard.
     this.droppedOpenCall = null;
@@ -262,6 +286,7 @@ export class OpenAIStreamGuard {
         return "";
       }
     }
+    if (this.frameBlankSwallowed(line)) return "";
     const payload = dataPayload(line);
     if (payload === null) return this.holdOrEmit(line);
     if (payload === "[DONE]") {
@@ -324,6 +349,16 @@ export class OpenAIStreamGuard {
     return "";
   }
 
+  // True when this line is the blank separator of a frame that was just
+  // withheld: it is dropped, because the separator is re-attached when the
+  // block is released. A non-blank line means the upstream omitted the
+  // separator; clearing the flag keeps it from eating a later blank.
+  frameBlankSwallowed(line) {
+    if (!this.frameBlankHeld) return false;
+    this.frameBlankHeld = false;
+    return line === "\n" || line === "\r\n";
+  }
+
   // Flush the pre-content hold: the held bytes contain both the first content
   // and the frames that preceded it. The shadow and the per-call hold are
   // applied to each frame inside — a frame that only opens a tool call is
@@ -346,6 +381,7 @@ export class OpenAIStreamGuard {
   }
 
   releaseHeldLine(line) {
+    if (this.frameBlankSwallowed(line)) return "";
     const payload = dataPayload(line);
     if (payload === null) return line;
     if (payload === "[DONE]") {
@@ -395,7 +431,10 @@ export class OpenAIStreamGuard {
       // Text, reasoning, finish_reason, or a usage frame while arguments are
       // still arriving: it belongs to the open call's turn and is withheld
       // with it, so the client never sees the call's tail before its args.
-      this.openCall.withheld += forward;
+      // The frame keeps its blank separator, and the physical one that follows
+      // is swallowed (see frameBlankSwallowed).
+      this.openCall.withheld += withFrameSeparator(forward);
+      this.frameBlankHeld = true;
       // finish_reason proves no further argument deltas are coming, which is
       // what makes an argument-less call whole.
       if (delta?.finish_reason) this.openCall.sawFinish = true;
@@ -427,12 +466,14 @@ export class OpenAIStreamGuard {
   }
 
   // Append one frame's tool-call payloads to the open call. The frame's bytes
-  // are withheld whole: the client sees a call open and its arguments arrive
-  // in one piece, never delta by delta.
+  // are withheld whole — including its blank separator, which is why the
+  // released block is still N separate SSE events: the client sees a call open
+  // and its arguments arrive in one piece, never delta by delta.
   absorbCallFrame(calls, forward) {
     const open = this.openCall;
     if (open === null) return "";
-    open.withheld += forward;
+    open.withheld += withFrameSeparator(forward);
+    this.frameBlankHeld = true;
     for (const call of calls) {
       if (call.index !== open.index) continue;
       if (typeof call.function?.arguments === "string") open.args += call.function.arguments;
@@ -454,10 +495,11 @@ export class OpenAIStreamGuard {
   }
 
   // Release the open call's withheld bytes. A call that is whole (id + name,
-  // and arguments that are absent or parse) is released verbatim; one that is
-  // not is DROPPED — the client never saw it, so a truncated call leaves no
-  // broken state behind. `final` marks the end of the stream, where empty
-  // arguments are legal (a call with no arguments at all).
+  // and arguments that are absent or parse) is released verbatim — every frame
+  // still followed by its own blank separator, so the block reads as N separate
+  // SSE events. One that is not whole is DROPPED — the client never saw it, so
+  // a truncated call leaves no broken state behind. `final` marks the end of
+  // the stream, where empty arguments are legal (a call with no arguments).
   closeOpenCall(final) {
     const open = this.openCall;
     if (open === null) return "";

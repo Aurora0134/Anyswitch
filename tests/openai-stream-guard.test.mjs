@@ -17,6 +17,28 @@ function pump(guard, parts) {
   return out;
 }
 
+// Every frame must reach the client as its own SSE event: exactly one `data:`
+// line per event. A client that joins an event's data lines with "\n" before
+// JSON.parse (openai-node does exactly that) turns two data lines into one
+// unparsable string — the 2026-11-01 zcode turn failure, where a held tool call
+// was released with its frames back to back.
+function assertOneDataLinePerEvent(text, label) {
+  const events = text.split("\n\n").filter((event) => event.trim() !== "");
+  for (const [index, event] of events.entries()) {
+    const dataLines = event.split("\n").filter((line) => line.startsWith("data:"));
+    assert.equal(dataLines.length, 1, `${label}: event #${index} must hold exactly one data line`);
+    const payload = dataLines[0].slice(5).trim();
+    if (payload === "[DONE]") continue;
+    assert.doesNotThrow(() => JSON.parse(payload), `${label}: event #${index} payload must parse as JSON`);
+  }
+}
+
+// Wire-frame builder for the tests that care about frame shape rather than
+// about the exact upstream field order.
+function frame(delta, choice = {}) {
+  return `data: ${JSON.stringify({ id: "cmpl-1", choices: [{ index: 0, delta, finish_reason: null, ...choice }] })}\n\n`;
+}
+
 describe("OpenAIStreamGuard", () => {
   it("holds a stream whose only tool call never gets a name and rejects it before anything is forwarded", () => {
     const guard = new OpenAIStreamGuard();
@@ -484,11 +506,72 @@ describe("tool-call delta normalization (upstream repeats empty strings on conti
         .map((payload) => JSON.stringify(JSON.parse(payload)));
     const expected = framePayloads(sse);
     const actual = framePayloads(emitted + (verdict.tail || ""));
+    assertOneDataLinePerEvent(emitted + (verdict.tail || ""), "canonical stream");
     assert.deepEqual(
       actual.sort(),
       expected.sort(),
       "canonical streams must produce the same frames (order may differ under per-call hold)",
     );
+  });
+});
+
+describe("per-call hold: a released block stays N separate SSE events", () => {
+  it("releases a tool call whose arguments arrived in three deltas without gluing them into one event", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      frame({ content: "我来读一下" }),
+      frame({ tool_calls: [{ index: 0, id: "call_a", type: "function", function: { name: "Read", arguments: "{" } }] }),
+      frame({ tool_calls: [{ index: 0, function: { arguments: '"file_path":' } }] }),
+      frame({ tool_calls: [{ index: 0, function: { arguments: '"a.txt"}' } }] }),
+      frame({}, { finish_reason: "tool_calls" }),
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    const wire = emitted + (verdict.tail || "");
+
+    assert.equal(verdict.action, "pass");
+    assertOneDataLinePerEvent(wire, "three-delta call");
+    assert.equal(wire.split('"name":"Read"').length - 1, 1, "the call must be released exactly once");
+    assert.ok(wire.includes('"arguments":"{"'), "the first argument delta must survive");
+    assert.ok(wire.includes("a.txt"), "the last argument delta must survive");
+    assert.equal(wire.includes("\n\n\n"), false, "a withheld frame's blank must not be forwarded twice");
+  });
+
+  it("keeps the frames a call releases at finish() in their own events, before [DONE]", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      frame({ content: "ok" }),
+      frame({ tool_calls: [{ index: 0, id: "call_b", type: "function", function: { name: "Bash" } }] }),
+      frame({}, { finish_reason: "tool_calls" }),
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    const wire = emitted + (verdict.tail || "");
+
+    assert.equal(verdict.action, "pass");
+    assertOneDataLinePerEvent(wire, "finish() release");
+    assert.ok(wire.indexOf('"name":"Bash"') < wire.indexOf("[DONE]"), "the released call must precede the terminator");
+  });
+
+  it("keeps a text frame withheld behind an open call in its own event too", () => {
+    // A text/reasoning frame that arrives while arguments are still streaming
+    // belongs to the call's turn and is withheld with it — and therefore needs
+    // the same separator treatment.
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      frame({ content: "先看" }),
+      frame({ tool_calls: [{ index: 0, id: "call_c", type: "function", function: { name: "Read", arguments: '{"file_path":' } }] }),
+      frame({ content: "再看这段" }),
+      frame({ tool_calls: [{ index: 0, function: { arguments: '"b.txt"}' } }] }),
+      frame({}, { finish_reason: "tool_calls" }),
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    const wire = emitted + (verdict.tail || "");
+
+    assert.equal(verdict.action, "pass");
+    assertOneDataLinePerEvent(wire, "text behind an open call");
+    assert.ok(wire.includes("再看这段"), "the withheld text must be released with the call");
   });
 });
 

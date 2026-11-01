@@ -781,6 +781,68 @@ describe("keep-alive resume (mid-response truncation, on tier)", () => {
     });
   });
 
+  it("a cut between a data line and its blank separator does not glue the resumed segment onto it", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        // The cut lands after a data line's newline but before the blank line
+        // that ends its SSE event: the client is still inside that event when
+        // the relay decides to resume.
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream([
+            'data: {"id":"cmpl-1","choices":[{"delta":{"content":"partial output "}}]}\n\n',
+            'data: {"id":"cmpl-1","choices":[{"delta":{"content":"cut mid event"}}]}\n',
+          ]),
+        };
+      }
+      // The resumed segment carries a tool call whose arguments arrive in two
+      // deltas — the shape that used to be released as one multi-data-line event.
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"cmpl-2","choices":[{"delta":{"content":" and the rest"}}]}\n\n',
+          'data: {"id":"cmpl-2","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"Read","arguments":"{"}}]}}]}\n\n',
+          'data: {"id":"cmpl-2","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"file_path\\":\\"a.txt\\"}"}}]}}]}\n\n',
+          'data: {"id":"cmpl-2","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 2, backoffMs: 10 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+
+      // A strict client reads one event at a time and hands the event's data
+      // lines to JSON.parse joined by "\n": two data lines in one event is an
+      // unparsable payload, not lenient SSE.
+      const events = text.split("\n\n").filter((event) => event.trim() !== "");
+      for (const event of events) {
+        const dataLines = event.split("\n").filter((line) => line.startsWith("data:"));
+        assert.equal(dataLines.length, 1, `one data line per event, got: ${JSON.stringify(event)}`);
+        const payload = dataLines[0].slice(5).trim();
+        if (payload === "[DONE]") continue;
+        assert.doesNotThrow(() => JSON.parse(payload), `event payload must parse: ${payload}`);
+      }
+      assert.ok(text.includes("partial output "), "the first segment must survive");
+      assert.ok(text.includes("cut mid event"), "the frame cut before its blank line must survive too");
+      assert.ok(text.includes("and the rest"), "the resumed segment must be appended");
+      assert.ok(text.includes('"name":"Read"'), "the resumed tool call must reach the client whole");
+      assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1, "exactly one terminator");
+      assert.equal(callCount, 2, "upstream was called twice (1 resume)");
+    });
+  });
+
   it("a think-only turn is resumed: the client sees reasoning, then the answer", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {

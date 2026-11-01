@@ -139,6 +139,10 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
   // upstream attempt can append its output to the same SSE stream.
   let heldOpenForResume = false;
   let sseBuffer = ""; // OpenAI passthrough: raw-line buffer for usage extraction
+  // Last bytes written to the client (OpenAI passthrough only). A later segment
+  // of the same response must not be spliced into an event the previous one
+  // left unterminated; see closeOpenEvent.
+  let wireTail = "";
 
   // Take the stream lock ourselves: the pipe reads through this reader, and a
   // client abort cancels through the SAME lock holder. Node 24 rejects (rather
@@ -198,6 +202,20 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     if (!text) return;
     commit();
     res.write(text);
+    wireTail = (wireTail + text).slice(-8);
+  };
+
+  // A cut can land between a data line and the blank line that ends its event.
+  // The guard only forwards complete lines, so the client is then left inside
+  // an unterminated event — and whatever this pipe writes next (a resumed
+  // segment's first frame, or the terminal error frame) would be read as a
+  // second data line of it: exactly the multi-JSON payload that kills strict
+  // clients with "Unexpected non-whitespace character after JSON". Closing the
+  // event first costs one blank line and keeps every later frame its own event.
+  const closeOpenEvent = () => {
+    if (!wireTail) return;
+    if (wireTail.endsWith("\n\n") || wireTail.endsWith("\r\n\r\n")) return;
+    emit("\n");
   };
 
   // Anthropic: parse + translate guarded text; only real translated events
@@ -353,6 +371,7 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
       guard.resumeShadow() !== null;
     if (canResume) {
       heldOpenForResume = true;
+      closeOpenEvent();
       return {
         outcome: "resume",
         reason: verdict.reason,
@@ -377,6 +396,7 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     // client-side, and the panel sees a 502 instead of a healthy-looking
     // completion.
     if (isOpenAI) {
+      closeOpenEvent();
       emit(verdict.errorLine);
       const message = verdict.error?.error?.message || "the upstream stream ended malformed after content was delivered";
       if (verdict.truncated) {
@@ -441,6 +461,7 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
     if (isOpenAI) {
       tracker?.recordEnd({ status: 502, error: { status: 502, message: streamErr?.message || "upstream stream error" }, usage: usageExtracted });
       try {
+        closeOpenEvent();
         res.write(`data: ${JSON.stringify(openAIError("api_error", "the upstream stream failed mid-response", UPSTREAM_INCOMPLETE_CODE))}\n\n`);
       } catch {
         // socket already gone
