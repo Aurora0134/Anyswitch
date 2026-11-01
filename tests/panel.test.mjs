@@ -4021,13 +4021,8 @@ describe("panel.html 设置全页视图", () => {
   });
 
   it("活动标签按存档回读：存档在册优先，认不到才回落第一个并改写存档", () => {
-    const srcOf = (name) => {
-      const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-      assert.ok(src, `${name} found in panel.js`);
-      return src;
-    };
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
-      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak", "pruneTerminalDoneState"].map(srcOf).join("\n");
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak", "pruneTerminalDoneState"].map(extractFn).join("\n");
     // M12 视口化：会话表重建后由宿主快照同步视口表，恢复语义（存档在册优先）也搬到
     // terminalViewportSyncFromHost。沙盒补视口的模块级符号（纯函数用生产实现）。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
@@ -4086,7 +4081,7 @@ describe("panel.html 设置全页视图", () => {
         setItem: (k, v) => { store[k] = v; },
         removeItem: (k) => { delete store[k]; },
       };
-      ${srcOf("rememberTerminalSessionId")}
+      ${extractFn("rememberTerminalSessionId")}
       rememberTerminalSessionId("preview-1");
       rememberTerminalSessionId("t-real");
     `)(previewStore);
@@ -12017,12 +12012,6 @@ describe("终端重画按钮（挤宽度让 agent 重画 + 重建客户端画面
 // resize 也要整屏重排一次）。③两处每拍重建的 innerHTML（页签栏 / 请求行）改
 // 整串指纹比对，相同即跳过赋值（DOM 零写）。结构用源码钉，行为在桩环境真跑。
 describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 指纹门控）", () => {
-  const extractFn = (name) => {
-    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-    assert.ok(src, `${name} found in panel.js`);
-    return src;
-  };
-
   it("塌缩防抖结构：按会话 id 连拍计数、阈值 3、计数跟归属数据拍走，归属恢复/会话关闭清零；锁存语义原样", () => {
     const render = extractFn("renderTerminalSessionData");
     assert.ok(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;/.test(panelJs), "阈值常量钉在 3（闪断一帧不算塌缩证据）");

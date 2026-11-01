@@ -3910,12 +3910,6 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
 // 会话」这条路径不刷新它——真行不回来，组顶的「新会话」兜底行就一直压着它，用户
 // 看到的就是「真正的新会话被压到一个（或多个）假『新会话』之下」。
 describe("终端页内新建会话：历史列表追赶", () => {
-  const extract = (name) => {
-    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-    assert.ok(src, `${name} found in panel.js`);
-    return src;
-  };
-
   // 真跑 refreshTerminalRailHistory 的取数路径。
   const refreshSandbox = ({ endpoint = "dsh", rows = [], fail = false }) => {
     const seen = [];
@@ -3933,7 +3927,7 @@ describe("终端页内新建会话：历史列表追赶", () => {
       function terminalRailAgentId() { return endpoint0; }
       function renderTerminalRail() { seen.push({ render: true }); }
       function toast() {}
-      ${extract("refreshTerminalRailHistory")}
+      ${extractFn("refreshTerminalRailHistory")}
       return { run: (opts) => refreshTerminalRailHistory(opts), history: () => terminalRailHistory };
     `)(state, seen, endpoint, rows, fail);
     return { fn, seen, state };
@@ -3970,14 +3964,14 @@ describe("终端页内新建会话：历史列表追赶", () => {
       const terminalRailHistory = history;
       function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
       function refreshTerminalRailHistory(opts) { calls.push(opts); return Promise.resolve(); }
-      ${extract("terminalRailNormDir")}
-      ${extract("terminalRailSameDir")}
-      ${extract("terminalRailSessionMap")}
-      ${extract("terminalRailActiveSession")}
-      ${extract("terminalRailAgentId")}
-      ${extract("terminalRailPendingFreshArmed")}
-      ${extract("terminalRailPendingNewTerminals")}
-      ${extract("maybeCatchUpTerminalRailHistory")}
+      ${extractFn("terminalRailNormDir")}
+      ${extractFn("terminalRailSameDir")}
+      ${extractFn("terminalRailSessionMap")}
+      ${extractFn("terminalRailActiveSession")}
+      ${extractFn("terminalRailAgentId")}
+      ${extractFn("terminalRailPendingFreshArmed")}
+      ${extractFn("terminalRailPendingNewTerminals")}
+      ${extractFn("maybeCatchUpTerminalRailHistory")}
       return {
         run: () => maybeCatchUpTerminalRailHistory(),
         catchUpAt: () => terminalRailCatchUpAt,
@@ -4058,7 +4052,7 @@ describe("终端页内新建会话：历史列表追赶", () => {
   });
 
   it("追赶挂在 1s 归属轮询收尾（数据路径，不是渲染路径）", () => {
-    assert.ok(extract("pollTerminalSessions").includes("maybeCatchUpTerminalRailHistory()"),
+    assert.ok(extractFn("pollTerminalSessions").includes("maybeCatchUpTerminalRailHistory()"),
       "轮询每拍问一次「有没有可疑兜底行要补」");
   });
 });
