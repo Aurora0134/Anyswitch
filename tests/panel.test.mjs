@@ -1801,10 +1801,13 @@ describe("panel.html sessions tab", () => {
     );
     const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "switchView found in panel.js");
-    assert.ok(m[1].includes("replayViewEnter(enteredView)"), "switchView plays the entrance on the entered view");
+    assert.ok(m[1].includes("playViewEnter(name)"), "switchView asks the shared dispatcher whether to play");
     const re = panelJs.match(/function replayViewEnter\(el\) \{([\s\S]*?)\n  \}/);
     assert.ok(re && re[1].includes('classList.add("view-enter")'), "重播实现收敛在共用 replayViewEnter");
-    assert.ok(m[1].includes('playBoardEnter(document.querySelector(".telemetry-view"))'), "board view routed to the variant entrance");
+    const d = panelJs.match(/function playViewEnter\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(d, "playViewEnter found in panel.js");
+    assert.ok(d[1].includes('playBoardEnter(document.querySelector(".telemetry-view"))'), "board view routed to the variant entrance");
+    assert.ok(d[1].includes("replayViewEnter($(id))"), "the remaining views routed to the generic entrance");
     assert.ok(m[1].includes("suppressViewEnter"), "switchView honors the suppress flag");
     const r = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(r, "restoreView found in panel.js");
@@ -1817,6 +1820,67 @@ describe("panel.html sessions tab", () => {
     );
   });
 
+  it("终端页不在入场名单里：整块终端裸切，不淡入不上浮", () => {
+    // 终端是一块画面而非一页内容：整块浮入会把屏上的字一起挪，还会和切签垫片
+    // 的停帧—揭帧叠成两段闪动（用户 2026-11-02 报障后拍板裸切）。
+    const targets = panelJs.match(/const VIEW_ENTER_TARGETS = \{([\s\S]*?)\n  \};/);
+    assert.ok(targets, "入场目标表存在——唯一的「视图名 → 容器」映射");
+    assert.ok(!/terminal/.test(targets[1]), "终端页不在表内，表外名字一律不播");
+    for (const id of ["skillsView", "presetsView", "storeView", "statsView", "settingsView", "sessionsView"]) {
+      assert.ok(targets[1].includes(`"${id}"`), `${id} 仍在入场名单里`);
+    }
+    const d = panelJs.match(/function playViewEnter\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(d, "playViewEnter found in panel.js");
+    assert.ok(d[1].includes("if (id) replayViewEnter($(id));"), "表外名字不播——没有兜底到会话页的链尾");
+    // 两条路都走同一个裁决：不许再有第二份视图名 → 容器的映射
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw && !/enteredView/.test(sw[1]), "switchView 不再自带映射链");
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(init && !/enteredView/.test(init[0]), "开屏淡出的钩子不再自带映射链");
+    assert.ok(init && !/classList\.add\("view-enter"\)/.test(init[0]), "钩子内不再内联重播");
+  });
+
+  it("入场派发实测：终端页一个动画都不播，看板走阶梯，其余走通用浮入", () => {
+    const targets = panelJs.match(/const VIEW_ENTER_TARGETS = \{([\s\S]*?)\n  \};/)?.[0];
+    const dispatch = panelJs.match(/function playViewEnter\(name\) \{([\s\S]*?)\n  \}/)?.[0];
+    const board = panelJs.match(/function playBoardEnter\(view\) \{[\s\S]*?\n  \}/)?.[0];
+    const replay = panelJs.match(/function replayViewEnter\(el\) \{([\s\S]*?)\n  \}/)?.[0];
+    assert.ok(targets && dispatch && board && replay, "派发与两个播放实现都在册");
+    const played = [];
+    const el = (id) => {
+      const classes = new Set();
+      return {
+        id,
+        classList: {
+          add: (c) => { classes.add(c); played.push(`${id}:${c}`); },
+          remove: (c) => classes.delete(c),
+          contains: (c) => classes.has(c),
+        },
+        addEventListener() {},
+        querySelectorAll: () => [],
+        querySelector: () => null,
+      };
+    };
+    const nodes = {};
+    for (const id of ["skillsView", "presetsView", "storeView", "statsView", "settingsView", "sessionsView", "terminalView"]) nodes[id] = el(id);
+    const telemetry = el("telemetry-view");
+    // board 容器 querySelectorAll 返回空表即够：这一段只问「播到谁身上」
+    const doc = {
+      getElementById: (id) => nodes[id] ?? null,
+      querySelector: (sel) => (sel === ".telemetry-view" ? telemetry : null),
+      documentElement: { getAttribute: () => null },
+    };
+    new Function("document", "getComputedStyle", "$",
+      `${targets}\n${replay}\n${board}\n${dispatch}\n
+       for (const n of ["terminal", "board", "skills", "presets", "store", "stats", "settings", "sessions", "nope"]) playViewEnter(n);
+      `)(doc, () => ({ animationName: "none" }), (id) => doc.getElementById(id));
+    assert.deepEqual(played, [
+      "telemetry-view:board-enter",
+      "skillsView:view-enter", "presetsView:view-enter", "storeView:view-enter",
+      "statsView:view-enter", "settingsView:view-enter", "sessionsView:view-enter",
+    ], "终端页与未知名字都不播；看板走变体，其余六屏逐一收到通用浮入");
+  });
+
   it("defers the restart-recovery entrance to the splash fade via restartEnterView", () => {
     const r = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(r, "restoreView found in panel.js");
@@ -1826,14 +1890,12 @@ describe("panel.html sessions tab", () => {
     assert.ok(r[1].includes('restartEnterView = (saved === "skills"'), "restored tab recorded for deferred playback");
     assert.ok(r[1].includes(': "board"'), "board default recorded — the board never passes through switchView on restore");
     assert.ok(!r[1].includes("playBoardEnter("), "no immediate playback while the splash still covers the page");
-    // init() 里消费：挂钩子、清标记、onLeave 起播
+    // init() 里消费：挂钩子、清标记、onLeave 交给共用派发
     const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
     assert.ok(init, "init found in panel.js");
-    assert.ok(init[0].includes("window.panelStartupController.onLeave = () => {"), "enter animation hooked onto the splash fade start");
+    assert.ok(init[0].includes("window.panelStartupController.onLeave = () => playViewEnter(view);"),
+      "enter animation hooked onto the splash fade start, dispatched by the shared entry point");
     assert.ok(init[0].includes("restartEnterView = null"), "marker consumed exactly once");
-    assert.ok(init[0].includes('if (view === "board") playBoardEnter('), "board routed to the staggered variant");
-    assert.ok(init[0].includes('classList.add("view-enter")'), "other views routed to the generic entrance");
-    // 声明与默认值
     assert.ok(panelJs.includes("let restartEnterView = null;"), "marker declared with null default");
   });
 
@@ -1846,9 +1908,9 @@ describe("panel.html sessions tab", () => {
       panelCss.includes(".board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards"),
       "cards stagger with 300ms easeInOut and backwards fill (panel.css)",
     );
-    const s = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(s, "switchView found in panel.js");
-    assert.ok(s[1].includes("} else if (board) {"), "board branch split from the generic entrance");
+    const s = panelJs.match(/function playViewEnter\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(s, "playViewEnter found in panel.js");
+    assert.ok(s[1].includes('if (name === "board") {'), "board branch split from the generic entrance");
     const m = panelJs.match(/function playBoardEnter\(view\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "playBoardEnter found in panel.js");
     assert.ok(m[1].includes('classList.add("board-enter")'), "container entrance plays");
@@ -3889,10 +3951,11 @@ describe("panel.html 设置全页视图", () => {
     const agents = panelJs.match(/async function refreshAgents\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(agents && agents[1].includes("notifyBoardRendered();"), "看板渲染完成即通知");
     const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
-    assert.ok(init && init[0].includes('view === "settings" ? $("settingsView")'),
-      "开屏淡出后的入场动画覆盖设置视图");
-    assert.ok(init && init[0].includes('view === "terminal" ? $("terminalView")'),
-      "开屏淡出后的入场动画覆盖终端页（漏一格就落在链尾的会话页上播）");
+    assert.ok(init && init[0].includes("playViewEnter(view)"),
+      "开屏淡出后的入场动画交给共用派发");
+    const targets = panelJs.match(/const VIEW_ENTER_TARGETS = \{([\s\S]*?)\n  \};/)?.[1] ?? "";
+    assert.ok(targets.includes('settings: "settingsView"'), "入场名单覆盖设置视图");
+    assert.ok(!targets.includes("terminal"), "终端页不在入场名单：重启落回终端页同样是裸切");
   });
 
   it("恢复决策实测：设置页标记决定落点，返回目标取主视图，launcher 首开清标记", () => {

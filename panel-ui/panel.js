@@ -362,22 +362,9 @@ async function api(method, path, body) {
       if (restartEnterView) {
         const view = restartEnterView;
         restartEnterView = null;
-        window.panelStartupController.onLeave = () => {
-          if (view === "board") playBoardEnter(document.querySelector(".telemetry-view"));
-          else {
-            const enteredView = view === "skills" ? $("skillsView")
-              : view === "presets" ? $("presetsView")
-              : view === "store" ? $("storeView")
-              : view === "stats" ? $("statsView")
-              : view === "settings" ? $("settingsView")
-              : view === "terminal" ? $("terminalView")
-              : $("sessionsView");
-            enteredView.classList.remove("view-enter");
-            void getComputedStyle(enteredView).animationName;
-            enteredView.classList.add("view-enter");
-            enteredView.addEventListener("animationend", () => enteredView.classList.remove("view-enter"), { once: true });
-          }
-        };
+        // 播不播交给 playViewEnter：与 switchView 同一条裁决，重启落回终端页时同样裸切
+        // （标记照记，不带任何页面专属判断；落点是否该播由裁决函数说了算）。
+        window.panelStartupController.onLeave = () => playViewEnter(view);
       }
       // 开屏层的退场判据从「请求 resolve 了」改成「看板拿到能当事实说的首帧」
       // （frame.ready，见 refreshAgents 的帧闸）。前者会把遮挡层掀在那幅静态基线上——
@@ -12424,6 +12411,29 @@ async function api(method, path, body) {
     el.addEventListener("animationend", () => el.classList.remove("view-enter"), { once: true });
   }
 
+  // 视图入场总派发：「切到某一屏时播不播、播哪一种」只在这里裁决一次，主动切换（switchView）
+  // 与重启恢复（init 的 onLeave）两条路共用。终端页不播：整屏终端是一块画面而不是一页内容，
+  // 整块淡入上浮会把终端里的字一起挪，还与它自己「切签垫片」的停帧—揭帧叠成两段闪动，故裸切。
+  // 表里没有的名字一律不播——早先两条路各抄一份「视图名 → 容器」的链，链尾兜底到会话页，
+  // 摘掉一格就会把入场播到错的一屏上；收拢成显式表后，新增视图漏登记最多是少播一次。
+  const VIEW_ENTER_TARGETS = {
+    skills: "skillsView",
+    presets: "presetsView",
+    store: "storeView",
+    stats: "statsView",
+    settings: "settingsView",
+    sessions: "sessionsView",
+  };
+
+  function playViewEnter(name) {
+    if (name === "board") {
+      playBoardEnter(document.querySelector(".telemetry-view"));
+      return;
+    }
+    const id = VIEW_ENTER_TARGETS[name];
+    if (id) replayViewEnter($(id));
+  }
+
   function resetPageScroll() {
     window.scrollTo(0, 0);
     document.documentElement.scrollTop = 0;
@@ -12518,20 +12528,11 @@ async function api(method, path, body) {
     document.documentElement.removeAttribute("data-prepaint-view");
     document.documentElement.removeAttribute("data-prepaint-subtab");
     // 内容区入场动效：仅主动切换播放；恢复/首屏由 suppressViewEnter 置位跳过。
-    // 看板走变体阶梯入场（playBoardEnter），其余视图走通用 view-enter。
+    // 播不播、播哪一种统一问 playViewEnter（看板阶梯变体、终端页裸切都在那里裁决）。
     if (suppressViewEnter) {
       suppressViewEnter = false;
-    } else if (board) {
-      playBoardEnter(document.querySelector(".telemetry-view"));
     } else {
-      const enteredView = name === "skills" ? $("skillsView")
-        : presets ? $("presetsView")
-        : store ? $("storeView")
-        : stats ? $("statsView")
-        : settings ? $("settingsView")
-        : terminal ? $("terminalView")
-        : $("sessionsView");
-      replayViewEnter(enteredView);
+      playViewEnter(name);
     }
     // panel-view 只存主视图（设置视图不覆盖它，那份留着当「←退出」的目标）；
     // 是否停在设置页由 panel-settings-open 单独记，restoreView 按这两个键恢复。

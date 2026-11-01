@@ -2451,7 +2451,8 @@
 
   /* 视图切换：内容区入场——新显示的视图淡入+上浮一次。参数与看板 board-enter 变体
      拉齐（10px / 300ms / easeInOut），六视图切换同属一族；看板在此基础上多一层
-     卡片阶梯。仅用户主动切换播放（switchView 加 .view-enter）；restoreView 恢复与
+     卡片阶梯。终端页不在其列（panel.js 的 VIEW_ENTER_TARGETS）：整屏终端是一块画面，
+     整块浮入会把屏上的字一起挪，裸切。仅用户主动切换播放；restoreView 恢复与
      首屏静默。reduced-motion 由全局禁用媒体查询兜住，此处无需分支。 */
   @keyframes viewEnter { from { opacity: 0; transform: translateY(10px); } }
   .view-enter { animation: viewEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }
