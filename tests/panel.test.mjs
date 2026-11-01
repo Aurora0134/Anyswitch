@@ -6158,6 +6158,8 @@ describe("设置项「看板排布」", () => {
   // ── 图标行不是卡：位置靠结构保证，出场靠它自己的那一拍 ──
   // 2026-11-01 两次「把图标行钉回容器末位」都失效：卡序重排是 container.append(...cards)
   // 整批搬卡，钉回只覆盖可见性重算那条路径，永远慢一拍。搬出容器是结构上不可能错的解。
+  const stripFn = (panelJs.match(/function syncBoardIconStrip\(\) \{[\s\S]*?\n  \}/) || [])[0];
+
   function htmlBlockEnd(html, idx) {
     const re = /<div\b|<\/div>/g;
     re.lastIndex = idx;
@@ -6189,13 +6191,90 @@ describe("设置项「看板排布」", () => {
     assert.ok(rule, ".board-icon-strip 规则存在");
     assert.ok(/padding:\s*0 0 2px/.test(rule[1]),
       "纵向 padding 收成 0 0 2px：上间距由 .main-col 的 gap 给，别在 gap 之上再垫一层");
+    assert.ok(/flex-wrap:\s*wrap/.test(rule[1]), "一行放不下就换行：不再靠横向滚动兜");
+  });
+
+  it("图标行不再有横滚视口与两侧虚化", () => {
+    // 图标本来就是几十像素的方片，横滚既看不见滚动条也没有滚动提示；两头虚化反而挡住
+    // 首尾图标。改成直接排布后，视口层/虚化层整条链路一起删干净，别留死样式和死监听。
+    assert.ok(!panelHtml.includes("boardIconStripViewport")
+      && !panelHtml.includes("board-icon-strip-fade") && !panelHtml.includes("boardIconStripTrack"),
+      "HTML 只剩图标行本身：视口层、轨道层、两侧虚化都已摘掉");
+    assert.ok(!panelCss.includes(".board-icon-strip-viewport")
+      && !panelCss.includes(".board-icon-strip-track")
+      && !panelCss.includes(".board-icon-strip-fade"),
+      "CSS 里不留死规则");
+    assert.ok(!panelJs.includes("updateBoardIconStripFades")
+      && !panelJs.includes("boardIconStripViewport")
+      && !panelJs.includes("boardIconStripBound"),
+      "JS 里的虚化更新、滚轮横滚、一次性绑定标记都已删");
   });
 
   it("补画图标行不再搬 DOM：钉回那行会把它反塞回容器", () => {
-    const stripFn = (panelJs.match(/function syncBoardIconStrip\(\) \{[\s\S]*?\n  \}/) || [])[0];
     assert.ok(stripFn, "panel.js must contain syncBoardIconStrip");
     assert.ok(!/container\.append\(strip\)/.test(stripFn),
       "结构已保证位置，补画时再 append 只会把图标行塞回卡容器末位，位置又跟着搬卡走");
+  });
+
+  it("补画图标行：直接把图标铺进行里，空的就整行收起", () => {
+    // 视口层拆掉后 sync 改成往图标行本身铺；这条真跑一遍，防「铺到已经不存在的那一层」
+    // 这种静默失败（类名对了但屏上永远空着）。
+    function stripSyncSandbox(liveIds, avatarIds = null) {
+      const cardEls = ["zcode", "claude", "kimi", "grok"].map((id) => ({
+        attrs: { "data-agent-id": id },
+        getAttribute(k) { return this.attrs[k] ?? null; },
+      }));
+      const container = {
+        querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cardEls : []),
+        querySelector: (sel) => {
+          if (!sel.includes(".agent-avatar")) return null;
+          const id = sel.slice(sel.indexOf('data-agent-id="') + 15).split('"')[0];
+          return !avatarIds || avatarIds.includes(id)
+            ? { src: sel, cloneNode: () => ({ src: sel }) }
+            : null;
+        },
+      };
+      const slots = [];
+      const strip = {
+        hidden: true,
+        _html: "上一轮的残影",
+        get innerHTML() { return this._html; },
+        set innerHTML(v) { this._html = v; if (v === "") slots.length = 0; },
+        children: slots,
+        appendChild(el) { slots.push(el); },
+      };
+      const doc = {
+        querySelector: (sel) => (sel === ".agent-cards-container" ? container : null),
+        createElement: () => ({
+          className: "", attrs: {}, child: null,
+          setAttribute(k, v) { this.attrs[k] = v; },
+          appendChild(el) { this.child = el; },
+        }),
+      };
+      const prelude = `let installedAgentIds = null;`
+        + ` let boardLiveAgentIds = new Set(${JSON.stringify(liveIds)});`
+        + ` const AGENT_CARD_ORDER = ["zcode", "claude", "kimi", "grok"];`
+        + ` function $(id) { return id === "boardIconStrip" ? strip : null; }`;
+      new Function("document", "strip", `${prelude}\n${stripFn}\nreturn syncBoardIconStrip;`)(doc, strip)();
+      return { strip, slots };
+    }
+
+    const partial = stripSyncSandbox(["grok"]);
+    assert.deepEqual(partial.slots.map((s) => s.attrs["data-agent-id"]), ["zcode", "claude", "kimi"],
+      "在跑的 grok 不进图标行，其余按卡序铺开");
+    partial.slots.forEach((s) => {
+      assert.equal(s.className, "board-icon-slot", "铺进去的是标准图标格");
+      assert.ok(s.child, "图标格带着克隆来的头像，不是空盒子");
+    });
+    assert.equal(partial.strip.hidden, false, "有图标就整行显示");
+
+    const allRunning = stripSyncSandbox(["zcode", "claude", "kimi", "grok"]);
+    assert.equal(allRunning.strip.hidden, true, "一个未运行的都没有：整行收起");
+    assert.deepEqual(allRunning.slots, [], "收起时连同残影一起清掉");
+
+    // 第二个收起口：清单里有端点，但一张头像都克隆不到（卡还没渲出来）——也不许留个空壳行
+    const noAvatars = stripSyncSandbox(["grok"], []);
+    assert.equal(noAvatars.strip.hidden, true, "一个图标都没铺成时同样整行收起");
   });
 
   // 假元素：只要 playBoardEnter 用到的那几样（类名、--board-delay、动画结束回调）
@@ -6236,7 +6315,7 @@ describe("设置项「看板排布」", () => {
     return { cards, strip, slots };
   }
 
-  it("图标行接在最后一张卡之后 40ms，视口里逐枚再错 20ms", () => {
+  it("图标行接在最后一张卡之后 40ms，行内逐枚再错 20ms", () => {
     assert.ok(/\.board-strip-enter \{ animation: boardStripEnter 300ms cubic-bezier\(0\.42, 0, 0\.58, 1\) backwards/
       .test(panelCss), "整行上浮与卡片同一套参数（10px / 300ms / 同一条 easeInOut）");
     assert.ok(/\.board-icon-enter \{ animation: boardIconEnter 300ms cubic-bezier\(0\.42, 0, 0\.58, 1\) backwards/
@@ -6254,7 +6333,7 @@ describe("设置项「看板排布」", () => {
     slots.forEach((s, i) => {
       assert.ok(s.classList.contains("board-icon-enter"), `第 ${i} 枚图标挂上淡入类`);
       assert.ok(!s.classList.contains("board-card-enter"),
-        "图标不做位移：它待在 overflow-y:hidden 的视口里，translateY 会把下沿裁出硬边");
+        "位移只做在行这一层：图标再逐枚位移会叠成两层动作，看着发飘");
     });
   });
 

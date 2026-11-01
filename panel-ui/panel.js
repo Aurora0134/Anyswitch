@@ -713,14 +713,12 @@ async function api(method, path, body) {
     try { localStorage.setItem(BOARD_LIVE_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
     if (boardLayoutMode !== "all") applyAgentCardVisibility(installedAgentIds);
   }
-  // ── 图标行视口 ──
-  // 未运行的已安装端点收进底部图标行（32px 图标横排，悬浮+滚轮横滚，两侧虚化到边即隐）。
-  // 空行整行隐藏；运行中的端点不进视口（去重：视口+上屏=全部已安装）。
-  let boardIconStripBound = false;
+  // ── 图标行 ──
+  // 未运行的已安装端点收进底部图标行（32px 图标横排，一行放不下就换行；不做横滚）。
+  // 空行整行隐藏；运行中的端点不进此行（去重：此行+上屏=全部已安装）。
   function syncBoardIconStrip() {
     const strip = $("boardIconStrip");
-    const track = $("boardIconStripTrack");
-    if (!strip || !track) return;
+    if (!strip) return;
     const container = document.querySelector(".agent-cards-container");
     if (!container) { strip.hidden = true; return; }
     // 图标行是容器外的兄弟节点（panel.html 有注释）：卡序重排搬的是容器的孩子，
@@ -740,9 +738,9 @@ async function api(method, path, body) {
       const ib = AGENT_CARD_ORDER.indexOf(b);
       return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
     });
-    if (ids.length === 0) { strip.hidden = true; return; }
+    if (ids.length === 0) { strip.hidden = true; strip.innerHTML = ""; return; }
     // 填充图标：克隆看板卡的 .agent-avatar（各家自带底衬/描边/圆角整体带过来）
-    track.innerHTML = "";
+    strip.innerHTML = "";
     for (const id of ids) {
       const src = container.querySelector('.panel-card[data-agent-id="' + id + '"] .agent-avatar');
       if (!src) continue;
@@ -750,36 +748,9 @@ async function api(method, path, body) {
       slot.className = "board-icon-slot";
       slot.setAttribute("data-agent-id", id);
       slot.appendChild(src.cloneNode(true));
-      track.appendChild(slot);
+      strip.appendChild(slot);
     }
-    if (track.children.length === 0) { strip.hidden = true; return; }
-    strip.hidden = false;
-    // 绑定滚轮横滚（只绑一次）
-    if (!boardIconStripBound) {
-      boardIconStripBound = true;
-      const viewport = $("boardIconStripViewport");
-      if (viewport) {
-        viewport.addEventListener("wheel", (e) => {
-          if (e.deltaY !== 0) {
-            e.preventDefault();
-            viewport.scrollLeft += e.deltaY;
-          }
-        }, { passive: false });
-        viewport.addEventListener("scroll", updateBoardIconStripFades);
-      }
-      window.addEventListener("resize", updateBoardIconStripFades);
-    }
-    updateBoardIconStripFades();
-  }
-  function updateBoardIconStripFades() {
-    const viewport = $("boardIconStripViewport");
-    const fadeL = document.querySelector(".board-icon-strip-fade--left");
-    const fadeR = document.querySelector(".board-icon-strip-fade--right");
-    if (!viewport || !fadeL || !fadeR) return;
-    const { scrollLeft, scrollWidth, clientWidth } = viewport;
-    const canScroll = scrollWidth > clientWidth + 1;
-    fadeL.style.opacity = canScroll && scrollLeft > 1 ? "1" : "0";
-    fadeR.style.opacity = canScroll && scrollLeft < scrollWidth - clientWidth - 1 ? "1" : "0";
+    strip.hidden = strip.children.length === 0;
   }
   function applyAgentCardVisibility(ids) {
     const container = document.querySelector(".agent-cards-container");
@@ -795,12 +766,12 @@ async function api(method, path, body) {
       if (boardLayoutMode === "live-only") {
         hiddenByLayout = boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
       } else if (boardLayoutMode === "compact") {
-        // 图标行档：未运行的卡整卡藏掉，由图标行视口收编
+        // 图标行档：未运行的卡整卡藏掉，由图标行收编
         hiddenByLayout = boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
       }
       card.hidden = hiddenByInstall || hiddenByLayout;
     }
-    // 图标行视口：只在图标行档且运行中集合已知时才填充/显示
+    // 图标行：只在图标行档且运行中集合已知时才填充/显示
     const strip = $("boardIconStrip");
     if (strip) {
       if (boardLayoutMode === "compact" && boardLiveAgentIds !== null) {
@@ -12641,9 +12612,9 @@ async function api(method, path, body) {
     });
     // 图标行不是 .panel-card，上面那圈取样取不到它，于是它只会跟着 .board-enter 整块
     // 淡入、没有自己那一拍——这就是「跟卡片对不上」的来源。这里把它接在最后一张可见卡
-    // 之后 40ms（与卡间距同一格），整行上浮、视口里逐枚图标再各错 20ms 淡入：合起来是
-    // 卡阶梯的下一级，而不是另起一段。图标本身不做位移——它待在 overflow-y:hidden 的
-    // 视口里，一 translate 下沿就会被裁出硬边。
+    // 之后 40ms（与卡间距同一格），整行上浮、行内逐枚图标再各错 20ms 淡入：合起来是
+    // 卡阶梯的下一级，而不是另起一段。位移只做在行这一层（10px 与卡片同深），图标逐枚
+    // 只淡入——两层位移叠起来会让人看着发飘，阶梯感交给延迟就够。
     const strip = view.querySelector(".board-icon-strip");
     if (strip && !strip.hidden) {
       const base = 150 + Math.max(cards.length - 1, 0) * 40;

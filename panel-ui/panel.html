@@ -1529,21 +1529,15 @@ if (window.panelStartupController) panelStartupPlay();
 
         </div>
 
-        <!-- 看板「图标行」排布的视口行：未运行的已安装端点收进这里（32px 图标横排，
-             悬浮+滚轮横滚，两侧虚化到边即隐）。运行中的端点保持完整卡片在上，此行只收
-             未运行的；空行整行隐藏。由 panel.js 的 applyAgentCardVisibility 填充与显隐。
+        <!-- 看板「图标行」排布的图标行：未运行的已安装端点收进这里（32px 图标横排，
+             宽了就换行，不做横滚）。运行中的端点保持完整卡片在上，此行只收未运行的；
+             空行整行隐藏。由 panel.js 的 applyAgentCardVisibility 填充与显隐。
 
              刻意放在 .agent-cards-container **之外**（同属 .main-col，作它的后一个兄弟）：
              卡序重排是 container.append(...cards) 整批搬卡，把节点搬进容器末位；只要本行
              不是容器的孩子，结构上就不可能被搬到卡列前面去。2026-11-01 两次尝试把「钉回
              末位」写进补画逻辑都失效（只覆盖可见性重算那条路径），故改由结构保证。 -->
-        <div class="board-icon-strip" id="boardIconStrip" hidden>
-          <div class="board-icon-strip-fade board-icon-strip-fade--left" aria-hidden="true"></div>
-          <div class="board-icon-strip-viewport" id="boardIconStripViewport">
-            <div class="board-icon-strip-track" id="boardIconStripTrack"></div>
-          </div>
-          <div class="board-icon-strip-fade board-icon-strip-fade--right" aria-hidden="true"></div>
-        </div>
+        <div class="board-icon-strip" id="boardIconStrip" hidden></div>
       </section>
     </div>
   </section>

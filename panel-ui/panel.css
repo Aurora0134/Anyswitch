@@ -1555,27 +1555,16 @@
      panelHiddenAgentsPrepaint CSS 层负责，运行时归这条）。 */
   .agent-cards-container > .panel-card[hidden] { display: none; }
 
-  /* 看板「图标行」排布的视口行：未运行的已安装端点收进这里（32px 图标横排，
-     悬浮+滚轮横滚，两侧虚化到边即隐）。运行中的端点保持完整卡片在上，此行只收
+  /* 看板「图标行」排布的图标行：未运行的已安装端点收进这里（32px 图标横排，一行放不下
+     就换行——不做横滚，也就没有视口和两侧虚化）。运行中的端点保持完整卡片在上，此行只收
      未运行的；空行整行隐藏（panel.js applyAgentCardVisibility 管显隐与填充）。
      本行是 .agent-cards-container 的后一个兄弟（见 panel.html 注释），与卡列之间
      的 20px 间距由 .main-col 的 gap 给，故纵向 padding 只留底部 2px 托底阴影。 */
   .board-icon-strip {
-    display: flex; align-items: center; position: relative;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
     padding: 0 0 2px;
   }
   .board-icon-strip[hidden] { display: none; }
-  .board-icon-strip-viewport {
-    flex: 1; overflow-x: auto; overflow-y: hidden;
-    scrollbar-width: none; /* Firefox */
-    -ms-overflow-style: none; /* IE/Edge */
-  }
-  .board-icon-strip-viewport::-webkit-scrollbar { display: none; }
-  .board-icon-strip-track {
-    display: flex; gap: 10px; align-items: center;
-    width: max-content; /* 内容多宽就多宽，超出由 viewport 滚动 */
-    padding: 2px 0;
-  }
   .board-icon-slot {
     width: 32px; height: 32px; flex: none;
     display: flex; align-items: center; justify-content: center;
@@ -1586,17 +1575,6 @@
     line-height: 0;
   }
   .board-icon-slot .agent-avatar { flex: none; transform: scale(0.875); transform-origin: center; }
-  /* 两侧虚化：渐变遮罩提示可滚动，到边即隐（opacity 由 JS 按 scrollLeft 实时切） */
-  .board-icon-strip-fade {
-    position: absolute; top: 0; bottom: 0; width: 48px; z-index: 2;
-    pointer-events: none; opacity: 0; transition: opacity 200ms var(--ease-out);
-  }
-  .board-icon-strip-fade--left {
-    left: 0; background: linear-gradient(to right, var(--surface-sunken) 0%, transparent 100%);
-  }
-  .board-icon-strip-fade--right {
-    right: 0; background: linear-gradient(to left, var(--surface-sunken) 0%, transparent 100%);
-  }
 
   .agent-top-bar {
     display: flex; align-items: center; justify-content: space-between;
@@ -2488,9 +2466,9 @@
   .board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
   .board-card-enter-scale { animation: boardEnterScale 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
   /* 图标行接在卡阶梯之后（panel.js playBoardEnter）：整行只做上浮、不淡入，淡入交给
-     视口里逐枚图标——一是行本身没有可见底衬，二是图标待在 overflow-y:hidden 的视口里
-     translateY 会把下沿裁出硬边。两段参数（10px / 300ms / 同一条 easeInOut）与卡片
-     同源，所以接上去像同一拍里的最后一级，而不是另起一段。 */
+     行内逐枚图标——行本身没有可见底衬；位移也只放在行这一层，逐枚再位移会叠成两层
+     动作。两段参数（10px / 300ms / 同一条 easeInOut）与卡片同源，所以接上去像同一拍
+     里的最后一级，而不是另起一段。 */
   @keyframes boardStripEnter { from { transform: translateY(10px); } }
   @keyframes boardIconEnter { from { opacity: 0; } }
   .board-strip-enter { animation: boardStripEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
