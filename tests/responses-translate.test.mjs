@@ -559,4 +559,30 @@ describe("ResponsesSseTranslator", () => {
     assert.deepEqual(completed.data.response.reasoning, { effort: "high" });
     assert.deepEqual(completed.data.response.tools, [{ type: "function", name: "Bash", parameters: {} }]);
   });
+
+  it("a resumed segment adds its usage onto what the client already saw", () => {
+    // The resume path re-enters the same translator, so the turn's tokens have
+    // to be the sum of both upstream segments rather than the last one alone.
+    const translator = new ResponsesSseTranslator({ model: "gpt-x" });
+    let out = translator.chunk(chunkDelta({ content: "半" }));
+    out += translator.chunk({
+      ...chunkDelta({}, { finish_reason: "stop" }),
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    });
+    translator.markContinuing();
+    out += translator.chunk(chunkDelta({ content: "句" }));
+    out += translator.chunk({
+      ...chunkDelta({}, { finish_reason: "stop" }),
+      usage: { prompt_tokens: 10, completion_tokens: 7, total_tokens: 17 },
+    });
+    out += translator.finish();
+
+    const events = parseEvents(out);
+    // response.created belongs to the turn, not the segment: it must not repeat.
+    assert.equal(events.filter((e) => e.event === "response.created").length, 1);
+    const completed = events.find((e) => e.event === "response.completed");
+    assert.equal(completed.data.response.usage.output_tokens, 12, "5 + 7 across two segments");
+    assert.equal(completed.data.response.usage.total_tokens, 32, "15 + 17 across two segments");
+    assert.equal(completed.data.response.output[0].content[0].text, "半句");
+  });
 });

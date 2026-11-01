@@ -292,3 +292,23 @@ test("SSEParser still yields parsed payloads and stops at [DONE]", () => {
 test("sseEvent frames a type and JSON payload", () => {
   assert.equal(sseEvent("ping", { ok: true }), 'event: ping\ndata: {"ok":true}\n\n');
 });
+
+// ---------- resume: usage accumulates across attempts ----------
+
+test("a resumed segment adds its usage onto what the client already saw", () => {
+  // A resume splits one logical request into two upstream generations. The
+  // client still sees a single message, so its usage must be the turn's sum
+  // rather than the last segment's count.
+  const translator = new StreamTranslator("anthropic/poke-api/claude-opus-5");
+  translator.start({ usage: { prompt_tokens: 10 } });
+  translator.chunk({ choices: [{ index: 0, delta: { content: "半" } }] });
+  translator.chunk({ choices: [{ index: 0, delta: {} }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+  translator.markContinuing();
+  translator.chunk({ choices: [{ index: 0, delta: { content: "句" } }] });
+  translator.chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 7 } });
+
+  assert.equal(translator.usage.output_tokens, 12, "5 + 7 across two segments");
+  const messageDelta = parseEvents(translator.finish()).find((e) => e.event === "message_delta");
+  assert.equal(messageDelta.data.usage.output_tokens, 12, "the single message_delta reports the whole turn");
+});
