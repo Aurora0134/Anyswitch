@@ -745,6 +745,7 @@ async function api(method, path, body) {
   function applyAgentCardVisibility(ids) {
     const container = document.querySelector(".agent-cards-container");
     if (!container) return;
+    const released = [];
     for (const card of container.querySelectorAll(".panel-card[data-agent-id]")) {
       // hidden=true 才是隐藏：只有「ids 非 null 且不在册」才藏；ids 为 null
       // （检测未知/失败）按 fail-open 全显示。首版把布尔写反（null→全藏、
@@ -759,8 +760,12 @@ async function api(method, path, body) {
         // 图标行档：未运行的卡整卡藏掉，由图标行收编
         hiddenByLayout = boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
       }
+      const wasHidden = card.hidden;
       card.hidden = hiddenByInstall || hiddenByLayout;
+      // 由藏转显 = 这张卡在揭示动画之后才进名单，回头按可见序位补台阶
+      if (wasHidden && !card.hidden) released.push(card);
     }
+    if (released.length && boardEnterInFlight()) armReleasedBoardCards(released);
     // 图标行：只在图标行档且运行中集合已知时才填充/显示
     const strip = $("boardIconStrip");
     if (strip) {
@@ -779,6 +784,27 @@ async function api(method, path, body) {
     // 占位卡会原样弹回来闪一下，等下一帧知道谁在跑再交棒。
     if (boardLayoutMode === "all" || boardLiveAgentIds !== null) {
       document.documentElement.removeAttribute("data-prepaint-board-layout");
+    }
+  }
+  // 揭示是否仍在进行：阶梯里的卡还挂着 entry 类，这些类各自在 animationend 才摘，天然
+  // 覆盖整段阶梯（约 700ms）。补挂只在这个窗口内生效——判定挂在「现役动画」上、不靠跨
+  // 调用的标记，就不会出现揭示早已结束而标记仍挂着、随后任意一张卡被放出来都凭空补一段
+  // 淡入（首拍取数失败、pending 补播、开屏这些路径也因此不需要额外的清标记动作）。
+  function boardEnterInFlight() {
+    if (!boardVisible()) return false;
+    const view = document.querySelector(".telemetry-view");
+    return !!view && !!view.querySelector(".panel-card.board-card-enter, .panel-card.board-card-enter-scale");
+  }
+  // 补挂台阶：序位口径与 playBoardEnter 一致——.telemetry-view 下 !hidden 的 .panel-card
+  // 逐张数下去（不能只看容器内的卡，侧栏卡也占延迟位）。只在揭示现役期间、看板可见
+  // 时调用，此时重排已落地，取的即是最终卡序。
+  function armReleasedBoardCards(released) {
+    const view = document.querySelector(".telemetry-view");
+    if (!view) return;
+    const cards = [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden);
+    for (const card of released) {
+      const index = cards.indexOf(card);
+      if (index >= 0) armBoardCardEnter(card, index);
     }
   }
   // 可见集变化时由 initSettingsView 注册重建入口：buildKeepAliveEndpoints 嵌在
@@ -950,10 +976,11 @@ async function api(method, path, body) {
         lastBoardAgents = res.agents;
         syncRouteChainsVer();
         // 「隐藏未运行的 Agent 卡」用的运行中集合：status 是端点级真值（生成中与待命都算
-        // running），与卡面徽标、reorderAgentCards 的分层同一口径。先落定再渲卡，
-        // 这一帧要藏掉的卡就不必先画一遍内容。
-        applyBoardLiveAgentIds(new Set(res.agents.filter((a) => a && a.status === "running").map((a) => a.id)));
+        // running），与卡面徽标、reorderAgentCards 的分层同一口径。先重排再落定：重排只读
+        // DOM 与 res.agents，显隐只读运行中集合，互不依赖；而显隐若放出揭示动画之后才进
+        // 名单的卡，补挂台阶取的序位必须是重排后的最终卡序。
         reorderAgentCards(res.agents);
+        applyBoardLiveAgentIds(new Set(res.agents.filter((a) => a && a.status === "running").map((a) => a.id)));
         const zc = res.agents.find(a => a.id === "zcode");
         const cc = res.agents.find(a => a.id === "claude");
         const dsh = res.agents.find(a => a.id === "dsh");
@@ -12601,6 +12628,18 @@ async function api(method, path, body) {
     if (window.panelStartupController) startupViewReady = entryReady;
   }
 
+  // 单张卡的入场装配：延迟（首卡 100ms、其余 150ms+序位×40ms）、冲样式、挂类、播完清类。
+  // 抽出来是为了让揭示第一拍之后才被放出来的卡也能按同一套曲线补一台阶——它们不在
+  // playBoardEnter 的取样名单里，只能在这之后单独装配（见 armReleasedBoardCards）。
+  function armBoardCardEnter(card, index) {
+    const hero = index === 0;
+    card.style.setProperty("--board-delay", hero ? "100ms" : `${150 + (index - 1) * 40}ms`);
+    card.classList.remove("board-card-enter", "board-card-enter-scale");
+    void getComputedStyle(card).animationName; // 同上：只冲样式，卡片不逐张重排
+    card.classList.add(hero ? "board-card-enter-scale" : "board-card-enter");
+    card.addEventListener("animationend", () => card.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
+  }
+
   // 看板变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）：容器整体淡入
   // 上浮 10px 立即开始；可见 .panel-card 按视觉顺序逐张阶梯——首卡（服务状态）用 scale
   // 变奏、延迟 100ms，其余淡入+上浮、延迟 150ms+i×40ms。隐藏卡（如无链时的路由链卡）
@@ -12628,14 +12667,7 @@ async function api(method, path, body) {
         if (rank.has(cards[i].getAttribute("data-agent-id"))) cards[i] = agentCards[nextAgent++];
       }
     }
-    cards.forEach((el, i) => {
-      const hero = i === 0;
-      el.style.setProperty("--board-delay", hero ? "100ms" : `${150 + (i - 1) * 40}ms`);
-      el.classList.remove("board-card-enter", "board-card-enter-scale");
-      void getComputedStyle(el).animationName; // 同上：只冲样式，卡片不逐张重排
-      el.classList.add(hero ? "board-card-enter-scale" : "board-card-enter");
-      el.addEventListener("animationend", () => el.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
-    });
+    cards.forEach((el, i) => armBoardCardEnter(el, i));
     // 图标行不是 .panel-card，上面那圈取样取不到它，于是它只会跟着 .board-enter 整块
     // 淡入、没有自己那一拍——这就是「跟卡片对不上」的来源。这里把它接在最后一张可见卡
     // 之后 40ms（与卡间距同一格），整行上浮、行内逐枚图标再各错 20ms 淡入：合起来是

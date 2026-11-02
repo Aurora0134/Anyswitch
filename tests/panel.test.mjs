@@ -1922,9 +1922,16 @@ describe("panel.html sessions tab", () => {
     assert.ok(m[1].includes('classList.add("board-enter")'), "container entrance plays");
     assert.ok(m[1].includes('querySelectorAll(".panel-card")'), "stagger covers the board panel cards");
     assert.ok(m[1].includes("!el.hidden"), "hidden cards skipped from the stagger");
-    assert.ok(m[1].includes("150 + (i - 1) * 40"), "stagger delay formula 150ms + i*40ms");
-    assert.ok(m[1].includes('hero ? "100ms"'), "hero card delay 100ms");
-    assert.ok(m[1].includes('hero ? "board-card-enter-scale" : "board-card-enter"'), "hero card uses the scale variant");
+    // 单卡装配抽成 armBoardCardEnter 后，延迟公式与 hero 变奏随它搬走；playBoardEnter 的
+    // 循环只剩调用。迟到放出的卡也走这里补台阶，故两段的接线一并钉住。
+    const arm = extractFn("armBoardCardEnter", "card, index");
+    assert.ok(arm.includes("150 + (index - 1) * 40"), "stagger delay formula 150ms + i*40ms");
+    assert.ok(arm.includes('hero ? "100ms"'), "hero card delay 100ms");
+    assert.ok(arm.includes('hero ? "board-card-enter-scale" : "board-card-enter"'), "hero card uses the scale variant");
+    assert.ok(arm.includes('classList.remove("board-card-enter", "board-card-enter-scale")'),
+      "重播前先摘旧类，连切才能从 0 重来");
+    assert.ok(m[1].includes("cards.forEach((el, i) => armBoardCardEnter(el, i));"),
+      "playBoardEnter 的循环改为调用 armBoardCardEnter");
   });
 
   it("staggers by the archived visual order while the prepaint card order is still in force", () => {
@@ -6378,8 +6385,9 @@ describe("设置项「看板排布」", () => {
     };
   }
   function boardEnterSandbox({ cardCount = 3, stripHidden = false, slotCount = 3 } = {}) {
-    const enterFn = (panelJs.match(/function playBoardEnter\(view\) \{[\s\S]*?\n  \}/) || [])[0];
-    assert.ok(enterFn, "playBoardEnter found in panel.js");
+    // 抽函数后两段源码要一起注入：playBoardEnter 的循环只剩对 armBoardCardEnter 的调用。
+    const armFn = extractFn("armBoardCardEnter", "card, index");
+    const enterFn = extractFn("playBoardEnter", "view");
     const cards = Array.from({ length: cardCount }, mkBoardAnimEl);
     const slots = Array.from({ length: slotCount }, mkBoardAnimEl);
     const strip = mkBoardAnimEl();
@@ -6390,7 +6398,7 @@ describe("设置项「看板排布」", () => {
     view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
     const doc = { documentElement: { getAttribute: () => null } };
     new Function("view", "document", "getComputedStyle",
-      `${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
+      `${armFn}\n${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
     return { cards, strip, slots };
   }
 
@@ -6425,6 +6433,103 @@ describe("设置项「看板排布」", () => {
     const noCards = boardEnterSandbox({ cardCount: 0, slotCount: 1 });
     assert.equal(noCards.strip.styleProps["--board-delay"], "150ms",
       "一张卡都不在时从 150ms 起拍，不留负延迟");
+  });
+
+  // 补挂台阶的行为沙箱：3 张端点卡，中间那张在揭示第一拍时还是 hidden（离开期间没在跑）。
+  // finishEnter=true 表示阶梯已播完：逐张调用 playBoardEnter 注册的 animationend 回调，
+  // entry 类按真实行为摘掉。随后用真值把中卡放出来，看它有没有被补挂。
+  const armFn = extractFn("armBoardCardEnter", "card, index");
+  const inFlightFn = extractFn("boardEnterInFlight");
+  const releaseFn = extractFn("armReleasedBoardCards", "released");
+  const visFn = extractFn("applyAgentCardVisibility", "ids");
+  const enterFn = extractFn("playBoardEnter", "view");
+  function boardReleaseSandbox(finishEnter) {
+    const ids = ["zcode", "claude", "kimi"];
+    const cards = ids.map((id) => {
+      const card = mkBoardAnimEl();
+      card.attrs["data-agent-id"] = id;
+      // 记下装配次数与 animationend 回调（用于模拟阶梯播完）
+      card.addEventListener = (ev, fn) => {
+        if (ev !== "animationend") return;
+        card.arms = (card.arms || 0) + 1;
+        card.finish = fn;
+      };
+      return card;
+    });
+    cards[1].hidden = true; // 揭示第一拍时它还没在跑
+    const container = { querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []) };
+    const view = mkBoardAnimEl();
+    view.querySelectorAll = (sel) => (sel === ".panel-card" ? cards : []);
+    // boardEnterInFlight 的取样：只要还有卡挂着 entry 类，就说明阶梯仍在播
+    view.querySelector = (sel) => {
+      if (sel === ".board-icon-strip") return null;
+      if (sel === ".panel-card.board-card-enter, .panel-card.board-card-enter-scale") {
+        return cards.find((c) => c.classList.contains("board-card-enter")
+          || c.classList.contains("board-card-enter-scale")) || null;
+      }
+      return null;
+    };
+    const doc = {
+      documentElement: { getAttribute: () => null, removeAttribute: () => {} },
+      querySelector: (sel) => (sel === ".agent-cards-container" ? container
+        : sel === ".telemetry-view" ? view : null),
+    };
+    const src = `
+      let boardLayoutMode = "live-only";
+      let boardLiveAgentIds = new Set();
+      function boardVisible() { return true; }
+      function $(id) { return null; }
+      ${armFn}
+      ${inFlightFn}
+      ${releaseFn}
+      ${visFn}
+      ${enterFn}
+      playBoardEnter(view);
+      if (finishEnter) view.querySelectorAll(".panel-card").forEach((c) => c.finish && c.finish());
+      boardLiveAgentIds = new Set(["zcode", "claude", "kimi"]);
+      applyAgentCardVisibility(new Set(["zcode", "claude", "kimi"]));
+    `;
+    new Function("view", "document", "getComputedStyle", "finishEnter", src)(
+      view, doc, () => ({ animationName: "none" }), finishEnter);
+    return cards;
+  }
+
+  it("揭示等待期被放出来的卡补上入场台阶，不改已排过的卡", () => {
+    // 切回看板那一刻中卡还是 hidden，playBoardEnter 只排了首末两张；40–60ms 后
+    // /api/agents 落地，中卡由藏转显——它按此刻可见序第 2 张补 150ms 的淡入，而不是
+    // 以终态硬出现。补挂只碰这一次放出来的卡。
+    const cards = boardReleaseSandbox(false);
+    assert.equal(cards[1].hidden, false, "中卡已被真值放出来");
+    assert.ok(cards[1].classList.contains("board-card-enter"), "迟到的卡拿到普通淡入类");
+    assert.ok(!cards[1].classList.contains("board-card-enter-scale"), "不是首卡，不走 hero 变奏");
+    assert.equal(cards[1].styleProps["--board-delay"], "150ms", "按可见序第 2 张补 150ms");
+    assert.equal(cards[0].arms, 1, "首卡不重复装配");
+    assert.equal(cards[2].arms, 1, "已排过的末卡不重复装配");
+    assert.equal(cards[1].arms, 1, "迟到的卡只装配一次");
+    assert.equal(cards[0].styleProps["--board-delay"], "100ms", "首卡延迟不被改动");
+    assert.equal(cards[2].styleProps["--board-delay"], "150ms", "末卡延迟不被改动");
+  });
+
+  it("揭示结束后再被放出来的卡不补挂台阶：闸门挂在现役动画上", () => {
+    // 阶梯播完（entry 类已在各自 animationend 摘掉）之后才由真值放出来的卡，说明揭示
+    // 早已收场——不许凭空补一段淡入。这条钉住「补挂只发生在揭示现役期间」：把
+    // boardEnterInFlight 换回一个跨调用的标记，这里就会红。
+    const settled = boardReleaseSandbox(true);
+    assert.equal(settled[1].hidden, false, "揭示结束后中卡照样被真值放出来");
+    assert.ok(!settled[1].classList.contains("board-card-enter"), "揭示已结束：不再补入场台阶");
+    assert.equal(settled[1].styleProps["--board-delay"], undefined, "也不发延迟");
+    assert.equal(settled[1].arms ?? 0, 0, "没有发生装配");
+  });
+
+  it("刷新时先重排、再落定运行中集合", () => {
+    // 补挂台阶取的序位必须是最终卡序：重排（reorderAgentCards）要先于显隐重算
+    // （applyBoardLiveAgentIds → applyAgentCardVisibility）。
+    const m = panelJs.match(/async function refreshAgents\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshAgents found in panel.js");
+    const reorder = m[1].indexOf("reorderAgentCards(res.agents)");
+    const apply = m[1].indexOf("applyBoardLiveAgentIds(");
+    assert.ok(reorder >= 0 && apply >= 0, "两处调用都在");
+    assert.ok(reorder < apply, "先重排取得最终卡序，再落定显隐");
   });
 });
 
@@ -8273,6 +8378,9 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
   const visibilityFn = (panelJs.match(
     /function applyAgentCardVisibility\(ids\) \{[\s\S]*?\n  \}/,
   ) || [])[0];
+  // 补挂闸门也取自源码：砂箱里的看板不可见（boardVisible 恒 false），真实判定必须
+  // 在这里短路成 false，才不会碰 armReleasedBoardCards。
+  const enterInFlightFn = extractFn("boardEnterInFlight");
   function visibilitySandbox({ layoutMode = "all", liveIds = null } = {}) {
     const cards = ["zcode", "claude", "kimi", "grok"].map((id) => ({
       id,
@@ -8293,8 +8401,10 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
     const prelude = `let boardLayoutMode = "${layoutMode}";`
       + ` let boardLiveAgentIds = ${liveIds === null ? "null" : "new Set(" + JSON.stringify(liveIds) + ")"};`
       + ` let installedAgentIds = null;`
+      + ` function boardVisible() { return false; }` // 看板不可见：补挂台阶一律不生效
       + ` function $(id) { return null; }`;
-    const apply = new Function("document", `${prelude}\n${visibilityFn}\nreturn applyAgentCardVisibility;`)(document);
+    const apply = new Function("document",
+      `${prelude}\n${enterInFlightFn}\n${visibilityFn}\nreturn applyAgentCardVisibility;`)(document);
     return { apply, cards, removedAttrs };
   }
 
