@@ -10056,6 +10056,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
         close: () => closeTerminalStream(),
         xterm: () => terminalXterm, source: () => terminalEventSource,
         fitAddon: () => terminalFitAddon, input: () => terminalInputDisposable,
+        send: (id, data) => sendTerminalInput(id, data),
       };
     `)(state);
     return { sandbox, state };
@@ -10237,31 +10238,44 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(revives[0].url, "/api/terminal/sessions/sess-x/revive", "复活走重组装凭据的路由");
   });
 
-  it("输入落进 409：复活一次并把这次输入补发过去，不静默吞字", async () => {
+  it("输入落进 409：不复活不补发，前端状态同步为 exited", async () => {
     const { sandbox, state } = streamSandbox();
     let inputAttempts = 0;
     state.apiImpl = (method, url) => {
       if (url.includes("/revive")) return Promise.resolve({ id: "sess-d", status: "running", pid: 99 });
       if (url.includes("/input")) {
         inputAttempts += 1;
-        if (inputAttempts === 1) return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
-        return Promise.resolve({ ok: true });
+        return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
       }
       return Promise.resolve({});
     };
-    const session = backendSession("sess-d", { backendState: { status: "exited" } });
+    const session = backendSession("sess-d", { backendState: { status: "running" } });
     state.sessions["sess-d"] = session;
     sandbox.connect(session, { revive: false });
     const term = sandbox.xterm();
     term.fire("hi");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const urls = state.posts.map((p) => p.url);
-    assert.ok(urls.some((u) => u.includes("/sess-d/revive")), "409 触发一次复活");
-    assert.equal(inputAttempts, 2, "复活后把这次输入补发一次");
-    assert.equal(session.backendState.status, "running", "会话状态随复活结果更新");
+    assert.ok(!state.posts.some((p) => p.url.includes("/sess-d/revive")), "打字不触发复活：退出可能本就是应当发生的结果");
+    assert.equal(inputAttempts, 1, "409 后不补发这次输入");
+    assert.equal(session.backendState.status, "exited", "会话前端状态同步为 exited");
   });
 
-  it("并发 409 只复活一次：两键同时落空不各起一个进程", async () => {
+  it("409 后 sendTerminalInput 返回 false：不再发 revive POST", async () => {
+    const { sandbox, state } = streamSandbox();
+    state.apiImpl = (method, url) => {
+      if (url.includes("/revive")) return Promise.resolve({ id: "sess-h", status: "running", pid: 101 });
+      if (url.includes("/input")) return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
+      return Promise.resolve({});
+    };
+    const session = backendSession("sess-h", { backendState: { status: "running" } });
+    state.sessions["sess-h"] = session;
+    const delivered = await sandbox.send("sess-h", "x");
+    assert.equal(delivered, false, "409＝进程已退：这次输入被静默放弃");
+    assert.ok(!state.posts.some((p) => p.url.includes("/revive")), "409 后不再发 revive POST");
+    assert.equal(session.backendState.status, "exited", "会话前端状态同步为 exited");
+  });
+
+  it("连打两键各落 409：一个复活都不发，输入也不补发", async () => {
     const { sandbox, state } = streamSandbox();
     let inputAttempts = 0;
     let reviveCalls = 0;
@@ -10269,19 +10283,19 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       if (url.includes("/revive")) { reviveCalls += 1; return Promise.resolve({ id: "sess-e", status: "running", pid: 100 }); }
       if (url.includes("/input")) {
         inputAttempts += 1;
-        if (inputAttempts <= 2) return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
-        return Promise.resolve({ ok: true });
+        return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
       }
       return Promise.resolve({});
     };
-    const session = backendSession("sess-e", { backendState: { status: "exited" } });
+    const session = backendSession("sess-e", { backendState: { status: "running" } });
     state.sessions["sess-e"] = session;
     sandbox.connect(session, { revive: false });
     const term = sandbox.xterm();
     term.fire("a");
     term.fire("b");
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(reviveCalls, 1, "同一会话的并发复活合并成一次");
+    assert.equal(reviveCalls, 0, "键入路径不发任何 revive POST（复活只认点页签的显式动作）");
+    assert.equal(inputAttempts, 2, "两键各投一次，无一补发");
   });
 
   it("非 409 的投递失败不触发复活", async () => {
