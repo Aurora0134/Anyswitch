@@ -6805,6 +6805,9 @@ async function api(method, path, body) {
   // 而「删掉计数比较」这种变异会被兜底计时器掩盖掉，测不出来。
   function terminalStaleScreenReady(stale) {
     if (!stale) return false;
+    // 闲剪重建（见 triggerTerminalIdleTrim）：视口位置落定才算新画面就绪——垫片多盖
+    // 到落位那一刻，用户看到的新帧直接就在原阅读位。2s 兜底计时器仍限总时长。
+    if (stale.restorePending) return false;
     if (terminalReplayEpoch !== stale.epochAtPark) return true;
     return terminalScreenHasContent(terminalXterm);
   }
@@ -7261,7 +7264,13 @@ async function api(method, path, body) {
     // 拽底（CD：处理白区时视窗自己不动）。
     let armedFollow = true;
     terminalReplayRestoreArm = () => {
-      if (replayTimer === null) armedFollow = followBottom; // 一次回放只取首拍的跟随态
+      if (replayTimer === null) {
+        armedFollow = followBottom; // 一次回放只取首拍的跟随态
+        // 闲剪重建（triggerTerminalIdleTrim）：fresh 实例的出厂跟随态不代表会话真实
+        // 态（用户可能正在读历史）——落位由触发方负责，闩清后不锚底；真实跟随态由
+        // 落点经滚动监听重新推导（到地板即复随）。typeof 闸护单测桩环境。
+        if (typeof terminalIdleTrimRebuild === "boolean" && terminalIdleTrimRebuild) armedFollow = false;
+      }
       if (replayTimer !== null) clearTimeout(replayTimer);
       replayTimer = setTimeout(() => {
         replayTimer = null;
@@ -7358,6 +7367,200 @@ async function api(method, path, body) {
     }, { passive: true });
   }
 
+  // ---- 滚轮直写 + 缓冲软顶（滚动错位根治，2026-11-02）----
+  //
+  // 病灶：scrollback 满仓后 xterm 的环剪把最老行顶掉、ydisp 由内部补偿保持视口内容
+  // 不动，但补偿是离散跳步；同一拍用户的滚轮走 Viewport 的 scrollTop 翻译路径
+  // （scrollTop += → scroll 事件 → _handleScroll 四舍五入回写 ydisp），翻译读的是
+  // 补偿前后的新旧 scrollTop——两个写者相撞时翻译结果过冲、再被 rAF 回写纠正，
+  // 画面就是一次行高级跳变（输出洪峰期滚动实测 ±100px 震荡、纯悬停被顶 458 行/10s）。
+  // 两层修法：
+  //
+  // ①滚轮直写：attachCustomWheelEventHandler 接管竖直滚轮，按 xterm 同源公式折成
+  //   行数后直接 term.scrollLines()（ydisp 单写者），scrollTop 只剩 rAF 回写一个方向，
+  //   与用户输入不再有翻译竞速。换算与 Viewport.getLinesScrolled 同源（deltaMode 折算、
+  //   fastScrollModifier 乘敏感度、像素模式小数跨事件累积），手感与原生一致；
+  //   shift/零 delta/备屏/鼠标上报模式（enable-mouse-events 类）一律交回 xterm 原路径
+  //   ——那几条语义不属于滚动缓冲。接管即自 preventDefault：xterm 原路径两分支
+  //   （滚得动 cancel、滚不动 _bubbleScroll）本来都会吞默认，直写补齐同款边界。
+  // ②缓冲软顶：scrollback 提到 15000（忙时超软顶只涨不剪，环剪错位不再发生在用户
+  //   滚动的时窗里）；空闲（无输出、无键入/滚轮 ≥5s）且超软顶 ≥500 行时，借切签
+  //   垫片通路无感重建一次——旧帧停成垫片，按宿主镜像（历史 5000 行上限）整屏回放，
+  //   回放静默后把视口精确落回剪前阅读位置（裁掉行数 = 重建前后缓冲行数差），揭幕
+  //   判据加「位置已落定」（见 terminalStaleScreenReady 的 restorePending），用户看到
+  //   新帧时直接就在原位。视口在将被裁掉的头段内时本次不剪（内容在硬顶内还在），
+  //   等回到保留窗或经切签/隐藏重建（那条通路本就整屏重放）再收。重建走被动重挂
+  //   语义（revive:false），绝不顺手复活已退出的进程；交接窗内用户滚动/键入即放弃
+  //   位置恢复让位给用户。
+  const TERMINAL_SCROLLBACK_SOFT_CAP = 5000; // 闲剪回落目标，与宿主镜像 TERMINAL_HISTORY_LINES 对齐
+  const TERMINAL_IDLE_TRIM_MS = 5000;
+  const TERMINAL_IDLE_TRIM_MIN_OVERAGE = 500;
+  const TERMINAL_IDLE_TRIM_SETTLE_MS = 150;
+  const TERMINAL_IDLE_TRIM_MAX_MS = 2500;
+  let terminalLastStreamDataAt = 0;
+  let terminalUserActionAt = 0;
+  let terminalIdleTrimInFlight = false;
+  let terminalIdleTrimAborted = false;
+  let terminalIdleTrimRebuild = false;
+  let terminalWheelPartialLines = 0;
+  let terminalWheelRowHeightCache = null;
+
+  // 行高量取：.xterm-screen 盒高 / 行数（渲染器行高的构造性来源）。缓存按行数与
+  // 2s 时效失效——字号变化不一定改行数，时效兜底自愈。
+  function terminalWheelRowHeight(term) {
+    const now = Date.now();
+    const cache = terminalWheelRowHeightCache;
+    if (cache && cache.rows === term.rows && cache.value > 0 && now - cache.at < 2000) return cache.value;
+    const screenEl = term.element?.querySelector?.(".xterm-screen");
+    const height = screenEl ? screenEl.getBoundingClientRect().height : 0;
+    const value = height > 0 && term.rows > 0 ? height / term.rows : 0;
+    if (value > 0) terminalWheelRowHeightCache = { rows: term.rows, value, at: now };
+    return value;
+  }
+
+  // 行数换算（xterm Viewport.getLinesScrolled 同源）：像素模式按行高折算并跨事件
+  // 累积小数（触控板亚行增量不丢），LINE 直取，PAGE 乘屏行数；fastScrollModifier
+  // （默认 alt）命中时乘 fastScrollSensitivity（默认 5）再乘 scrollSensitivity（默认 1）。
+  // deltaMode 用字面量 0/1/2，不引 WheelEvent 全局（桩环境常无此构造器）。
+  function terminalWheelLines(event, rowHeight, term) {
+    if (event.deltaY === 0 || event.shiftKey) return 0;
+    const options = term.options || {};
+    const sensitivity = typeof options.scrollSensitivity === "number" ? options.scrollSensitivity : 1;
+    const fastSensitivity = typeof options.fastScrollSensitivity === "number" ? options.fastScrollSensitivity : 5;
+    const fastModifier = typeof options.fastScrollModifier === "string" ? options.fastScrollModifier : "alt";
+    const accelerated =
+      (fastModifier === "alt" && event.altKey)
+      || (fastModifier === "ctrl" && event.ctrlKey)
+      || (fastModifier === "shift" && event.shiftKey);
+    const amount = event.deltaY * (accelerated ? fastSensitivity * sensitivity : sensitivity);
+    if (event.deltaMode === 1) return Math.trunc(amount);
+    if (event.deltaMode === 2) return Math.trunc(amount * term.rows);
+    terminalWheelPartialLines += amount / rowHeight;
+    const lines = Math.floor(Math.abs(terminalWheelPartialLines)) * (terminalWheelPartialLines > 0 ? 1 : -1);
+    terminalWheelPartialLines %= 1;
+    return lines;
+  }
+
+  // 闲剪的触发门（垫在 1s 归属轮询拍上，见 pollTerminalSessions 尾部）。所有闸都在
+  // 这里判：inFlight/回放期/无活流/隐藏/非终端页/组字态/无后端会话/备屏。静默判据
+  // 取「流数据帧」与「用户动作」（滚轮/键入/指针，见 installTerminalWheelDirect 的
+  // noteUserAction）两个时戳的较新者。
+  function maybeTerminalIdleTrim() {
+    if (terminalIdleTrimInFlight || terminalReplayRestoring || terminalReplayFramePending) return;
+    const term = terminalXterm;
+    if (!term || !terminalEventSource) return;
+    if (typeof document !== "undefined" && document.hidden) return;
+    if (currentView !== "terminal") return;
+    if (terminalImeHold) return;
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session?.backend) return;
+    const buffer = term.buffer?.active;
+    if (!buffer || buffer.type === "alternate" || !buffer.hasScrollback) return;
+    if (Date.now() - Math.max(terminalLastStreamDataAt, terminalUserActionAt) < TERMINAL_IDLE_TRIM_MS) return;
+    const overage = buffer.length - (TERMINAL_SCROLLBACK_SOFT_CAP + term.rows);
+    if (overage < TERMINAL_IDLE_TRIM_MIN_OVERAGE) return;
+    // 视口在将被裁掉的头段内：本次不剪。内容在客户端硬顶内原样保留，硬剪会把用户
+    // 正在读的行整段变没；等视口回到保留窗（下一拍轮询自然再判）或切签/隐藏重建。
+    if (buffer.viewportY < overage) return;
+    triggerTerminalIdleTrim(session, term, buffer.viewportY, overage);
+  }
+
+  function triggerTerminalIdleTrim(session, term, viewportY, overage) {
+    const lineBefore = term.buffer.active.length;
+    terminalIdleTrimInFlight = true;
+    terminalIdleTrimAborted = false;
+    terminalLastStreamDataAt = Date.now();
+    // 供护栏首拍采跟随态时认出本条重建（不按 fresh 实例出厂态锚底，见 arm 内消费）；
+    // settle 收摊时清掉，窗口最长 2.5s，不会外溢到无关连接。
+    terminalIdleTrimRebuild = true;
+    // 与切签同一编排：停旧帧为垫片 → 重建流（被动重挂，不复活）→ fit。垫片由
+    // parkTerminalScreen 的观察循环与 2s 兜底负责揭/撤，这里只补一件事——揭幕判据
+    // 认「位置已落定」（stale.restorePending），保证用户看到的新帧直接就在原位。
+    const stale = typeof parkTerminalScreen === "function" ? parkTerminalScreen() : null;
+    if (stale) stale.restorePending = true;
+    connectTerminalStream(session, { revive: false });
+    if (currentView === "terminal") scheduleTerminalFit();
+    const newTerm = terminalXterm;
+    let writeDisposable = null;
+    let lastWriteParsedAt = 0;
+    let sawWrite = false;
+    let pollTimer = null;
+    let safetyTimer = null;
+    let finished = false;
+    const settle = () => {
+      if (finished) return;
+      finished = true;
+      if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
+      if (safetyTimer !== null) { clearTimeout(safetyTimer); safetyTimer = null; }
+      writeDisposable?.dispose?.();
+      terminalIdleTrimRebuild = false;
+      // 垫片还在自己手里才放行揭幕并落位；已被兜底撤走（2s 上限、被别的重建顶替）
+      // 时用户已经看过未落位的新帧，再 scrollToLine 就是可见跳变，只收摊不落位。
+      const shimStillMine = !!stale && !stale.done && terminalStaleScreen === stale;
+      if (shimStillMine) stale.restorePending = false;
+      terminalIdleTrimInFlight = false;
+      if (terminalIdleTrimAborted || !shimStillMine) return;
+      if (newTerm !== terminalXterm || !newTerm?.element?.isConnected) return;
+      const buffer = newTerm.buffer?.active;
+      if (!buffer || buffer.type === "alternate" || buffer.length <= newTerm.rows) return;
+      // 裁掉行数 = 重建前后缓冲差；落位目标夹在 [0, 缓冲-屏行]，等价用户视口在
+      // 新缓冲里的同一行（保留窗判定已保证目标 ≥0）。
+      const trimmed = Math.max(0, lineBefore - buffer.length);
+      const line = Math.max(0, Math.min(viewportY - trimmed, buffer.length - newTerm.rows));
+      if (line !== buffer.viewportY) newTerm.scrollToLine(line);
+    };
+    // 重建没起来（隐藏闸等）：收摊，inFlight 不悬死。
+    if (!newTerm || newTerm === term) { settle(); return; }
+    // 落位时机：回放写入静默一拍后（镜像回放是单帧大写入，静默即完整）；期间用户
+    // 滚动/键入（noteUserAction）或垫片被顶替则放弃位置恢复。50ms 轮询驱动 +
+    // 2.5s 安全上限（连接失败无写入时收摊）。
+    writeDisposable = newTerm.onWriteParsed?.(() => { sawWrite = true; lastWriteParsedAt = Date.now(); });
+    const poll = () => {
+      if (finished) return;
+      if (terminalIdleTrimAborted
+        || (stale && stale.done) || (stale && terminalStaleScreen !== stale)
+        || newTerm !== terminalXterm) { settle(); return; }
+      if (sawWrite && Date.now() - lastWriteParsedAt >= TERMINAL_IDLE_TRIM_SETTLE_MS) { settle(); return; }
+      pollTimer = setTimeout(poll, 50);
+    };
+    pollTimer = setTimeout(poll, 50);
+    safetyTimer = setTimeout(settle, TERMINAL_IDLE_TRIM_MAX_MS);
+  }
+
+  // 滚轮直写安装：接管竖直滚轮的行数换算与 ydisp 直写（见本节头部病灶注释）。
+  // 事件面与护栏共用 term root 的 capture 监听记「用户动作」时戳（闲剪静默判据、
+  // 交接窗放弃落位都靠它）。
+  function installTerminalWheelDirect(term) {
+    const root = term.element;
+    if (!root || typeof term.attachCustomWheelEventHandler !== "function") return;
+    // 每实例重置：小数残额与行高缓存不属于新连接。
+    terminalWheelPartialLines = 0;
+    terminalWheelRowHeightCache = null;
+    const noteUserAction = () => {
+      terminalUserActionAt = Date.now();
+      if (terminalIdleTrimInFlight) terminalIdleTrimAborted = true;
+    };
+    root.addEventListener("pointerdown", noteUserAction, { capture: true, passive: true });
+    root.addEventListener("pointermove", (event) => { if (event.buttons) noteUserAction(); }, { capture: true, passive: true });
+    root.addEventListener("touchstart", noteUserAction, { capture: true, passive: true });
+    root.addEventListener("keydown", noteUserAction, { capture: true, passive: true });
+    term.attachCustomWheelEventHandler((event) => {
+      if (!event || event.type !== "wheel") return true;
+      if (event.shiftKey || !event.deltaY) return true;
+      // 鼠标上报模式（TUI 应用收 SGR 滚轮事件）与备屏（方向键翻译）不属于缓冲滚动。
+      if (root.classList?.contains?.("enable-mouse-events")) return true;
+      const buffer = term.buffer?.active;
+      if (!buffer || !buffer.hasScrollback) return true;
+      const rowHeight = terminalWheelRowHeight(term);
+      if (!rowHeight) return true; // 行高量不出（渲染未就绪）：退回 xterm 原生路径
+      noteUserAction();
+      const lines = terminalWheelLines(event, rowHeight, term);
+      if (lines !== 0) term.scrollLines(lines);
+      event.preventDefault();
+      return false;
+    });
+  }
+
   // 五枚 xterm 资产（xterm.js / xterm.css / fit / unicode11 / webgl）由 panel.html
   // 静态引用，本脚本同为 defer 且排在其后：走到这里四个脚本的全局与样式表都已定形，
   // 缺哪枚在此可对账。此前缺失全链路无声——脚本标签无 onerror、下方消费闸静默跳过、
@@ -7392,7 +7595,10 @@ async function api(method, path, body) {
       scrollOnUserInput: false,
       fontFamily: 'ui-monospace, "Cascadia Mono", "Cascadia Code", SFMono-Regular, Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace',
       fontSize: terminalFontSize,
-      scrollback: 5000,
+      // 硬顶 15000：忙时（输出洪峰期滚动）超软顶只涨不剪，环剪错位不再发生（病灶
+      // 与软顶回落见 installTerminalWheelDirect 上方节注释）；闲时经 maybeTerminalIdleTrim
+      // 无感回落到 5000（宿主镜像上限）。
+      scrollback: 15000,
       theme: terminalXtermTheme(),
     });
     terminalXterm = term;
@@ -7435,6 +7641,8 @@ async function api(method, path, body) {
     term.open(host);
     installTerminalFollowBottomGuard(term);
     installTerminalBottomAlign(term);
+    // typeof 闸护单测桩环境（同 parkTerminalScreen）：真面板里本函数恒在。
+    if (typeof installTerminalWheelDirect === "function") installTerminalWheelDirect(term);
     if (window.WebglAddon?.WebglAddon) {
       try {
         terminalWebglAddon = new window.WebglAddon.WebglAddon();
@@ -7855,11 +8063,15 @@ async function api(method, path, body) {
     terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     terminalEventSource.addEventListener("snapshot", (event) => {
       terminalStreamSyncCancel?.();
+      // 流侧时戳（闲剪静默判据，见 maybeTerminalIdleTrim）。typeof 闸护单测桩环境
+      // （同 terminalReplayEpoch）。
+      if (typeof terminalLastStreamDataAt === "number") terminalLastStreamDataAt = Date.now();
       try {
         absorbTerminalSnapshot(term, session, JSON.parse(event.data));
       } catch {}
     });
     terminalEventSource.addEventListener("data", (event) => {
+      if (typeof terminalLastStreamDataAt === "number") terminalLastStreamDataAt = Date.now();
       // 任意数据帧落地即撤「正在加载」占位：同一时刻只有活跃会话有流（connect 前
       // 必先 close），帧到即「武装会话已开画」。typeof 闸护单测桩环境（同
       // terminalReplayEpoch——那些沙箱把本函数整段切出真跑，没有占位设施）。
@@ -8081,6 +8293,9 @@ async function api(method, path, body) {
         return;
       }
       renderTerminalSessionData();
+      // 闲剪检查垫在轮询拍上（本拍已带可见性与终端页闸，判据见 maybeTerminalIdleTrim）。
+      // typeof 闸护单测桩环境（同 renderTerminalRail）。
+      if (typeof maybeTerminalIdleTrim === "function") maybeTerminalIdleTrim();
     } catch {
       // 归属面任何一环失败都不清屏：上一帧继续显示，下一拍自然重试。
     } finally {
