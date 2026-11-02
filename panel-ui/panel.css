@@ -1524,13 +1524,17 @@
   #logLevelSelect[data-level="info"] { color: var(--console-info); font-weight: 600; }
   #logLevelSelect[data-level="warn"] { color: var(--console-warn); font-weight: 600; }
   #logLevelSelect[data-level="error"] { color: var(--console-error); font-weight: 600; }
-  /* 收起态字号对齐同行左侧那组字：这一行左边是「日志级别」标题加一句说明（说明字
-     .modal-item-desc 为 11.5px），右边就是这枚下拉。原先沿用 .logs-sel 的 12.5px，
-     比左边的说明字大一档，同一行并列时右边那串 token 看着比左边的字更宽（2026-11-02
-     报障）。只收字号，字重 600 与语义色照旧——那是「与实时输出行同形」的既定设计。
-     作用域钉在这一枚下拉上：.logs-sel 的另一处用途是统计页请求日志的筛选条，那里没有
-     贴着的小字说明，统一收小会破坏筛选条与表头的一致性。 */
-  #logLevelSelect { font-size: 11.5px; }
+  /* 收起态与左侧那串展示 token 逐字同宽：同一个级别词（INFO/WARN/ERROR）在本卡
+     「级别说明」图例和看板左侧的实时输出行里都是 --font-mono 11.5px/600；这枚下拉
+     却只从 .logs-sel 拿到 font-family: inherit，落在正文字体栈（Segoe UI）上，比例
+     字体的字面宽度本就参差——WARN 8.6px/字符、ERROR 7.2px/字符，而等宽栈恒为
+     6.32px/字符，整串 34.4 vs 25.3、36.0 vs 31.6（2026-11-02 两次报障）。所以差的
+     是字宽、不是字号：只收字号治不了，必须把字体族换成与两侧展示字同源的
+     --font-mono，字号仍取 11.5px 与两侧同档，字重 600 与语义色照旧（「与实时输出
+     行同形」的既定设计）。作用域钉在这一枚下拉上：.logs-sel 的另一处用途是统计页
+     请求日志筛选条，那里是中文筛选项、没有并排的等宽 token，改字族会破坏筛选条与
+     表头的一致性。 */
+  #logLevelSelect { font-family: var(--font-mono); font-size: 11.5px; }
 
   /* ── 看板加载态（<html data-board="pending">）───────────────────────────────
      看板九张卡的静态默认是「数据态」：八张写着「未检测到运行中的 X 客户端」，ZCode
