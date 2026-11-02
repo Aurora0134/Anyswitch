@@ -8191,10 +8191,9 @@ async function api(method, path, body) {
       // 迟到的旧流帧不得消费回放闩 / 推进揭幕计数（后者是垫片的就绪判据）。
       if (term !== terminalXterm) return;
       if (typeof terminalLastStreamDataAt === "number") terminalLastStreamDataAt = Date.now();
-      // 任意数据帧落地即撤「正在加载」占位：同一时刻只有活跃会话有流（connect 前
-      // 必先 close），帧到即「武装会话已开画」。typeof 闸护单测桩环境（同
-      // terminalReplayEpoch——那些沙箱把本函数整段切出真跑，没有占位设施）。
-      if (typeof dropTerminalBootingOverlay === "function") dropTerminalBootingOverlay();
+      // 「正在加载」占位不在这里撤（2026-11-02）：数据帧不等于出画——换绑清屏帧、
+      // 新 PTY 的空回放、TUI 自己的清屏序列都从这条路进来，按帧撤会在擦除那一刻把
+      // 占位一起撤走。撤层判据是「新画面真的出字」，见 watchTerminalBootingOverlay。
       try {
         const text = JSON.parse(event.data);
         // 建连后的第一帧是自足整屏重绘（见 absorbTerminalSnapshot），直写——此刻
@@ -9018,17 +9017,28 @@ async function api(method, path, body) {
     try { localStorage.setItem(TERMINAL_ADD_AGENTS_KEY, JSON.stringify(agents)); } catch { /* 存储被禁：菜单退回每次现取 */ }
   }
 
-  // 「+」新建页签的「正在加载」占位：确认启动到 agent 首帧之间屏上只有底色——切签
-  // 垫片（parkTerminalScreen）只服务「有旧帧可停」的切换，全新页签没有旧帧。武装只认
-  // + 菜单确认的那一次新建（续接/复活不武装，不闪占位）；页签渲染当拍挂层，首帧数据
-  // 落地即撤（connectTerminalStream 的 data 处理器），3 秒兜底与「活跃会话变了」同撤。
+  // 「正在加载」占位：两个入口共用——「+」新建页签（确认启动到 agent 首帧之间屏上
+  // 只有底色，切签垫片只服务「有旧帧可停」的切换，全新页签没有旧帧），以及超实例内切
+  // （/switch 是 terminate+spawn，换绑清屏之后到新会话画出第一屏之前同样只有底色）。
+  // 武装只认这两次动作（续接/复活不武装，不闪占位）。
+  //
+  // 时序（2026-11-02 用户报告占位错位后重排，两处旧判据都反了）：
+  //  · 挂层只认「新实例已经建好那一拍」——renderTerminalPreviewSession 在 connect
+  //    之后才调 sync。旧版在点击当拍就挂（内切路径显式 sync 了一次），那会儿屏上还是
+  //    上一屏的画面，占位压在没擦的旧画面上；现在挂上时垫片已盖着旧帧、占位本身压在
+  //    垫片之下（见 CSS），旧帧还在时它不露脸。
+  //  · 撤层只认「新画面真的出字」（terminalScreenHasContent），不认「首个数据帧」。
+  //    旧版 data 处理器任意一帧就撤，而换绑清屏（宿主 resetSessionScreen 发的 2J）、
+  //    新 PTY 的空回放、TUI 自己的清屏序列都走这条通路——占位正好在擦除那一刻被撤走，
+  //    剩下的就是用户看到的那段空屏。
+  // 兜底三条不变：挂层后 3 秒上限、武装 10 秒过期、活跃会话变了同撤。
   const TERMINAL_BOOTING_MAX_MS = 3000;
   const TERMINAL_BOOTING_ARM_TTL_MS = 10000;
   let terminalBooting = null;
 
   function armTerminalBootingOverlay(sessionId) {
     dropTerminalBootingOverlay();
-    terminalBooting = { sessionId, armedAt: Date.now(), timer: null, el: null };
+    terminalBooting = { sessionId, armedAt: Date.now(), timer: null, el: null, frame: null };
   }
 
   function dropTerminalBootingOverlay() {
@@ -9036,7 +9046,23 @@ async function api(method, path, body) {
     if (!booting) return;
     terminalBooting = null;
     if (booting.timer !== null) clearTimeout(booting.timer);
+    if (booting.frame !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(booting.frame);
     if (booting.el && booting.el.parentNode) booting.el.parentNode.removeChild(booting.el);
+  }
+
+  // 撤层观察者：xterm 的 write 是异步解析，同一拍 write 完去看缓冲区还是空的，只有
+  // 逐帧看才抓得到「新画面真的落绘」那一刻。空屏期本就没有渲染负担，逐帧扫一遍的代价
+  // 可接受（terminalScreenHasContent 遇到第一行非空即返回）。帧循环随撤层一起收：drop
+  // 把 terminalBooting 置空，回调见身份不符即退，不再排下一帧。
+  function watchTerminalBootingOverlay(booting) {
+    if (typeof requestAnimationFrame !== "function") return;
+    booting.frame = requestAnimationFrame(() => {
+      booting.frame = null;
+      if (terminalBooting !== booting) return;
+      if (Date.now() - booting.armedAt > TERMINAL_BOOTING_ARM_TTL_MS) { dropTerminalBootingOverlay(); return; }
+      if (terminalScreenHasContent(terminalXterm)) { dropTerminalBootingOverlay(); return; }
+      watchTerminalBootingOverlay(booting);
+    });
   }
 
   function syncTerminalBootingOverlay(sessionId) {
@@ -9054,6 +9080,7 @@ async function api(method, path, body) {
     screen.appendChild(el);
     booting.el = el;
     booting.timer = setTimeout(() => dropTerminalBootingOverlay(), TERMINAL_BOOTING_MAX_MS);
+    watchTerminalBootingOverlay(booting);
   }
 
   function closeTerminalAddMenu() {
@@ -9293,13 +9320,10 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
-    // 「正在加载」占位随活跃会话同步：武装的那次新建当拍挂层（首帧前屏上不再是
-    // 纯底色），其余会话把层撤走（用户在占位期间点了别的页签）。
-    syncTerminalBootingOverlay(session.id);
     if (deferScreen) {
       // live 行快路径让帧（M5）：左栏点已开着的会话行时，这一帧先让栏体当拍重渲
-      // （高亮即刻点亮），停放＋建流＋fit 三步整组延后到双 rAF 之后——同步任务里
-      // 先跑完栏渲染，xterm 重建的耗时不再挡首绘。三步必须成对延后：次序即
+      // （高亮即刻点亮），停放＋建流＋挂占位＋fit 整组延后到双 rAF 之后——同步任务里
+      // 先跑完栏渲染，xterm 重建的耗时不再挡首绘。这几步必须成对延后：次序即
       // 「旧画面停放成像素垫片、新画面就绪再揭幕」（92f6ced/b285e3d 立下的机制），
       // 拆开就会有一帧没有垫片的空屏。令牌保连点：醒来发现已不是自己这一帧
       // （用户又点了别的），旧帧整组退场不执行。
@@ -9309,6 +9333,9 @@ async function api(method, path, body) {
         if (terminalScreenSeq !== screenSeq) return;
         if (typeof parkTerminalScreen === "function") parkTerminalScreen();
         connectTerminalStream(session, { revive });
+        // 「正在加载」占位只在这一拍挂（见 syncTerminalBootingOverlay 前的时序注释）：
+        // 停放之后新实例已重置成空屏，旧帧还盖着的话占位在垫片之下不露脸。
+        if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(session.id);
         if (currentView === "terminal") scheduleTerminalFit();
       };
       if (typeof requestAnimationFrame === "function") {
@@ -9323,6 +9350,8 @@ async function api(method, path, body) {
     // 之间没有 await，旧画面不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
     if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     connectTerminalStream(session, { revive });
+    // 同上：挂层排在建流之后，点当拍不挂——内切的 /switch 在飞期间屏上还是上一屏。
+    if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(session.id);
     if (currentView === "terminal") scheduleTerminalFit();
   }
 
@@ -11976,13 +12005,10 @@ async function api(method, path, body) {
       // 兜底行当拍出现在目标目录组顶。working/无从内切落点都是别的页签，不许亮本页
       // 签——武装点必须在这两个 return 之后。
       if (!resume) terminalRailArmSelect({ endpoint: agentId, terminalId: active.id, cwd });
-      // 切换期进行态（A6）：/switch 在家主侧是 terminate+spawn，实测 6~12s，屏上不能停在
-      // 旧画面无反馈——复用「正在加载」占位（零新增文案），首帧数据落地即撤。/switch 在飞
-      // 期间没有别的渲染通路会调 sync，武装后立刻挂一层。
-      armTerminalBootingOverlay(active.id);
-      if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(active.id);
       // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本视口的记录（终端 id
-      // 不变，视口/页签都不变）。
+      // 不变，视口/页签都不变）。切换期进行态（A6）不排在这一拍：在飞的 6~12s 里屏上还是
+      // 上一屏的画面，这会儿挂「正在加载」占位就是叠在没擦的旧画面上（2026-11-02 用户
+      // 报告的错位现场），武装排到 /switch 落地之后（见下）。
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
       // 成功即收武装：兜底行的真实身份已经由宿主快照接手（spawnedAt 刷新、resume
@@ -11990,6 +12016,11 @@ async function api(method, path, body) {
       // （armed 会整段跳过「已被接替」判据）。高亮不丢：活跃终端没换，兜底行的选中
       // 判据回落到「这条终端就是活跃终端」；续接内切的新页签同样由 live 行接任。
       terminalRailEndSelect(null);
+      // 换屏已成事实（宿主 terminate+spawn 回来了，接下来这一帧屏上会先空一段：换绑
+      // 清屏 + 新实例重置）：此刻才武装「正在加载」占位，render 里的 sync 把它挂到新
+      // 实例上（垫片之下），新画面真出字才撤——判据见 syncTerminalBootingOverlay 前的
+      // 注释。失败不武装：判据门/服务端拒换都没换屏，屏上原样留着旧画面，没有空窗要盖。
+      armTerminalBootingOverlay(active.id);
       renderTerminalPreviewSession();
     } catch (error) {
       // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：

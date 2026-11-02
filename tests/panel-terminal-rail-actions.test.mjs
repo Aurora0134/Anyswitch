@@ -4155,6 +4155,7 @@ describe("M12 视口化验收（页签＝视口）", () => {
         if (method === "POST" && path.endsWith("/switch")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length, path.length - "/switch".length));
           log.switchBodies.push({ id, body });
+          log.order = (log.order || []).concat("switch_resolve");
           return Promise.resolve(state.switchSnapshot(id, body));
         }
         if (method === "POST" && path.endsWith("/close")) {
@@ -4181,7 +4182,10 @@ describe("M12 视口化验收（页签＝视口）", () => {
       ${extractFn("createAgentTerminal")}
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
-      function armTerminalBootingOverlay(id) { log.booting = (log.booting || []).concat(id); }
+      function armTerminalBootingOverlay(id) {
+        log.booting = (log.booting || []).concat(id);
+        log.order = (log.order || []).concat("arm");
+      }
       function renderTerminalPreviewSession() { log.renders += 1; }
       function renderTerminalPreviewTabs() { log.tabs += 1; }
       function renderTerminalEmptyState() { log.empty += 1; }
@@ -4234,7 +4238,9 @@ describe("M12 视口化验收（页签＝视口）", () => {
       id: "t-old", body: { resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" }, cwd: "C:\\dev\\alpha" },
     }], "空闲走既有 /switch：同记录 terminate+spawn，页签不变");
     assert.deepEqual(sandbox.viewports(), [{ id: "viewport-1", terminalId: "t-old" }], "视口仍只有一个、仍指向原终端记录");
-    assert.deepEqual(log.booting, ["t-old"], "A6：/switch 在飞期间武装「正在加载」占位（零新增文案）");
+    assert.deepEqual(log.booting, ["t-old"], "A6：内切换屏后武装「正在加载」占位（零新增文案）");
+    assert.deepEqual(log.order, ["switch_resolve", "arm"],
+      "武装排在 /switch 落地之后（2026-11-02 错位：在飞期间屏上还是上一屏，早挂就是压在没擦的旧画面上）");
   });
 
   it("A2 终端空闲点「新建会话」：就地换新会话，页签数不变", async () => {

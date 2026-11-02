@@ -15323,14 +15323,23 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.equal(blank.sandbox.booting()?.sessionId, "t-new", "空白终端新建同样武装");
   });
 
-  it("加载占位接线：页签渲染同步显隐，首帧数据落地即撤", () => {
+  it("加载占位接线：挂层排在建流之后（不压旧屏），撤层认出字不认数据帧", () => {
     const render = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
     assert.ok(render, "renderTerminalPreviewSession 可取样");
     assert.ok(render.includes("syncTerminalBootingOverlay(null)"), "未就绪/零会话分支撤占位");
-    assert.ok(render.includes("syncTerminalBootingOverlay(session.id)"), "主路径按活跃会话同步占位（武装的挂、其余撤）");
+    const connects = [...render.matchAll(/connectTerminalStream\(session, \{ revive \}\);/g)].map((m) => m.index);
+    const syncs = [...render.matchAll(/syncTerminalBootingOverlay\(session\.id\)/g)].map((m) => m.index);
+    assert.equal(connects.length, 2, "两条切换路径各建流一次");
+    assert.equal(syncs.length, 2, "两条切换路径各同步一次占位（武装的挂、其余撤）");
+    assert.ok(syncs[0] > connects[0] && syncs[1] > connects[1],
+      "挂层排在建流之后：旧屏还在的那一拍不挂（2026-11-02 错位现场）");
     const data = panelJs.match(/terminalEventSource\.addEventListener\("data"[\s\S]*?\n    \}\);/)?.[0];
     assert.ok(data, "流 data 处理器可取样");
-    assert.ok(data.includes("dropTerminalBootingOverlay"), "首帧数据落地即撤占位（typeof 闸护桩环境）");
+    assert.equal(data.includes("dropTerminalBootingOverlay"), false,
+      "数据帧不再是撤层判据：换绑清屏帧也是数据帧，按帧撤会撤在擦除那一刻");
+    const watch = panelJs.match(/function watchTerminalBootingOverlay\(booting\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(watch, "撤层观察者取得到");
+    assert.ok(watch.includes("terminalScreenHasContent(terminalXterm)"), "撤层判据＝新画面真的出字");
   });
 
   it("createAgentTerminal POST 到新路由，成功分支登记会话、置活跃、重渲", async () => {

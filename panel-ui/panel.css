@@ -2219,12 +2219,14 @@
   .terminal-xterm-host .xterm.terminal-stale-frame {
     position: absolute; inset: 0; z-index: 1; pointer-events: none;
   }
-  /* 「+」新建页签的「正在加载」占位（panel.js syncTerminalBootingOverlay）：全新
-     页签没有旧帧可垫，agent 首帧前屏上只有底色——这里按武装的会话挂一层居中
-     占位，首帧数据落地即撤。绝对定位不参与布局，z-index 与切签垫片同层（压在
-     空态覆盖层之下），指针事件穿透，键入照常进终端。 */
+  /* 「正在加载」占位（panel.js syncTerminalBootingOverlay）：新建页签没有旧帧可垫，
+     超实例内切换绑清屏之后到新会话首屏之前屏上也只剩底色——这里按武装的会话挂一层
+     居中占位，新画面真的出字才撤。绝对定位不参与布局、指针事件穿透，键入照常进终端。
+     z-index 压在切签垫片（1）之下：挂上这一拍垫片盖着的正是上一屏的像素，占位必须等
+     它撤走才露脸——同层的话它按 DOM 顺序压在垫片上方，就是「加载中文案叠在终端画面
+     上」的那张错位现场（2026-11-02）。空态覆盖层（2）照旧盖住它。 */
   .terminal-booting {
-    position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
     display: flex; align-items: center; justify-content: center; gap: 10px;
     font: 12.5px var(--font-sans); color: var(--terminal-fg); opacity: .55;
   }

@@ -933,3 +933,151 @@ describe("T10 建连：fit 的 resize POST 落定后再开流", () => {
     await connectPromise;
   });
 });
+
+/* ============================================================
+   T11 「正在加载」占位：挂层排在新实例建好之后，撤层认出画
+   ============================================================ */
+// 病灶（2026-11-02 用户报告的内切错位）：占位在上一屏还没擦时就挂上了，叠在终端
+// 画面上；等旧画面被擦掉、新会话还在启动那段，它又已经撤走，剩一整段空屏。两条
+// 判据各反了一面，本组逐面钉住：
+//   · 挂层：武装本身不碰 DOM（点击当拍不能上屏），sync 之后占位压在垫片之下
+//     （z-index 0 < 1，见 CSS 断言），旧帧还在时它不露脸；
+//   · 撤层：数据帧不再是判据（换绑清屏帧、空回放、TUI 清屏序列都是数据帧），只有
+//     「活跃实例缓冲区真的有字」才撤；3 秒上限仍在，防永久挂着。
+describe("T11 「正在加载」占位：只在旧屏已擦、新屏未出字那一段露脸", () => {
+  // 真跑 arm/drop/sync/watch 四个真身 + 内容判据，只把 $ / document / rAF / 定时器
+  // 与「现在」替成桩：断言只锚 DOM 存在性与帧序列，不锚任何墙钟。
+  function makeOverlayWorld() {
+    const clock = makeClock();
+    const screen = {
+      children: [],
+      appendChild(node) { node.parentNode = screen; screen.children.push(node); return node; },
+      removeChild(node) {
+        node.parentNode = null;
+        screen.children = screen.children.filter((c) => c !== node);
+        return node;
+      },
+    };
+    const factory = new Function(
+      "$", "document", "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout", "Date",
+      `
+      let terminalXterm = null;
+      const TERMINAL_BOOTING_MAX_MS = 3000;
+      const TERMINAL_BOOTING_ARM_TTL_MS = 10000;
+      let terminalBooting = null;
+      ${extractFn("terminalScreenHasContent")}
+      ${extractFn("armTerminalBootingOverlay")}
+      ${extractFn("dropTerminalBootingOverlay")}
+      ${extractFn("watchTerminalBootingOverlay")}
+      ${extractFn("syncTerminalBootingOverlay")}
+      return {
+        arm: armTerminalBootingOverlay,
+        drop: dropTerminalBootingOverlay,
+        sync: syncTerminalBootingOverlay,
+        booting: () => terminalBooting,
+        setTerm: (t) => { terminalXterm = t; },
+      };
+      `
+    );
+    let now = 1_000_000;
+    const world = factory(
+      (id) => (id === "terminalScreen" ? screen : null),
+      { createElement: () => ({ className: "", innerHTML: "", parentNode: null }) },
+      clock.requestAnimationFrame, clock.cancelAnimationFrame, clock.setTimeout, clock.clearTimeout,
+      { now: () => now },
+    );
+    return { world, clock, screen, advance: (ms) => { now += ms; } };
+  }
+
+  // 内容判据的输入：只有第一行有字，其余行空（与真 xterm 一开屏就有 rows 行空行
+  // 的形状一致——判据必须逐行看内容，不能数行数）。
+  function termWith(text) {
+    return {
+      rows: 4,
+      buffer: {
+        active: {
+          length: 4,
+          viewportY: 0,
+          getLine: (y) => ({ translateToString: () => (y === 0 ? text : "") }),
+        },
+      },
+    };
+  }
+
+  it("武装不碰 DOM：点击当拍屏上不多任何东西（旧屏还在，那一段不能挂）", () => {
+    const w = makeOverlayWorld();
+    w.world.arm("t-old");
+    assert.equal(w.screen.children.length, 0, "武装只记意图");
+    assert.equal(w.world.booting().sessionId, "t-old", "意图锚在这条会话上");
+  });
+
+  it("sync 只给武装的那个会话挂层；换成别的会话即撤（用户在占位期点了别的页签）", () => {
+    const w = makeOverlayWorld();
+    w.world.arm("t-old");
+    w.world.sync("t-new");
+    assert.equal(w.screen.children.length, 0, "不是武装的会话：不挂，且把武装撤掉");
+    assert.equal(w.world.booting(), null);
+    w.world.arm("t-old");
+    w.world.sync("t-old");
+    assert.equal(w.screen.children.length, 1, "武装的会话挂一层");
+    assert.equal(w.screen.children[0].className, "terminal-booting");
+    assert.match(w.screen.children[0].innerHTML, /正在加载/, "沿用既有文案，零新增");
+  });
+
+  it("空屏会话：空回放/清屏之后不撤，新画面出字那一帧才撤", () => {
+    const w = makeOverlayWorld();
+    w.world.arm("t-x");
+    w.world.sync("t-x");
+    w.world.setTerm(termWith(""));
+    for (let i = 0; i < 5; i += 1) w.clock.flushFrames();
+    assert.equal(w.screen.children.length, 1,
+      "缓冲区里没有字就不撤——旧判据「任意数据帧落地即撤」在这一步就撤走了，正是那段空屏");
+    w.world.setTerm(termWith("Claude Code"));
+    w.clock.flushFrames();
+    assert.equal(w.screen.children.length, 0, "新画面出字即撤");
+    assert.equal(w.world.booting(), null, "武装一并收掉");
+    assert.equal(w.clock.pendingFrames(), 0, "帧循环不空转");
+  });
+
+  it("一直不出字也不永久挂着：3 秒上限兜底撤层", () => {
+    const w = makeOverlayWorld();
+    w.world.arm("t-x");
+    w.world.sync("t-x");
+    w.world.setTerm(termWith(""));
+    for (let i = 0; i < 5; i += 1) w.clock.flushFrames();
+    assert.equal(w.screen.children.length, 1, "帧推进不会撤（判据没成立）");
+    w.clock.flushAll();
+    assert.equal(w.screen.children.length, 0, "兜底计时器到点撤层");
+    assert.equal(w.world.booting(), null);
+  });
+
+  it("陈旧武装不挂到后来的重建上：超 10 秒的 sync 直接作废", () => {
+    const w = makeOverlayWorld();
+    w.world.arm("t-x");
+    w.advance(10001);
+    w.world.sync("t-x");
+    assert.equal(w.screen.children.length, 0, "过期武装不挂层");
+    assert.equal(w.world.booting(), null, "过期即清");
+  });
+
+  it("源码/CSS：占位压在垫片之下（旧帧还在时不露脸），且不参与布局、不吞指针", () => {
+    const rule = panelCss.match(/\.terminal-booting \{[\s\S]*?\}/)?.[0] || "";
+    assert.match(rule, /position: absolute/);
+    assert.match(rule, /inset: 0/);
+    assert.match(rule, /pointer-events: none/);
+    assert.match(rule, /z-index: 0/);
+    const stale = panelCss.match(/\.terminal-xterm-host \.xterm\.terminal-stale-frame \{[\s\S]*?\}/)?.[0] || "";
+    assert.match(stale, /z-index: 1/, "垫片压在上面：占位等同层就叠到终端画面上了");
+  });
+
+  it("源码：挂层点在 render 的建流之后，data 处理器不再撤层", () => {
+    const render = extractFn("renderTerminalPreviewSession");
+    const connects = [...render.matchAll(/connectTerminalStream\(session, \{ revive \}\);/g)].map((m) => m.index);
+    const syncs = [...render.matchAll(/syncTerminalBootingOverlay\(session\.id\)/g)].map((m) => m.index);
+    assert.equal(syncs.length, 2, "两条切换路径各同步一次");
+    assert.ok(syncs[0] > connects[0] && syncs[1] > connects[1], "挂层排在建流之后");
+    const data = extractFn("connectTerminalStream");
+    assert.equal(data.includes("dropTerminalBootingOverlay"), false, "数据帧不是撤层判据");
+  });
+});
+
