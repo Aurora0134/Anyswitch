@@ -502,13 +502,16 @@ if (window.panelStartupController) panelStartupPlay();
       </button>
     </div>
   </div>
-  <!-- 设置全页头行：与主头行互斥（switchView 切 hidden）；右侧亮暗钮与主头行同一状态源 -->
+  <!-- 设置全页头行：与主头行互斥（switchView 切 hidden）；右侧亮暗钮与主头行同一状态源。
+       页题跟当前子 tab 走（通用 / 高级选项 / 自动路由 / 主题 / 关于）：文字由
+       syncSettingsHeadTitle 现取子 tab 条那一格的标签，不另抄一份字符串；静态默认
+       「通用」与静态选中的「通用」子 tab 同帧一致（同 #v2PageTitle 的默认位规矩）。 -->
   <div class="layout-container head-inner" id="settingsHeadInner" hidden>
     <div class="settings-head-left">
       <button class="icon-btn" id="settingsExitBtn" title="回到之前的视图" aria-label="回到之前的视图">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
       </button>
-      <h1 class="settings-head-title">设置</h1>
+      <h1 class="settings-head-title" id="settingsHeadTitle">通用</h1>
     </div>
     <button class="icon-btn" id="settingsThemeToggle" aria-label="切换亮暗主题" title="切换亮暗主题">
       <svg id="settingsIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>

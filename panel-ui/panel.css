@@ -273,6 +273,22 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+  /* 滚动条槽位恒留：各页内容高度不同，文档滚动条时有时无（一屏装得下就没有），而它要
+     在布局里吃掉 10px——.layout-container 是按可用宽度居中的，于是整列内容连同设置页头
+     行的页题一起左右各挪 5px，页题到左栏的间距也跟着变（1920 宽下实测 151px ↔ 156px），
+     切子 tab 时看着就是标题跳了一下。槽位恒留后，有无滚动条都不再改可用宽度。
+     终端页例外：它满屏、自身不滚（body.terminal-mode 已 overflow:hidden），槽位只会白
+     让 xterm 少 10px 宽。首帧那一帧还没有 body.terminal-mode，按首帧标记重述同一档，
+     见文件尾「首帧视图落位」段。 */
+  html { scrollbar-gutter: stable; }
+  html:has(body.terminal-mode) { scrollbar-gutter: auto; }
+  /* 与槽位恒留成对：满屏浮层用 inset:0 取宽，量到的是扣掉槽位的可用宽度，右缘会漏出
+     一条没被盖住的底色带（开屏层的亚克力、弹窗与会话删除的压暗都缺这一条，实测暗色
+     下是 #16171b 对 #0f1014）。100vw 含滚动条宽度，铺满整窗；三者都是 fixed 层，fixed
+     元素不计入可滚动范围，不会凭空撑出横向滚动条。
+     写成单行：style-lab-sync 测试以「行首 #panelStartup {」认开屏样式段的起点，多行
+     拆开后这条会被误认成那个边界锚点。 */
+  .modal-overlay, .sessions-drawer-mask, #panelStartup { width: 100vw; }
 
   /* 全站统一焦点可见性：2px 实色环 + 柔光，outline-offset 防贴边 */
   button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
@@ -5424,6 +5440,11 @@
   html[data-prepaint-view="terminal"] body header.site-head { display: none; }
   html[data-prepaint-view="terminal"] body > footer { display: none; }
   html[data-prepaint-view="terminal"] body main.layout-container { max-width: none; padding: 0; margin: 0; }
+  /* 终端页首帧同样不占滚动条槽位：上面那条只是把 body 的滚动收掉，而槽位恒留挂在
+     <html> 上（那是文档滚动容器），不收就白让终端屏少 10px 宽——首帧窄 10px、落定后
+     由 body.terminal-mode 那条收回，等于整屏横跳一次。与基座那条「终端态豁免槽位」
+     同值，两处必须一起改。 */
+  html[data-prepaint-view="terminal"] { scrollbar-gutter: auto; }
   /* 新版（v2）的终端首帧：上面那条把 padding/max-width 抹成旧版口径，而 v2 的左让挂在
      :root[data-ui-version="v2"] 上——首帧与落定态不一致会整屏跳一次。按栏态分档重述：
      栏常驻，窄栏让 72、宽档让 216。两个标记同在 <html> 上，同链按落定态重述

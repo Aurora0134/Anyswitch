@@ -411,6 +411,10 @@ async function api(method, path, body) {
   let notifyBoardRendered = () => {};
   let enterSettingsView = () => {};
   let leaveSettingsView = () => {};
+  // 设置头行页题跟当前子 tab 走（实现在 initSettingsView）。switchView 换头行那刻也调
+  // 一次：子 tab 的激活排在首帧之后的进入工作里，光靠 activateSettingsSubTab 会让头行
+  // 先带着上一格的字亮一帧。参数＝即将落的那一格，空值按「通用」兜底。
+  let syncSettingsHeadTitle = () => {};
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -4396,9 +4400,22 @@ async function api(method, path, body) {
       theme: "railDirTheme",
       about: "railDirAbout",
     };
+    // 头行页题＝当前子 tab 的名字。文字现取子 tab 条那一格自己的标签（与 v2 轻页头
+    // #v2PageTitle 取栏 tab 标签同一手法），不另抄一份字符串；静态默认「通用」与静态
+    // 选中的「通用」子 tab 同帧一致。空键按「通用」兜底：主动进设置恒落通用，恢复存档
+    // 里存着已退役的键也只有这一条退路。
+    const settingsHeadTitle = $("settingsHeadTitle");
+    syncSettingsHeadTitle = (which) => {
+      const key = settingsSubTabs[which] ? which : "general";
+      if (settingsHeadTitle) settingsHeadTitle.textContent = $(settingsSubTabs[key][0]).textContent.trim();
+    };
     function activateSettingsSubTab(which, animate) {
       const selected = settingsSubTabs[which];
-      if (!selected || $(selected[0]).classList.contains("active")) return;
+      if (!selected) return;
+      // 页题先落再谈早退：它跟的是「此刻该显示的那一格」，已经在选中的那格再点一次
+      // （或进入设置时程序置位）也得保证两者一致。
+      syncSettingsHeadTitle(which);
+      if ($(selected[0]).classList.contains("active")) return;
       resetPageScroll();
       if (which !== "about") about.leave();
       if (which !== "advanced") { dataBundle.leave(); backupLocation.leave(); }
@@ -12560,6 +12577,10 @@ async function api(method, path, body) {
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
     $("mainHeadInner").hidden = settings || terminal;
     $("settingsHeadInner").hidden = !settings;
+    // 页题先按即将落的那一格写好，再交给进入工作里真正激活子 tab 那一步复核：子 tab 的
+    // 激活排在首帧之后，只在那里写会让头行先带着上一格的字亮一帧。恢复进设置时那格来自
+    // 存档（enterSettingsView 消费的就是它），主动进设置恒落「通用」。
+    if (settings) syncSettingsHeadTitle(settingsSubTabToRestore);
     $("tabBoard").classList.toggle("active", board);
     $("tabSkills").classList.toggle("active", name === "skills");
     $("tabPresets").classList.toggle("active", presets);
