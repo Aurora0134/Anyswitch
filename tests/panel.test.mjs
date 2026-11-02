@@ -3801,7 +3801,7 @@ describe("panel.html 设置全页视图", () => {
       "JS 不再驱动 master-off / ep-off");
   });
 
-  it("设置专用头行：左侧「←」图标钮（无文字）+「设置」标题，右侧亮暗钮与主头行同源", () => {
+  it("设置专用头行：左侧「←」图标钮（无文字）+ 子 tab 名页题，右侧亮暗钮与主头行同源", () => {
     assert.ok(/<div class="layout-container head-inner" id="mainHeadInner">/.test(panelHtml),
       "主头行有 mainHeadInner 锚点");
     assert.ok(/id="settingsHeadInner" hidden/.test(panelHtml), "设置头行默认隐藏");
@@ -3811,13 +3811,65 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(exit[0].includes('title="回到之前的视图"') && exit[0].includes('aria-label="回到之前的视图"'),
       "退出钮悬浮提示与无障碍标签保留");
     assert.ok(/^\s*<svg[\s\S]*<\/svg>\s*$/.test(exit[1]), "退出钮仅含箭头图标、无文字");
-    assert.ok(/class="settings-head-title">设置</.test(head), "「设置」标题");
+    // 页题不再是固定的「设置」，而是跟着当前子 tab 走：静态默认位必须与静态选中的那个
+    // 子 tab 逐字同（同 #v2PageTitle 的默认位规矩），否则首帧就自相矛盾。
+    const headTitle = head.match(/<h1 class="settings-head-title" id="settingsHeadTitle">([^<]*)<\/h1>/);
+    assert.ok(headTitle, "页题是 .settings-head-title 且带 id（子 tab 切换据此改写文字）");
+    const defaultTab = (panelHtml.match(/<button class="view-tab active" id="settingsTab\w+"[^>]*>([^<]+)<\/button>/) || [])[1];
+    assert.strictEqual(headTitle[1], defaultTab,
+      `页题静态默认（${headTitle[1]}）与静态选中的子 tab（${defaultTab}）逐字同`);
     assert.ok(head.includes('id="settingsThemeToggle"'), "右侧亮暗切换按钮");
     assert.ok(head.includes('id="settingsIcoMoon"') && head.includes('id="settingsIcoSun"'), "日/月图标齐备");
     const theme = panelJs.match(/function initTheme\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(theme, "initTheme found in panel.js");
     assert.ok(theme[1].includes("settingsThemeToggle") && theme[1].includes("settingsIcoSun"),
       "initTheme 把设置头行亮暗钮并入同一状态源");
+  });
+
+  it("设置页题跟当前子 tab 走：文字现取子 tab 标签，子 tab 未激活的窗口期也不落旧字", () => {
+    // 三处一起锁：①写入点（activateSettingsSubTab 里，早退之前）；②文字源＝子 tab 条
+    // 那一格自己的标签（不另抄一份字符串，同 v2 轻页头取栏 tab 标签的手法）；③换头行
+    // 那一刻的前置写入（子 tab 激活排在首帧之后，缺这一笔会先亮上一格的字一帧）。
+    const hook = panelJs.match(/syncSettingsHeadTitle = \(which\) => \{([\s\S]*?)\n    \};/);
+    assert.ok(hook, "initSettingsView 里装配 syncSettingsHeadTitle");
+    assert.ok(hook[1].includes('settingsHeadTitle.textContent = $(settingsSubTabs[key][0]).textContent.trim()'),
+      "页题文字逐次现取子 tab 标签");
+    assert.ok(/const key = settingsSubTabs\[which\] \? which : "general";/.test(hook[1]),
+      "空键/退役键兜底落「通用」，与主动进入设置的落点同源");
+    const activate = panelJs.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
+    assert.ok(activate, "activateSettingsSubTab found");
+    const writeAt = activate[1].indexOf("syncSettingsHeadTitle(which)");
+    const earlyReturn = activate[1].indexOf('classList.contains("active")) return');
+    assert.ok(writeAt >= 0, "子 tab 切换要写页题");
+    assert.ok(earlyReturn > writeAt, "写入点排在「已在选中格就早退」之前，重复点同一格也不会留下旧字");
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found");
+    assert.ok(sw[1].includes("if (settings) syncSettingsHeadTitle(settingsSubTabToRestore);"),
+      "换头行那一刻先按即将落的那一格写好页题（子 tab 激活晚于首帧）");
+  });
+
+  it("设置页题不随子 tab 内容高低横移：滚动条槽位恒留，满屏浮层按整窗宽补回", () => {
+    // 病根：各子 tab 内容高度不同 → 文档滚动条时有时无 → 可用宽度差 10px；内容列是按
+    // 可用宽度居中的，于是整列连同页题左右各挪 5px（1920 宽实测 151px ↔ 156px）。
+    assert.ok(/html \{ scrollbar-gutter: stable; \}/.test(panelCss),
+      "文档滚动条槽位恒留：有无滚动条都不再改可用宽度");
+    // 终端页满屏且自身不滚，槽位恒留只会白让 xterm 少 10px 宽：运行态与首帧各豁免一次，
+    // 两处取值必须同——首帧那一帧还没有 body.terminal-mode，只认首帧标记。
+    assert.ok(/html:has\(body\.terminal-mode\) \{ scrollbar-gutter: auto; \}/.test(panelCss),
+      "终端态豁免槽位恒留（运行态）");
+    const prepaintCss = panelCss.slice(panelCss.indexOf("首帧视图落位"));
+    assert.ok(prepaintCss.length > 0, "取到「首帧视图落位」段");
+    assert.ok(/html\[data-prepaint-view="terminal"\] \{ scrollbar-gutter: auto; \}/.test(prepaintCss),
+      "终端页首帧豁免槽位恒留（漏这条＝首帧窄 10px、落定后再宽回来，整屏横跳一次）");
+    // 与槽位恒留成对：满屏浮层用 inset:0 取宽，量到的是扣掉槽位的可用宽度，右缘会漏出
+    // 一条没被盖住的底色带。三条必须成组出现，且各自仍是满屏 fixed 层——改成非 fixed
+    // 或非 inset:0，这条补宽就失去意义（fixed 元素不计入可滚动范围，故不会撑出横滚）。
+    const fullBleed = panelCss.match(/\.modal-overlay,\s*\.sessions-drawer-mask,\s*#panelStartup \{([^}]*)\}/);
+    assert.ok(fullBleed, "满屏浮层成组补宽（与槽位恒留配对）");
+    assert.ok(fullBleed[1].includes("width: 100vw"), "取 100vw（含滚动条宽度）铺满整窗");
+    assert.ok(/\.modal-overlay \{[\s\S]*?position: fixed; inset: 0;/.test(panelCss), "弹窗遮罩仍是满屏 fixed");
+    assert.ok(/\.sessions-drawer-mask \{ position: fixed; inset: 0;/.test(panelCss), "会话删除遮罩仍是满屏 fixed");
+    assert.ok(/html\[data-startup\] #panelStartup \{[\s\S]*?position: fixed; inset: 0;/.test(panelCss), "开屏层仍是满屏 fixed");
   });
 
   it("设置头行日/月图标 path 与主头行 #themeToggle 逐字一致", () => {
