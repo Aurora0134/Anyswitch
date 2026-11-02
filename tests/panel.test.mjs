@@ -7347,7 +7347,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
   });
 
   it("布局断点按栏态校准：宽档 +240 / 窄栏 +96（栏常驻，窄栏块无下界）；只校准真挤压的布局断点", () => {
-    // 校准清单（v1 阈值 → v2 宽档/窄栏）：看板双栏 1080→1320/1176、统计上半区 1000→1240/1096、
+    // 校准清单（v1 阈值 → v2 宽档/窄栏）：看板双栏 1107→1347/1203、统计上半区 1000→1240/1096、
     // 会话详情+目录 1023→1263/1119（目录浮动钮显隐随同一条）、Skills 双栏/统计四宫格 960→仅窄栏
     // 1056（宽档阈值 960+240=1200 恰为档界：v1 口径的塌缩内容宽在宽档本就够不到，宽档无需补）。
     // 手动态修正：collapsed（宽档栏收 72、内容只让 96）时宽档三块收 :not() 摘出——≥1200 内容
@@ -7356,9 +7356,9 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
       const text = `${mq} {\n${rules.map((r) => `    ${r}`).join("\n")}\n  }`;
       assert.ok(panelCss.includes(text), `校准块在册：${mq}`);
     };
-    expectBlock("@media (min-width: 1200px) and (max-width: 1320px)",
+    expectBlock("@media (min-width: 1200px) and (max-width: 1347px)",
       [':root[data-ui-version="v2"]:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }']);
-    expectBlock("@media (max-width: 1176px)",
+    expectBlock("@media (max-width: 1203px)",
       [':root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }']);
     expectBlock("@media (max-width: 1056px)",
       [':root[data-ui-version="v2"] .skills-grid { grid-template-columns: 1fr; }',
