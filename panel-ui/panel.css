@@ -452,18 +452,21 @@
 
   /* v2 布局断点校准：栏体占宽折算进塌缩阈值（宽档 +240 / 窄栏 +96，与栏+间距 240/96
      同源；栏在任何宽度常驻，窄栏块无下界、一路塌到最窄窗口）。只校准「塌晚了真挤压
-     内容」的布局模式断点：看板双栏 1080 / 统计上半区 1000 / 会话详情+目录 1023（目录
+     内容」的布局模式断点：看板双栏 1107 / 统计上半区 1000 / 会话详情+目录 1023（目录
      浮动钮显隐随同一条）/ Skills 双栏与统计四宫格 960。960 系的宽档阈值 960+240=1200
      恰为档界（v1 口径的塌缩内容宽在宽档本就够不到），只补窄栏。瓦片类小网格与排版/
-     紧凑类断点不动。
+     紧凑类断点不动。看板双栏阈值 2026-11-02 由 1080 平移 +27 至 1107：阈值守的是主栏
+     内容地板，左栏 320→347（柱图槽位甜点，见 .ms-cell 注释）多吃的 27px 折算进阈值，
+     主栏可用宽在塌缩点不降。
      手动态修正（栏顶收起钮，data-rail="collapsed"）：宽档栏收 72 后内容只让 96，
-     ≥1200 时内容恒 ≥1104（盖过全部 v1 阈值 1080/1023/1000），三处宽档校准块收
-     :not([data-rail="collapsed"]) 限定、手动态下不命中；expanded 的反向修正（窄栏
-     栏展 216、内容让 240 全程真挤压）在阶段 2 段的手动态块里补一条全档塌缩。 */
-  @media (min-width: 1200px) and (max-width: 1320px) {
+     ≥1200 时内容恒 ≥1104（v1 各阈值 1107/1023/1000 的塌缩内容地板均在其下），三处
+     宽档校准块收 :not([data-rail="collapsed"]) 限定、手动态下不命中；expanded 的
+     反向修正（窄栏栏展 216、内容让 240 全程真挤压）在阶段 2 段的手动态块里补一条
+     全档塌缩。 */
+  @media (min-width: 1200px) and (max-width: 1347px) {
     :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }
   }
-  @media (max-width: 1176px) {
+  @media (max-width: 1203px) {
     :root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }
   }
   @media (max-width: 1056px) {
@@ -1322,14 +1325,17 @@
     padding-bottom: 48px;
   }
 
+  /* 左栏 347px 是状态检测柱图的槽位甜点（容器 309px = 48 柱 ×4px + 47 间隙 ×2px
+     + 行 padding 4px + 柱图缩进 19px，恰整除零余量，机制见 .ms-cell 注释）；改左栏
+     宽度时此阈值（1107）与 v2 校准块两处塌折断点须按同量同步平移。 */
   .telemetry-layout-grid {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 347px 1fr;
     gap: 20px;
     align-items: start;
   }
 
-  @media (max-width: 1080px) {
+  @media (max-width: 1107px) {
     .telemetry-layout-grid { grid-template-columns: 1fr; }
   }
 
@@ -1416,15 +1422,18 @@
   .ms-rate.y { color: var(--warn); }
   .ms-rate.r { color: var(--danger); }
   /* 柱宽 = 整数槽位（--ms-slot 由 panel.js 按容器实测宽下取整写入，48 柱均分
-     「可用宽 − 47 个 3px 间隙」）：等分 flex（flex:1 1 0）会把 259px 分成每柱
-     2.46px 这类分数宽，浏览器涂色时对每根柱左右边缘各自取整到像素格，相邻柱
-     可见宽就在 2px/3px 间交替（2026-10-31 实测复现）。改固定整数槽宽后，除不尽
-     的余数由 space-between 摊进间隙——间隙是背景色，3px/4px 之差不可见，柱子
-     严格同宽且首尾柱贴行两端、整行铺满。shrink 保留 1：仅当槽位常量漂移导致
-     总宽超出容器时兜底收缩，正常路径永不触发。 */
-  .ms-cells { position: relative; display: flex; align-items: flex-end; justify-content: space-between; gap: 3px; height: 22px; margin: 8px 0 0 19px; contain: layout; }
+     「可用宽 − 47 个 2px 间隙」）：等分 flex（flex:1 1 0）分得的是分数宽，浏览器
+     涂色时对每根柱左右边缘各自取整到像素格，相邻柱可见宽会在两档间交替
+     （2026-10-31 实测复现）。固定整数槽宽后，除不尽的余数由 space-between 摊进
+     间隙——间隙是背景色，1px 之差不可见，柱子严格同宽且首尾柱贴行两端、整行
+     铺满。2026-11-02 比例重修：旧态左栏 320px 下槽位被钳到 2px、间隙 3px，缝比
+     柱宽近一倍；左栏放宽至 347px 后容器恰 309px，48 柱 ×4px + 47 间隙 ×2px
+     + 行 padding 4px + 缩进 19px 零余量——柱 4px 缝 2px（347/94 与左栏栅格、
+     panel.js syncMsBarSlot 常量同组约定，改一处须同步，塌折断点随左栏平移）。
+     shrink 保留 1：仅当槽位常量漂移导致总宽超出容器时兜底收缩，正常路径永不触发。 */
+  .ms-cells { position: relative; display: flex; align-items: flex-end; justify-content: space-between; gap: 2px; height: 22px; margin: 8px 0 0 19px; contain: layout; }
   .ms-cells::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--border); pointer-events: none; }
-  .ms-cell { flex: 0 1 var(--ms-slot, 2px); height: 4px; border-radius: 1.5px 1.5px 0 0; background-color: var(--ok); cursor: pointer; }
+  .ms-cell { flex: 0 1 var(--ms-slot, 4px); height: 4px; border-radius: 1.5px 1.5px 0 0; background-color: var(--ok); cursor: pointer; }
   .ms-cell.mid { background-color: var(--warn); }
   .ms-cell.bad { background-color: var(--danger); }
   .ms-cell.idle { height: 2px !important; background-color: var(--text-4); opacity: 0.35; cursor: default; border-radius: 1px; }
@@ -1457,7 +1466,7 @@
   .prop-name { color: var(--text-3); font-weight: 500; }
   .prop-val { font-family: var(--font-mono); font-weight: 600; color: var(--text); }
 
-  /* 看板左栏的虚拟终端入口卡：纵向排——说明在上、按钮占满整行（左栏只有 320px，
+  /* 看板左栏的虚拟终端入口卡：纵向排——说明在上、按钮占满整行（左栏只有 347px，
      横向两栏会把说明压成一竖条）。说明的字号与色档抄 .modal-item-desc。 */
   .terminal-entry-desc { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin-bottom: 14px; }
   .terminal-entry-btn { display: flex; width: 100%; justify-content: center; }

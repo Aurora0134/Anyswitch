@@ -1789,16 +1789,16 @@ async function api(method, path, body) {
 
   // 柱图槽位同步（.ms-cell 宽度的整数化来源，机制见 panel.css .ms-cell 注释）：
   // 宽量自 msList（与 .ms-item 同宽——flex 列内拉伸到列表内容宽），扣掉 .ms-item
-  // 左右 padding 共 4px、.ms-cells margin-left 19px 与 47 个 3px 间隙后，48 柱
+  // 左右 padding 共 4px、.ms-cells margin-left 19px 与 47 个 2px 间隙后，48 柱
   // 均分下取整。卡隐藏时量到 0 保持旧值，可见后由渲染或 RO 回调补算。槽位相关
-  // 常量（4/19/141/48）与 CSS（padding/margin/gap）及后端 BUCKET_COUNT=48 是
-  // 一组约定，改一处须同步。
+  // 常量（4/19/94/48）与 CSS（padding/margin/gap）及后端 BUCKET_COUNT=48 是
+  // 一组约定，改一处须同步；左栏宽 347 是该组约定的甜点位（容器 309px 恰整除）。
   function syncMsBarSlot() {
     const list = $("msList");
     if (!list) return;
     const w = list.clientWidth;
     if (!w) return;
-    const slot = Math.max(2, Math.floor((w - 4 - 19 - 141) / 48));
+    const slot = Math.max(2, Math.floor((w - 4 - 19 - 94) / 48));
     list.style.setProperty("--ms-slot", slot + "px");
   }
 
