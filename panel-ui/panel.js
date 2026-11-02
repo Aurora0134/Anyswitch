@@ -7560,8 +7560,9 @@ async function api(method, path, body) {
 
   // 复活一条已退出的会话：走服务端 /revive，由它按当前安装与设置重新组装
   // 启动参数与凭据（env 从不落盘，宿主自己重启拿不到这些值，起来的就是
-  // agent 的原生实例）。同一会话的并发复活合并成一次——输入触发的复活与
-  // 页签点击可能同时发生，重复打只会多起一个进程。
+  // agent 的原生实例）。只服务点页签等主动通路（键入不复活，见
+  // sendTerminalInput）；同一会话的并发复活合并成一次——快速重入时上一
+  // 次复活可能还在路上，重复打只会多起一个进程。
   const terminalReviveInflight = new Map();
   function reviveTerminalSession(session) {
     if (!session?.backend) return Promise.resolve(null);
@@ -7581,9 +7582,11 @@ async function api(method, path, body) {
     return run;
   }
 
-  // 键入的唯一出口。进程已退（服务端 409 session_exited）时不把这次输入丢掉：
-  // 标记该会话已结束、复活一次、再把这次输入补发过去——用户不该为一次重开
-  // 再敲一遍。复活失败则放弃这次输入，由调用方保持沉默（终端上没有新增提示）。
+  // 键入的唯一出口。进程已退（服务端 409 session_exited）时不复活：退出可能
+  // 本就是应当发生的结果（用户主动退出、拒绝信任目录等），键入自动复活只会把
+  // 会话推进「退出→自动重启→再退出」的循环。这里只把前端状态同步成 exited、
+  // 放弃这次输入并返回 false，调用方保持沉默（终端上没有新增提示）；重开是
+  // 显式动作，只认点页签的复活通路（connectTerminalStream 的 revive 分支）。
   function sendTerminalInput(sessionId, data) {
     if (sessionId === null || sessionId === undefined) return Promise.resolve(false);
     // 键入即读：往这个终端打字＝看着它，done（跑完未读）标记当场清。
@@ -7597,14 +7600,9 @@ async function api(method, path, body) {
           console.warn("[terminal] input delivery failed:", error);
           return false;
         }
+        // 409＝进程已退：同步前端状态后放弃这次输入，绝不替用户重开（见函数头）。
         if (session?.backendState) session.backendState = { ...session.backendState, status: "exited" };
-        return reviveTerminalSession(session).then((revived) => {
-          if (!revived) return false;
-          return api("POST", path, { data }).then(() => true).catch((retryError) => {
-            console.warn("[terminal] input delivery failed after revive:", retryError);
-            return false;
-          });
-        });
+        return false;
       });
   }
 
