@@ -116,6 +116,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
       // 尺寸可信度两个开关：默认「可测 + 不在组字」（与真身常态一致），用例 9 按需拨。
       measurable: (v) => { state.measurable = v; },
       imeHold: (v) => { terminalImeHold = v; },
+      setStreak: (v) => { terminalGeometryRealignStreak = v; },
       swapTerm: (term) => { terminalXterm = term; },
     };
     `
@@ -399,6 +400,9 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     const session = sessionOf("S1");
     const { es, term } = await prime(world, session);
     assert.equal(world.streak(), 0, "前置：匹配帧把账清零");
+    // 先把账顶到 1（等价于此前真发生过一次「量得到但宿主对不上」的重对齐）。这样下面
+    // 那一帧不可测的快照才分得清「原地不动」与「归零」两种实现——从 0 起算两种都过。
+    world.setStreak(1);
 
     // 这一拍 fit 静默早退（容器量不到），term.cols 停在 xterm 出厂值——这是猜测值，
     // 不是测量值，拿它 POST 等于把 80 列硬写进 PTY。
@@ -411,7 +415,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.sources.length, 1, "也不重连");
     assert.deepEqual(world.state.warnings, [], "不告警");
     assert.equal(world.pending(), false, "不占回放闩");
-    assert.equal(world.streak(), 0, "不累加");
+    assert.equal(world.streak(), 1, "不可测的一帧既不归零也不累加：只认「判得了且没对上」的连续失败");
     assert.deepEqual(world.state.writes, ["不可测时的回放"], "照原逻辑落屏：屏上有内容");
 
     // 组字期几何被冻结（terminalImeHold 非空），同样不可信，同样不判。
@@ -422,6 +426,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.posts.length, 0, "组字期也不 POST");
     assert.equal(world.state.sources.length, 1, "组字期也不重连");
     assert.equal(world.pending(), false, "组字期也不占回放闩");
+    assert.equal(world.streak(), 1, "组字期那一帧同样不动账");
     world.imeHold(null);
   });
 });
