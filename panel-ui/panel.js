@@ -7428,6 +7428,9 @@ async function api(method, path, body) {
   // 重画一遍，不如退回原逻辑让用户至少看到画面。
   const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
   const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
+  // POST 挂住不落定（api() 没有超时）时的兜底：先放开数据闸让回放照常落屏。这时回放
+  // 仍是错宽度（同修复前的形态），但画面在；POST 真落定后 finally 仍会重连重画一帧对的。
+  const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
   let terminalGeometryRealignPending = false;
   let terminalGeometryRealignAt = 0;
   let terminalGeometryRealignStreak = 0;
@@ -7979,10 +7982,15 @@ async function api(method, path, body) {
         }
         // 用客户端真实尺寸强制对齐：postTerminalResize 内部已处理失败重试与 backendState
         // 回写。落定后重开一条流，拿宿主按新尺寸自绘的整屏帧——这份回放已经作废。
+        const realignStall = setTimeout(() => {
+          if (term === terminalXterm) terminalGeometryRealignPending = false;
+        }, TERMINAL_GEOMETRY_REALIGN_STALL_MS);
         postTerminalResize(session, clientCols, clientRows).finally(() => {
+          clearTimeout(realignStall);
           terminalGeometryRealignPending = false;
           // 期间可能已切走 / 被拆流 / 换了实例：那些情况下这条重连都是多余的。
           if (term !== terminalXterm || !terminalEventSource) return;
+          if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
           connectTerminalStream(session, { revive: false });
         });
         return;

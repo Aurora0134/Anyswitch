@@ -21,6 +21,7 @@ const panelJs = readFileSync(join(here, "../panel-ui", "panel.js"), "utf8");
 // 数值不另抄：冷却窗与连续上限都从真身源码里取原句塞进沙箱，改真身时测试跟着走。
 const COOLDOWN_DECL = /const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = \d+;/;
 const MAX_ATTEMPTS_DECL = /const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = \d+;/;
+const STALL_DECL = /const TERMINAL_GEOMETRY_REALIGN_STALL_MS = \d+;/;
 
 function declOf(pattern, name) {
   const decl = panelJs.match(pattern)?.[0];
@@ -40,14 +41,34 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     posts: [],
     writes: [],
     disposed: 0,
+    warnings: [],
     fitImpl: () => null,
     postImpl: () => Promise.resolve({}),
+  };
+  // 可控时钟：几何账的冷却窗（Date.now）与挂起兜底定时器共用同一条时间线，测试里
+  // 用 advance() 显式推进，不依赖墙钟。
+  const clock = {
+    now: 1_000_000,
+    seq: 0,
+    timers: [],
+    advance(ms) {
+      clock.now += ms;
+      for (;;) {
+        const due = clock.timers.filter((timer) => timer.at <= clock.now);
+        if (due.length === 0) break;
+        due.sort((a, b) => a.at - b.at || a.id - b.id);
+        const timer = due[0];
+        clock.timers = clock.timers.filter((candidate) => candidate !== timer);
+        timer.fn();
+      }
+    },
   };
   const factory = new Function(
     "state", "EventSource", "API_BASE", "document", "$",
     "ensureTerminalXterm", "fitTerminalXterm", "sendTerminalInput", "reviveTerminalSession",
     "postTerminalResize", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst",
     "disarmTerminalDprWatch", "cancelAnimationFrame", "console",
+    "Date", "setTimeout", "clearTimeout",
     `
     let terminalXterm = null;
     let terminalEventSource = null;
@@ -76,16 +97,20 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     let terminalGeometryRealignStreak = 0;
     ${declOf(COOLDOWN_DECL, "TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS")}
     ${declOf(MAX_ATTEMPTS_DECL, "TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS")}
+    ${declOf(STALL_DECL, "TERMINAL_GEOMETRY_REALIGN_STALL_MS")}
     ${extractFn("closeTerminalStream")}
     ${extractFn("absorbTerminalSnapshot")}
     ${extractFn("connectTerminalStream")}
     return {
       connect: connectTerminalStream,
       term: () => terminalXterm,
+      stream: () => terminalEventSource,
       pending: () => terminalGeometryRealignPending,
       streak: () => terminalGeometryRealignStreak,
       epoch: () => terminalReplayEpoch,
       cooldown: () => TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS,
+      maxAttempts: () => TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS,
+      stall: () => TERMINAL_GEOMETRY_REALIGN_STALL_MS,
       setPending: (v) => { terminalGeometryRealignPending = v; },
       swapTerm: (term) => { terminalXterm = term; },
     };
@@ -133,9 +158,18 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     () => {},
     () => {},
     () => {},
-    { warn() {} },
+    { warn(...args) { state.warnings.push(args); } },
+    { now: () => clock.now },
+    (fn, ms) => {
+      clock.seq += 1;
+      const id = clock.seq;
+      clock.timers.push({ id, at: clock.now + (ms || 0), fn });
+      return id;
+    },
+    (id) => { clock.timers = clock.timers.filter((timer) => timer.id !== id); },
   );
   world.state = state;
+  world.clock = clock;
   return world;
 }
 
@@ -261,5 +295,97 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     await connecting;
     assert.equal(world.state.sources.length, 0, "await 之后复查隐藏闸：一帧都不开");
     assert.equal(world.state.disposed, 1, "半成品实例当场收掉，不留悬空 xterm");
+  });
+
+  it("连续错配超出上限后不再 POST/重连，只告警一次，那一帧照常落屏", async () => {
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    await prime(world, session);
+    const max = world.maxAttempts();
+    world.state.postImpl = () => Promise.resolve({ cols: 123, rows: 34 });
+
+    // 第一、第二次错配：冷却窗外各重对齐一次，连续计数顶到上限
+    let term = world.term();
+    term.cols = 123;
+    world.state.sources[0].emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    await flushMicrotasks();
+    assert.equal(world.state.posts.length, 1, "前置：第一次错配重对齐");
+    assert.equal(world.state.sources.length, 2, "前置：第一次重连");
+
+    world.clock.advance(world.cooldown() + 1);
+    term = world.term();
+    term.cols = 126;
+    world.state.sources[1].emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    await flushMicrotasks();
+    assert.equal(world.state.posts.length, 2, "冷却窗外第二次错配仍重对齐");
+    assert.equal(world.state.sources.length, 3, "第二次也重连");
+    assert.equal(world.streak(), max, "连续计数顶到上限");
+    assert.deepEqual(world.state.warnings, [], "上限那一拍是正常重对齐，还不告警");
+
+    // 第三次错配：超限刹车。不 POST、不重连，只告警一次，且这一帧按原逻辑落屏。
+    world.clock.advance(world.cooldown() + 1);
+    term = world.term();
+    term.cols = 129;
+    world.state.writes.length = 0;
+    const es = world.state.sources[2];
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    es.emit("data", "超限后的回放");
+    assert.equal(world.state.posts.length, 2, "超限后不再 POST");
+    assert.equal(world.state.sources.length, 3, "也不重连");
+    assert.equal(world.pending(), false, "超限帧不占回放闩");
+    assert.equal(world.state.warnings.length, 1, "告警一次");
+    assert.match(world.state.warnings[0][0], /geometry realign abandoned/);
+    assert.deepEqual(world.state.writes, ["超限后的回放"], "超限那一帧照常落屏，不是空白");
+
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    assert.equal(world.state.warnings.length, 1, "接续的错配不再重复告警");
+  });
+
+  it("重对齐 POST 在飞时视图隐藏：落定后拆掉旧流，不留实例", async () => {
+    let releasePost;
+    const postInFlight = new Promise((resolve) => { releasePost = resolve; });
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    const { es, term } = await prime(world, session);
+    world.state.postImpl = () => postInFlight;
+    term.cols = 123;
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    assert.equal(world.state.posts.length, 1, "前置：POST 在飞");
+    assert.equal(world.pending(), true, "前置：数据闸关着");
+
+    world.state.viewHidden = true; // 用户在 POST 落定前切走
+    releasePost({ cols: 123, rows: 34 });
+    await flushMicrotasks();
+
+    assert.equal(world.pending(), false, "落定后撤标志");
+    assert.equal(world.stream(), null, "旧流被拆掉，不留在刚 reset 的实例上继续按错宽度写");
+    assert.equal(world.term(), null, "实例一并收掉（切回终端页会走整屏重建）");
+    assert.equal(es.closed, true, "旧 EventSource 真关掉");
+    assert.equal(world.state.sources.length, 1, "隐藏期也不新建流");
+  });
+
+  it("POST 永不落定：兜底超时放开数据闸，回放照常落屏且不拆流", async () => {
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    const { es, term } = await prime(world, session);
+    world.state.postImpl = () => new Promise(() => {});
+    term.cols = 123;
+    world.state.writes.length = 0;
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    es.emit("data", "在飞期间的错宽回放");
+    assert.deepEqual(world.state.writes, [], "前置：兜底前数据帧仍被丢掉");
+    assert.equal(world.pending(), true, "前置：闸还关着");
+
+    world.clock.advance(world.stall() - 1);
+    es.emit("data", "兜底前一刻");
+    assert.deepEqual(world.state.writes, [], "未到兜底时限仍不放行");
+
+    world.clock.advance(1);
+    assert.equal(world.pending(), false, "越过兜底时限后放开数据闸");
+    es.emit("data", "兜底后的回放");
+    assert.deepEqual(world.state.writes, ["兜底后的回放"], "错宽回放照常落屏：有画面胜过空白");
+    assert.equal(world.stream(), es, "流没有被拆掉");
+    assert.equal(world.term(), term, "实例也还在（可见时拆流没有补救通路）");
+    assert.equal(world.state.sources.length, 1, "不新建流");
   });
 });
