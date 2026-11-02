@@ -6363,18 +6363,21 @@ describe("设置项「看板排布」", () => {
     assert.equal(noAvatars.strip.hidden, true, "一个图标都没铺成时同样整行收起");
   });
 
-  // 假元素：只要 playBoardEnter 用到的那几样（类名、--board-delay、动画结束回调）
+  // 假元素：只要 playBoardEnter / armBoardIconStrip 用到的那几样（类名、--board-delay、
+  // 动画结束回调）。removed 记下摘过的类，用于验证「重播前旧类被摘掉」。
   function mkBoardAnimEl() {
     const classes = new Set();
     const styleProps = {};
+    const removed = [];
     return {
       hidden: false,
       attrs: {},
       classes,
       styleProps,
+      removed,
       classList: {
         add: (c) => classes.add(c),
-        remove: (...cs) => cs.forEach((c) => classes.delete(c)),
+        remove: (...cs) => { cs.forEach((c) => classes.delete(c)); removed.push(...cs); },
         contains: (c) => classes.has(c),
       },
       style: { setProperty: (k, v) => { styleProps[k] = v; } },
@@ -6385,8 +6388,10 @@ describe("设置项「看板排布」", () => {
     };
   }
   function boardEnterSandbox({ cardCount = 3, stripHidden = false, slotCount = 3 } = {}) {
-    // 抽函数后两段源码要一起注入：playBoardEnter 的循环只剩对 armBoardCardEnter 的调用。
+    // 抽函数后两段源码要一起注入：playBoardEnter 只剩对 armBoardIconStrip /
+    // armBoardCardEnter 的调用。
     const armFn = extractFn("armBoardCardEnter", "card, index");
+    const armStripFn = extractFn("armBoardIconStrip", "strip, cardCount");
     const enterFn = extractFn("playBoardEnter", "view");
     const cards = Array.from({ length: cardCount }, mkBoardAnimEl);
     const slots = Array.from({ length: slotCount }, mkBoardAnimEl);
@@ -6398,7 +6403,7 @@ describe("设置项「看板排布」", () => {
     view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
     const doc = { documentElement: { getAttribute: () => null } };
     new Function("view", "document", "getComputedStyle",
-      `${armFn}\n${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
+      `${armFn}\n${armStripFn}\n${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
     return { cards, strip, slots };
   }
 
@@ -6440,6 +6445,7 @@ describe("设置项「看板排布」", () => {
   // 脚本，脚本可以 return 结果；animationend 回调由 playBoardEnter 注册时记下，可手动
   // 触发以模拟「阶梯播完」（entry 类按真实行为摘掉）。
   const armFn = extractFn("armBoardCardEnter", "card, index");
+  const armStripFn = extractFn("armBoardIconStrip", "strip, cardCount");
   const inFlightFn = extractFn("boardEnterInFlight");
   const releaseFn = extractFn("armReleasedBoardCards", "released");
   const visFn = extractFn("applyAgentCardVisibility", "ids");
@@ -6473,6 +6479,7 @@ describe("设置项「看板排布」", () => {
       function boardVisible() { return true; }
       function $(id) { return null; }
       ${armFn}
+      ${armStripFn}
       ${inFlightFn}
       ${releaseFn}
       ${visFn}
@@ -6547,6 +6554,125 @@ describe("设置项「看板排布」", () => {
     assert.equal(flags.afterRelease, false, "放出来的卡没有被补台阶");
     assert.ok(!cards[1].classList.contains("board-card-enter"), "放回来时没带过期类");
     assert.equal(cards[1].arms, 1, "只被首轮装配过一次");
+  });
+
+  // ── 图标行在第一拍之后被整行重铺：台阶要接回来 ──
+  // syncBoardIconStrip 每次都清空整行重铺，第一拍取样的 .board-icon-slot 成了弃子，
+  // 新格子没有任何入场类——44–94ms 的这次重建曾让逐枚淡入整段丢失（行原本隐藏时连行
+  // 上浮也一起丢）。这里钉住补拍：按同一套参数、按最终可见卡数（含侧栏卡）起拍。
+
+  it("armBoardIconStrip 按 cardCount 起拍，重播前先摘旧类", () => {
+    const slots = Array.from({ length: 3 }, mkBoardAnimEl);
+    const strip = mkBoardAnimEl();
+    strip.querySelectorAll = (sel) => (sel === ".board-icon-slot" ? slots : []);
+    // 预置上一轮留下的类：重播必须先摘再挂，否则连切时动画不会从 0 重来
+    strip.classList.add("board-strip-enter");
+    slots.forEach((s) => s.classList.add("board-icon-enter"));
+    new Function("strip", "getComputedStyle",
+      `${armStripFn}\narmBoardIconStrip(strip, 2);`)(strip, () => ({ animationName: "none" }));
+    assert.equal(strip.styleProps["--board-delay"], "190ms", "cardCount=2 → 150+(2-1)×40");
+    assert.ok(strip.removed.includes("board-strip-enter"), "重播前摘掉旧的行类");
+    assert.ok(strip.classList.contains("board-strip-enter"), "摘完再挂上（仍在播）");
+    assert.deepEqual(slots.map((s) => s.styleProps["--board-delay"]),
+      ["190ms", "210ms", "230ms"], "行内逐枚 20ms 微阶梯，起点与行同拍");
+    slots.forEach((s, i) => {
+      assert.ok(s.removed.includes("board-icon-enter"), `第 ${i} 枚先摘旧类`);
+      assert.ok(s.classList.contains("board-icon-enter"), `第 ${i} 枚重新挂上淡入类`);
+    });
+  });
+
+  // 图标行补拍沙箱：真跑 armBoardIconStrip / playBoardEnter / applyAgentCardVisibility，
+  // 只把 syncBoardIconStrip 换成「重铺 N 个新格子」的桩——本组钉的是再装配的卡数口径与
+  // 时机，铺格本身由「补画图标行：直接把图标铺进行里」那条真跑覆盖。
+  // view 下固定 1 张侧栏卡（无 data-agent-id）+ 2 张端点卡：与 .telemetry-view 的口径
+  // 一致，误用容器里的端点卡数会得到 190ms 而不是 230ms。
+  function stripRearmSandbox({ slotCount = 3 } = {}) {
+    const cards = ["claude", "kimi"].map((id) => {
+      const card = mkBoardAnimEl();
+      card.attrs["data-agent-id"] = id;
+      // 记下 animationend 回调（用于模拟阶梯播完）
+      card.addEventListener = (ev, fn) => { if (ev === "animationend") card.finish = fn; };
+      return card;
+    });
+    const sidebar = mkBoardAnimEl(); // 侧栏卡：不携 data-agent-id，但占可见卡的一位
+    sidebar.addEventListener = (ev, fn) => { if (ev === "animationend") sidebar.finish = fn; };
+    const allCards = [sidebar, ...cards];
+    let slots = [];
+    const strip = mkBoardAnimEl();
+    strip.addEventListener = (ev) => { if (ev === "animationend") strip.arms = (strip.arms || 0) + 1; };
+    strip.querySelectorAll = (sel) => (sel === ".board-icon-slot" ? slots : []);
+    Object.defineProperty(strip, "slots", { get: () => slots });
+    const rebuild = (n = slotCount) => {
+      strip.innerHTML = "";
+      slots = Array.from({ length: n }, () => {
+        const s = mkBoardAnimEl();
+        s.className = "board-icon-slot";
+        return s;
+      });
+    };
+    const container = { querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []) };
+    const view = mkBoardAnimEl();
+    view.querySelectorAll = (sel) => (sel === ".panel-card" ? allCards : []);
+    view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
+    const doc = {
+      documentElement: { getAttribute: () => null, removeAttribute: () => {} },
+      querySelector: (sel) => (sel === ".agent-cards-container" ? container
+        : sel === ".telemetry-view" ? view : null),
+    };
+    const run = (body) => new Function("view", "document", "getComputedStyle", "strip", "rebuild", `
+      let boardLayoutMode = "compact";
+      let boardLiveAgentIds = new Set(["claude", "kimi"]);
+      let installedAgentIds = null;
+      function boardVisible() { return true; }
+      function $(id) { return id === "boardIconStrip" ? strip : null; }
+      function syncBoardIconStrip() { rebuild(); }
+      ${armFn}
+      ${armStripFn}
+      ${inFlightFn}
+      ${releaseFn}
+      ${visFn}
+      ${enterFn}
+      ${body}
+    `)(view, doc, () => ({ animationName: "none" }), strip, rebuild);
+    return { cards, sidebar, strip, rebuild, run };
+  }
+
+  it("图标行被重铺后按最终可见卡数补拍（含侧栏卡）", () => {
+    const { strip, run } = stripRearmSandbox({ slotCount: 3 });
+    run(`
+      rebuild(3);
+      playBoardEnter(view);                 // 第一拍：给当时的 3 枚格子发台阶
+      rebuild(3);                           // 44–94ms：/api/agents 落地，整行重铺成新节点
+      applyAgentCardVisibility(new Set(["claude", "kimi"]));
+    `);
+    assert.equal(strip.arms, 2, "第一拍一次 + 重铺后补拍一次");
+    assert.equal(strip.styleProps["--board-delay"], "230ms",
+      "补拍起点按 3 张可见卡：150+(3-1)×40（误取容器里的端点卡数会得 190ms）");
+    assert.deepEqual(strip.slots.map((s) => s.styleProps["--board-delay"]),
+      ["230ms", "250ms", "270ms"], "新格子逐枚接回 20ms 微阶梯");
+    strip.slots.forEach((s, i) => {
+      assert.ok(s.classList.contains("board-icon-enter"), `第 ${i} 枚新格子拿到淡入类`);
+    });
+  });
+
+  it("揭示结束后重铺不回补台阶", () => {
+    const { strip, run } = stripRearmSandbox({ slotCount: 3 });
+    const inFlight = run(`
+      rebuild(3);
+      playBoardEnter(view);
+      // 阶梯播完：各卡的 entry 类在 animationend 摘掉
+      view.querySelectorAll(".panel-card").forEach((c) => c.finish && c.finish());
+      rebuild(3);
+      applyAgentCardVisibility(new Set(["claude", "kimi"]));
+      return boardEnterInFlight();
+    `);
+    assert.equal(inFlight, false, "没有可见卡还在播");
+    assert.equal(strip.arms, 1, "只被第一拍装配过，重铺后不再补拍");
+    assert.deepEqual(strip.slots.map((s) => s.styleProps["--board-delay"]),
+      [undefined, undefined, undefined], "不给新格子发延迟");
+    strip.slots.forEach((s, i) => {
+      assert.ok(!s.classList.contains("board-icon-enter"), `第 ${i} 枚不带入场类`);
+    });
   });
 
   it("刷新时先重排、再落定运行中集合", () => {

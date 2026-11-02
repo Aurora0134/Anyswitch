@@ -776,6 +776,18 @@ async function api(method, path, body) {
     if (strip) {
       if (boardLayoutMode === "compact" && boardLiveAgentIds !== null) {
         syncBoardIconStrip();
+        // syncBoardIconStrip 每次都清空整行重铺：playBoardEnter 取样时拿到的 .board-icon-slot
+        // 已成弃子，新格子一个入场类都没有——揭示第一拍后 44–94ms 的这次重建会把逐枚淡入
+        // 整段丢掉（行原本隐藏时连行上浮也一起丢，整行硬出现）。揭示仍在播就按同一套参数
+        // 补一拍。卡数必须取 .telemetry-view 下的可见 .panel-card（含侧栏卡），与
+        // playBoardEnter 的 cards.length 同口径；改用容器里的端点卡会少算侧栏卡、早起拍。
+        if (!strip.hidden && boardEnterInFlight()) {
+          const view = document.querySelector(".telemetry-view");
+          const cardCount = view
+            ? [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden).length
+            : 0;
+          armBoardIconStrip(strip, cardCount);
+        }
       } else {
         strip.hidden = true;
       }
@@ -12648,6 +12660,36 @@ async function api(method, path, body) {
     card.addEventListener("animationend", () => card.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
   }
 
+  // 图标行装配：整行接在最后一张可见卡之后 40ms（与卡间距同一格）上浮，行内逐枚图标
+  // 再各错 20ms 淡入——合起来是卡阶梯的下一级，而不是另起一段。位移只做在行这一层
+  // （10px 与卡片同深），图标逐枚只淡入：两层位移叠起来会让人看着发飘，阶梯感交给
+  // 延迟就够。cardCount 与 playBoardEnter 的 cards.length 同口径（.telemetry-view 下
+  // 可见的 .panel-card，含侧栏卡）。
+  // 抽出来还为了另一条路径：揭示第一拍之后 syncBoardIconStrip 会清空整行重铺，新格子
+  // 不在任何取样名单里，只能按同一套参数单独补拍（见 applyAgentCardVisibility）。
+  function armBoardIconStrip(strip, cardCount) {
+    const base = 150 + Math.max(cardCount - 1, 0) * 40;
+    strip.style.setProperty("--board-delay", `${base}ms`);
+    strip.classList.remove("board-strip-enter");
+    void getComputedStyle(strip).animationName; // 同上：只冲样式
+    strip.classList.add("board-strip-enter");
+    // animationend 会从图标冒泡上来：只认行自己那一次，否则行会在第一枚图标播完时
+    // 就被摘掉类名，行自己的上浮半途收场。
+    const onStripEnd = (e) => {
+      if (e.target !== strip) return;
+      strip.removeEventListener("animationend", onStripEnd);
+      strip.classList.remove("board-strip-enter");
+    };
+    strip.addEventListener("animationend", onStripEnd);
+    [...strip.querySelectorAll(".board-icon-slot")].forEach((slot, i) => {
+      slot.style.setProperty("--board-delay", `${base + i * 20}ms`);
+      slot.classList.remove("board-icon-enter");
+      void getComputedStyle(slot).animationName; // 同上：只冲样式
+      slot.classList.add("board-icon-enter");
+      slot.addEventListener("animationend", () => slot.classList.remove("board-icon-enter"), { once: true });
+    });
+  }
+
   // 看板变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）：容器整体淡入
   // 上浮 10px 立即开始；可见 .panel-card 按视觉顺序逐张阶梯——首卡（服务状态）用 scale
   // 变奏、延迟 100ms，其余淡入+上浮、延迟 150ms+i×40ms。隐藏卡（如无链时的路由链卡）
@@ -12676,34 +12718,9 @@ async function api(method, path, body) {
       }
     }
     cards.forEach((el, i) => armBoardCardEnter(el, i));
-    // 图标行不是 .panel-card，上面那圈取样取不到它，于是它只会跟着 .board-enter 整块
-    // 淡入、没有自己那一拍——这就是「跟卡片对不上」的来源。这里把它接在最后一张可见卡
-    // 之后 40ms（与卡间距同一格），整行上浮、行内逐枚图标再各错 20ms 淡入：合起来是
-    // 卡阶梯的下一级，而不是另起一段。位移只做在行这一层（10px 与卡片同深），图标逐枚
-    // 只淡入——两层位移叠起来会让人看着发飘，阶梯感交给延迟就够。
+    // 图标行不是 .panel-card，上面那圈取样取不到它，只能单独装配（见 armBoardIconStrip）。
     const strip = view.querySelector(".board-icon-strip");
-    if (strip && !strip.hidden) {
-      const base = 150 + Math.max(cards.length - 1, 0) * 40;
-      strip.style.setProperty("--board-delay", `${base}ms`);
-      strip.classList.remove("board-strip-enter");
-      void getComputedStyle(strip).animationName; // 同上：只冲样式
-      strip.classList.add("board-strip-enter");
-      // animationend 会从图标冒泡上来：只认行自己那一次，否则行会在第一枚图标播完时
-      // 就被摘掉类名，行自己的上浮半途收场。
-      const onStripEnd = (e) => {
-        if (e.target !== strip) return;
-        strip.removeEventListener("animationend", onStripEnd);
-        strip.classList.remove("board-strip-enter");
-      };
-      strip.addEventListener("animationend", onStripEnd);
-      [...strip.querySelectorAll(".board-icon-slot")].forEach((slot, i) => {
-        slot.style.setProperty("--board-delay", `${base + i * 20}ms`);
-        slot.classList.remove("board-icon-enter");
-        void getComputedStyle(slot).animationName; // 同上：只冲样式
-        slot.classList.add("board-icon-enter");
-        slot.addEventListener("animationend", () => slot.classList.remove("board-icon-enter"), { once: true });
-      });
-    }
+    if (strip && !strip.hidden) armBoardIconStrip(strip, cards.length);
   }
 
   // 视图进入工作的让位调度：把目标视图的首次渲染排到「点击已画出高亮」之后。
