@@ -7943,7 +7943,11 @@ async function api(method, path, body) {
     const hostSized = Number.isFinite(hostCols) && Number.isFinite(hostRows);
     // 客户端量不到尺寸时没有可对齐的目标（POST 也没有真实参数），宁可照旧画。
     const clientSized = Number.isFinite(clientCols) && Number.isFinite(clientRows)
-      && clientCols > 0 && clientRows > 0;
+      && clientCols > 0 && clientRows > 0
+      // 尺寸还得是「真量到的」：容器不可测或正在组字（inputmethod 组字期会冻结几何）时，
+      // 这一拍的 cols/rows 只是 xterm 出厂值或旧值，拿它 POST 等于把猜测写进 PTY。
+      // 不判也就不纠错，照原逻辑落屏——不可测本来就没有可对齐的目标。
+      && terminalHostMeasurable() && !terminalImeHold;
     const geometryMismatch = hostSized && clientSized
       && (hostCols !== clientCols || hostRows !== clientRows);
     // 对上了就清账：下一次错配重新从 0 起算（计数只认「连续」）。

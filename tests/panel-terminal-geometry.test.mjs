@@ -42,6 +42,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     writes: [],
     disposed: 0,
     warnings: [],
+    measurable: true,
     fitImpl: () => null,
     postImpl: () => Promise.resolve({}),
   };
@@ -68,7 +69,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     "ensureTerminalXterm", "fitTerminalXterm", "sendTerminalInput", "reviveTerminalSession",
     "postTerminalResize", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst",
     "disarmTerminalDprWatch", "cancelAnimationFrame", "console",
-    "Date", "setTimeout", "clearTimeout",
+    "Date", "setTimeout", "clearTimeout", "terminalHostMeasurable",
     `
     let terminalXterm = null;
     let terminalEventSource = null;
@@ -112,6 +113,9 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
       maxAttempts: () => TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS,
       stall: () => TERMINAL_GEOMETRY_REALIGN_STALL_MS,
       setPending: (v) => { terminalGeometryRealignPending = v; },
+      // 尺寸可信度两个开关：默认「可测 + 不在组字」（与真身常态一致），用例 9 按需拨。
+      measurable: (v) => { state.measurable = v; },
+      imeHold: (v) => { terminalImeHold = v; },
       swapTerm: (term) => { terminalXterm = term; },
     };
     `
@@ -167,6 +171,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
       return id;
     },
     (id) => { clock.timers = clock.timers.filter((timer) => timer.id !== id); },
+    () => state.measurable,
   );
   world.state = state;
   world.clock = clock;
@@ -387,5 +392,36 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.stream(), es, "流没有被拆掉");
     assert.equal(world.term(), term, "实例也还在（可见时拆流没有补救通路）");
     assert.equal(world.state.sources.length, 1, "不新建流");
+  });
+
+  it("容器不可测时不判错配：不 POST 不重连不告警，回放照常落屏", async () => {
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    const { es, term } = await prime(world, session);
+    assert.equal(world.streak(), 0, "前置：匹配帧把账清零");
+
+    // 这一拍 fit 静默早退（容器量不到），term.cols 停在 xterm 出厂值——这是猜测值，
+    // 不是测量值，拿它 POST 等于把 80 列硬写进 PTY。
+    world.measurable(false);
+    term.cols = 80;
+    world.state.writes.length = 0;
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    es.emit("data", "不可测时的回放");
+    assert.deepEqual(world.state.posts, [], "不可测：不拿猜测尺寸 POST");
+    assert.equal(world.state.sources.length, 1, "也不重连");
+    assert.deepEqual(world.state.warnings, [], "不告警");
+    assert.equal(world.pending(), false, "不占回放闩");
+    assert.equal(world.streak(), 0, "不累加");
+    assert.deepEqual(world.state.writes, ["不可测时的回放"], "照原逻辑落屏：屏上有内容");
+
+    // 组字期几何被冻结（terminalImeHold 非空），同样不可信，同样不判。
+    world.measurable(true);
+    world.imeHold({});
+    term.cols = 81;
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    assert.equal(world.state.posts.length, 0, "组字期也不 POST");
+    assert.equal(world.state.sources.length, 1, "组字期也不重连");
+    assert.equal(world.pending(), false, "组字期也不占回放闩");
+    world.imeHold(null);
   });
 });
