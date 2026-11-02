@@ -50,7 +50,10 @@
 // 解析本身可以按时间预算切片（writeSliced/drain）：预算用尽就停在字符边界，
 // 剩余字节留在待解析缓冲里等下一轮，画面随后补齐。
 
-export const TERMINAL_HISTORY_LINES = 5000; // matches the panel's xterm scrollback
+// matches the panel's idle soft cap (TERMINAL_SCROLLBACK_SOFT_CAP in panel.js);
+// the panel's xterm scrollback itself is 15000 and gets trimmed back to this
+// line budget when the terminal goes idle (see maybeTerminalIdleTrim in panel.js).
+export const TERMINAL_HISTORY_LINES = 5000;
 export const TERMINAL_HISTORY_MAX_BYTES = 1024 * 1024;
 export const TERMINAL_REPLAY_MAX_BYTES = 2 * 1024 * 1024;
 // 跨块未完成转义序列的暂留上限：畸形且永不终结的 OSC/DCS 不能无限吃缓冲。

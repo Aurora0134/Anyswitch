@@ -10802,6 +10802,423 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
   });
 });
 
+// 滚动错位根治（2026-11-02）：scrollback 满仓环剪的 ydisp 离散补偿 × 用户滚轮的
+// scrollTop 翻译路径相撞 = 输出洪峰期滚动跳变。两层修法的行为钉：①滚轮直写——
+// attachCustomWheelEventHandler 接管竖直滚轮、按 xterm 同源公式折行数后直接
+// scrollLines（ydisp 单写者，翻译竞速不存在）；②缓冲软顶——硬顶 15000 忙时只涨
+// 不剪，闲时（无输出无动作 ≥5s、超软顶 ≥500 行）借切签垫片通路无感重建回 5000
+// 并把视口精确落回原阅读行。函数体切进桩环境真跑（定时器与时钟可驱动）。
+describe("虚拟终端滚动软顶与滚轮直写（忙时不剪、闲时无感回落）", () => {
+  // —— 桩：可换缓冲形态的 xterm ——
+  const makeFakeTerm = ({ rows = 30, length, viewportY, type = "normal", hasScrollback = true, alive = true }) => {
+    const captured = { scrollToLineCalls: [], writeHandlers: [] };
+    const buffer = { length, viewportY, type, hasScrollback };
+    const term = {
+      rows,
+      options: {},
+      buffer: { active: buffer },
+      element: { isConnected: alive },
+      scrollToLine(line) { captured.scrollToLineCalls.push(line); buffer.viewportY = line; },
+      onWriteParsed(fn) {
+        captured.writeHandlers.push(fn);
+        return { dispose: () => { captured.writeHandlers = captured.writeHandlers.filter((f) => f !== fn); } };
+      },
+      captured,
+    };
+    return term;
+  };
+
+  function idleTrimSandbox(setup = {}) {
+    const state = {
+      now: 100000,
+      parked: 0,
+      connects: [],
+      fits: 0,
+      timers: new Map(),
+      timerSeq: 0,
+      term: setup.term || null,
+      newTerm: setup.newTerm ?? null,
+      parkResult: setup.parkResult ?? { done: false, restorePending: false },
+      session: setup.session ?? { id: "sess-1", backend: true },
+      source: setup.source !== undefined ? setup.source : { alive: true },
+    };
+    const bodies = ["maybeTerminalIdleTrim", "triggerTerminalIdleTrim"].map(extractFn).join("\n");
+    const sandbox = new Function("state", `
+      const TERMINAL_SCROLLBACK_SOFT_CAP = 5000;
+      const TERMINAL_IDLE_TRIM_MS = 5000;
+      const TERMINAL_IDLE_TRIM_MIN_OVERAGE = 500;
+      const TERMINAL_IDLE_TRIM_SETTLE_MS = 150;
+      const TERMINAL_IDLE_TRIM_MAX_MS = 2500;
+      let terminalXterm = state.term;
+      const terminalEventSource = state.source;
+      let terminalLastStreamDataAt = 0;
+      let terminalUserActionAt = 0;
+      let terminalIdleTrimInFlight = false;
+      let terminalIdleTrimAborted = false;
+      let terminalReplayRestoring = false;
+      let terminalReplayFramePending = false;
+      let terminalImeHold = null;
+      const currentView = "terminal";
+      const document = { hidden: false };
+      const activeTerminalPreviewId = "sess-1";
+      const terminalSessionFor = () => state.session;
+      const terminalStaleScreen = state.parkResult;
+      const Date = { now: () => state.now };
+      const setTimeout = (fn, ms) => { const id = ++state.timerSeq; state.timers.set(id, { fn, at: state.now + ms }); return id; };
+      const clearTimeout = (id) => { state.timers.delete(id); };
+      function parkTerminalScreen() { state.parked += 1; return state.parkResult; }
+      function connectTerminalStream(session, opts) { state.connects.push({ id: session.id, opts }); terminalXterm = state.newTerm; }
+      function scheduleTerminalFit() { state.fits += 1; }
+      ${bodies}
+      return {
+        maybe: maybeTerminalIdleTrim,
+        inFlight: () => terminalIdleTrimInFlight,
+        stampData: () => { terminalLastStreamDataAt = Date.now(); },
+        markUserAction: () => { terminalUserActionAt = Date.now(); },
+        setAborted: () => { terminalIdleTrimAborted = true; },
+      };
+    `)(state);
+    const fireTimers = () => {
+      while (state.timers.size) {
+        const [id, timer] = [...state.timers.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        state.timers.delete(id);
+        state.now = Math.max(state.now, timer.at);
+        timer.fn();
+      }
+    };
+    return { sandbox, state, fireTimers };
+  }
+
+  function wheelSandbox(setup = {}) {
+    const rows = setup.rows ?? 30;
+    const rowHeight = setup.rowHeight ?? 16;
+    const state = {
+      now: 100000,
+      mouseMode: setup.mouseMode ?? false,
+      hasScrollback: setup.hasScrollback ?? true,
+      altScreen: setup.altScreen ?? false,
+      screenEl: setup.screenEl !== undefined ? setup.screenEl : { getBoundingClientRect: () => ({ height: rows * rowHeight }) },
+      scrollLines: [],
+      preventDefaultCount: 0,
+      returns: [],
+      listeners: [],
+    };
+    const bodies = ["installTerminalWheelDirect", "terminalWheelLines", "terminalWheelRowHeight"].map(extractFn).join("\n");
+    const sandbox = new Function("state", `
+      let terminalUserActionAt = 0;
+      let terminalIdleTrimInFlight = false;
+      let terminalIdleTrimAborted = false;
+      let terminalWheelPartialLines = 0;
+      let terminalWheelRowHeightCache = null;
+      const Date = { now: () => state.now };
+      const term = {
+        rows: ${rows},
+        options: {},
+        element: {
+          isConnected: true,
+          classList: { contains: (c) => state.mouseMode && c === "enable-mouse-events" },
+          querySelector: (sel) => (sel === ".xterm-screen" ? state.screenEl : null),
+          addEventListener: (type, fn, opts) => state.listeners.push({ type, capture: opts?.capture === true, passive: opts?.passive === true }),
+        },
+        buffer: { active: { hasScrollback: state.hasScrollback, type: state.altScreen ? "alternate" : "normal", length: 100, viewportY: 50 } },
+        scrollLines(n) { state.scrollLines.push(n); },
+        attachCustomWheelEventHandler(fn) { state.wheelHandler = fn; },
+      };
+      ${bodies}
+      installTerminalWheelDirect(term);
+      return {
+        wheel: (event) => { const r = state.wheelHandler(event); state.returns.push(r); return r; },
+        getUserActionAt: () => terminalUserActionAt,
+        markInFlight: () => { terminalIdleTrimInFlight = true; },
+        getAborted: () => terminalIdleTrimAborted,
+      };
+    `)(state);
+    const wheelEvent = (props = {}) => ({
+      type: "wheel", deltaY: 0, deltaMode: 0, shiftKey: false, altKey: false, ctrlKey: false,
+      preventDefault() { state.preventDefaultCount += 1; },
+      ...props,
+    });
+    return { sandbox, state, wheelEvent };
+  }
+
+  it("接线面：硬顶 15000、直写随实例安装、轮询挂闲剪、流帧记时戳、揭幕判据认落位", () => {
+    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure, "ensureTerminalXterm found in panel.js");
+    assert.ok(ensure.includes("scrollback: 15000"), "xterm 硬顶 15000（忙时超软顶只涨不剪）");
+    assert.ok(/installTerminalBottomAlign\(term\);[\s\S]*?installTerminalWheelDirect\(term\);/.test(ensure), "滚轮直写随实例安装");
+    const poll = panelJs.match(/async function pollTerminalSessions\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(poll?.includes("maybeTerminalIdleTrim();"), "闲剪检查垫在归属轮询拍上（可见性闸复用轮询）");
+    const connect = panelJs.match(/async function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(connect && /addEventListener\("snapshot"[\s\S]*?terminalLastStreamDataAt = Date\.now\(\)/.test(connect), "snapshot 帧记流侧时戳");
+    assert.ok(connect && /addEventListener\("data"[\s\S]*?terminalLastStreamDataAt = Date\.now\(\)/.test(connect), "data 帧记流侧时戳");
+    const ready = panelJs.match(/function terminalStaleScreenReady\(stale\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ready?.includes("stale.restorePending"), "就绪判据认「位置已落定」才揭幕");
+    const arm = panelJs.match(/terminalReplayRestoreArm = \(\) => \{[\s\S]*?\n    \};/)?.[0];
+    assert.ok(arm?.includes("terminalIdleTrimRebuild"), "护栏首拍跟随态认闲剪重建：不按 fresh 实例出厂态锚底");
+  });
+
+  it("闲剪触发：停旧帧为垫片、被动重挂（不复活）、回放静默后视口精确落回原阅读行", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 5500 });
+    const newTerm = makeFakeTerm({ length: 5030, viewportY: 5000 });
+    const { sandbox, state, fireTimers } = idleTrimSandbox({ term, newTerm });
+    state.now += 6000; // 距流侧时戳（初值 0）静默 5s 达成
+    sandbox.maybe();
+    sandbox.maybe(); // inFlight 期间不重入
+    assert.equal(state.parked, 1, "旧帧停放成垫片");
+    assert.deepEqual(state.connects, [{ id: "sess-1", opts: { revive: false } }], "重建走被动重挂语义（绝不顺手复活）");
+    assert.equal(state.parkResult.restorePending, true, "揭幕判据先扣住：等位置落定");
+    assert.equal(state.fits, 1, "重建后补 fit");
+    newTerm.captured.writeHandlers.forEach((fn) => fn()); // 首帧回放解析
+    fireTimers(); // 驱动 50ms 轮询至 150ms 静默 → settle
+    assert.deepEqual(newTerm.captured.scrollToLineCalls, [4500], "落位 = 原阅读行 − 裁掉行数（5500 − 1000）");
+    assert.equal(state.parkResult.restorePending, false, "位置落定放行揭幕");
+    assert.equal(sandbox.inFlight(), false, "inFlight 收摊");
+  });
+
+  // 主链钉（护栏真跑 + 触发器真跑同桩）：落位后滚动监听把「无意图离底」当钳制抖动
+  // 拽回底部的老语义，必须被「闲剪重建的首拍跟随态=false」挡住——否则 scrollToLine
+  // 落下去一帧内就被 scrollToBottom 撤销，用户看到的是一次跳变。
+  it("落位不被跟随护栏拽回：闲剪重建首拍按「不锚底」交接，真实跟随态由落点重新推导", () => {
+    const state = {
+      now: 100000,
+      parked: 0,
+      connects: [],
+      fits: 0,
+      scrollToBottomCount: 0,
+      timers: new Map(),
+      timerSeq: 0,
+      parkResult: { done: false, restorePending: false },
+      session: { id: "sess-1", backend: true },
+      source: { alive: true },
+    };
+    const fireTimers = () => {
+      while (state.timers.size) {
+        const [id, timer] = [...state.timers.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+        state.timers.delete(id);
+        state.now = Math.max(state.now, timer.at);
+        timer.fn();
+      }
+    };
+    // 事件管道健全的假 xterm：root/viewport 监听可触发，scrollToLine 同步派发 scroll 事件
+    const makeWiredTerm = (rows, length) => {
+      const rootListeners = [];
+      const viewportListeners = [];
+      const writeHandlers = [];
+      const buffer = { length, baseY: length - rows, viewportY: length - rows, type: "normal", hasScrollback: true, getLine: () => null };
+      const viewportEl = { addEventListener: (type, fn) => viewportListeners.push({ type, fn }) };
+      const fireViewportScroll = () => viewportListeners.filter((l) => l.type === "scroll").forEach((l) => l.fn());
+      return {
+        rows,
+        element: {
+          isConnected: true,
+          addEventListener: (type, fn) => rootListeners.push({ type, fn }),
+          querySelector: (sel) => (sel === ".xterm-viewport" ? viewportEl : null),
+        },
+        buffer: { active: buffer },
+        scrollToLine(line) { buffer.viewportY = line; fireViewportScroll(); },
+        scrollToBottom() { state.scrollToBottomCount += 1; buffer.viewportY = buffer.baseY; fireViewportScroll(); },
+        onWriteParsed(fn) { writeHandlers.push(fn); return { dispose: () => {} }; },
+        onResize() { return { dispose: () => {} }; },
+        fireWheelIntent: () => rootListeners.filter((l) => l.type === "wheel").forEach((l) => l.fn()),
+        fireViewportScroll,
+        writeHandlers,
+      };
+    };
+    const bodies = ["installTerminalFollowBottomGuard", "terminalEffectiveBottomBase", "maybeTerminalIdleTrim", "triggerTerminalIdleTrim"].map(extractFn).join("\n");
+    const oldTerm = makeWiredTerm(30, 6030);
+    const newTerm = makeWiredTerm(30, 5030);
+    const sandbox = new Function("state", "oldTerm", "newTerm", `
+      const TERMINAL_SCROLLBACK_SOFT_CAP = 5000;
+      const TERMINAL_IDLE_TRIM_MS = 5000;
+      const TERMINAL_IDLE_TRIM_MIN_OVERAGE = 500;
+      const TERMINAL_IDLE_TRIM_SETTLE_MS = 150;
+      const TERMINAL_IDLE_TRIM_MAX_MS = 2500;
+      const TERMINAL_SCROLL_INTENT_MS = 250;
+      const TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS = 120;
+      let terminalXterm = oldTerm;
+      const terminalEventSource = state.source;
+      let terminalLastStreamDataAt = 0;
+      let terminalUserActionAt = 0;
+      let terminalIdleTrimInFlight = false;
+      let terminalIdleTrimAborted = false;
+      let terminalIdleTrimRebuild = false;
+      let terminalReplayRestoring = false;
+      let terminalReplayFramePending = false;
+      let terminalReplayRestoreArm = null;
+      let terminalReplayRestoreCancel = null;
+      let terminalImeHold = null;
+      const terminalStaleScreen = state.parkResult;
+      const currentView = "terminal";
+      const document = { hidden: false };
+      const activeTerminalPreviewId = "sess-1";
+      const terminalSessionFor = () => state.session;
+      const $ = (id) => (id === "terminalView" ? { hidden: false } : null);
+      function terminalBottomAlignEnabled() { return false; }
+      const Date = { now: () => state.now };
+      const setTimeout = (fn, ms) => { const id = ++state.timerSeq; state.timers.set(id, { fn, at: state.now + ms }); return id; };
+      const clearTimeout = (id) => { state.timers.delete(id); };
+      function parkTerminalScreen() { state.parked += 1; return state.parkResult; }
+      function connectTerminalStream(session, opts) {
+        state.connects.push({ id: session.id, opts });
+        terminalXterm = newTerm;
+        installTerminalFollowBottomGuard(newTerm); // 与真实 connect 同拍装护栏
+        terminalReplayRestoring = true;
+        terminalReplayRestoreArm(); // 与真实 connect 同拍置闩（首拍采跟随态，旗标在这拍消费）
+      }
+      function scheduleTerminalFit() { state.fits += 1; }
+      ${bodies}
+      return { maybe: maybeTerminalIdleTrim, installGuard: installTerminalFollowBottomGuard };
+    `)(state, oldTerm, newTerm);
+    // 旧实例先挂上护栏（模拟已连接的会话），用户滚轮上翻读历史 → followBottom=false
+    sandbox.installGuard(oldTerm);
+    oldTerm.fireWheelIntent();
+    oldTerm.buffer.active.viewportY = 5500;
+    oldTerm.fireViewportScroll();
+    state.now += 6000; // 静默 5s+
+    sandbox.maybe();
+    assert.equal(state.parked, 1, "闲剪触发（停垫片＋被动重挂）");
+    newTerm.writeHandlers.forEach((fn) => fn()); // 首帧回放解析（护栏的锚定监听＋落位监听都收到）
+    fireTimers(); // 驱动至护栏闩清（120ms）与触发器落位（150ms）
+    assert.equal(newTerm.buffer.active.viewportY, 4500, "落位保持 4500：没有被跟随护栏拽回底部");
+    assert.equal(state.scrollToBottomCount, 0, "零 scrollToBottom（老语义会把落位当钳制抖动拉回）");
+    assert.equal(state.parkResult.restorePending, false, "落位完成放行揭幕");
+  });
+
+  it("忙时不剪：流帧新鲜或用户动作新鲜的一律不动", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 5500 });
+    const dataFresh = idleTrimSandbox({ term });
+    dataFresh.state.now += 6000;
+    dataFresh.sandbox.stampData();
+    dataFresh.sandbox.maybe();
+    assert.equal(dataFresh.state.parked, 0, "输出还在到达：不剪");
+    const userFresh = idleTrimSandbox({ term });
+    userFresh.state.now += 6000;
+    userFresh.sandbox.markUserAction();
+    userFresh.sandbox.maybe();
+    assert.equal(userFresh.state.parked, 0, "用户刚滚动/键入：不剪");
+  });
+
+  it("视口在将被裁掉的头段内：本次不剪（内容在硬顶内保留，等回到保留窗）", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 900 }); // overage 1000 > viewportY
+    const { sandbox, state } = idleTrimSandbox({ term });
+    state.now += 6000;
+    sandbox.maybe();
+    assert.equal(state.parked, 0, "推迟本次");
+    assert.equal(state.connects.length, 0);
+  });
+
+  it("超量不足（<500 行）、无活流、备屏一律不触发", () => {
+    const small = makeFakeTerm({ length: 5300, viewportY: 300 }); // overage 270
+    const smallCase = idleTrimSandbox({ term: small });
+    smallCase.state.now += 6000;
+    smallCase.sandbox.maybe();
+    const alt = makeFakeTerm({ length: 6030, viewportY: 5500, type: "alternate", hasScrollback: false });
+    const altCase = idleTrimSandbox({ term: alt });
+    altCase.state.now += 6000;
+    altCase.sandbox.maybe();
+    const noStream = idleTrimSandbox({ term: makeFakeTerm({ length: 6030, viewportY: 5500 }), source: null });
+    noStream.state.now += 6000;
+    noStream.sandbox.maybe();
+    assert.equal(smallCase.state.parked + altCase.state.parked + noStream.state.parked, 0, "三条都不触发");
+  });
+
+  it("交接窗内用户滚动：放弃位置恢复（让位给用户），垫片照常放行", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 5500 });
+    const newTerm = makeFakeTerm({ length: 5030, viewportY: 5000 });
+    const { sandbox, state, fireTimers } = idleTrimSandbox({ term, newTerm });
+    state.now += 6000;
+    sandbox.maybe();
+    sandbox.setAborted(); // 用户在交接窗内滚了轮
+    newTerm.captured.writeHandlers.forEach((fn) => fn());
+    fireTimers();
+    assert.deepEqual(newTerm.captured.scrollToLineCalls, [], "用户在滚动：不把视口拽回");
+    assert.equal(state.parkResult.restorePending, false, "垫片放行（不无限盖住）");
+    assert.equal(sandbox.inFlight(), false, "inFlight 收摊");
+  });
+
+  it("垫片已被兜底撤走（2s 上限）：只收摊不落位——晚到 scrollToLine 就是可见跳变", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 5500 });
+    const newTerm = makeFakeTerm({ length: 5030, viewportY: 5000 });
+    const { sandbox, state, fireTimers } = idleTrimSandbox({ term, newTerm });
+    state.now += 6000;
+    sandbox.maybe();
+    state.parkResult.done = true; // 2s 兜底计时器把垫片撤了
+    newTerm.captured.writeHandlers.forEach((fn) => fn());
+    fireTimers();
+    assert.deepEqual(newTerm.captured.scrollToLineCalls, [], "不落位");
+    assert.equal(sandbox.inFlight(), false, "inFlight 收摊");
+  });
+
+  it("重建后无任何回放写入：2.5s 安全上限收摊，inFlight 不悬死", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 5500 });
+    // 无写入的新实例就是出厂形态：一屏空行（length=rows）——缓冲不足以落位，
+    // settle 的长度闸天然挡住 scrollToLine。
+    const newTerm = makeFakeTerm({ length: 30, viewportY: 0 });
+    const { sandbox, state, fireTimers } = idleTrimSandbox({ term, newTerm });
+    state.now += 6000;
+    sandbox.maybe();
+    fireTimers(); // 不喂 writeHandlers：50ms 轮询一路空转，安全上限（2500ms）兜底
+    assert.deepEqual(newTerm.captured.scrollToLineCalls, [], "无写入不落位");
+    assert.equal(sandbox.inFlight(), false, "安全上限收摊");
+  });
+
+  it("重建没起来（隐藏闸早退）：当拍收摊不悬死", () => {
+    const term = makeFakeTerm({ length: 6030, viewportY: 5500 });
+    const { sandbox, state } = idleTrimSandbox({ term, newTerm: null });
+    state.now += 6000;
+    sandbox.maybe();
+    assert.equal(state.parked, 1, "停放照走（真实面板里隐藏闸会让 park 返回 null，桩里验证收摊语义即可）");
+    assert.equal(sandbox.inFlight(), false, "connect 没建出新实例：立即收摊");
+  });
+
+  it("像素滚轮：行数直写＋小数跨事件累积＋接管即吞默认", () => {
+    const { sandbox, state, wheelEvent } = wheelSandbox();
+    for (let i = 0; i < 4; i += 1) sandbox.wheel(wheelEvent({ deltaY: 10 })); // 10px/16px = 0.625 行/拍
+    assert.deepEqual(state.scrollLines, [1, 1], "亚行小数跨事件累积，跨过整行才滚（同 xterm _wheelPartialScroll）");
+    assert.equal(state.preventDefaultCount, 4, "接管即吞默认（0 行的亚行事件同样吞，同 _bubbleScroll）");
+    assert.ok(state.returns.every((r) => r === false), "钩子返回 false：xterm 原生路径不再碰 scrollTop");
+  });
+
+  it("LINE/PAGE 折算与 alt 快滚 5 倍速（同 xterm fastScrollModifier 语义）", () => {
+    const { sandbox, state, wheelEvent } = wheelSandbox();
+    sandbox.wheel(wheelEvent({ deltaY: 3, deltaMode: 1 }));
+    sandbox.wheel(wheelEvent({ deltaY: 2, deltaMode: 2 }));
+    sandbox.wheel(wheelEvent({ deltaY: 3, deltaMode: 1, altKey: true }));
+    assert.deepEqual(state.scrollLines, [3, 60, 15], "LINE 直取、PAGE 乘屏行数（30）、alt 快滚 5×");
+  });
+
+  it("shift/零 delta/鼠标上报模式/备屏/量不到行高：一律交回 xterm 原路径", () => {
+    const plain = wheelSandbox();
+    assert.equal(plain.sandbox.wheel(plain.wheelEvent({ deltaY: 10, shiftKey: true })), true, "shift+wheel 交回（xterm 原生判 0 行不吞、事件自然冒泡）");
+    assert.equal(plain.sandbox.wheel(plain.wheelEvent({ deltaY: 0 })), true, "零 delta 交回");
+    const mouse = wheelSandbox({ mouseMode: true });
+    assert.equal(mouse.sandbox.wheel(mouse.wheelEvent({ deltaY: 10 })), true, "鼠标上报模式（TUI 收 SGR 滚轮事件）交回");
+    const alt = wheelSandbox({ altScreen: true, hasScrollback: false });
+    assert.equal(alt.sandbox.wheel(alt.wheelEvent({ deltaY: 10 })), true, "备屏交回（xterm 的方向键翻译路径）");
+    const unmeasured = wheelSandbox({ screenEl: null });
+    assert.equal(unmeasured.sandbox.wheel(unmeasured.wheelEvent({ deltaY: 10 })), true, "行高量不出退回原生路径");
+    assert.deepEqual(plain.state.scrollLines, [], "交回路径零直写");
+    assert.equal(plain.state.preventDefaultCount, 0, "交回的不吞默认");
+  });
+
+  it("用户动作时戳与交接窗放弃恢复：滚轮一拍即记、inFlight 时置 aborted", () => {
+    const { sandbox, state, wheelEvent } = wheelSandbox();
+    sandbox.wheel(wheelEvent({ deltaY: -100 }));
+    assert.ok(sandbox.getUserActionAt() > 0, "滚轮记用户动作时戳（闲剪静默判据）");
+    sandbox.markInFlight();
+    sandbox.wheel(wheelEvent({ deltaY: -100 }));
+    assert.equal(sandbox.getAborted(), true, "交接窗内滚动：位置恢复让位给用户");
+    assert.deepEqual(state.scrollLines, [-6, -6], "直写行数按符号正确（向上滚为负）");
+  });
+
+  it("用户动作监听面：指针/触摸/键盘 capture＋passive 注册（先于 xterm 冒泡监听）", () => {
+    const { state } = wheelSandbox();
+    const types = state.listeners.map((l) => l.type);
+    assert.ok(["pointerdown", "pointermove", "touchstart", "keydown"].every((t) => types.includes(t)), "四类监听齐全");
+    assert.ok(state.listeners.every((l) => l.capture && l.passive), "全部 capture＋passive");
+  });
+});
+
 // 输入法锚点的折叠补正（2026-10-20 定案）：xterm 的组字定位按「光标屏内行 × 行高」算，
 // 不含 viewportY 偏移——底部自动对齐把视口锚到真尾之上后，组字窗恒偏高「折起的空白带
 // 行数」行；光标出视口时 xterm 整块跳过更新（锚点留在旧位置）。修法：冻结时按公开缓冲
