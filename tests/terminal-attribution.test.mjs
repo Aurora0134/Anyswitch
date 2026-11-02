@@ -531,3 +531,89 @@ describe("filterTerminalRequestRows", () => {
     assert.deepEqual(filterTerminalRequestRows(null, { agentId: "kimi" }), []);
   });
 });
+
+describe("claude conversation fold (memberPids reverse lookup)", () => {
+  const baseSession = { id: "t1", label: "新终端", shell: "powershell", pid: 8888, status: "running" };
+
+  it("binds a member pid to its folded conversation row (claude rows live in the sessions bucket)", () => {
+    // 折叠后行 id 是会话身份（claude-sess-*），join 手里的进程号要按
+    // memberPids 映回行身份——否则折叠行的终端高亮失锚（2026-11-01 报障的
+    // 另一半：会话行高亮失败）。
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
+      [{ id: "claude", name: "Claude Code", sessions: [{ id: "claude-sess-abc", memberPids: [4321, 4322] }] }],
+    );
+    assert.equal(out[0].agent.instanceId, "claude-sess-abc");
+    assert.equal(out[0].agent.pid, 4321);
+  });
+
+  it("binds via the instances bucket too (the panel payload mirrors sessions into instances)", () => {
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "claude", pid: 4322, ancestors: [8888] }],
+      [{ id: "claude", name: "Claude Code", instances: [{ id: "claude-sess-abc", memberPids: [4321, 4322] }] }],
+    );
+    assert.equal(out[0].agent.instanceId, "claude-sess-abc");
+  });
+
+  it("a canonical per-pid row still wins over the member reverse lookup", () => {
+    // 未折叠的逐 pid 行与折叠行并存时，进程号精确命中的行优先——反查只是
+    // 「canonical 查不到」时的兜底。
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
+      [{ id: "claude", name: "Claude Code", sessions: [
+        { id: "claude-4321", memberPids: [4321] },
+        { id: "claude-sess-abc", memberPids: [4321] },
+      ] }],
+    );
+    assert.equal(out[0].agent.instanceId, "claude-4321");
+  });
+
+  it("a member pid without a matching row stays unbound", () => {
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "claude", pid: 9999, ancestors: [8888] }],
+      [{ id: "claude", name: "Claude Code", sessions: [{ id: "claude-sess-abc", memberPids: [4321] }] }],
+    );
+    assert.equal(out[0].agent.instanceId, null);
+  });
+});
+
+describe("filterTerminalRequestRows (instanceIds set filter)", () => {
+  // 折叠行的「最近请求」：journal 账目是逐进程的，折叠行的请求散在全部成员
+  // 键下；instanceIds 与 instanceId 并集生效，任一命中即算本行。
+  const rows = [
+    { ts: 1, agentId: "claude", instanceId: "claude-4444", model: "m1", ok: true },
+    { ts: 2, agentId: "claude", instanceId: "claude-5555", model: "m2", ok: true },
+    { ts: 3, agentId: "claude", instanceId: "claude-7777", model: "m3", ok: true },
+    { ts: 4, agentId: "kimi", instanceId: "kimi-4444", model: "m4", ok: true },
+    { ts: 5, agentId: "claude", instanceId: "claude-sess-abc", model: "m5", ok: true },
+  ];
+
+  it("matches any of the member keys, newest-first", () => {
+    const out = filterTerminalRequestRows(rows, {
+      agentId: "claude",
+      instanceId: "claude-sess-abc",
+      instanceIds: ["claude-4444", "claude-5555"],
+    });
+    assert.deepEqual(out.map((r) => r.ts), [5, 2, 1],
+      "成员键与行自身键并集；别的会话（7777）与别的端点（kimi）不进集");
+  });
+
+  it("instanceIds alone (no instanceId) still binds", () => {
+    const out = filterTerminalRequestRows(rows, { agentId: "claude", instanceIds: ["claude-7777"] });
+    assert.deepEqual(out.map((r) => r.ts), [3]);
+  });
+
+  it("empty instanceIds degrades to the plain instanceId filter", () => {
+    const out = filterTerminalRequestRows(rows, { agentId: "claude", instanceId: "claude-4444", instanceIds: [] });
+    assert.deepEqual(out.map((r) => r.ts), [1]);
+  });
+
+  it("junk entries in instanceIds are ignored", () => {
+    const out = filterTerminalRequestRows(rows, { agentId: "claude", instanceIds: ["", "claude-5555", 7] });
+    assert.deepEqual(out.map((r) => r.ts), [2]);
+  });
+});

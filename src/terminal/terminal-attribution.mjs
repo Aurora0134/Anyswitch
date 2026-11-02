@@ -142,16 +142,29 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
   }
   const agentName = new Map();
   const instanceRow = new Map(); // `${agentId}:${instanceId}` presence
+  // 折叠行的成员 pid → 行 id（claude 会话行 / claude-desktop 合成行携带
+  // memberPids）：pid 形 canonical id 查不到行时，按成员进程反查折叠行——
+  // 折叠后行 id 是会话身份，join 手里的进程号必须先映回行身份。
+  const memberPidRow = new Map(); // `${agentId}:${pid}` -> row id
+  const indexRow = (agentId, row) => {
+    if (!row || typeof row.id !== "string") return;
+    instanceRow.set(`${agentId}:${row.id}`, true);
+    if (Array.isArray(row.memberPids)) {
+      for (const pid of row.memberPids) {
+        if (Number.isInteger(pid) && !memberPidRow.has(`${agentId}:${pid}`)) {
+          memberPidRow.set(`${agentId}:${pid}`, row.id);
+        }
+      }
+    }
+  };
   if (Array.isArray(agents)) {
     for (const agent of agents) {
       if (!agent || typeof agent.id !== "string") continue;
       if (typeof agent.name === "string" && agent.name.length > 0) agentName.set(agent.id, agent.name);
-      for (const inst of Array.isArray(agent.instances) ? agent.instances : []) {
-        if (inst && typeof inst.id === "string") instanceRow.set(`${agent.id}:${inst.id}`, true);
-      }
-      for (const sess of Array.isArray(agent.sessions) ? agent.sessions : []) {
-        if (sess && typeof sess.id === "string") instanceRow.set(`${agent.id}:${sess.id}`, true);
-      }
+      // claude 的行在 sessions 桶（不产 instances），其余 agent 在 instances——
+      // 两个桶都可能携带折叠行，memberPids 索引必须都建。
+      for (const inst of Array.isArray(agent.instances) ? agent.instances : []) indexRow(agent.id, inst);
+      for (const sess of Array.isArray(agent.sessions) ? agent.sessions : []) indexRow(agent.id, sess);
     }
   }
   const feeds = {};
@@ -166,7 +179,9 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
     candidates.sort((a, b) => a.distance - b.distance);
     const best = candidates[0];
     const canonicalId = `${best.agentId}-${best.pid}`;
-    const pidRowId = instanceRow.has(`${best.agentId}:${canonicalId}`) ? canonicalId : null;
+    const pidRowId = instanceRow.has(`${best.agentId}:${canonicalId}`)
+      ? canonicalId
+      : (memberPidRow.get(`${best.agentId}:${best.pid}`) ?? null);
     const feed = feeds[best.agentId];
     const bridgedId = feed !== undefined && feed.length > 0
       ? sessionRowInstanceIdFor(session.cwd, feed, instanceRow)
@@ -213,14 +228,23 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
 //               (clients that never declared an id) never match — an
 //               attributed-but-unbound session (codex pre-traffic) therefore
 //               gets an empty list instead of someone else's requests.
-export function filterTerminalRequestRows(rows, { agentId, instanceId } = {}, limit = 10) {
+//   instanceIds: 集合形过滤（会话折叠行的成员键）：journal 账目是逐进程的，
+//               折叠行的请求分布在其全部成员的 pid 键下，任一命中即算本行。
+//               与 instanceId 同传时两键并集生效。
+export function filterTerminalRequestRows(rows, { agentId, instanceId, instanceIds } = {}, limit = 10) {
   if (!Array.isArray(rows) || typeof agentId !== "string" || agentId.length === 0) return [];
-  const bound = typeof instanceId === "string" && instanceId.length > 0 ? instanceId : null;
+  const boundSet = new Set();
+  if (typeof instanceId === "string" && instanceId.length > 0) boundSet.add(instanceId);
+  if (Array.isArray(instanceIds)) {
+    for (const id of instanceIds) {
+      if (typeof id === "string" && id.length > 0) boundSet.add(id);
+    }
+  }
   const out = [];
   for (let i = rows.length - 1; i >= 0 && out.length < limit; i--) {
     const row = rows[i];
     if (!row || row.agentId !== agentId) continue;
-    if (bound !== null && row.instanceId !== bound) continue;
+    if (boundSet.size > 0 && !boundSet.has(row.instanceId)) continue;
     out.push(row);
   }
   return out;
