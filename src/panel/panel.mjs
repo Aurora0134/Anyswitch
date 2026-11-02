@@ -1946,6 +1946,12 @@ export function createPanelRouter({
   function handleTerminalRequests(url, res) {
     const agentId = url.searchParams.get("agentId") || "";
     const instanceId = url.searchParams.get("instanceId") || "";
+    // 折叠行（claude 会话行）的成员键集合：journal 账目逐进程，折叠行的请求
+    // 散在全部成员键下；前端从行上的 memberPids 派生这串列表。
+    const instanceIds = (url.searchParams.get("instanceIds") || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
     let rows = [];
     try {
       const today = dayKey(Date.now());
@@ -1954,7 +1960,7 @@ export function createPanelRouter({
       logger?.warn?.(`terminal requests journal read failed: ${err.message}`);
       rows = [];
     }
-    sendJson(res, 200, { ok: true, requests: filterTerminalRequestRows(rows, { agentId, instanceId }) });
+    sendJson(res, 200, { ok: true, requests: filterTerminalRequestRows(rows, { agentId, instanceId, instanceIds }) });
   }
 
   // ---- Terminal host lifecycle (relay-owned child, panel drives it) ----

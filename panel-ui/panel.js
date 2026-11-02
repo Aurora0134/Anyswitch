@@ -8239,6 +8239,11 @@ async function api(method, path, body) {
       session.status = terminalSessionBusyFromSignals(session, activeRequests) ? "working" : "idle";
       noteTerminalWorkingStatus(session, session.status);
       session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
+      // 折叠行（claude 会话行）的成员实例键：journal 账目是逐进程的，「最近
+      // 请求」按成员键集合过滤才不漏行。非折叠行没有 memberPids，维持单键。
+      session.memberInstanceIds = instance && Array.isArray(instance.memberPids) && instance.memberPids.length > 0
+        ? instance.memberPids.map((pid) => `${agent.endpointId}-${pid}`)
+        : null;
       const { route, routeCurrent } = agent
         ? terminalRouteForEndpoint(agent.endpointId, chains, runtime)
         : { route: [], routeCurrent: 0 };
@@ -8254,6 +8259,9 @@ async function api(method, path, body) {
       return;
     }
     const query = new URLSearchParams({ agentId: session.agent.endpointId, instanceId: session.agent.instanceId });
+    if (Array.isArray(session.memberInstanceIds) && session.memberInstanceIds.length > 0) {
+      query.set("instanceIds", session.memberInstanceIds.join(","));
+    }
     const data = await api("GET", `/api/terminal/requests?${query.toString()}`).catch(() => null);
     if (!data || !Array.isArray(data.requests)) return; // 失败帧保留上一帧
     session.requests = terminalRequestsFromRows(data.requests);

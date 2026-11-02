@@ -12,6 +12,15 @@ import { workbuddyConfigRoot } from "../launchers/workbuddy-merge-models.mjs";
 // 「锚 pid 之下有没有活命令」与切换守卫同一个函数、同一份数据，面板的忙显示与
 // 守卫的拒换因此同源，不会各说各话。
 import { hasRunningCommand } from "../terminal/terminal-switch-guard.mjs";
+// Claude 会话折叠的正源读侧（pid → 会话 id）：CC 自维护的注册表 + 进程启动
+// 刻度对账，细则见模块头注释。
+import {
+  assignClaudeSessions,
+  claudeProcStartQuery,
+  defaultClaudeSessionsDir,
+  parseClaudeProcStartOutput,
+  readClaudeSessionRegistry,
+} from "./claude-session-registry.mjs";
 // AUTO_MODEL is the virtual chain model ("auto"): routing glue, never a real
 // model on any channel. The reporters must never publish it as a model name.
 import { AUTO_MODEL } from "../channels/chain-routing.mjs";
@@ -1302,7 +1311,7 @@ export function parseDshConsoleQueryOutput(out) {
 //   可信模式常关。自进程与裸 node 脚本的命令行不带 node_modules，不入计数；
 //   unclaimedNodeRows === 0 的轮次，护栏逐位等价于不存在。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, unclaimedNodeRows: 0, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), claudeSessionByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, unclaimedNodeRows: 0, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -3093,6 +3102,25 @@ export function createAgentMetricsCollector(options = {}) {
     }
   }
 
+  // Claude 会话归属（会话粒度折叠的正源，折叠本身在读侧 getActiveClaudeSessions）：
+  // CC 注册表给「pid → 会话 id」，进程启动刻度对账挡 PID 复用。只在可信轮跑——
+  // 刻度查询骑常驻探针（可选档），降级轮走 carryTrustedForm 的沿用（与其他分型
+  // 同一条 30s 窗）。任一环读不出：本轮 claudeSessionByPid 为空，读侧自然逐
+  // PID 成行，不折。
+  const claudeSessionsDir = options.claudeSessionsDir
+    ?? defaultClaudeSessionsDir(options.env ?? process.env);
+  async function attachClaudeSessions(counts) {
+    counts.claudeSessionByPid = new Map();
+    const pids = counts.claudePids instanceof Set ? counts.claudePids : new Set();
+    if (pids.size === 0) return;
+    const registry = readClaudeSessionRegistry(claudeSessionsDir, pids);
+    if (!(registry instanceof Map) || registry.size === 0) return;
+    const query = claudeProcStartQuery([...registry.keys()]);
+    if (query === null) return;
+    const out = await psProbe.query(query, { optional: true }).catch(() => null);
+    counts.claudeSessionByPid = assignClaudeSessions(registry, parseClaudeProcStartOutput(out ?? ""));
+  }
+
   // 降级轮的分类延续（2026-10-05 报障：只开一个 Claude Desktop，claude 卡上却
   // 出现十几个带 CLI 徽标的实例行）。回落 tasklist 的那一轮读不到命令行，而
   // 「这个进程是什么形态」「它是谁的子进程」「哪个进程算会话宿主」三件事全都
@@ -3109,6 +3137,7 @@ export function createAgentMetricsCollector(options = {}) {
   const CARRIED_FORM_KEYS = [
     ["claudeSurfaceByPid", "map"],
     ["claudeDesktopPids", "set"],
+    ["claudeSessionByPid", "map"],
     ["kimiSurfaceByPid", "map"],
     ["kimiEnginePids", "set"],
     ["kimiDesktopPids", "set"],
@@ -3209,6 +3238,7 @@ export function createAgentMetricsCollector(options = {}) {
         // 语义与改前一致（只是不再挡住第一次读）。
         await reapDshTerminalOrphans(counts);
         await attachKimiSurfaces(counts);
+        await attachClaudeSessions(counts);
         return cachedProcessCounts;
       }
 
@@ -4159,7 +4189,19 @@ export function createAgentMetricsCollector(options = {}) {
         entry.wbTrafficPid = norm.clientPid;
       }
       const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId,
-        (count) => publishActivity(bucketAgentId, instanceId, count));
+        (count) => {
+          // claude 会话折叠：帧落到折叠行（含成员在途合计）；id 是
+          // claude-<pid> 形才谈得上折叠，其余形态（claude-desktop、自定义
+          // id）原样发布。
+          if (bucketAgentId === "claude") {
+            const m = typeof instanceId === "string" ? instanceId.match(/^claude-(\d+)$/) : null;
+            if (m !== null) {
+              publishClaudeActivity(Number(m[1]), instanceId, count);
+              return;
+            }
+          }
+          publishActivity(bucketAgentId, instanceId, count);
+        });
       instanceAttached = true;
       composed = composeInstanceTracker(primary, mirror);
       // 迟到挂载补标：链归属（resolver + 当前成员）只在请求开头的成员循环里
@@ -4302,14 +4344,15 @@ export function createAgentMetricsCollector(options = {}) {
     session.lastSeen = now;
     session.token = token;
     if (typeof report.requests === "number") session.requests = report.requests;
+    // 0↔N jump of the merged per-session counter — the frame itself goes out
+    // after claudeSessions.set below: the folded counter
+    // (claudeFoldedActiveCountFor) walks claudeSessions, so a first report
+    // must be in the map before its 0→N frame is counted.
+    let activityBoundary = false;
     if (typeof report.activeRequests === "number") {
       const prevActive = session.activeRequests;
       session.activeRequests = report.activeRequests;
-      // 0↔N jump of the merged per-session counter — publish the absolute
-      // state; same busy-idle boundary semantics as the aggregate trackers.
-      if ((prevActive === 0) !== (session.activeRequests === 0)) {
-        publishActivity("claude", session.id, session.activeRequests);
-      }
+      activityBoundary = (prevActive === 0) !== (session.activeRequests === 0);
     }
     if (typeof report.activeDurationMs === "number") session.activeDurationMs = report.activeDurationMs;
     if (typeof report.promptTokens === "number") session.promptTokens = report.promptTokens;
@@ -4392,6 +4435,9 @@ export function createAgentMetricsCollector(options = {}) {
     }
 
     claudeSessions.set(key, session);
+    // 0↔N 翻转的绝对状态帧——与聚合追踪器同一生灭边界语义；入册后才发，
+    // 折叠行的成员在途合计（含自己）此刻已能算全。
+    if (activityBoundary) publishClaudeActivity(pid, session.id, session.activeRequests);
   }
 
   // Claude 桌面形态收敛：MSIX 桌面壳（单形态约 5 个进程）与桌面托管引擎
@@ -4426,6 +4472,7 @@ export function createAgentMetricsCollector(options = {}) {
     const folded = {
       id: "claude-desktop",
       pid: null,
+      memberPids: members.map((m) => m.pid).filter((pid) => Number.isInteger(pid)),
       token: null,
       surface: "desktop",
       clientForm: "desktop",
@@ -4467,6 +4514,136 @@ export function createAgentMetricsCollector(options = {}) {
       out.push(s);
     }
     return out;
+  }
+
+  // 会话粒度折叠（2026-11-02，报障：一条对话被 resume/continue 附着的第二个
+  // 进程并发驱动，看板扫出两张各带活跃数据的 TUI 卡，用户认的那张高亮被劈到
+  // 另一张上）。实例行的语义单位是「哪条对话」——与 workbuddy-sess-/
+  //  codex-sess- 行同族——归属正源是 CC 自维护的会话注册表（本轮扫描的
+  // claudeSessionByPid，已过启动刻度对账）。有归属的行换成稳定会话身份
+  // claude-sess-<sessionId>（单成员也换：行身份跨进程换代延续，重启/续接不再
+  // 裂行）；同会话多成员合并计数、在途取并集。未归属的行维持逐 PID 旧形态——
+  // 宁可漏折，不可误折。纯呈现层：claudeSessions 仍逐 PID 跟踪生灭，退役账
+  // 吸收不动，卡片总量恒等式不受影响。
+  function foldClaudeConversationRows(sessions, sessionIdByPid) {
+    if (!(sessionIdByPid instanceof Map) || sessionIdByPid.size === 0) return sessions;
+    const groups = new Map(); // sessionId -> member rows（行序 = 首个成员的原位置）
+    const rowsOut = [];
+    for (const s of sessions) {
+      const sessionId = typeof s.pid === "number" ? sessionIdByPid.get(s.pid) : undefined;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        rowsOut.push(s);
+        continue;
+      }
+      let group = groups.get(sessionId);
+      if (!group) {
+        group = { sessionId, anchor: rowsOut.length, members: [] };
+        groups.set(sessionId, group);
+        rowsOut.push(null); // 占位，折叠产物回填
+      }
+      group.members.push(s);
+    }
+    for (const group of groups.values()) {
+      const members = group.members;
+      const newestWith = (field) => {
+        let best = null;
+        for (const m of members) {
+          if (m[field] === null || m[field] === undefined) continue;
+          if (best === null || m.lastSeen >= best.lastSeen) best = m;
+        }
+        return best;
+      };
+      const ttftHolder = newestWith("lastTtftMs");
+      const sparkHolder = newestWith("sparkHistory");
+      const samplesHolder = newestWith("samples");
+      const modelHolder = newestWith("model");
+      const lastModelHolder = newestWith("lastModel");
+      const newest = members.reduce((a, b) => (a.lastSeen >= b.lastSeen ? a : b));
+      rowsOut[group.anchor] = {
+        id: `claude-sess-${group.sessionId}`,
+        pid: null,
+        // 成员进程表：终端归属 join 与「最近请求」过滤靠它把行身份映回逐
+        // 进程键（journal 账目仍是逐 pid 的）。
+        memberPids: members.map((m) => m.pid).filter((pid) => Number.isInteger(pid)),
+        token: null,
+        // 面只认全员一致：全员明确 TUI 才贴 TUI；有成员读不出形态就不贴
+        // （桌面成员根本到不了这里——桌面折叠先行，见 groupClaudeClientInstances）。
+        surface: members.every((m) => m.surface === "cli") ? "cli" : null,
+        clientForm: members.every((m) => m.surface === "cli") ? "cli" : null,
+        transport: newest.transport ?? null,
+        identitySource: members.some((m) => m.identitySource === "reporter")
+          ? "reporter"
+          : (members.some((m) => m.identitySource === "socket-pid") ? "socket-pid" : "process-scan"),
+        startedAt: Math.min(...members.map((m) => m.startedAt)),
+        lastSeen: Math.max(...members.map((m) => m.lastSeen)),
+        requests: members.reduce((sum, m) => sum + m.requests, 0),
+        activeRequests: members.reduce((sum, m) => sum + m.activeRequests, 0),
+        activeDurationMs: members.reduce((sum, m) => sum + m.activeDurationMs, 0),
+        promptTokens: members.reduce((sum, m) => sum + m.promptTokens, 0),
+        completionTokens: members.reduce((sum, m) => sum + m.completionTokens, 0),
+        cachedTokens: members.reduce((sum, m) => sum + m.cachedTokens, 0),
+        lastTtftMs: ttftHolder?.lastTtftMs ?? null,
+        lastError: newestWith("lastError")?.lastError ?? null,
+        errorActive: members.some((m) => m.errorActive),
+        sparkHistory: sparkHolder?.sparkHistory ?? null,
+        samples: samplesHolder?.samples ?? null,
+        model: modelHolder?.model ?? null,
+        providerId: modelHolder?.providerId ?? null,
+        viaAuto: modelHolder?.viaAuto === true,
+        chainKey: modelHolder?.chainKey ?? null,
+        lastModel: lastModelHolder?.lastModel ?? null,
+        lastProvider: lastModelHolder?.lastProvider ?? null,
+        lastViaAuto: lastModelHolder?.lastViaAuto === true,
+        lastChainKey: lastModelHolder?.lastChainKey ?? null,
+        ended: false,
+      };
+    }
+    return rowsOut;
+  }
+
+  // 活跃帧身份翻译：行折叠成会话粒度后，帧也得落在折叠行的 id 上——否则 SSE
+  // 快车道会把「生成中」写到一张已不存在的逐 PID 行上（轮询慢车道能自愈，但
+  // 帧的意义就是省那一拍）。映射只认最新一轮落地扫描的归属表；表里没有
+  // （注册表还没读到 / 对账未过）原样放行，彼时的行本来就是逐 PID 形态。
+  // 发布入口是下面的 publishClaudeActivity。
+
+  // 折叠行的在途合计：帧语义是「绝对状态」，成员 0↔N 翻转时发的是全体会话
+  // 成员的合计——单发成员自己的计数会把「另一个成员还在跑」的行闪灭。账目源
+  // 与读侧同构：reporter 行读自身快照，占位行的常驻桶即其在途（两者按构造
+  // 互斥），桶里「行还没建出来」的成员（首请求先于扫描轮）一并收进。
+  function claudeFoldedActiveCountFor(sessionId) {
+    const map = cachedProcessCounts?.claudeSessionByPid;
+    if (!(map instanceof Map)) return null;
+    let sum = 0;
+    let found = false;
+    const counted = new Set();
+    for (const s of claudeSessions.values()) {
+      if (s.ended || !Number.isInteger(s.pid) || map.get(s.pid) !== sessionId) continue;
+      found = true;
+      counted.add(s.pid);
+      if (s.token !== null) sum += s.activeRequests;
+      else sum += instanceBuckets.claude.get(`claude-${s.pid}`)?.state.activeRequests ?? 0;
+    }
+    for (const [id, entry] of instanceBuckets.claude) {
+      const m = id.match(/^claude-(\d+)$/);
+      if (m === null) continue;
+      const pid = Number(m[1]);
+      if (counted.has(pid) || map.get(pid) !== sessionId) continue;
+      found = true;
+      sum += entry.state.activeRequests;
+    }
+    return found ? sum : null;
+  }
+
+  // 会话归属下的帧发布：能折则发折叠行 id＋成员合计，否则原样逐 PID。
+  function publishClaudeActivity(pid, fallbackId, count) {
+    const map = cachedProcessCounts?.claudeSessionByPid;
+    const sessionId = map instanceof Map && Number.isInteger(pid) ? map.get(pid) : undefined;
+    if (typeof sessionId === "string" && sessionId.length > 0) {
+      publishActivity("claude", `claude-sess-${sessionId}`, claudeFoldedActiveCountFor(sessionId) ?? count);
+      return;
+    }
+    publishActivity("claude", fallbackId, count);
   }
 
   // Liveness is decided by the process list, not by a TTL. A session is alive
@@ -4630,7 +4807,12 @@ export function createAgentMetricsCollector(options = {}) {
       mergeResidentClaudeMetrics(s, now);
       active.push(s);
     }
-    return groupClaudeClientInstances(active, procCounts.claudeDesktopPids);
+    // 先桌面形态折叠（合成 claude-desktop 行），再会话粒度折叠（claude-sess-*）：
+    // 桌面行不参与会话折叠，会话折叠只见非桌面成员。
+    return foldClaudeConversationRows(
+      groupClaudeClientInstances(active, procCounts.claudeDesktopPids),
+      procCounts.claudeSessionByPid,
+    );
   }
 
   async function getAgentsStatus() {
@@ -5331,6 +5513,11 @@ export function createAgentMetricsCollector(options = {}) {
         id: s.id,
         title: `实例 #${idx + 1}`,
         status: s.activeRequests > 0 ? "active" : "idle",
+        // 行成员进程：折叠行（会话粒度/桌面合成）是成员列表，逐 PID 行是单元素
+        // 表。终端归属 join 与「最近请求」过滤据此把行身份映回逐进程键。
+        memberPids: Array.isArray(s.memberPids)
+          ? s.memberPids
+          : (Number.isInteger(s.pid) ? [s.pid] : []),
         tps,
         cacheHitRate,
         lastTtftMs: s.lastTtftMs,

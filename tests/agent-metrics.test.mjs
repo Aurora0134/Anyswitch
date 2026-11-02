@@ -8664,3 +8664,183 @@ describe("已工作时间随端点关闭清零", () => {
     assert.equal(zcode.metrics.activeDurationMs, 0, "工时随关闭清零，连孤儿尾巴一并清");
   });
 });
+
+describe("claude conversation fold (session registry)", () => {
+  // 双答探针：主扫描（Get-CimInstance 全表 dump）答进程表；会话归属的启动
+  // 刻度查询（Get-Process -Id …，见 claude-session-registry.mjs）答
+  // pid,filetime 行。其余可选查询（kimi 形态、DSH 控制台）答空串。
+  const makeFoldProbe = (scanCsv, procStartAnswer) => () => {
+    const child = new EventEmitter();
+    const stdout = new EventEmitter();
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter();
+    stderr.resume = () => {};
+    child.stdin = {
+      write: (text) => {
+        const markerMatch = text.match(/Write-Output '([^']+)'/);
+        const marker = markerMatch ? markerMatch[1] : "";
+        let body = text.includes("Get-Process -Id") ? procStartAnswer : "";
+        if (!text.includes("Get-Process -Id") && text.includes("Win32_Process")) body = scanCsv;
+        if (body.length > 0 && !body.endsWith("\r\n")) body += "\r\n";
+        stdout.emit("data", body + marker + "\r\n");
+      },
+    };
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => { child.emit("exit", 0); };
+    child.unref = () => {};
+    return child;
+  };
+
+  const CLAUDE_TWO_CLI =
+    `"claude.exe","4444","Console","1","55,000 K"\r\n` +
+    `"claude.exe","5555","Console","1","55,000 K"\r\n`;
+
+  const writeRegistry = (dir, rows) => {
+    for (const [pid, sessionId, procStart] of rows) {
+      writeFileSync(join(dir, `${pid}.json`), JSON.stringify({ pid, sessionId, procStart, kind: "interactive" }));
+    }
+  };
+
+  const claudeCard = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+
+  it("folds two processes driving one conversation into a single stable row", async () => {
+    // 2026-11-01 报障现场：一条对话被 resume 附着的第二个进程并发驱动，看板
+    // 扫出两张各带活跃数据的 TUI 卡。注册表把两个 pid 指到同一条会话。
+    const dir = mkTestDir();
+    writeRegistry(dir, [[4444, "sess-abc", "111"], [5555, "sess-abc", "222"]]);
+    const collector = testCollector({
+      spawnFn: makeFoldProbe(CLAUDE_TWO_CLI, "4444,111\r\n5555,222\r\n"),
+      nowFn: () => 10000,
+      claudeSessionsDir: dir,
+    });
+
+    collector.reportSession("tok_A", {
+      pid: 4444, requests: 3, activeRequests: 1, activeDurationMs: 1000,
+      promptTokens: 2000, completionTokens: 300, cachedTokens: 1500,
+    });
+    collector.reportSession("tok_B", {
+      pid: 5555, requests: 2, activeRequests: 1, activeDurationMs: 500,
+      promptTokens: 1000, completionTokens: 100, cachedTokens: 500,
+    });
+
+    const claude = await claudeCard(collector);
+    assert.equal(claude.sessionsCount, 1, "two pids of one conversation are one row");
+    const row = claude.sessions[0];
+    assert.equal(row.id, "claude-sess-sess-abc");
+    assert.deepEqual(row.memberPids, [4444, 5555]);
+    assert.equal(row.status, "active");
+    assert.equal(row.requests, 5, "counts sum across member processes");
+    assert.equal(row.activeRequests, 2, "in-flight is the union of both members");
+    assert.equal(row.tokens.prompt, 3000);
+    assert.equal(row.tokens.cached, 2000);
+  });
+
+  it("keeps distinct conversations as separate rows (a single member still gets the stable session id)", async () => {
+    const dir = mkTestDir();
+    writeRegistry(dir, [[4444, "sess-a", "111"], [5555, "sess-b", "222"]]);
+    const collector = testCollector({
+      spawnFn: makeFoldProbe(CLAUDE_TWO_CLI, "4444,111\r\n5555,222\r\n"),
+      nowFn: () => 10000,
+      claudeSessionsDir: dir,
+    });
+
+    collector.reportSession("tok_A", { pid: 4444, requests: 1, activeRequests: 0 });
+    collector.reportSession("tok_B", { pid: 5555, requests: 1, activeRequests: 0 });
+
+    const claude = await claudeCard(collector);
+    assert.equal(claude.sessionsCount, 2);
+    const ids = claude.sessions.map((s) => s.id).sort();
+    assert.deepEqual(ids, ["claude-sess-sess-a", "claude-sess-sess-b"]);
+    // 单成员也换稳定身份：行身份跨进程换代延续（重启/续接不再裂行），且
+    // memberPids 让下游（终端归属、最近请求）仍能映回进程键。
+    assert.deepEqual(claude.sessions.map((s) => s.memberPids).sort(), [[4444], [5555]]);
+  });
+
+  it("refuses the fold when the live start tick disagrees (PID reuse: stale registry file)", async () => {
+    const dir = mkTestDir();
+    writeRegistry(dir, [[4444, "sess-abc", "111"], [5555, "sess-abc", "222"]]);
+    const collector = testCollector({
+      // 4444 的实时刻度与注册表对不上：旧文件碰上了同名新进程。
+      spawnFn: makeFoldProbe(CLAUDE_TWO_CLI, "4444,999\r\n5555,222\r\n"),
+      nowFn: () => 10000,
+      claudeSessionsDir: dir,
+    });
+
+    collector.reportSession("tok_A", { pid: 4444, requests: 1, activeRequests: 0 });
+    collector.reportSession("tok_B", { pid: 5555, requests: 1, activeRequests: 0 });
+
+    const claude = await claudeCard(collector);
+    assert.equal(claude.sessionsCount, 2, "no attribution, no fold — 宁可漏折，不可误折");
+    const ids = claude.sessions.map((s) => s.id).sort();
+    assert.deepEqual(ids, ["claude-4444", "claude-sess-sess-abc"]);
+  });
+
+  it("keeps per-pid rows when the registry has no answer (pre-2.1 CC or unreadable dir)", async () => {
+    const dir = mkTestDir(); // 空目录：没有任何注册表文件
+    const collector = testCollector({
+      spawnFn: makeFoldProbe(CLAUDE_TWO_CLI, "4444,111\r\n5555,222\r\n"),
+      nowFn: () => 10000,
+      claudeSessionsDir: dir,
+    });
+
+    collector.reportSession("tok_A", { pid: 4444, requests: 1, activeRequests: 0 });
+    collector.reportSession("tok_B", { pid: 5555, requests: 1, activeRequests: 0 });
+
+    const claude = await claudeCard(collector);
+    assert.equal(claude.sessionsCount, 2);
+    assert.deepEqual(claude.sessions.map((s) => s.id).sort(), ["claude-4444", "claude-5555"]);
+  });
+
+  it("publishes activity frames on the folded row with the conversation-wide count", async () => {
+    const dir = mkTestDir();
+    writeRegistry(dir, [[4444, "sess-abc", "111"], [5555, "sess-abc", "222"]]);
+    const collector = testCollector({
+      spawnFn: makeFoldProbe(CLAUDE_TWO_CLI, "4444,111\r\n5555,222\r\n"),
+      nowFn: () => 10000,
+      claudeSessionsDir: dir,
+    });
+    const frames = [];
+    collector.onActivity((f) => frames.push(f));
+    const sig = (f) => [f.type, f.endpointId, f.instanceId, f.activeRequests];
+
+    await claudeCard(collector); // 落一轮可信扫描，归属映射进缓存
+    assert.deepEqual(frames, [], "scans publish nothing");
+
+    collector.reportSession("tok_A", { pid: 4444, activeRequests: 1 });
+    assert.deepEqual(frames.map(sig), [["activity", "claude", "claude-sess-sess-abc", 1]],
+      "member A 0→N: the folded row lights up with the conversation total");
+
+    collector.reportSession("tok_B", { pid: 5555, activeRequests: 1 });
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "claude", "claude-sess-sess-abc", 1],
+      ["activity", "claude", "claude-sess-sess-abc", 2],
+    ], "member B 0→N: both members busy, total 2");
+
+    collector.reportSession("tok_A", { pid: 4444, activeRequests: 0 });
+    assert.deepEqual(frames.map(sig).at(-1), ["activity", "claude", "claude-sess-sess-abc", 1],
+      "member A goes idle but B still runs — the row must not blink off");
+
+    collector.reportSession("tok_B", { pid: 5555, activeRequests: 0 });
+    assert.deepEqual(frames.map(sig).at(-1), ["activity", "claude", "claude-sess-sess-abc", 0]);
+    assert.equal(frames.length, 4);
+  });
+
+  it("a reporter's first frame counts itself (publish happens after the session lands)", async () => {
+    // 时点钉：0→N 帧若在 claudeSessions.set 之前发，折叠合计会漏掉首发会话
+    // 自己（彼时 map 里还看不到它），单成员会话的首帧会错发 0。
+    const dir = mkTestDir();
+    writeRegistry(dir, [[4444, "sess-abc", "111"]]);
+    const collector = testCollector({
+      spawnFn: makeFoldProbe(`"claude.exe","4444","Console","1","55,000 K"\r\n`, "4444,111\r\n"),
+      nowFn: () => 10000,
+      claudeSessionsDir: dir,
+    });
+    const frames = [];
+    collector.onActivity((f) => frames.push(f));
+
+    await claudeCard(collector);
+    collector.reportSession("tok_A", { pid: 4444, activeRequests: 1 });
+    assert.deepEqual(frames.map((f) => [f.instanceId, f.activeRequests]), [["claude-sess-sess-abc", 1]]);
+  });
+});
