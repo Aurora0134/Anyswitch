@@ -6435,15 +6435,16 @@ describe("设置项「看板排布」", () => {
       "一张卡都不在时从 150ms 起拍，不留负延迟");
   });
 
-  // 补挂台阶的行为沙箱：3 张端点卡，中间那张在揭示第一拍时还是 hidden（离开期间没在跑）。
-  // finishEnter=true 表示阶梯已播完：逐张调用 playBoardEnter 注册的 animationend 回调，
-  // entry 类按真实行为摘掉。随后用真值把中卡放出来，看它有没有被补挂。
+  // 补挂台阶的行为沙箱：3 张端点卡，startHidden 指定揭示第一拍时哪张还是 hidden
+  // （离开期间没在跑），null 表示三张都可见。run(body) 在同一作用域里跑真源码 + 给定
+  // 脚本，脚本可以 return 结果；animationend 回调由 playBoardEnter 注册时记下，可手动
+  // 触发以模拟「阶梯播完」（entry 类按真实行为摘掉）。
   const armFn = extractFn("armBoardCardEnter", "card, index");
   const inFlightFn = extractFn("boardEnterInFlight");
   const releaseFn = extractFn("armReleasedBoardCards", "released");
   const visFn = extractFn("applyAgentCardVisibility", "ids");
   const enterFn = extractFn("playBoardEnter", "view");
-  function boardReleaseSandbox(finishEnter) {
+  function boardEnterEnv({ startHidden = 1 } = {}) {
     const ids = ["zcode", "claude", "kimi"];
     const cards = ids.map((id) => {
       const card = mkBoardAnimEl();
@@ -6456,25 +6457,17 @@ describe("设置项「看板排布」", () => {
       };
       return card;
     });
-    cards[1].hidden = true; // 揭示第一拍时它还没在跑
+    if (startHidden !== null) cards[startHidden].hidden = true;
     const container = { querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []) };
     const view = mkBoardAnimEl();
     view.querySelectorAll = (sel) => (sel === ".panel-card" ? cards : []);
-    // boardEnterInFlight 的取样：只要还有卡挂着 entry 类，就说明阶梯仍在播
-    view.querySelector = (sel) => {
-      if (sel === ".board-icon-strip") return null;
-      if (sel === ".panel-card.board-card-enter, .panel-card.board-card-enter-scale") {
-        return cards.find((c) => c.classList.contains("board-card-enter")
-          || c.classList.contains("board-card-enter-scale")) || null;
-      }
-      return null;
-    };
+    view.querySelector = () => null; // 只有 .board-icon-strip 会被问到
     const doc = {
       documentElement: { getAttribute: () => null, removeAttribute: () => {} },
       querySelector: (sel) => (sel === ".agent-cards-container" ? container
         : sel === ".telemetry-view" ? view : null),
     };
-    const src = `
+    const run = (body) => new Function("view", "document", "getComputedStyle", `
       let boardLayoutMode = "live-only";
       let boardLiveAgentIds = new Set();
       function boardVisible() { return true; }
@@ -6484,21 +6477,21 @@ describe("设置项「看板排布」", () => {
       ${releaseFn}
       ${visFn}
       ${enterFn}
-      playBoardEnter(view);
-      if (finishEnter) view.querySelectorAll(".panel-card").forEach((c) => c.finish && c.finish());
-      boardLiveAgentIds = new Set(["zcode", "claude", "kimi"]);
-      applyAgentCardVisibility(new Set(["zcode", "claude", "kimi"]));
-    `;
-    new Function("view", "document", "getComputedStyle", "finishEnter", src)(
-      view, doc, () => ({ animationName: "none" }), finishEnter);
-    return cards;
+      ${body}
+    `)(view, doc, () => ({ animationName: "none" }));
+    return { cards, run };
   }
 
   it("揭示等待期被放出来的卡补上入场台阶，不改已排过的卡", () => {
     // 切回看板那一刻中卡还是 hidden，playBoardEnter 只排了首末两张；40–60ms 后
     // /api/agents 落地，中卡由藏转显——它按此刻可见序第 2 张补 150ms 的淡入，而不是
     // 以终态硬出现。补挂只碰这一次放出来的卡。
-    const cards = boardReleaseSandbox(false);
+    const { cards, run } = boardEnterEnv({ startHidden: 1 });
+    run(`
+      playBoardEnter(view);
+      boardLiveAgentIds = new Set(["zcode", "claude", "kimi"]);
+      applyAgentCardVisibility(new Set(["zcode", "claude", "kimi"]));
+    `);
     assert.equal(cards[1].hidden, false, "中卡已被真值放出来");
     assert.ok(cards[1].classList.contains("board-card-enter"), "迟到的卡拿到普通淡入类");
     assert.ok(!cards[1].classList.contains("board-card-enter-scale"), "不是首卡，不走 hero 变奏");
@@ -6514,11 +6507,46 @@ describe("设置项「看板排布」", () => {
     // 阶梯播完（entry 类已在各自 animationend 摘掉）之后才由真值放出来的卡，说明揭示
     // 早已收场——不许凭空补一段淡入。这条钉住「补挂只发生在揭示现役期间」：把
     // boardEnterInFlight 换回一个跨调用的标记，这里就会红。
-    const settled = boardReleaseSandbox(true);
+    const { cards: settled, run } = boardEnterEnv({ startHidden: 1 });
+    run(`
+      playBoardEnter(view);
+      view.querySelectorAll(".panel-card").forEach((c) => c.finish && c.finish());
+      boardLiveAgentIds = new Set(["zcode", "claude", "kimi"]);
+      applyAgentCardVisibility(new Set(["zcode", "claude", "kimi"]));
+    `);
     assert.equal(settled[1].hidden, false, "揭示结束后中卡照样被真值放出来");
     assert.ok(!settled[1].classList.contains("board-card-enter"), "揭示已结束：不再补入场台阶");
     assert.equal(settled[1].styleProps["--board-delay"], undefined, "也不发延迟");
     assert.equal(settled[1].arms ?? 0, 0, "没有发生装配");
+  });
+
+  it("揭示途中被藏掉的卡摘干净入场类，残留类不骗过现役判定", () => {
+    // 动画播到一半被 hidden=true（compact 档任务结束）：display:none 会 cancel 动画、
+    // 不触发 animationend，类若留着会一直骗人——boardEnterInFlight() 永远为真，之后任意
+    // 卡被放出来都补一段淡入。这里钉住「藏卡摘类 + 判定只认可见卡」两道。
+    const { cards, run } = boardEnterEnv({ startHidden: null });
+    const flags = run(`
+      playBoardEnter(view);
+      // 首末两张先播完，中卡还在阶梯里
+      view.querySelectorAll(".panel-card")[0].finish();
+      view.querySelectorAll(".panel-card")[2].finish();
+      // 中卡在播报途中被整卡藏掉（compact 档：那个端点跑完了）
+      boardLiveAgentIds = new Set(["zcode", "kimi"]);
+      applyAgentCardVisibility(new Set(["zcode", "claude", "kimi"]));
+      const afterHide = boardEnterInFlight();
+      const classAfterHide = view.querySelectorAll(".panel-card")[1]
+        .classList.contains("board-card-enter");
+      // 再放出来：闸门仍须为假，不许凭空补台阶
+      boardLiveAgentIds = new Set(["zcode", "claude", "kimi"]);
+      applyAgentCardVisibility(new Set(["zcode", "claude", "kimi"]));
+      return { afterHide, classAfterHide, afterRelease: boardEnterInFlight() };
+    `);
+    assert.equal(cards[1].hidden, false, "中卡最终被放出来");
+    assert.equal(flags.classAfterHide, false, "藏卡时顺手摘掉入场类");
+    assert.equal(flags.afterHide, false, "没有可见卡在播：现役判定为假");
+    assert.equal(flags.afterRelease, false, "放出来的卡没有被补台阶");
+    assert.ok(!cards[1].classList.contains("board-card-enter"), "放回来时没带过期类");
+    assert.equal(cards[1].arms, 1, "只被首轮装配过一次");
   });
 
   it("刷新时先重排、再落定运行中集合", () => {
@@ -8382,11 +8410,21 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
   // 在这里短路成 false，才不会碰 armReleasedBoardCards。
   const enterInFlightFn = extractFn("boardEnterInFlight");
   function visibilitySandbox({ layoutMode = "all", liveIds = null } = {}) {
-    const cards = ["zcode", "claude", "kimi", "grok"].map((id) => ({
-      id,
-      hidden: null,
-      getAttribute: (k) => (k === "data-agent-id" ? id : null),
-    }));
+    const cards = ["zcode", "claude", "kimi", "grok"].map((id) => {
+      // 隐藏时源码会顺手摘入场类（display:none 不触发 animationend），桩要给类表
+      const classes = new Set();
+      return {
+        id,
+        hidden: null,
+        classes,
+        classList: {
+          add: (c) => classes.add(c),
+          remove: (...cs) => cs.forEach((c) => classes.delete(c)),
+          contains: (c) => classes.has(c),
+        },
+        getAttribute: (k) => (k === "data-agent-id" ? id : null),
+      };
+    });
     const removedAttrs = [];
     const container = {
       querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []),

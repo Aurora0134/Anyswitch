@@ -761,7 +761,12 @@ async function api(method, path, body) {
         hiddenByLayout = boardLiveAgentIds !== null && !boardLiveAgentIds.has(id);
       }
       const wasHidden = card.hidden;
-      card.hidden = hiddenByInstall || hiddenByLayout;
+      const nextHidden = hiddenByInstall || hiddenByLayout;
+      // 隐藏卡不该携带动画类：display:none 会 cancel 动画、不触发 animationend，类会
+      // 永久留在卡上——既骗过 boardEnterInFlight()（之后任意卡放出都被补一段淡入），
+      // 也会让「藏了再放」带着过期类原样回来。
+      if (!wasHidden && nextHidden) card.classList.remove("board-card-enter", "board-card-enter-scale");
+      card.hidden = nextHidden;
       // 由藏转显 = 这张卡在揭示动画之后才进名单，回头按可见序位补台阶
       if (wasHidden && !card.hidden) released.push(card);
     }
@@ -786,14 +791,17 @@ async function api(method, path, body) {
       document.documentElement.removeAttribute("data-prepaint-board-layout");
     }
   }
-  // 揭示是否仍在进行：阶梯里的卡还挂着 entry 类，这些类各自在 animationend 才摘，天然
-  // 覆盖整段阶梯（约 700ms）。补挂只在这个窗口内生效——判定挂在「现役动画」上、不靠跨
-  // 调用的标记，就不会出现揭示早已结束而标记仍挂着、随后任意一张卡被放出来都凭空补一段
+  // 揭示是否仍在进行：阶梯里的可见卡还挂着 entry 类，这些类各自在 animationend 才摘，
+  // 天然覆盖整段阶梯（约 700ms）。补挂只在这个窗口内生效——判定挂在「现役动画」上、不靠
+  // 跨调用的标记，就不会出现揭示早已结束而标记仍挂着、随后任意一张卡被放出来都凭空补一段
   // 淡入（首拍取数失败、pending 补播、开屏这些路径也因此不需要额外的清标记动作）。
+  // 只认未隐藏的卡：隐藏节点上的残留类不算「还在播」，否则一次中途藏卡就能把闸门焊死。
   function boardEnterInFlight() {
     if (!boardVisible()) return false;
     const view = document.querySelector(".telemetry-view");
-    return !!view && !!view.querySelector(".panel-card.board-card-enter, .panel-card.board-card-enter-scale");
+    if (!view) return false;
+    return [...view.querySelectorAll(".panel-card")].some((el) => !el.hidden
+      && (el.classList.contains("board-card-enter") || el.classList.contains("board-card-enter-scale")));
   }
   // 补挂台阶：序位口径与 playBoardEnter 一致——.telemetry-view 下 !hidden 的 .panel-card
   // 逐张数下去（不能只看容器内的卡，侧栏卡也占延迟位）。只在揭示现役期间、看板可见
