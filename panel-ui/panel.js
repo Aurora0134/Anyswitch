@@ -7946,6 +7946,10 @@ async function api(method, path, body) {
     // 对上了就清账：下一次错配重新从 0 起算（计数只认「连续」）。
     if (hostSized && clientSized && !geometryMismatch) terminalGeometryRealignStreak = 0;
     if (geometryMismatch) {
+      // 两条刹车：连续超过上限（宿主尺寸真改不动）与冷却窗内（刚重连过）都不再重开流，
+      // 这一帧按原逻辑照常落屏——拖窗口/连续重连的那一拍不能让屏停在空白上。
+      const realignable = terminalGeometryRealignStreak < TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS
+        && Date.now() - terminalGeometryRealignAt >= TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS;
       if (terminalGeometryRealignStreak >= TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
         // 连续几次都没对上：宿主侧尺寸多半改不动（进程拒绝 resize 等）。再重连只会把同
         // 一份错位回放重画一遍，退回原逻辑至少让用户看到画面；只告警一次。
@@ -7955,10 +7959,8 @@ async function api(method, path, body) {
             host: [hostCols, hostRows], client: [clientCols, clientRows],
           });
         }
-      } else if (Date.now() - terminalGeometryRealignAt < TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS) {
-        // 重连刚在同一实例上触发过：这一帧属于正在被换掉的那条流，丢掉等新流重发。
-        return;
-      } else {
+      }
+      if (realignable) {
         terminalGeometryRealignAt = Date.now();
         terminalGeometryRealignStreak += 1;
         // 重对齐在飞期间到达的回放一律丢弃（见 data 帧处理器的第一行），否则它仍会写进
