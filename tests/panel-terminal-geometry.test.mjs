@@ -399,22 +399,19 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     const world = makeGeometryWorld();
     const session = sessionOf("S1");
     const { es, term } = await prime(world, session);
-    assert.equal(world.streak(), 0, "前置：匹配帧把账清零");
-    // 先把账顶到 1（等价于此前真发生过一次「量得到但宿主对不上」的重对齐）。这样下面
-    // 那一帧不可测的快照才分得清「原地不动」与「归零」两种实现——从 0 起算两种都过。
+    // 先把连续计数置到 1：用来区分「不可测的一帧把账清零了」与「账原地不动」。
     world.setStreak(1);
-
-    // 这一拍 fit 静默早退（容器量不到），term.cols 停在 xterm 出厂值——这是猜测值，
-    // 不是测量值，拿它 POST 等于把 80 列硬写进 PTY。
     world.measurable(false);
     term.cols = 80;
     world.state.writes.length = 0;
     es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    // snapshot 本身不写屏，回放帧必须跟一发，writes 断言才有落点。
     es.emit("data", "不可测时的回放");
-    assert.deepEqual(world.state.posts, [], "不可测：不拿猜测尺寸 POST");
-    assert.equal(world.state.sources.length, 1, "也不重连");
-    assert.deepEqual(world.state.warnings, [], "不告警");
-    assert.equal(world.pending(), false, "不占回放闩");
+
+    assert.equal(world.state.posts.length, 0, "不可测时不 POST");
+    assert.equal(world.state.sources.length, 1, "不可测时不重连");
+    assert.deepEqual(world.state.warnings, [], "不可测时不告警");
+    assert.equal(world.pending(), false, "不可测时不占回放闩");
     assert.equal(world.streak(), 1, "不可测的一帧既不归零也不累加：只认「判得了且没对上」的连续失败");
     assert.deepEqual(world.state.writes, ["不可测时的回放"], "照原逻辑落屏：屏上有内容");
 
