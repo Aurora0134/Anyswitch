@@ -313,7 +313,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     "requestAnimationFrame", "cancelAnimationFrame", "document",
     "ensureTerminalXterm", "fitTerminalXterm", "sendTerminalInput", "reviveTerminalSession",
     "flushTerminalBurst", "discardTerminalBurst", "queueTerminalChunk",
-    "disarmTerminalDprWatch", "nextTerminal",
+    "disarmTerminalDprWatch", "nextTerminal", "terminalHostMeasurable",
     `
     let terminalXterm = null;
     let terminalEventSource = null;
@@ -405,6 +405,8 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
       created.push(term);
       return term;
     },
+    // 几何闸的「尺寸可信」判据：本文件的世界里宿主总是可测的（与真身默认路径一致）。
+    () => true,
   );
   function openTerm() {
     log.push("open_new");
