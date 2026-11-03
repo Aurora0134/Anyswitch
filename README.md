@@ -112,6 +112,10 @@ npm test
 
 ZCode CLI 是显式配置制：需自备 zcode CLI 发行物，并以环境变量 `ZCODE_CLI_EXECUTABLE` 指向其入口文件（`bin\zcode.mjs`）；未配置时该启动器不可用。
 
+### 普通终端里，直接敲 agent 的命令
+
+接上线的 agent 不必每次都写启动器路径：只要本机装了它，在任意终端里敲它本来的命令（`claude`、`grok`、`opencode`……）就是走 Anyswitch。这件事自动发生，无须安装或设置；新开的终端生效，已经开着的终端不受影响。取消接线或卸载 agent 后，命令自动回到它自己的原生入口；Anyswitch 没在运行时，命令同样可用。命令文件统一放在 `~/.config/anyswitch-bin/`，你自己放在那里的启动脚本不会被改动。
+
 配置同步把托管渠道写进各 agent 自己的配置位置，你手写的其它内容原样保留：
 
 | agent | Anyswitch 写入的位置 |

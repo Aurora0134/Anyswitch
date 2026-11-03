@@ -112,6 +112,10 @@ Ten agents, eleven wiring details — configure once and they are all here:
 
 ZCode CLI is explicit-configuration only: bring your own zcode CLI distribution and point `ZCODE_CLI_EXECUTABLE` at its entry file (`bin\zcode.mjs`); without it, that launcher is unavailable.
 
+### In any terminal, just type the agent's command
+
+For a wired agent there is no need to type the launcher path every time: as long as it is installed on this machine, its regular command (`claude`, `grok`, `opencode`, ...) typed in any terminal routes through Anyswitch. This happens automatically — nothing to install or configure. It takes effect in newly opened terminals; terminals that are already open are unaffected. Unwiring an agent or uninstalling it returns the command to its native entry point; with Anyswitch not running, the commands still work. The command files live under `~/.config/anyswitch-bin/`; any startup scripts you place there yourself are left untouched.
+
 Config sync writes the managed channels into each agent's own config location; anything you wrote yourself stays untouched:
 
 | Agent | Where Anyswitch writes |
