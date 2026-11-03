@@ -932,6 +932,10 @@ export function createPanelRouter({
   // endpoint configs under ~/.zcode, ~/.pi, ~/.codex and friends — a unit test
   // must never do that, so this is injectable like the relay controls.
   spawnAgentSyncFn = spawnAgentSync,
+  // 垫片对账（shim-reconcile.mjs）：手动同步完成后对齐终端命令门牌与接线状
+  // 态。默认 null——只有真正的面板宿主（startPanelHost）注入真实现；路由器单
+  // 测试与 relay-host 副本不注入即不触发，绝不碰真实注册表。
+  reconcileShimsFn = null,
   getRelayStatusFn = (root) => getRelayStatus(root),
   startRelayFn = (root) => startRelay(root),
   stopRelayFn = (root) => stopRelay(root),
@@ -2995,6 +2999,13 @@ export function createPanelRouter({
         writeSyncStatus(relayRoot, syncStatusFromResult(result, "manual"));
       } catch (err) {
         logger?.warn?.(`sync status write failed: ${err.message}`);
+      }
+      // 接线状态可能刚变过（同步就是接线面的落盘动作）——垫片对账跟上，让终
+      // 端命令门牌与面板所见一致。fire-and-forget：对账是外围设施，不拖慢同
+      // 步按钮的响应，失败也不翻红本次同步。
+      if (reconcileShimsFn) {
+        Promise.resolve(reconcileShimsFn({ log: (level, message) => logger?.[level]?.(message) }))
+          .catch((error) => logger?.warn?.(`shim reconcile failed (non-fatal): ${error?.message ?? error}`));
       }
       // 同步进程在 stdout 上留了一行机器可读摘要。个别端点写不进去不再算整次
       // 失败：其余端点已经同步好，按钮只把没写进去的端点报出来。仓库数据读不

@@ -25,6 +25,7 @@ import { storePaths } from "../store/store-io.mjs";
 import { loadSettings, defaultSettingsPath, createLoggingEnabledGate } from "../relay/relay-settings.mjs";
 import { isWatchdogAutostartEnabled, enableWatchdogAutostart, reconcileAutostart } from "../ops/autostart.mjs";
 import { spawnWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
+import { reconcileShims } from "../agents/shim-reconcile.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "../ops/git-anchor.mjs";
 import { ensureTerminalHost } from "../terminal/terminal-process-manager.mjs";
 
@@ -56,6 +57,9 @@ export function createPanelServer(options = {}) {
     logger,
     metricsCollector,
     startTime,
+    // 同步完成后对齐垫片门牌（真实现由 startPanelHost 注入；直接建路由器的测
+    // 试与 relay-host 副本不传即不触发——注入语义见 panel.mjs）。
+    reconcileShimsFn: options.reconcileShimsFn,
     // 自动检测并下载更新的真实拍节（首开一拍 + 周期拍），只在常驻 panel-host
     // 进程里布——panel.mjs 侧的默认值刻意是「不布」。
     selfUpdateAutoDownloadScheduleFn: options.selfUpdateAutoDownloadScheduleFn ?? ((fn) => {
@@ -125,7 +129,10 @@ export async function discoverTerminalBackend(root, { ensureFn = ensureTerminalH
 }
 
 export async function startPanelHost(options = {}) {
-  const { server, logger, metricsCollector } = createPanelServer(options);
+  // 垫片对账真实现默认在此注入（createPanelServer 与路由器的默认都是不注入
+  // 即不触发——测试安全边界，注入语义见 panel.mjs）。
+  const reconcileShimsFn = options.reconcileShimsFn ?? reconcileShims;
+  const { server, logger, metricsCollector } = createPanelServer({ ...options, reconcileShimsFn });
   try {
     logGitAnchorResult(logger, ensureGitAnchor(APP_DIR));
   } catch {
@@ -183,6 +190,20 @@ export async function startPanelHost(options = {}) {
     }
   } catch (err) {
     logger.warn(`autostart reconcile failed (non-fatal): ${err.message}`);
+  }
+
+  // 垫片对账：门牌跟随接线状态（shim-reconcile.mjs 头注释——「垫片随产品安
+  // 装」语义）。升级路径也靠这一轮自愈：换树后新面板宿主起来，≤0.7.0 旧形态
+  // 门牌就地改写成新路径。外围设施姿态与自启对账一致：失败记日志，不挡面板。
+  try {
+    const shimReport = await reconcileShimsFn({
+      log: (level, message) => logger[level]?.(message),
+    });
+    if (!shimReport?.ok) {
+      logger.warn(`shims: left as-is (non-fatal): ${shimReport?.reason ?? "unknown reason"}`);
+    }
+  } catch (err) {
+    logger.warn(`shim reconcile failed (non-fatal): ${err.message}`);
   }
 
   const shutdown = async (signal) => {
