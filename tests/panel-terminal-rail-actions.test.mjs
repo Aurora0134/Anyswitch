@@ -45,6 +45,12 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
+  // 屏尾/未使用槽判据是关闭、内切、新开三处闸门的共用依赖（2026-11-03 A1/A2/A4）。
+  // 桩环境的 xterm 实例为空：屏尾判据对 null 返回 false，行为面由专用用例覆盖。
+  let terminalXterm = null;
+  ${extractFn("terminalScreenAtPrompt")}
+  ${extractFn("terminalManualShellBusy")}
+  ${extractFn("terminalSessionUnusedAgentSlot")}
   ${names.map(extractFn).join("\n")}
 `;
 
@@ -3283,6 +3289,9 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
       // terminalSessionBusyFromSignals），用例要模拟「回合已结束、命令还在跑」
       // 就得先把会话塞进闸里。
       armed: terminalTurnArmed,
+      // 屏尾判据的观察面：桩环境的 xterm 默认空（判不了即不拦），A1 用例显式塞屏。
+      setTerm: (term) => { terminalXterm = term; },
+      background: () => Array.from(terminalBackgroundIds),
     };
   `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })), realEnrich);
   return { fn, log };
@@ -4084,9 +4093,12 @@ describe("M12 视口化验收（页签＝视口）", () => {
     file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
   };
   const AGENT = (instanceId) => ({ endpointId: "kimi", instanceId, name: "Kimi Code", pid: 100, busy: false });
-  const TERM_ITEM = (id, { instance = "inst-" + id, resume = null } = {}) => ({
+  // bound 默认给一个合成对话身份：这些用例的终端都是「已经在用的会话」（在跑 / 后台 /
+  // 可回），未使用槽的形态由 A4 保护专项用例显式传 bound: null 建模。
+  const TERM_ITEM = (id, { instance = "inst-" + id, resume = null, bound = { endpoint: "kimi", id: "c-" + id } } = {}) => ({
     id, label: "终端 " + id, shell: "powershell", cwd: "C:\\dev\\alpha",
-    agentId: "kimi", agentName: "Kimi Code", agent: AGENT(instance), resume, status: "running",
+    agentId: "kimi", agentName: "Kimi Code", agent: AGENT(instance), resume,
+    boundConversation: bound, status: "running",
   });
 
   function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE } = {}) {
@@ -4480,6 +4492,176 @@ describe("M12-A4 绑定库身份（boundConversation）", () => {
       selectPending: { terminalId: "t-bg", cwd: "C:\\dev\\alpha" },
     });
     assert.equal(armed().length, 1, "武装窗豁免保留：正在内切成新会话，兜底行必须当拍出现");
+  });
+});
+
+// ── 在跑判据补口（2026-11-03 A1/A2/A4）──
+// 进程树看不见同进程 cmdlet（Start-Sleep / 循环 / 写文件都不 spawn 子进程），前端
+// working 位也看不见：关闭会把正在跑命令的手开终端当空闲直接杀、内切会把它整树
+// terminate。屏尾判据是护栏不是真值：判不准一律按「在跑」处置。
+describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未使用槽）", () => {
+  const line = (text) => ({ translateToString: () => text });
+  const termOf = (lines, { alternate = false, rows = 8 } = {}) => ({
+    rows,
+    buffer: {
+      active: {
+        type: alternate ? "alternate" : "normal",
+        viewportY: 0,
+        getLine: (y) => (y < lines.length ? line(lines[y]) : null),
+      },
+    },
+  });
+  const atPrompt = (term) => new Function(`${extractFn("terminalScreenAtPrompt")}; return terminalScreenAtPrompt;`)()(term);
+
+  it("屏尾：提示符行→true；命令回显/输出行→false；全屏 TUI、空屏、超长行→false", () => {
+    assert.equal(atPrompt(termOf(["PS C:\\dev\\alpha>"])), true, "shell 提示符");
+    assert.equal(atPrompt(termOf(["user@host MINGW64 ~/x", "$"])), true, "bash 提示符（末行只有 $）");
+    assert.equal(atPrompt(termOf(["PS C:\\dev\\alpha> Start-Sleep 90"])), false, "命令已回车、还没回到提示符");
+    assert.equal(atPrompt(termOf(["PS C:\\dev\\alpha> ping -n 9 127.0.0.1", "", "Reply from 127.0.0.1: bytes=32 time<1ms TTL=128"])), false,
+      "命令输出留在屏尾");
+    assert.equal(atPrompt(termOf(["PS C:\\dev\\alpha>", ""])), true, "尾随空行跳过，往前找提示符");
+    assert.equal(atPrompt(termOf([])), false, "空屏判不了：按在跑");
+    assert.equal(atPrompt(termOf(["vim README.md"], { alternate: true })), false, "全屏 TUI 没有提示符可判");
+    assert.equal(atPrompt(termOf(["x".repeat(200)])), false, "超长行不猜");
+    assert.equal(atPrompt(null), false, "无实例不猜");
+  });
+
+  const manualBusy = (session, { term = null, activeId = session && session.id } = {}) => new Function("session", "terminalXterm", `
+      let activeTerminalPreviewId = ${JSON.stringify(activeId)};
+      ${extractFn("terminalScreenAtPrompt")}
+      ${extractFn("terminalManualShellBusy")}
+      return terminalManualShellBusy(session);
+    `)(session, term);
+  const SHELL = (extra = {}) => ({
+    id: "t-sh", backend: true, agent: null, agentId: null, resume: null, status: "idle",
+    backendState: { status: "running", lastInputAt: Date.now() - 60_000 }, ...extra,
+  });
+  const RUNNING_SCREEN = termOf(["PS C:\\dev\\alpha> Start-Sleep 90"]);
+
+  it("手开终端忙判据：屏尾不在提示符且敲过字→忙；提示符/没敲字/agent 会话/非活跃终端→不忙", () => {
+    assert.equal(manualBusy(SHELL(), { term: RUNNING_SCREEN }), true, "命令还在跑");
+    assert.equal(manualBusy(SHELL(), { term: termOf(["PS C:\\dev\\alpha>"]) }), false, "回到提示符");
+    assert.equal(manualBusy(SHELL({ backendState: { status: "running" } }), { term: RUNNING_SCREEN }), false, "没敲过字不可能在跑");
+    assert.equal(manualBusy(SHELL({ agent: { endpointId: "kimi" } }), { term: RUNNING_SCREEN }), false, "agent 会话交回回合闸");
+    assert.equal(manualBusy(SHELL(), { term: RUNNING_SCREEN, activeId: "t-other" }), false, "屏里是别的终端，判不了");
+    assert.equal(manualBusy(SHELL({ backendState: { status: "exited", lastInputAt: Date.now() } }), { term: RUNNING_SCREEN }), false, "已退出");
+    assert.equal(manualBusy(SHELL(), { term: null }), false, "没有屏实例：判不了即不拦");
+  });
+
+  const runClose = (session, { term = null, confirmResult = true } = {}) => {
+    const log = { confirms: [], posts: [] };
+    const returned = new Function("log", "session", "terminalXterm", `
+      const terminalBackendSessions = { [session.id]: session };
+      let activeTerminalPreviewId = session.id;
+      const terminalBackgroundIds = new Set();
+      const terminalHollowStreak = new Map();
+      const terminalDoneUnread = new Set();
+      const terminalPrevWorking = new Map();
+      const terminalTurnArmed = new Set();
+      const window = { confirm: (msg) => { log.confirms.push(msg); return ${confirmResult}; } };
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function saveTerminalViewports() {}
+      function api(method, path) { log.posts.push({ method, path }); return Promise.resolve({ ok: true }); }
+      function toast() {}
+      function panelError(err, fallback) { return fallback; }
+      ${extractFn("terminalScreenAtPrompt")}
+      ${extractFn("terminalManualShellBusy")}
+      ${extractFn("terminalCloseTerminal")}
+      return terminalCloseTerminal(session.id);
+    `)(log, session, term);
+    return { returned, log };
+  };
+
+  it("关页签：空闲但屏尾不在提示符的手开终端→弹既有确认；取消即不关、不发 /close", () => {
+    const { returned, log } = runClose(SHELL(), { term: RUNNING_SCREEN, confirmResult: false });
+    assert.deepEqual(log.confirms, ["当前终端仍在运行，关闭后将中断任务。确定继续吗？"], "确认文案原样复用（零新增文案）");
+    assert.equal(returned, false, "取消＝不关");
+    assert.deepEqual(log.posts, [], "不发 /close");
+  });
+
+  it("关页签：回到提示符的手开终端→不弹确认，照常关", () => {
+    const { returned, log } = runClose(SHELL(), { term: termOf(["PS C:\\dev\\alpha>"]) });
+    assert.deepEqual(log.confirms, [], "空闲不打扰");
+    assert.equal(returned, true, "照常关");
+    assert.deepEqual(log.posts.map((p) => p.path), ["/api/terminal/sessions/t-sh/close"], "发 /close");
+  });
+
+  it("关页签：agent 会话仍按既有 working 位确认（回归）", () => {
+    const { log } = runClose({ ...SHELL(), agent: { endpointId: "kimi" }, status: "working" }, { confirmResult: true });
+    assert.equal(log.confirms.length, 1, "working 位照旧弹确认");
+  });
+
+  const UNUSED = {
+    id: "t-a", backend: true, agentId: "kimi", agentName: "Kimi Code",
+    agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: null, boundConversation: null,
+    status: "idle", label: "Kimi Code", backendState: { status: "running", spawnedAt: Date.now() - 5_000, lastInputAt: 0 },
+  };
+
+  it("内切：未使用的 agent 终端→新开页签承载目标会话，原终端不改写、零 /switch（A4）", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...UNUSED } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 1, "新开一个终端承载目标会话");
+    assert.deepEqual(log.placements[0], { placement: "new" }, "落新页签，不挂当前视口");
+    assert.deepEqual(log.switchBodies, [], "不换绑原终端");
+    assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "零 /switch（那条链路会整树 terminate）");
+  });
+
+  it("内切：已绑定对话的同一形态照旧就地换（A4 只拦未使用槽）", async () => {
+    const used = { ...UNUSED, boundConversation: { endpoint: "kimi", id: "c-old" } };
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": used }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 0, "不开新页签");
+    assert.equal(log.switchBodies.length, 1, "照旧就地换内容");
+  });
+
+  it("内切：出生窗外（>10min）仍没有对话身份的空会话照旧就地换（不无限拦）", async () => {
+    const stale = { ...UNUSED, backendState: { status: "running", spawnedAt: Date.now() - 11 * 60 * 1000 } };
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": stale }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 0, "不开新页签");
+    assert.equal(log.switchBodies.length, 1, "老空会话没有可丢的内容，照旧就地换");
+  });
+
+  it("内切：出生点缺位（老宿主快照）不拦，判不出就不改变既有行为", async () => {
+    const unknown = { ...UNUSED, backendState: { status: "running" } };
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": unknown }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.switchBodies.length, 1, "照旧就地换");
+  });
+
+  it("内切：手开终端屏尾不在提示符→保活（不走 /switch，旧终端进后台）", async () => {
+    const shell = SHELL({ id: "t-a", backendState: { status: "running", lastInputAt: Date.now() - 30_000 } });
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": shell }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.setTerm(RUNNING_SCREEN);
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.deepEqual(log.switchBodies, [], "换绑＝整树 terminate，必须拦住");
+    assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "不发 /switch");
+    assert.equal(log.creates.length, 1, "建目标终端");
+    // keepPrevious 是「旧终端不杀」的契约位：terminalViewportPlaceTerminal 见到它就把
+    // 上一个终端放进后台集合而不是 retire。本桩没有既有视口（走 create 分支），后台集合
+    // 落不着，故只钉契约位，落点由视口专族的用例覆盖。
+    assert.equal(log.placements[0].keepPrevious, true, "旧终端保活、目标挂当前视口（页签不增）");
+    assert.ok(fn.sessions["t-a"], "原终端记录还在（没被结束）");
   });
 });
 
