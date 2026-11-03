@@ -4450,6 +4450,16 @@ export function createPanelRouter({
             const result = await svc.readSkillBody(requireString(body.relPath, "relPath"));
             return sendJson(res, 200, { ok: true, ...result });
           }
+          // 正文保存：只收正文，frontmatter 由服务端按盘上前缀原样拼回。
+          // baseHash 是读取时下发的乐观锁令牌，不一致回 409（skills_body_conflict）。
+          if (path === "/panel/api/skills/body/save") {
+            const result = await svc.writeSkillBody({
+              relPath: requireString(body.relPath, "relPath"),
+              baseHash: requireString(body.baseHash, "baseHash"),
+              body: body.body,
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
         } catch (err) {
           // err.code 是服务端给的机读信号（如 skills_repo_empty），随响应透出供前端分支
           return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) });

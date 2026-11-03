@@ -2901,8 +2901,54 @@
     font-family: var(--font-mono); font-size: 11px; padding: 0 4px;
     background: var(--surface-sunken); border: 1px solid var(--border); border-radius: 4px;
   }
+  /* ── 正文编辑态：透明 textarea 叠在高亮层上 ──
+     两层同字体/字号/行高/padding/换行规则，且都 absolute inset:0 —— 尺寸完全同源，
+     边框只放在外壳上。scrollbar-gutter 两边都留，避免 textarea 滚动条把换行宽度
+     挤窄、与高亮层从折行处开始错位。 */
+  .skills-editor {
+    position: relative; display: flex; flex: 1 1 auto; min-height: 320px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+    background: var(--surface-sunken); overflow: hidden;
+  }
+  .skills-editor:focus-within { border-color: var(--accent); }
+  .skills-editor-highlight,
+  .skills-editor-input {
+    position: absolute; inset: 0; box-sizing: border-box;
+    margin: 0; border: 0; padding: 12px 14px;
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.65; letter-spacing: 0;
+    white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; tab-size: 2;
+    scrollbar-gutter: stable;
+  }
+  .skills-editor-highlight {
+    overflow: hidden; pointer-events: none; color: var(--text);
+  }
+  .skills-editor-input {
+    resize: none; outline: none; overflow: auto; background: transparent;
+    color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);
+  }
+  .skills-editor-input::selection { background: var(--accent-soft); }
+  /* 高亮只动颜色/底色，不动字重与字形——它们会改字形宽度，让折行点错位 */
+  .md-tok-h { color: var(--accent); }
+  .md-tok-punct { color: var(--text-3); }
+  .md-tok-code { color: var(--accent); }
+  .md-tok-link { color: var(--accent); }
+  .md-tok-strong { background: var(--accent-soft); border-radius: 3px; }
+  .md-tok-em { color: var(--text-2); }
   /* 正文查阅弹窗加宽（修饰类挂在 overlay 上，其他弹窗保持原宽度） */
   .skills-modal-wide .modal-card { max-width: 860px; }
+  /* 正文编辑态：再高一档，正文区撑满卡片；编辑器自己滚，弹窗不滚 */
+  .skills-modal-edit .modal-card {
+    max-width: min(1180px, 94vw); height: 90vh; max-height: 90vh;
+    display: flex; flex-direction: column;
+  }
+  .skills-modal-edit .modal-head,
+  .skills-modal-edit .modal-foot { flex: 0 0 auto; }
+  .skills-modal-edit .modal-body {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column;
+  }
+  /* 查阅态左下那颗「编辑」：贴左，其余按钮保持右对齐 */
+  #skillsModalAuxBtn { margin-right: auto; }
 
   /* ── 异常卡整卡折叠（默认收起）──────────────────────────────
      卡身 hidden 时卡头那道底边会悬空，跟着收掉；卡头右侧徽标与折叠钮同行排。 */

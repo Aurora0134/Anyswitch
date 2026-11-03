@@ -10105,6 +10105,12 @@ async function api(method, path, body) {
   let skillsModalConfirm = null;
   let skillsModalBusy = false;   // 确认处理中：抑制遮罩/关闭，防重复点击
   let skillsModalGen = 0;        // showSkillsModal 代际：确认回调内可能改开新弹窗
+  // 查阅弹窗的关闭拦截（编辑态用）：hideSkillsModal 先问它，再决定关不关。
+  let skillsModalCloseHandler = null;
+  // 正文编辑会话：只在弹窗打开期间存在，真正关闭时清空。body 是保存基线，
+  // draft 与它不等即为「有未保存改动」。
+  let skillBodySession = null;
+  let skillBodySaving = false; // Ctrl+S 与按钮共用，防同一 baseHash 连发两次
   // 「高光即选中」：选中集合（relPath，dirName 可能重复而 relPath 唯一）= 所有高亮行
   // = 一切操作的作用对象；焦点键是集合内最后加入的一员，驱动右侧详情卡。
   let skillsSelection = new Set();
@@ -14024,21 +14030,283 @@ async function api(method, path, body) {
     });
   }
 
-  // 查阅 SKILL.md 正文（契约：POST /api/skills/body { relPath } → { ok, name, content }）
+  // textarea 的 value 规范一律 LF；保存基线也按 LF 存，否则 CRLF 文件一进编辑
+  // 就被判成「有未保存改动」，取消时白弹一次守卫。
+  function skillBodyDraftOf(text) {
+    return String(text == null ? "" : text).replace(/\r\n/g, "\n");
+  }
+
+  // 查阅 SKILL.md 正文（契约：POST /api/skills/body { relPath } →
+  // { ok, name, content, body, hash, editable }）。预览态只读；编辑态在同
+  // 一弹窗内换成语法视图，保存只提交正文，frontmatter 由服务端原样拼回。
   async function viewSkillBody(relPath) {
     try {
       const d = await api("POST", "/api/skills/body", { relPath });
-      showSkillsModal({
-        title: `Skill 正文：${d.name}`,
-        danger: false,
-        wide: true, // 长文加宽弹窗
-        bodyHtml: `<div class="skills-body-view">${renderSkillMarkdown(d.content)}</div>`,
-        confirmText: "关闭",
-        onConfirm: null,
-      });
+      skillBodySession = {
+        relPath: d.relPath || relPath,
+        name: d.name,
+        baseHash: d.hash || "",
+        content: typeof d.content === "string" ? d.content : "",
+        body: skillBodyDraftOf(d.body),
+        editable: d.editable !== false,
+      };
+      renderSkillBodyPreview();
     } catch (e) {
       toast(panelError(e, "读取 skill 正文失败"), true);
     }
+  }
+
+  function renderSkillBodyPreview() {
+    const s = skillBodySession;
+    if (!s) return;
+    showSkillsModal({
+      title: `Skill 正文：${s.name}`,
+      wide: true, // 长文加宽弹窗
+      bodyHtml: `<div class="skills-body-view">${renderSkillMarkdown(s.content)}</div>`,
+      confirmText: "关闭",
+      auxText: s.editable ? "编辑" : null,
+      onAux: enterSkillBodyEditor,
+      onConfirm: null,
+    });
+  }
+
+  function enterSkillBodyEditor() {
+    const s = skillBodySession;
+    if (!s) return;
+    renderSkillBodyEditor({ draft: s.body, focus: true });
+  }
+
+  // ── 编辑态：透明 textarea 叠在高亮层上 ──
+  // draft / 选区 / 滚动位置都由调用方传入：守卫往返时能原样接回，不丢光标。
+  function renderSkillBodyEditor({ draft, selStart = 0, selEnd = 0, scrollTop = 0, focus = true } = {}) {
+    const s = skillBodySession;
+    if (!s) return;
+    showSkillsModal({
+      title: `Skill 正文：${s.name}`,
+      edit: true,
+      bodyHtml: `<div class="skills-editor">
+        <pre class="skills-editor-highlight" aria-hidden="true"><code id="skillsEditorHighlight"></code></pre>
+        <textarea id="skillsEditorInput" class="skills-editor-input" spellcheck="false" autocapitalize="off" aria-label="SKILL.md 正文"></textarea>
+      </div>`,
+      confirmText: "保存",
+      onConfirm: saveSkillBodyDraft,
+      onCancel: () => requestSkillBodyEditExit("preview"),
+      onRequestClose: () => requestSkillBodyEditExit("close"),
+    });
+
+    const input = $("skillsEditorInput");
+    if (!input) return;
+    input.value = draft;
+    input.setSelectionRange(selStart, selEnd);
+    input.scrollTop = scrollTop;
+
+    let composing = false;
+    let raf = 0;
+    const paint = () => {
+      const code = $("skillsEditorHighlight");
+      if (!code) return;
+      code.innerHTML = highlightSkillMarkdown(input.value) + "\n";
+      const pre = code.parentElement;
+      pre.scrollTop = input.scrollTop;
+      pre.scrollLeft = input.scrollLeft;
+    };
+    const schedulePaint = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; paint(); });
+    };
+    // 中文输入法合成期间重绘会打断候选框，等 compositionend 再补一次
+    input.addEventListener("compositionstart", () => { composing = true; });
+    input.addEventListener("compositionend", () => { composing = false; schedulePaint(); });
+    input.addEventListener("input", () => { if (!composing) schedulePaint(); });
+    input.addEventListener("scroll", () => {
+      const pre = $("skillsEditorHighlight") && $("skillsEditorHighlight").parentElement;
+      if (pre) { pre.scrollTop = input.scrollTop; pre.scrollLeft = input.scrollLeft; }
+    });
+    input.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        saveSkillBodyDraft();
+        return;
+      }
+      if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        input.setRangeText("  ", input.selectionStart, input.selectionEnd, "end");
+        schedulePaint();
+      }
+    });
+
+    paint();
+    if (focus) input.focus();
+  }
+
+  // ── 零依赖 Markdown 高亮（仅编辑层用）──
+  // 硬约束：输出逐字符等价——只加 span、不删字符。隐藏 ** 或反引号会让高亮层
+  // 比 textarea 少字符，从折行处开始光标整段漂移。所以标记符一律保留可见，只上色。
+  function highlightSkillMarkdown(text) {
+    const src = String(text == null ? "" : text);
+    const out = [];
+    let fence = "";
+    for (const line of src.split("\n")) {
+      const m = /^(```+|~~~+)/.exec(line);
+      if (fence) {
+        out.push(`<span class="md-tok-code">${escapeHtml(line)}</span>`);
+        if (line.trim().startsWith(fence)) fence = "";
+        continue;
+      }
+      if (m) {
+        fence = m[1];
+        out.push(`<span class="md-tok-code">${escapeHtml(line)}</span>`);
+        continue;
+      }
+      out.push(highlightSkillMarkdownLine(line));
+    }
+    return out.join("\n");
+  }
+
+  function highlightSkillMarkdownLine(line) {
+    const esc = escapeHtml(line);
+    if (!esc.trim()) return esc;
+    if (/^\s*(?:---|\*\*\*|___)\s*$/.test(esc)) {
+      return `<span class="md-tok-punct">${esc}</span>`;
+    }
+    let marker = "";
+    let rest = esc;
+    const m = /^(#{1,6}[ \t]+|>[ \t]?|(?:[-*+]|\d+[.)])[ \t]+)/.exec(rest);
+    if (m) {
+      marker = `<span class="md-tok-punct">${m[1]}</span>`;
+      rest = rest.slice(m[1].length);
+    }
+    const body = formatSkillInline(rest);
+    return marker + (/^#/.test(m ? m[1] : "") ? `<span class="md-tok-h">${body}</span>` : body);
+  }
+
+  function formatSkillInline(text) {
+    const stash = [];
+    let s = text.replace(/`([^`\r\n]+)`/g, (m, code) => {
+      const html = `<span class="md-tok-punct">\`</span><span class="md-tok-code">${code}</span><span class="md-tok-punct">\`</span>`;
+      return `\x00${stash.push(html) - 1}\x00`;
+    });
+    s = s
+      // 不加粗、不倾斜：字重/字形一变，字形宽度就可能变，折行点与 textarea 对不上。
+      // 结构只用颜色与底色表达，这两者都不参与排版。
+      .replace(/\*\*([^*]+)\*\*/g, (m, inner) => `<span class="md-tok-punct">**</span><span class="md-tok-strong">${inner}</span><span class="md-tok-punct">**</span>`)
+      .replace(/\*([^*\n]+)\*/g, (m, inner) => `<span class="md-tok-punct">*</span><span class="md-tok-em">${inner}</span><span class="md-tok-punct">*</span>`)
+      .replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (m, label, url) => `<span class="md-tok-punct">[</span><span class="md-tok-link">${label}</span><span class="md-tok-punct">](${url})</span>`);
+    return s.replace(/\x00(\d+)\x00/g, (m, i) => stash[Number(i)]);
+  }
+
+  async function saveSkillBodyDraft() {
+    const s = skillBodySession;
+    const input = $("skillsEditorInput");
+    if (!s || !input || skillBodySaving) return;
+    const draft = input.value;
+    if (draft === s.body) {
+      renderSkillBodyPreview();
+      return;
+    }
+    if (!draft.trim()) {
+      toast("正文为空，未保存", true);
+      keepSkillsModalOpen("保存");
+      return;
+    }
+    skillBodySaving = true;
+    try {
+      const d = await api("POST", "/api/skills/body/save", {
+        relPath: s.relPath,
+        body: draft,
+        baseHash: s.baseHash,
+      });
+      s.baseHash = d.hash || s.baseHash;
+      if (typeof d.content === "string") s.content = d.content;
+      s.body = skillBodyDraftOf(typeof d.body === "string" ? d.body : draft);
+      toast("已保存");
+      renderSkillBodyPreview();
+    } catch (e) {
+      if (e.serverCode === "skills_body_conflict") {
+        renderSkillBodyConflict();
+        return;
+      }
+      toast(panelError(e, "操作失败"), true);
+      keepSkillsModalOpen("保存");
+    } finally {
+      skillBodySaving = false;
+    }
+  }
+
+  // 保存失败要留在编辑态，而外层确认包装在 finally 里会复位按钮并关弹窗。
+  // 递增代际让它认为「回调内改开了新弹窗」，按钮态在这里自己复位；DOM 不重建，
+  // 光标与滚动位置原样保留。
+  function keepSkillsModalOpen(label) {
+    skillsModalGen++;
+    const btn = $("skillsModalConfirmBtn");
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+
+  function renderSkillBodyConflict() {
+    if (!skillBodySession) return;
+    showSkillsModal({
+      title: "文件已在外部修改",
+      bodyHtml: "<div>SKILL.md 在编辑期间被其他程序改动，本次保存未写入。重新载入会载入磁盘上的最新内容，当前草稿不再保留。</div>",
+      confirmText: "重新载入",
+      cancelText: "放弃并关闭",
+      onConfirm: reloadSkillBody,
+    });
+  }
+
+  async function reloadSkillBody() {
+    const s = skillBodySession;
+    if (!s) return;
+    try {
+      const d = await api("POST", "/api/skills/body", { relPath: s.relPath });
+      s.name = d.name;
+      s.baseHash = d.hash || "";
+      s.content = typeof d.content === "string" ? d.content : "";
+      s.body = skillBodyDraftOf(d.body);
+      s.editable = d.editable !== false;
+      renderSkillBodyEditor({ draft: s.body, focus: true });
+    } catch (e) {
+      toast(panelError(e, "读取 skill 正文失败"), true);
+      keepSkillsModalOpen("重新载入");
+    }
+  }
+
+  // 编辑态两个出口：取消回预览，X / 点遮罩关弹窗；有未保存改动先过守卫。
+  function requestSkillBodyEditExit(target) {
+    const s = skillBodySession;
+    const input = $("skillsEditorInput");
+    if (!s || !input) {
+      if (target === "close") forceHideSkillsModal();
+      else renderSkillBodyPreview();
+      return;
+    }
+    if (input.value === s.body) {
+      if (target === "close") forceHideSkillsModal();
+      else renderSkillBodyPreview();
+      return;
+    }
+    const snapshot = {
+      draft: input.value,
+      selStart: input.selectionStart,
+      selEnd: input.selectionEnd,
+      scrollTop: input.scrollTop,
+    };
+    showSkillsModal({
+      title: "放弃未保存的修改？",
+      danger: true,
+      bodyHtml: "<div>当前正文还没有保存。</div>",
+      confirmText: "放弃修改",
+      cancelText: "继续编辑",
+      onConfirm: () => {
+        if (target === "close") forceHideSkillsModal();
+        else renderSkillBodyPreview();
+      },
+      onCancel: () => renderSkillBodyEditor(snapshot),
+      // 守卫上再点 X / 遮罩等同「继续编辑」：不能第二次点击就静默丢草稿
+      onRequestClose: () => renderSkillBodyEditor(snapshot),
+    });
   }
 
   // ── 极简 markdown 渲染（零依赖，仅供 SKILL.md 正文查阅） ──
@@ -14606,8 +14874,10 @@ async function api(method, path, body) {
   }
 
   // ── 共用确认 modal ──
-  // wide = 正文查阅那一档宽度；diff = 再宽一档并允许更高，两栏逐行对照需要横向空间
-  function showSkillsModal({ title, bodyHtml, confirmText, danger, wide, diff, onConfirm }) {
+  // wide = 正文查阅那一档宽度；diff = 再宽一档并允许更高，两栏逐行对照需要横向空间；
+  // edit = 正文编辑态（更高更宽，正文区撑满）。auxText 是左下那颗附加动作钮，
+  // 缺省隐藏；onCancel / onRequestClose 缺省仍走关闭，既有调用方行为不变。
+  function showSkillsModal({ title, bodyHtml, confirmText, cancelText, danger, wide, diff, edit, auxText, onAux, onCancel, onRequestClose, onConfirm }) {
     $("storeAddPoolCtl")?.remove(); // 新增渠道弹窗注入标题的建池控件，防跨弹窗残留
     $("skillsModalTitle").textContent = title;
     $("skillsModalBody").innerHTML = bodyHtml;
@@ -14615,17 +14885,37 @@ async function api(method, path, body) {
     btn.textContent = confirmText || "确认";
     btn.disabled = false; // 上一弹窗可能停在「处理中…」禁用态（回调内改开新弹窗的路径）
     btn.className = "btn" + (danger ? " btn-danger" : " btn-primary");
+    const cancelBtn = $("skillsModalCancelBtn");
+    cancelBtn.textContent = cancelText || "取消";
+    cancelBtn.onclick = onCancel || hideSkillsModal;
+    const auxBtn = $("skillsModalAuxBtn");
+    auxBtn.hidden = !auxText;
+    auxBtn.textContent = auxText || "";
+    auxBtn.onclick = onAux || null;
     skillsModalConfirm = onConfirm || null;
+    skillsModalCloseHandler = onRequestClose || null;
     skillsModalGen++;
     $("skillsModal").classList.toggle("skills-modal-wide", !!wide || !!diff);
     $("skillsModal").classList.toggle("skills-modal-diff", !!diff);
+    $("skillsModal").classList.toggle("skills-modal-edit", !!edit);
     $("skillsModal").classList.add("show");
   }
 
   function hideSkillsModal() {
     if (skillsModalBusy) return; // 确认处理中：忽略遮罩点击与关闭按钮
-    $("skillsModal").classList.remove("show");
+    // 编辑态要拦 X / 遮罩：先执行注册的关闭处理器（可能是「放弃修改？」守卫）
+    if (skillsModalCloseHandler) {
+      skillsModalCloseHandler();
+      return;
+    }
+    forceHideSkillsModal();
+  }
+
+  function forceHideSkillsModal() {
+    $("skillsModal").classList.remove("show", "skills-modal-edit");
     skillsModalConfirm = null;
+    skillsModalCloseHandler = null;
+    skillBodySession = null;
   }
 
   // ══════════════════════════════════════════════════════════════════

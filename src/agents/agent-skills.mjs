@@ -30,7 +30,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import { atomicWriteFile } from "../store/atomic-write.mjs";
+import { casWriteFile, contentHash, PreconditionFailedError, atomicWriteFile } from "../store/atomic-write.mjs";
 import { relayDataRoot } from "../relay/relay-settings.mjs";
 import { diffFileText } from "../shared/skill-diff.mjs";
 
@@ -128,6 +128,39 @@ export function parseSkillFrontmatter(text) {
     fields[key] = value;
   }
   return fields;
+}
+
+/**
+ * Split a SKILL.md into its YAML frontmatter prefix and editable body.
+ * The prefix is everything through the closing `---` line and its newline,
+ * kept verbatim (BOM included) so a body-only save cannot rewrite metadata.
+ * Delimiter detection mirrors parseSkillFrontmatter exactly: first line
+ * trims to `---`, the first later line that trims to `---` closes it; with
+ * no closing line the whole file counts as body.
+ * `eol` is the dominant line ending of the file — the body is normalized to
+ * it on save so a CRLF file stays CRLF instead of turning into a whole-file
+ * diff.
+ */
+export function splitSkillFrontmatter(text) {
+  const src = String(text ?? "");
+  const eol = dominantEol(src);
+  const lines = [];
+  const re = /[^\n]*\n|[^\n]+$/g;
+  let match;
+  while ((match = re.exec(src))) lines.push({ text: match[0], end: re.lastIndex });
+  if (!lines.length || lines[0].text.trim() !== "---") return { prefix: "", body: src, eol };
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].text.trim() === "---") {
+      return { prefix: src.slice(0, lines[i].end), body: src.slice(lines[i].end), eol };
+    }
+  }
+  return { prefix: "", body: src, eol };
+}
+
+function dominantEol(text) {
+  const crlf = (text.match(/\r\n/g) || []).length;
+  const lf = (text.match(/\n/g) || []).length - crlf;
+  return crlf > lf ? "\r\n" : "\n";
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1244,13 +1277,10 @@ export function diffSkillContent({ endpointId, skillName, repoPath }, { homeDir 
   return { ok: true, endpointId, skillName, files };
 }
 
-/**
- * Read a repo skill's SKILL.md by its relPath (the scanRepo unique key).
- * The relPath is resolved under repoPath and must stay inside it — anything
- * escaping the repo (`..`, absolute paths) is refused. Throws when the path
- * is not a scanned skill or its SKILL.md is missing.
- */
-export function readSkillBody(repoPath, relPath) {
+// Shared resolver for body read/write: relPath must stay inside the repo and
+// name a directory scanRepo recognizes as a skill. Keeping one copy means the
+// write path can never be looser than the read path.
+function resolveRepoSkill(repoPath, relPath) {
   if (typeof relPath !== "string" || !relPath.trim()) {
     const error = new Error("relPath 不能为空");
     error.statusCode = 400;
@@ -1274,9 +1304,90 @@ export function readSkillBody(repoPath, relPath) {
     error.statusCode = 404;
     throw error;
   }
-  const content = readFileSync(join(skill.absPath, "SKILL.md"), "utf8");
-  return { name: skill.name, dirName: skill.dirName, relPath: skill.relPath, content };
+  return skill;
 }
+
+/**
+ * Read a repo skill's SKILL.md by its relPath (the scanRepo unique key).
+ * Also returns the editable body (frontmatter stripped), the whole-file hash
+ * the write path uses as an optimistic-lock token, and whether the bytes
+ * round-trip as UTF-8 — editing a file we cannot decode would corrupt it on
+ * save, so the panel hides the edit affordance when `editable` is false.
+ */
+export function readSkillBody(repoPath, relPath) {
+  const skill = resolveRepoSkill(repoPath, relPath);
+  const buf = readFileSync(join(skill.absPath, "SKILL.md"));
+  const content = buf.toString("utf8");
+  return {
+    name: skill.name,
+    dirName: skill.dirName,
+    relPath: skill.relPath,
+    content,
+    body: splitSkillFrontmatter(content).body,
+    hash: contentHash(content),
+    editable: Buffer.from(content, "utf8").equals(buf),
+  };
+}
+
+/**
+ * Replace only the body of a repo skill's SKILL.md.
+ * The frontmatter prefix is re-read from disk and concatenated verbatim, so
+ * a body-only draft can never rewrite name/description or normalize the
+ * metadata block. `baseHash` is the hash handed out by readSkillBody; a
+ * mismatch means another writer changed the file while the panel was open,
+ * and the save is refused with 409 instead of clobbering it. The actual
+ * write goes through casWriteFile, which re-checks the hash under a
+ * cross-process lock (closing the check-then-rename window).
+ */
+export function writeSkillBody(repoPath, { relPath, body, baseHash }) {
+  const skill = resolveRepoSkill(repoPath, relPath);
+  const target = join(skill.absPath, "SKILL.md");
+
+  if (typeof baseHash !== "string" || !baseHash.trim()) {
+    const error = new Error("baseHash 不能为空");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (typeof body !== "string" || !body.trim()) {
+    const error = new Error("正文为空，未保存");
+    error.statusCode = 400;
+    error.code = "skills_body_empty";
+    throw error;
+  }
+
+  const buf = readFileSync(target);
+  const current = buf.toString("utf8");
+  if (!Buffer.from(current, "utf8").equals(buf)) {
+    const error = new Error("SKILL.md 不是 UTF-8 编码，未保存");
+    error.statusCode = 415;
+    error.code = "skills_body_encoding";
+    throw error;
+  }
+  if (contentHash(current) !== baseHash) {
+    const error = new Error("文件已在外部修改");
+    error.statusCode = 409;
+    error.code = "skills_body_conflict";
+    throw error;
+  }
+
+  const { prefix, eol } = splitSkillFrontmatter(current);
+  // 浏览器 textarea 一律给 \n；按原文件主导行尾归一，避免把 CRLF 文件整份改写。
+  const savedBody = body.replace(/\r\n/g, "\n").split("\n").join(eol);
+  const next = prefix + savedBody;
+  try {
+    casWriteFile(target, next, { expectedHash: baseHash });
+  } catch (error) {
+    if (error instanceof PreconditionFailedError) {
+      const conflict = new Error("文件已在外部修改");
+      conflict.statusCode = 409;
+      conflict.code = "skills_body_conflict";
+      throw conflict;
+    }
+    throw error;
+  }
+  return { ok: true, hash: contentHash(next), content: next, body: savedBody };
+}
+
 
 // ─────────────────────────────────────────────────────────────
 // Service factory (what the panel router consumes)
@@ -1471,6 +1582,11 @@ export function createSkillsService({
     readSkillBody(relPath) {
       const repoPath = requireExistingRepo();
       return readSkillBody(repoPath, relPath);
+    },
+
+    writeSkillBody({ relPath, body, baseHash }) {
+      const repoPath = requireExistingRepo();
+      return writeSkillBody(repoPath, { relPath, body, baseHash });
     },
   };
 }

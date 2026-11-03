@@ -28,7 +28,9 @@ import {
   saveSkillsConfig,
   scanEndpoints,
   scanRepo,
+  splitSkillFrontmatter,
   undeploy,
+  writeSkillBody,
 } from "../src/agents/agent-skills.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -1076,6 +1078,202 @@ describe("readSkillBody", () => {
       assert.equal(r.name, "skill-a");
       assert.match(r.content, /name: skill-a/);
       assert.throws(() => svc.readSkillBody(join("..", "x")), /越出|traversal|拒绝/i);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("splitSkillFrontmatter", () => {
+  it("拆出 CRLF frontmatter 前缀与正文，行尾取主导值", () => {
+    const src = "---\r\nname: a\r\ndescription: d\r\n---\r\n\r\nbody\r\n";
+    assert.deepEqual(splitSkillFrontmatter(src), {
+      prefix: "---\r\nname: a\r\ndescription: d\r\n---\r\n",
+      body: "\r\nbody\r\n",
+      eol: "\r\n",
+    });
+  });
+
+  it("无 frontmatter 时整份算正文，前缀为空", () => {
+    assert.deepEqual(splitSkillFrontmatter("纯正文\n第二行\n"), {
+      prefix: "",
+      body: "纯正文\n第二行\n",
+      eol: "\n",
+    });
+  });
+
+  it("只有开头 --- 没有闭合时不当 frontmatter", () => {
+    const src = "---\n不是 frontmatter\n";
+    assert.deepEqual(splitSkillFrontmatter(src), { prefix: "", body: src, eol: "\n" });
+  });
+});
+
+describe("writeSkillBody", () => {
+  it("只替换正文，frontmatter 字节原样保留（含块标量）", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      const skillDir = join(repo, "skill-a");
+      mkdirSync(skillDir, { recursive: true });
+      const frontmatter = "---\nname: skill-a\ndescription: |\n  第一行\n  第二行\n---\n";
+      const original = `${frontmatter}\n旧正文\n`;
+      writeFileSync(join(skillDir, "SKILL.md"), original, "utf8");
+
+      const read = readSkillBody(repo, "skill-a");
+      assert.equal(read.body, "\n旧正文\n");
+      assert.equal(read.editable, true);
+      assert.ok(read.hash);
+
+      const saved = writeSkillBody(repo, { relPath: "skill-a", body: "\n新正文\n", baseHash: read.hash });
+      assert.equal(readFileSync(join(skillDir, "SKILL.md"), "utf8"), `${frontmatter}\n新正文\n`);
+      assert.equal(saved.body, "\n新正文\n");
+      assert.equal(saved.hash, readSkillBody(repo, "skill-a").hash);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("CRLF 文件保存后仍是全 CRLF，不混入裸 LF", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      const skillDir = join(repo, "skill-a");
+      mkdirSync(skillDir, { recursive: true });
+      const frontmatter = "---\r\nname: skill-a\r\ndescription: d\r\n---\r\n";
+      writeFileSync(join(skillDir, "SKILL.md"), `${frontmatter}\r\n旧正文\r\n`, "utf8");
+
+      const read = readSkillBody(repo, "skill-a");
+      writeSkillBody(repo, { relPath: "skill-a", body: "\n新正文\n", baseHash: read.hash });
+
+      const after = readFileSync(join(skillDir, "SKILL.md"), "utf8");
+      assert.equal(after, `${frontmatter}\r\n新正文\r\n`);
+      assert.equal(after.replace(/\r\n/g, "").includes("\n"), false, "存在裸 LF");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("无 frontmatter 的文件整份可编辑", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      const skillDir = join(repo, "skill-a");
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, "SKILL.md"), "旧正文\n第二行\n", "utf8");
+
+      const read = readSkillBody(repo, "skill-a");
+      assert.equal(read.body, "旧正文\n第二行\n");
+      writeSkillBody(repo, { relPath: "skill-a", body: "新正文\n", baseHash: read.hash });
+      assert.equal(readFileSync(join(skillDir, "SKILL.md"), "utf8"), "新正文\n");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("hash 过期拒绝写入并保留外部改动", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      const skillDir = join(repo, "skill-a");
+      mkdirSync(skillDir, { recursive: true });
+      const target = join(skillDir, "SKILL.md");
+      writeFileSync(target, "---\nname: skill-a\n---\n\n旧正文\n", "utf8");
+
+      const read = readSkillBody(repo, "skill-a");
+      writeFileSync(target, `${read.content}外部插入\n`, "utf8");
+
+      assert.throws(
+        () => writeSkillBody(repo, { relPath: "skill-a", body: "覆盖\n", baseHash: read.hash }),
+        (err) => {
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, "skills_body_conflict");
+          return true;
+        },
+      );
+      assert.match(readFileSync(target, "utf8"), /外部插入/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("空正文拒绝保存", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      const read = readSkillBody(repo, "skill-a");
+      assert.throws(
+        () => writeSkillBody(repo, { relPath: "skill-a", body: "  \n", baseHash: read.hash }),
+        (err) => {
+          assert.equal(err.statusCode, 400);
+          assert.equal(err.code, "skills_body_empty");
+          return true;
+        },
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("非 UTF-8 的 SKILL.md 拒绝读写，编辑标记为不可用", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      const skillDir = join(repo, "skill-a");
+      mkdirSync(skillDir, { recursive: true });
+      const target = join(skillDir, "SKILL.md");
+      writeFileSync(target, Buffer.from([0x2d, 0x2d, 0x2d, 0x0a, 0xff, 0xfe, 0x0a]));
+
+      const read = readSkillBody(repo, "skill-a");
+      assert.equal(read.editable, false);
+      assert.throws(
+        () => writeSkillBody(repo, { relPath: "skill-a", body: "x\n", baseHash: read.hash }),
+        (err) => {
+          assert.equal(err.statusCode, 415);
+          assert.equal(err.code, "skills_body_encoding");
+          return true;
+        },
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("越界 relPath 与空 baseHash 直接拒绝", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      writeSkill(join(dir, "outside"), { name: "outside" });
+
+      assert.throws(
+        () => writeSkillBody(repo, { relPath: join("..", "outside"), body: "x\n", baseHash: "h" }),
+        /越出|traversal|拒绝/i,
+      );
+      assert.throws(
+        () => writeSkillBody(repo, { relPath: "skill-a", body: "x\n", baseHash: "  " }),
+        (err) => err.statusCode === 400,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+  it("服务层暴露 writeSkillBody，并按已配置仓库写入", () => {
+    const { dir, cleanup } = tempRoot();
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+    try {
+      const svc = createSkillsService({ homeDir: join(dir, "home"), base, recycleDirFn: mockRecycle([]) });
+      assert.throws(
+        () => svc.writeSkillBody({ relPath: "skill-a", body: "x\n", baseHash: "h" }),
+        /尚未设置主仓库/,
+      );
+      svc.setRepoPath(repo);
+      const read = svc.readSkillBody("skill-a");
+      const saved = svc.writeSkillBody({ relPath: "skill-a", body: "新正文\n", baseHash: read.hash });
+      assert.equal(saved.ok, true);
+      assert.match(readFileSync(join(repo, "skill-a", "SKILL.md"), "utf8"), /新正文/);
     } finally {
       cleanup();
     }

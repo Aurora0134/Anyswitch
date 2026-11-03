@@ -69,7 +69,8 @@ function mockService(overrides = {}) {
     resolveConflictSkill: async () => ({ ok: true }),
     diffLocalSkill: async () => ({ ok: true, diffs: [] }),
     diffSkillContent: async () => ({ ok: true, files: [] }),
-    readSkillBody: (relPath) => ({ name: relPath, dirName: relPath, relPath, content: "---\n---\n" }),
+    readSkillBody: (relPath) => ({ name: relPath, dirName: relPath, relPath, content: "---\n---\n", body: "", hash: "h1", editable: true }),
+    writeSkillBody: async () => ({ ok: true, hash: "h2", content: "", body: "" }),
     ...overrides,
   };
 }
@@ -371,6 +372,51 @@ describe("panel router skills routes", () => {
     await router.handle(blank.req, blank.res);
     assert.equal(blank.res.statusCode, 400);
     assert.equal(blank.json().ok, false);
+  });
+
+  it("POST /panel/api/skills/body/save passes the draft and base hash to the service", async () => {
+    let got = null;
+    const router = skillsRouter(mockService({
+      writeSkillBody: (args) => { got = args; return { ok: true, hash: "h2", content: "next", body: "new body\n" }; },
+    }));
+    const { req, res, json } = fakeReqRes("/panel/api/skills/body/save", "POST", {
+      relPath: "skill-a", baseHash: "h1", body: "new body\n",
+    });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(got, { relPath: "skill-a", baseHash: "h1", body: "new body\n" });
+    assert.equal(json().ok, true);
+    assert.equal(json().hash, "h2");
+  });
+
+  it("POST /panel/api/skills/body/save maps a stale hash to 409 with the machine code", async () => {
+    const router = skillsRouter(mockService({
+      writeSkillBody: () => {
+        const error = new Error("文件已在外部修改");
+        error.statusCode = 409;
+        error.code = "skills_body_conflict";
+        throw error;
+      },
+    }));
+    const { req, res, json } = fakeReqRes("/panel/api/skills/body/save", "POST", {
+      relPath: "skill-a", baseHash: "stale", body: "x\n",
+    });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 409);
+    assert.equal(json().ok, false);
+    assert.equal(json().code, "skills_body_conflict");
+  });
+
+  it("POST /panel/api/skills/body/save refuses a missing baseHash before touching the service", async () => {
+    let called = false;
+    const router = skillsRouter(mockService({
+      writeSkillBody: () => { called = true; return { ok: true }; },
+    }));
+    const { req, res, json } = fakeReqRes("/panel/api/skills/body/save", "POST", { relPath: "skill-a", body: "x" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(json().ok, false);
+    assert.equal(called, false);
   });
 
   it("rejects skills POSTs without the panel header as CSRF (service never called)", async () => {
