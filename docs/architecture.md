@@ -173,10 +173,18 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `src/agents/agent-sync-run.mjs` / `src/agents/agent-sync-spawn.mjs` — 配置同步的独立短命进程与其拉起助手。同步刻意跑在常驻进程之外：每次新进程都从磁盘现读 `agent-sync` 与各 merge 模块，因此改动这些模块无需重启 relay 或面板。
 - `src/panel/panel-host-restart-helper.mjs` — 一次性重启助手：面板页的「重启」按钮由 panel-host 自己承载，进程无法重启自身，故由本助手等旧进程退出、拉起新进程并确认应答。
 - `src/ops/git-anchor-repair.mjs` — 运维脚本：修复或迁移 git 锚点（含把改名前路径下的旧对象库搬到 `%LOCALAPPDATA%\Anyswitch-git\objects`、重设 ACL）。会改动权限与对象库，属需人工授权的一次性操作。
+- `src/agents/shim-manager.mjs` — 垫片纯库：三件套渲染/落盘（原子写、幂等）、用户级 PATH 手术（注册表读写走 PowerShell 的 Win32 API，保值的既有 kind）、WM_SETTINGCHANGE 广播、卸载合成（目录清空才撤 PATH 条目）。全注入面（fs/pathStore/broadcastFn），导入零副作用；历史上只有卸载侧的编排者调用它，安装侧的编排者是 shim-reconcile。
+- `src/agents/shim-reconcile.mjs` — 垫片对账：把 `~/.config/anyswitch-bin` 维持成「接线状态的终端投影」——已接线且本机已装的端点门牌在盘并置顶 PATH，掉线/卸载即撤下；判据与契约见下节。触发面＝面板宿主启动＋面板手动同步完成后（fire-and-forget）；store 读不出即整体不动，一切失败非致命、不挡面板。
 
 ### 安全与加解密
 - `src/ops/dpapi.mjs` — DPAPI 桥（调用 `dpapi.ps1`）：`protect`/`unprotect`，不缓存不记录、自分配缓冲区退出清零；v2 熵 `ApiCred|DPAPI|v2|<ProviderId>`。失败带**固定错误码**（超时／助手起不来／助手失败／应答不可读／输出超限）：调用方需要区分这些情况（处置不同），但绝不能拿到可能回显 payload 的底层文本，所以只认码、不读 message。
 - `src/launchers/pi-relay-token.mjs` — 常驻 relay 令牌的生成与读取（数据根下按端点存放），供无法自带鉴权头的客户端复用。
+
+### 垫片门牌与跨版本拉起契约
+
+- **根入口名是跨版本拉起协议**：`relay-host.mjs` / `panel-host.mjs` / `panel-host-restart-helper.mjs` / `agent-watchdog.mjs` 四个根路径是零实现转发壳（转发芯 `src/shared/entry-forward.mjs`：argv/stdio/cwd/退出码全透传、常驻进程包一层、pidfile 记壳 pid），唯一职责是把 ≤0.7.0 升级器在换树后仍按根路径发起的拉起转发到 `src/` 真入口。改这四个名字、或挪动 src 真入口而不留根路径壳，等于打死所有 ≤0.7.0 用户的**应用内升级**（换树后旧路径 MODULE_NOT_FOUND → 新面板起不来 → 确定性回滚重试永远失败；2026-11-03 沙盒 A 轮实证）。0.7.1 起升级器自身的 spawn 位全部走 src 路径，不再产生新的旧路径债；壳的退役条件是 ≤0.7.0 用户清零，不做版本内退役。真入口全部带 `isEntryModule` 守卫（认 argv[1]），因此壳必须**转发 exec**、不能 re-export——re-export 形态过不了守卫，等于没转发。
+- **launcher 路径稳定性纪律**：`src/launchers/<launcher>.mjs` 的绝对路径写在用户家目录的垫片文件里，是对外契约面。将来挪动 launcher 位置必须二选一：(a) 在旧路径留转发壳；(b) 依赖垫片对账自愈——门牌改写发生在换树后新面板宿主起来的这一轮对账里（升级流程内部，秒级窗口）。只挪文件不动门牌，正是 0.7.0→0.7.1 这笔更新债在垫片侧的成因。
+- **垫片＝接线状态的终端投影**（2026-11-03 裁决「垫片随产品安装」的落地语义）：门牌只为「已接线且本机已安装」的端点存在。接线判定＝可见渠道/启用虚拟模型（全体端点共享）或该端点自己的 auto 链；安装判定用环境检测同族 resolver。掉线或 Agent 卸载即撤下、直连恢复；手写异形门牌（三件套字节不等于「当前形态或根路径旧形态」渲染结果）永远不碰——装侧不覆盖、撤侧不删除。PATH 置顶是必要条件（追加条目永远排在 Agent 自己的安装目录之后，命令查找轮不到门牌）；期望终态一次性写入（在册目录按 SHIM_SPECS 稳定序置顶、其余条目原样跟随），与归一化当前值比对有差才写——幂等由此而来。
 
 ## 5. 安全模型
 
