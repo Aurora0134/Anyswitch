@@ -51,9 +51,10 @@ describe("agent-prompts-inject endpoint table", () => {
     // grok: a dedicated *.md under the always-scanned ~/.grok/rules/ dir —
     // never the user's own ~/.grok/AGENTS.md.
     assert.equal(byId.grok.target, join(homeDir, ".grok", "rules", "anyswitch-managed-prompts.md"));
-    // workbuddy: the memory file CodeBuddy reads at session start — taken over as a
-    // managed block by user decision (no extra backup).
-    assert.equal(byId.workbuddy.target, join(homeDir, ".workbuddy", "AGENTS.md"));
+    // workbuddy: a dedicated *.md under the user-level rules dir, which the
+    // desktop shell and the bundled CLI scan at session start. Its own
+    // ~/.workbuddy/AGENTS.md is never read by any WorkBuddy code path.
+    assert.equal(byId.workbuddy.target, join(homeDir, ".workbuddy", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
     // Qoder re-watches a loaded rule file, so preset edits land next turn.

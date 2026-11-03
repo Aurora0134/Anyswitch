@@ -23,7 +23,7 @@ description: 规范 Anyswitch（原 apicred）提示词预设的写入流程与�
 | qoder | Qoder | ~/.qoder/rules/anyswitch-managed-prompts.md | 是 |
 | codex | Codex | ~/.codex/AGENTS.md | 否 |
 | grok | Grok Build | ~/.grok/rules/anyswitch-managed-prompts.md | 否 |
-| workbuddy | WorkBuddy | ~/.workbuddy/AGENTS.md | 否 |
+| workbuddy | WorkBuddy | ~/.workbuddy/rules/anyswitch-managed-prompts.md | 否 |
 
 热加载端点写完即生效，其余 7 个下次会话启动才读到——向用户如实报告生效时机。
 

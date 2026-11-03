@@ -574,21 +574,37 @@ async function stripDsh(ctx) {
   return steps;
 }
 
-// WorkBuddy 的提示词托管块（~/.workbuddy/AGENTS.md）：PROMPT_ENDPOINTS 的登记
-// 在另一分支，卸载不能依赖它已合并——这里直接用注入器导出的纯变换
-// applyManagedBlock 摘块，语义与快照注入完全同源（空文件删除、保留用户正文）。
-function stripWorkbuddyPromptBlock(configRoot) {
-  const target = join(configRoot, "AGENTS.md");
-  if (!existsSync(target)) return { step: "prompt-block", ok: true, changed: false };
+// WorkBuddy 的提示词托管块：现行落点是 ~/.workbuddy/rules/anyswitch-managed-prompts.md
+// （用户级规则目录，会话启动时读取）；旧的 ~/.workbuddy/AGENTS.md 是 0.7.1 及以前
+// 的落点，WorkBuddy 从不读它，卸载仍需把老安装留下的块摘掉。两处都用注入器导出的
+// 纯变换 applyManagedBlock 处理，语义与快照注入完全同源（空文件删除、保留用户正文）。
+const WORKBUDDY_PROMPT_TARGETS = [
+  ["rules", "anyswitch-managed-prompts.md"],
+  ["AGENTS.md"], // legacy: 0.7.1 及以前的失效落点
+];
+
+function stripManagedBlockFile(target) {
+  if (!existsSync(target)) return { changed: false, removed: false };
   const text = readFileSync(target, "utf8");
   const next = applyManagedBlock(text, null);
-  if (next === text) return { step: "prompt-block", ok: true, changed: false };
+  if (next === text) return { changed: false, removed: false };
   if (next.trim() === "") {
     rmSync(target, { force: true });
-    return { step: "prompt-block", ok: true, changed: true, removed: true };
+    return { changed: true, removed: true };
   }
   atomicWriteFile(target, next);
-  return { step: "prompt-block", ok: true, changed: true };
+  return { changed: true, removed: false };
+}
+
+function stripWorkbuddyPromptBlock(configRoot) {
+  let changed = false;
+  let removed = false;
+  for (const parts of WORKBUDDY_PROMPT_TARGETS) {
+    const result = stripManagedBlockFile(join(configRoot, ...parts));
+    changed = changed || result.changed;
+    removed = removed || result.removed;
+  }
+  return { step: "prompt-block", ok: true, changed, ...(removed ? { removed: true } : {}) };
 }
 
 // claude / workbuddy 的 skills 目录联接清理：rmdir 只摘链接，绝不碰目标目录

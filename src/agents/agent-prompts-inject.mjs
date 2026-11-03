@@ -16,6 +16,14 @@
 //     as a user rule. Rules are read at session start with no file watcher
 //     (same treatment as codex) → hotReload false. Anyswitch never touches
 //     ~/.grok/AGENTS.md — hence a dedicated file under rules/.
+//   - workbuddy: Electron desktop shell + bundled CodeBuddy Code CLI. No
+//     WorkBuddy code path reads ~/.workbuddy/AGENTS.md (verified against the
+//     installed app.asar and CLI bundle); the user-level injection surface is
+//     the rules dir `<config dir>/rules` (default `~/.workbuddy/rules`), whose
+//     *.md files load as user rules when no `paths` frontmatter is present
+//     (alwaysApply defaults true, single-file cap 40k chars). Read once at
+//     session start → hotReload false. A dedicated file under rules/, never
+//     the user's own AGENTS.md.
 //
 // Managed-block semantics:
 //   - empty effective set removes the block; when the file holds only the
@@ -51,10 +59,10 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },
   { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
   { id: "grok", label: "Grok Build", hotReload: false, targetRel: "~/.grok/rules/anyswitch-managed-prompts.md", home: [".grok", "rules", "anyswitch-managed-prompts.md"] },
-  // WorkBuddy（Electron 桌面壳 + 内置 CodeBuddy Code CLI）：CodeBuddy 在会话启动时读
-  // 记忆文件，故 hotReload:false。该文件现为手工抄本，用户已裁决接管为托管块，
-  // 不另留备份；卸载时由移除托管块还原。
-  { id: "workbuddy", label: "WorkBuddy", hotReload: false, targetRel: "~/.workbuddy/AGENTS.md", home: [".workbuddy", "AGENTS.md"] },
+  // WorkBuddy（Electron 桌面壳 + 内置 CodeBuddy Code CLI）：用户级规则目录
+  // ~/.workbuddy/rules 是唯一会被会话读取的全局面（AGENTS.md 无人读）；会话
+  // 启动时扫描一次，故 hotReload:false。
+  { id: "workbuddy", label: "WorkBuddy", hotReload: false, targetRel: "~/.workbuddy/rules/anyswitch-managed-prompts.md", home: [".workbuddy", "rules", "anyswitch-managed-prompts.md"] },
 ]);
 
 // Bodies only: the title lives in prompts.json for the panel; it never

@@ -725,9 +725,16 @@ function seedWorkbuddy(home, sidecarRoot, { sidecar = true } = {}) {
     ],
     theme: "dark",
   });
+  const rulesFile = join(home, ".workbuddy", "rules", "anyswitch-managed-prompts.md");
+  mkdirSync(dirname(rulesFile), { recursive: true });
+  writeFileSync(
+    rulesFile,
+    "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n",
+  );
+  // 旧版落点（≤0.7.1 写 ~/.workbuddy/AGENTS.md，WorkBuddy 从不读它）：残留也要清。
   writeFileSync(
     join(home, ".workbuddy", "AGENTS.md"),
-    "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n",
+    buildManagedBlock([{ content: "preset body" }]) + "\n",
   );
   if (sidecar) seedSidecar(sidecarRoot, "workbuddy-sidecar.json", ["chan1"]);
   return modelsPath;
@@ -753,7 +760,11 @@ test("workbuddy: managed models, prompt block, skill junctions and sidecar are r
   const models = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.deepEqual(models.models.map((entry) => entry.id), ["user-1"]);
   assert.equal(models.theme, "dark", "未知顶层键原样保留");
-  assert.equal(readFileSync(join(home, ".workbuddy", "AGENTS.md"), "utf8"), "# My notes\n");
+  assert.equal(
+    readFileSync(join(home, ".workbuddy", "rules", "anyswitch-managed-prompts.md"), "utf8"),
+    "# My notes\n",
+  );
+  assert.ok(!existsSync(join(home, ".workbuddy", "AGENTS.md")), "旧落点的纯托管文件一并删除");
   assert.ok(!existsSync(join(skillsDir, "my-skill")), "junction removed");
   assert.ok(existsSync(join(repo, "my-skill", "SKILL.md")), "junction target intact");
   assert.ok(existsSync(join(skillsDir, "local-skill", "SKILL.md")), "real dir untouched");
@@ -806,9 +817,9 @@ test("workbuddy: WORKBUDDY_CONFIG_DIR 只挪 models，提示词与 skills 仍按
     theme: "dark",
   });
   // 提示词与 skills 落在注入/部署侧的静态 home 目录里。
-  const agentsMd = join(home, ".workbuddy", "AGENTS.md");
-  mkdirSync(dirname(agentsMd), { recursive: true });
-  writeFileSync(agentsMd, "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n");
+  const rulesFile = join(home, ".workbuddy", "rules", "anyswitch-managed-prompts.md");
+  mkdirSync(dirname(rulesFile), { recursive: true });
+  writeFileSync(rulesFile, "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n");
   const repo = mkTestDir("workbuddy-skills-repo-envroot-");
   mkdirSync(join(repo, "my-skill"), { recursive: true });
   writeFileSync(join(repo, "my-skill", "SKILL.md"), "---\nname: my-skill\n---\n");
@@ -822,7 +833,7 @@ test("workbuddy: WORKBUDDY_CONFIG_DIR 只挪 models，提示词与 skills 仍按
   const models = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.deepEqual(models.models.map((entry) => entry.id), ["user-1"], "env 目录的托管模型条目被清除");
   assert.equal(models.theme, "dark");
-  assert.equal(readFileSync(agentsMd, "utf8"), "# My notes\n", "静态 home 的托管块被清除");
+  assert.equal(readFileSync(rulesFile, "utf8"), "# My notes\n", "静态 home 的托管块被清除");
   assert.ok(!existsSync(join(skillsDir, "my-skill")), "静态 home 的联接被撤销");
   assert.ok(existsSync(join(repo, "my-skill", "SKILL.md")), "junction target intact");
   assert.equal(stepsByName(result)["prompt-block"].changed, true);
