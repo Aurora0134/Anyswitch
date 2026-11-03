@@ -2304,6 +2304,37 @@ function createOpencodeAdapter(roots) {
   };
 }
 
+// opencode 会话 busy 位（switch-guard 杀前旁证）：opencode 的对话由它自家的
+// 后台服务进程执行，流量也走它自家通道——relay 在途计数与 PTY 树探两头都
+// 看不见它的在途请求（2026-11-03 现场：终端内切把 TUI 杀了，后台服务里在途
+// 的对话又自己跑了 10 分钟）。session_v2 行自带 busy 语义：time_busy 有值且
+// 其后没有更晚的 time_idle＝在跑（真实数据验证过三形态：运行中 idle 为空、
+// 完成后 idle 更新到更晚、空闲会话 busy 为空）。1.x 的 session 表没有这两列，
+// 更早的 2.x 版本 session_v2 也没有（列缺失即判不出）。
+// 三值语义：true＝在跑；false＝确定不在跑；null＝判不出（库不在/表不在/
+// 行不在/读失败）——调用方按「不挡」处置，本读只加保护、不新增拒换面。
+export function readOpencodeBusy(conversationId, home = homedir()) {
+  if (typeof conversationId !== "string" || conversationId === "") return null;
+  const dbPath = join(defaultRoots(home).opencode[0], "opencode.db");
+  try {
+    if (!sqliteStorePresent(dbPath)) return null;
+    const db = openSqliteReadOnly(dbPath);
+    try {
+      if (!sqliteTableExists(db, "session_v2")) return null;
+      const row = db.prepare("SELECT time_busy, time_idle FROM session_v2 WHERE id = ?").get(conversationId);
+      if (!row) return null;
+      const busy = typeof row.time_busy === "number" ? row.time_busy : null;
+      if (busy === null) return false;
+      const idle = typeof row.time_idle === "number" ? row.time_idle : null;
+      return idle === null || busy > idle;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Top-level orchestration (called by panel.mjs routes)
 // ---------------------------------------------------------------------------

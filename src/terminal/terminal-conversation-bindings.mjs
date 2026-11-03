@@ -157,7 +157,10 @@ function sanitizeBinding(value) {
   if (typeof cwd !== "string" || cwd === "") return null;
   if (typeof conversationId !== "string" || conversationId === "") return null;
   if (typeof boundAt !== "number" || !Number.isFinite(boundAt)) return null;
-  if (source !== "bound" && source !== "scanned") return null;
+  // source 三值：bound＝绑定捕获路径、scanned＝复活兜底扫描、switched＝内切
+  // 换绑（历史续接落地即改写为目标身份，2026-11-03 双高亮现场）。旧版本读到
+  // switched 会被这里判无效丢弃——降级为「没绑定」，由捕获路径自然接管。
+  if (source !== "bound" && source !== "scanned" && source !== "switched") return null;
   return {
     agentId,
     cwd,

@@ -54,7 +54,7 @@ import {
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "../ops/app-self-update.mjs";
 import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault, readRemoteHeadRelation as readRemoteHeadRelationDefault } from "../ops/app-git-identity.mjs";
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "../ops/version-check.mjs";
-import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "../agents/session-scan.mjs";
+import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner, readOpencodeBusy } from "../agents/session-scan.mjs";
 import { createSessionScanOffload } from "../agents/session-scan-worker.mjs";
 import { TERMINAL_HOST_PORT } from "../terminal/terminal-process-manager.mjs";
 import { probeTerminalCommandTree as defaultProbeTerminalCommandTree, SWITCH_GUARD_PROBE_TIMEOUT_MS } from "../terminal/terminal-switch-guard.mjs";
@@ -994,6 +994,9 @@ export function createPanelRouter({
    // （session-scan-worker.mjs：worker 线程里跑，面板进程零阻塞）；单测注入
    // 假扫描函数时原地同步跑，不碰真存档、也不起 worker。
    scanAgentConversationsFn = null,
+   // opencode busy 旁证读取（switch-guard 杀前用，语义见 readOpencodeBusy 头
+   // 注释）。默认真读取——主键单行查询，毫秒级；单测注入假读，不碰真存档。
+   opencodeBusyFn = readOpencodeBusy,
    // 扫描承载的 worker 模块（session-scan-worker.mjs）。默认 null＝用模块自带的
    // 那一个（同文件既是主线程壳也是 worker 体）。给单测一个替换口：把「扫描」
    // 换成忙等块，用来钉住「扫描不占面板事件循环」——修前这条会红。
@@ -1706,6 +1709,21 @@ export function createPanelRouter({
     // 没有活进程，restart 的树杀只剩残留登记的收尾。前端收到 switch_busy 静默转
     // 新开（新开本就是点击历史会话的合法落点，无需提示）。
     if (session.status === "running") {
+      // opencode busy 旁证（2026-11-03 现场补的第三道信号）：opencode 的对话跑
+      // 在它自家的后台服务进程里，在途请求既不进 relay（在途计数读 0）也不在
+      // PTY 树里（树探判干净）——上面两道门对这种形态全盲。绑定的对话若在它
+      // 存档里仍处 busy，按 switch_busy 拒换：前端静默转保活，在跑的终端原样
+      // 留着。身份取「这条终端现在实际在跑的对话」——绑定优先，无绑定退宿主
+      // resume。判不出（null）不挡：本检查只加保护，不新增拒换面。
+      if (session.agentId === "opencode") {
+        const bound = terminalBindings().get(session.id);
+        const busyConversationId = bound && bound.agentId === "opencode" && typeof bound.conversationId === "string" && bound.conversationId !== ""
+          ? bound.conversationId
+          : (session.resume && session.resume.endpoint === "opencode" && typeof session.resume.id === "string" && session.resume.id !== "" ? session.resume.id : null);
+        if (busyConversationId && opencodeBusyFn(busyConversationId) === true) {
+          return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
+        }
+      }
       // 归属锚：relay 检测面里这个会话的 agent 主进程 pid——有锚时探测从锚起
       //（锚之下的进程才是在跑命令，agent 本体不算），无锚按根形态判（见
       // terminal-switch-guard）。join 复用轮询的拉取缓存，纯内存计算；失败或
@@ -1797,7 +1815,12 @@ export function createPanelRouter({
     }, { token });
     if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     // 每次切换都开启新代：在飞的旧代扫描不得把上一段身份绑回来。全新内切
-    // 还须清旧对话绑定，否则复活会接回旧会话；历史续接的既有绑定语义不变。
+    // 须清旧对话绑定，否则复活会接回旧会话；历史续接把绑定改写到目标身份
+    // ——绑定语义是「这条终端现在实际在跑的对话」，切换落地后它就是目标会
+    // 话。修前历史续接不换绑：宿主 resume 已指目标、绑定还钉在旧对话上，左
+    // 栏 live 行按两套身份各命中一条（双高亮），点旧行走「聚焦已开终端」聚
+    // 焦到的却是已换内容的终端，永远回不去（2026-11-03 现场）。agent 若
+    // resume 另起新存档，下方 refresh 自愈仍会接上。
     terminalBindingGenerations.set(session.id, (terminalBindingGenerations.get(session.id) ?? 0) + 1);
     if (resume === null) {
       terminalBindings().delete(session.id);
@@ -1806,6 +1829,20 @@ export function createPanelRouter({
       // 是 5s）。这正是 S1 的现场——用户点完 ⊕ 想打字，却卡在等绑定上。
       bindingCaptureMissStreak.delete(session.id);
       bindingCaptureLastAttempt.delete(session.id);
+    } else {
+      // 绑定库是旁路数据面：写失败不挡切换主流程，下一轮捕获/自愈还有机会接上。
+      try {
+        terminalBindings().set(session.id, {
+          agentId: endpoint,
+          cwd: launch.cwd,
+          conversationId,
+          file: resumeFile,
+          boundAt: Date.now(),
+          source: "switched",
+        });
+      } catch {
+        /* 身份非法或落盘失败：不挡切换 */
+      }
     }
     // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
     // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新

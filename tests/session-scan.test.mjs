@@ -11,7 +11,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, utimesSync 
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
-import { createSessionScanner, buildTurns } from "../src/agents/session-scan.mjs";
+import { createSessionScanner, buildTurns, readOpencodeBusy } from "../src/agents/session-scan.mjs";
 import { createSessionScanOffload } from "../src/agents/session-scan-worker.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -1705,6 +1705,43 @@ test("opencode: scans its own db and builds a verified resume command", async ()
     "文件清单",
     "读取失败",
   ]);
+});
+
+// switch-guard 杀前旁证（2026-11-03 现场）：opencode 的对话由它自家后台服务
+// 进程执行，relay 在途与 PTY 树探都看不见；session_v2 的 busy 位是唯一本机
+// 可读的「这条对话还在不在跑」信号。三值语义＝true/false/null（判不出）。
+test("opencode busy 位读取（switch-guard 旁证）：三值语义", () => {
+  const home = makeTmp();
+  const ocRoot = join(home, ".local", "share", "opencode");
+  mkdirSync(ocRoot, { recursive: true });
+  const db = new DatabaseSync(join(ocRoot, "opencode.db"));
+  db.exec("CREATE TABLE session_v2 (id text primary key, time_busy integer, time_idle integer)");
+  const insert = db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?)");
+  // 真实数据验证过的三形态＋回归形态：运行中 idle 为空；完成后 idle 更晚；
+  // 空闲会话 busy 为空；跑完又跑起来＝busy 比 idle 晚。
+  insert.run("ses_running", 2000, null);
+  insert.run("ses_rebusy", 3000, 2000);
+  insert.run("ses_done", 1000, 2000);
+  insert.run("ses_never", null, 500);
+  db.close();
+  assert.equal(readOpencodeBusy("ses_running", home), true, "busy 有值且无 idle＝在跑");
+  assert.equal(readOpencodeBusy("ses_rebusy", home), true, "busy 比 idle 晚＝又在跑");
+  assert.equal(readOpencodeBusy("ses_done", home), false, "idle 比 busy 晚＝已跑完");
+  assert.equal(readOpencodeBusy("ses_never", home), false, "busy 为空＝不在跑");
+  assert.equal(readOpencodeBusy("ses_missing", home), null, "行不在＝判不出");
+  assert.equal(readOpencodeBusy("", home), null, "空 id＝判不出");
+  assert.equal(readOpencodeBusy("ses_running", makeTmp()), null, "库不在＝判不出（没装/没聊过）");
+  // 1.x／更早的 2.x 形态：库在但没有带 busy 列的 session_v2 表——判不出，不炸。
+  const oneXHome = makeTmp();
+  const oneXRoot = join(oneXHome, ".local", "share", "opencode");
+  mkdirSync(oneXRoot, { recursive: true });
+  new DatabaseSync(join(oneXRoot, "opencode.db")).close(); // 空库无表
+  assert.equal(readOpencodeBusy("ses_running", oneXHome), null, "无 session_v2 表＝判不出");
+  const oldV2Home = makeTmp();
+  const oldV2Root = join(oldV2Home, ".local", "share", "opencode");
+  mkdirSync(oldV2Root, { recursive: true });
+  makeOpencodeV2Db(oldV2Root); // session_v2 存在但没有 busy 两列
+  assert.equal(readOpencodeBusy("ses_v2new", oldV2Home), null, "session_v2 无 busy 列＝判不出");
 });
 
 test("opencode 2.x: reads session_v2 + session_message and still lists 1.x-only rows", async () => {
