@@ -305,7 +305,7 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
 // M12-A 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
 // 换绑），页签不新增。working 判定在面板侧，本路由只接「已决定内切」的请求。
 describe("内切切换会话（terminal sessions switch）", () => {
-  function switchRouter({ root, hostSession, restarted, probe, scanAgentConversations, terminalSessions, scanAll, binding } = {}) {
+  function switchRouter({ root, hostSession, restarted, probe, scanAgentConversations, terminalSessions, scanAll, binding, opencodeBusyFn } = {}) {
     const calls = { restart: [], fetch: [], probe: [] };
     const terminalBindingStore = createBindingStore({ file: join(root, "terminal-conversation-bindings.json") });
     terminalBindingStore.set(SESSION_ID, binding ?? {
@@ -341,6 +341,8 @@ describe("内切切换会话（terminal sessions switch）", () => {
           : restarted;
       },
       scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
+      // busy 旁证默认「判不出」（单测不碰真存档）；busy 门用例按需注入真值。
+      opencodeBusyFn: opencodeBusyFn ?? (() => null),
       bindingRefreshScheduleFn: () => { calls.bindingRefresh = (calls.bindingRefresh || 0) + 1; },
       bindingCaptureDebounceMs: 0,
       // 「判不出」的负结果退避也清零：绑定用例要在同一拍里连看两轮捕获
@@ -627,6 +629,62 @@ describe("内切切换会话（terminal sessions switch）", () => {
       await router.handle(call.req, call.res);
       assert.equal(call.res.statusCode, 200, "判不出不等于不存在");
       assert.equal(calls.restart.length, 1, "照常换绑");
+    });
+  });
+
+  // 2026-11-03 双高亮现场（发 hi 的新会话切到历史会话后卡死）的根因收口：历史
+  // 续接内切只改宿主 resume、不动绑定库——左栏 live 行按 resume 与
+  // boundConversation 两套身份各命中一条（双高亮），点旧行的「聚焦已开终端」
+  // 聚焦到已换内容的终端，永远回不去。修法＝切换落地即把绑定改写到目标身份。
+  it("历史续接内切：绑定随目标换写，换绑自愈照常排程", async () => {
+    await withFakeAgents(async (cwd) => {
+      const { router, calls, terminalBindingStore } = switchRouter({ root: mkTestDir("anyswitch-switch-rebind-") });
+      const call = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: "conv-target" }, cwd,
+      });
+      await router.handle(call.req, call.res);
+      assert.equal(call.res.statusCode, 200, "内切起终端");
+      const bound = terminalBindingStore.get(SESSION_ID);
+      assert.ok(bound, "历史续切后绑定仍在（换写不是清空）");
+      assert.equal(bound.conversationId, "conv-target", "绑定改写到目标身份（与宿主 resume 同一套）");
+      assert.equal(bound.agentId, "kimi");
+      assert.equal(bound.cwd, cwd, "cwd 用目标会话项目目录");
+      assert.equal(bound.source, "switched");
+      assert.equal(calls.bindingRefresh, 1, "agent 另起新存档的自愈换绑照常排程");
+    });
+  });
+
+  // 同现场的另一半：opencode 的对话跑在它自家后台服务进程里，在途请求不进
+  // relay 也不在 PTY 树里——前端 working 门与树探两头全盲，在跑的会话被内切
+  // 斩首（TUI 死了、后台服务把对话跑到完，用户永远看不到过程）。修法＝
+  // switch-guard 杀前多读一拍绑定对话的 busy 位。
+  it("opencode busy 旁证：绑定的对话在跑 → 409 switch_busy 不杀；判不出不挡", async () => {
+    await withFakeAgents(async (cwd) => {
+      const reads = [];
+      const mk = (busy) => switchRouter({
+        root: mkTestDir(busy ? "anyswitch-switch-oc-busy-" : "anyswitch-switch-oc-unknown-"),
+        hostSession: { id: SESSION_ID, label: "OpenCode", cwd, shell: "cmd", status: "running", pid: 42, agentId: "opencode" },
+        binding: { agentId: "opencode", cwd, conversationId: "conv-hi", file: null, boundAt: 1, source: "bound" },
+        opencodeBusyFn: (id) => { reads.push(id); return busy; },
+      });
+      const busy = mk(true);
+      const busyCall = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: "conv-target" }, cwd,
+      });
+      await busy.router.handle(busyCall.req, busyCall.res);
+      assert.equal(busyCall.res.statusCode, 409, "在跑拒换");
+      assert.equal(busyCall.json().code, "switch_busy", "机器可判短码");
+      assert.equal(busyCall.json().error, "switch_busy", "error 即机器码本身（零文案）");
+      assert.deepEqual(reads, ["conv-hi"], "读的是绑定里的当前对话（要杀的那条，不是目标）");
+      assert.equal(busy.calls.restart.length, 0, "不 restart（前端接 409 静默转保活）");
+      assert.equal(busy.calls.probe.length, 0, "busy 命中在树探之前早退");
+      const unknown = mk(null);
+      const unknownCall = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: "conv-target" }, cwd,
+      });
+      await unknown.router.handle(unknownCall.req, unknownCall.res);
+      assert.equal(unknownCall.res.statusCode, 200, "判不出不挡（本检查只加保护，不新增拒换面）");
+      assert.equal(unknown.calls.restart.length, 1, "照常换绑");
     });
   });
 

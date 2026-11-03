@@ -106,6 +106,17 @@ describe("terminal-conversation-bindings", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it("switched source round-trips（内切历史续接的换绑落库）", () => {
+      const { dir, store } = mkStore();
+      try {
+        store.set("sess-1", binding({ source: "switched" }));
+        const reread = createBindingStore({ file: join(dir, "terminal-conversation-bindings.json") });
+        assert.equal(reread.get("sess-1").source, "switched", "换绑来源跨实例读回");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("resumeArgsFor", () => {
