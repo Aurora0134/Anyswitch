@@ -13372,6 +13372,20 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(fresh.status, "idle", "孵化窗内零请求零有效输出：idle（内切门就地换内容）");
   });
 
+  it("前端：孵化豁免让位于已键入——新壳敲过命令后照常判忙（2026-11-03 A2）", async () => {
+    // A2 实测：新壳 6s 跑 Start-Sleep，关页签/内切都被判空闲——出生 15s 的孵化豁免把
+    // 用户自己的命令一起盖掉了。豁免只服务 banner/续接重放，用户敲过字就不再适用。
+    const now = 1_000_000;
+    const busy = (backendState) => vmFn("terminalBusyByOutput", [{ backendState }, 5000, now]);
+    const born = now - 6_000;
+    assert.equal(await busy({ status: "running", createdAt: born, spawnedAt: born, lastActiveAt: now - 300, lastInputAt: now - 5_000 }), true,
+      "出生 6s、5s 前敲过命令、仍在出字：在跑（豁免不再盖住用户命令）");
+    assert.equal(await busy({ status: "running", createdAt: born, spawnedAt: born, lastActiveAt: now - 300 }), false,
+      "同一时刻但从未键入：仍按 banner/重放豁免");
+    assert.equal(await busy({ status: "running", createdAt: born, spawnedAt: born, lastActiveAt: now - 300, lastInputAt: 0 }), false,
+      "lastInputAt 为 0（老快照）按未键入处理");
+  });
+
   it("前端：回合闸——已归属 agent 会话的空闲自绘不点亮，回合内输出照常点亮", async () => {
     const now = Date.now();
     // 回合闸是跨拍状态（Set），必须落在同一个 VM 上下文里连续调用：vmFn 每次新建

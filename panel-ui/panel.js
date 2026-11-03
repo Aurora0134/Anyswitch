@@ -5692,7 +5692,11 @@ async function api(method, path, body) {
   function terminalCloseTerminal(terminalId) {
     if (!terminalId) return true;
     const session = terminalSessionFor(terminalId);
-    if (session && session.status === "working"
+    // 「在跑」的确认面＝既有 working 位 ＋ 手开终端的屏尾判据。后者补的是 working 位
+    // 的结构盲区：同进程 cmdlet 不产生输出、新壳 15s 孵化豁免——2026-11-03 A2 实测
+    // 新壳跑 Start-Sleep 时点 ✕ 无任何确认即整树杀掉。
+    const running = !!session && (session.status === "working" || terminalManualShellBusy(session));
+    if (running
       && typeof window !== "undefined" && typeof window.confirm === "function"
       && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return false;
     if (session && session.backend) {
@@ -6330,16 +6334,57 @@ async function api(method, path, body) {
     if (!state || state.status === "exited") return false;
     const at = state.lastActiveAt;
     if (!(Number.isFinite(at) && now - at < windowMs)) return false;
-    // 孵化豁免：出生 15s 内不判忙。出生点缺位（更老的快照）不豁免——按纯输出
-    // 窗口径走。
+    const inputAt = state.lastInputAt;
+    const hasInput = Number.isFinite(inputAt) && inputAt > 0;
+    // 孵化豁免：出生 15s 内的输出（新 shell banner／续接重放）不当「在跑」。**前提是
+    // 用户还没敲过字**——敲过字的终端跑的是用户自己的东西，banner 期也按输出窗判
+    // （2026-11-03 A2：新壳 15s 内敲命令后关页签/切走被判空闲静默杀掉）。出生点缺位
+    // （更老的快照）不豁免——按纯输出窗口径走。
     const born = Number.isFinite(state.spawnedAt) ? state.spawnedAt : state.createdAt;
-    if (Number.isFinite(born) && now - born < TERMINAL_BUSY_INCUBATION_MS) return false;
+    if (!hasInput && Number.isFinite(born) && now - born < TERMINAL_BUSY_INCUBATION_MS) return false;
     // 键入抑制：最近 2s 内有键入则输出多半是回显，不判忙。lastInputAt 缺位
     // （undefined/0：老会话恢复、老宿主快照）按无抑制处理——抑制面只认明确的
     // 新鲜键入。
-    const inputAt = state.lastInputAt;
-    if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt < TERMINAL_BUSY_INPUT_SUPPRESS_MS) return false;
+    if (hasInput && now - inputAt < TERMINAL_BUSY_INPUT_SUPPRESS_MS) return false;
     return true;
+  }
+
+  // 屏尾判据（手开终端专用）：命令跑完一定回到提示符，没回到就是还在跑。进程树看不见
+  // 同进程 cmdlet（Start-Sleep / 循环 / 写文件不 spawn 子进程），屏尾补这一刀。它是
+  // 护栏不是真值：判不准一律返回 false（＝按在跑处置），宁可多留一个后台进程，也不
+  // 误杀用户正在做的事（2026-11-03 A1/A2）。
+  function terminalScreenAtPrompt(term) {
+    const buf = term && term.buffer ? term.buffer.active : null;
+    if (!buf || typeof buf.getLine !== "function") return false;
+    // 全屏 TUI（vim/htop 之类）没有提示符可判；空屏（首帧还没到）同理。
+    if (buf.type === "alternate") return false;
+    const rows = term.rows || 0;
+    const top = buf.viewportY || 0;
+    for (let y = top + rows - 1; y >= top; y -= 1) {
+      const line = buf.getLine(y);
+      const text = line ? String(line.translateToString(true)).replace(/\s+$/u, "") : "";
+      if (!text) continue;
+      // 命令回显/输出行一般远长于提示符；超长一律按在跑（不猜）。
+      if (text.length > 160) return false;
+      return /[>$#%❯λ]\s*$/u.test(text);
+    }
+    return false;
+  }
+
+  // 手开终端（无 agent 归属）是否可能在跑命令。屏里只有活跃终端那一块（xterm 是单
+  // 实例），后台终端判不了 → false，交回既有判据。没敲过字的终端不可能在跑（shell
+  // 不会自己起命令），一并 false。
+  function terminalManualShellBusy(session) {
+    if (!session || !session.backend) return false;
+    if (session.agent || session.agentId) return false;
+    const state = session.backendState ? session.backendState : null;
+    if (state && state.status === "exited") return false;
+    const inputAt = state ? state.lastInputAt : undefined;
+    if (!(Number.isFinite(inputAt) && inputAt > 0)) return false;
+    if (session.id !== activeTerminalPreviewId) return false;
+    // 没有实例（还没建屏 / 已拆）＝判不了，交回既有判据，不能当成「不在提示符」。
+    if (!terminalXterm) return false;
+    return !terminalScreenAtPrompt(terminalXterm);
   }
 
   // 口径：请求在途，或回合内的输出/命令活跃 → working，两者都无 → idle。「N 个请求进行中」
@@ -11956,6 +12001,26 @@ async function api(method, path, body) {
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
+  // 「刚启动、还没用过」的 agent 终端：作为 agent 起的、还没产生任何对话身份
+  // （resume 与 boundConversation 皆空），且出生在窗内。这种终端在说出第一句话之前
+  // 结构上恒为 idle（回合闸要有过请求才入闸，出生 15s 内还有孵化豁免），内切准入会把
+  // 它当空闲槽就地换绑——用户刚开的会话凭空消失（2026-11-03 A4 实测 1s/20s/40s 全中）。
+  // 为什么看年龄而不是「用户敲没敲过」：lastInputAt 也会被 xterm 对 TUI 查询的自动应答
+  // 刷新（不是人打的），拿它判「用过」会把刚开的会话全判成用过，保护等于没有。
+  // 空白 shell 不算（没有可丢的东西，算进来会让「空白终端→点历史」每次多一个页签）；
+  // 窗外的旧空会话也不拦——没内容可丢，也给「不回报绑定身份的 agent」留退路，否则那些
+  // 终端会永远拦着换内容，点一次多一个页签。
+  function terminalSessionUnusedAgentSlot(session, now = Date.now()) {
+    const TERMINAL_UNUSED_SLOT_MS = 10 * 60 * 1000;
+    if (!session || !session.backend) return false;
+    if (!session.agentId && !session.agent) return false;
+    if (session.resume || session.boundConversation) return false;
+    const state = session.backendState ? session.backendState : null;
+    const born = state ? state.spawnedAt : null;
+    if (!Number.isFinite(born)) return false;
+    return now - born < TERMINAL_UNUSED_SLOT_MS;
+  }
+
   // 保活分支：旧终端进后台集合（不杀），目标终端新建后挂进当前视口——页签数不变。
   // keepPrevious 让挂接跳过「旧终端」的杀/留复判：/switch 的 switch_busy 与补读失败
   // 都是「服务端可能探到活进程」的判定，此时绝不能回头把旧终端当空闲杀掉。
@@ -11985,6 +12050,15 @@ async function api(method, path, body) {
     }
     terminalSwitchInFlight = true;
     try {
+      // 未使用的 agent 终端不是「可回收的空槽」（2026-11-03 A4）：点历史会话时，它还没
+      // 产生任何对话身份（resume / boundConversation 皆空）、用户也没敲过字——就地
+      // /switch 会把用户刚开的会话换成别人的对话，终端 id 与页签数都不变，被杀的新会话
+      // 连对话文件都没写成（1s/20s/40s/已有对话四组实测全中）。改新开页签：原会话原样
+      // 留着，页签 +1 是可见的代价。只拦「换内容」的内切，不拦「新建会话」——两个空会话
+      // 互换不丢东西，拦了反而点一次多一个页签。
+      if (resume && terminalSessionUnusedAgentSlot(active)) {
+        return createAgentTerminal({ agentId, cwd, resume }, { placement: "new" });
+      }
       // 补读两拍（规格时序防线）：活跃面即时取（防 SSE 活跃流一拍延迟误杀在跑
       // 任务）＋宿主单读（PTY 现态，顺带确认记录还在）。判不出就按「在跑」处置：
       // 旧终端保活、目标挂进当前视口——宁可多留一个进程，不误杀（A12）。
@@ -12005,6 +12079,10 @@ async function api(method, path, body) {
       const working = !exited && (active.status === "working" || (active.metrics && active.metrics.activeRequests > 0));
       // 旧终端在跑：留后台保活、不杀；目标终端挂进当前视口，页签数不变。
       if (working) return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
+      // 手开终端同理：进程树看不见同进程 cmdlet（Start-Sleep / 循环 / 写文件），
+      // 屏尾不在提示符就当还在跑，与 working 同路保活（2026-11-03 A1：静默长命令
+      // 期间内切被整树 terminate，切回来找不回）。
+      if (terminalManualShellBusy(active)) return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       // 全新内切乐观选中（M5 补口）：没有历史身份可亮，activeTerminalPreviewId 又不
       // 换（同记录换内容）——不武装的话，高亮要等 POST 返回、spawnedAt 刷新、兜底行
       // 出现才挪过去（实测小半秒）。确定要内切（过了 working 门）后、POST 之前点亮：
