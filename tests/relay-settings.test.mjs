@@ -79,9 +79,34 @@ describe("relay-settings", () => {
     assert.equal(fromConfig.mode, "on");
     assert.equal(fromConfig.enabled, true);
 
+    // Retired mode + enabled: false is the only shape where the fold is
+    // observable: the mode value must outrank the disabled flag instead of
+    // falling through to "off" (enabled only decides when the mode is absent
+    // or unknown). A plain retired mode lands on "on" via the generic
+    // fallback either way, so it cannot tell the fold branch from its
+    // absence.
+    const fromDisabledBasic = parseKeepAliveConfig({ mode: "basic", enabled: false }, {});
+    assert.equal(fromDisabledBasic.mode, "on");
+    assert.equal(fromDisabledBasic.enabled, true);
+    const fromDisabledEnhanced = parseKeepAliveConfig({ mode: "enhanced", enabled: false }, {});
+    assert.equal(fromDisabledEnhanced.mode, "on");
+    assert.equal(fromDisabledEnhanced.enabled, true);
+
     const fromEnv = parseKeepAliveConfig({}, { ANYSWITCH_KEEPALIVE_MODE: "basic" });
     assert.equal(fromEnv.mode, "on");
     assert.equal(fromEnv.enabled, true);
+    const fromEnvEnhanced = parseKeepAliveConfig({}, { ANYSWITCH_KEEPALIVE_MODE: "enhanced" });
+    assert.equal(fromEnvEnhanced.mode, "on");
+    assert.equal(fromEnvEnhanced.enabled, true);
+    // The env leg carries no enabled flag of its own, so the disabled side
+    // can only come from the stored config: a retired value arriving through
+    // ANYSWITCH_KEEPALIVE_MODE must still win over it.
+    const envEnhancedOverDisabled = parseKeepAliveConfig(
+      { enabled: false },
+      { ANYSWITCH_KEEPALIVE_MODE: "enhanced" },
+    );
+    assert.equal(envEnhancedOverDisabled.mode, "on");
+    assert.equal(envEnhancedOverDisabled.enabled, true);
 
     const tmp = mkTestDir("anyswitch-settings-migrate-");
     const path = join(tmp, "settings.json");
@@ -92,12 +117,32 @@ describe("relay-settings", () => {
       assert.equal(loaded.keepAlive.mode, "on");
       assert.equal(loaded.keepAlive.enabled, true);
 
+      // The same precedence on load: a retired mode on disk outranks the
+      // enabled: false stored next to it.
+      writeFileSync(path, JSON.stringify({ keepAlive: { enabled: false, mode: "enhanced" } }));
+      const loadedDisabled = loadSettings(path, {});
+      assert.equal(loadedDisabled.keepAlive.mode, "on");
+      assert.equal(loadedDisabled.keepAlive.enabled, true);
+
       // An old client POSTing mode: "basic" is normalized on save too.
       const saved = saveSettings(path, { keepAlive: { mode: "basic" } }, {});
       assert.equal(saved.keepAlive.mode, "on");
       assert.equal(saved.keepAlive.enabled, true);
       const onDisk = JSON.parse(readFileSync(path, "utf8"));
       assert.equal(onDisk.keepAlive.mode, "on");
+
+      // Same for "enhanced" POSTs, and for a patch that pairs the retired
+      // mode with enabled: false — mode is the source of truth on the PATCH
+      // path too, so the pair must not resolve to "off".
+      const savedEnhanced = saveSettings(path, { keepAlive: { mode: "enhanced" } }, {});
+      assert.equal(savedEnhanced.keepAlive.mode, "on");
+      assert.equal(savedEnhanced.keepAlive.enabled, true);
+      const savedDisabled = saveSettings(path, { keepAlive: { mode: "basic", enabled: false } }, {});
+      assert.equal(savedDisabled.keepAlive.mode, "on");
+      assert.equal(savedDisabled.keepAlive.enabled, true);
+      const onDiskAfterPair = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal(onDiskAfterPair.keepAlive.mode, "on");
+      assert.equal(onDiskAfterPair.keepAlive.enabled, true);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
