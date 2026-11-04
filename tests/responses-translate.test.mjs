@@ -565,9 +565,16 @@ describe("ResponsesSseTranslator", () => {
     // The resume path re-enters the same translator, so the turn's tokens have
     // to be the sum of both upstream segments rather than the last one alone.
     const translator = new ResponsesSseTranslator({ model: "gpt-x" });
+    // Segment one is the cut the resume path starts from: no finish_reason and
+    // no [DONE], with usage riding the terminal chunk that carries no choices —
+    // the mid-word-truncation shape the guard actually resumes. A merged
+    // finish_reason+usage chunk is a clean completion, which never resumes.
     let out = translator.chunk(chunkDelta({ content: "半" }));
     out += translator.chunk({
-      ...chunkDelta({}, { finish_reason: "stop" }),
+      id: "chatcmpl-9",
+      created: 1720000000,
+      model: "gpt-x",
+      choices: [],
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     });
     translator.markContinuing();
