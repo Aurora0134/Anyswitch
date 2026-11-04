@@ -4524,7 +4524,7 @@ async function api(method, path, body) {
       scaleEl.appendChild(boardClone);
       // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
       // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
-      // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开供 viewport 内滚。
+      // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开（预览随内容全高）。
       const mainCs = getComputedStyle(main);
       const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
       const availW = viewport.clientWidth;
@@ -4535,7 +4535,6 @@ async function api(method, path, body) {
       scaleEl.style.transform = `scale(${s})`;
       sizer.style.width = naturalW * s + "px";
       sizer.style.height = naturalH * s + "px";
-      viewport.scrollTop = 0;
     }
     // 恢复路径下进「主题」的那次快照可能拍在首刷数据落地之前（空壳看板）：挂一次性补拍，
     // 等 refreshAgents 把真实内容渲染完再拍。正常路径拍到的已是真实内容，补拍值相同、
