@@ -9,7 +9,7 @@
 //
 // Guarantees the three frontends rely on:
 //   - OpenAIStreamGuard valves the upstream bytes; nothing is forwarded until
-//     the stream proves itself usable (holdEntireTurn under enhanced mode).
+//     the stream proves itself usable.
 //   - committed means real content bytes were sent; keep-alive pings do not
 //     count, so a pre-content fault stays retryable.
 //   - A stream that ends while still holding surfaces as retryable instead of
@@ -839,9 +839,11 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
         tracker?.recordEnd({ status: result.status, usage: result.body?.usage });
       }
       if (res.headersSent) {
-        // An earlier attempt's enhanced-mode pings already committed the SSE
-        // headers; the definitive error must ride an SSE error line instead
-        // of a status line the wire can no longer carry.
+        // Live resume path: an earlier segment of this response already
+        // forwarded content — commit() wrote the SSE headers with its first
+        // byte — and this terminal result is a later attempt's answer on the
+        // same response. The wire can no longer carry a status line, so the
+        // definitive error must ride an SSE error line.
         try {
           res.write(`data: ${JSON.stringify(result.body)}\n\n`);
         } catch {
@@ -927,8 +929,9 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
 // tracker recordEnd paths do not cover this format and ends are recorded here
 // in onSettled (same split as the Anthropic channels). Pre-stream terminal
 // errors keep the relay's usual JSON error shape; once the SSE headers are
-// committed (keep-alive pings) the definitive error rides a response.failed
-// frame instead of a status line the wire can no longer carry.
+// committed (a resumed segment's forwarded content) the definitive error
+// rides a response.failed frame instead of a status line the wire can no
+// longer carry.
 // Pool routing (phase 2): same callUpstreams / shouldFailover /
 // onMemberSuccess contract as the other channels.
 export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {

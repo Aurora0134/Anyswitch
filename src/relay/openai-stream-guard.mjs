@@ -4,11 +4,10 @@
 // abort the whole request on such streams, so a relay that pipes them
 // through turns an upstream glitch into a client-side crash.
 //
-// Strategy: hold every byte until the stream proves itself usable. Proof
-// of usability depends on the keep-alive mode:
-//   - pre-content hold (always on): real text, reasoning, or a complete tool
-//     call (id + name) releases the hold. Empty streams stay held so the
-//     caller can retry; a cut after release surfaces as a truncation verdict.
+// Strategy: hold every byte until the stream proves itself usable — real
+// text, reasoning, or a complete tool call (id + name) releases the hold
+// the moment it arrives. Empty streams stay held so the caller can retry;
+// a cut after release surfaces as a truncation verdict.
 // If the stream ends while still holding and nothing usable was proven,
 // nothing was forwarded and the caller can reject (a plain 5xx the client
 // can retry). If the malformation only appears after content was already
@@ -565,8 +564,8 @@ export class OpenAIStreamGuard {
   }
 
   // Proof the stream is usable. Text/reasoning always releases. A complete
-  // tool call (id + name) also releases unless the whole turn is held —
-  // then nothing releases and finish() validates the turn atomically.
+  // tool call (id + name) also releases — the caller lifts the hold the
+  // moment this returns true, so no turn is ever held past its first proof.
   isHealthy(parsed) {
     for (const choice of parsed.choices ?? []) {
       const delta = choice?.delta;
@@ -665,10 +664,11 @@ export class OpenAIStreamGuard {
     this.partial = "";
     if (this.holding) {
       // Nothing was forwarded yet, so every failure shape is safely
-      // retryable. Whole-turn hold (enhanced) lands every provable-content
-      // turn here by design and validates it atomically before its bytes
-      // flush. Basic mode only reaches here when no text/reasoning/complete
-      // tool call ever arrived (true empty / incomplete-id-name).
+      // retryable. The hold lifts mid-stream at the first proof of
+      // usability (isHealthy in line(): text, reasoning, or a complete tool
+      // call), so a turn still holding here never proved anything — a true
+      // empty stream, calls that never gained an id/name, or nothing but
+      // unproving lines (keep-alive pings, malformed JSON chunks).
       if (this.hasIncompleteToolCall()) {
         return { action: "reject", reason: "incomplete_tool_call", error: toolCallError() };
       }

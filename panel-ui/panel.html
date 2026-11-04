@@ -2190,7 +2190,7 @@ if (window.panelStartupController) panelStartupPlay();
                看板卡显隐由 panel.js 的 applyAgentCardVisibility 一处出口合并（与「未安装」过滤
                同一把闸）；同一份存档还被 head 里的 panelBoardLayoutPrepaint 读去画首帧。
                三档：全部 = 所有已安装 Agent 卡纵向铺开；图标行 = 运行中的保持完整卡片、未运行的
-               收进底部图标行（横向滚动）；仅运行中 = 只留运行中的完整卡片。 -->
+               收进底部图标行（32px 图标横排，宽了就换行，不做横滚）；仅运行中 = 只留运行中的完整卡片。 -->
           <div class="modal-item">
             <div>
               <div class="modal-item-title">看板排布</div>
