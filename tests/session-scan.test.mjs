@@ -64,7 +64,7 @@ test("claude: custom-title beats first user message", async () => {
     JSON.stringify({ type: "custom-title", customTitle: "我的自定义标题" }),
   ]);
   const { sessions, endpointErrors } = await claudeScanner(root).scanAll();
-  // 其余八家的根目录都是空壳：没有会话就没有错误条目（缺库不算故障）。
+  // 其余九家的根目录都是空壳：没有会话就没有错误条目（缺库不算故障）。
   assert.deepEqual(endpointErrors, []);
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].title, "我的自定义标题");

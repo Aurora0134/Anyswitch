@@ -1,6 +1,6 @@
 // Scan host: run session-scan.mjs's synchronous on-disk scan in a worker thread.
 //
-// Why this file exists (2026-10-26, M1「扫描离线程」)：session-scan.mjs 的九个
+// Why this file exists (2026-10-26, M1「扫描离线程」)：session-scan.mjs 的十个
 // adapter 体内全是同步 fs（readdirSync/statSync/readFileSync/readSync），async
 // 外壳下没有任何 await 点——整段扫描跑在同一个 turn 里。修前面板进程（47820）
 // 直接调用它，实测 2927 条会话要 2.7–8.0s；而终端字节流、SSE 握手与全部面板
