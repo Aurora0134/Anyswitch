@@ -101,7 +101,10 @@ test("claude npm 位是文本桩时不算数：引擎健在就解析到引擎", 
     const engineExe = join(local, "Claude-3p", "claude-code", "2.1.295", "d2e29494ec83", "claude.exe");
     mkdirSync(dirname(engineExe), { recursive: true });
     writeFileSync(engineExe, "MZ");
-    assert.equal(resolveClaudeExecutable({ APPDATA: roaming, LOCALAPPDATA: local }), engineExe.replace(/\\/g, "/"));
+    assert.equal(
+      resolveClaudeExecutable({ APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: join(dir, "home") }),
+      engineExe.replace(/\\/g, "/"),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
