@@ -4,7 +4,7 @@
 // Node): it holds nothing between calls and every call re-reads the agents'
 // files.
 //
-// 扫描执行位置（2026-10-26 起，M1「扫描离线程」）：这些 adapter 体内全是同步 fs
+// 扫描执行位置（2026-10-26 起，「扫描离线程」）：这些 adapter 体内全是同步 fs
 // （readdirSync/statSync/readFileSync/readSync），async 外壳下没有任何 await 点，
 // 所以「在哪个线程调用」就是「哪个事件循环被按住」。修前面板进程（47820）直接
 // 调用它，2927 条会话实测 2.7–8.0s，期间终端字节流、SSE 握手、1s 轮询全部停摆。

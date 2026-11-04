@@ -263,7 +263,7 @@ describe("probeTerminalCommandTree：按需探测", () => {
     assert.equal(spawned, 0);
   });
 
-  // 复探形态（M2-T3）：观察点由子进程自己睡出来，好让两个探测的启动税重叠。
+  // 复探形态：观察点由子进程自己睡出来，好让两个探测的启动税重叠。
   it("delayMs：脚本先 Start-Sleep，睡的那段不占查询预算", async () => {
     let captured = null;
     const exec = async (file, args, opts, cb) => { captured = { file, args, opts }; cb(null, "10\t1\tcmd.exe\tcmd /c claude\n"); };

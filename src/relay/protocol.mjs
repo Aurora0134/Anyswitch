@@ -229,7 +229,7 @@ export function anthropicToOpenAI(body, modelId, options = {}) {
   // Mid-conversation system messages (role:"system" inside `messages`) are what
   // Claude Code appends every turn (<total_tokens> markers, environment
   // updates). Some upstreams hoist them into the prompt's stable head region,
-  // pinning the prefix-cache breakpoint there (M11: 3% cache hit in
+  // pinning the prefix-cache breakpoint there (3% cache hit in
   // production); rewritten to user the sequence stays purely appended and the
   // cache holds (99.7% measured). Only the role changes — never merged, split
   // or dropped — and the top-level system above, the prompt's real head, is

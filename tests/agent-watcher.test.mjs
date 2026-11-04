@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createAgentWatcher } from "../src/agents/agent-watcher.mjs";
 
-// followAgent 的 anyAgent 求和必须把 WorkBuddy 算进去（plan §3.3-5）：只开
+// followAgent 的 anyAgent 求和必须把 WorkBuddy 算进去，只开
 // WorkBuddy 时 relay 也要被拉起，否则用户以为「跟随启动」坏了。
 describe("follow-agent watcher 的 anyAgent 求和", () => {
   function makeWatcher(procs, calls) {

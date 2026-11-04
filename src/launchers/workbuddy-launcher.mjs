@@ -13,7 +13,7 @@
 //   - 不写 relay token 到 env：token 只作为 models.json 条目的 apiKey 落盘。
 //   - 上游网关的真实 key（CODEBUDDY_BASE_URL / *_TOKEN 这类覆盖项）剥掉，
 //     避免自定义模型之外的内置通道被环境变量改道；CODEBUDDY_API_KEY 按
-//     plan §3.2 保留（用户自己的内置模型凭据不受影响）。
+//     保留（用户自己的内置模型凭据不受影响）。
 //
 // argv 全量透传：`-p` 非交互、`--acp` 宿主模式、无参交互 TUI 三种用法都从
 // shim/面板原样穿到 CLI。
@@ -38,7 +38,7 @@ export { resolveWorkbuddyExecutable, workbuddyModelsPath, workbuddyConfigRoot };
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
 // Upstream-only overrides stripped from the child environment. `CODEBUDDY_API_KEY`
-// is deliberately NOT here (plan §3.2): it is the user's own built-in-gateway
+// is deliberately NOT here: it is the user's own built-in-gateway
 // credential, and custom-model traffic never reads it — the per-entry apiKey in
 // models.json is the relay token. These four, by contrast, would reroute or
 // re-authenticate the built-in gateway away from its own configuration.

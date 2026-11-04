@@ -390,7 +390,7 @@ test("workbuddy 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>�
   try {
     const base = fakeBase(root);
     const launch = buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base });
-    assert.equal(launch.label, "WorkBuddy", "显示名与计划 §5 一致");
+    assert.equal(launch.label, "WorkBuddy", "显示名与既定一致");
     assert.equal(launch.agentName, "WorkBuddy");
     assert.equal(launch.shell, "cmd");
     assert.equal(launch.launch.file, base.ComSpec, "经 cmd 启动（归属链硬前提）");
@@ -431,7 +431,7 @@ test("workbuddy 续接：launcher 固定参数 + --resume <会话 id>，env 不�
 test("跨入口一致性：终端启动与 launcher 启动都不删 CODEBUDDY_API_KEY", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
-    // 用户自己的内置模型凭据：双击 / shim 起的 launcher 保留它（plan §3.2：只剥
+    // 用户自己的内置模型凭据：双击 / shim 起的 launcher 保留它（只剥
     // 会让客户端绕开 relay 的上游键），面板终端必须同口径。
     const base = { ...fakeBase(root), CODEBUDDY_API_KEY: "user-own-builtin-key" };
     const launch = buildAgentSessionLaunch({ agentId: "workbuddy", cwd: root, token: TOKEN, base });

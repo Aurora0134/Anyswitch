@@ -1,4 +1,4 @@
-// 终端会话栏视图状态（M7 S1/S2）：归档清单 + 已移除分组目录清单。
+// 终端会话栏视图状态：归档清单 + 已移除分组目录清单。
 // 三层断言：store 纯单测（清洗/归一化/幂等/落盘形状与重读）+ 路由级
 // （createPanelRouter 真跑五条端点，持久化跨router实例）+ 装配级
 // （不注入 store 真跑 panel.mjs 的惰性装配分支，落点与跨实例加载）。
@@ -57,7 +57,7 @@ function railRouter({ root, store }) {
   });
 }
 
-describe("终端会话栏视图状态存储（M7）", () => {
+describe("终端会话栏视图状态存储", () => {
   describe("store：归档清单", () => {
     const withStore = (fn) => {
       const root = mkTestDir("anyswitch-rail-store-");

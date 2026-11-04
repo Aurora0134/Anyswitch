@@ -345,7 +345,7 @@ function createSessionsListSnapshot(load, ttlMs) {
     },
     // 只读当前快照、绝不触发扫描：调用方要的是「本进程此刻已经知道什么」。冷缓存
     // （还没扫过）返回 null，由调用方自己决定是等真扫描还是放行——用于「目标会话
-    // 是否存在」这类只该在已有盘面时判的旁证（M12 报告 G3 的收口，见 /switch 路由）。
+    // 是否存在」这类只该在已有盘面时判的旁证（报告的收口，见 /switch 路由）。
     peek() {
       return snap ? snap.value : null;
     },
@@ -1007,7 +1007,7 @@ export function createPanelRouter({
    // 扫描承载降级后的冷却窗（毫秒）。默认 null＝模块默认 5 分钟；单测注入 0
    // 验「冷却到点确实重建」，注入大值验「冷却窗内不重建」。
    sessionScanReviveCooldownMs = null,
-   // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单，M7）：store 为 null 时
+   // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单）：store 为 null 时
    // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
    terminalRailStore = null,
    bindingCaptureDebounceMs = 5000,
@@ -1376,7 +1376,7 @@ export function createPanelRouter({
     return terminalBindingStore;
   }
 
-  // ---- 终端会话栏视图状态（M7：归档 / 分组移除） ----
+  // ---- 终端会话栏视图状态（归档 / 分组移除） ----
   // 与绑定库同一条惰性装配：存储在 relayRoot 下，读写失败不影响面板主流程——
   // 归档与分组移除是视图状态，丢了最坏回到「没归档过」，不该把列表路由带崩。
   function terminalRailPrefs() {
@@ -1603,12 +1603,12 @@ export function createPanelRouter({
     }, bindingRefreshDelayMs);
   }
 
-  // 内切切换（M12-A）：把一条已开着的终端就地换成目标会话——宿主同记录内
+  // 内切切换：把一条已开着的终端就地换成目标会话——宿主同记录内
   // terminate 旧进程树→spawn 目标会话→身份换绑，页签不新增。与复活路由的分工：
   // 复活用会话自己的身份重组装；内切用请求体给的目标会话身份（endpoint/id/file）
   // 重组装，cwd 用目标会话的项目目录（claude 这类按项目分存档，目录错了 --resume
   // 找不到会话）。body 不带 resume＝全新内切：把这条终端就地换成一个全新 agent
-  // 会话（「新建会话」入口对齐 M12 矩阵），身份侧清空旧 resume（clearResume），
+  // 会话（「新建会话」入口对齐矩阵），身份侧清空旧 resume（clearResume），
   // 绑定重扫不做——没有目标身份可扫，新对话存档由既有绑定捕获路径自然接管。
   // working 判定与在飞闸在面板侧（panel.js terminalRailSwitchOrCreate），本路由
   // 接「已决定内切」的请求，但杀进程前再做一道 switch-guard 复核（见下）：
@@ -1636,7 +1636,7 @@ export function createPanelRouter({
         return sendJson(res, 400, { ok: false, code: "resume-unsupported", error: "resume-unsupported" });
       }
       if (typeof resume.file === "string" && resume.file.trim()) resumeFile = resume.file.trim();
-      // 目标存在性（M12 行为报告 G3 的收口）：换绑落点是「整树 terminate + 按目标
+      // 目标存在性（行为报告的收口）：换绑落点是「整树 terminate + 按目标
       // 身份重组装」。目标会话若在盘上根本不存在，宿主照样换绑，agent 落一行英文
       // 报错——HTTP 200、前端无提示、也不降级新开，用户停在一条不可用的页签上。
       // 这里拿会话列表快照当旁证，三条纪律：
@@ -1803,7 +1803,7 @@ export function createPanelRouter({
       launch: launch.launch,
       cwd: launch.cwd,
       env: launch.env,
-      // 身份同步三件＋resume：宿主 restart 路由写进会话记录（M12-A），去重聚焦、
+      // 身份同步三件＋resume：宿主 restart 路由写进会话记录，去重聚焦、
       // 页签与栏行展示都读它们；env 只走请求体，不经响应回显。全新内切带
       // clearResume 显式清空旧 resume——缺省「不更新」语义会残留旧会话身份。
       ...(resume !== null
@@ -1903,7 +1903,7 @@ export function createPanelRouter({
         env: launch.env,
         agentId: launch.agentId,
         agentName: launch.agentName,
-        // 续接身份随创建一并记进宿主会话记录（M7 S5 去重聚焦的数据源）：只递
+        // 续接身份随创建一并记进宿主会话记录（去重聚焦的数据源）：只递
         // endpoint + 会话 id 两个非密字段。能走到这儿 resume 已过
         // buildAgentResumeArgs 校验（端点匹配、id/file 形状合法），宿主还会按
         // 自己的形状再验一遍；file 不递——去重不需要路径。
@@ -3756,7 +3756,7 @@ export function createPanelRouter({
         }
         return handleTerminalSessionRevive(req, res, reviveMatch[1]);
       }
-      // 内切切换（M12-A）：路由体带目标会话身份，与 revive（无体、用会话自己的
+      // 内切切换：路由体带目标会话身份，与 revive（无体、用会话自己的
       // 身份）分工；先收体再进处理器，读体失败按 400 拒。
       const switchMatch = suffix.match(/^([a-f0-9-]{8,64})\/switch$/i);
       if (switchMatch && method === "POST") {
@@ -3781,7 +3781,7 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/terminal/requests" && method === "GET") return handleTerminalRequests(url, res);
-    // 终端会话栏视图状态（M7）：归档清单与已移除分组目录清单。GET 全量 + 四个
+    // 终端会话栏视图状态：归档清单与已移除分组目录清单。GET 全量 + 四个
     // 动作 POST，落点与绑定库同目录（见 terminalRailPrefs）。
     if (path === "/panel/api/terminal/rail/prefs" && method === "GET") return handleTerminalRailPrefs(res);
     for (const action of ["archive", "unarchive", "remove-group", "restore-group"]) {

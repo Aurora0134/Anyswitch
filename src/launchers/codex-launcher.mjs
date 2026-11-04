@@ -200,7 +200,7 @@ export function realSpawnCodex({ env, args }) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  // codex-merge-config.mjs is a separate module (plan §3); imported lazily so
+  // codex-merge-config.mjs is a separate module; imported lazily so
   // this launcher stays loadable in checkouts where the writer has not landed.
   const { writeCodexConfig } = await import("./codex-merge-config.mjs");
   const code = await runCodexLauncher({
