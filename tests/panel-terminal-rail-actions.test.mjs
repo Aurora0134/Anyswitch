@@ -4167,8 +4167,14 @@ describe("M12 视口化验收（页签＝视口）", () => {
         if (method === "POST" && path.endsWith("/switch")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length, path.length - "/switch".length));
           log.switchBodies.push({ id, body });
-          log.order = (log.order || []).concat("switch_resolve");
-          return Promise.resolve(state.switchSnapshot(id, body));
+          // switch_resolve 记「落地」不记「发出」：记进返回 Promise 的 .then()，A1 的
+          // log.order 断言才真钉住「await 回来后才 arm」。若记在发出时（此处同步 concat），
+          // 回归把 arm 挪到 POST 发出之后、await 返回之前，顺序仍是 [switch_resolve, arm]，
+          // 断言照样绿——恰是本桩曾守不住的弱不变量。
+          return Promise.resolve(state.switchSnapshot(id, body)).then((snap) => {
+            log.order = (log.order || []).concat("switch_resolve");
+            return snap;
+          });
         }
         if (method === "POST" && path.endsWith("/close")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length, path.length - "/close".length));
