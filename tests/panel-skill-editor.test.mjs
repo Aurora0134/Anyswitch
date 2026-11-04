@@ -98,6 +98,14 @@ describe("正文编辑接线", () => {
     assert.match(panelHtml, /id="skillsModalAuxBtn"/);
   });
 
+  it("查阅态隐藏重复的「取消」按钮，编辑/冲突态保持原样", () => {
+    // 每次 show 都复位隐藏态，否则上一个弹窗的隐藏会泄漏到下一个
+    assert.match(extractFn("showSkillsModal"), /cancelBtn\.hidden = !!hideCancel/);
+    assert.match(extractFn("renderSkillBodyPreview"), /hideCancel: true/);
+    assert.doesNotMatch(extractFn("renderSkillBodyEditor"), /hideCancel/);
+    assert.doesNotMatch(extractFn("renderSkillBodyConflict"), /hideCancel/);
+  });
+
   it("两层对齐的样式契约还在（隐式依赖，改动会静默错位）", () => {
     assert.match(panelCss, /\.skills-editor-highlight,\s*\n\s*\.skills-editor-input \{/);
     assert.match(panelCss, /scrollbar-gutter: stable/);
