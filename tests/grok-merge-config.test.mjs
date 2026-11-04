@@ -531,19 +531,33 @@ describe("grok reasoning_efforts injection", () => {
     assert.doesNotMatch(text, /context_window = 1050000/);
   });
 
-  it("writeGrokConfig: no settings file → injection on, optimistic levels written", () => {
+  it("writeGrokConfig: no settings file → injection on, empty library falls back to optimistic levels", () => {
     const dir = mkTestDir("grok-effort-");
     const configPath = join(dir, ".grok", "config.toml");
-    const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath);
+    const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath, { catalog: { models: new Map() } });
     assert.equal(result.ok, true);
     const text = readFileSync(configPath, "utf8");
     const headers = text.match(/^\[\[model\."anyswitch-poke-api~gpt-6-astra"\.reasoning_efforts\]\]$/gm) ?? [];
     assert.deepEqual(
       [...text.matchAll(/^\s*value = "([a-z]+)"$/gm)].map((m) => m[1]),
       ["max", "xhigh", "high"],
-      "library-missing optimistic default set",
+      "an empty library has no row for this model, so the optimistic set answers",
     );
     assert.equal(headers.length, 3);
+    assert.match(text, /value = "high"\nlabel = "High Effort"\ndescription = [^\n]+\ndefault = true/);
+  });
+
+  it("writeGrokConfig: 数据目录没有库时回落仓根基线，挡位比乐观默认更细", () => {
+    const dir = mkTestDir("grok-effort-");
+    const configPath = join(dir, ".grok", "config.toml");
+    const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(result.ok, true);
+    const text = readFileSync(configPath, "utf8");
+    const values = [...text.matchAll(/^\s*value = "([a-z]+)"$/gm)].map((m) => m[1]);
+    assert.ok(
+      values.includes("medium"),
+      "基线给该模型补了 medium；乐观默认只有 high/xhigh/max，这条断言用来区分两者",
+    );
     assert.match(text, /value = "high"\nlabel = "High Effort"\ndescription = [^\n]+\ndefault = true/);
   });
 
