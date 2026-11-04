@@ -1267,5 +1267,19 @@ describe("渲染快照（跨宿主重启的恢复原料）", () => {
     assert.deepEqual(b.screenLines(), ["", "", "", ""], "兜底后是空白出厂屏");
     assert.ok(Number.isFinite(b.info().row) && Number.isFinite(b.info().col), "光标是有限值");
     assert.doesNotThrow(() => b.toReplay(), "兜底态的回放可用");
+    // 「出厂态」要钉到 region 语义上，不能只看画面空白：region 缺失若兜成 top=0、
+    // bottom=0 的 1 行区，后续换行全按分区内滚动走（每行刚写上就被滚空），而真
+    // xterm 对 1;1r 这类 bottom<=top 的区静默忽略、维持整屏滚动——兜底镜像与真
+    // 出厂态喂同款字节就此分叉（旧兜底实测 b 得 ["","","",""]、出厂态得
+    // ["d","e","f",""]，toReplay 还会发出非法的 1;1r 区域序列）。region 兜成
+    // 整屏区后，两侧必须画面、光标、回放逐项一致。
+    const fresh = createScreenMirror({ cols: 20, rows: 4 });
+    const followup = "d\r\ne\r\nf\r\n";
+    b.write(followup);
+    fresh.write(followup);
+    assert.deepEqual(b.screenLines(), fresh.screenLines(), "兜底态喂同款字节后与真出厂态画面一致");
+    assert.equal(b.info().row, fresh.info().row, "兜底态与真出厂态光标行一致");
+    assert.equal(b.info().col, fresh.info().col, "兜底态与真出厂态光标列一致");
+    assert.equal(b.toReplay(), fresh.toReplay(), "兜底态与真出厂态回放一致（整屏区不发区域序列）");
   });
 });

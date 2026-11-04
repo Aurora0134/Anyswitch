@@ -38,11 +38,14 @@ import {
 } from "../src/relay/relay-process-manager.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
-// stopRelay verifies against the real app directory, so the "own" command
-// lines injected in these tests must reference it.
-const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
-const OWN_RELAY_CMD = `"C:\\Program Files\\nodejs\\node.exe" ${APP_DIR}relay-host.mjs`;
-const OWN_LAUNCHER_CMD = `node.exe ${APP_DIR}zcode-launcher.mjs`; // per-launch launcher also binds 47821
+// isOwnProcess verifies against the repo root — the same APP_DIR the source
+// derives in src/relay/relay-process-manager.mjs (its default appDir) — and
+// the real own processes run src/relay/relay-host.mjs plus the launchers in
+// src/launchers/, so the "own" command lines injected in these tests must
+// reference those real script paths.
+const APP_DIR = fileURLToPath(new URL("../", import.meta.url));
+const OWN_RELAY_CMD = `"C:\\Program Files\\nodejs\\node.exe" ${APP_DIR}src\\relay\\relay-host.mjs`;
+const OWN_LAUNCHER_CMD = `node.exe ${APP_DIR}src\\launchers\\zcode-launcher.mjs`; // per-launch launcher also binds 47821
 const FOREIGN_CMD = `"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\someone\\projects\\unrelated\\server.mjs`;
 
 function makeRoot() {
@@ -104,7 +107,7 @@ test("isOwnProcess accepts a per-launch launcher command line (not just relay-ho
 });
 
 test("isOwnProcess accepts forward-slash command lines", () => {
-  const fwd = `node.exe ${APP_DIR.replaceAll("\\", "/")}relay-host.mjs`;
+  const fwd = `node.exe ${APP_DIR.replaceAll("\\", "/")}src/relay/relay-host.mjs`;
   assert.equal(isOwnProcess(fwd, APP_DIR), true);
 });
 

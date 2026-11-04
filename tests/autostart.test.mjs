@@ -265,7 +265,10 @@ describe("reconcileAutostart", () => {
     assert.equal(calls.length, 1);
   });
 
-  it("ignores a path that differs only by case or separators", async () => {
+  it("ignores a path that differs only by case", async () => {
+    // actionMatches folds case alone: command and quoted paths (actionPaths)
+    // are compared lowercased. Separator differences (/ vs \) are NOT
+    // normalised — those count as a stale registration and get healed.
     const action = taskAction();
     const shouty = { command: action.command.toUpperCase(), arguments: action.arguments.toUpperCase() };
     const { spawnFn, calls } = fakePSSeries([{ stdout: probeOutput({ AnyswitchRelay: shouty }) }]);

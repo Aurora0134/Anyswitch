@@ -161,8 +161,9 @@ describe("openai relay keep-alive anti-truncation", () => {
   // *-launcher.mjs 的 createOpenAIProductionDeps() 都不转发 getKeepAliveConfig，
   // 运行时落到 stream-pipe.mjs 的内置兜底 {enabled:true,maxRetries:1,backoffMs:500}
   // （同样无 mode）→ 非 on 档、不续接，首字前耗尽走 502 JSON。
-  // 面板常驻链路的 parseKeepAliveConfig 产物恒带 mode:"on"，同一场景走 (A4) 的
-  // 200+SSE。两条分支都是现役行为，各有用例钉住，502 与 SSE 并不自相矛盾。
+  // 面板常驻链路的 parseKeepAliveConfig 产物恒带 mode:"on"，同一场景（空流、
+  // 头未提交）也走 (A4) 钉住的真实 502：耗尽返回 502 还是只能 ride SSE，分界
+  // 在头是否已提交（已提交侧的对照是 (d)），与档位无关。
   it("(b) exhausts retries when all attempts return empty stream, returns 502 and keeps fault latched", async () => {
     let callCount = 0;
     const upstreamFetch = async () => {
@@ -287,7 +288,8 @@ describe("openai relay keep-alive anti-truncation", () => {
   });
 
   // 无 mode 夹具同 (b)：per-launch 兜底中继的现役配置形状，耗尽契约是 502 JSON
-  // 而非 on 档续接后的 200+SSE。逐端点开关的语义由 callCount 断言独立承载，
+  // （头未提交→真实 502，与档位无关；on 档同场景见 (A4)，只有内容已提交后的
+  // 错误才 ride SSE）。逐端点开关的语义由 callCount 断言独立承载，
   // 在任一档位下都成立；状态断言只负责钉住这条分支的客户端可见契约。
   it("(c2) does NOT retry on an endpoint switched off in the panel, while other endpoints keep retrying", async () => {
     let callCount = 0;

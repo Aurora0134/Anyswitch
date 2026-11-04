@@ -331,6 +331,17 @@ it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改�
       const entry = /^npm:(.+):latest$/.exec(CLIENTS[id].source ?? "");
       assert.ok(entry, `${id} 的 CLIENTS 条目不是 npm dist-tag 源`);
       assert.equal(entry[1], pkg, `${id} 的 npm 包名与 products 登记的 ${pkg} 漂移`);
+      if (!repo) {
+        // 只登记包名、不登记仓库的客户端（dsh-tui / grok / qoder-cli），safeLink
+        // 唯一放行的官方链接就是 /package/<pkg> 包页本体。CLIENTS 里这三条的 url
+        // 与 source 是分开手写的字面量：url 路径与包名漂移（或整个换走）时前端
+        // 会静默拒链、只钉 source 的旧断言不触发，这里把 url 与包名互钉。
+        assert.equal(
+          CLIENTS[id].url,
+          `https://www.npmjs.com/package/${pkg}`,
+          `${id} 的 npm 包页链接与包名 ${pkg} 漂移，safeLink 会静默拒链`,
+        );
+      }
     }
     if (repo) {
       assert.ok(

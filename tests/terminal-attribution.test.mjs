@@ -559,16 +559,20 @@ describe("claude conversation fold (memberPids reverse lookup)", () => {
 
   it("a canonical per-pid row still wins over the member reverse lookup", () => {
     // 未折叠的逐 pid 行与折叠行并存时，进程号精确命中的行优先——反查只是
-    // 「canonical 查不到」时的兜底。
+    // 「canonical 查不到」时的兜底。canonical 行刻意不带 memberPids：一带上，
+    // 反查索引（首见优先）也把 4321 映回同一个 id，两条路径结果重合，用例
+    // 对优先级翻转免疫；不带时反查只能落到折叠行 claude-sess-abc，优先级
+    // 被删或被前置才会真正变红。
     const out = attributeTerminalSessions(
       [baseSession],
       [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
       [{ id: "claude", name: "Claude Code", sessions: [
-        { id: "claude-4321", memberPids: [4321] },
+        { id: "claude-4321" },
         { id: "claude-sess-abc", memberPids: [4321] },
       ] }],
     );
-    assert.equal(out[0].agent.instanceId, "claude-4321");
+    assert.equal(out[0].agent.instanceId, "claude-4321",
+      "canonical 命中优先；若反查兜底被前置或 canonical 判定被删，会得到 claude-sess-abc");
   });
 
   it("a member pid without a matching row stays unbound", () => {

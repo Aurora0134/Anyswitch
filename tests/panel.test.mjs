@@ -123,6 +123,22 @@ const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET
     return found;
   })
   .join("\n");
+// 闲剪（缓冲软顶回落）的阈值常量与跟随护栏的窗口常量：同款从源码取样注入——
+// 测试不抄数字，改阈值时行为钉跟着变（如闲剪落位钉 4500 按软顶 5000 折算）。
+const terminalIdleTrimConsts = ["TERMINAL_SCROLLBACK_SOFT_CAP", "TERMINAL_IDLE_TRIM_MS", "TERMINAL_IDLE_TRIM_MIN_OVERAGE", "TERMINAL_IDLE_TRIM_SETTLE_MS", "TERMINAL_IDLE_TRIM_MAX_MS"]
+  .map((name) => {
+    const found = panelJs.match(new RegExp(`const ${name} = [^;]+;`))?.[0];
+    assert.ok(found, `${name} 可从 panel.js 取到`);
+    return found;
+  })
+  .join("\n");
+const terminalFollowBottomConsts = ["TERMINAL_SCROLL_INTENT_MS", "TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS"]
+  .map((name) => {
+    const found = panelJs.match(new RegExp(`const ${name} = [^;]+;`))?.[0];
+    assert.ok(found, `${name} 可从 panel.js 取到`);
+    return found;
+  })
+  .join("\n");
 const panelMjs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "..", "src", "panel", "panel.mjs"),
   "utf8",
@@ -3875,8 +3891,8 @@ describe("panel.html 设置全页视图", () => {
     // 两处取值必须同——首帧那一帧还没有 body.terminal-mode，只认首帧标记。
     assert.ok(/html:has\(body\.terminal-mode\) \{ scrollbar-gutter: auto; \}/.test(panelCss),
       "终端态豁免槽位恒留（运行态）");
-    const prepaintCss = panelCss.slice(panelCss.indexOf("首帧视图落位"));
-    assert.ok(prepaintCss.length > 0, "取到「首帧视图落位」段");
+    // 首帧豁免挂在「首帧视图落位」段的旧版终端首帧块里（v2 栏让重述之前）
+    const prepaintCss = sliceBetween(panelCss, "首帧视图落位（绘制前）", "新版（v2）的终端首帧");
     assert.ok(/html\[data-prepaint-view="terminal"\] \{ scrollbar-gutter: auto; \}/.test(prepaintCss),
       "终端页首帧豁免槽位恒留（漏这条＝首帧窄 10px、落定后再宽回来，整屏横跳一次）");
     // 与槽位恒留成对：满屏浮层用 inset:0 取宽，量到的是扣掉槽位的可用宽度，右缘会漏出
@@ -10914,11 +10930,7 @@ describe("虚拟终端滚动软顶与滚轮直写（忙时不剪、闲时无感�
     };
     const bodies = ["maybeTerminalIdleTrim", "triggerTerminalIdleTrim"].map(extractFn).join("\n");
     const sandbox = new Function("state", `
-      const TERMINAL_SCROLLBACK_SOFT_CAP = 5000;
-      const TERMINAL_IDLE_TRIM_MS = 5000;
-      const TERMINAL_IDLE_TRIM_MIN_OVERAGE = 500;
-      const TERMINAL_IDLE_TRIM_SETTLE_MS = 150;
-      const TERMINAL_IDLE_TRIM_MAX_MS = 2500;
+      ${terminalIdleTrimConsts}
       let terminalXterm = state.term;
       const terminalEventSource = state.source;
       let terminalLastStreamDataAt = 0;
@@ -11098,13 +11110,8 @@ describe("虚拟终端滚动软顶与滚轮直写（忙时不剪、闲时无感�
     const oldTerm = makeWiredTerm(30, 6030);
     const newTerm = makeWiredTerm(30, 5030);
     const sandbox = new Function("state", "oldTerm", "newTerm", `
-      const TERMINAL_SCROLLBACK_SOFT_CAP = 5000;
-      const TERMINAL_IDLE_TRIM_MS = 5000;
-      const TERMINAL_IDLE_TRIM_MIN_OVERAGE = 500;
-      const TERMINAL_IDLE_TRIM_SETTLE_MS = 150;
-      const TERMINAL_IDLE_TRIM_MAX_MS = 2500;
-      const TERMINAL_SCROLL_INTENT_MS = 250;
-      const TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS = 120;
+      ${terminalIdleTrimConsts}
+      ${terminalFollowBottomConsts}
       let terminalXterm = oldTerm;
       const terminalEventSource = state.source;
       let terminalLastStreamDataAt = 0;

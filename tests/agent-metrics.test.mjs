@@ -5913,43 +5913,56 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     });
 
     it("folds a pid-shaped socket-fallback row into the session row with its account", async () => {
-      // 冷缓存窗口：socket 兜底合成 workbuddy-<pid> 落了账；注册表跟上后重折叠
-      // 整行改并入会话行，计数不丢。
+      // 冷缓存窗口的并账形状：会话行已带自己的账，注册表反查一时读不出（换写
+      // 窗口），新请求折不进会话行、按 pid 形落账；注册表跟上后，读取侧重折叠
+      // 把 pid 行整行折进已存在的会话行——计数并入（不并＝冷窗口攒的账凭空清零），
+      // 流量锚随账并入（扛过那些请求的引擎 pid 保住行的活跃判定）。
       let t = 3000;
+      // lookup 函数在构造时固定，但它引用的 registry 可变——按阶段演化读得出/读不出。
+      let registry = { 61: { kind: "interactive", sessionId: "9a3f", cwd: "C:\\proj\\bridge" } };
       const collector = wbCollector({
         nowFn: () => t,
-        workbuddySessionLookup: () => null, // 首轮读不出（文件还没写）
-        workbuddySessionDirectory: async () => [],
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [{ id: "9a3f", title: "bridge", pid: 61, startedAt: 3000 }],
+        // 快照读得成（ok）但会话文件全静默：行活跃三选一只剩「扛过流量的引擎
+        // pid 还活着」一条臂，流量锚有没有随折并入就在这里见分晓。
+        workbuddySessionActivity: async () => new Map(),
         execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(61, 60))),
       });
       await collector.scanProcesses();
-      const r1 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-61", model: "m1" });
-      r1.recordEnd({ status: 200, usage: { prompt_tokens: 80, completion_tokens: 30 } });
+      const r1 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-9a3f", model: "m1" });
+      r1.recordEnd({ status: 200, usage: { prompt_tokens: 20, completion_tokens: 10 } });
 
-      // 注册表跟上：pid 61 → sessionId 9a3f。下一轮读取触发重折叠。
-      collector["__noop"] = true;
+      // 冷缓存窗口：注册表反查读不出，请求侧归一化折不动，落 pid 形行再攒一笔账。
+      t += 5000;
+      registry = {};
       const r2 = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-61", model: "m1" });
-      r2.recordEnd({ status: 200, usage: { prompt_tokens: 20, completion_tokens: 10 } });
-      // 让下一次 getAgentsStatus 用新注册表：直接替换 lookup 不行（构造时已固定），
-      // 走快照路径不便——用第二个 collector 演化不现实，改为验证 refold 的输入
-      // 纯函数：resolveInstanceId 把 workbuddy-61 折到会话行。
-      //（此处用模块级 normalizeInstanceId + 注入注册表反查。）
-      const { normalizeInstanceId } = await import("../src/agents/agent-metrics.mjs");
-      // 通过创建一个带注册表的 collector 来接管模块级反查，再调纯函数。
-      const helper = wbCollector({
-        nowFn: () => t,
-        workbuddySessionLookup: registryLookup({ 61: { kind: "interactive", sessionId: "9a3f" } }),
-        workbuddySessionDirectory: async () => [],
-        execFn: (cmd, opts, cb) => cb(null, ""),
-      });
-      try {
-        const folded = normalizeInstanceId("workbuddy", "workbuddy-61", {
-          workbuddyEnginePids: new Set([61]),
-        });
-        assert.equal(folded.id, "workbuddy-sess-9a3f", "pid 形行按注册表折会话行");
-      } finally {
-        helper.dispose();
-      }
+      r2.recordEnd({ status: 200, usage: { prompt_tokens: 80, completion_tokens: 30 } });
+
+      // 注册表跟上：下一轮读取触发重折叠，pid 行折进已存在的会话行并账。
+      t += 5000;
+      registry = { 61: { kind: "interactive", sessionId: "9a3f", cwd: "C:\\proj\\bridge" } };
+      await collector.scanProcesses();
+      const card = wb(await collector.getAgentsStatus());
+      assert.equal(card.instances.length, 1, "pid 行折进会话行，不留 pid 形幽灵行");
+      const row1 = card.instances.find((i) => i.id === "workbuddy-sess-9a3f");
+      assert.ok(row1, "会话行还在");
+      assert.equal(row1.requests, 2, "冷窗口攒的计数并入会话行，不清零");
+      assert.equal(row1.tokens.prompt, 100, "会话行 20 ＋ pid 行 80");
+      assert.equal(row1.tokens.completion, 40, "会话行 10 ＋ pid 行 30");
+      assert.equal(row1.surface, "Desktop", "面随当前 runtime 的父链");
+      assert.equal(row1.title, "bridge", "标题来自注册表 cwd 基名");
+
+      // 流量锚随账并入的护栏：会话文件静默、无在途请求，行续命只剩「扛过流量
+      // 的引擎 pid 还活着」——锚没并入的话，第二轮不活跃确认会连行带并进来的
+      // 账一起收走。
+      t += 5000;
+      await collector.scanProcesses();
+      const settled = wb(await collector.getAgentsStatus());
+      const row2 = settled.instances.find((i) => i.id === "workbuddy-sess-9a3f");
+      assert.ok(row2, "流量锚随账并入：引擎还活着，行不被不活跃判定收走");
+      assert.equal(row2.requests, 2, "并账结果在后续读取里稳定");
+      assert.equal(row2.tokens.prompt, 100);
     });
 
     it("reaps a closed session row after two confirmed absent rounds (no pause window)", async () => {

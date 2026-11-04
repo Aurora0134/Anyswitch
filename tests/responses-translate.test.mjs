@@ -271,10 +271,11 @@ describe("translateResponsesRequest", () => {
 // Direct unit coverage for the helpers the live streaming translator uses:
 // ResponsesSseTranslator calls responseIdFromChatId, chatUsageToResponsesUsage
 // and splitLeadingThinkBlock. translateChatResponse itself is intentionally
-// not tested: it has no production caller — openai-server.mjs imports only
-// translateResponsesRequest and forces stream: true on /v1/responses
-// (openai-server.mjs:1001), so every chat -> Responses translation runs
-// through ResponsesSseTranslator (stream-pipe.mjs:23).
+// not tested: it has no production caller — src/relay/openai-server.mjs
+// imports only translateResponsesRequest and forces stream: true on
+// /v1/responses (the chatBody spread at src/relay/openai-server.mjs:1064),
+// so every chat -> Responses translation runs through ResponsesSseTranslator
+// (imported at src/relay/stream-pipe.mjs:23; line numbers may drift).
 describe("response-side helpers", () => {
   it("responseIdFromChatId keeps an already-prefixed resp_ id and prefixes bare chat ids", () => {
     assert.equal(responseIdFromChatId("resp_abc"), "resp_abc");
@@ -564,9 +565,16 @@ describe("ResponsesSseTranslator", () => {
     // The resume path re-enters the same translator, so the turn's tokens have
     // to be the sum of both upstream segments rather than the last one alone.
     const translator = new ResponsesSseTranslator({ model: "gpt-x" });
+    // Segment one is the cut the resume path starts from: no finish_reason and
+    // no [DONE], with usage riding the terminal chunk that carries no choices —
+    // the mid-word-truncation shape the guard actually resumes. A merged
+    // finish_reason+usage chunk is a clean completion, which never resumes.
     let out = translator.chunk(chunkDelta({ content: "半" }));
     out += translator.chunk({
-      ...chunkDelta({}, { finish_reason: "stop" }),
+      id: "chatcmpl-9",
+      created: 1720000000,
+      model: "gpt-x",
+      choices: [],
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     });
     translator.markContinuing();
