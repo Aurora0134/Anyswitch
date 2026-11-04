@@ -113,6 +113,14 @@ describe("正文编辑接线", () => {
     assert.match(panelCss, /\.skills-modal-edit \.modal-body \{/);
   });
 
+  it("高亮层内层 code 必须继承字体（UA 的 monospace 会压掉继承，字宽不同即错位）", () => {
+    // <code> 的 UA 样式自带 font-family: monospace，优先级高于从 <pre> 继承；
+    // 两层字体不同则等宽字宽不同，可见字沿行累积漂移，光标落在旁边的字上。
+    const decl = panelCss.match(/\.skills-editor-highlight code \{([^}]*)\}/);
+    assert.ok(decl, "必须给高亮层的 code 显式钉住字体");
+    assert.match(decl[1], /font:\s*inherit|font-family:\s*inherit/);
+  });
+
   it("选区底色必须半透明：不透明会整片盖住下层高亮文字", () => {
     // textarea 在上层、自身文字透明，选中区完全由这层底色绘制；saas / sepia 亮色的
     // --accent-soft 是实色，拿它当底色会把下层高亮层的字整片涂掉（选中即看不见字）。

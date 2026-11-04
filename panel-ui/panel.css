@@ -2922,6 +2922,10 @@
   .skills-editor-highlight {
     overflow: hidden; pointer-events: none; color: var(--text);
   }
+  /* <code> 带浏览器默认的 font-family: monospace，会压过从 <pre> 继承下来的字体：
+     两层字体一旦不同，等宽字宽就不同，可见字沿行累积漂移（实测 51 字的英文行到行末
+     差 31px，约 2.6 个字），光标就永远落在旁边的字上。强制继承，与 textarea 同源。 */
+  .skills-editor-highlight code { font: inherit; }
   .skills-editor-input {
     resize: none; outline: none; overflow: auto; background: transparent;
     color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);
