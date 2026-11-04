@@ -271,10 +271,11 @@ describe("translateResponsesRequest", () => {
 // Direct unit coverage for the helpers the live streaming translator uses:
 // ResponsesSseTranslator calls responseIdFromChatId, chatUsageToResponsesUsage
 // and splitLeadingThinkBlock. translateChatResponse itself is intentionally
-// not tested: it has no production caller — openai-server.mjs imports only
-// translateResponsesRequest and forces stream: true on /v1/responses
-// (openai-server.mjs:1001), so every chat -> Responses translation runs
-// through ResponsesSseTranslator (stream-pipe.mjs:23).
+// not tested: it has no production caller — src/relay/openai-server.mjs
+// imports only translateResponsesRequest and forces stream: true on
+// /v1/responses (the chatBody spread at src/relay/openai-server.mjs:1064),
+// so every chat -> Responses translation runs through ResponsesSseTranslator
+// (imported at src/relay/stream-pipe.mjs:23; line numbers may drift).
 describe("response-side helpers", () => {
   it("responseIdFromChatId keeps an already-prefixed resp_ id and prefixes bare chat ids", () => {
     assert.equal(responseIdFromChatId("resp_abc"), "resp_abc");
