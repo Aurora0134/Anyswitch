@@ -6,7 +6,7 @@
 主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
 横幅注释），本目录的 `SLUG.css` 是**源文件**——改动片段后必须把最新内容同步嵌入 panel.css 对应块。
 
-同步由仓库根目录 `style-lab-sync.test.mjs`（node:test，随全量测试一起跑）强制校验：解析 panel.css 的
+同步由 `tests/style-lab-sync.test.mjs`（node:test，随全量测试一起跑）强制校验：解析 panel.css 的
 横幅块与对应 `SLUG.css` 归一化行尾（CRLF/LF）后逐字比对，漂移即红。
 若发现两侧漂移：以现行生效的一侧为准回写另一侧（panel.css 内嵌块是实际加载的样式，
 通常是内嵌块领先、源文件落后，把内嵌块内容回写进 `SLUG.css`），不许只改一侧留漂移。
