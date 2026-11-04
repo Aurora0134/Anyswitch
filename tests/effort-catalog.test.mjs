@@ -211,6 +211,89 @@ describe("getEffortCatalog cache", () => {
   });
 });
 
+describe("getEffortCatalog 仓根基线兜底", () => {
+  const BUNDLED = dbWith({
+    "glm-5.3": SAMPLE_MODELS["glm-5.3"],
+    "kimi-k3": { kind: "reasoning", levels: ["low", "high", "max"], default: "high" },
+  });
+
+  it("数据目录没有文件时用基线，而不是退回乐观默认", () => {
+    const io = {
+      iomarker: "fallback-missing",
+      ...fakeFs({ "/bundled.json": BUNDLED }),
+      bundledBaselinePath: "/bundled.json",
+    };
+    const catalog = getEffortCatalog("/nowhere/thinking-efforts.db.json", io);
+    assert.equal(catalog.source, "bundled");
+    assert.equal(catalog.operatorWarning, "missing");
+    assert.equal(catalog.loadedCount, 2);
+    assert.equal(resolveModelEfforts("glm-5.3", catalog).origin, "library");
+    clearEffortCatalogCache();
+  });
+
+  it("数据目录文件损坏且没有可用副本时也走基线", () => {
+    const io = {
+      iomarker: "fallback-broken",
+      ...fakeFs({ "/db.json": "{ broken", "/bundled.json": BUNDLED }),
+      bundledBaselinePath: "/bundled.json",
+    };
+    const catalog = getEffortCatalog("/db.json", io);
+    assert.equal(catalog.source, "bundled");
+    assert.equal(catalog.operatorWarning, "unparseable");
+    assert.equal(catalog.loadedCount, 2);
+    clearEffortCatalogCache();
+  });
+
+  it("数据目录文件能解析时基线不得覆盖它", () => {
+    const io = {
+      iomarker: "fallback-operator-wins",
+      ...fakeFs({
+        "/db.json": dbWith({ "glm-5.3": SAMPLE_MODELS["glm-5.3"] }),
+        "/bundled.json": BUNDLED,
+      }),
+      bundledBaselinePath: "/bundled.json",
+    };
+    const catalog = getEffortCatalog("/db.json", io);
+    assert.equal(catalog.source, "operator");
+    assert.equal(catalog.loadedCount, 1, "操作者文件整表优先，不按条合并");
+    assert.equal(catalog.operatorWarning, undefined);
+    clearEffortCatalogCache();
+  });
+
+  it("基线也读不到时保持原有空表语义", () => {
+    const io = {
+      iomarker: "fallback-none",
+      ...fakeFs({}),
+      bundledBaselinePath: "/nowhere/baseline.json",
+    };
+    const catalog = getEffortCatalog("/nowhere/thinking-efforts.db.json", io);
+    assert.equal(catalog.loadedCount, 0);
+    assert.equal(catalog.warning, "missing");
+    assert.equal(catalog.source, undefined);
+    clearEffortCatalogCache();
+  });
+
+  it("进程内已读过操作者文件后文件消失：沿用内存里的表，盘上基线要等重启才接手", () => {
+    const files = {
+      "/db.json": dbWith({ "glm-5.3": SAMPLE_MODELS["glm-5.3"] }),
+      "/bundled.json": BUNDLED,
+    };
+    const io = {
+      iomarker: "fallback-deleted",
+      ...fakeFs(files),
+      bundledBaselinePath: "/bundled.json",
+    };
+    assert.equal(getEffortCatalog("/db.json", io).source, "operator");
+    delete files["/db.json"];
+    const after = getEffortCatalog("/db.json", io);
+    assert.equal(after.source, "operator", "既有语义：手改坏或文件暂时读不到都不应清零档位");
+    assert.equal(after.loadedCount, 1);
+    assert.equal(after.stale, true);
+    assert.match(after.warning, /missing-while-stale/);
+    clearEffortCatalogCache();
+  });
+});
+
 describe("resolveModelEfforts", () => {
   const catalog = { models: new Map(Object.entries(SAMPLE_MODELS).map(([k, v]) => [k, normalizeEffortEntry(v)])) };
 

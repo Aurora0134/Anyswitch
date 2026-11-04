@@ -14142,6 +14142,7 @@ async function api(method, path, body) {
       wide: true, // 长文加宽弹窗
       bodyHtml: `<div class="skills-body-view">${renderSkillMarkdown(s.content)}</div>`,
       confirmText: "关闭",
+      hideCancel: true, // 「关闭」已能退出，去掉重复的「取消」
       auxText: s.editable ? "编辑" : null,
       onAux: enterSkillBodyEditor,
       onConfirm: null,
@@ -14178,7 +14179,6 @@ async function api(method, path, body) {
     input.setSelectionRange(selStart, selEnd);
     input.scrollTop = scrollTop;
 
-    let composing = false;
     let raf = 0;
     const paint = () => {
       const code = $("skillsEditorHighlight");
@@ -14192,10 +14192,11 @@ async function api(method, path, body) {
       if (raf) return;
       raf = requestAnimationFrame(() => { raf = 0; paint(); });
     };
-    // 中文输入法合成期间重绘会打断候选框，等 compositionend 再补一次
-    input.addEventListener("compositionstart", () => { composing = true; });
-    input.addEventListener("compositionend", () => { composing = false; schedulePaint(); });
-    input.addEventListener("input", () => { if (!composing) schedulePaint(); });
+    // 组字期间照常重绘。透明 textarea 自己不显字：预输入（组字中的拼音原文）只活在
+    // input.value 里，不铺到高亮层就是屏上一片空、只剩光标逐字右移。原先担心「重绘会
+    // 打断候选框」而按「正在组字」提前返回，实测不成立——无头 Chrome 的合成组字通路连推
+    // 四次组字更新再上屏，会话未打断、终值与事件序列均正常（2026-11-04）。
+    input.addEventListener("input", schedulePaint);
     input.addEventListener("scroll", () => {
       const pre = $("skillsEditorHighlight") && $("skillsEditorHighlight").parentElement;
       if (pre) { pre.scrollTop = input.scrollTop; pre.scrollLeft = input.scrollLeft; }
@@ -14954,8 +14955,9 @@ async function api(method, path, body) {
   // ── 共用确认 modal ──
   // wide = 正文查阅那一档宽度；diff = 再宽一档并允许更高，两栏逐行对照需要横向空间；
   // edit = 正文编辑态（更高更宽，正文区撑满）。auxText 是左下那颗附加动作钮，
-  // 缺省隐藏；onCancel / onRequestClose 缺省仍走关闭，既有调用方行为不变。
-  function showSkillsModal({ title, bodyHtml, confirmText, cancelText, danger, wide, diff, edit, auxText, onAux, onCancel, onRequestClose, onConfirm }) {
+  // 缺省隐藏；hideCancel 用于正文查阅态（底部「关闭」已能退出，「取消」重复且意义不明）；
+  // onCancel / onRequestClose 缺省仍走关闭，既有调用方行为不变。
+  function showSkillsModal({ title, bodyHtml, confirmText, cancelText, danger, wide, diff, edit, auxText, onAux, hideCancel, onCancel, onRequestClose, onConfirm }) {
     $("storeAddPoolCtl")?.remove(); // 新增渠道弹窗注入标题的建池控件，防跨弹窗残留
     $("skillsModalTitle").textContent = title;
     $("skillsModalBody").innerHTML = bodyHtml;
@@ -14964,6 +14966,8 @@ async function api(method, path, body) {
     btn.disabled = false; // 上一弹窗可能停在「处理中…」禁用态（回调内改开新弹窗的路径）
     btn.className = "btn" + (danger ? " btn-danger" : " btn-primary");
     const cancelBtn = $("skillsModalCancelBtn");
+    // 每次 show 都必须赋值，否则上一个弹窗的隐藏态会泄漏到下一个弹窗
+    cancelBtn.hidden = !!hideCancel;
     cancelBtn.textContent = cancelText || "取消";
     cancelBtn.onclick = onCancel || hideSkillsModal;
     const auxBtn = $("skillsModalAuxBtn");

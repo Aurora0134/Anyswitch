@@ -5,7 +5,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import {
   defaultClaudeExecutable, resolveClaudeExecutable, resolveCodexExecutable,
   resolveOpencodeExecutable, resolvePiExecutable, resolveKimiExecutable,
-  resolveDshExecutable, resolveZcodeExecutable, resolveZcodeCliExecutable,
+  resolveDshExecutable, resolveDshTuiExecutable, resolveZcodeExecutable, resolveZcodeCliExecutable,
   resolveQoderExecutable,
   resolveQoderCliExecutable, resolveGrokExecutable, resolveWorkbuddyExecutable,
 } from "../src/agents/agent-discovery.mjs";
@@ -332,4 +332,70 @@ test("resolveZcodeCliExecutable: explicit-config only — override wins, unconfi
     () => resolveZcodeCliExecutable({ ...base, ZCODE_CLI_EXECUTABLE: "zcode.mjs" }),
     /must be an absolute path/,
   );
+});
+
+test("dsh-tui 解析遍历所有 profile：profile 名不是 dsh-tui 也能认到", () => {
+  const dir = mkTestDir("dsh-tui-profiles-");
+  try {
+    const dshHome = join(dir, ".dsh");
+    const install = (profile, version) => {
+      const packageDir = join(dshHome, "profiles", profile, "node_modules", "@deepseek-harness-tui", "dsh-tui");
+      mkdirSync(join(packageDir, "bin"), { recursive: true });
+      writeFileSync(join(packageDir, "bin", "dsh-tui.js"), "");
+      writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: "@deepseek-harness-tui/dsh-tui", version }));
+      return join(packageDir, "bin", "dsh-tui.js");
+    };
+    install("dsh-tui", "0.14.0");
+    install("legacy", null);
+    const newer = install("web", "0.15.0");
+    mkdirSync(join(dshHome, "profiles", "headless"), { recursive: true });
+    // DSH_HOME 不设时按 USERPROFILE 派生，与 dsh 自己的默认落点一致。
+    const base = { USERPROFILE: dir };
+    assert.equal(resolveDshTuiExecutable(base), newer, "多 profile 取版本最高的一份，读不到版本的排最后");
+    // 同版本按 profile 名升序，结果不随目录枚举顺序漂移。
+    const desktop = install("desktop", "0.15.0");
+    assert.equal(resolveDshTuiExecutable(base), desktop);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dsh-tui 解析：一份都没有返回 null，清单坏了不吞掉已装插件", () => {
+  const dir = mkTestDir("dsh-tui-loose-");
+  try {
+    const dshHome = join(dir, ".dsh");
+    const base = { USERPROFILE: dir, DSH_HOME: dshHome };
+    assert.equal(resolveDshTuiExecutable(base), null, "profiles 目录不存在");
+    mkdirSync(join(dshHome, "profiles", "work"), { recursive: true });
+    assert.equal(resolveDshTuiExecutable(base), null, "profile 在但没装插件");
+
+    // bin 在、清单损坏：仍然认已安装，版本读不到只影响排序。
+    const packageDir = join(dshHome, "profiles", "work", "node_modules", "@deepseek-harness-tui", "dsh-tui");
+    mkdirSync(join(packageDir, "bin"), { recursive: true });
+    writeFileSync(join(packageDir, "bin", "dsh-tui.js"), "");
+    writeFileSync(join(packageDir, "package.json"), "{");
+    assert.equal(resolveDshTuiExecutable(base), join(packageDir, "bin", "dsh-tui.js"));
+
+    // 目录列不出来（非 ENOENT）时退回旧的固定落点，不让原本认得到的 profile 消失。
+    const legacy = join(dshHome, "profiles", "dsh-tui", "node_modules", "@deepseek-harness-tui", "dsh-tui", "bin", "dsh-tui.js");
+    assert.equal(
+      resolveDshTuiExecutable(base, {
+        readdirSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+        existsSync: () => true,
+      }),
+      legacy,
+    );
+
+    // 覆盖变量优先于目录扫描；相对路径拒绝，避免指回 Anyswitch 自己的 shim。
+    assert.equal(
+      resolveDshTuiExecutable({ ...base, DSH_TUI_EXECUTABLE: "D://tools//dsh-tui.js" }),
+      "D://tools//dsh-tui.js",
+    );
+    assert.throws(
+      () => resolveDshTuiExecutable({ ...base, DSH_TUI_EXECUTABLE: "dsh-tui.js" }),
+      /must be an absolute path/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

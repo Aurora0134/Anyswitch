@@ -1,5 +1,6 @@
 import { join, isAbsolute, basename } from "node:path";
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { compareVersions, parseVersion } from "../ops/version-check.mjs";
 
 function absoluteOverride(base, key) {
   const override = base[key];
@@ -286,19 +287,66 @@ export function resolveDshExecutable(base = process.env, io = { existsSync }) {
 
 // dsh-tui 是社区界面插件（@deepseek-harness-tui/dsh-tui），装进某个 dsh
 // profile 的 node_modules，入口是包里的 bin/dsh-tui.js（清单 bin 同时声明
-// dsh-tui 与 dst 两个名字，指向同一个文件）。本机实际使用的就是名为
-// dsh-tui 的 profile，关于页也只描述用户真正进的那个终端界面，因此固定读
-// 这一个 profile，不遍历全部 profile。找不到返回 null（与 zcode CLI 同款的
-// 优雅 not-found），报「未找到」还是跳过由调用方决定。
-export function resolveDshTuiExecutable(base = process.env, io = { existsSync }) {
+// dsh-tui 与 dst 两个名字，指向同一个文件）。profile 名由用户安装时决定，
+// 不一定是 dsh-tui；关于页只描述用户真正进的那个终端界面，因此遍历
+// ~/.dsh/profiles 下所有装了该插件的 profile，取版本最高的一份（同版本按
+// profile 名升序），仍优先认 DSH_TUI_EXECUTABLE 覆盖。一份都没有返回 null
+//（与 zcode CLI 同款的优雅 not-found），报「未找到」还是跳过由调用方决定。
+export function resolveDshTuiExecutable(base = process.env, io = { existsSync, readdirSync, readFileSync }) {
   const override = absoluteOverride(base, "DSH_TUI_EXECUTABLE");
   if (override !== null) return override;
   const dshHome = base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh");
-  const candidate = join(
-    dshHome, "profiles", "dsh-tui", "node_modules",
-    "@deepseek-harness-tui", "dsh-tui", "bin", "dsh-tui.js",
-  );
-  return io.existsSync(candidate) ? candidate : null;
+  const profilesDir = join(dshHome, "profiles");
+  let entries;
+  try {
+    entries = io.readdirSync(profilesDir);
+  } catch (error) {
+    if (io.strictErrors && !["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
+    // 目录列不出来时退回旧的固定落点：能列出目录才谈得上遍历，列不出来不该
+    // 让原本认得到的 dsh-tui profile 一起消失。
+    const legacy = join(
+      profilesDir, "dsh-tui", "node_modules",
+      "@deepseek-harness-tui", "dsh-tui", "bin", "dsh-tui.js",
+    );
+    return io.existsSync(legacy) ? legacy : null;
+  }
+  const installs = [];
+  for (const entry of entries) {
+    const profile = typeof entry === "string" ? entry : entry?.name;
+    if (typeof profile !== "string") continue;
+    const packageDir = join(profilesDir, profile, "node_modules", "@deepseek-harness-tui", "dsh-tui");
+    const bin = join(packageDir, "bin", "dsh-tui.js");
+    let present;
+    try {
+      present = io.existsSync(bin);
+    } catch (error) {
+      if (io.strictErrors && !["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
+      continue;
+    }
+    if (!present) continue;
+    installs.push({ profile, bin, version: dshTuiInstalledVersion(packageDir, io) });
+  }
+  if (installs.length === 0) return null;
+  installs.sort((a, b) => {
+    if (a.version && b.version) {
+      const order = compareVersions(a.version, b.version);
+      if (order !== null && order !== 0) return -order;
+    } else if (a.version !== b.version) {
+      // 版本可读的排在读不到的前面；版本只用于挑一份展示，读不到不该让整条记录消失。
+      return a.version ? -1 : 1;
+    }
+    return a.profile < b.profile ? -1 : a.profile > b.profile ? 1 : 0;
+  });
+  return installs[0].bin;
+}
+
+function dshTuiInstalledVersion(packageDir, io) {
+  try {
+    const manifest = JSON.parse(io.readFileSync(join(packageDir, "package.json"), "utf8"));
+    return parseVersion(manifest?.version) ? manifest.version : null;
+  } catch {
+    return null;
+  }
 }
 
 export function resolveZcodeExecutable(base = process.env) {
