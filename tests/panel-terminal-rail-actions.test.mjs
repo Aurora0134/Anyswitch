@@ -1,8 +1,8 @@
-// 终端会话栏 M7 修正（S1 归档 / S2 分组移除 / S3 组头三件 / S4 钉底 / S5 去重聚焦）。
+// 终端会话栏修正：归档 / 分组移除 / 组头三件 / 钉底 / 去重聚焦。
 // 断言分两层：静态源码（HTML 骨架 / CSS 观感红线 / JS 挂点与文案逐字）+ vm 真跑
 // （过滤与归组、归档两分支、toast 撤销、钉底分层结构、去重两分支）。
 // 取样惯例照 panel-terminal-rail.test.mjs：源码字符串断言 + 按函数名切源码进桩环境。
-// M13 追加：归档/撤销 FLIP（退场幽灵行＋flip 门＋armed 门）、toast 动效（入场/
+// 追加：归档/撤销 FLIP（退场幽灵行＋flip 门＋armed 门）、toast 动效（入场/
 // 淡出/瞬时收场）与 toast 第二钮「筛选已归档会话」（文案逐字批准，全文件唯一新增文案）。
 // 2026-11-01 追加 live 闸（归档即杀）：会话有终端开着时归档先弹二次确认，确认后走行内
 // × 同一条 terminalCloseTerminal 链路关掉再归档；取消确认或关闭被拦都不归档。
@@ -25,7 +25,7 @@ const railHtml = () => {
   return m[0];
 };
 
-// ── 视口表（M12：页签＝视口）的桩前置 ──
+// ── 视口表（页签＝视口）的桩前置 ──
 // 单测按函数体抽取进 vm，模块级符号不会跟着来。视口纯函数直接用生产实现（这样断言
 // 测的是真口径），只在这里补它们的模块级状态量；外部依赖（api / terminalSessionFor /
 // renderTerminalPreviewSession…）仍由各沙盒自己提供。
@@ -197,7 +197,7 @@ function rowHtmlSandbox(prefs) {
   return fn;
 }
 
-// 归档/撤销交互沙盒（S1 与 M13 共用）：归档两分支真跑——本地态、POST、toast opts。
+// 归档/撤销交互沙盒（归档与撤销共用）：归档两分支真跑——本地态、POST、toast opts。
 // 2026-11-01 追加 live 闸：会话有终端开着时归档＝二次确认＋归档即杀（走行内 × 同一
 // 条 terminalCloseTerminal 链路）。沙盒默认无 live 会话（window 置 undefined，生产
 // 浏览器里 confirm 恒在）；live 三分支由 openSessions 注入、window 桩收 confirm。
@@ -264,11 +264,11 @@ describe("S1 会话归档（finding 1a）", () => {
         prefs: { archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: [] },
       });
       withArchived.fn.render("kimi");
-      assert.ok(!withArchived.list.html.includes('data-rail-term-resume="s-1"'), "归档行不进列表（立即出布局，M13 起由退场幽灵行接手视觉）");
+      assert.ok(!withArchived.list.html.includes('data-rail-term-resume="s-1"'), "归档行不进列表（立即出布局，由退场幽灵行接手视觉）");
       assert.ok(withArchived.list.html.includes('data-rail-term-resume="s-2"'), "同组未归档行不受影响");
 
       // 计数口径：alpha 3 条 → 归档 1 条后剩 2 条；再补 4 条让组超过一档，
-      // 验证「展开其余 N」数的是过滤后的行数（m6b §A6 实测口径）。
+      // 验证「展开其余 N」数的是过滤后的行数（实测口径）。
       const many = {
         endpoint: "kimi",
         sessions: [
@@ -354,7 +354,7 @@ describe("S1 会话归档（finding 1a）", () => {
       assert.deepEqual(log.posts.at(-1), { method: "POST", path: "/api/terminal/rail/unarchive", body: { endpoint: "kimi", id: "s-1" } },
         "POST 取消归档");
       await flush();
-      assert.equal(log.toasts.length, 0, "取消归档无 toast（m6b §A6 实测口径）");
+      assert.equal(log.toasts.length, 0, "取消归档无 toast（实测口径）");
     });
 
     it("落盘失败：回退本地态 + 错误提示，不假装归档成功", async () => {
@@ -488,12 +488,12 @@ describe("S1 会话归档（finding 1a）", () => {
         "归档钮在行点击之前判（否则点了归档变成续接）");
     });
 
-    it("toast 动作钮复用既有件：6s + actions 形状（M13 起多钮，单 action 兼容）", () => {
+    it("toast 动作钮复用既有件：6s + actions 形状（多钮，单 action 兼容）", () => {
       const archive = extractFn("terminalRailArchiveSession");
       assert.ok(archive.includes('toast("会话已归档。"'), "文案逐字");
       assert.ok(archive.includes('label: "撤销"'), "动作文案逐字");
       assert.ok(archive.includes("durationMs: 6000"), "驻留 6s");
-      // toast(msg, isErr, opts) 支持 opts.actions = [{label, onClick}, …]（M13 多钮）
+      // toast(msg, isErr, opts) 支持 opts.actions = [{label, onClick}, …]（多钮）
       // 与 opts.action（单钮，既有调用形状不破）
       const toastFn = panelJs.match(/function toast\(msg, isErr, opts\)[\s\S]*?\n  \}/)?.[0];
       assert.ok(toastFn && toastFn.includes("opts.actions"), "toast 件有多钮入口");
@@ -514,12 +514,12 @@ describe("S1 会话归档（finding 1a）", () => {
     });
 
     it("文案清单逐字：归档会话 / 会话已归档。/ 撤销，不新造", () => {
-      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const body = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       for (const copy of ["归档会话", "会话已归档。", "撤销"]) {
         assert.ok(body.includes(copy), `栏体文案「${copy}」在册`);
       }
-      // 取消归档钮的文案口径（M8 T7a 起）：归档行在「全部会话（显示已归档）」筛选下
-      // 内联显示，hover 出「取消归档」钮（m6b §A2 第三恢复入口，恢复链由此补齐），
+      // 取消归档钮的文案口径：归档行在「全部会话（显示已归档）」筛选下
+      // 内联显示，hover 出「取消归档」钮（第三恢复入口，恢复链由此补齐），
       // 与 toast 的「撤销」动作并存；上屏文案里「取消归档」只作为该钮的 title/aria，
       // 不进任何 toast 句子。
       const railStatic = panelHtml.slice(panelHtml.indexOf('id="railTerminalDir"'), panelHtml.indexOf('class="rail-foot"'));
@@ -764,7 +764,7 @@ describe("S2 分组移除（finding 1b）", () => {
         "正文逐字（目录短名代入）");
       // 桩里 onConfirm 被同步调起：本地先生效、POST 落盘
       assert.deepEqual(fn.prefs().removedGroups, ["C:\\dev\\alpha"], "本地先进清单（瞬时重排，不等网络）");
-      // 两次收场：开弹窗前收一次（M10-F2，菜单不许压弹窗）＋确认后 commit 里再收一次
+      // 两次收场：开弹窗前收一次（菜单不许压弹窗）＋确认后 commit 里再收一次
       assert.equal(log.menuClosed, 2, "菜单收起（F2 开弹窗前 + commit 后各一次）");
       assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/remove-group", body: { dir: "C:\\dev\\alpha" } }],
         "POST 带目录原始拼写");
@@ -815,10 +815,10 @@ describe("S2 分组移除（finding 1b）", () => {
       for (const gone of ["data-rail-term-restore-group", "data-rail-term-removed-toggle", "terminalRailRestoreGroup", "toggleTerminalRailRemoved"]) {
         assert.ok(!init.includes(gone), `恢复区挂点 ${gone} 已清除`);
       }
-      // 移除分组必须走带确认弹窗的入口（M7 复审必修 1）：委托直接调 commit 版会把
+      // 移除分组必须走带确认弹窗的入口（评审必修 1）：委托直接调 commit 版会把
       // 红色确认弹窗整个绕过——点一下就真移除，没有任何二次确认。
-      // M9 复审必修 1 起该分支随菜单 portal 搬到 document 级委托（先判菜单项后走
-      // 收场），dir 委托里只留注释指向——断链的真 DOM 守卫见「M9 复审必修」用例。
+      // 评审必修 1 起该分支随菜单 portal 搬到 document 级委托（先判菜单项后走
+      // 收场），dir 委托里只留注释指向——断链的真 DOM 守卫见「评审必修」用例。
       const docAt = init.indexOf('document.addEventListener("click"');
       const docBlock = init.slice(docAt, init.indexOf("});", docAt));
       const removeBranch = docBlock.slice(docBlock.indexOf("data-rail-term-remove-group"), docBlock.indexOf("terminalRailRemoveGroup(") + 40);
@@ -837,7 +837,7 @@ describe("S2 分组移除（finding 1b）", () => {
 
   describe("S2 静态与文案", () => {
     it("确认弹窗文案逐字（含弯引号），不新造一字", () => {
-      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const body = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(body.includes("把“"), "正文起手逐字");
       assert.ok(body.includes("”从会话栏移除。文件夹和会话记录都会保留，里面的会话会显示在“未分组”下。"), "正文余下逐字");
       assert.ok(body.includes('title: "移除分组"'), "弹窗标题逐字");
@@ -867,7 +867,7 @@ describe("S2 分组移除（finding 1b）", () => {
     });
 
     it("CSS：菜单容器与 danger 项在册，0ms 硬切；恢复区样式已随区拆掉", () => {
-      assert.ok(cssRule(".rail-term-menu {").length > 0, "⋯ 菜单容器样式在册（可扩：M8 加项只加 DOM）");
+      assert.ok(cssRule(".rail-term-menu {").length > 0, "⋯ 菜单容器样式在册（可扩：加项只加 DOM）");
       const danger = panelCss.match(/\.rail-term-menu-item\.is-danger \{([^}]*)\}/);
       assert.ok(danger, "danger 项样式在册");
       assert.ok(danger[1].includes("var(--danger)"), "danger 项取既有危险色 token");
@@ -878,7 +878,7 @@ describe("S2 分组移除（finding 1b）", () => {
   });
 });
 
-describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
+describe("组头三件（dsh 工作区行按钮）", () => {
   describe("⊕ 在此目录新建终端（vm 真跑）", () => {
     const runCreate = ({ collapsed = [], agentId = "kimi", ready = true, apiImpl, sessions = {}, activeId = null, agentsImpl, hostReadImpl, switchImpl } = {}) => {
       const log = { posts: [], gets: [], switchBodies: [], renders: 0, collapsed: new Set(collapsed) };
@@ -976,7 +976,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       assert.ok(fn.includes("terminalRailSwitchOrCreateCore({ agentId: terminalRailAgentId(), cwd: key })"), "与「新建会话」同一道内切判定门");
       assert.ok(!fn.includes('agentId: ""'), "没有为无 agent 兜底的代码路径");
       // 理由写在函数上方的注释里（栏体代码段内）
-      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const block = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(block.includes("历史会话段只在有 agent 聚焦时"), "注释说明为何无需无 agent 分支");
     });
 
@@ -995,7 +995,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
 
   describe("hover 卡（源码 + CSS）", () => {
     it("800ms 延迟、三行内容、整卡复制路径 + 「已复制」", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(src.includes("TERMINAL_RAIL_HOVER_DELAY_MS = 800"), "延迟 800ms（dsh 同值）");
       assert.ok(src.includes("个会话"), "第三行「N 个会话」");
       assert.ok(src.includes('sessCopyText(key, "已复制")'), "整卡点击复制完整路径，反馈「已复制」（复用既有手法）");
@@ -1003,7 +1003,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     });
 
     it("⋯ 菜单打开期间抑制 hover 卡（dsh 的 disabled: menuOpen 同口径）", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(/if \(!head \|\| !key \|\| terminalRailMenuKey\) return/.test(src),
         "菜单开着不排卡");
       assert.ok(src.includes("closeTerminalRailHoverCard()") && src.includes("openTerminalRailGroupMenu"),
@@ -1020,7 +1020,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     });
   });
 
-  describe("图标同槽互换（CSS 钉死，M14 照 dsh 尺寸与色档）", () => {
+  describe("图标同槽互换（CSS 钉死，照 dsh 尺寸与色档）", () => {
     it("非 hover 文件夹、hover 箭头同槽互换；槽 16×20，箭头 14×14、文件夹 16×16", () => {
       const slot = cssRule(".rail-term-group-slot {");
       assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "槽位 16×20（dsh 实测槽）");
@@ -1105,15 +1105,15 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       assert.ok(block.includes(': ""'), "无组键（未分组）时动作区为空串");
     });
 
-    it("⋯ 菜单容器可扩：单一挂点 + 项是可增的 DOM（M8 加项不开第二套浮层）", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+    it("⋯ 菜单容器可扩：单一挂点 + 项是可增的 DOM（加项不开第二套浮层）", () => {
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(src.includes("function openTerminalRailGroupMenu(key)"), "单一开菜单挂点");
       assert.ok(/menu\.append\(item\)/.test(src), "菜单项是 append 进去的（可扩）");
     });
   });
 });
 
-describe("S4 底栏钉住（finding 2，m6 §3）", () => {
+describe("S4 底栏钉住", () => {
   describe("三层结构（HTML 钉死）", () => {
     it("栏体三层：顶区新建终端 / 段头（滚动层外）/ 中段唯一滚动层（树）/ 底栏亮暗返回", () => {
       const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/);
@@ -1125,11 +1125,11 @@ describe("S4 底栏钉住（finding 2，m6 §3）", () => {
       // 段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none）
       assert.ok(body.indexOf('id="railTermSectionHead"') < body.indexOf('class="rail-term-scroll"'),
         "段头在滚动层之前（不随树滚）");
-      // 中段：唯一滚动层里只有一棵工作区树（M8 T1 两段合并）
+      // 中段：唯一滚动层里只有一棵工作区树（两段合并）
       const scroll = body.match(/<div class="rail-term-scroll">([\s\S]*?)<\/div>\s*<span class="rail-term-fade"/);
       assert.ok(scroll, "中段滚动层在册，且遮罩挂在它外面（不随内容滚）");
       assert.ok(scroll[1].includes('id="railTermHistoryList"'), "工作区树在滚动层内（live 行内联其中）");
-      assert.ok(!scroll[1].includes('id="railTermOpenList"'), "「打开的终端」段已拆（M8 T1）");
+      assert.ok(!scroll[1].includes('id="railTermOpenList"'), "「打开的终端」段已拆");
       // 滚动层里不再套内层滚动容器（唯一滚动层）
       assert.ok(!body.includes("rail-term-history-scroll"), "无内层滚动容器（滚动只发生在中段）");
       // 底栏：亮暗/返回在栏体下，是 .rail 的flex 子项（本 nav 之外）
@@ -1142,7 +1142,7 @@ describe("S4 底栏钉住（finding 2，m6 §3）", () => {
 
   describe("滚动条指针感知隐退（JS 钉死）", () => {
     it("指针在列内可见、离开 2s 隐退：变量替换瞬时消失，无淡出", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(src.includes("TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000"), "滞留 2s（dsh 同值）");
       assert.ok(src.includes("pointerenter"), "进列即显");
       assert.ok(src.includes("pointerleave"), "出列即排隐退");
@@ -1298,7 +1298,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
           cols: 120,
           rows: 34,
         },
-      }], "没有可聚焦的终端才走续接新建（M3 契约原样）");
+      }], "没有可聚焦的终端才走续接新建（续接契约原样）");
       assert.equal(fn.activeId(), "t-new", "新终端置活跃");
     });
 
@@ -1323,7 +1323,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
     });
 
     it("去重口径写进注释：两个身份都算，不再是「只保续接终端」", () => {
-      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const block = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(block.includes("去重范围＝两种身份都算"), "去重口径注释在册");
       assert.ok(block.includes("boundConversation"), "绑定库身份写进注释（A4：全新会话终端的真身份只在这里）");
     });
@@ -1333,8 +1333,8 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
       assert.ok(fn.indexOf("terminalRailFindOpenSession") < fn.indexOf("terminalRailSwitchOrCreate"),
         "先查已开着的终端，再走内切/新开判定");
       const decide = extractFn("terminalRailSwitchOrCreateCore");
-      // M12 视口化后判定门自己也兜一次去重：目标会话已有活终端＝直接切视口（方案第二节
-      // 矩阵第 2 条）。入口去重仍在续接之前，这里兜的是绕过入口的调用点。
+      // 视口化后判定门自己也兜一次去重：目标会话已有活终端＝直接切视口（判定矩阵
+      // 第 2 条）。入口去重仍在续接之前，这里兜的是绕过入口的调用点。
       const findAt = decide.indexOf("terminalRailFindOpenSession");
       assert.ok(findAt >= 0 && findAt < decide.indexOf("terminalSwitchInFlight = true"),
         "判定门内先按 resume 两键去重，命中即切视口（在补读与建终端之前）");
@@ -1356,7 +1356,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         "两键比对：绑定库身份 endpoint + 会话 id（全新会话终端的真身份只在这里）");
     });
 
-    it("乐观选中（M5）源码钉死：BeginSelect 在判定门之前点亮，失败清点两处到位", () => {
+    it("乐观选中源码钉死：BeginSelect 在判定门之前点亮，失败清点两处到位", () => {
       const fn = extractFn("terminalRailResumeSession");
       assert.ok(fn.indexOf("terminalRailBeginSelect") < fn.indexOf("terminalRailSwitchOrCreate"),
         "过完全部拦截后先点亮再调判定门——高亮不等宿主 1~2s");
@@ -1387,7 +1387,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         "兜底行同口径：选中判据走共享谓词（pending 按终端 id 命中才亮，一屏至多一条）");
     });
 
-    it("乐观选中（M5）vm 真跑：在飞时不亮不切，放行后才点亮", async () => {
+    it("乐观选中 vm 真跑：在飞时不亮不切，放行后才点亮", async () => {
       const { fn, log } = runResume({}, "t-0", async () => ({ id: "t-new", agentId: "kimi" }));
       fn.setBusy(true);
       fn.resume(HISTORY_ROW);
@@ -1419,7 +1419,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
   });
 });
 
-describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树", () => {
+describe("两段合并：live 内联 / 新会话兜底 / 无 agent 空树", () => {
   const LIVE = { id: "t-1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-1" } };
 
   it("live 行内联进所属目录组，与普通行同按 lastActive 倒序（live 不插队）", () => {
@@ -1467,7 +1467,7 @@ describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树"
     assert.equal(order[0], "t-9", "兜底行在组顶");
   });
 
-  it("乐观选中（M5）：pending 期间兜底行不亮、历史行亮，一屏至多一条（整树口径）", () => {
+  it("乐观选中：pending 期间兜底行不亮、历史行亮，一屏至多一条（整树口径）", () => {
     const sandbox = renderSandbox({
       history: {
         endpoint: "kimi",
@@ -1565,10 +1565,10 @@ describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树"
   });
 });
 
-// ── 兜底行生命周期动效（2026-10-25，与归档 M13 同观感）──
+// ── 兜底行生命周期动效（2026-10-25，与归档同观感）──
 // 真跑 renderTerminalRailHistory，动效帮手换成记录桩：兜底集增删的那一帧置 flip、
 // 量旧位、挂幽灵；稳态帧/换 agent/搜索退出/未武装一律瞬时。几何与幽灵机制本体由
-// M13 组的真跑用例与「快照只量行」源码钉死覆盖，这里钉的是 diff 的接线与门。
+// 归档/撤销组的真跑用例与「快照只量行」源码钉死覆盖，这里钉的是 diff 的接线与门。
 describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
   const DIFF_HISTORY = {
     endpoint: "kimi",
@@ -1685,7 +1685,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
     fn.render("kimi");
     assert.deepEqual(rec.measureModes, ["flip"], "兜底集出现的那帧按 flip 量旧位");
     assert.equal(rec.flips, 1, "FLIP 播放一次");
-    assert.equal(rec.snapshots, 1, "退场快照同帧拍下（出现帧无行离开，真实挂载由存活判定拦下，见 M13 真跑组）");
+    assert.equal(rec.snapshots, 1, "退场快照同帧拍下（出现帧无行离开，真实挂载由存活判定拦下，见归档/撤销真跑组）");
     fn.setPresent(["t-9"]);
     fn.render("kimi");
     assert.deepEqual(rec.measureModes, ["flip"], "兜底集未变的重渲不动画");
@@ -1701,10 +1701,10 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
     fn.setPending(null);
     fn.render("kimi");
     assert.deepEqual(rec.measureModes, ["flip", "flip"], "出现帧与消失帧都置 flip");
-    assert.equal(rec.ghosts, 2, "两帧都把快照交给幽灵挂载（真实挂载时只有离开的那行被克隆，见 M13 真跑组）");
+    assert.equal(rec.ghosts, 2, "两帧都把快照交给幽灵挂载（真实挂载时只有离开的那行被克隆，见归档/撤销真跑组）");
   });
 
-  it("reset 门：换 agent 与搜索退出的那一帧瞬时落位（沿 M13 resetKey 口径）", () => {
+  it("reset 门：换 agent 与搜索退出的那一帧瞬时落位（沿既有 resetKey 口径）", () => {
     const { fn, rec } = diffSandbox();
     fn.render("kimi");
     fn.setPending("t-9");
@@ -1731,7 +1731,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
   });
 });
 
-describe("M8 T2 选中态跟随聚焦", () => {
+describe("选中态跟随聚焦", () => {
   it("选中只属于聚焦终端对应的 live 行", () => {
     const sandbox = renderSandbox({
       history: {
@@ -1762,7 +1762,7 @@ describe("M8 T2 选中态跟随聚焦", () => {
     const resumeBranch = block.slice(block.indexOf("data-rail-term-resume"), block.indexOf('data-rail-term-group"'));
     assert.ok(resumeBranch.includes("data-rail-term-live"), "行分支先看 live 属性");
     assert.ok(resumeBranch.includes("terminalRailActivateSession"), "live 行 → 聚焦其终端");
-    assert.ok(resumeBranch.includes("terminalRailResumeHistoryRow"), "非 live 行 → 去重聚焦或带 resume 新开（M7 甲链路原样）");
+    assert.ok(resumeBranch.includes("terminalRailResumeHistoryRow"), "非 live 行 → 去重聚焦或带 resume 新开（既有链路原样）");
     const rowFn = new Function("session", "live", "activeId", `
       const TERMINAL_RAIL_ICON_ARCHIVE = "";
       const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -1787,7 +1787,7 @@ describe("M8 T2 选中态跟随聚焦", () => {
   });
 });
 
-describe("M8 T3 文案与时间格式", () => {
+describe("文案与时间格式", () => {
   it("栏内局部时间格式：dsh 式无前缀（不动会话页共用的 sessRelTime）", () => {
     // 冻结时钟沙盒：实现内部自取 Date.now()/new Date()，旧写法直接喂真实时刻——
     // 昨天/跨年分支随运行日期漂移、月/年边界还有毫秒级竞态（普查 finding）。固定
@@ -1850,7 +1850,7 @@ describe("M8 T3 文案与时间格式", () => {
   });
 });
 
-describe("M8 T4 组文件夹图标含当前会话时变主题色", () => {
+describe("组文件夹图标含当前会话时变主题色", () => {
   it("聚焦终端所在组的文件夹图标带 is-current，取主题 accent 变量（不写死蓝）", () => {
     const sandbox = renderSandbox({
       history: {
@@ -1877,7 +1877,7 @@ describe("M8 T4 组文件夹图标含当前会话时变主题色", () => {
   });
 });
 
-describe("M8 T5 live 行悬停动作与归档钮并存", () => {
+describe("live 行悬停动作与归档钮并存", () => {
   it("live 行 ×＋归档并存；非 live 行只有归档；全部 0ms 硬切", () => {
     assert.ok(panelCss.includes(".rail-term-row.is-live:hover .rail-term-row-close { display: inline-flex; }"),
       "live 行 hover 出关闭叉（走 terminalRailCloseSession 同一条路）");
@@ -1891,7 +1891,7 @@ describe("M8 T5 live 行悬停动作与归档钮并存", () => {
   });
 });
 
-describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
+describe("段头搜索（照搬实测规格，裁剪后）", () => {
   describe("HTML 与 CSS", () => {
     it("段头三钮位：搜索槽（钮＋输入框＋清空钮）在册，刷新在位，文案逐字", () => {
       const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/)[0];
@@ -1899,10 +1899,10 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       assert.ok(head.includes('id="railTermSearchBtn"'), "搜索钮在册");
       assert.ok(head.includes('id="railTermSearchInput"'), "搜索输入框在册");
       assert.ok(head.includes('id="railTermSearchClear"'), "清空钮在册");
-      assert.ok(head.includes('placeholder="搜索会话名称"'), "placeholder 逐字（m6c §A2）");
-      assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字（m6c §A2）");
+      assert.ok(head.includes('placeholder="搜索会话名称"'), "placeholder 逐字");
+      assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字");
       // D4：段头只剩搜索＋视图选项两钮（刷新钮已砍，用户拍板）
-      assert.ok(!head.includes('id="railTermHistoryRefresh"'), "刷新钮不在册（M9-D4）");
+      assert.ok(!head.includes('id="railTermHistoryRefresh"'), "刷新钮不在册");
       // 位序：标题 → 搜索 → 视图选项（dsh 两钮排布）
       assert.ok(head.indexOf('id="railTermSectionTitle"') < head.indexOf('id="railTermSearchBtn"')
         && head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermViewOptionsBtn"'), "位序：标题 → 搜索 → 视图选项");
@@ -1916,7 +1916,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       assert.ok(/\.rail-term-search \{[\s\S]*?max-width: 28px/.test(panelCss), "收起态搜索槽 28px");
       assert.ok(/\.rail-term-section-head\.is-searching \.rail-term-search \{[\s\S]*?max-width: 100%/.test(panelCss), "展开态搜索槽 100%");
       const searchRule = cssRule(".rail-term-search {");
-      assert.ok(/transition:[^;]*\.18s/.test(searchRule), "搜索槽过渡 .18s（m6c §A1）");
+      assert.ok(/transition:[^;]*\.18s/.test(searchRule), "搜索槽过渡 .18s");
       // 栏内运动纪律：行/钮/组头容器不因搜索加过渡
       assert.ok(!cssRule(".rail-term-row {").includes("transition"), "行本体仍 0ms 硬切");
     });
@@ -1955,15 +1955,15 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       const hits = run("命中", many);
       assert.equal(hits.length, 25, "匹配函数本身不截");
       // 截断在渲染层（TERMINAL_RAIL_SEARCH_LIMIT = 20）
-      assert.ok(panelJs.includes("TERMINAL_RAIL_SEARCH_LIMIT = 20"), "上限 20（m6c §A4，Host 侧同值）");
+      assert.ok(panelJs.includes("TERMINAL_RAIL_SEARCH_LIMIT = 20"), "上限 20（Host 侧同值）");
     });
   });
 
   describe("搜索交互状态机（源码钉死）", () => {
-    const src = () => panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+    const src = () => panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
 
     it("防抖 250ms；搜索中态「正在搜索会话历史…」role=status", () => {
-      assert.ok(src().includes("TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250"), "防抖 250ms（m6c §A2）");
+      assert.ok(src().includes("TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250"), "防抖 250ms");
       assert.ok(src().includes("正在搜索会话历史…"), "搜索中文案逐字");
       assert.ok(src().includes('role="status"'), "role=status（无障碍）");
     });
@@ -1992,7 +1992,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
         return closeTerminalRailSearch;
       `)(scrollEl, headEl, inputEl, state, closeLog);
       close();
-      assert.equal(scrollEl.scrollTop, 0, "退出后列表滚动回顶（m6c §A6，实现行为真跑）");
+      assert.equal(scrollEl.scrollTop, 0, "退出后列表滚动回顶（实现行为真跑）");
       assert.equal(closeLog.renders, 1, "退出后重渲回树");
       assert.equal(state.open, false, "搜索态随退出收起");
     });
@@ -2001,7 +2001,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       const s = src();
       assert.ok(s.includes("terminalRailResumeSession"), "结果行走续接两分支（去重内置）");
       assert.ok(s.includes('data-rail-term-live'), "结果行带 live 属性（聚焦分支）");
-      assert.ok(s.includes("这条会话已归档，取消归档后才能续接"), "归档行点击落批准句（m6b 已取原文）");
+      assert.ok(s.includes("这条会话已归档，取消归档后才能续接"), "归档行点击落批准句（已取原文）");
       assert.ok(s.includes("rail-term-row-result"), "结果行有专属类（平铺无组头）");
     });
 
@@ -2013,7 +2013,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
   });
 });
 
-// ── M8 T7b 视图选项（照搬 m6c §B 全集） ──
+// ── 视图选项（照搬实测规格全集） ──
 // 探针：从 panel.js 栏体段按函数名切源码进 vm 桩环境（照本文件既有惯例）。
 import { readFileSync as readForT7b } from "node:fs";
 import { join as joinForT7b } from "node:path";
@@ -2025,7 +2025,7 @@ const T7B_GROUPS = [
   { key: "C:\\dev\\alpha\\sub", label: "sub", rows: [{ id: "s-1", project: "C:\\dev\\alpha\\sub", lastActive: 300 }], latest: 300 },
 ];
 
-describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => {
+describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
   describe("HTML 与 ⋯ 补录", () => {
     it("视图选项钮在册：滑杆图标、title/aria 逐字「视图选项」，位序在搜索与刷新之间", () => {
       const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/)[0];
@@ -2061,7 +2061,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
       assert.equal(byKey.get("C:\\dev\\alpha\\sub").depth, 2, "sub 的深度 2（父 alpha）");
       assert.equal(byKey.get("C:\\dev").depth, 0, "dev 深度 0");
       assert.equal(byKey.get("").depth, 0, "未分组不嵌套");
-      // 祖先组自动展开（m6c §B3）：真跑 applyTerminalRailViewChoice("groupBy",
+      // 祖先组自动展开：真跑 applyTerminalRailViewChoice("groupBy",
       // "workspace-tree")，钉死解折叠分支本体。旧断言 /ancestor/i 命中的是另一个
       // 函数（terminalRailIsAncestorDir）的函数名与注释，删掉解折叠分支也照过——
       // 普查 finding：该分支全测试集零真实覆盖。
@@ -2100,14 +2100,14 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
     });
 
     it("单列表：无组平铺，全部会话一个列表（树标签＝会话）", () => {
-      const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
-      assert.ok(s.includes('label: "会话"'), "平铺模式标签「会话」（m6c §B3）");
+      const s = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(s.includes('label: "会话"'), "平铺模式标签「会话」");
       assert.ok(s.includes("groupBy === \"flat\""), "flat 分支在册");
     });
 
-    it("缩进 8+depth×12px（m6c §B3 实测值）", () => {
+    it("缩进 8+depth×12px（实测值）", () => {
       // 缩进算在 JS 渲染层（组头 inline style），不在 CSS 规则里
-      const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const s = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(/padding-inline-start: \$\{8 \+ group\.depth \* 12\}px/.test(s), "树模式缩进算式 8+depth×12px 在册");
     });
   });
@@ -2149,10 +2149,10 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
     it("行 draggable＝非归档；组行不拖（组是目录派生、无清单可持久化）", () => {
       const render = extractFn("terminalRailRowHtml");
       assert.ok(/draggable/.test(render), "会话行带 draggable（手序的唯一来源）");
-      const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const s = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       const headHtml = s.slice(s.indexOf("rail-term-group-head"), s.indexOf("rail-term-group-slot"));
       assert.ok(!headHtml.includes("draggable"), "组行不搬拖拽");
-      // 归档行不可拖（m6c：draggable＝非空白且非归档）
+      // 归档行不可拖（draggable＝非空白且非归档）
       const rowFn = new Function("session", "live", "activeId", "prefs", `
         const terminalRailPrefs = prefs;
         const TERMINAL_RAIL_ICON_ARCHIVE = "";
@@ -2181,7 +2181,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
     });
 
     it("切 manual 快照当前派生序；切回 updated 清空手序", () => {
-      const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const s = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(s.includes("terminalRailSnapshotManualOrder"), "切入快照函数在册");
       assert.ok(/delete terminalRailViewPrefs\.sessionOrder\[/.test(s), "切回 updated 清空该 agent 手序");
     });
@@ -2218,7 +2218,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
     });
 
     it("仅已归档且一条都没有：空态「暂无已归档会话」＋「查看其他会话」", () => {
-      const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const s = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(s.includes("暂无已归档会话"), "空态文案逐字");
       assert.ok(s.includes("查看其他会话"), "空态动作文案逐字");
       assert.ok(s.includes("data-rail-term-view-reset"), "点了切回「隐藏已归档」");
@@ -2226,7 +2226,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
   });
 
   describe("持久化与菜单交互（源码钉死）", () => {
-    const src = () => panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+    const src = () => panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
 
     it("视图偏好一个 localStorage 键存全部（dsh 的 view store 同层）", () => {
       assert.ok(src().includes('TERMINAL_RAIL_VIEW_KEY = "panel-terminal-rail-view"'), "键名在册");
@@ -2239,7 +2239,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
     it("菜单形制：右对齐锚定、dense 30px、✓ 居项最右、点选即关", () => {
       assert.ok(/\.rail-term-view-menu \{[\s\S]*?min-width/.test(panelCss), "菜单容器在册");
       const item = cssRule(".rail-term-view-item {");
-      assert.ok(/min-height:\s*30px/.test(item), "dense 30px 项（m6c §B2）");
+      assert.ok(/min-height:\s*30px/.test(item), "dense 30px 项");
       assert.ok(/\.rail-term-view-check \{[^}]*margin-left:\s*auto/.test(panelCss),
         "✓ 居项最右（margin-left:auto）");
       assert.ok(/\.rail-term-view-item\.is-selected \.rail-term-view-check \{[\s\S]*?display:\s*inline-flex/.test(panelCss),
@@ -2256,7 +2256,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
   });
 });
 
-describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
+describe("评审必修 1：取消归档钮的行委托断链", () => {
   const initBlock = () => {
     const init = extractFn("initTerminalRail");
     const clickAt = init.indexOf('dir.addEventListener("click"');
@@ -2340,7 +2340,7 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
     const unarchiveBtn = { getAttribute: () => "s-1" };
     click({ target: { closest: (sel) => (sel === "[data-rail-term-unarchive]" ? unarchiveBtn : (sel === "[data-rail-term-resume]" ? rowEl : null)) } });
     assert.deepEqual(log.unarchive, [{ endpoint: "kimi", id: "s-1" }], "执行取消归档（endpoint 从历史行解析）");
-    assert.deepEqual(log.toasts, [], "无 toast（m6b §A6：取消归档成功路径不 notify）");
+    assert.deepEqual(log.toasts, [], "无 toast（取消归档成功路径不 notify）");
     assert.deepEqual(log.resume, [], "不续接（不被行点击抢走）");
     assert.deepEqual(log.activate, [], "不聚焦");
     // 对照组：点普通历史行（无 unarchive 钮）照旧走续接两分支
@@ -2349,7 +2349,7 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
   });
 });
 
-describe("M13 新会话按钮的首次交互动画", () => {
+describe("新会话按钮的首次交互动画", () => {
   it("第一次按下新建按钮就武装动画，不必先点历史行", () => {
     const listeners = {};
     const fn = new Function("listeners", `
@@ -2401,7 +2401,7 @@ describe("M13 新会话按钮的首次交互动画", () => {
   });
 });
 
-describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
+describe("复审必修 2：段头行观感照抄实测值", () => {
   const decls = (selector) => {
     const at = panelCss.indexOf(selector);
     assert.ok(at >= 0, `规则 ${selector} 在册`);
@@ -2410,20 +2410,20 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
 
   it("段头行：36px 高、gap 4px、radius-md、padding-left 4px", () => {
     const head = decls(".rail-term-section-head {");
-    assert.ok(/min-height:\s*36px/.test(head), "段头行高 36px（m6c §B5）");
+    assert.ok(/min-height:\s*36px/.test(head), "段头行高 36px");
     assert.ok(/gap:\s*4px/.test(head), "gap 4px");
     assert.ok(/border-radius:\s*var\(--radius-md\)/.test(head), "radius-md 12px");
     assert.ok(/padding:\s*0\s*4px/.test(head) || /padding-left:\s*4px/.test(head), "padding-left 4px");
     // 钉底纪律不回归：段头仍是滚动层外的定高块
-    assert.ok(head.includes("flex: none"), "段头 flex:none（M7-S4 钉底三层不变）");
+    assert.ok(head.includes("flex: none"), "段头 flex:none（钉底三层不变）");
   });
 
-  it("M11-A：收起态工具组贴右（搜索槽 auto 左边距）；展开态不接管", () => {
+  it("收起态工具组贴右（搜索槽 auto 左边距）；展开态不接管", () => {
     // 刷新钮砍掉后，标题 45% 封顶之外的剩余空间无 item 吸收、全堆在钮带右侧——
     // auto 左边距落在工具组首元（搜索槽）上，「搜索＋视图选项」整体贴到段头右缘，
-    // 与刷新钮在时的右缘位置一致（m6c §B5 的 45% 封顶本就按三钮带调准）。
+    // 与刷新钮在时的右缘位置一致（45% 封顶本就按三钮带调准）。
     assert.ok(/\.rail-term-section-head:not\(\.is-searching\) \.rail-term-search \{[\s\S]*?margin-left:\s*auto/.test(panelCss),
-      "收起态搜索槽 margin-left:auto＝工具组整体贴右（M11-A）");
+      "收起态搜索槽 margin-left:auto＝工具组整体贴右");
     // 展开态搜索槽 flex:1 1 auto 要吃饱：auto 边距会先于 flex-grow 吃掉剩余空间，
     // 必须被 :not(.is-searching) scop 掉——展开态布局零改动。
     const expanded = decls(".rail-term-section-head.is-searching .rail-term-search {");
@@ -2442,7 +2442,7 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
   it("图标钮 28×28；视图选项菜单 min-width 200px", () => {
     for (const sel of [".rail-term-icon-btn {", ".rail-term-search-btn {"]) {
       const rule = decls(sel);
-      assert.ok(/width:\s*28px/.test(rule) && /height:\s*28px/.test(rule), `${sel} 28×28（m6c §B5）`);
+      assert.ok(/width:\s*28px/.test(rule) && /height:\s*28px/.test(rule), `${sel} 28×28`);
     }
     const menu = decls(".rail-term-view-menu {");
     assert.ok(/min-width:\s*200px/.test(menu), "视图选项菜单 min-width 200px（dsh 实测值）");
@@ -2453,12 +2453,12 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
     assert.ok(/height:\s*28px/.test(collapsed), "收起态 28px");
     const expanded = decls(".rail-term-section-head.is-searching .rail-term-search {");
     assert.ok(/height:\s*30px/.test(expanded), "展开态 30px");
-    // 过渡列表里不许出现 height（m6c §A1：28→30 瞬时跳）
+    // 过渡列表里不许出现 height（28→30 瞬时跳）
     assert.ok(!/transition:[^;]*height/.test(collapsed), "height 不在过渡列表（瞬时跳变）");
   });
 });
 
-describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了没反应」回归）", () => {
+describe("段头接线守卫：段头两钮点击必须接通（防「点了没反应」回归）", () => {
   // 背景：主控真机曾报「视图选项点不开／搜索不展开」，本 worktree 第二实例与生产
   // 47820 双环境真实点击均复现不出（菜单 8 项在场 1.5s＋、搜索 28→175px 展开聚焦）。
   // 但「点击无反应」这类断链在结构断言里极难发现，故用 vm 跑真委托把接线钉死：
@@ -2543,7 +2543,7 @@ describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了�
     assert.equal(log.openSearch, 1, "首点＝展开");
     assert.equal(log.closeSearch, 0, "首点不收起（非 toggle）");
     listeners["searchBtn:click"]({ stopPropagation() {} });
-    assert.equal(log.closeSearch, 0, "已展开再点＝不退出（m6c §A6：非 toggle）");
+    assert.equal(log.closeSearch, 0, "已展开再点＝不退出（非 toggle）");
     assert.equal(log.focus, "searchInput", "再点＝重新聚焦输入框");
   });
 
@@ -2556,7 +2556,7 @@ describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了�
   });
 });
 
-describe("M9 复审必修：portal 后菜单项点击接线（真 DOM 守卫）", () => {
+describe("评审必修：portal 后菜单项点击接线（真 DOM 守卫）", () => {
   // 背景：D1 把菜单 portal 到 body 后，菜单项（data-rail-term-view /
   // data-rail-term-remove-group）的唯一处理入口原先只在 #railTerminalDir 作用域
   // 的点击委托里——body 不是 dir 后代，点击永远到不了委托，菜单项全死。
@@ -2761,7 +2761,7 @@ describe("M9 复审必修：portal 后菜单项点击接线（真 DOM 守卫）"
   });
 });
 
-describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
+describe("评审必修 2：视图菜单 min-width 层叠", () => {
   // 真因：.rail-term-view-menu{min-width:200px} 与 .rail-term-menu{min-width:120px}
   // 同权重（0,1,0），后书者胜——视图菜单实际算出来 120px。修法：复合选择器提权重。
   // 这里跑一个迷你层叠模拟：收集所有能命中「同时带两类的元素」的规则，按
@@ -2794,11 +2794,11 @@ describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
 
   it("层叠胜者的 min-width = 200px（不被 .rail-term-menu 的 120px 盖掉）", () => {
     const railBlock = panelCss.slice(panelCss.indexOf("/* ── 终端会话栏"), panelCss.indexOf("── 阶段 2 补"));
-    assert.equal(cascadeMinWidth(railBlock), 200, "视图菜单 min-width 计算值 200px（m6c §B2 实测值）");
+    assert.equal(cascadeMinWidth(railBlock), 200, "视图菜单 min-width 计算值 200px（实测值）");
   });
 
   it("视图选项菜单补随树滚动收场（对称组头菜单的 once-capture scroll 监听）", () => {
-    const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+    const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
     const groupOpen = src.slice(src.indexOf("function openTerminalRailGroupMenu"), src.indexOf("function toggleTerminalRailGroupMenu"));
     const viewOpen = src.slice(src.indexOf("function openTerminalRailViewMenu"), src.indexOf("function applyTerminalRailViewChoice"));
     assert.ok(groupOpen.includes('addEventListener("scroll", closeTerminalRailGroupMenu, { capture: true, once: true })'),
@@ -2808,8 +2808,8 @@ describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
   });
 });
 
-describe("M10 F1：单列表模式下「新会话」兜底行不新建真组", () => {
-  // 现象（M8 遗留）：flat 转换先于兜底注入执行，兜底行找不到 key "" 的伪组就新建
+describe("单列表模式下「新会话」兜底行不新建真组", () => {
+  // 现象（遗留）：flat 转换先于兜底注入执行，兜底行找不到 key "" 的伪组就新建
   // 一个真组——点「单列表」后平铺行之外多出一个真组头（key 如 C:\\Users\\me，
   // 内挂 live 兜底行）。修法：flat 模式下兜底行挂伪组（key ""）不新建组。
   it("flat ＋ 全新终端兜底行：无 key 非空的伪组头，兜底行挂在平铺伪组里", () => {
@@ -2849,7 +2849,7 @@ describe("M10 F1：单列表模式下「新会话」兜底行不新建真组", (
   });
 });
 
-describe("M10 F2：点「移除分组」先收场组头菜单再开弹窗", () => {
+describe("点「移除分组」先收场组头菜单再开弹窗", () => {
   // 现象：菜单 z-index 1200 高于弹窗 overlay 300，菜单滞留 DOM 到下一次外点，
   // 窄窗/靠中组头下可能压住弹窗。修法：开弹窗前先 closeTerminalRailGroupMenu()。
   it("terminalRailRemoveGroup：先收场菜单，后开弹窗（调用有序）", () => {
@@ -2867,7 +2867,7 @@ describe("M10 F2：点「移除分组」先收场组头菜单再开弹窗", () =
   });
 });
 
-describe("M12-A 内切判定矩阵（vm 真跑）", () => {
+describe("内切判定矩阵（vm 真跑）", () => {
   // 点栏内历史会话、去重未命中后：对当前活跃视口显示的终端 A 做判定。视口是唯一能换
   // 内容的槽——空白壳/idle/exited 就地换（同页签）；working、switch_busy 与补读失败
   // 都属「旧终端可能在跑」，走保活分支：旧终端留后台不杀，目标终端挂进当前视口，页签
@@ -2969,7 +2969,7 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     await flush();
     assert.equal(log.creates.length, 1, "只建目标终端");
     assert.deepEqual(log.creates[0], { agentId: "kimi", cwd: "C:\\dev\\alpha", resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" } },
-      "目标终端就是既有的续接新建（M3 契约原样）");
+      "目标终端就是既有的续接新建（续接契约原样）");
     assert.deepEqual(log.placements[0], { placement: "viewport", keepPrevious: true },
       "落点是当前视口 + 旧终端强制保活：页签数不变，在跑任务不被树杀");
     assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "不发内切（/switch 会 terminate 旧进程树）");
@@ -3059,7 +3059,7 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     await flush();
     assert.equal(log.creates.length, 1, "建目标终端（保护在跑命令）");
     assert.deepEqual(log.creates[0], { agentId: "kimi", cwd: "C:\\dev\\alpha", resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" } },
-      "目标终端带目标会话续接身份（M3 契约原样）");
+      "目标终端带目标会话续接身份（续接契约原样）");
     assert.deepEqual(log.placements[0], { placement: "viewport", keepPrevious: true },
       "旧终端强制保活：服务端刚证明它有活进程，绝不能回头当空闲杀");
     assert.equal(log.toasts.length, 0, "不提示（目标已换上，没有需要用户处理的失败）");
@@ -3087,7 +3087,7 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     }
   });
 
-  it("乐观选中（M5）：内切失败即撤 pending；switch_busy 转新开不清（点击仍在兑现途中）", async () => {
+  it("乐观选中：内切失败即撤 pending；switch_busy 转新开不清（点击仍在兑现途中）", async () => {
     // 失败清点：宿主判死 → 撤高亮（点亮的行没换成，继续说它选中就是说谎）。
     const failed = runSwitch({
       sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
@@ -3178,7 +3178,7 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
   });
 });
 
-// runSwitch 提升为顶层工具：M12-A 判定矩阵与全新内切乐观选中两族共用
+// runSwitch 提升为顶层工具：判定矩阵与全新内切乐观选中两族共用
 const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl, realEnrich = false }) => {
   const log = { gets: [], switchBodies: [], creates: [], placements: [], toasts: [], renders: 0 };
   const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", "realEnrich", `      let terminalBackendReady = true;
@@ -3297,7 +3297,7 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
   return { fn, log };
 };
 
-// 判定矩阵夹具（M12-A 判定矩阵与全新内切乐观选中两族共用）
+// 判定矩阵夹具（判定矩阵与全新内切乐观选中两族共用）
 const HISTORY_ROW = {
   endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
   file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
@@ -3432,9 +3432,9 @@ describe("进程树忙判据（agent.busy）进 working 口径与内切判定门
 // 推导、去重聚焦都以此为准。
 const SWITCH_FRESH_OK = { id: "t-a", status: "running", pid: 99, label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: null };
 
-describe("全新内切乐观选中（M5 补口：组头 ⊕ / 新建会话无历史身份可先亮）", () => {
+describe("全新内切乐观选中（补口：组头 ⊕ / 新建会话无历史身份可先亮）", () => {
   // 症状：超实例页签内点「新建会话」/组头 ⊕，高亮在旧会话行上多留约半秒。
-  // M5 的 pending 只认历史行身份（endpoint＋会话 id），全新内切既无 resume、
+  // pending 只认历史行身份（endpoint＋会话 id），全新内切既无 resume、
   // 活跃终端 id 又不变（同记录换内容），成功前没有任何通道能把高亮挪到新行——
   // 只能等 POST /switch 返回、spawnedAt 刷新后兜底行「新会话」才出现并被点亮。
   // 补口：判定门确定要内切后、POST 之前武装一枚按**终端 id**认行的 pending，
@@ -3495,7 +3495,7 @@ describe("全新内切乐观选中（M5 补口：组头 ⊕ / 新建会话无历
     assert.equal(failed.fn.pending(), null, "内切失败即撤");
     assert.equal(failed.log.toasts.length, 1, "照旧提示一次");
 
-    // 续接内切的 switch_busy 不清（M5 原口径：新开仍是这次点击的兑现，新页签会
+    // 续接内切的 switch_busy 不清（原口径：新开仍是这次点击的兑现，新页签会
     // 亮）；全新内切不同——兜底行提前出现锚在**本页签**上，转新开后本页签没换
     // 内容，留着就是点亮一个没发生的内切。
     const busy = runSwitch({
@@ -3542,11 +3542,11 @@ describe("全新内切乐观选中（M5 补口：组头 ⊕ / 新建会话无历
 });
 
 
-// ── M13 归档/撤销动效（FLIP）＋toast 动效与去向引导钮（dsh 对齐） ──
+// ── 归档/撤销动效（FLIP）＋toast 动效与去向引导钮（dsh 对齐） ──
 // 用户拍板方案：归档不再瞬时消失——被归档行克隆进覆盖层 100ms 淡出、下方行 200ms
 // 上移、隐藏池回填行 100ms 淡入；撤销是镜像；toast 入场 -6px/160ms、驻留 6s 后
 // 1s 淡出、动作点击瞬时收场；引导钮只在「隐藏已归档」筛选下出现（文案逐字批准）。
-describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
+describe("归档/撤销动效（FLIP）＋toast 引导钮", () => {
   // 6 条会话、水位线 5（TERMINAL_RAIL_WATERMARK）：归档 s-1 → s-6 回填进可见段；
   // 撤销 s-1 → s-6 再让位回隐藏池。行高 30px、首行视口 top 100、滚动层 top 50、
   // scrollTop 12——幽灵绝对位＝100−50＋12＝62px。
@@ -3905,7 +3905,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
 
   describe("文案纪律（冻结条款）", () => {
     it("唯一新增文案＝「筛选已归档会话」；既有文案原样", () => {
-      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const body = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.equal((body.match(/筛选已归档会话/g) || []).length, 1, "新文案恰好一处（toast 引导钮 label）");
       for (const copy of ["会话已归档。", "撤销", "归档会话", "取消归档", "归档未能保存，请重试", "取消归档未能保存，请重试"]) {
         assert.ok(body.includes(copy), `既有文案「${copy}」原样在册`);
@@ -4082,10 +4082,10 @@ describe("全新内切成功即收武装", () => {
   });
 });
 
-// ── M12 视口化验收（页签＝视口）────────────────────────────────────────
+// ── 视口化验收（页签＝视口）────────────────────────────────────────
 // 把真函数串起来跑：宿主快照同步（rebuild → sync）＋内切判定门＋左栏聚焦＋关页签＋
-// 关停清场。断言对应方案第二节验收清单 A1/A2/A3/A4/A5/A8/A9/A11。
-describe("M12 视口化验收（页签＝视口）", () => {
+// 关停清场。断言对应验收清单的既定条目。
+describe("视口化验收（页签＝视口）", () => {
   const AGENT_IDLE = { agents: [{ id: "kimi", instances: [] }] };
   const agentsWorking = (instanceId) => ({ agents: [{ id: "kimi", instances: [{ id: instanceId, activeRequests: 1 }] }] });
   const HISTORY = {
@@ -4381,13 +4381,13 @@ describe("M12 视口化验收（页签＝视口）", () => {
   });
 });
 
-// ── M12-A4 补验：宿主绑定库身份（boundConversation）──────────────────────
+// ── 补验：宿主绑定库身份（boundConversation）──────────────────────
 // A4 缺口：后台保活的那条终端若是「全新会话」终端，它在宿主记录里没有 resume（它不是
 // 续接起的），真实对话身份只在宿主绑定库里（panel.mjs 随列表下发 boundConversation）。
 // 前端不认这个身份时：左栏真行不亮 live（点它按 resume 再起一条同对话进程，同一个对话
 // 被两个进程同时写），而且这条终端还会再冒一条假「新会话」兜底行压在真行之上。这一组
 // 把三处消费者（字段透传 / 打开中终端查找 / 兜底行推导）按真函数串起来跑。
-describe("M12-A4 绑定库身份（boundConversation）", () => {
+describe("绑定库身份（boundConversation）", () => {
   // 字段级沙盒：terminalBackendSession 只碰 terminalDefaultCwd 这一个模块级量。
   const backendSessionSandbox = () => new Function(`
     let terminalDefaultCwd = "";

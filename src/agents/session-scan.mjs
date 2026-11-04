@@ -4,7 +4,7 @@
 // Node): it holds nothing between calls and every call re-reads the agents'
 // files.
 //
-// 扫描执行位置（2026-10-26 起，M1「扫描离线程」）：这些 adapter 体内全是同步 fs
+// 扫描执行位置（2026-10-26 起，「扫描离线程」）：这些 adapter 体内全是同步 fs
 // （readdirSync/statSync/readFileSync/readSync），async 外壳下没有任何 await 点，
 // 所以「在哪个线程调用」就是「哪个事件循环被按住」。修前面板进程（47820）直接
 // 调用它，2927 条会话实测 2.7–8.0s，期间终端字节流、SSE 握手、1s 轮询全部停摆。
@@ -101,7 +101,7 @@ const SUMMARY_MAX_CHARS = 160;
 // entry) — never an Anyswitch-managed takeover shim, which exists only on
 // machines that hand-installed one. The one exception is workbuddy: its CLI
 // lives inside the app's app.asar.unpacked and has no PATH entry of its own,
-// so `workbuddy` IS this round's shim command (workbuddy-integration-plan §1.5),
+// so `workbuddy` IS this round's shim command,
 // installed by the same shim-manager pass as the other endpoints. dsh carries
 // its profile flag because bare `dsh` refuses to boot without one and the
 // copied command must run as-is.
@@ -1756,7 +1756,7 @@ function createGrokAdapter(roots) {
 
 // ---------------------------------------------------------------------------
 // workbuddy — ~/.workbuddy/projects/<cwd-slug>/<sessionId>.jsonl（2026-10-31
-// 本机实测，见 workbuddy-integration-plan.md §1.5 / §3.5）。cwd-slug 是项目
+// 本机实测）。cwd-slug 是项目
 // 路径小写、`\`→`-`（`C:\Users\me\proj` → `c-users-me-proj`）；同名目录
 // <sessionId>/ 只放 subagents/ 与 tool-results/，是会话的旁挂数据，不是会话
 // 本身，因此扫描只认 <project>/<sessionId>.jsonl 这一层。

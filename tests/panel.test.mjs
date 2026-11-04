@@ -92,7 +92,7 @@ const sliceBetween = (src, startAnchor, endAnchor) => {
   assert.ok(start >= 0 && end > start, `切片锚在册且有序：${startAnchor} → ${endAnchor}`);
   return src.slice(start, end);
 };
-// ── M12 视口表（页签＝视口）的 vm 沙盒前置 ──
+// ── 视口表（页签＝视口）的 vm 沙盒前置 ──
 // 单测按函数名切源码进 new Function，模块级符号不会跟着来。视口纯函数用生产实现，
 // 这里只补状态量与存档键；外部依赖（api / terminalSessionFor / renderer…）各沙盒自备。
 const panelFnSrc = extractFn;
@@ -4212,7 +4212,7 @@ describe("panel.html 设置全页视图", () => {
   it("活动标签按存档回读：存档在册优先，认不到才回落第一个并改写存档", () => {
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
       "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak", "pruneTerminalDoneState"].map(extractFn).join("\n");
-    // M12 视口化：会话表重建后由宿主快照同步视口表，恢复语义（存档在册优先）也搬到
+    // 视口化：会话表重建后由宿主快照同步视口表，恢复语义（存档在册优先）也搬到
     // terminalViewportSyncFromHost。沙盒补视口的模块级符号（纯函数用生产实现）。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
       let activeTerminalPreviewId = initialId;
@@ -7242,7 +7242,7 @@ describe("新版 UI 阶段 3：统计页平铺（描边盒 + 表格纪律 + 四�
       "v1 日志页固定高 96 原样");
   });
 
-  it("POLISH02 回归：statsTrendChartHeight 必须是外层作用域声明（嵌套进渲染器则调用处 ReferenceError、趋势图整图空白）", () => {
+  it("回归：statsTrendChartHeight 必须是外层作用域声明（嵌套进渲染器则调用处 ReferenceError、趋势图整图空白）", () => {
     // 批次 1 事故实录：该函数被写成 renderStatsLineChart 体内的嵌套声明，而调用点
     // height: statsTrendChartHeight(chartEl) 在 renderStatsTrend——外层作用域没有
     // 这个名字，每次渲染入口即抛 ReferenceError，容器清空后整图空白（连坐标轴都不出）。
@@ -8217,12 +8217,12 @@ describe("panel.html 删除渠道/号池携路由链剪除", () => {
     const clause = new Function(`return function poolRollbackClause(createdCount, failedRollbacks) {${m[1]}\n  }`)();
     assert.equal(clause(3, []), "已回滚 3 个已建渠道");
     assert.equal(
-      clause(2, ["a6api-03"]),
-      "已回滚 1 个已建渠道，1 个删除失败：a6api-03，请到渠道列表手动删除",
+      clause(2, ["demo-03"]),
+      "已回滚 1 个已建渠道，1 个删除失败：demo-03，请到渠道列表手动删除",
     );
     assert.equal(
-      clause(3, ["a6api-03", "a6api-04"]),
-      "已回滚 1 个已建渠道，2 个删除失败：a6api-03、a6api-04，请到渠道列表手动删除",
+      clause(3, ["demo-03", "demo-04"]),
+      "已回滚 1 个已建渠道，2 个删除失败：demo-03、demo-04，请到渠道列表手动删除",
     );
   });
 
@@ -8285,7 +8285,7 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
     assert.ok(toastRule, "基座 .toast 规则存在");
     assert.ok(toastRule[0].includes("top: 68px"), "固定在 56px 顶栏下方 12px");
     assert.ok(!toastRule[0].includes("bottom:"), "底部定位已移除");
-    assert.ok(toastRule[0].includes("translateY(-6px)"), "入场自上方滑下（M13 对齐 dsh 批准规格 -6px/160ms）");
+    assert.ok(toastRule[0].includes("translateY(-6px)"), "入场自上方滑下（对齐 dsh 批准规格 -6px/160ms）");
   });
 
   it("终态远离通报：置「等切回」标记、停淡出计时、弹带链接的 8s toast", () => {
@@ -8774,7 +8774,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
-  // 回归钉（M2-T2）：⊕ 与点历史行走的共用判定门用 `GET /api/terminal/sessions/:id`
+  // 回归钉：⊕ 与点历史行走的共用判定门用 `GET /api/terminal/sessions/:id`
   // 只读 id 与 status，而宿主那条单读会把全量回放窗一起送（实测 0.58–0.61MB）。
   // 面板代理层剥掉它——与列表路由同一口径。
   //
@@ -8828,7 +8828,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(json().error, "not_found");
   });
 
-  // 回归钉（M2-T3，评审必修）：`/stream` 是 SSE，绝不能落到剥壳的单读处理器上——
+  // 回归钉（评审必修）：`/stream` 是 SSE，绝不能落到剥壳的单读处理器上——
   // 那会把整条事件流当 JSON 解析/改写（回放全没）。把路由条件放宽成「所有 GET 都
   // 剥壳」时这条必红：单读处理器被调用、content-type 变成 application/json。
   it("SSE 子路（/stream）仍直通代理：不剥壳、content-type 是 event-stream、首帧是快照", async () => {
@@ -9279,7 +9279,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(renderBody.includes("connectTerminalStream(session, { revive });"), "SSE 只在结构层重连，且把复活口径透传下去");
     assert.ok(!panelJs.includes("预览至少保留一个终端标签"), "「至少保留一个终端标签」预览遗规已移除");
     assert.ok(!panelJs.includes("ids.length <= 1"), "关闭守卫不再按数量拦截");
-    // M12 视口化：「还有没有页签」的判据从会话数换成视口数——后台保活会话仍在宿主
+    // 视口化：「还有没有页签」的判据从会话数换成视口数——后台保活会话仍在宿主
     // 会话表里，拿会话数判空会让关掉最后一个页签后留在「有页签」的假态。
     // 取样限定在关页签的语义函数里（pollTerminalSessions 也有同款判据，取第一个会取错）。
     const tabsWire = panelJs.match(/tabs\.addEventListener\("click"[\s\S]*?\n    \}\);/)?.[0];
@@ -12910,7 +12910,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     const init = extractFn("initTerminalPreview");
     const closeAt = init.indexOf('event.target.closest(".terminal-tab-close")');
     assert.ok(closeAt > 0, "关标签分支可取样");
-    // M12 视口化：关页签＝结束该视口显示的终端再销毁视口，结束动作收敛在
+    // 视口化：关页签＝结束该视口显示的终端再销毁视口，结束动作收敛在
     // terminalCloseViewportTab / terminalCloseTerminal 里（页签 × 与左栏 live 行 ×
     // 共用，一处清计数）。
     const closeCall = "terminalCloseViewportTab(viewportId)";
@@ -13040,7 +13040,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     };
     const tabsApi = new Function("$", "escapeHtml", "sessions", `
       let activeTerminalPreviewId = "t1";
-      // M12：页签渲染源＝视口表（tab 键＝视口 id，当前终端另挂 data-terminal-terminal）
+      // 页签渲染源＝视口表（tab 键＝视口 id，当前终端另挂 data-terminal-terminal）
       let terminalViewports = [{ id: "viewport-1", terminalId: "t1" }];
       let terminalViewportActiveId = "viewport-1";
       let terminalTabsRenderedHtml = "";
@@ -13136,7 +13136,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     };
     const api = new Function("$", "escapeHtml", "sessions", `
       let activeTerminalPreviewId = "t1";
-      // M12：一视口一页签；tab 键是视口 id，当前终端挂在 data-terminal-terminal 上。
+      // 一视口一页签；tab 键是视口 id，当前终端挂在 data-terminal-terminal 上。
       let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
       let terminalViewportActiveId = "viewport-1";
       let terminalTabsRenderedHtml = "";
@@ -13346,7 +13346,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     const now = 1_000_000;
     const busy = (backendState) => vmFn("terminalBusyByOutput", [{ backendState }, 5000, now]);
     // 面 1：出生零输出不忙——宿主不再播种 lastActiveAt，刚打开的空会话不转圈、
-    // M12 内切门按 idle 就地换内容（不再保护性新开）。
+    // 内切门按 idle 就地换内容（不再保护性新开）。
     assert.equal(await busy({ status: "running", createdAt: now - 1000, spawnedAt: now - 1000 }), false,
       "出生零输出不忙（快照没有 lastActiveAt）");
     // 面 2：近 2s 有键入则输出不判忙（PTY 回显归因用户交互）；静默超 2s 后的
@@ -14018,7 +14018,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const terminalBackendReady = true;
       let terminalPollInFlight = false;
       const terminalBackendSessions = {};
-      // M12：页签＝视口。零视口才落空态（后台保活会话不算页签）。
+      // 页签＝视口。零视口才落空态（后台保活会话不算页签）。
       let terminalViewports = [];
       async function api() { state.data += 1; return { sessions: [] }; }
       function rebuildTerminalBackendSessions() {}
@@ -14718,7 +14718,7 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
     assert.equal(kimiScans, 1, "同一未绑定会话在防抖窗内只扫一拍");
   });
 
-  // 回归钉（M1）：列表路由里的绑定捕获扫描不许占住面板的事件循环。S1 取证实测
+  // 回归钉：列表路由里的绑定捕获扫描不许占住面板的事件循环。取证实测
   // 修前 dsh 全盘扫描 2.7–4.3s，期间 setTimeout(1) 链一次都没触发、并发的
   // /input 从 25ms 变 4325ms——用户主观就是「点完组头 ⊕ 打字要等 5 秒」。
   // 装置三件（评审 F5 加严）：
@@ -14822,9 +14822,9 @@ parentPort.on("message", (message) => {
     assert.ok(!existsSync(fallbackMarker), "扫描没走 worker 而是走了进程内兜底——这一拍其实仍在占事件循环");
   });
 
-  // 回归钉（M1）：判不出要退避，不能每 5s 重扫一遍全盘。刚内切/新开的会话在
+  // 回归钉：判不出要退避，不能每 5s 重扫一遍全盘。刚内切/新开的会话在
   // agent 写出第一条存档前，扫描必然判不出——修前是「判不出就 5s 后再扫」，
-  // 于是用户打字的那段时间里，面板每 5s 被按住 1.5–4.6s（S1 §3.2⑦）。
+  // 于是用户打字的那段时间里，面板每 5s 被按住 1.5–4.6s（早先实测）。
   it("判不出后按退避窗等，不再每拍重扫（回归钉）", async () => {
     const root = mkTestDir("anyswitch-capture-backoff-root-");
     const cwd = mkTestDir("anyswitch-capture-backoff-cwd-");
@@ -14854,7 +14854,7 @@ parentPort.on("message", (message) => {
     assert.equal(scans, 1, `判不出后仍在重扫（扫了 ${scans} 次）——这就是每 5s 卡一次的开关`);
   });
 
-  // 回归钉（M1，评审 F4）：退避必须是**有界**退避，不能退化成「永不再试」。
+  // 回归钉（评审 F4）：退避必须是**有界**退避，不能退化成「永不再试」。
   // 没有这条钉时，把 bindingCaptureMissMaxMs 改成 Infinity（判不出＝永久放弃
   // 绑定）三套测试全绿——「新开的会话会不会永远绑不上」正好落在那个盲区里。
   // 这里把退避压到几十毫秒，先让扫描判不出、再让它能判出，断言退避窗过后确实
@@ -14903,7 +14903,7 @@ parentPort.on("message", (message) => {
     assert.equal(bindings?.["t-heal"]?.conversationId, "conv-heal", "自愈重扫后绑定必须写上");
   });
 
-  // 回归钉（M1，评审 F4 第二半）：退避不仅要会重试，还得**有上限**。只断言
+  // 回归钉（评审 F4 第二半）：退避不仅要会重试，还得**有上限**。只断言
   // 「重试过一次」的话，把上限拆掉（`Math.min(…)` 变成无界翻倍）仍然会绿——
   // 而生产上 base 是 10s，无界翻倍几次就等于「这个进程里再也不试了」。
   // 这里用 20ms 起步 / 40ms 封顶，在 500ms 窗口里数「判不出的重扫次数」：
@@ -14940,7 +14940,7 @@ parentPort.on("message", (message) => {
     assert.ok(scans >= 8, `500ms 内只重扫了 ${scans} 次——退避没有封顶（无界翻倍约 5 拍）`);
   });
 
-  // 回归钉（M1，评审 F3）：内切＝同一终端 id 换新对话，上一代累计的退避必须
+  // 回归钉（评审 F3）：内切＝同一终端 id 换新对话，上一代累计的退避必须
   // 一起清掉。否则新对话要等旧代攒到的 40–60s 退避走完才尝试第一次捕获
   // （修前是 5s），正好是 S1 的现场。
   it("内切（resume 为空）清掉该会话的退避与防抖，新对话立刻可再捕获", async () => {
@@ -15068,7 +15068,7 @@ describe("内切杀前复核（switch-guard 双探）", () => {
     assert.equal(restarts, 1, "空闲会话照常内切");
   });
 
-  // 评审钉（M2-T3，安全方向）：首探没跑成（null：超时/枚举不可信）一律拒换，不许被
+  // 评审钉（安全方向）：首探没跑成（null：超时/枚举不可信）一律拒换，不许被
   // 复探的「干净」观察救回来。修前这里会放行——一次没看完的枚举不该由后一次兜底。
   it("首探超时（null）→ 409 fail-safe：复探的「干净」不得把它救回来", async () => {
     let restarts = 0;
@@ -15205,7 +15205,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let terminalAddMenuAgentsAt = 0;
       let terminalAddMenuSelection = "";
       let terminalBooting = null;
-      // M12 落点：createAgentTerminal / 空白终端都经 terminalViewportPlaceTerminal 决定
+      // 落点：createAgentTerminal / 空白终端都经 terminalViewportPlaceTerminal 决定
       // 页签数（「+」＝新视口）。沙盒补视口状态与纯函数，旧终端处置打桩（这里不走重挂）。
       ${viewportPrelude(["terminalViewportNextId", "terminalViewportCreate", "terminalViewportAttach", "terminalViewportPlaceTerminal", "saveTerminalViewports"])}
       function terminalViewportRetire() { return false; }
@@ -15460,7 +15460,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
       const fn = new Function("$", "escapeHtml", "sessions", `
-        // M12：页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
+        // 页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
         let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
         let terminalViewportActiveId = "viewport-1";
         let terminalTabsRenderedHtml = "";
@@ -15523,7 +15523,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     globalThis.document = docStub;
     try {
       new Function("$", "escapeHtml", "sessions", `
-        // M12：页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
+        // 页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
         let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
         let terminalViewportActiveId = "viewport-1";
         let terminalTabsRenderedHtml = "";
@@ -15550,7 +15550,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
       new Function("$", "escapeHtml", "sessions", `
-        // M12：页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
+        // 页签渲染源＝视口表；这里按会话表同序摆一份视口桩（一视口一终端）。
         let terminalViewports = Object.keys(sessions).map((id, index) => ({ id: "viewport-" + (index + 1), terminalId: id }));
         let terminalViewportActiveId = "viewport-1";
         let terminalTabsRenderedHtml = "";

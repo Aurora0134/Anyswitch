@@ -82,7 +82,7 @@ function mockSessionScan({ scanResult, scanError, messagesResult, deleteResult }
 }
 
 describe("panel router sessions routes", () => {
-  // 回归钉（M1）：不注入 sessionScanService 时，列表扫描必须走扫描承载（worker
+  // 回归钉：不注入 sessionScanService 时，列表扫描必须走扫描承载（worker
   // 线程），绝不许在面板进程里直接跑 session-scan 的同步 fs 扫描。修前这条路径
   // 就是 `scanAll: sessionScanAll`——一次 8s 的同步块，整个面板停摆。
   // 活性探针跑满扫描全程（worker 忙等 400ms）：慢机/粗定时器只会让拍距变宽、
@@ -128,7 +128,7 @@ parentPort.on("message", (message) => {
     assert.ok(worstGap < 150, `扫描期间事件循环空档 ${worstGap}ms`);
   });
 
-  // 回归钉（M1）：列表路由的扫描是「短 TTL + 在飞去重 + 先返回上次结果」。
+  // 回归钉：列表路由的扫描是「短 TTL + 在飞去重 + 先返回上次结果」。
   // 修前每次 GET 都整盘重扫（S2 实测 2927 条会话 2.7–8.0s / 1.6MB），用户
   // 每进一次终端页就堵一次事件循环；修后同一 TTL 窗口内只扫一拍。
   it("TTL 窗口内重复 GET 只扫一拍（在飞去重）", async () => {
@@ -144,7 +144,7 @@ parentPort.on("message", (message) => {
     assert.equal(svc.calls.scanAll, 1, "TTL 窗口内三次列表请求只该触发一次扫描");
   });
 
-  // 回归钉（M1，评审 F2）：会话管理 tab 的刷新按钮不许变成假动作。TTL 内
+  // 回归钉（评审 F2）：会话管理 tab 的刷新按钮不许变成假动作。TTL 内
   // 普通 GET 拿旧快照是对的，但用户显式点刷新（?refresh=1）必须等一次真扫描
   // 再回新值——否则前端照旧 toast「已刷新」，屏幕上还是旧列表。
   it("?refresh=1 命中 TTL 也等真扫描并返回新值（刷新按钮的逃生口）", async () => {
@@ -230,7 +230,7 @@ parentPort.on("message", (message) => {
     assert.equal(svc.calls.scanAll, 1, "预热落地的快照直接服务首个请求，不再冷扫");
   });
 
-  // 回归钉（M1，评审 F9）：删除与在飞刷新有竞态——删掉一行的同时后台刷新正
+  // 回归钉（评审 F9）：删除与在飞刷新有竞态——删掉一行的同时后台刷新正
   // 在飞，那份结果是「删之前」的盘面，落地时会把刚删的行写回快照，最长留一个
   // TTL。用户看到的是「删了又回来」。删除代际：dropRows 时 +1，刷新落地时代际
   // 不符就整份丢弃。

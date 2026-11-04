@@ -22,7 +22,7 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // a request whose owner cannot be resolved stays on the aggregate bucket, and
 // the card falls back to the process scan for liveness (unchanged behavior).
 // WorkBuddy 与 kimi/pi/dsh 同一处境：GUI 双击启动不经过我们的 launcher，
-// 命令行也不注实例头（plan §1.3：身份走 URL 段前缀），所以连接属主进程是
+// 命令行也不注实例头（身份走 URL 段前缀），所以连接属主进程是
 // 唯一的实例身份。行 id 形如 workbuddy-<pid>，与进程扫描的占位行同键。
 const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "qoder", "claude", "workbuddy"]);
 

@@ -600,7 +600,7 @@ const AGENT_IMAGE_BUCKETS = [
   ["grok.exe", "grok"],
   // Kimi Code 的官方桌面端是原生 Electron 包：镜像名 `Kimi Code.exe`，命令行里
   // 没有任何 `kimi-code` 安装路径特征，下面 node.exe 分支的那套路径谓词永远匹配
-  // 不到它（步 1 of kimi-desktop-integration-plan.md §3：桌面端在进程面全盲）。
+  // 不到它（桌面端在进程面全盲）。
   ["kimi code.exe", "kimi"],
   // WorkBuddy 桌面端同样是 Electron 包，且一个实例起九个同镜像进程（主进程 /
   // --type= 辅助 / daemon / sidecar / agent 运行时，真机 2026-10-31 取证）。
@@ -680,12 +680,12 @@ function resolveProbeRow(lower) {
 }
 
 // ---------------------------------------------------------------------------
-// DSH surface classification (步 1 of bridge/anyswitch/dsh-tui-integration-plan.md).
+// DSH surface classification.
 //
 // One community-TUI launch in npm form is THREE node.exe rows: the global
 // launcher, the profile-copy launcher it delegates to, and the real
 // `dsh --profile dsh-tui` process it spawns (replayed against the shipped
-// bin/dsh-tui.js + the npm dsh.cmd shim — see the plan's §2/§3). All three
+// bin/dsh-tui.js + the npm dsh.cmd shim). All three
 // used to land in the DSH count because the loose `bin\dsh` matcher is a
 // prefix of `bin\dsh-tui.js`, so the card read 3 processes per terminal. Only
 // the last one is a session: the two shells are stdio-inherit stubs that live
@@ -723,8 +723,7 @@ const DSH_PROFILE_NAME_RE = /^[^"'\\\s/]{1,40}$/;
 // ---------------------------------------------------------------------------
 // DSH Desktop (the official Electron package, 0.2). Same endpoint, third
 // interface — the "one product, several interfaces" shape kimi already has,
-// so nothing here introduces an endpoint of its own (dsh-tui-integration-plan
-// §8, still binding).
+// so nothing here introduces an endpoint of its own (standing design decision).
 //
 // It is invisible on the process plane for a reason worth writing down: the
 // app does not boot the harness as a script we can recognize. `DeepSeek
@@ -868,7 +867,7 @@ function foldDshDelegatingHosts(counts) {
 }
 
 // ---------------------------------------------------------------------------
-// Kimi Code 的分面（步 1/2 of bridge/anyswitch/kimi-desktop-integration-plan.md）。
+// Kimi Code 的分面。
 //
 // 一个 kimi 端点 id、一份 ~/.kimi-code 家目录之上有三个界面：终端客户端
 // （`kimi`）、`kimi web`（在终端里前台起的 server，浏览器只是它的观看端）、
@@ -1029,7 +1028,7 @@ export function summarizeKimiSurfaces(procCounts) {
 }
 
 // ---------------------------------------------------------------------------
-// WorkBuddy 的分面（plan §1.4 / research §4）。
+// WorkBuddy 的分面。
 //
 // 一个桌面实例起九个 `WorkBuddy.exe`：主进程（GUI 宿主，命令行无 `--type=`、
 // 无 CLI 入口）、四个 `--type=` 辅助子进程、daemon（`daemon-app-server-entry.js`）、
@@ -1678,7 +1677,7 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
         if (pid) result.grokPids.add(pid);
       }
     } else if (bucket === "workbuddy") {
-      // 同名九进程（真机 2026-10-31 取证，plan §1.4）：主进程是 GUI 宿主，
+      // 同名九进程（真机 2026-10-31 取证）：主进程是 GUI 宿主，
       // --type= 四个辅助、daemon、sidecar 都只是家族成员；只有 agent 运行时
       // （命令行含 cli\bin\codebuddy、且无 --type=）算会话。镜像名只决定进桶，
       // 计数必须过命令行谓词——否则一个客户端报九次。裸 --version 是环境检测
@@ -4064,7 +4063,7 @@ export function createAgentMetricsCollector(options = {}) {
     return false;
   }
 
-  // WorkBuddy 的身份主通道是 URL 段前缀（plan §1.3），relay 侧会把段解析成
+  // WorkBuddy 的身份主通道是 URL 段前缀，relay 侧会把段解析成
   // agentId "workbuddy"；UA 只是兜底——CLI 发自定义模型请求前会显式删掉
   // user-agent，所以这条通道不可依赖，但未走配置的探针/旧版本可能还会带。
   function isWorkbuddyRequest(meta = {}) {
@@ -5735,7 +5734,7 @@ export function createAgentMetricsCollector(options = {}) {
     // 5. Kimi Code Agent Status
     // 卡内分面汇总（"Desktop ×1 · TUI ×1"）：与 DSH 同一形状、不同来源——kimi 的
     // 面读自镜像名与它自己的 server 登记表（口径见 summarizeKimiSurfaces 上方），
-    // 请求面上三个面共用同一条 kimi 归属、本期不承担分面（计划 §8）。
+    // 请求面上三个面共用同一条 kimi 归属、本期不承担分面。
     const kimiAgent = {
       ...buildAggregateAgentStatus({
         id: "kimi",

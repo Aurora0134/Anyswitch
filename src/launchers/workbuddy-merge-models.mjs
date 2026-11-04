@@ -7,7 +7,7 @@
 //   - JSON 没有注释锚点，也没有托管块。清理靠「url 签名」：凡 url 命中
 //     /openai/workbuddy~ 的条目即我方托管项，整类剔除后按当前 store 重建；
 //     用户自己的模型条目与未知顶层键原样保留。
-//   - 两种读法并存（workbuddy-integration-research.md §2.3）：GUI 同时接受顶层
+//   - 两种读法并存：GUI 同时接受顶层
 //     数组与对象，CLI 的 parseModelsJson 只认对象 {models, availableModels}，传
 //     数组直接得到空表且不报错。**写入形状固定为对象**，读入时数组兼容归一。
 //   - 更要紧的是：GUI 的模型设置一保存就把整份文件归一成顶层数组，CLI 那边随即
@@ -103,7 +103,7 @@ export function workbuddyModelId(channelId, modelId) {
   return packChannelModelSlug(channelId, modelId);
 }
 
-// 条目模板逐字固定（plan §1.2）：字段顺序也是模板的一部分，别顺手重排。
+// 条目模板逐字固定：字段顺序也是模板的一部分，别顺手重排。
 export function buildWorkbuddyModelEntry(providerId, provider, modelId, model, port, token) {
   const segment = provider?.baseUrlSegment ?? providerId;
   const url = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(WORKBUDDY_AGENT_ID, segment)}/v1/chat/completions`;
@@ -316,7 +316,7 @@ function readModelsSnapshot(filePath, io) {
 
 // 高层写入：读既有 models.json → 剔除托管项并按当前 store 重建 → CAS 原子写 + 备份。
 // 返回 {ok, unchanged?, backupPath?, reason?, skipped?}。坏 JSON 走 fail-closed：
-// 报告原因，绝不覆盖（plan §1.2）。
+// 报告原因，绝不覆盖。
 // 读—改—写之间有并发窗口：写冲突（读入后的原文已被改动）就重读重合并一次，仍
 // 冲突则返回失败，不拿旧快照盖掉别人刚写进去的内容。
 export function writeWorkbuddyModels(

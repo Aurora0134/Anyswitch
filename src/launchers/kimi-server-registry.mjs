@@ -1,5 +1,4 @@
-// Kimi Code 的 server 实例注册表读取（步 1 of
-// bridge/anyswitch/kimi-desktop-integration-plan.md）。
+// Kimi Code 的 server 实例注册表读取。
 //
 // 背景：Kimi Code 的每一个「带 server 的界面」启动时都会在自己家目录的
 // server/instances/ 下登记一条 <server_id>.json（字段 server_id / pid / host /
@@ -12,7 +11,7 @@
 // 「客户端自己写好的结构化实例清单」——DSH 三个面只能靠命令行 `--profile`
 // 正则与 netstat 反查，Kimi 不需要。
 //
-// 口径（与计划 §7 步 1 同源，越出这条就不是本模块的职责）：
+// 口径（与既有口径同源，越出这条就不是本模块的职责）：
 // - **注册表只用来分面，不用来判活。** 判活正源永远是进程扫描：这里返回的 pid
 //   由调用方与扫描结果取交集，扫描里没有的记录一律不产生任何效果。一条残档
 //   既不能撑出一行实例，也不能把卡片点亮。

@@ -334,7 +334,7 @@ test("anthropic path retries once without the field when the channel refuses it"
   assert.equal("reasoning_effort" in sent[1], false);
 });
 
-// ---------- 图片降级（M13：纯文本模型预判 + 报错兜底） ----------
+// ---------- 图片降级（纯文本模型预判 + 报错兜底） ----------
 
 const EMPTY_EFFORT_CATALOG = { models: new Map() };
 

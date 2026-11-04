@@ -36,7 +36,7 @@
 
   // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick }（单钮）或
   // opts.actions = [{ label, onClick }, …]（多钮）在文案后追加可点小字——点中即
-  // 瞬时收起 toast 再执行 onClick。动效（M13，dsh 同款）：入场 -6px 滑入＋淡入
+  // 瞬时收起 toast 再执行 onClick。动效（dsh 同款）：入场 -6px 滑入＋淡入
   // 160ms（CSS 基座过渡）；驻留期满先转 1s 淡出（is-leaving）再落暗；动作点击
   // 瞬时消失（is-gone 压掉过渡）。
   function toast(msg, isErr, opts) {
@@ -445,7 +445,7 @@ async function api(method, path, body) {
     // 进后台第一件事是拆掉会话字节流（理由见 syncTerminalDataStream）；回前台由下面
     // 各视图分支重建。这条转折漏发也不要紧：1s 轮询拍里同一个函数再核一次。
     //
-    // 拆之前先把画面停成垫片（M4，见 parkTerminalScreen）：拆流之后唯一还能留在屏上
+    // 拆之前先把画面停成垫片（见 parkTerminalScreen）：拆流之后唯一还能留在屏上
     // 的只有垫片，切回时它就是「新画面画好之前的内容」。typeof 闸护单测桩环境。
     if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     syncTerminalDataStream();
@@ -5500,7 +5500,7 @@ async function api(method, path, body) {
   // 改写为真实会话 id。
   let activeTerminalPreviewId = "checkout";
   let terminalBackendSessions = {};
-  // ── 页签＝视口（M12 复原） ──
+  // ── 页签＝视口（复原） ──
   // 页签不再等于终端进程：一个视口同一时刻只显示一个终端（terminalId）；换下来的终端
   // 若还在跑就进 terminalBackgroundIds 继续作为后台会话活着（仍是左栏的一行），空闲或
   // 已退出的才结束（用户口径「在跑的不杀、没在跑的杀」）。页签数因此只由视口数决定
@@ -6067,7 +6067,7 @@ async function api(method, path, body) {
       // 归属轮询落地前标签就能显示是哪个 agent。
       agentId: typeof item.agentId === "string" ? item.agentId : null,
       agentName: typeof item.agentName === "string" ? item.agentName : null,
-      // 续接身份（M7 S5）：这条终端是替哪条会话续接建的（宿主记录、随列表下发）。
+      // 续接身份：这条终端是替哪条会话续接建的（宿主记录、随列表下发）。
       // 历史会话点击时先查它——同 endpoint＋同会话 id 的终端已开着就直接聚焦，
       // 不重复建。全新终端（无 resume 记录）不参与去重。
       resume: item.resume && typeof item.resume === "object"
@@ -6393,7 +6393,7 @@ async function api(method, path, body) {
   //
   // 归属会话另过回合闸（terminalTurnArmed）：输出窗单独不足以证明「回合在跑」——
   // dsh 这类 Ink 自绘 TUI 空闲时也在写 PTY，只看字节会让空闲页周期性转圈，也会
-  // 让 M12 内切判定门误走「保护性新开页签」。所以输出窗只在「本回合」内有效：
+  // 让内切判定门误走「保护性新开页签」。所以输出窗只在「本回合」内有效：
   // 该实例一出现在途请求即入回合，回落到无请求且输出窗过期即出回合；出回合后
   // 只有新的请求能重新入回合，界面自绘不再点亮。无归属的普通终端没有回合概念，
   // 维持原输出窗口径（用户在 shell 里跑命令照样看得到进行中）。
@@ -6738,7 +6738,7 @@ async function api(method, path, body) {
 
   // ---- 切签垫片：切换期屏上始终有内容 ----
   //
-  // 病灶（S2 §2）：切换链第一步就是 closeTerminalStream() → terminalXterm.dispose()，
+  // 病灶：切换链第一步就是 closeTerminalStream() → terminalXterm.dispose()，
   // xterm 自己把 DOM 从宿主摘掉，三层覆盖层（未连接/降级/零会话）都不服务「正在重建」，
   // 于是中间态只能是 #terminalScreen 的一块底色。
   //
@@ -6772,7 +6772,7 @@ async function api(method, path, body) {
   // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：垫片观察者拿停放时的值与
   // 当前值比较，变了就是新画面已经交代过一屏。见 connectTerminalStream 的 data 处理器。
   let terminalReplayEpoch = 0;
-  // 延后重建流的帧令牌（M5 live 行快路径）：renderTerminalPreviewSession 的
+  // 延后重建流的帧令牌（live 行快路径）：renderTerminalPreviewSession 的
   // deferScreen 把停放＋建流＋fit 整组推到双 rAF 之后，连点两条会话时旧帧
   // 醒来发现令牌已变即整组退场——不拿旧会话的流覆盖新会话。
   let terminalScreenSeq = 0;
@@ -6845,7 +6845,7 @@ async function api(method, path, body) {
   //  b) **首帧回放那一拍已经发生过**：拿「停放时的计数」与当前值比，变了即成立。
   //
   // 判「有字」不能看 buffer.active.length：xterm 一开屏就有 rows 行空行，length 恒
-  // ≥ rows，拿它当判据等于「实例一建出来就算就绪」——CDP 实测（M4 T6）这条错判据会
+  // ≥ rows，拿它当判据等于「实例一建出来就算就绪」——CDP 实测这条错判据会
   // 让垫片在新画面写入前约 340ms 就被撤走，空白照旧。必须逐行看有没有非空白字符。
   //
   // b 为什么是「计数」而不是「逐帧看 terminalReplayFramePending」：snapshot 与首帧 data
@@ -7222,7 +7222,7 @@ async function api(method, path, body) {
   // 钳制派发的 scroll 事件不带任何标记，xterm 拿它当「用户滚动」写进 ydisp；此后
   // ydisp≠ybase，新输出不再带动视口，画面卡死在接近顶端的位置不自行恢复。
   // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态下、最近没有用户
-  // 语义对齐 Claude Desktop（实证规格 .pocketower/findings/m1-claude-bottom-align-spec.md，
+  // 语义对齐 Claude Desktop（实证规格，
   // 2026-10-20 用户拍板）：空区出现时不自动折回——视口原地不动，空白带留在屏上；用户
   // 上滚翻看历史时「地板」随滚动逐拍收紧（trim 只缩不扩），空区被吃掉而视口不跳；滚回
   // 地板即恢复跟随，落点恰好是修剪后的内容底。用户主动离底的各条通路都先记意图——滚轮/
@@ -9231,9 +9231,9 @@ async function api(method, path, body) {
   }
 
   // 一键启动：凭证只走环境变量注入（服务端组装），这里只递 agentId 与工作目录。
-  // resume 可选（M3 契约）：历史会话续接把 { endpoint, id, file } 原样带上，服务端判
+  // resume 可选（续接契约）：历史会话续接把 { endpoint, id, file } 原样带上，服务端判
   // 不可续接时回 400 resume-unsupported——前端落同一句提示，不暴露短码。
-  // 落点（M12 视口化）：placement＝"viewport" 进当前视口（左栏新建会话 / 内切 / 空视口
+  // 落点（视口化）：placement＝"viewport" 进当前视口（左栏新建会话 / 内切 / 空视口
   // 补建），"new" 新建一个视口（页签条「+」）。新建终端本身不再等于新页签。
   function createAgentTerminal({ agentId, cwd, resume }, { placement = "viewport", keepPrevious = false } = {}) {
     const body = { agentId, cwd, ...terminalCreateSize() };
@@ -9248,11 +9248,11 @@ async function api(method, path, body) {
         renderTerminalPreviewSession();
       })
       .catch((error) => {
-        // 失败清点（M5）：续接新建失败即撤乐观高亮——点亮的那行没换成，继续说它
+        // 失败清点：续接新建失败即撤乐观高亮——点亮的那行没换成，继续说它
         // 选中就是说谎。不带 resume 的新建（⊕/新建终端）不碰 pending：没有哪一次
         // 点击预测过它，别误伤别人在飞的选中。
         if (resume) terminalRailEndSelect(null);
-        // 续接类失败（M3 契约的 resume-unsupported，以及同族的 resume-invalid 等）
+        // 续接类失败（续接契约的 resume-unsupported，以及同族的 resume-invalid 等）
         // 一律落批准句：后端原文是给开发者看的短码/细节，不能上屏。
         const code = error && (error.serverCode || error.code);
         if (typeof code === "string" && code.startsWith("resume-")) {
@@ -9366,7 +9366,7 @@ async function api(method, path, body) {
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
     if (deferScreen) {
-      // live 行快路径让帧（M5）：左栏点已开着的会话行时，这一帧先让栏体当拍重渲
+      // live 行快路径让帧：左栏点已开着的会话行时，这一帧先让栏体当拍重渲
       // （高亮即刻点亮），停放＋建流＋挂占位＋fit 整组延后到双 rAF 之后——同步任务里
       // 先跑完栏渲染，xterm 重建的耗时不再挡首绘。这几步必须成对延后：次序即
       // 「旧画面停放成像素垫片、新画面就绪再揭幕」（92f6ced/b285e3d 立下的机制），
@@ -9511,7 +9511,7 @@ async function api(method, path, body) {
       }, 1000);
     }
     syncTerminalActivityStream();
-    // 页签点击/关闭委托（M12 视口语义）：页签键是视口 id。点击＝激活该视口（只换显示、
+    // 页签点击/关闭委托（视口语义）：页签键是视口 id。点击＝激活该视口（只换显示、
     // 重建 SSE 流，不走 /switch——identityChanged 会作废宿主镜像）；关闭＝结束该视口
     // 当前显示的终端（沿用 /close 树杀）再销毁视口，后台保活的终端一概不动。
     // 两段语义各自成函数（terminalCloseViewportTab / terminalViewportActivate），
@@ -10437,14 +10437,14 @@ async function api(method, path, body) {
   }
 
   /* ============================================================
-     终端会话栏（M4 + M7 + M8）：终端视图下的左栏换血内容
+     终端会话栏：终端视图下的左栏换血内容
      ============================================================ */
-  // 栏体自上而下（M8 T1 两段合并）：「新建终端」钮 →「工作区」段头（T7 三钮）→
+  // 栏体自上而下（两段合并）：「新建终端」钮 →「工作区」段头（段头三钮）→
   // 目录分组树 → 栏底。「打开的终端」段已整段拆除——live 不再单列，而是树里行的
-  // 属性：一条会话行有开着终端替它续接（resume 两键映射，M7-S5）即是 live，带状态
+  // 属性：一条会话行有开着终端替它续接（resume 两键映射）即是 live，带状态
   // 点/选中态/关闭叉。全新终端在会话文件落盘前按 cwd 在组顶插「新会话」兜底行
-  // （渲染时从后端真值表现推导，不另记状态）。原左上角 agent 身份行已拆（M7-S0）。
-  // 观感按 dsh 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作
+  // （渲染时从后端真值表现推导，不另记状态）。原左上角 agent 身份行已拆。
+  // 观感按 dsh 左栏实测：行 hover/选中、行内动作
   // 按钮一律 0ms 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位
   // 移有运动。
   const TERMINAL_RAIL_WATERMARK = 5;
@@ -10456,17 +10456,17 @@ async function api(method, path, body) {
   // 历史会话缓存：{ endpoint, sessions, fetchedAt, error }。只装当前 agent 那一份——
   // 换 agent 即整份作废重拉，不做多端点缓存（用户拍板「跟随」而非「浏览」）。
   let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
-  // 视图状态（M7）：归档清单 + 已移除分组目录清单。进终端视图时从面板后端拉一次
+  // 视图状态：归档清单 + 已移除分组目录清单。进终端视图时从面板后端拉一次
   // （GET /api/terminal/rail/prefs），之后的动作本地先生效、POST 落盘。落在面板侧，
   // 与 terminal-host 就绪与否无关——降级/未就绪时归档照样可用（dsh 同口径：归档
   // 是 workspace domain 的持久化集合，不是宿主能力）。
   let terminalRailPrefs = { archived: [], removedGroups: [] };
-  // 移除时刻（M14）：目录归一化键 → 移除时的毫秒时间戳，落 localStorage。后端清单
+  // 移除时刻：目录归一化键 → 移除时的毫秒时间戳，落 localStorage。后端清单
   // 只存目录拼写，没有时间轴；而「移除持久＋新会话自愈」必须知道移除发生在哪一刻，
   // 才能判「这条会话是移除之后新来的」。纯视图状态（与视图偏好同层），不进面板后端。
   const TERMINAL_RAIL_REMOVED_AT_KEY = "panel-terminal-rail-removed-at";
   let terminalRailRemovedAt = {};
-  // 视图偏好（M8 T7b）：分组方式 / 排序方式 / 归档筛选三组，落 localStorage（dsh
+  // 视图偏好：分组方式 / 排序方式 / 归档筛选三组，落 localStorage（dsh
   // 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）。手序按 agent 键存
   // （手动排序的唯一来源）。默认值即 dsh 出厂默认。
   const TERMINAL_RAIL_VIEW_KEY = "panel-terminal-rail-view";
@@ -10477,7 +10477,7 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_COLLAPSED_KEY = "panel-terminal-rail-collapsed";
   // 树的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
   let terminalRailRendered = { history: null };
-  // 乐观选中态（M5）：点会话行当拍点亮的高亮。is-active 的 live 派生判据要等
+  // 乐观选中态：点会话行当拍点亮的高亮。is-active 的 live 派生判据要等
   // POST /switch（或 /agent-sessions）成功才成立，而宿主侧一次切换是进程探测＋
   // PTY 重启的 1~2s——那段时间栏上没有选中行，点击像丢了。pending 让高亮在
   // 点击当拍成立，切换落定后由 live/active 派生自然接管（成功路径不清：两条
@@ -10509,7 +10509,7 @@ async function api(method, path, body) {
   // 补拉只排一次：进页、换身份、轮询都经同一个门，重复排队没有意义。
   let terminalRailFetchQueued = false;
   // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
-  // flipMode 一帧用完即复位，组展开/收起与归档/撤销（M13）会置 "flip"。
+  // flipMode 一帧用完即复位，组展开/收起与归档/撤销会置 "flip"。
   let terminalRailMotionArmed = false;
   let terminalRailFlipMode = "instant";
   // 活跃终端所在组的自动展开与滚入只做一次：换活跃终端才重做，用户手动收起不被
@@ -10520,7 +10520,7 @@ async function api(method, path, body) {
   // 不重新扫 DOM。
   let terminalRailLastGroups = [];
   // 兜底行生命周期动效（2026-10-25）的 diff 门状态：换 agent 与搜索退出两族渲染
-  // 沿 M13 的 resetKey 口径保持瞬时落位——换 agent 时 DOM 里是旧 agent 的兜底行，
+  // 沿既有 resetKey 口径保持瞬时落位——换 agent 时 DOM 里是旧 agent 的兜底行，
   // 搜索退出时树从结果平铺换回，两者的「行集合变化」都不是兜底行的真实离开，
   // 不播幽灵。首帧（无记录）同样按 reset 处理。
   let terminalRailLastDiffAgent = null;
@@ -10534,16 +10534,16 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_ICON_FOLDER_OPEN = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M2.55912 7.93683C2.67584 7.49906 3.0723 7.19446 3.52536 7.19446H13.6491C14.3061 7.19446 14.7846 7.81725 14.6153 8.45209L13.4411 12.856C13.3244 13.2938 12.9279 13.5984 12.4748 13.5984H2.35113C1.69411 13.5984 1.21562 12.9756 1.38489 12.3407L2.55912 7.93683Z" fill="currentColor" opacity="0.16"></path><path d="M13.6491 6.69446C14.6346 6.69453 15.3522 7.62895 15.0983 8.58118L13.9245 12.9845C13.7494 13.6412 13.1539 14.0988 12.4743 14.0988H2.35126C1.36574 14.0988 0.648153 13.1643 0.902044 12.212L2.07587 7.80774C2.25102 7.15128 2.84567 6.69455 3.52509 6.69446H13.6491ZM3.52509 7.69446C3.29865 7.69455 3.10004 7.84674 3.04169 8.06555L1.86786 12.4698C1.78345 12.7872 2.02285 13.0988 2.35126 13.0988H12.4743C12.7007 13.0988 12.8992 12.9463 12.9577 12.7277L14.1325 8.32336C14.2171 8.00598 13.9776 7.69453 13.6491 7.69446H3.52509Z" fill="currentColor"></path><path d="M4.7666 1.90137C5.13227 1.90144 5.48571 2.03525 5.75977 2.27734L7.27246 3.61328C7.36379 3.69382 7.48174 3.73828 7.60352 3.73828H12.3994C13.2276 3.73841 13.8993 4.41005 13.8994 5.23828V6.7168C13.8183 6.70327 13.735 6.69436 13.6494 6.69434H12.8994V5.23828C13.8993 4.96233 13.8994 4.73841 12.3994 4.73828H7.60352C7.23781 4.73828 6.88446 4.60438 6.61035 4.3623L5.09766 3.02637C5.00636 2.94576 4.88838 2.90144 4.7666 2.90137H2.0498C1.77366 2.90137 1.5498 3.12523 1.5498 3.40137V9.78223L0.902344 12.2119C0.648452 13.1642 1.36604 14.0986 2.35156 14.0986H2.0498C1.2214 14.0986 0.549838 13.427 0.549805 12.5986V3.40137C0.549805 2.57294 1.22138 1.90137 2.0498 1.90137H4.7666Z" fill="currentColor"></path></svg>';
   const TERMINAL_RAIL_ICON_FOLDER_CLOSED = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M1.50439 3.11059C1.50439 2.55831 1.95211 2.1106 2.50439 2.1106H5.43389C5.67773 2.1106 5.91318 2.19969 6.09593 2.36113L7.71649 3.79265C7.89924 3.95409 8.1347 4.04319 8.3785 4.04319H13.4958C14.0481 4.04319 14.4958 4.4909 14.4958 5.04319V12.8894C14.4958 13.4417 14.0481 13.8894 13.4958 13.8894H2.50439C1.95211 13.8894 1.50439 13.4417 1.50439 12.8894V4.04319V3.11059Z" stroke="currentColor"></path><path d="M3.63501 7.66614H12.3647" stroke="currentColor"></path></svg>';
   const TERMINAL_RAIL_ICON_ARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>';
-  // 取消归档钮（M8 T7a，归档行的第三恢复入口）：归档盒 + 向上的箭头（出盒即还原）
+  // 取消归档钮（归档行的第三恢复入口）：归档盒 + 向上的箭头（出盒即还原）
   const TERMINAL_RAIL_ICON_UNARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/><polyline points="12 11 12 7"/><polyline points="9 10 12 7 15 10"/></svg>';
   // 组头 ⋯ 钮与 ⊕ 钮（feather more-horizontal / plus）：16px 槽，与行内归档/关闭叉
   // 同一描边风。⋯ 不设 title/aria-label——批准文案清单里没有它的标签，按栏内关闭
   // 叉的既有形制（aria-hidden 装饰图标）处理，标签文案留待清单补录。
   const TERMINAL_RAIL_ICON_ELLIPSIS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
   const TERMINAL_RAIL_ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
-  // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底（m6c §B2）
+  // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底
   const TERMINAL_RAIL_ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-  // M12-B 运行中转圈（dsh 实测规格逐项照抄）：行首 16×20 前导槽内的 14×14 SVG——
+  // 运行中转圈（dsh 实测规格逐项照抄）：行首 16×20 前导槽内的 14×14 SVG——
   // 轨道圆 r=9.5 静态（opacity .25），弧线圆同描边 dasharray 12 150 呼吸（1.5s
   // ease-in-out：0% 12 150/offset 0 → 50% 24 150/offset -6 → 100% 12 150/offset 0），
   // 外层 g 匀速转 360°（1.5s linear）——两动画同周期成稳定加载环。currentColor 吃
@@ -10591,7 +10591,7 @@ async function api(method, path, body) {
     return /^[\w-]+$/.test(raw) ? raw : "";
   }
 
-  // 栏内局部时间格式（M8 T3，dsh 式无前缀）：刚刚 / N分钟 / N小时 / 昨天 / N天 /
+  // 栏内局部时间格式（dsh 式无前缀）：刚刚 / N分钟 / N小时 / 昨天 / N天 /
   // M月D日（跨年 YYYY年M月D日）。**栏内局部实现**——会话页共用的 sessRelTime 带
   // 「前」缀且被别的视图用着，不动它。
   function terminalRailRelTime(ts) {
@@ -10678,11 +10678,11 @@ async function api(method, path, body) {
     return "";
   }
 
-  // 移除清单自愈（M14）：恢复区砍掉之后，组重新出现的唯一路径就是
+  // 移除清单自愈：恢复区砍掉之后，组重新出现的唯一路径就是
   // 这条——该目录在移除之后来了新会话，组自动重现。判据：目录下存在 createdAt（缺
   // 省退化为 lastActive）晚于移除时刻的会话。自愈即把目录从清单摘掉并 POST 落盘；
   // 落盘失败静默回退，且本会话内不再自动重试（1s 归属轮询每拍都走这里，重试会变成
-  // 请求风暴）。没有移除时刻的条目（M14 之前落盘的老数据）不自愈——没有时间轴就
+  // 请求风暴）。没有移除时刻的条目（早先落盘的老数据）不自愈——没有时间轴就
   // 无从判断哪条会话是「新」的，由 loadTerminalRailPrefs 在拉回时补记当下。
   const terminalRailSelfHealFailed = new Set();
 
@@ -10717,7 +10717,7 @@ async function api(method, path, body) {
     return healed;
   }
 
-  // 分组移除（dsh §2.4 / m6 §2）：只从视图里摘掉目录身份——被移除目录的会话落
+  // 分组移除（dsh §2.4）：只从视图里摘掉目录身份——被移除目录的会话落
   // 「未分组」，会话记录与磁盘文件夹都不动。全局生效（不分 agent，dsh 工作区清单
   // 同为全局）。归一化比较口径同 store（terminalRailSameDir）：前端拿 project 路径、
   // 后端存用户点选时的原始拼写，必须是同一把尺。未分组组没有目录身份，天然不被
@@ -10759,8 +10759,8 @@ async function api(method, path, body) {
   }
 
   // 归档＝视图过滤（dsh §1.4）：底层列表一个字节都不动，过滤放在分组之前——
-  // 组内序、水位线、「展开其余 N」计数自然都按过滤后的行算（m6b §A6 实测口径：
-  // 归档即计数减一，取消即加一）。M8 T7b 起筛选三态：default 隐藏 / show 内联灰显 /
+  // 组内序、水位线、「展开其余 N」计数自然都按过滤后的行算（实测口径：
+  // 归档即计数减一，取消即加一）。筛选三态：default 隐藏 / show 内联灰显 /
   // only 只留归档（无归档的组整组丢弃，见渲染层的组过滤）。
   function terminalRailVisibleSessions() {
     const all = terminalRailHistory.sessions;
@@ -10769,7 +10769,7 @@ async function api(method, path, body) {
     return all.filter((session) => !terminalRailIsArchived(session));
   }
 
-  // ── 全新终端兜底行（M8 T1）──
+  // ── 全新终端兜底行 ──
   // 新建终端后会话文件可能还没生成（agent 未发消息、列表里没有这条历史）——此时在
   // 它 cwd 所属组的组顶插一条 live 行，标签「新会话」、无时间；会话文件出现后自然
   // 被真行接替（dsh 的「新会话」行正是这个形态）。**渲染时从后端真值表现推导**，
@@ -10821,12 +10821,12 @@ async function api(method, path, body) {
     return out;
   }
 
-  // ── 段头搜索（M8 T7a，照搬 m6c §A 裁剪后） ──
+  // ── 段头搜索（照搬实测规格，裁剪后） ──
   // 行内展开不是浮层：点搜索钮＝展开＋自动聚焦；已展开再点不退出（非 toggle，只
   // 重新聚焦）。退出手势：Esc／清空钮／点开结果行＝清空＋收起；点搜索区外**仅当
   // 查询为空**才收起（有查询只失焦）。退出后列表滚动回顶、分组展开态保留。
   // 范围＝会话标题＋目录短名的大小写不敏感子串——dsh 出厂配置把 Host 内容搜索整个
-  // 关了（m6c §A3 重大发现），侧栏实际就只有这个口径；照搬的就是它，不做全文。
+  // 关了（实测重大发现），侧栏实际就只有这个口径；照搬的就是它，不做全文。
   // 防抖 250ms（窗口内出「正在搜索会话历史…」骨架位）。不挂任何键盘加速入口
   // （显式不做清单既有口径）。
   const TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250;
@@ -10869,7 +10869,7 @@ async function api(method, path, body) {
     terminalRailSearch.open = false;
     terminalRailSearch.query = "";
     terminalRailSearch.searching = false;
-    // 退出后列表滚动回顶（m6c §A6：滚动位不保留；分组展开态在 collapsedGroups 里，
+    // 退出后列表滚动回顶（滚动位不保留；分组展开态在 collapsedGroups 里，
     // 与搜索无关，天然保留）
     const scroll = document.querySelector(".rail-term-scroll");
     if (scroll) scroll.scrollTop = 0;
@@ -10897,8 +10897,8 @@ async function api(method, path, body) {
 
   // 搜索结果＝替换式平铺列表（无组头）：行＝标题＋目录短名，无命中高亮；live/归档
   // 行的形态与树里同一套（terminalRailRowHtml 的 result 变体）。归档会话也进结果
-  // （跟随归档筛选，m6c §A3）——灰字、点击落「这条会话已归档，取消归档后才能续接」、
-  // hover 出「取消归档」钮（m6b §A2 第三恢复入口）。
+  // （跟随归档筛选）——灰字、点击落「这条会话已归档，取消归档后才能续接」、
+  // hover 出「取消归档」钮（第三恢复入口）。
   function renderTerminalRailSearchResults(list) {
     const hits = terminalRailSearchMatches(terminalRailSearch.query, terminalRailVisibleSessions());
     const shown = hits.slice(0, TERMINAL_RAIL_SEARCH_LIMIT);
@@ -10924,7 +10924,7 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 视图选项（M8 T7b，照搬 m6c §B 全集） ──
+  // ── 视图选项（照搬实测规格全集） ──
   // 三组互斥单选：分组方式（按工作区/按工作区树/单列表）、排序方式（最近更新/
   // 手动排序）、筛选会话（隐藏已归档/全部会话/仅显示已归档）。偏好落 localStorage
   // 一个键（dsh 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）；
@@ -10999,7 +10999,7 @@ async function api(method, path, body) {
     } catch { /* 隐私模式等：本次会话内仍生效 */ }
   }
 
-  // 移除时刻表的读写（M14 自愈用）：键一律过 terminalRailNormDir，与移除清单同一把
+  // 移除时刻表的读写（自愈用）：键一律过 terminalRailNormDir，与移除清单同一把
   // 尺——大小写/斜杠/尾斜杠不同的拼写必须落到同一条。读不懂/被禁用就从空表开始：
   // 最坏是这次会话不自愈，组保持隐藏，不会误把已移除的组放出来。
   function loadTerminalRailRemovedAt() {
@@ -11029,7 +11029,7 @@ async function api(method, path, body) {
     return na !== "" && nb.startsWith(na + "\\");
   }
 
-  // 按工作区树：组按目录祖先关系嵌套（m6c §B3 的 owningParentFolder：逐级找最近
+  // 按工作区树：组按目录祖先关系嵌套（owningParentFolder：逐级找最近
   // 已注册祖先）。给每组打 depth；祖先组自动展开（切进树模式时一次性解除折叠，
   // 之后尊重用户手动收起——与 dsh 的 expandedGroups 含全部 ancestorKeys 同效果）。
   function terminalRailNestGroups(groups) {
@@ -11154,8 +11154,8 @@ async function api(method, path, body) {
         menu.append(el);
       }
     }
-    // M9-D1：portal 到 body 下 position:fixed（栏体 overflow:hidden 会裁栏内浮层，
-    // dsh 的 portal:true 同款）；右对齐锚定＝菜单右缘贴钮右缘（m6c §B2 align:end）。
+    // portal 到 body 下 position:fixed（栏体 overflow:hidden 会裁栏内浮层，
+    // dsh 的 portal:true 同款）；右对齐锚定＝菜单右缘贴钮右缘（align:end）。
     document.body.append(menu);
     const btnRect = btn.getBoundingClientRect();
     const width = menu.offsetWidth || 200;
@@ -11197,7 +11197,7 @@ async function api(method, path, body) {
     // 就绪闸与页签栏加号同拍：未就绪时新建不可点（禁用位由 syncTerminalAddBtn 同拍刷新）。
     if (newBtn) {
       newBtn.disabled = !terminalBackendReady;
-      // 文案随聚焦分态（M8 T3，用户 2026-10-21 指示）：有 agent 聚焦时起的是该
+      // 文案随聚焦分态（用户 2026-10-21 指示）：有 agent 聚焦时起的是该
       // agent 的会话，叫「新建会话」；无 agent 聚焦时起空白终端，叫「新建终端」。
       // 行为不变，仅文案；aria/title 同步换。标签在子 span 里（钮上还有图标），
       // 不能直接写 textContent。
@@ -11211,7 +11211,7 @@ async function api(method, path, body) {
     syncTerminalRailHistory(agentId);
   }
 
-  // 树行 HTML（M8 T1/T2/T5）：live 行带状态点 + 关闭叉 + 归档钮；非 live 行只带
+  // 树行 HTML：live 行带状态点 + 关闭叉 + 归档钮；非 live 行只带
   // 归档钮；归档行（筛选 show 态内联）灰字 + 取消归档钮。live 属性带终端 id——
   // 点击委托据此分支（聚焦终端 vs 走续接两分支）。
   function terminalRailRowHtml(session, live, activeId, opts) {
@@ -11223,7 +11223,7 @@ async function api(method, path, body) {
     if (result) cls.push("rail-term-row-result");
     if (live) cls.push("is-live");
     if (archived) cls.push("is-archived");
-    // 选中判据（M5）：pending 存在时只看 pending 是否命中本行——点下一条的瞬间
+    // 选中判据：pending 存在时只看 pending 是否命中本行——点下一条的瞬间
     // 旧活跃行立刻失亮（pending 优先于 live 派生，一屏至多一条选中）；无 pending
     // 维持原 live 派生。读模块状态位而非 DOM-only 切类名：1s 轮询全树重铺会冲掉
     // 类名（见 terminalRailSelectPending 处注释）。
@@ -11248,7 +11248,7 @@ async function api(method, path, body) {
     const action = archived
       ? `<span class="rail-term-row-unarchive" data-rail-term-unarchive="${esc(session.id)}" title="取消归档" aria-label="取消归档">${TERMINAL_RAIL_ICON_UNARCHIVE}</span>`
       : `<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
-    // 会话行可拖（M8 T7b：手序的唯一来源）；归档行不可拖（m6c：draggable＝非空白且
+    // 会话行可拖（手序的唯一来源）；归档行不可拖（draggable＝非空白且
     // 非归档行）。组行不拖——组是目录派生、无清单可持久化。
     const draggable = archived ? "" : ` draggable="true"`;
     return `
@@ -11262,12 +11262,12 @@ async function api(method, path, body) {
       </button>`;
   }
 
-  // 「新会话」兜底行（M8 T1）：组顶 live 行，无时间、无归档钮（还没有会话身份可
+  // 「新会话」兜底行：组顶 live 行，无时间、无归档钮（还没有会话身份可
   // 归档），点击走聚焦、hover 出关闭叉。
   function terminalRailPendingRowHtml(entry, activeId) {
     const session = terminalRailSessionMap()[entry.id];
     const working = !!session && session.status === "working";
-    // 同 terminalRailRowHtml 的选中判据（M5）：pending 存在时按终端 id 认行——
+    // 同 terminalRailRowHtml 的选中判据：pending 存在时按终端 id 认行——
     // 这枚 pending 就是这条终端的全新内切时，兜底行是这次点击的目标行，当拍亮；
     // 其余情况不亮（pending 命中的历史行才是被选中的那条，一屏至多一条）。
     const active = terminalRailPendingFreshActive(entry, activeId);
@@ -11282,7 +11282,7 @@ async function api(method, path, body) {
   function renderTerminalRailHistory(agentId) {
     const list = $("railTermHistoryList");
     if (!list) return;
-    // 搜索态：结果平铺列表整块替换树（m6c §A4），树渲染全旁路。退出搜索后的首帧
+    // 搜索态：结果平铺列表整块替换树，树渲染全旁路。退出搜索后的首帧
     // 树渲染也按 reset 处理（兜底行 diff 门，见下方）——树从结果平铺换回，行集合
     // 变化不是兜底行的真实离开。
     if (terminalRailSearch.open && terminalRailSearch.query.trim()) {
@@ -11296,7 +11296,7 @@ async function api(method, path, body) {
     // 就会让那次真展开永远不来。
     const loaded = !agentId || (terminalRailHistory.endpoint === agentId && !terminalRailHistory.error);
     const sessions = loaded ? terminalRailVisibleSessions() : [];
-    // 移除自愈（M14）先于分组：该目录在移除之后来了新会话，就先把它从移除清单摘掉，
+    // 移除自愈先于分组：该目录在移除之后来了新会话，就先把它从移除清单摘掉，
     // 下面的分组与「移除摘牌」照常按最新清单算。用未过滤的会话全集判定——归档只是
     // 视图过滤，不该影响「这目录有没有新会话」。
     if (loaded) terminalRailSelfHealRemovedGroups(terminalRailHistory.sessions);
@@ -11307,7 +11307,7 @@ async function api(method, path, body) {
     if (terminalRailViewPrefs.archivedFilter === "only") {
       groups = groups.filter((group) => group.key === "" || group.rows.length > 0);
     }
-    // 分组方式三态（M8 T7b）：单列表＝无组平铺（key 空串的伪组，不渲组头）；
+    // 分组方式三态：单列表＝无组平铺（key 空串的伪组，不渲组头）；
     // 按工作区树＝目录祖先嵌套＋缩进；按工作区＝平铺目录组（默认）。
     const flat = terminalRailViewPrefs.groupBy === "flat";
     if (flat) {
@@ -11320,12 +11320,12 @@ async function api(method, path, body) {
     }
     // 手动排序：组内行按手序排（榜上无名回落到最近活跃）
     if (terminalRailViewPrefs.orderBy === "manual") terminalRailApplyManualOrder(groups);
-    // 全新终端兜底行（M8 T1）：按 cwd 找所属组，没有就为它建组（目录被用户移除过
+    // 全新终端兜底行：按 cwd 找所属组，没有就为它建组（目录被用户移除过
     // 的除外——那种目录的会话都进「未分组」，兜底行同命运）。
     const pending = terminalRailPendingNewTerminals();
     for (const entry of pending) {
       const removed = terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, entry.cwd));
-      // M10-F1：flat 模式只有 key "" 的平铺伪组——兜底行挂伪组，不新建真组
+      // flat 模式只有 key "" 的平铺伪组——兜底行挂伪组，不新建真组
       // （否则单列表平铺行之外会多出一个真组头，刚拉起全新 agent 终端即撞见）。
       let group = flat
         ? groups.find((row) => row.flat)
@@ -11342,7 +11342,7 @@ async function api(method, path, body) {
       if (!group.pending) group.pending = [];
       group.pending.push(entry);
     }
-    // live 映射：行 → 开着终端（resume 两键，M7-S5）。selected 由渲染时的活跃终端定。
+    // live 映射：行 → 开着终端（resume 两键）。selected 由渲染时的活跃终端定。
     for (const group of groups) {
       if (!group.live) group.live = new Map();
       for (const row of group.rows) {
@@ -11365,7 +11365,7 @@ async function api(method, path, body) {
       scrollKey = activeGroup;
     }
     const parts = [];
-    // 「仅显示已归档」且一条归档都没有：空态（m6c §A1）——24px 归档图标 + 两句，
+    // 「仅显示已归档」且一条归档都没有：空态——24px 归档图标 + 两句，
     // 「查看其他会话」点了切回「隐藏已归档」。
     if (terminalRailViewPrefs.archivedFilter === "only" && sessions.length === 0) {
       parts.push(`
@@ -11377,11 +11377,11 @@ async function api(method, path, body) {
     }
     for (const group of groups) {
       const collapsed = terminalRailCollapsedGroups.has(terminalRailNormDir(group.key));
-      // 组头三件（M7 S3 / M8 T7）：非 hover 是文件夹图标（开/关两枚），hover 同槽位
+      // 组头三件：非 hover 是文件夹图标（开/关两枚），hover 同槽位
       // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
       // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
       // 没有目录身份，这些都不给（dsh 同口径）。组头本身仍是整行可点的折叠开关。
-      // 树模式缩进 8+depth×12px（m6c §B3）；单列表模式不渲组头。
+      // 树模式缩进 8+depth×12px；单列表模式不渲组头。
       const current = group.key !== "" && group.key === activeGroup;
       const indent = group.depth ? ` style="padding-inline-start: ${8 + group.depth * 12}px"` : "";
       const headActions = group.key
@@ -11414,7 +11414,7 @@ async function api(method, path, body) {
           }
         } else {
           const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
-          // M12-B 水位线联动（dsh requiredWatermark 同构）：运行中＋当前会话两档
+          // 水位线联动（dsh requiredWatermark 同构）：运行中＋当前会话两档
           // 强制入可见段——永远不被藏进「展开其余 N 个会话」。我们只有 running＋
           // current 两个信号（无 pendingInteraction/completed，范围声明）。flat
           // 模式不设水位（整组平铺全露），走不到这条分支。
@@ -11437,7 +11437,7 @@ async function api(method, path, body) {
       if (!group.flat) parts.push(`</div>`);
     }
     const html = parts.join("");
-    // 兜底行生命周期动效（2026-10-25，与归档 M13 同观感）：本帧兜底集与 DOM 现存
+    // 兜底行生命周期动效（2026-10-25，与归档同观感）：本帧兜底集与 DOM 现存
     // 集比对，有增删且动效可用时本帧按归档同款处理——量旧位＋快照→换写→FLIP
     // （下方元素位移 200ms/新元素淡入 100ms）＋消失元素挂幽灵淡出 100ms。新会话行的
     // 出现（新建/全新内切）与消失（内切换走/被真行接替/关闭终端）都走这一条；
@@ -11543,7 +11543,7 @@ async function api(method, path, body) {
   }
 
   // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新元素 100ms ease-out）。
-  // 组展开/收起与归档/撤销（M13）置 flip；兜底行增删（2026-10-25）同样置 flip。
+  // 组展开/收起与归档/撤销置 flip；兜底行增删（2026-10-25）同样置 flip。
   // 量测集＝TERMINAL_RAIL_MOTION_SELECTOR（行＋组头＋水位线钮，2026-10-26 扩全）：
   // 同一段位移里所有元素同缓动，不再出现组头瞬跳压在行上。
   // 水位线增减、刷新、换 agent 是 resetKey，直接落位；首次输入前、首次挂载（没有
@@ -11570,7 +11570,7 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 退场动效（M13 归档/撤销；2026-10-25 起兜底行增删同路，dsh AnimatedRows
+  // ── 退场动效（归档/撤销；2026-10-25 起兜底行增删同路，dsh AnimatedRows
   // FLIP 路径）── 归档/撤销不再是 resetKey 瞬时消失：动作前给在册元素拍快照（克隆＋
   // 视口位），重渲后离开布局的元素以幽灵克隆补进滚动层 100ms 淡出——下方元素上移/
   // 落回 200ms、回填/归位元素淡入 100ms 由上面的 FLIP（flip 门）承担。量测集自
@@ -11643,14 +11643,14 @@ async function api(method, path, body) {
 
   // ---- 数据 ----
   // 历史会话只在进终端视图时拉一次（全量扫盘实测 6.7s、无缓存——禁挂轮询）；身份
-  // 换人时补拉一次。M9-D4 起段头刷新钮已砍（用户拍板只留搜索/视图选项），界面上的
+  // 换人时补拉一次。段头刷新钮已砍（用户拍板只留搜索/视图选项），界面上的
   // 手动重取入口随之消失。现存自动重取共三条：①进页（受下方 30s TTL 闸，TTL 内
   // 退出再进不发请求）；②身份换人（同步重拉）；③会话栏追赶
   // maybeCatchUpTerminalRailHistory（终端页内新建会话、兜底行压着真行时发
   // ?refresh=1，另有 20s 最小间隔与无进展收敛）。注意「退出终端视图再进」不是可靠的
   // 手动刷新手段——TTL 内进来复用缓存。
   //
-  // M4 起「进页」这条路径不再把请求排在首帧上：进页先拿缓存渲一帧，TTL 内一次都
+  // 「进页」这条路径不再把请求排在首帧上：进页先拿缓存渲一帧，TTL 内一次都
   // 不发；过期才由 scheduleTerminalRailHistoryFetch 排到首帧之后补一拍。原来的写法
   // 是进页第一件事把缓存清成空表再同步重取——请求与首帧抢同一条链路，左栏在这几秒
   // 里也是空的（S2 场景②③④的共同来源）。「身份换人」那条仍是同步重拉（既有契约，
@@ -11728,7 +11728,7 @@ async function api(method, path, body) {
     if (!agentId) {
       // 两种无 agent 焦点，处置不同（空态回落中性空树＝用户 2026-10-24 裁决）：
       // ①空白外壳页签还开着——保留上次加载的历史，用户才点得到行、把空白壳
-      //   内切接管（M12-A 判定矩阵空白壳行，f2a60f0；真机验收发现旧行为在此
+      //   内切接管（判定矩阵空白壳行，f2a60f0；真机验收发现旧行为在此
       //   清空 history 会让矩阵那一行永远不可达）。
       // ②一个终端都没了（关光最后一个页签/远端关光/进程自退）——栏回落中性
       //   空树，不再挂已关 agent 的会话表：会话栏是壳的资产，空态保持终端页
@@ -11800,7 +11800,7 @@ async function api(method, path, body) {
     return terminalSwitchInFlight;
   }
 
-  // 乐观选中起点（M5）：领令牌、写 pending、起 TTL 兜底，然后只重渲栏——
+  // 乐观选中起点：领令牌、写 pending、起 TTL 兜底，然后只重渲栏——
   // 高亮当拍成立，不等宿主侧 1~2s 的进程探测与 PTY 重启。在飞闸前置：在飞时
   // 点亮了也兑现不了（点击会被判定门吞掉），直接返回不亮。
   // 入参两形：历史会话行 { endpoint, id }（续接内切/新开都用它认行）；全新内切
@@ -11883,7 +11883,7 @@ async function api(method, path, body) {
     // 点它的会话栏行即读：done（跑完未读）标记当场清（聚焦清是每拍兜底，这里
     // 是点行这一拍的即时清——两路同一语义）。
     terminalDoneUnread.delete(id);
-    // 改主意清点（M5）：无条件作废旧选中令牌再置活跃——activate 是 live 行快
+    // 改主意清点：无条件作废旧选中令牌再置活跃——activate 是 live 行快
     // 路径，置活跃即由 live 派生接管高亮；旧 pending 继续压着会把别的行说成选中。
     terminalRailEndSelect(null);
     if (!id || !terminalSessionFor(id) || id === activeTerminalPreviewId) return;
@@ -11943,7 +11943,7 @@ async function api(method, path, body) {
       .catch((error) => toast(panelError(error, "无法新建终端"), true));
   }
 
-  // 历史会话点击两分支：resumeCommand 非空 → 按 M3 契约带 resume 建会话（与一键启动
+  // 历史会话点击两分支：resumeCommand 非空 → 按续接契约带 resume 建会话（与一键启动
   // 同一条创建通路，续接失败的提示也由它统一落）；为空 → 只提示，不做复制命令。
   // 续接的 cwd 必须用会话自己的 project：claude 这类 agent 的存档按项目目录分，
   // 在别的目录下 --resume 找不到那条会话，还会触发不该有的目录信任提示。所以
@@ -11952,7 +11952,7 @@ async function api(method, path, body) {
   // 会话），不为它新造文案。
   function terminalRailResumeSession(session) {
     if (!session) return;
-    // 去重聚焦（M7 S5，用户选甲）：先查打开中的终端有没有同 endpoint＋同会话 id
+    // 去重聚焦（用户选甲）：先查打开中的终端有没有同 endpoint＋同会话 id
     // 的——有就直接聚焦（terminalRailActivateSession 同路：置活跃、写存档、重渲），
     // 不再带 resume 新建。点已续接开的会话不该再开一条一模一样的新终端。
     // 去重范围＝两种身份都算：续接创建的终端（宿主记录的 resume），以及全新终端里
@@ -11965,7 +11965,7 @@ async function api(method, path, body) {
       terminalRailActivateSession(open.id);
       return;
     }
-    // 归档会话点不开（M8 T7a，dsh notifyArchivedNotOpenable 同口径）：恢复链是
+    // 归档会话点不开（dsh notifyArchivedNotOpenable 同口径）：恢复链是
     // 行内取消归档钮 + toast 撤销，续接要先取消归档。live 终端已开着的走上面聚焦，
     // 到这儿的就是没开着终端的归档行。
     if (terminalRailIsArchived(session)) {
@@ -11983,14 +11983,14 @@ async function api(method, path, body) {
     }
     const resume = { endpoint: session.endpoint, id: session.id };
     if (typeof session.file === "string" && session.file) resume.file = session.file;
-    // 乐观选中（M5）：过完全部拦截（去重命中/归档/不可续接/无 project）之后、
+    // 乐观选中：过完全部拦截（去重命中/归档/不可续接/无 project）之后、
     // 调判定门之前点亮——点击当拍高亮成立，不等宿主侧 1~2s 的进程探测与 PTY 重启。
     // 在飞闸在 BeginSelect 内前置：在飞时不亮（亮也会被判定门吞掉，说谎比慢更糟）。
     terminalRailBeginSelect(session);
     return terminalRailSwitchOrCreate({ session, resume, cwd });
   }
 
-  // M12-A 内切判定（视口化后的矩阵）：点栏内历史会话、去重未命中后，对当前活跃视口
+  // 内切判定（视口化后的矩阵）：点栏内历史会话、去重未命中后，对当前活跃视口
   // 显示的终端 A 做判定。视口是唯一可换内容的槽——页签数只由视口数决定：
   //   · 目标会话已有活终端（既有去重口径）→ 直接切视口；
   //   · 无视口 / 视口没有终端 → 建目标终端挂进视口（无视口才新开视口）；
@@ -12083,7 +12083,7 @@ async function api(method, path, body) {
       // 屏尾不在提示符就当还在跑，与 working 同路保活（2026-11-03 A1：静默长命令
       // 期间内切被整树 terminate，切回来找不回）。
       if (terminalManualShellBusy(active)) return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
-      // 全新内切乐观选中（M5 补口）：没有历史身份可亮，activeTerminalPreviewId 又不
+      // 全新内切乐观选中（补口）：没有历史身份可亮，activeTerminalPreviewId 又不
       // 换（同记录换内容）——不武装的话，高亮要等 POST 返回、spawnedAt 刷新、兜底行
       // 出现才挪过去（实测小半秒）。确定要内切（过了 working 门）后、POST 之前点亮：
       // 兜底行当拍出现在目标目录组顶。working/无从内切落点都是别的页签，不许亮本页
@@ -12115,13 +12115,13 @@ async function api(method, path, body) {
         // 服务端判据。改走保活分支——旧终端不杀、目标终端挂进当前视口，页签数不变
         // （旧实现这里静默新开页签，正是「页签自动变多」的直接来源）。不提示：目标
         // 会话照旧换成内容，没有需要用户处理的失败。
-        // 失败清点（M5 原口径）：续接内切点亮的是历史行，新终端挂上后那枚高亮仍兑现
+        // 失败清点（原口径）：续接内切点亮的是历史行，新终端挂上后那枚高亮仍兑现
         // （live 行接任），此处清会让高亮先弹回旧行；全新内切不同——兜底行锚在本次
         // 点击换上的终端上，照旧撤掉旧瞄准。
         if (!resume) terminalRailEndSelect(null);
         return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
-      // 失败清点（M5）：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
+      // 失败清点：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
       // 继续说它选中就是说谎。不放 finally 清：working 转新开等落点经 finally
       // 会让高亮弹回旧行。
       terminalRailEndSelect(null);
@@ -12160,7 +12160,7 @@ async function api(method, path, body) {
     return null;
   }
 
-  // 归档（dsh §1.4 / m6b §A）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
+  // 归档（dsh §1.4）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
   // 平静会话单击即归档，无确认。本地先生效再落盘——POST 是本机回环，等它往返再
   // 动列表会出现「点了没反应」的半个节拍；落盘失败回退本地态并提示，不假装成功
   // （刷新回来还在，比假成功更难理解）。归档与续接无关：不可续接的会话照样可归档。
@@ -12168,9 +12168,9 @@ async function api(method, path, body) {
   // 保活都算），归档先弹二次确认，确认后「归档即杀」——走行内 × 同一条
   // terminalCloseTerminal 链路（working 会再叠它自己的运行中确认），关掉才归档。
   // 否则归档行从默认筛选消失、终端却在别处活着，终端一关会话即从视野彻底消失、
-  // 点击续接又被归档拦截。动效（M13）走 AnimatedRows 同款：行克隆淡出、
+  // 点击续接又被归档拦截。动效走 AnimatedRows 同款：行克隆淡出、
   // 下方行上移、隐藏池回填行淡入（terminalRailRerenderExitFlip）。恢复入口三件：
-  // toast「撤销」＋行内取消归档钮＋段头「视图选项」筛选（m6b §A2 三入口齐备）。
+  // toast「撤销」＋行内取消归档钮＋段头「视图选项」筛选（三入口齐备）。
   function terminalRailArchiveSession(id) {
     const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
     if (!session) return;
@@ -12214,8 +12214,8 @@ async function api(method, path, body) {
   }
 
   // 取消归档：从清单移除即回到原分组原位置——底层列表从没被改动，组内按最近活跃
-  // 的排序天然还原（dsh 的 sessionIds 槽位保留是同一种思路）。无 toast（m6b §A6
-  // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。动效（M13）＝
+  // 的排序天然还原（dsh 的 sessionIds 槽位保留是同一种思路）。无 toast（
+  // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。动效＝
   // 归档的镜像：行淡入回槽、下方行落回、水位线让位的回填行克隆淡出。
   function terminalRailUnarchiveSession(endpoint, id) {
     const key = `${endpoint}\u0000${id}`;
@@ -12255,7 +12255,7 @@ async function api(method, path, body) {
     return terminalRailSwitchOrCreateCore({ agentId: terminalRailAgentId(), cwd: key });
   }
 
-  // ── 组头 hover 卡（M7 S3，dsh B4） ──
+  // ── 组头 hover 卡（dsh B4） ──
   // 800ms 延迟（dsh 同值）；三行＝目录短名／完整路径／「N 个会话」；整卡可点，
   // 点击复制完整路径并短暂显示「已复制」（复用既有 sessCopyText 复制反馈手法）。
   // 挂 body 下 position:fixed（dsh 同款 portal——栏体 overflow-x:hidden 会切掉贴
@@ -12324,8 +12324,8 @@ async function api(method, path, body) {
     });
   }
 
-  // ── 组头 ⋯ 菜单（M7 S2/S3） ──
-  // 栏内单例：同一时刻只开一个，换目标即换主。容器做成可扩的——M8 往段头「视图
+  // ── 组头 ⋯ 菜单 ──
+  // 栏内单例：同一时刻只开一个，换目标即换主。容器做成可扩的——往段头「视图
   // 选项」加项时若还要组级菜单，只在这里 append，不开第二套浮层。挂在栏体下而
   // 不在列表里：列表整体 innerHTML 重渲（1s 轮询每拍都可能），挂进去会被抹掉。
   let terminalRailMenuKey = "";
@@ -12364,7 +12364,7 @@ async function api(method, path, body) {
     item.setAttribute("data-rail-term-remove-group", key);
     item.textContent = "移除分组";
     menu.append(item);
-    // M9-D1：portal 到 body 下 position:fixed——栏体 overflow:hidden 会裁掉栏内
+    // portal 到 body 下 position:fixed——栏体 overflow:hidden 会裁掉栏内
     // 浮层（dsh 的 portal:true 同款）。坐标直接按视口 rect 算，不再换算到栏体。
     document.body.append(menu);
     const headRect = head.getBoundingClientRect();
@@ -12381,10 +12381,10 @@ async function api(method, path, body) {
     else openTerminalRailGroupMenu(key);
   }
 
-  // 分组移除（dsh §2 / m6 §2）：红色确认弹窗（复用共用确认件），只从清单移除，
+  // 分组移除（dsh §2）：红色确认弹窗（复用共用确认件），只从清单移除，
   // 磁盘文件夹与会话记录不动，会话落「未分组」。
   function terminalRailRemoveGroup(key) {
-    // 先收场组头菜单再开弹窗（M10-F2）：菜单 z-index 1200 高于弹窗 overlay 300，
+    // 先收场组头菜单再开弹窗：菜单 z-index 1200 高于弹窗 overlay 300，
     // 不收场会滞留 DOM 压住弹窗（窄窗/靠中组头下尤其明显）。
     closeTerminalRailGroupMenu();
     showSkillsModal({
@@ -12402,7 +12402,7 @@ async function api(method, path, body) {
   function terminalRailCommitRemoveGroup(key) {
     if (terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, key))) return;
     terminalRailPrefs.removedGroups.push(key);
-    // 记移除时刻（M14 自愈的判据）：该目录此后新到的会话会把组重新放出来。
+    // 记移除时刻（自愈的判据）：该目录此后新到的会话会把组重新放出来。
     // 顺手清掉自愈失败标记：用户重新移除＝重新起算，上一轮落盘失败不该压死这一轮。
     terminalRailRemovedAt[terminalRailNormDir(key)] = Date.now();
     terminalRailSelfHealFailed.delete(terminalRailNormDir(key));
@@ -12466,7 +12466,7 @@ async function api(method, path, body) {
           archived: Array.isArray(data && data.archived) ? data.archived : [],
           removedGroups: Array.isArray(data && data.removedGroups) ? data.removedGroups : [],
         };
-        // M14 自愈的时间轴补齐：盘上有清单条目、本地却没有移除时刻的（M14 之前
+        // 自愈的时间轴补齐：盘上有清单条目、本地却没有移除时刻的（早先
         // 落盘的老数据，或换了浏览器 profile），按「此刻」记一笔——此后该目录再来的
         // 会话才算新的。不补的话这些条目永远不自愈，而恢复区已经砍掉了。
         const now = Date.now();
@@ -12519,7 +12519,7 @@ async function api(method, path, body) {
     loadTerminalRailViewPrefs(); // 视图偏好先进状态再首渲（localStorage 读回）
     loadTerminalRailCollapsedGroups(); // 组折叠态同层读回：首帧就是存档形态，不先全展开再跳
     initTerminalRailScrollbarQuiet();
-    // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，M13 走捕获相）：
+    // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，走捕获相）：
     // 合成点击（element.click()）不派发 pointerdown——进页首帧、自动化测量都瞬时
     // 落位。监听挂整个会话栏而非仅历史列表：新建按钮也在列内，它的首次点击同样
     // 会让兜底行出现，不能等到下一次操作才有动画。
@@ -12543,9 +12543,9 @@ async function api(method, path, body) {
         terminalRailArchiveSession(archive.getAttribute("data-rail-term-archive"));
         return;
       }
-      // 取消归档钮（M8 T7a，m6b §A2 第三恢复入口）：必须排在行点击（resume）分支
+      // 取消归档钮（第三恢复入口）：必须排在行点击（resume）分支
       // 之前——钮是行按钮的子元素，排在后面会被行点击整个抢走（断链：点了没反应）。
-      // 无 toast（m6b §A6：取消归档成功路径从不 notify）。
+      // 无 toast（取消归档成功路径从不 notify）。
       const unarchive = target.closest("[data-rail-term-unarchive]");
       if (unarchive) {
         const id = unarchive.getAttribute("data-rail-term-unarchive");
@@ -12564,7 +12564,7 @@ async function api(method, path, body) {
         return;
       }
       // 注：⋯ 菜单项（data-rail-term-remove-group）与视图选项菜单项
-      // （data-rail-term-view）不在本委托里——两个菜单已 portal 到 body（M9-D1），
+      // （data-rail-term-view）不在本委托里——两个菜单已 portal 到 body，
       // 不是 #railTerminalDir 后代，它们的处理入口在 document 级委托（见
       // initTerminalRail 尾部，先判菜单项后走收场）。
       // 「仅显示已归档」空态动作（在树内，留在本委托）：切回「隐藏已归档」
@@ -12580,7 +12580,7 @@ async function api(method, path, body) {
       }
       const resumeRow = target.closest("[data-rail-term-resume]");
       if (resumeRow) {
-        // live 行点击＝聚焦其终端（M8 T2）；非 live 行才走去重/续接两分支
+        // live 行点击＝聚焦其终端；非 live 行才走去重/续接两分支
         const liveId = resumeRow.getAttribute("data-rail-term-live");
         if (liveId) {
           terminalRailActivateSession(liveId);
@@ -12600,7 +12600,7 @@ async function api(method, path, body) {
       if (more) toggleTerminalRailWatermark(more.getAttribute("data-rail-term-more"));
     });
     $("railTermNewBtn").onclick = () => terminalRailCreateTerminal();
-    // 段头搜索（M8 T7a）：钮＝展开/重新聚焦（非 toggle）；输入＝防抖 250ms；清空钮
+    // 段头搜索：钮＝展开/重新聚焦（非 toggle）；输入＝防抖 250ms；清空钮
     // 与 Esc＝清空＋收起。外点收起逻辑挂在下面的 document 委托里（仅空查询）。
     const searchBtn = $("railTermSearchBtn");
     const searchInput = $("railTermSearchInput");
@@ -12610,7 +12610,7 @@ async function api(method, path, body) {
         if (event && typeof event.stopPropagation === "function") event.stopPropagation();
         if (terminalRailSearch.open) {
           if (searchInput && typeof searchInput.focus === "function") searchInput.focus();
-          return; // 已展开再点＝重新聚焦，不退出（m6c 实测#32）
+          return; // 已展开再点＝重新聚焦，不退出
         }
         openTerminalRailSearch();
       });
@@ -12627,7 +12627,7 @@ async function api(method, path, body) {
         closeTerminalRailSearch();
       });
     }
-    // 视图选项钮（M8 T7b）：菜单开关
+    // 视图选项钮：菜单开关
     const viewBtn = $("railTermViewOptionsBtn");
     if (viewBtn) {
       viewBtn.addEventListener("click", (event) => {
@@ -12636,7 +12636,7 @@ async function api(method, path, body) {
         else openTerminalRailViewMenu();
       });
     }
-    // 会话行拖拽（M8 T7b，手序的唯一来源）：draggable 只在非归档行上；同列表内
+    // 会话行拖拽（手序的唯一来源）：draggable 只在非归档行上；同列表内
     // 移动（dsh 只允许同父级兄弟，我们的组/平铺都是一个父）。落点＝目标行之前。
     let railDragId = "";
     dir.addEventListener("dragstart", (event) => {
@@ -12707,7 +12707,7 @@ async function api(method, path, body) {
     document.addEventListener("click", (event) => {
       const target = event.target;
       const hasClosest = !!(target && typeof target.closest === "function");
-      // 菜单项分支（M9 复审必修 1）：两个菜单 portal 到 body 后不是 #railTerminalDir
+      // 菜单项分支（评审必修 1）：两个菜单 portal 到 body 后不是 #railTerminalDir
       // 后代，dir 委托接不到——菜单项的唯一处理入口搬到这里，**先判菜单项、后走
       // 下面的收场逻辑**（点选即关由 applyTerminalRailViewChoice 自己承担）。
       if (hasClosest) {
@@ -12719,7 +12719,7 @@ async function api(method, path, body) {
         }
         const removeItem = target.closest("[data-rail-term-remove-group]");
         if (removeItem) {
-          // 移除分组必须走带确认弹窗的入口（M7 复审必修 1 钉住的链：直接调 commit
+          // 移除分组必须走带确认弹窗的入口（评审必修 1 钉住的链：直接调 commit
           // 版会把红色确认弹窗整个绕过）。
           terminalRailRemoveGroup(removeItem.getAttribute("data-rail-term-remove-group"));
           return;
@@ -12740,7 +12740,7 @@ async function api(method, path, body) {
           }
         }
       }
-      // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开，m6c §A6）
+      // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开）
       if (terminalRailSearch.open) {
         const head = $("railTermSectionHead");
         if (!head || !head.contains(target)) {
@@ -19972,7 +19972,7 @@ async function api(method, path, body) {
   // 220，联动断裂、卡下半截悬空（v1/v2 同发）；此处按同比例由宽派生高，与
   // statsChartWidth 同下限同藏态回落（undefined→220 基线），v1/v2 同效。外层作用域
   // 声明：调用点在 renderStatsTrend（renderStatsLineChart 之外），嵌套声明会让调用处
-  // 直接 ReferenceError、整图中止渲染（POLISH02 事故根因）。
+  // 直接 ReferenceError、整图中止渲染（历史事故根因）。
   function statsTrendChartHeight(el) {
     const w = Math.round(el.clientWidth);
     if (!w) return undefined;

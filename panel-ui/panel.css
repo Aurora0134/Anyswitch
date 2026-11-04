@@ -584,19 +584,19 @@
   :root[data-ui-version="v2"] .settings-subtabs { display: none; }
   :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
 
-  /* ── 终端会话栏（M4 + M7 + M8）：终端视图下的左栏换血内容 ─────────────────────────
+  /* ── 终端会话栏：终端视图下的左栏换血内容 ─────────────────────────
      进终端视图（body.terminal-mode）时，栏内主 tab 组整组换成这份随 agent 的会话
      栏（与设置目录同一换血形制：换内容而非追加），栏底齿轮换「返回」——点返回 =
      回进入终端前的视图（terminalReturnView，与设置态那颗钮同一槽位、两态互斥）。
      退出终端即还原；v1 无栏，本段全部锚 v2。
-     观感按 dsh 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作
+     观感按 dsh 左栏实测：行 hover/选中、行内动作
      按钮、文件夹图标开/关、水位线增减一律 0ms 硬切——这些规则里不写 transition，
      写了就错；栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位移有运动。颜色全走语义
      token（--surface / --surface-hover / --accent-soft / --text-3…），不造新色值。 */
   #railTerminalDir {
     /* 换血时整栏接管：不吃 .rail-dir 的贴底 margin-top:auto（id 选择器提级，压过
        后文那条基座规则），改为从栏顶往下铺满，中段滚动层自己滚。
-       min-height:0 + overflow:hidden（M9-D1，dsh regionArea 同口径）：早先选 auto
+       min-height:0 + overflow:hidden（dsh regionArea 同口径）：早先选 auto
        是为躲 e160790（行压段头），但它把整棵树的 min-content 全高传给 aside 的 flex
        布局——收缩链断在栏体，aside 自己滚、底栏被滚走、滚动层从不接管（真机实测：
        rail scrollHeight 1468 > clientHeight 566，滚动层 1254==1254）。改成 0 后栏体
@@ -622,14 +622,14 @@
   }
   .rail-term-new:hover { background: var(--surface-hover); }
   .rail-term-new:disabled { opacity: 0.5; cursor: default; }
-  /* M8 T1 起段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none，
-     滚的只有里面的树）。T7 的搜索/视图选项钮也挂在这行——行观感参数照抄 m6c §B5
-     实测全集：36px 高、gap 4px、radius-md、padding-left 4px；标题 14px/20/400
+  /* 段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none，
+     滚的只有里面的树）。搜索/视图选项钮也挂在这行——行观感参数按实测全集：
+     36px 高、gap 4px、radius-md、padding-left 4px；标题 14px/20/400
      tertiary、max-width 45%；图标钮 28×28。 */
   .rail-term-section-head { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 4px 6px; flex: none; border-radius: var(--radius-md); }
   .rail-term-section-title { flex: 1; min-width: 0; max-width: 45%; font-size: 14px; line-height: 20px; font-weight: 400; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail-term-head-actions { flex: none; display: flex; align-items: center; gap: 4px; }
-  /* ── 段头搜索（M8 T7a，m6c §A） ──
+  /* ── 段头搜索 ──
      行内展开不是浮层：搜索槽从 28px 原地展开到 100%，标题与右侧钮带同时序收缩
      让位（.18s——栏内第二条过渡，只此机制有；行/钮照旧 0ms 硬切）。 */
   .rail-term-search {
@@ -641,7 +641,7 @@
   .rail-term-section-head.is-searching .rail-term-search {
     max-width: 100%; flex: 1 1 auto; height: 30px; padding: 0 7px; border: 1px solid var(--border); background: var(--surface-sunken);
   }
-  /* M11-A：刷新钮砍掉后，标题 max-width 45% 封顶之外的剩余空间无 item 吸收、全堆在
+  /* 刷新钮砍掉后，标题 max-width 45% 封顶之外的剩余空间无 item 吸收、全堆在
      钮带右侧——两钮态实测空隙 36.66px（刷新钮在时三钮带只剩 4.66px 残差，肉眼视作贴齐，
      45% 封顶本就按三钮带调准）。收起态把「搜索＋视图选项」工具组整体贴到段头右缘的 4px
      边距线：auto 左边距落在组首元（搜索槽）上，标题让出的空间改留在标题与工具组之间
@@ -674,13 +674,13 @@
   }
   .rail-term-section-head.is-searching .rail-term-search-clear { display: inline-flex; }
   .rail-term-search-clear:hover { background: var(--surface-hover); color: var(--text); }
-  /* 搜索结果平铺行：标题＋目录短名（无组头、无高亮，m6c §A4） */
+  /* 搜索结果平铺行：标题＋目录短名（无组头、无高亮） */
   .rail-term-row-result { min-height: 34px; }
   .rail-term-row-dir { flex: none; font-size: 11px; color: var(--text-4); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail-term-row-result:hover .rail-term-row-dir { display: none; }
   .rail-term-search-status { padding: 8px; font-size: 12px; color: var(--text-3); }
   .rail-term-search-note { padding: 8px; font-size: 12px; color: var(--text-3); }
-  /* ── 视图选项菜单（M8 T7b，m6c §B2） ──
+  /* ── 视图选项菜单 ──
      右对齐锚定（JS 算 left）、min-width 200、padding 4、dense 30px 项、分组标签
      11px tertiary、✓ 居项最右（margin-left:auto，选中才显、不换文字色不铺底）、
      点选即关（JS）。打开/关闭无动画（0ms 挂载/卸载）。 */
@@ -692,7 +692,7 @@
   .rail-term-view-text { flex: 1; min-width: 0; }
   .rail-term-view-check { flex: none; display: none; align-items: center; margin-left: auto; color: var(--accent); line-height: 0; }
   .rail-term-view-item.is-selected .rail-term-view-check { display: inline-flex; }
-  /* 「仅显示已归档」空态（m6c §A1）：图标 + 两句 + 查看其他会话动作 */
+  /* 「仅显示已归档」空态：图标 + 两句 + 查看其他会话动作 */
   .rail-term-empty {
     display: flex; flex-direction: column; align-items: center; gap: 8px;
     padding: 32px 12px; color: var(--text-3); font-size: 12.5px;
@@ -703,7 +703,7 @@
     font: inherit; font-size: 12.5px; cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm);
   }
   .rail-term-empty-action:hover { background: var(--surface-hover); }
-  /* 会话行拖拽（M8 T7b）：被拖行半透明（0ms 硬切，无过渡——栏内运动纪律） */
+  /* 会话行拖拽：被拖行半透明（0ms 硬切，无过渡——栏内运动纪律） */
   .rail-term-row-history[draggable="true"] { cursor: grab; }
   .rail-term-row-history.is-dragging { opacity: 0.5; }
   .rail-term-icon-btn {
@@ -715,7 +715,7 @@
   .rail-term-icon-btn:disabled { opacity: 0.5; cursor: default; }
   /* 树容器是内容高度的定高块（不参与收缩）；溢出由中段滚动层裁切，不越段。 */
   .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; }
-  /* ── 中段唯一滚动层（M7 S4，dsh §3.1/§3.3） ──
+  /* ── 中段唯一滚动层（dsh §3.1/§3.3） ──
      两个段都在里面滚（dsh 的 .list 同口径）：flex:1 + min-height:0 吃剩余空间，
      空间不够时它先缩——定高块（新建钮/段头/行）都不参与收缩，「行压段头」的旧缺陷
      （e160790 修过的）才不会复现。scrollbar-gutter:stable 预留滚动条槽位，有无
@@ -752,13 +752,13 @@
     flex: none; width: 16px; height: 20px; display: inline-flex;
     align-items: center; justify-content: center; line-height: 0;
   }
-  /* ── 归档/撤销退场幽灵行（M13） ──
+  /* ── 归档/撤销退场幽灵行 ──
      离开布局的行克隆补进滚动层（.rail-term-scroll 是 position:relative 的最近
      定位祖先，幽灵随内容滚动）：inert＋不可命中，100ms 淡出后由 JS 移除。动画走
      WAAPI（JS 的 matchMedia 门拦 reduced-motion，全站 CSS 压零规则拦不到 WAAPI），
      这里只管脱离布局流、不挡指针。 */
   .rail-term-ghost { position: absolute; pointer-events: none; margin: 0; }
-  /* ── 运行中转圈（M12-B，dsh 实测规格逐项） ──
+  /* ── 运行中转圈（dsh 实测规格逐项） ──
      转圈住进行首 16×20 常驻槽（.rail-term-slot）：working 填入，idle 与非 live
      行一律留空（dsh 四态机 idle 不画任何图标，灰点已退役），不替换任何图标。
      槽内挂读屏文本「进行中」。页签指示位复用本组件（.terminal-tab-state 槽内
@@ -798,7 +798,7 @@
   .rail-term-row.is-active { background: var(--accent-soft); color: var(--accent); }
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .rail-term-row-time { flex: none; font-size: 11px; color: var(--text-4); }
-  /* 关闭叉（M8 T5）：只在 live 行 hover 时出现（走 terminalRailCloseSession 同一条
+  /* 关闭叉：只在 live 行 hover 时出现（走 terminalRailCloseSession 同一条
      路），纯 display 硬切（无淡入、无位移、无宽度过渡）。行的归档钮同样只在该行
      hover 时出现——时间同槽位让位（dsh 只在 rowActions 出现时才把时间让位）。 */
   .rail-term-row-close { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
@@ -806,7 +806,7 @@
   .rail-term-row-archive { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
   .rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }
   .rail-term-row-history:hover .rail-term-row-time { display: none; }
-  /* live 行的取消归档钮（M8 T7a）：归档行在「全部会话」筛选下内联显示，hover 出 */
+  /* live 行的取消归档钮：归档行在「全部会话」筛选下内联显示，hover 出 */
   .rail-term-row-unarchive { flex: none; display: none; padding: 0 2px; color: var(--text-3); cursor: pointer; }
   .rail-term-row-history.is-archived:hover .rail-term-row-unarchive { display: inline-flex; }
   .rail-term-row-history.is-archived:hover .rail-term-row-archive { display: none; }
@@ -814,8 +814,8 @@
   .rail-term-row-history.is-archived .rail-term-row-title,
   .rail-term-row-history.is-archived .rail-term-row-time { color: var(--text-4); }
   /* 组头：文件夹图标随组态开/关（0ms 硬切），箭头是栏内唯一一条 CSS 过渡。
-     M7 S3 起组头是「容器」：里面整行是可点的折叠开关（toggle 钮），右侧 hover
-     才出动作钮（⋯ 菜单，M8 可能扩项）。容器本身不接点击——折叠走 toggle 钮，
+     组头是「容器」：里面整行是可点的折叠开关（toggle 钮），右侧 hover
+     才出动作钮（⋯ 菜单，可能扩项）。容器本身不接点击——折叠走 toggle 钮，
      动作钮是兄弟 span，互不吃对方的点击。 */
   .rail-term-group { display: flex; flex-direction: column; gap: 2px; }
   .rail-term-group + .rail-term-group { margin-top: 6px; }
@@ -833,12 +833,12 @@
     min-height: 26px; padding: 0 8px; border-radius: var(--radius-md);
   }
   .rail-term-group-toggle:hover { background: var(--surface-hover); color: var(--text-2); }
-  /* 图标同槽互换（M7 S3 / M14，dsh 实测同款）：非 hover 显示文件夹（开/关两枚），
+  /* 图标同槽互换（dsh 实测同款）：非 hover 显示文件夹（开/关两枚），
      hover 时同槽位换成箭头——两个图标同在 16×20 的居中槽里 display 硬切，不产生
      宽度跳动（文件夹 16×16、箭头 14×14，同槽居中即 dsh 的槽位尺寸）。箭头展开
      旋转 .15s ease-in-out（栏内唯一行内过渡）。互换规则只作用于组头（.rail-term-
      group-head 之内的箭头默认隐）。色档照 dsh 实测：文件夹吃三级文字色（含当前
-     聚焦会话的组改走 --accent，M8 T4 用户修正：不写死 dsh 的蓝），箭头吃 caption
+     聚焦会话的组改走 --accent，用户修正：不写死 dsh 的蓝），箭头吃 caption
      级（--text-4）。 */
   .rail-term-group-slot { flex: none; width: 16px; height: 20px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
   .rail-term-group-arrow {
@@ -851,7 +851,7 @@
     flex: none; display: inline-flex; align-items: center; justify-content: center;
     line-height: 0; color: var(--text-3);
   }
-  /* M8 T4：含当前聚焦会话的组，文件夹图标取主题 accent（用户修正：不写死 dsh 的蓝，
+  /* 含当前聚焦会话的组，文件夹图标取主题 accent（用户修正：不写死 dsh 的蓝，
      sepia 主题出橙等——亮暗/sepia/各皮肤各自生效）。 */
   .rail-term-group-icon.is-current { color: var(--accent); }
   .rail-term-group-head .rail-term-group-arrow { display: none; }
@@ -866,11 +866,11 @@
   }
   .rail-term-group-head:hover .rail-term-group-btn { display: inline-flex; }
   .rail-term-group-btn:hover { background: var(--surface-hover); color: var(--text); }
-  /* ── 组头 ⋯ 菜单（M7 S2/S3） ──
-     栏内单例（JS 保证同一时刻只开一个），挂在栏体下绝对定位。容器可扩：M8 加项
+  /* ── 组头 ⋯ 菜单 ──
+     栏内单例（JS 保证同一时刻只开一个），挂在栏体下绝对定位。容器可扩：加项
      只加 DOM。现仅「移除分组」一项（红色 danger）。 */
   .rail-term-menu {
-    /* M9-D1：菜单 portal 到 body 下（position:fixed + 视口坐标）——栏体加了
+    /* 菜单 portal 到 body 下（position:fixed + 视口坐标）——栏体加了
        overflow:hidden，栏内 absolute 会被裁掉；层级与 hover 卡/右键菜单同档，
        压过栏体 40 与终端页内容。 */
     position: fixed; z-index: 1200; min-width: 120px; padding: 4px;
@@ -886,7 +886,7 @@
   .rail-term-menu-item:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-menu-item.is-danger { color: var(--danger); }
   .rail-term-menu-item.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
-  /* ── 组头 hover 卡（M7 S3，dsh B4） ──
+  /* ── 组头 hover 卡（dsh B4） ──
      800ms 延迟后出现；三行＝目录短名／完整路径／「N 个会话」；整卡可点（复制完整
      路径 + 「已复制」）。挂 body 下 position:fixed（dsh 同款 portal——栏体
      overflow-x:hidden 会切掉贴右缘展开的卡），z-index 与右键菜单同档。 */
@@ -1807,7 +1807,7 @@
   /* 浮动 Toast */
   /* 顶部居中浮层：落在 56px 顶栏下方 12px 处，不遮顶栏 tab——底部位置实测难以
      察觉（带动作的刷新结果报信需要更高可见性，全站 toast 统一上移）；入场由上方
-     6px 滑下（160ms ease-out，M13 对齐 dsh）；驻留期满转 1s 只淡出不位移
+     6px 滑下（160ms ease-out，对齐 dsh）；驻留期满转 1s 只淡出不位移
      （is-leaving，落暗由 JS 在淡出期满摘类），动作钮点击瞬时消失（is-gone 压
      过渡）。z-index 须在 modal-overlay（300）之上：弹窗开着时弹出的报错（如导入
      弹窗里的互斥提示）不能被蒙层盖住。reduced-motion 走全站压零规则
@@ -1823,10 +1823,10 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.err { color: var(--danger); border-color: var(--danger-border); }
-  /* 驻留期满的收场（M13）：只淡出不位移，1s；须后置于 .toast.show（同特异性，
+  /* 驻留期满的收场：只淡出不位移，1s；须后置于 .toast.show（同特异性，
      层叠序取胜），is-gone 同理再后置 */
   .toast.is-leaving { opacity: 0; transition: opacity 1s var(--ease-out); }
-  /* 动作钮点击的瞬时收场（M13）：压掉一切过渡，摘类当帧生效 */
+  /* 动作钮点击的瞬时收场：压掉一切过渡，摘类当帧生效 */
   .toast.is-gone { transition: none; }
   /* toast 动作小字（如渠道刷新结果尾部的「查看差异」）：accent 实色可点击。
      基座 .toast 不拦指针（float 层不遮下方操作），动作小字要可点必须在可见态
@@ -3358,7 +3358,7 @@
     50% { outline-color: color-mix(in srgb, var(--accent) 30%, transparent); }
   }
 
-  /* 轨道悬浮层（M8 整链概览）：与 .skills-ctx-menu 同面板风格 */
+  /* 轨道悬浮层（整链概览）：与 .skills-ctx-menu 同面板风格 */
   .route-rail-pop {
     position: fixed; z-index: 1200; min-width: 240px; max-width: 360px; padding: 8px 10px;
     background: var(--surface-glass); border: 1px solid var(--border-strong);

@@ -275,7 +275,7 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
     });
   });
 
-  // M7 S5：续接创建的终端要把「替哪条会话续接的」记进宿主会话记录（前端历史会话
+  // 续接创建的终端要把「替哪条会话续接的」记进宿主会话记录（前端历史会话
   // 点击先查它做去重聚焦）。面板负责把校验过的 resume 身份随创建转发——只递
   // endpoint + 会话 id 两个非密字段。
   it("resume 身份随创建转发给 terminal-host：只递 endpoint + id，不进 file/命令原文", async () => {
@@ -292,7 +292,7 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
       assert.equal(calls.length, 1, "走注入的 createTerminalSession");
       assert.deepEqual(calls[0].body.resume, { endpoint: "kimi", id: SESSION_ID },
         "转发 resume:{endpoint,id}（file 不转发——去重不需要路径）");
-      // 无 resume 的普通创建不递这个字段（M3 契约逐位不变）
+      // 无 resume 的普通创建不递这个字段（续接契约逐位不变）
       const plain = resumeRouter({ root: mkTestDir("anyswitch-resume-plain-root-") });
       const plainCall = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi", cwd });
       await plain.router.handle(plainCall.req, plainCall.res);
@@ -302,7 +302,7 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
   });
 });
 
-// M12-A 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
+// 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
 // 换绑），页签不新增。working 判定在面板侧，本路由只接「已决定内切」的请求。
 describe("内切切换会话（terminal sessions switch）", () => {
   function switchRouter({ root, hostSession, restarted, probe, scanAgentConversations, terminalSessions, scanAll, binding, opencodeBusyFn } = {}) {
@@ -551,7 +551,7 @@ describe("内切切换会话（terminal sessions switch）", () => {
       const cases = [
         // 组装失败（身份值带 cmd 元字符）：走 catch 的原有形状——code 机器可判，error 是组装错误原文
         { resume: { endpoint: "dsh", id: "a&calc" }, expectCode: "resume-invalid", machine: false },
-        // 路由级拒换（M12-A 三处 400）：error 即机器码本身，零文案——连字符族让前端门接住落批准句
+        // 路由级拒换（三处 400）：error 即机器码本身，零文案——连字符族让前端门接住落批准句
         { resume: { endpoint: "kimi" }, expectCode: "resume-invalid", machine: true },
         { resume: { endpoint: "kimi", id: "" }, expectCode: "resume-invalid", machine: true },
         { resume: { endpoint: "no-such-agent", id: SESSION_ID }, expectCode: "resume-unsupported", machine: true },
@@ -574,7 +574,7 @@ describe("内切切换会话（terminal sessions switch）", () => {
     });
   });
 
-  // M12 行为报告 G3 的收口：目标会话在盘上不存在时，换绑照做会让 agent 落一行
+  // 行为报告的收口：目标会话在盘上不存在时，换绑照做会让 agent 落一行
   // 英文报错、HTTP 还是 200、无提示也不降级——用户停在不可用页签上。判据只在
   // 「快照已经知道盘面」时生效：冷缓存放行，快照说没有才强制刷一拍再定。
   it("目标会话不存在：不换绑、不起终端，回机器可判的 resume-invalid（G3 收口）", async () => {

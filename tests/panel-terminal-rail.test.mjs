@@ -1,4 +1,4 @@
-// 终端视图左栏换血（M4）：随 agent 的会话栏。
+// 终端视图左栏换血：随 agent 的会话栏。
 // 断言分三层：静态源码（HTML 骨架 / CSS 换血与观感红线 / JS 挂点）、vm 真跑纯函数
 // （分组、水位线、跟随、指纹门控、FLIP 门控）、vm 真跑点击两分支（续接 POST 与提示）。
 // 取样惯例照 panel.test.mjs：源码字符串断言 + 按函数名切源码进桩环境，函数体不得出现
@@ -21,7 +21,7 @@ const railHtml = () => {
   return m[0];
 };
 
-// ── 视口表（M12：页签＝视口）的桩前置 ──
+// ── 视口表（页签＝视口）的桩前置 ──
 // 函数按名抽进 vm 后，模块级状态量不会跟着来；视口纯函数直接用生产实现，只补状态量。
 const VIEWPORT_FNS = [
   "terminalViewportNextId", "terminalViewportActive", "terminalViewportById",
@@ -65,7 +65,7 @@ const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-describe("终端视图左栏换血（M4）", () => {
+describe("终端视图左栏换血", () => {
   describe("HTML 骨架", () => {
     it("终端会话栏静态在册：hidden、aria-label「终端会话」、落在主 tab 组与栏底之间", () => {
       const rail = railHtml();
@@ -77,15 +77,15 @@ describe("终端视图左栏换血（M4）", () => {
       for (const id of ["railTermNewBtn", "railTermSectionHead", "railTermHistoryList"]) {
         assert.ok(dir[1].includes(`id="${id}"`), `骨架节点 ${id} 就位`);
       }
-      // M8 T1 两段合并后栏体自上而下：新建终端 → 「工作区」段头（T7 三钮）→
+      // 两段合并后栏体自上而下：新建终端 → 「工作区」段头（段头三钮）→
       // 目录分组树（live 会话内联）→ 底栏。「打开的终端」段整段拆除。
       const body = dir[1];
       assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf('id="railTermSectionHead"')
         && body.indexOf('id="railTermSectionHead"') < body.indexOf("rail-term-scroll"),
         "栏体自上而下：新建终端 → 段头 → 滚动层（树）");
-      assert.ok(!body.includes('id="railTermOpenList"'), "「打开的终端」段整段拆除（M8 T1）");
+      assert.ok(!body.includes('id="railTermOpenList"'), "「打开的终端」段整段拆除");
       assert.ok(!body.includes("打开的终端"), "旧段头文案不在册");
-      assert.ok(body.includes(">工作区<"), "段头标题「工作区」（M8 T3）");
+      assert.ok(body.includes(">工作区<"), "段头标题「工作区」");
     });
 
     it("身份行整块拆除：头像槽、名称、通用字形与相关 id 一律不在册", () => {
@@ -97,7 +97,7 @@ describe("终端视图左栏换血（M4）", () => {
       }
       assert.ok(!panelHtml.includes("rail-term-agent-glyph"), "通用终端字形槽一并清净");
       assert.ok(!panelCss.includes(".rail-term-agent"), "身份行样式一并清净");
-      const railBlock = sliceBetween(panelJs, "终端会话栏（M4 + M7 + M8）", "function initSkillsTab");
+      const railBlock = sliceBetween(panelJs, "终端会话栏：终端视图下的左栏换血内容", "function initSkillsTab");
       for (const symbol of ["renderTerminalRailAgent", "terminalRailAgentGlyph", "terminalRailAgentLabel"]) {
         assert.ok(!railBlock.includes(symbol), `身份行函数 ${symbol} 已清净`);
       }
@@ -112,7 +112,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(body.includes(">新建终端<"), "新建按钮可见文案「新建终端」");
       assert.ok(body.includes(">工作区<"), "段头标题「工作区」");
       // D4：段头只剩搜索＋视图选项两钮（刷新钮已砍）；刷新钮不在册
-      assert.ok(!body.includes('id="railTermHistoryRefresh"'), "段头刷新钮已拆除（M9-D4，用户拍板）");
+      assert.ok(!body.includes('id="railTermHistoryRefresh"'), "段头刷新钮已拆除（用户拍板）");
       // 栏内可见文案只许是批准清单里的那几句：把 HTML 文本节点全取出来逐个比对，
       // 新造词一进来就红（不是只看某一条正则不命中）。
       const textNodes = [...body.matchAll(/>([^<>]+)</g)].map((m) => m[1].trim()).filter(Boolean);
@@ -140,13 +140,13 @@ describe("终端视图左栏换血（M4）", () => {
       const row = cssRule(".rail-term-row {");
       assert.ok(!/transition/.test(row), "行本体无 transition——hover 底色 0ms 硬切（加过渡就错）");
       assert.ok(panelCss.includes(".rail-term-row:hover { background: var(--surface-hover);"), "hover 底色直接换，无过渡");
-      // live 行的关闭叉（M8 T5）：只限 live 行 hover 出现，与归档钮同形制
+      // live 行的关闭叉：只限 live 行 hover 出现，与归档钮同形制
       const closeRule = panelCss.match(/\.rail-term-row\.is-live:hover \.rail-term-row-close \{([^}]*)\}/);
-      assert.ok(closeRule, "live 行 hover 出关闭叉（M8 T5，× 走 terminalRailCloseSession 同一条路）");
+      assert.ok(closeRule, "live 行 hover 出关闭叉（× 走 terminalRailCloseSession 同一条路）");
       assert.ok(closeRule[1].includes("display: inline-flex"), "动作按钮 display 硬切（无淡入无位移）");
       const arrow = cssRule(".rail-term-group-arrow {");
       assert.ok(arrow.includes("transition: transform .15s ease-in-out"),
-        "组箭头是栏内唯一一条 CSS 过渡：.15s ease-in-out（M14 照 dsh 实测缓动）");
+        "组箭头是栏内唯一一条 CSS 过渡：.15s ease-in-out（照 dsh 实测缓动）");
       assert.ok(panelCss.includes(".rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }"),
         "展开态箭头旋转 90°");
       const rm = panelCss.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-group-arrow \{ transition: none; \}/);
@@ -157,19 +157,19 @@ describe("终端视图左栏换血（M4）", () => {
       // 真机缺陷：栏体是列 flex，定高块默认 flex:0 1 auto 会参与收缩，而它们的行有
       // min-height、容器没有 → 行溢出容器画到下一段头上。布局几何在桩框架里量不出来
       // （要真渲染才有 rect），所以这里钉住让几何成立的结构契约；几何本身由无头
-      // Chrome harness 验。M8 T1 起段头是滚动层外的定高块（dsh：sectionHeader 在
+      // Chrome harness 验。段头是滚动层外的定高块（dsh：sectionHeader 在
       // regionArea 里 flex:none，滚的只有里面的列表）。
       const dir = cssRule("#railTerminalDir {");
       // 只比对声明（注释里也会出现「min-height:0」这类说明文字）
       const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
-      // M9-D1：栏体必须 min-height:0 + overflow:hidden（dsh regionArea 同口径）。
+      // 栏体必须 min-height:0 + overflow:hidden（dsh regionArea 同口径）。
       // 早先选 auto 是为躲 e160790，但它把整棵树的 min-content 全高传给 aside 的
       // flex 布局——收缩链断在栏体，aside 自己滚、底栏被滚走、滚动层从不接管
       // （真机实测：rail scrollHeight 1468 > clientHeight 566，滚动层 1254==1254）。
       // min-height:0 让栏体可缩到剩余空间，flex:1 的滚动层成为唯一 scroller；
       // overflow:hidden 保证矮窗下溢出的也是被裁切而不是画到段头/底栏上（e160790
       // 的病征是「可见的重叠」，裁切是 containment，且 500px 矮窗下根本裁不到）。
-      assert.ok(/min-height:\s*0/.test(decls(dir)), "栏体 min-height:0（收缩链不断，M9-D1）");
+      assert.ok(/min-height:\s*0/.test(decls(dir)), "栏体 min-height:0（收缩链不断）");
       assert.ok(/overflow:\s*hidden/.test(decls(dir)), "栏体 overflow:hidden（溢出由滚动层裁）");
       for (const [selector, why] of [
         [".rail-term-new {", "新建终端钮"],
@@ -178,7 +178,7 @@ describe("终端视图左栏换血（M4）", () => {
       ]) {
         assert.ok(cssRule(selector).includes("flex: none"), `${why} 是定高块，必须 flex:none（不参与收缩）`);
       }
-      // S4 起滚动收进唯一中段滚动层（M8 起里面只有一棵工作区树）
+      // 滚动收进唯一中段滚动层（里面只有一棵工作区树）
       const scroll = cssRule(".rail-term-scroll {");
       assert.ok(scroll.includes("flex: 1 1 auto") && scroll.includes("min-height: 0"),
         "中段滚动层是唯一吃剩余空间的那层（空间不够时它先缩）");
@@ -189,14 +189,14 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(!/\.rail-term-history[^{]*\{[^}]*overflow/.test(panelCss), "树容器不靠 overflow 裁切");
     });
 
-    it("M9-D1：栏内浮层 portal 到 body（栏体 overflow:hidden 不裁它们）", () => {
+    it("栏内浮层 portal 到 body（栏体 overflow:hidden 不裁它们）", () => {
       // 组头 ⋯ 菜单与视图选项菜单原先挂在栏内 absolute——栏体加 overflow:hidden 后
       // 会把贴边展开的菜单裁掉，故一并 portal 到 body（dsh 的 portal:true 同款），
       // 坐标改按视口 rect 算、层级抬到与 hover 卡/右键菜单同档。
       const menu = cssRule(".rail-term-menu {");
       assert.ok(menu.includes("position: fixed"), "菜单挂 body 下 fixed（不再吃栏内 absolute）");
       assert.ok(/z-index:\s*1200/.test(menu), "层级 1200：压过栏体 40 与终端页内容");
-      const railBlock = sliceBetween(panelJs, "终端会话栏（M4 + M7 + M8）", "function initSkillsTab");
+      const railBlock = sliceBetween(panelJs, "终端会话栏：终端视图下的左栏换血内容", "function initSkillsTab");
       const groupOpen = sliceBetween(railBlock, "function openTerminalRailGroupMenu", "function toggleTerminalRailGroupMenu");
       const viewOpen = sliceBetween(railBlock, "function openTerminalRailViewMenu", "function applyTerminalRailViewChoice");
       assert.ok(groupOpen.includes("document.body.append(menu)"), "组头菜单 append 到 body");
@@ -206,7 +206,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("钉底三层：顶区/中段滚动层/底栏各司其职，不用 sticky/fixed", () => {
-      // S4（m6 §3）：dsh 的钉底不是 sticky/fixed，是 flex:1+min-height:0 的唯一
+      // dsh 的钉底不是 sticky/fixed，是 flex:1+min-height:0 的唯一
       // 可伸缩层 + flex:none 的兄弟节点。栏体与设置态共用骨架，底栏一颗钮两态共用。
       // （hover 卡是挂 body 的 portal 浮层，dsh 同款 position:fixed，不属钉底机制，
       // 钉底三件——滚动层/底栏/遮罩——的规则里不许出现 sticky/fixed。）
@@ -261,7 +261,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("样式全走语义 token：不新增色值", () => {
-      const start = panelCss.indexOf("/* ── 终端会话栏（M4 + M7 + M8）");
+      const start = panelCss.indexOf("/* ── 终端会话栏");
       assert.ok(start > 0, "终端会话栏样式段在册");
       const block = panelCss.slice(start, panelCss.indexOf("── 阶段 2 补", start));
       assert.ok(block.length > 0, "样式段可取样");
@@ -300,7 +300,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(src.includes("target.agentId"), "快照身份次之");
     });
 
-    it("live 判定＝打开中的终端有同 endpoint＋同会话 id 的 resume 记录（M8 T1，M7-S5 映射复用）", () => {
+    it("live 判定＝打开中的终端有同 endpoint＋同会话 id 的 resume 记录（映射复用）", () => {
       // 「打开的终端」段拆除后，live 不再是一张独立列表，而是树里行的属性：
       // 一条历史会话行，只要有开着终端替它续接（resume 两键匹配），就是 live。
       const run = (sessions, endpoint, id) => {
@@ -358,7 +358,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.deepEqual(groupFn()(null), [], "非数组不炸");
     });
 
-    it("分组键归一化：同一目录的不同拼写只出一组，label 取最短拼写（M14）", () => {
+    it("分组键归一化：同一目录的不同拼写只出一组，label 取最短拼写", () => {
       // 用户实测的病灶：同名目录因拼写不同裂成两个组（两个「ai4math」）。
       const groups = groupFn()([
         { id: "a", project: "C:\\dev\\alpha", lastActive: 100 },
@@ -403,7 +403,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.deepEqual(run.view(3, 5), { visible: 3, hidden: 0, expanded: true }, "不足一档的组不截断");
     });
 
-    it("live 行渲染：状态点 + 选中态 + 关闭叉 + 归档钮并存（M8 T1/T2/T5）", () => {
+    it("live 行渲染：状态点 + 选中态 + 关闭叉 + 归档钮并存", () => {
       const fn = new Function("session", "live", "activeId", `
         const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
         const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
@@ -427,7 +427,7 @@ describe("终端视图左栏换血（M4）", () => {
       const session = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 };
       const live = { id: "t-1", status: "working" };
       const html = fn(session, live, "t-1");
-      // M12-B：working 行的行首槽位挂转圈（dsh 实测口径），不再用 7×7 状态点。
+      // working 行的行首槽位挂转圈（dsh 实测口径），不再用 7×7 状态点。
       assert.ok(html.includes("SPINNER-STUB"), "working 行行首槽位挂转圈");
       assert.ok(!html.includes("terminal-tab-state"), "working 行不挂 7×7 状态点（转圈即运行中视觉）");
       assert.ok(html.includes("is-active"), "聚焦终端对应的行是选中态（T2）");
@@ -452,7 +452,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(!other.includes("is-active"), "同一时刻至多一条选中（T2）");
     });
 
-    it("M12-B 转圈 markup 逐项（源码钉死，dsh 实测规格照抄）", () => {
+    it("转圈 markup 逐项（源码钉死，dsh 实测规格照抄）", () => {
       const spinner = panelJs.match(/const TERMINAL_RAIL_SPINNER = '([\s\S]*?)';/)?.[1];
       assert.ok(spinner, "转圈常量在册");
       assert.ok(spinner.includes('width="14" height="14" viewBox="0 0 24 24"'), "SVG 14×14、viewBox 0 0 24 24");
@@ -670,7 +670,7 @@ describe("终端视图左栏换血（M4）", () => {
       file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
     };
 
-    it("resumeCommand 非空：按 M3 契约 POST，成功即登记会话并置活跃", async () => {
+    it("resumeCommand 非空：按续接契约 POST，成功即登记会话并置活跃", async () => {
       const { sandbox, log } = runResume(RESUMABLE, async () => ({
         id: "t-9", label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", shell: "cmd", cwd: "C:\\dev\\alpha",
       }));
@@ -780,7 +780,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(log.toasts[0].msg, "无法启动这个终端", "非续接类失败走终端创建的既有兜底");
     });
 
-    it("乐观选中（M5）：点击当拍落 pending；新建失败即撤，成功不清（live 接管）", async () => {
+    it("乐观选中：点击当拍落 pending；新建失败即撤，成功不清（live 接管）", async () => {
       // 点亮发生在调判定门之前：点击当拍高亮成立，不等宿主 1~2s。
       const ok = runResume(RESUMABLE, async () => ({
         id: "t-9", label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", shell: "cmd", cwd: "C:\\dev\\alpha",
@@ -917,7 +917,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(sandbox.done("t1"), "别的会话的标记不受牵连");
     });
 
-    it("乐观选中（M5）：activate 无条件作废旧令牌；EndSelect 令牌不匹配 no-op", () => {
+    it("乐观选中：activate 无条件作废旧令牌；EndSelect 令牌不匹配 no-op", () => {
       const { sandbox, log } = runRail({ sessions: { t1: { id: "t1" }, t2: { id: "t2" } }, activeId: "t1" });
       // 改主意清点：点 live 行（activate）前先有一发在飞的乐观选中（resume 路径落的）。
       sandbox.begin({ endpoint: "kimi", id: "s-1" });
@@ -997,7 +997,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
   });
 
-  describe("乐观选中态（M5）：行选中判据 pending 优先（vm 真跑）", () => {
+  describe("乐观选中态：行选中判据 pending 优先（vm 真跑）", () => {
     // 行 HTML 直判：同一份 pending 状态下两行各渲一次，等价于一屏——「一屏至多
     // 一条选中」由判据本身保证（pending 存在时只有命中行亮）。
     const rowSandbox = () => new Function("log", `
@@ -1479,7 +1479,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(extractFn("enterTerminalRail").includes("renderTerminalRail()"), "进页即渲一帧（不必等轮询）");
       // D4：段头刷新钮已砍（用户拍板只留搜索/视图选项）——手动重取入口随之消失，
       // 列表拉取只剩「进终端视图一次 + 换 agent 补拉」两条自动路径。
-      assert.ok(!panelJs.includes("railTermHistoryRefresh"), "刷新钮本体/绑定/锚点全清净（M9-D4）");
+      assert.ok(!panelJs.includes("railTermHistoryRefresh"), "刷新钮本体/绑定/锚点全清净");
     });
 
     it("渲染挂点：会话渲染、归属轮询、就绪位三处同拍重渲栏体（typeof 闸护桩环境）", () => {
@@ -1498,7 +1498,7 @@ describe("终端视图左栏换血（M4）", () => {
         "栏体只在终端视图露出，别处不白跑渲染");
     });
 
-    it("live 行快路径让帧（M5）：停放/建流/fit 成对延后双 rAF，帧令牌保连点（源码+vm 真跑）", async () => {
+    it("live 行快路径让帧：停放/建流/fit 成对延后双 rAF，帧令牌保连点（源码+vm 真跑）", async () => {
       const render = extractFn("renderTerminalPreviewSession");
       assert.ok(render.includes("{ revive = true, deferScreen = false } = {}"), "开关默认关，其余调用点行为不变");
       const branch = render.slice(render.indexOf("if (deferScreen)"));
@@ -1582,7 +1582,7 @@ describe("终端视图左栏换血（M4）", () => {
         "禁用态跟就绪位同拍");
     });
 
-    it("新建钮文案随聚焦分态：有 agent「新建会话」/ 无 agent「新建终端」（M8 T3）", () => {
+    it("新建钮文案随聚焦分态：有 agent「新建会话」/ 无 agent「新建终端」", () => {
       // 用户 2026-10-21 指示：起的是该 agent 的会话时就叫「新建会话」；起空白终端
       // 才叫「新建终端」。行为不变，仅文案；aria/title 同步换。
       const render = extractFn("renderTerminalRail");
@@ -1590,8 +1590,8 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(render.includes("agentId ?"), "按有无 agent 聚焦分态");
     });
 
-    it("M8 显式不做：选工作区钮 / 身份行 / 真删除会话 / 置顶 / 组行拖拽 / 快捷键 / v1", () => {
-      const railBlock = sliceBetween(panelJs, "终端会话栏（M4 + M7 + M8）", "function initSkillsTab");
+    it("显式不做：选工作区钮 / 身份行 / 真删除会话 / 置顶 / 组行拖拽 / 快捷键 / v1", () => {
+      const railBlock = sliceBetween(panelJs, "终端会话栏：终端视图下的左栏换血内容", "function initSkillsTab");
       assert.ok(railBlock.length > 1000, "栏体代码段可取样");
       for (const forbidden of ["marquee", "contextmenu", "快捷键", "terminalRailPin"]) {
         assert.ok(!railBlock.includes(forbidden), `不做清单项「${forbidden}」不在栏体代码里`);
@@ -1599,7 +1599,7 @@ describe("终端视图左栏换血（M4）", () => {
       // 会话行拖拽随「手动排序」照搬（手序的唯一来源）；组行不可拖（组是目录派生）
       const groupHeadHtml = sliceBetween(railBlock, "rail-term-group-head", "rail-term-group-slot");
       assert.ok(!groupHeadHtml.includes("draggable"), "组行不搬拖拽（我们的组无清单可持久化）");
-      // 真删除会话文件不在栏体能力里（归档=标记+过滤，M7 口径不变）
+      // 真删除会话文件不在栏体能力里（归档=标记+过滤，语义不变）
       assert.ok(!railBlock.includes("sessionDelete") && !railBlock.includes("deleteSession"), "栏体不碰真删除");
       // v1 旧版面板通路不碰：栏体全部锚 v2
       assert.ok(!railBlock.includes('data-ui-version="v1"'), "不写 v1 分支");
@@ -2062,7 +2062,7 @@ describe("组折叠持久化（localStorage）", () => {
   });
 });
 
-describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => {
+describe("运行中转圈与水位线联动（dsh 实测规格）", () => {
   it("转圈 CSS 逐项：16×20 槽、轨道/弧线 currentColor、两动画同周期、reduced-motion 降级", () => {
     const slot = cssRule(".rail-term-spinner {");
     assert.ok(/width:\s*16px/.test(slot) && /height:\s*20px/.test(slot), "行首槽位 16×20（dsh 实测）");
@@ -2208,7 +2208,7 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     assert.ok(/renderTerminalSessionData\(\);\s*renderTerminalPreviewTabs\(\);/s.test(block), "原两渲不动（数据＋页签）");
   });
 
-  // M12-A 空白壳接管的可达性前提：活跃页签是空白外壳（无 agent 归属）时栏体不清表——
+  // 空白壳接管的可达性前提：活跃页签是空白外壳（无 agent 归属）时栏体不清表——
   // 沿用上次加载的历史，用户才点得到行、把空白壳内切接管（规格判定矩阵空白壳行）。
   // 真机验收发现：旧行为在空白壳聚焦时把 history 清空，矩阵那一行 thereby 不可达。
   it("空白壳聚焦不清栏：沿用上次加载的历史，同参不重拉（vm 真跑）", () => {

@@ -479,7 +479,7 @@ function agentMetadata(session) {
     ...(session.agentId ? { agentId: session.agentId } : {}),
     ...(session.agentName ? { agentName: session.agentName } : {}),
     ...(session.launch ? { launch: session.launch } : {}),
-    // 续接身份（M7 S5）：这条终端是替哪条会话续接建的。只记 endpoint + 会话 id
+    // 续接身份：这条终端是替哪条会话续接建的。只记 endpoint + 会话 id
     // 两个非密字段（file 是路径，去重聚焦用不到，不进记录）。面板历史会话点击时
     // 先查它——同 endpoint＋同会话 id 的终端已开着就直接聚焦，不重复建。
     ...(session.resume ? { resume: session.resume } : {}),
@@ -585,7 +585,7 @@ function normalizeResume(raw) {
   return { resume: { endpoint, id } };
 }
 
-// M12-A 内切身份同步三件：restart 路由的可选 body 字段。缺省/空串＝不更新（沿用
+// 内切身份同步三件：restart 路由的可选 body 字段。缺省/空串＝不更新（沿用
 // 原值）；带了但形状不对一律拒（error 码与 create 路由的同款字段口径），不静默
 // 忽略——换绑是显式动作，半途丢字段比报错更难查。resume 走 normalizeResume。
 // clearResume（全新内切）：布尔，true＝把记录里的 resume 显式清空。缺省沿用
@@ -669,8 +669,8 @@ export function createTerminalHost({
   //
   // 病灶：旧实现把「全部会话 + 每会话 128KB 尾部」序列化成一份 JSON，防抖每
   // 250ms 整份重写。单拍成本 O(N)——实测 N=2 12ms/301KB、N=8 27ms/1.2MB、
-  // N=20 45ms/3.0MB——而且每个出字的会话都在替所有空闲会话付这笔钱（S3 报告
-  // §2.1 是宿主侧唯一的 O(N) 热点）。
+  // N=20 45ms/3.0MB——而且每个出字的会话都在替所有空闲会话付这笔钱，这桩写入
+  // 是宿主侧唯一的 O(N) 热点。
   //
   // 形态：索引（成员表 + 主题，几百字节）＋ 每会话一份记录文件
   // <root>/terminal-sessions/<id>.json（该会话的元数据 + 128KB 落盘尾部）。
@@ -1437,7 +1437,7 @@ export function createTerminalHost({
     }
   }
 
-  // 内切换按身份重置镜像（M6）：这条终端就地换成另一个 agent / 另一段会话时，
+  // 内切换按身份重置镜像：这条终端就地换成另一个 agent / 另一段会话时，
   // 旧 agent 画在镜像当前网格里的那一屏必须整屏作废。只做 restartHygiene 的话，
   // 旧帧留在新 agent 画面上方、新输出只往下方续写，客户端一重挂就按镜像整屏
   // 重绘，把老会话画面回填到新实例屏上（claude→kimi 显形即此）；残留还随
@@ -1562,12 +1562,12 @@ export function createTerminalHost({
       // 漂移）。只认调用方校验过的值，缺失则沿用会话原值。
       if (launch) session.launch = launch;
       if (cwd) session.cwd = cwd;
-      // 身份同步（M12-A 内切）：这条终端就地换成目标会话——label/agentId/agentName
+      // 身份同步（内切）：这条终端就地换成目标会话——label/agentId/agentName
       // 与 resume 身份（endpoint＋会话 id）一并改写，落盘随本轮的 persistNow 走。
       // 缺省字段一律沿用原值（restart 的既有语义：只更新带来的）。clearResume 是
       // 全新内切的显式清除位：内切成新会话时旧 resume 必须清空，残留会让面板的
       // 去重聚焦与「新会话」兜底行拿旧身份误判。
-      // 在改写身份字段之前算「身份是否真的换了」（M6）：agentId 不同、resume 换了
+      // 在改写身份字段之前算「身份是否真的换了」：agentId 不同、resume 换了
       // 另一段会话、clearResume 清掉旧 resume，三种都意味着这条终端交给了另一个
       // 身份——旧 agent 画在镜像里的那一屏对新 agent 是纯回填污染。同身份字段的
       // 重开（复活/重挂带全量字段）与不带身份字段的普通重开都不算，继续保史。
@@ -1588,7 +1588,7 @@ export function createTerminalHost({
       // 字节窗与镜像原地保留、新进程输出续写在旧画面下方（与 VS Code 同屏重开
       // 终端同一语义）；宿主重启后恢复的深度以盘上尾窗预算为限（既有上限）。
       // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。唯一例外是
-      // 内切换身份变了（M6）：旧画面整屏作废、换一只新镜像，否则新会话页上方
+      // 内切换身份变了：旧画面整屏作废、换一只新镜像，否则新会话页上方
       // 会回填老会话的完整内容——见 resetSessionScreen。
       if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
       else if (identityChanged) resetSessionScreen(session);
@@ -1778,7 +1778,7 @@ export function createTerminalHost({
         const body = await readBody(req);
         const launch = normalizeLaunch(body.launch);
         const env = normalizeInjectedEnv(body.env);
-        // 续接身份（M7 S5）：先校验再建——坏形状连会话都不建（面板那边已按模板
+        // 续接身份：先校验再建——坏形状连会话都不建（面板那边已按模板
         // 校验过一遍，这里是宿主自己的独立一道闸）。
         const resumeInput = normalizeResume(body.resume);
         if (resumeInput && resumeInput.error) return json(res, 400, { error: resumeInput.error });
@@ -1798,7 +1798,7 @@ export function createTerminalHost({
           pid: null,
           createdAt: Date.now(),
           // 不播种 lastActiveAt（出生≠活跃）：输出活跃窗只认 emit 真出过字。播种会让
-          // 刚打开的空会话在前 5s 误转圈、M12 内切门误判 working 走保护性新开。
+          // 刚打开的空会话在前 5s 误转圈、内切门误判 working 走保护性新开。
           cols: Math.max(2, Math.min(240, Number(body.cols) || 120)),
           rows: Math.max(1, Math.min(120, Number(body.rows) || 34)),
           exitCode: null,
@@ -1968,7 +1968,7 @@ export function createTerminalHost({
         const launch = body?.launch !== undefined && body.launch !== null ? normalizeLaunch(body.launch) : null;
         const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : null;
         if (cwd !== null && !existsSync(cwd)) return json(res, 400, { error: "invalid_cwd" });
-        // 身份同步三件（M12-A 内切）：随 restart 带上即改写会话记录，缺省/空串
+        // 身份同步三件（内切）：随 restart 带上即改写会话记录，缺省/空串
         // 视为「不更新」沿用原值；形状不对拒 400，不静默忽略（换绑是显式动作）。
         const identity = normalizeIdentityUpdate(body);
         if (identity.error) return json(res, 400, { error: identity.error });

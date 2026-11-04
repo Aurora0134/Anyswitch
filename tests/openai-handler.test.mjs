@@ -705,7 +705,7 @@ describe("outbound history tool-call sanitization", () => {
   });
 });
 
-// ---------- 图片降级（M13：纯文本模型预判 + 报错兜底，openai 直传/汇合路径） ----------
+// ---------- 图片降级（纯文本模型预判 + 报错兜底，openai 直传/汇合路径） ----------
 
 const IMAGE_URL_PART = { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } };
 const EMPTY_EFFORT_CATALOG = { models: new Map() };

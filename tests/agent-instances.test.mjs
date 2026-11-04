@@ -682,7 +682,7 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     // netstat 反查，面来自同一次进程扫描里的镜像名。relay 落的是原始 kimi-<pid>，
     // 首轮状态读的冷缓存重折叠把它归位到面级稳定行——主进程换代不再重置这行。
     // 这条把"双击启动也能被观测"整条链钉住——它正是本期决定不引入 launcher 的
-    // 前提（计划 §8）。
+    // 前提。
     const desktopPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,\"C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi Code\\Kimi Code.exe\" ,kimi code.exe,4321\r\n");
     const collector = testCollector({ execFn: desktopPidExec });
     const { seen, socketOwner } = stubOwner(4321);

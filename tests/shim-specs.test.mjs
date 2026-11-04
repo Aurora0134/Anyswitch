@@ -31,8 +31,8 @@ function duplicates(values) {
 // ── 渲染体 exec 枚举（sh / cmd / ps1）────────────────────────────
 // 「别的什么都不执行」不能靠只抓 Anyswitch/app 前缀后面的 .mjs 段来证明：
 // 路径落在 %LOCALAPPDATA%\Anyswitch\app 之外的 exec 对那个正则完全不可见，
-// 往渲染体里追加一条 %APPDATA% 下的 node 调用照样全绿（2026-11-04 增量审计
-// §③-15）。改成把每种方言的语句全部归类：launches 是会启动进程的
+// 往渲染体里追加一条 %APPDATA% 下的 node 调用照样全绿。
+// 改成把每种方言的语句全部归类：launches 是会启动进程的
 // { command, args }，assignments 是 sh 变量名 / ps1 的 launcher 路径拼装
 // 语句，unclassified 是解析器不认识的行——后者一律翻红，exec 就没法藏进
 // 一个未知的语句形状里。

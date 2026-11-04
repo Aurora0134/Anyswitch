@@ -5060,7 +5060,7 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
 
   it("counts one desktop app as one Kimi process, labelled Desktop, and ignores its Electron children", async () => {
     // 桌面端是原生 Electron 包：命令行里没有 `kimi-code` 安装路径，今天那套
-    // node 路径谓词一条都不命中（计划 §3：进程面全盲）。主进程自己就是会话
+    // node 路径谓词一条都不命中（进程面全盲）。主进程自己就是会话
     // 属主（kimi 核心内嵌其中、relay 连接挂在它身上），所以它计数并贴桌面面；
     // --type= 的辅助子进程与 qoder / ChatGPT.exe 同口径只进家族集。
     const collector = testCollector({

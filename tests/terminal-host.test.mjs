@@ -196,7 +196,7 @@ test("PTY 已退出的会话 POST input 返回 409 session_exited", async () => 
 });
 
 // 工作态信号收窄（dsh 语义对齐·信号层）：出生不再播种 lastActiveAt（出生≠活跃，
-// 播种会让刚打开的空会话在前 5s 误转圈、M12 内切门误判 working 走保护性新开）；
+// 播种会让刚打开的空会话在前 5s 误转圈、内切门误判 working 走保护性新开）；
 // 键入改记 lastInputAt、不刷新 lastActiveAt（PTY 回显的判忙交给面板键入抑制窗）；
 // spawn 记 spawnedAt（孵化豁免窗锚点——内切/复活保记录换进程，createdAt 不动，
 // 只有它跟着每次 spawn 走）。pty 用不回显的哑件：把「键入→回显走 emit 刷新
@@ -910,7 +910,7 @@ test("⑤ 写盘失败时 close/clear-all 回 500 拒答，不答假 200", async
 // ---------------------------------------------------------------------------
 // ⑥⑦⑧ 落盘不再随会话数线性膨胀。
 //
-// 病灶（S3 报告 §2.1）：旧实现把「全部会话 + 每会话 128KB 尾部」序列化成一份
+// 病灶：旧实现把「全部会话 + 每会话 128KB 尾部」序列化成一份
 // JSON，防抖每 250ms 整份重写。一个会话在出字，全部空闲会话的尾部也要跟着重写
 // 一遍——单拍成本 O(N)，现场实测 N=2 12ms/301KB、N=8 27ms/1.2MB、N=20 45ms/3MB，
 // 而且 `persistChain` 单笔超 250ms 就无界积压。用户点 ⊕ 不断新增会话，这条路径
@@ -1428,7 +1428,7 @@ test("⑬ 全量冲净不被定向冲净降级：返回时不留欠账", async (
 
 // ⑭ 全量冲净必须「写到没有欠账」，不是「跑一轮」。
 //
-// 评审 r2 §3.2：上一版 `pumpWantFull` 是**一次性请求位**，每轮开头就被消费掉。
+// 评审意见：上一版 `pumpWantFull` 是**一次性请求位**，每轮开头就被消费掉。
 // 第 1 轮（full）跑完若仍有欠账 → 进第 2 轮，但第 2 轮的 full 位已是 false，于是
 // 第 2 轮退化成有界单拍（≤4 份）；第 2 轮后既不再 continue 也没人置位 → 泵退出、
 // 欠账留给 250ms 后的防抖拍。而 close() 只 await 泵、不等那个定时器，SIGTERM 紧接
@@ -1850,7 +1850,7 @@ test("restore 后快照带 agentId/agentName/launch，且不自动重新 spawn",
   }
 });
 
-test("restart 接受 resume 身份与 label/agentId/agentName 同步（M12-A 内切）", async () => {
+test("restart 接受 resume 身份与 label/agentId/agentName 同步（内切）", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
   const { calls, ptyModule } = capturingPtyModule();
   const host = createTerminalHost({ root, port: 0, ptyModule, killTreeFn: async () => {}, isAliveFn: () => false, logger: { warn() {} } });
@@ -3536,7 +3536,7 @@ test("建连遇到镜像积压时不同步排空：回放分轮到达且内容�
   }
 });
 
-// M7 S5：续接创建的终端把「替哪条会话续接的」记进会话记录，随列表下发——
+// 续接创建的终端把「替哪条会话续接的」记进会话记录，随列表下发——
 // 面板历史会话点击先查它做去重聚焦（同 endpoint＋同会话 id 的终端已开着就聚焦，
 // 不重复建）。terminal-host 存活期内有效，页面刷新不丢（随状态文件持久化）。
 test("续接身份落会话记录：创建带 resume、快照与落盘都带，重启原样读回", async () => {
@@ -3595,9 +3595,9 @@ test("无 resume 的普通创建不新增字段；坏 resume 一律 400 不建�
       headers: headers(host),
       body: JSON.stringify({ label: "新终端", cwd: root, shell: "powershell" }),
     }).then((response) => response.json());
-    assert.ok(!("resume" in plain), "普通创建的响应不新增 resume 字段（M3 契约逐位不变）");
+    assert.ok(!("resume" in plain), "普通创建的响应不新增 resume 字段（续接契约逐位不变）");
 
-    // resume:null/undefined 按 M3 契约＝无续接（普通创建），不是非法
+    // resume:null/undefined 按续接契约＝无续接（普通创建），不是非法
     for (const extra of [{ resume: null }, { resume: undefined }, {}]) {
       const none = await fetch(url("/terminal/sessions"), {
         method: "POST",
