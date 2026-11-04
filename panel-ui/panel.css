@@ -589,7 +589,7 @@
      栏（与设置目录同一换血形制：换内容而非追加），栏底齿轮换「返回」——点返回 =
      回进入终端前的视图（terminalReturnView，与设置态那颗钮同一槽位、两态互斥）。
      退出终端即还原；v1 无栏，本段全部锚 v2。
-     观感按 dsh 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作
+     观感按 dsh 左栏实测：行 hover/选中、行内动作
      按钮、文件夹图标开/关、水位线增减一律 0ms 硬切——这些规则里不写 transition，
      写了就错；栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位移有运动。颜色全走语义
      token（--surface / --surface-hover / --accent-soft / --text-3…），不造新色值。 */
@@ -623,13 +623,13 @@
   .rail-term-new:hover { background: var(--surface-hover); }
   .rail-term-new:disabled { opacity: 0.5; cursor: default; }
   /* M8 T1 起段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none，
-     滚的只有里面的树）。T7 的搜索/视图选项钮也挂在这行——行观感参数照抄 m6c §B5
-     实测全集：36px 高、gap 4px、radius-md、padding-left 4px；标题 14px/20/400
+     滚的只有里面的树）。搜索/视图选项钮也挂在这行——行观感参数按实测全集：
+     36px 高、gap 4px、radius-md、padding-left 4px；标题 14px/20/400
      tertiary、max-width 45%；图标钮 28×28。 */
   .rail-term-section-head { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 4px 6px; flex: none; border-radius: var(--radius-md); }
   .rail-term-section-title { flex: 1; min-width: 0; max-width: 45%; font-size: 14px; line-height: 20px; font-weight: 400; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail-term-head-actions { flex: none; display: flex; align-items: center; gap: 4px; }
-  /* ── 段头搜索（M8 T7a，m6c §A） ──
+  /* ── 段头搜索 ──
      行内展开不是浮层：搜索槽从 28px 原地展开到 100%，标题与右侧钮带同时序收缩
      让位（.18s——栏内第二条过渡，只此机制有；行/钮照旧 0ms 硬切）。 */
   .rail-term-search {
@@ -674,13 +674,13 @@
   }
   .rail-term-section-head.is-searching .rail-term-search-clear { display: inline-flex; }
   .rail-term-search-clear:hover { background: var(--surface-hover); color: var(--text); }
-  /* 搜索结果平铺行：标题＋目录短名（无组头、无高亮，m6c §A4） */
+  /* 搜索结果平铺行：标题＋目录短名（无组头、无高亮） */
   .rail-term-row-result { min-height: 34px; }
   .rail-term-row-dir { flex: none; font-size: 11px; color: var(--text-4); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail-term-row-result:hover .rail-term-row-dir { display: none; }
   .rail-term-search-status { padding: 8px; font-size: 12px; color: var(--text-3); }
   .rail-term-search-note { padding: 8px; font-size: 12px; color: var(--text-3); }
-  /* ── 视图选项菜单（M8 T7b，m6c §B2） ──
+  /* ── 视图选项菜单 ──
      右对齐锚定（JS 算 left）、min-width 200、padding 4、dense 30px 项、分组标签
      11px tertiary、✓ 居项最右（margin-left:auto，选中才显、不换文字色不铺底）、
      点选即关（JS）。打开/关闭无动画（0ms 挂载/卸载）。 */
@@ -692,7 +692,7 @@
   .rail-term-view-text { flex: 1; min-width: 0; }
   .rail-term-view-check { flex: none; display: none; align-items: center; margin-left: auto; color: var(--accent); line-height: 0; }
   .rail-term-view-item.is-selected .rail-term-view-check { display: inline-flex; }
-  /* 「仅显示已归档」空态（m6c §A1）：图标 + 两句 + 查看其他会话动作 */
+  /* 「仅显示已归档」空态：图标 + 两句 + 查看其他会话动作 */
   .rail-term-empty {
     display: flex; flex-direction: column; align-items: center; gap: 8px;
     padding: 32px 12px; color: var(--text-3); font-size: 12.5px;

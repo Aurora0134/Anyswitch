@@ -600,7 +600,7 @@ const AGENT_IMAGE_BUCKETS = [
   ["grok.exe", "grok"],
   // Kimi Code 的官方桌面端是原生 Electron 包：镜像名 `Kimi Code.exe`，命令行里
   // 没有任何 `kimi-code` 安装路径特征，下面 node.exe 分支的那套路径谓词永远匹配
-  // 不到它（步 1 of kimi-desktop-integration-plan.md §3：桌面端在进程面全盲）。
+  // 不到它（桌面端在进程面全盲）。
   ["kimi code.exe", "kimi"],
   // WorkBuddy 桌面端同样是 Electron 包，且一个实例起九个同镜像进程（主进程 /
   // --type= 辅助 / daemon / sidecar / agent 运行时，真机 2026-10-31 取证）。
@@ -680,7 +680,7 @@ function resolveProbeRow(lower) {
 }
 
 // ---------------------------------------------------------------------------
-// DSH surface classification (步 1 of bridge/anyswitch/dsh-tui-integration-plan.md).
+// DSH surface classification.
 //
 // One community-TUI launch in npm form is THREE node.exe rows: the global
 // launcher, the profile-copy launcher it delegates to, and the real
@@ -723,8 +723,7 @@ const DSH_PROFILE_NAME_RE = /^[^"'\\\s/]{1,40}$/;
 // ---------------------------------------------------------------------------
 // DSH Desktop (the official Electron package, 0.2). Same endpoint, third
 // interface — the "one product, several interfaces" shape kimi already has,
-// so nothing here introduces an endpoint of its own (dsh-tui-integration-plan
-// §8, still binding).
+// so nothing here introduces an endpoint of its own (standing design decision).
 //
 // It is invisible on the process plane for a reason worth writing down: the
 // app does not boot the harness as a script we can recognize. `DeepSeek
@@ -868,7 +867,7 @@ function foldDshDelegatingHosts(counts) {
 }
 
 // ---------------------------------------------------------------------------
-// Kimi Code 的分面（步 1/2 of bridge/anyswitch/kimi-desktop-integration-plan.md）。
+// Kimi Code 的分面。
 //
 // 一个 kimi 端点 id、一份 ~/.kimi-code 家目录之上有三个界面：终端客户端
 // （`kimi`）、`kimi web`（在终端里前台起的 server，浏览器只是它的观看端）、

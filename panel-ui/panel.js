@@ -7222,7 +7222,7 @@ async function api(method, path, body) {
   // 钳制派发的 scroll 事件不带任何标记，xterm 拿它当「用户滚动」写进 ydisp；此后
   // ydisp≠ybase，新输出不再带动视口，画面卡死在接近顶端的位置不自行恢复。
   // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态下、最近没有用户
-  // 语义对齐 Claude Desktop（实证规格 .pocketower/findings/m1-claude-bottom-align-spec.md，
+  // 语义对齐 Claude Desktop（实证规格，
   // 2026-10-20 用户拍板）：空区出现时不自动折回——视口原地不动，空白带留在屏上；用户
   // 上滚翻看历史时「地板」随滚动逐拍收紧（trim 只缩不扩），空区被吃掉而视口不跳；滚回
   // 地板即恢复跟随，落点恰好是修剪后的内容底。用户主动离底的各条通路都先记意图——滚轮/
@@ -10444,7 +10444,7 @@ async function api(method, path, body) {
   // 属性：一条会话行有开着终端替它续接（resume 两键映射，M7-S5）即是 live，带状态
   // 点/选中态/关闭叉。全新终端在会话文件落盘前按 cwd 在组顶插「新会话」兜底行
   // （渲染时从后端真值表现推导，不另记状态）。原左上角 agent 身份行已拆（M7-S0）。
-  // 观感按 dsh 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作
+  // 观感按 dsh 左栏实测：行 hover/选中、行内动作
   // 按钮一律 0ms 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位
   // 移有运动。
   const TERMINAL_RAIL_WATERMARK = 5;
@@ -10541,7 +10541,7 @@ async function api(method, path, body) {
   // 叉的既有形制（aria-hidden 装饰图标）处理，标签文案留待清单补录。
   const TERMINAL_RAIL_ICON_ELLIPSIS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
   const TERMINAL_RAIL_ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
-  // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底（m6c §B2）
+  // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底
   const TERMINAL_RAIL_ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   // M12-B 运行中转圈（dsh 实测规格逐项照抄）：行首 16×20 前导槽内的 14×14 SVG——
   // 轨道圆 r=9.5 静态（opacity .25），弧线圆同描边 dasharray 12 150 呼吸（1.5s
@@ -10821,12 +10821,12 @@ async function api(method, path, body) {
     return out;
   }
 
-  // ── 段头搜索（M8 T7a，照搬 m6c §A 裁剪后） ──
+  // ── 段头搜索（照搬实测规格，裁剪后） ──
   // 行内展开不是浮层：点搜索钮＝展开＋自动聚焦；已展开再点不退出（非 toggle，只
   // 重新聚焦）。退出手势：Esc／清空钮／点开结果行＝清空＋收起；点搜索区外**仅当
   // 查询为空**才收起（有查询只失焦）。退出后列表滚动回顶、分组展开态保留。
   // 范围＝会话标题＋目录短名的大小写不敏感子串——dsh 出厂配置把 Host 内容搜索整个
-  // 关了（m6c §A3 重大发现），侧栏实际就只有这个口径；照搬的就是它，不做全文。
+  // 关了（实测重大发现），侧栏实际就只有这个口径；照搬的就是它，不做全文。
   // 防抖 250ms（窗口内出「正在搜索会话历史…」骨架位）。不挂任何键盘加速入口
   // （显式不做清单既有口径）。
   const TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250;
@@ -10869,7 +10869,7 @@ async function api(method, path, body) {
     terminalRailSearch.open = false;
     terminalRailSearch.query = "";
     terminalRailSearch.searching = false;
-    // 退出后列表滚动回顶（m6c §A6：滚动位不保留；分组展开态在 collapsedGroups 里，
+    // 退出后列表滚动回顶（滚动位不保留；分组展开态在 collapsedGroups 里，
     // 与搜索无关，天然保留）
     const scroll = document.querySelector(".rail-term-scroll");
     if (scroll) scroll.scrollTop = 0;
@@ -10897,7 +10897,7 @@ async function api(method, path, body) {
 
   // 搜索结果＝替换式平铺列表（无组头）：行＝标题＋目录短名，无命中高亮；live/归档
   // 行的形态与树里同一套（terminalRailRowHtml 的 result 变体）。归档会话也进结果
-  // （跟随归档筛选，m6c §A3）——灰字、点击落「这条会话已归档，取消归档后才能续接」、
+  // （跟随归档筛选）——灰字、点击落「这条会话已归档，取消归档后才能续接」、
   // hover 出「取消归档」钮（m6b §A2 第三恢复入口）。
   function renderTerminalRailSearchResults(list) {
     const hits = terminalRailSearchMatches(terminalRailSearch.query, terminalRailVisibleSessions());
@@ -10924,7 +10924,7 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 视图选项（M8 T7b，照搬 m6c §B 全集） ──
+  // ── 视图选项（照搬实测规格全集） ──
   // 三组互斥单选：分组方式（按工作区/按工作区树/单列表）、排序方式（最近更新/
   // 手动排序）、筛选会话（隐藏已归档/全部会话/仅显示已归档）。偏好落 localStorage
   // 一个键（dsh 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）；
@@ -11029,7 +11029,7 @@ async function api(method, path, body) {
     return na !== "" && nb.startsWith(na + "\\");
   }
 
-  // 按工作区树：组按目录祖先关系嵌套（m6c §B3 的 owningParentFolder：逐级找最近
+  // 按工作区树：组按目录祖先关系嵌套（owningParentFolder：逐级找最近
   // 已注册祖先）。给每组打 depth；祖先组自动展开（切进树模式时一次性解除折叠，
   // 之后尊重用户手动收起——与 dsh 的 expandedGroups 含全部 ancestorKeys 同效果）。
   function terminalRailNestGroups(groups) {
@@ -11155,7 +11155,7 @@ async function api(method, path, body) {
       }
     }
     // M9-D1：portal 到 body 下 position:fixed（栏体 overflow:hidden 会裁栏内浮层，
-    // dsh 的 portal:true 同款）；右对齐锚定＝菜单右缘贴钮右缘（m6c §B2 align:end）。
+    // dsh 的 portal:true 同款）；右对齐锚定＝菜单右缘贴钮右缘（align:end）。
     document.body.append(menu);
     const btnRect = btn.getBoundingClientRect();
     const width = menu.offsetWidth || 200;
@@ -11248,7 +11248,7 @@ async function api(method, path, body) {
     const action = archived
       ? `<span class="rail-term-row-unarchive" data-rail-term-unarchive="${esc(session.id)}" title="取消归档" aria-label="取消归档">${TERMINAL_RAIL_ICON_UNARCHIVE}</span>`
       : `<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
-    // 会话行可拖（M8 T7b：手序的唯一来源）；归档行不可拖（m6c：draggable＝非空白且
+    // 会话行可拖（手序的唯一来源）；归档行不可拖（draggable＝非空白且
     // 非归档行）。组行不拖——组是目录派生、无清单可持久化。
     const draggable = archived ? "" : ` draggable="true"`;
     return `
@@ -11282,7 +11282,7 @@ async function api(method, path, body) {
   function renderTerminalRailHistory(agentId) {
     const list = $("railTermHistoryList");
     if (!list) return;
-    // 搜索态：结果平铺列表整块替换树（m6c §A4），树渲染全旁路。退出搜索后的首帧
+    // 搜索态：结果平铺列表整块替换树，树渲染全旁路。退出搜索后的首帧
     // 树渲染也按 reset 处理（兜底行 diff 门，见下方）——树从结果平铺换回，行集合
     // 变化不是兜底行的真实离开。
     if (terminalRailSearch.open && terminalRailSearch.query.trim()) {
@@ -11365,7 +11365,7 @@ async function api(method, path, body) {
       scrollKey = activeGroup;
     }
     const parts = [];
-    // 「仅显示已归档」且一条归档都没有：空态（m6c §A1）——24px 归档图标 + 两句，
+    // 「仅显示已归档」且一条归档都没有：空态——24px 归档图标 + 两句，
     // 「查看其他会话」点了切回「隐藏已归档」。
     if (terminalRailViewPrefs.archivedFilter === "only" && sessions.length === 0) {
       parts.push(`
@@ -11381,7 +11381,7 @@ async function api(method, path, body) {
       // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
       // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
       // 没有目录身份，这些都不给（dsh 同口径）。组头本身仍是整行可点的折叠开关。
-      // 树模式缩进 8+depth×12px（m6c §B3）；单列表模式不渲组头。
+      // 树模式缩进 8+depth×12px；单列表模式不渲组头。
       const current = group.key !== "" && group.key === activeGroup;
       const indent = group.depth ? ` style="padding-inline-start: ${8 + group.depth * 12}px"` : "";
       const headActions = group.key
@@ -12610,7 +12610,7 @@ async function api(method, path, body) {
         if (event && typeof event.stopPropagation === "function") event.stopPropagation();
         if (terminalRailSearch.open) {
           if (searchInput && typeof searchInput.focus === "function") searchInput.focus();
-          return; // 已展开再点＝重新聚焦，不退出（m6c 实测#32）
+          return; // 已展开再点＝重新聚焦，不退出
         }
         openTerminalRailSearch();
       });
@@ -12740,7 +12740,7 @@ async function api(method, path, body) {
           }
         }
       }
-      // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开，m6c §A6）
+      // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开）
       if (terminalRailSearch.open) {
         const head = $("railTermSectionHead");
         if (!head || !head.contains(target)) {
@@ -19972,7 +19972,7 @@ async function api(method, path, body) {
   // 220，联动断裂、卡下半截悬空（v1/v2 同发）；此处按同比例由宽派生高，与
   // statsChartWidth 同下限同藏态回落（undefined→220 基线），v1/v2 同效。外层作用域
   // 声明：调用点在 renderStatsTrend（renderStatsLineChart 之外），嵌套声明会让调用处
-  // 直接 ReferenceError、整图中止渲染（POLISH02 事故根因）。
+  // 直接 ReferenceError、整图中止渲染（历史事故根因）。
   function statsTrendChartHeight(el) {
     const w = Math.round(el.clientWidth);
     if (!w) return undefined;

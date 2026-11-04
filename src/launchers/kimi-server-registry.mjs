@@ -1,5 +1,4 @@
-// Kimi Code 的 server 实例注册表读取（步 1 of
-// bridge/anyswitch/kimi-desktop-integration-plan.md）。
+// Kimi Code 的 server 实例注册表读取。
 //
 // 背景：Kimi Code 的每一个「带 server 的界面」启动时都会在自己家目录的
 // server/instances/ 下登记一条 <server_id>.json（字段 server_id / pid / host /

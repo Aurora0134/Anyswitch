@@ -1891,7 +1891,7 @@ describe("M8 T5 live 行悬停动作与归档钮并存", () => {
   });
 });
 
-describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
+describe("段头搜索（照搬实测规格，裁剪后）", () => {
   describe("HTML 与 CSS", () => {
     it("段头三钮位：搜索槽（钮＋输入框＋清空钮）在册，刷新在位，文案逐字", () => {
       const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/)[0];
@@ -1899,8 +1899,8 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       assert.ok(head.includes('id="railTermSearchBtn"'), "搜索钮在册");
       assert.ok(head.includes('id="railTermSearchInput"'), "搜索输入框在册");
       assert.ok(head.includes('id="railTermSearchClear"'), "清空钮在册");
-      assert.ok(head.includes('placeholder="搜索会话名称"'), "placeholder 逐字（m6c §A2）");
-      assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字（m6c §A2）");
+      assert.ok(head.includes('placeholder="搜索会话名称"'), "placeholder 逐字");
+      assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字");
       // D4：段头只剩搜索＋视图选项两钮（刷新钮已砍，用户拍板）
       assert.ok(!head.includes('id="railTermHistoryRefresh"'), "刷新钮不在册（M9-D4）");
       // 位序：标题 → 搜索 → 视图选项（dsh 两钮排布）
@@ -1916,7 +1916,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       assert.ok(/\.rail-term-search \{[\s\S]*?max-width: 28px/.test(panelCss), "收起态搜索槽 28px");
       assert.ok(/\.rail-term-section-head\.is-searching \.rail-term-search \{[\s\S]*?max-width: 100%/.test(panelCss), "展开态搜索槽 100%");
       const searchRule = cssRule(".rail-term-search {");
-      assert.ok(/transition:[^;]*\.18s/.test(searchRule), "搜索槽过渡 .18s（m6c §A1）");
+      assert.ok(/transition:[^;]*\.18s/.test(searchRule), "搜索槽过渡 .18s");
       // 栏内运动纪律：行/钮/组头容器不因搜索加过渡
       assert.ok(!cssRule(".rail-term-row {").includes("transition"), "行本体仍 0ms 硬切");
     });
@@ -1955,7 +1955,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       const hits = run("命中", many);
       assert.equal(hits.length, 25, "匹配函数本身不截");
       // 截断在渲染层（TERMINAL_RAIL_SEARCH_LIMIT = 20）
-      assert.ok(panelJs.includes("TERMINAL_RAIL_SEARCH_LIMIT = 20"), "上限 20（m6c §A4，Host 侧同值）");
+      assert.ok(panelJs.includes("TERMINAL_RAIL_SEARCH_LIMIT = 20"), "上限 20（Host 侧同值）");
     });
   });
 
@@ -1963,7 +1963,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
     const src = () => panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
 
     it("防抖 250ms；搜索中态「正在搜索会话历史…」role=status", () => {
-      assert.ok(src().includes("TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250"), "防抖 250ms（m6c §A2）");
+      assert.ok(src().includes("TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250"), "防抖 250ms");
       assert.ok(src().includes("正在搜索会话历史…"), "搜索中文案逐字");
       assert.ok(src().includes('role="status"'), "role=status（无障碍）");
     });
@@ -1992,7 +1992,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
         return closeTerminalRailSearch;
       `)(scrollEl, headEl, inputEl, state, closeLog);
       close();
-      assert.equal(scrollEl.scrollTop, 0, "退出后列表滚动回顶（m6c §A6，实现行为真跑）");
+      assert.equal(scrollEl.scrollTop, 0, "退出后列表滚动回顶（实现行为真跑）");
       assert.equal(closeLog.renders, 1, "退出后重渲回树");
       assert.equal(state.open, false, "搜索态随退出收起");
     });
@@ -2013,7 +2013,7 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
   });
 });
 
-// ── M8 T7b 视图选项（照搬 m6c §B 全集） ──
+// ── 视图选项（照搬实测规格全集） ──
 // 探针：从 panel.js 栏体段按函数名切源码进 vm 桩环境（照本文件既有惯例）。
 import { readFileSync as readForT7b } from "node:fs";
 import { join as joinForT7b } from "node:path";
@@ -2061,7 +2061,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
       assert.equal(byKey.get("C:\\dev\\alpha\\sub").depth, 2, "sub 的深度 2（父 alpha）");
       assert.equal(byKey.get("C:\\dev").depth, 0, "dev 深度 0");
       assert.equal(byKey.get("").depth, 0, "未分组不嵌套");
-      // 祖先组自动展开（m6c §B3）：真跑 applyTerminalRailViewChoice("groupBy",
+      // 祖先组自动展开：真跑 applyTerminalRailViewChoice("groupBy",
       // "workspace-tree")，钉死解折叠分支本体。旧断言 /ancestor/i 命中的是另一个
       // 函数（terminalRailIsAncestorDir）的函数名与注释，删掉解折叠分支也照过——
       // 普查 finding：该分支全测试集零真实覆盖。
@@ -2101,11 +2101,11 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
 
     it("单列表：无组平铺，全部会话一个列表（树标签＝会话）", () => {
       const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
-      assert.ok(s.includes('label: "会话"'), "平铺模式标签「会话」（m6c §B3）");
+      assert.ok(s.includes('label: "会话"'), "平铺模式标签「会话」");
       assert.ok(s.includes("groupBy === \"flat\""), "flat 分支在册");
     });
 
-    it("缩进 8+depth×12px（m6c §B3 实测值）", () => {
+    it("缩进 8+depth×12px（实测值）", () => {
       // 缩进算在 JS 渲染层（组头 inline style），不在 CSS 规则里
       const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(/padding-inline-start: \$\{8 \+ group\.depth \* 12\}px/.test(s), "树模式缩进算式 8+depth×12px 在册");
@@ -2152,7 +2152,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
       const s = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       const headHtml = s.slice(s.indexOf("rail-term-group-head"), s.indexOf("rail-term-group-slot"));
       assert.ok(!headHtml.includes("draggable"), "组行不搬拖拽");
-      // 归档行不可拖（m6c：draggable＝非空白且非归档）
+      // 归档行不可拖（draggable＝非空白且非归档）
       const rowFn = new Function("session", "live", "activeId", "prefs", `
         const terminalRailPrefs = prefs;
         const TERMINAL_RAIL_ICON_ARCHIVE = "";
@@ -2239,7 +2239,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
     it("菜单形制：右对齐锚定、dense 30px、✓ 居项最右、点选即关", () => {
       assert.ok(/\.rail-term-view-menu \{[\s\S]*?min-width/.test(panelCss), "菜单容器在册");
       const item = cssRule(".rail-term-view-item {");
-      assert.ok(/min-height:\s*30px/.test(item), "dense 30px 项（m6c §B2）");
+      assert.ok(/min-height:\s*30px/.test(item), "dense 30px 项");
       assert.ok(/\.rail-term-view-check \{[^}]*margin-left:\s*auto/.test(panelCss),
         "✓ 居项最右（margin-left:auto）");
       assert.ok(/\.rail-term-view-item\.is-selected \.rail-term-view-check \{[\s\S]*?display:\s*inline-flex/.test(panelCss),
@@ -2401,7 +2401,7 @@ describe("M13 新会话按钮的首次交互动画", () => {
   });
 });
 
-describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
+describe("复审必修 2：段头行观感照抄实测值", () => {
   const decls = (selector) => {
     const at = panelCss.indexOf(selector);
     assert.ok(at >= 0, `规则 ${selector} 在册`);
@@ -2410,7 +2410,7 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
 
   it("段头行：36px 高、gap 4px、radius-md、padding-left 4px", () => {
     const head = decls(".rail-term-section-head {");
-    assert.ok(/min-height:\s*36px/.test(head), "段头行高 36px（m6c §B5）");
+    assert.ok(/min-height:\s*36px/.test(head), "段头行高 36px");
     assert.ok(/gap:\s*4px/.test(head), "gap 4px");
     assert.ok(/border-radius:\s*var\(--radius-md\)/.test(head), "radius-md 12px");
     assert.ok(/padding:\s*0\s*4px/.test(head) || /padding-left:\s*4px/.test(head), "padding-left 4px");
@@ -2421,7 +2421,7 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
   it("M11-A：收起态工具组贴右（搜索槽 auto 左边距）；展开态不接管", () => {
     // 刷新钮砍掉后，标题 45% 封顶之外的剩余空间无 item 吸收、全堆在钮带右侧——
     // auto 左边距落在工具组首元（搜索槽）上，「搜索＋视图选项」整体贴到段头右缘，
-    // 与刷新钮在时的右缘位置一致（m6c §B5 的 45% 封顶本就按三钮带调准）。
+    // 与刷新钮在时的右缘位置一致（45% 封顶本就按三钮带调准）。
     assert.ok(/\.rail-term-section-head:not\(\.is-searching\) \.rail-term-search \{[\s\S]*?margin-left:\s*auto/.test(panelCss),
       "收起态搜索槽 margin-left:auto＝工具组整体贴右（M11-A）");
     // 展开态搜索槽 flex:1 1 auto 要吃饱：auto 边距会先于 flex-grow 吃掉剩余空间，
@@ -2442,7 +2442,7 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
   it("图标钮 28×28；视图选项菜单 min-width 200px", () => {
     for (const sel of [".rail-term-icon-btn {", ".rail-term-search-btn {"]) {
       const rule = decls(sel);
-      assert.ok(/width:\s*28px/.test(rule) && /height:\s*28px/.test(rule), `${sel} 28×28（m6c §B5）`);
+      assert.ok(/width:\s*28px/.test(rule) && /height:\s*28px/.test(rule), `${sel} 28×28`);
     }
     const menu = decls(".rail-term-view-menu {");
     assert.ok(/min-width:\s*200px/.test(menu), "视图选项菜单 min-width 200px（dsh 实测值）");
@@ -2453,7 +2453,7 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
     assert.ok(/height:\s*28px/.test(collapsed), "收起态 28px");
     const expanded = decls(".rail-term-section-head.is-searching .rail-term-search {");
     assert.ok(/height:\s*30px/.test(expanded), "展开态 30px");
-    // 过渡列表里不许出现 height（m6c §A1：28→30 瞬时跳）
+    // 过渡列表里不许出现 height（28→30 瞬时跳）
     assert.ok(!/transition:[^;]*height/.test(collapsed), "height 不在过渡列表（瞬时跳变）");
   });
 });
@@ -2543,7 +2543,7 @@ describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了�
     assert.equal(log.openSearch, 1, "首点＝展开");
     assert.equal(log.closeSearch, 0, "首点不收起（非 toggle）");
     listeners["searchBtn:click"]({ stopPropagation() {} });
-    assert.equal(log.closeSearch, 0, "已展开再点＝不退出（m6c §A6：非 toggle）");
+    assert.equal(log.closeSearch, 0, "已展开再点＝不退出（非 toggle）");
     assert.equal(log.focus, "searchInput", "再点＝重新聚焦输入框");
   });
 
@@ -2794,7 +2794,7 @@ describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
 
   it("层叠胜者的 min-width = 200px（不被 .rail-term-menu 的 120px 盖掉）", () => {
     const railBlock = panelCss.slice(panelCss.indexOf("/* ── 终端会话栏"), panelCss.indexOf("── 阶段 2 补"));
-    assert.equal(cascadeMinWidth(railBlock), 200, "视图菜单 min-width 计算值 200px（m6c §B2 实测值）");
+    assert.equal(cascadeMinWidth(railBlock), 200, "视图菜单 min-width 计算值 200px（实测值）");
   });
 
   it("视图选项菜单补随树滚动收场（对称组头菜单的 once-capture scroll 监听）", () => {

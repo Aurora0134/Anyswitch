@@ -7242,7 +7242,7 @@ describe("新版 UI 阶段 3：统计页平铺（描边盒 + 表格纪律 + 四�
       "v1 日志页固定高 96 原样");
   });
 
-  it("POLISH02 回归：statsTrendChartHeight 必须是外层作用域声明（嵌套进渲染器则调用处 ReferenceError、趋势图整图空白）", () => {
+  it("回归：statsTrendChartHeight 必须是外层作用域声明（嵌套进渲染器则调用处 ReferenceError、趋势图整图空白）", () => {
     // 批次 1 事故实录：该函数被写成 renderStatsLineChart 体内的嵌套声明，而调用点
     // height: statsTrendChartHeight(chartEl) 在 renderStatsTrend——外层作用域没有
     // 这个名字，每次渲染入口即抛 ReferenceError，容器清空后整图空白（连坐标轴都不出）。
@@ -8217,12 +8217,12 @@ describe("panel.html 删除渠道/号池携路由链剪除", () => {
     const clause = new Function(`return function poolRollbackClause(createdCount, failedRollbacks) {${m[1]}\n  }`)();
     assert.equal(clause(3, []), "已回滚 3 个已建渠道");
     assert.equal(
-      clause(2, ["a6api-03"]),
-      "已回滚 1 个已建渠道，1 个删除失败：a6api-03，请到渠道列表手动删除",
+      clause(2, ["demo-03"]),
+      "已回滚 1 个已建渠道，1 个删除失败：demo-03，请到渠道列表手动删除",
     );
     assert.equal(
-      clause(3, ["a6api-03", "a6api-04"]),
-      "已回滚 1 个已建渠道，2 个删除失败：a6api-03、a6api-04，请到渠道列表手动删除",
+      clause(3, ["demo-03", "demo-04"]),
+      "已回滚 1 个已建渠道，2 个删除失败：demo-03、demo-04，请到渠道列表手动删除",
     );
   });
 
