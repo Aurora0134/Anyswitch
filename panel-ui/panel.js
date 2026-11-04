@@ -14179,7 +14179,6 @@ async function api(method, path, body) {
     input.setSelectionRange(selStart, selEnd);
     input.scrollTop = scrollTop;
 
-    let composing = false;
     let raf = 0;
     const paint = () => {
       const code = $("skillsEditorHighlight");
@@ -14193,10 +14192,11 @@ async function api(method, path, body) {
       if (raf) return;
       raf = requestAnimationFrame(() => { raf = 0; paint(); });
     };
-    // 中文输入法合成期间重绘会打断候选框，等 compositionend 再补一次
-    input.addEventListener("compositionstart", () => { composing = true; });
-    input.addEventListener("compositionend", () => { composing = false; schedulePaint(); });
-    input.addEventListener("input", () => { if (!composing) schedulePaint(); });
+    // 组字期间照常重绘。透明 textarea 自己不显字：预输入（组字中的拼音原文）只活在
+    // input.value 里，不铺到高亮层就是屏上一片空、只剩光标逐字右移。原先担心「重绘会
+    // 打断候选框」而按「正在组字」提前返回，实测不成立——无头 Chrome 的合成组字通路连推
+    // 四次组字更新再上屏，会话未打断、终值与事件序列均正常（2026-11-04）。
+    input.addEventListener("input", schedulePaint);
     input.addEventListener("scroll", () => {
       const pre = $("skillsEditorHighlight") && $("skillsEditorHighlight").parentElement;
       if (pre) { pre.scrollTop = input.scrollTop; pre.scrollLeft = input.scrollLeft; }
