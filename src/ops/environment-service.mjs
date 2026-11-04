@@ -520,11 +520,12 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
-  // DSH 终端形态的第二个组件：界面插件 dsh-tui（community 包，装在
-  // ~/.dsh/profiles/dsh-tui 下）。它和本体 harness 是同一个终端形态的两半，
-  // 因此挂在 dsh 端点下作为第三条安装记录（kind "tui"），不另开端点。插件
-  // 未装时如实 not_found，不占主行位置；版本从包清单读，与 npm CLI 同口径。
-  // remoteId 是 "dsh-tui"：关于页拿它查 npm dist-tags，面板白名单同步登记。
+  // DSH 终端形态的第二个组件：界面插件 dsh-tui（community 包，装在 dsh 的
+  // 某个 profile 下，profile 名由用户安装时决定）。它和本体 harness 是同一个
+  // 终端形态的两半，因此挂在 dsh 端点下作为第三条安装记录（kind "tui"），
+  // 不另开端点。插件未装时如实 not_found，不占主行位置；版本从包清单读，与
+  // npm CLI 同口径。remoteId 是 "dsh-tui"：关于页拿它查 npm dist-tags，面板
+  // 白名单同步登记。
   async function inspectDshTui() {
     const result = { kind: "tui", remoteId: "dsh-tui", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
     try {
