@@ -239,17 +239,26 @@ test("reconcile：共享 bin/ 部分在册——未要的命令清掉，目录�
   const dsh = specOf("dsh");
   const zcode = specOf("zcode");
   const bin = join(home.home, ".config", "anyswitch-bin", "bin");
+  // 真实共享态＝上一轮对账收敛后的稳态：bin 已在 PATH，当前形态的 zcode 三件
+  // 套与旧形态 dsh-cli 三件套同住。邻居必须在撤 dsh 的那一刻就在场——只放
+  // dsh 三件套的话，bin 会先被清空 rmdir、再由 zcode 同轮重建，「共享目录保
+  // 留」就退化成删建而非保留，守不住「撤除连邻居一起端掉」的回归。
   writeTriplet(dsh, bin, legacyFormOf(dsh)); // 旧形态的 dsh-cli 三件套
+  writeTriplet(zcode, bin, zcode); // 在册邻居：撤除发生时它必须在场
   const runner = makeRunner(home, {
-    pathInitial: "C:\\Windows\\System32",
+    pathInitial: `${bin};C:\\Windows\\System32`,
     installed: (id) => id === "zcode",
   });
   const report = await runner.run();
-  assert.deepEqual(report.installed, ["zcode"]);
+  // 邻居零写入是判别点：「撤除时把共享目录连邻居端掉、再整体重装」的回归
+  // 会把 zcode 变回从零装（installed=["zcode"]），在这里必须翻红。
+  assert.deepEqual(report.installed, []);
+  assert.deepEqual(report.rewrote, []);
   assert.deepEqual(report.removed, ["dsh"]);
   assert.equal(readFileSync(join(bin, "zcode.cmd"), "utf8"), renderShimScripts(zcode).cmd);
   assert.ok(!existsSync(join(bin, "dsh-cli.cmd")), "未在册命令清掉");
   assert.ok(existsSync(bin), "zcode 还在，共享目录保留");
+  assert.equal(runner.pathStore.state.writes.length, 0, "PATH 无变化零写入");
   assert.equal(runner.pathStore.state.value, `${bin};C:\\Windows\\System32`, "共享目录条目恰一条");
 });
 
