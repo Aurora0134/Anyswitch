@@ -15,10 +15,15 @@ import {
 } from "../src/terminal/terminal-process-manager.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
-const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
+// The relay spawns the terminal host as `node <repo>/src/terminal/terminal-host.mjs`
+// (TERMINAL_HOST_SCRIPT in relay-host.mjs), and isOwnProcess accepts that command
+// line because the script sits under the repo root it trusts as the app directory
+// (src/relay/ two levels up). Own fixtures reproduce that real shape — a
+// tests/terminal-host.mjs path would match no process that could ever exist.
+const TERMINAL_HOST_SCRIPT = fileURLToPath(new URL("../src/terminal/terminal-host.mjs", import.meta.url));
 
 function ownCommandLine() {
-  return `"C:\\Program Files\\nodejs\\node.exe" "${APP_DIR}terminal-host.mjs"`;
+  return `"C:\\Program Files\\nodejs\\node.exe" "${TERMINAL_HOST_SCRIPT}"`;
 }
 
 function makeDeps({ ownerPid = null, alive = [], commandLines = {} } = {}) {
