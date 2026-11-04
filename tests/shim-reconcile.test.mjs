@@ -6,7 +6,10 @@
 //      与撤侧手写都不动、退役清理、共享 bin/ 部分在册、store 不可读整体不
 //      动、PATH 期望终态一次性写入、广播恰一次、广播失败不翻红。
 //   3. 路由器接线：/panel/api/sync-agents 完成后触发对账（注入即触发）；
-//      不注入即不触发——「默认 null 不碰真实注册表」本身是被测行为。
+//      不注入即不触发——「默认 null 不碰真实注册表」本身是被测行为。bare 路由
+//      器配探针 logger＋进程 env 指向沙箱：默认被改成真实 reconcileShims 时，
+//      真实现读沙箱 store（不存在）走整体不动分支，零落盘零注册表写，但探针
+//      里会留下 "shim reconcile skipped" 日志——断言据此翻红。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -323,11 +326,46 @@ test("路由器：同步完成后触发对账；不注入（默认 null）即不
   assert.equal(first.res.statusCode, 200);
   assert.equal(calls.length, 1, "同步完成即触发对账（fire-and-forget 但调用本身同步发生）");
 
-  const bare = createPanelRouter(baseOptions);
-  const second = fakeReqRes("/panel/api/sync-agents", "POST");
-  await bare.handle(second.req, second.res);
-  assert.equal(second.res.statusCode, 200);
-  assert.equal(calls.length, 1, "不注入即不触发——测试与 relay-host 副本的安全边界");
+  // 后半段：bare（不注入 reconcileShimsFn）必须真的什么都不做。只断
+  // calls.length 挡不住「默认从 null 改成真实 reconcileShims」的回归——calls
+  // 只被上面注入的闭包 push，bare 结构上碰不到，用例会静默全绿，而真实实现
+  // 会拿默认依赖（真 process.env、真注册表 pathStore、loadStore(storePaths())）
+  // 去改写开发机。这里换成可观测探针：给 bare 配探针 logger（reconcileShims
+  // 的 log 参数经 panel.mjs 桥接到 logger 上），并把进程 env 临时指向沙箱。
+  // 真实实现若真跑起来，默认 loadStoreFn 读的是沙箱 store（不存在 →
+  // store_unreadable 整体不动：不建目录、不碰注册表），既保证零落盘零写，
+  // 又会在探针里留下一条 "shim reconcile skipped" warn——那条日志就是本断
+  // 言红/绿的判据。默认 null 时 fire-and-forget 链路整个不存在，探针保持无
+  // 任何垫片对账日志。
+  const bareLogs = [];
+  const bare = createPanelRouter({
+    ...baseOptions,
+    logger: {
+      info: (message) => bareLogs.push(["info", message]),
+      warn: (message) => bareLogs.push(["warn", message]),
+      error: (message) => bareLogs.push(["error", message]),
+    },
+  });
+  const envBackup = { USERPROFILE: process.env.USERPROFILE, LOCALAPPDATA: process.env.LOCALAPPDATA };
+  try {
+    process.env.USERPROFILE = root;
+    process.env.LOCALAPPDATA = join(root, "AppData", "Local");
+    const second = fakeReqRes("/panel/api/sync-agents", "POST");
+    await bare.handle(second.req, second.res);
+    assert.equal(second.res.statusCode, 200);
+    // fire-and-forget：真实 reconcile（若默认被改成真实现）在这几拍里跑完
+    // 才把日志落进探针，drain 之后才能下断言。
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(
+      !bareLogs.some(([, message]) => String(message).includes("shim")),
+      "不注入即不触发——bare 的同步不得产生任何垫片对账日志（默认 null 被改成真实 reconcileShims 时这里必须红）",
+    );
+    assert.equal(calls.length, 1, "实例隔离：bare 的同步不触发第一个路由器注入的对账函数");
+  } finally {
+    process.env.USERPROFILE = envBackup.USERPROFILE;
+    process.env.LOCALAPPDATA = envBackup.LOCALAPPDATA;
+  }
 });
 
 function fakeReqRes(path, method) {
