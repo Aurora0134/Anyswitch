@@ -128,4 +128,13 @@ describe("正文编辑接线", () => {
     assert.ok(decl, "编辑层选区样式必须存在");
     assert.match(decl[1], /color-mix\([^;]*transparent\)|rgba\(/);
   });
+
+  it("组字期间照常重绘：预输入只活在透明 textarea 里，跳过重绘等于屏上无字", () => {
+    // 2026-11-04 实机反馈「中文预输入看不到、光标自己往右飞」的成因：两层分工下
+    // textarea 的字是透明的，组字文本只有铺到高亮层才看得见。原按 composing 早退，
+    // 理由是「重绘会打断候选框」，该说法已被无头 Chrome 的合成组字通路证伪，勿加回。
+    const editor = extractFn("renderSkillBodyEditor");
+    assert.doesNotMatch(editor, /composing/);
+    assert.match(editor, /addEventListener\("input", schedulePaint\)/);
+  });
 });
