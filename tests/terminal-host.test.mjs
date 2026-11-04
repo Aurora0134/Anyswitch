@@ -2630,7 +2630,7 @@ test("POST /terminal/sessions/clear-all 空表也是 ok，且不许被当成会�
 // race the test runner's own listeners.
 test("installTerminalHostFaultHandlers records uncaughtException and unhandledRejection to the log file and stderr sink", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-faults-"));
-  const logPath = join(root, "../logs", "terminal-host.log"); // logs/ does not exist yet — the handler must create it
+  const logPath = join(root, "logs", "terminal-host.log"); // logs/ does not exist yet — the handler must create it
   const written = [];
   const handle = installTerminalHostFaultHandlers({ logPath, write: (line) => written.push(line) });
   try {
@@ -2639,13 +2639,21 @@ test("installTerminalHostFaultHandlers records uncaughtException and unhandledRe
   } finally {
     handle.dispose();
   }
+  // Each record spans several physical lines (a "[stamp] [label]" header plus
+  // the error's full stack), so records are counted by header, not by line.
+  // root is a fresh mkdtemp sandbox, hence the file holds only this run's
+  // records — anchoring that count keeps the includes asserts below
+  // falsifiable even if the fixture ever drifts back to a path shared
+  // across runs.
   const text = readFileSync(logPath, "utf8");
-  assert.ok(text.includes("[uncaughtException]"), "the uncaught exception is labelled");
+  const headers = text.match(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(uncaughtException|unhandledRejection)\] /gm) ?? [];
+  assert.equal(headers.length, 2, "exactly the two records from this run land in the log file");
+  assert.ok(headers.some((h) => h.includes("[uncaughtException]")), "the uncaught exception is labelled");
   assert.ok(text.includes("socket exploded"), "and carries the trace");
-  assert.ok(text.includes("[unhandledRejection]"), "the rejection is labelled");
+  assert.ok(headers.some((h) => h.includes("[unhandledRejection]")), "the rejection is labelled");
   assert.ok(text.includes("stray rejection"));
-  assert.equal(written.length, 2, "the stderr sink receives the same two lines");
-  assert.ok(/^\[\d{4}-\d{2}-\d{2} /m.test(text), "every line carries a wall-clock stamp");
+  assert.equal(written.length, 2, "the stderr sink receives the same two records");
+  assert.ok(headers.every((h) => /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] /.test(h)), "every record header carries a wall-clock stamp");
   rmSync(root, { recursive: true, force: true });
 });
 
