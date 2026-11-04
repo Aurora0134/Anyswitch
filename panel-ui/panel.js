@@ -14958,6 +14958,9 @@ async function api(method, path, body) {
   // 缺省隐藏；hideCancel 用于正文查阅态（底部「关闭」已能退出，「取消」重复且意义不明）；
   // onCancel / onRequestClose 缺省仍走关闭，既有调用方行为不变。
   function showSkillsModal({ title, bodyHtml, confirmText, cancelText, danger, wide, diff, edit, auxText, onAux, hideCancel, onCancel, onRequestClose, onConfirm }) {
+    // 同窗换态（查阅↔编辑、守卫、冲突重载）时弹窗并没有重新打开：.show 一直在，挂在
+    // 它上面的入场动画不会重播，正文与卡片尺寸都是硬切。已开则把卡片入场从 0 重播一次。
+    const wasOpen = $("skillsModal").classList.contains("show");
     $("storeAddPoolCtl")?.remove(); // 新增渠道弹窗注入标题的建池控件，防跨弹窗残留
     $("skillsModalTitle").textContent = title;
     $("skillsModalBody").innerHTML = bodyHtml;
@@ -14981,6 +14984,17 @@ async function api(method, path, body) {
     $("skillsModal").classList.toggle("skills-modal-diff", !!diff);
     $("skillsModal").classList.toggle("skills-modal-edit", !!edit);
     $("skillsModal").classList.add("show");
+    if (wasOpen) replayModalCardEnter($("skillsModal"));
+  }
+
+  // 重播弹窗卡片入场：清成 none 冲刷一次再留空，动画名回到级联，各皮肤变体自动生效。
+  // 冲刷读 animationName 而不是 offsetWidth：只为中断动画，不逼布局（同 replayViewEnter）。
+  function replayModalCardEnter(overlay) {
+    const card = overlay.querySelector(".modal-card");
+    if (!card) return;
+    card.style.animation = "none";
+    void getComputedStyle(card).animationName;
+    card.style.animation = "";
   }
 
   function hideSkillsModal() {

@@ -106,6 +106,35 @@ describe("正文编辑接线", () => {
     assert.doesNotMatch(extractFn("renderSkillBodyConflict"), /hideCancel/);
   });
 
+  it("同窗换态重播弹窗入场：已开才重播，冲刷只为中断动画", () => {
+    const modal = extractFn("showSkillsModal");
+    // 判定必须在挂 .show 之前：之后判永远为真，每次开窗都会多播一遍
+    const readAt = modal.indexOf('const wasOpen = $("skillsModal").classList.contains("show")');
+    const showAt = modal.indexOf('$("skillsModal").classList.add("show")');
+    assert.ok(readAt >= 0, "必须记录调用前是否已开");
+    assert.ok(showAt > readAt, "已开判定前置于 .show");
+    assert.match(modal, /if \(wasOpen\) replayModalCardEnter\(/);
+
+    const replay = extractFn("replayModalCardEnter", "overlay");
+    assert.match(replay, /card\.style\.animation = "none"/);
+    assert.match(replay, /getComputedStyle\(card\)\.animationName/);
+    assert.doesNotMatch(replay, /offsetWidth|offsetHeight/, "冲刷不逼布局");
+    // 留空串还原：动画名回到级联，各皮肤变体才能自动生效
+    assert.match(replay, /card\.style\.animation = ""/);
+  });
+
+  it("重播依赖的入场动画仍在 .show 上（含各皮肤变体）", () => {
+    assert.match(panelCss, /\.modal-overlay\.show \.modal-card \{[^}]*animation: modal-in/);
+    assert.match(panelCss, /@keyframes modal-in \{/);
+    for (const style of ["saas", "aurora", "sepia"]) {
+      assert.match(
+        panelCss,
+        new RegExp(`:root\\[data-style="${style}"\\] \\.modal-overlay\\.show \\.modal-card \\{[^}]*animation: ${style}-modal-in`),
+        `${style} 皮肤变体缺失会让重播落到默认动画上，与开窗手感不一致`,
+      );
+    }
+  });
+
   it("两层对齐的样式契约还在（隐式依赖，改动会静默错位）", () => {
     assert.match(panelCss, /\.skills-editor-highlight,\s*\n\s*\.skills-editor-input \{/);
     assert.match(panelCss, /scrollbar-gutter: stable/);
