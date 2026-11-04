@@ -2926,7 +2926,10 @@
     resize: none; outline: none; overflow: auto; background: transparent;
     color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);
   }
-  .skills-editor-input::selection { background: var(--accent-soft); }
+  /* 选区底色必须半透明：textarea 在高层且字是透明的，不透明底色会把下层高亮文字
+     整片盖住（saas/sepia 亮色主题的 --accent-soft 是实色，选中即看不到字）。
+     用 accent 的透明度版本，任何皮肤下都只染一层薄色、字仍可读。 */
+  .skills-editor-input::selection { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   /* 高亮只动颜色/底色，不动字重与字形——它们会改字形宽度，让折行点错位 */
   .md-tok-h { color: var(--accent); }
   .md-tok-punct { color: var(--text-3); }

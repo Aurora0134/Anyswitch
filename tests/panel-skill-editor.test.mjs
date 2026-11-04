@@ -112,4 +112,12 @@ describe("正文编辑接线", () => {
     assert.match(panelCss, /-webkit-text-fill-color: transparent/);
     assert.match(panelCss, /\.skills-modal-edit \.modal-body \{/);
   });
+
+  it("选区底色必须半透明：不透明会整片盖住下层高亮文字", () => {
+    // textarea 在上层、自身文字透明，选中区完全由这层底色绘制；saas / sepia 亮色的
+    // --accent-soft 是实色，拿它当底色会把下层高亮层的字整片涂掉（选中即看不见字）。
+    const decl = panelCss.match(/\.skills-editor-input::selection \{([^}]*)\}/);
+    assert.ok(decl, "编辑层选区样式必须存在");
+    assert.match(decl[1], /color-mix\([^;]*transparent\)|rgba\(/);
+  });
 });
