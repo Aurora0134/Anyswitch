@@ -1526,9 +1526,14 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     appModes = snap.appModes && typeof snap.appModes === "object" ? { ...snap.appModes } : {};
     setSgr(Array.isArray(snap.sgr) ? snap.sgr.map(String) : []);
     const region = snap.region && typeof snap.region === "object" ? snap.region : {};
-    top = Math.min(Math.max(0, region.top | 0), height - 1);
-    bottom = Math.min(Math.max(0, region.bottom | 0), height - 1);
-    if (bottom < top) { top = 0; bottom = height - 1; }
+    // region 或字段缺失时兜底成出厂整屏区（top=0、bottom=height-1），不是 top=0、
+    // bottom=0 的 1 行区：解析路径永远到不了 bottom<=top 的非法区（DECSTBM 要求
+    // bottom>top，客户端对 1;1r 这类区静默忽略、维持整屏滚动），镜像却会照 1 行区
+    // 滚动——回放发出的非法区域序列与后续换行从此两边分叉。字段在时照旧逐项夹取，
+    // 夹出非法区（含显式等值区）同样重置回整屏；height=1 时整屏本就是 0..0，重置等值。
+    top = region.top === undefined ? 0 : Math.min(Math.max(0, region.top | 0), height - 1);
+    bottom = region.bottom === undefined ? height - 1 : Math.min(Math.max(0, region.bottom | 0), height - 1);
+    if (bottom <= top) { top = 0; bottom = height - 1; }
     altApi = Number.isInteger(snap.altApi) ? snap.altApi : 1049;
     const cursor = snap.cursor && typeof snap.cursor === "object" ? snap.cursor : {};
     row = Math.min(height - 1, Math.max(0, cursor.r | 0));
