@@ -289,8 +289,9 @@ function opencodeServeAncestorPid(tailPid, agentId, clientPids, procSnapshot) {
 function resolveInstanceId(agentId, rawId, procSnapshot = null) {
   const id = sanitizeInstanceId(rawId);
   if (id === null || typeof agentId !== "string" || agentId.length === 0) return null;
-  // 会话粒度行（codex-sess- / opencode-sess- / workbuddy-sess-）声明不了属主
-  // pid：id 里的数字尾巴是会话 id 的一部分而不是进程号，归一对它们是恒等映射。
+  // 会话粒度行（codex-sess- / opencode-sess- / workbuddy-sess- / zcode-sess-）
+  // 声明不了属主 pid：id 里的数字尾巴是会话 id 的一部分而不是进程号，归一对
+  // 它们是恒等映射。
   if (isSessionRowId(id)) return { id, label: null, clientPid: null };
   const tail = id.match(/-(\d+)$/);
   if (tail === null) return { id, label: null, clientPid: null };
@@ -451,6 +452,14 @@ const CODEX_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
 // TTL).
 export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 
+// zcode session rows (ids "zcode-sess-<会话 id>", from the x-session-id request
+// header — see zcodeSessionInstanceId in openai-server.mjs). 与 opencode 同构的
+// 无属主 pid 处境：桌面端 Electron utility 进程跨会话共享连接池，CLI 进程随终端
+// 窗口生灭，pid 粒度两头都锚不住会话。生死随端点家族（zcode.exe 主进程 +
+// bin\zcode.mjs 的 CLI node 进程，连续缺席两轮收行），与 opencode 一样不设空闲
+// 档——静置未关的会话不该丢行。
+export const ZCODE_SESSION_ID_PREFIX = "zcode-sess-";
+
 // WorkBuddy 会话行（id "workbuddy-sess-<产品会话 id>"）。身份正源是产品自己的
 // 进程注册表（~/.workbuddy/sessions/<pid>.json 的 sessionId）：runtime 是池化的
 // （一个会话在一次运行里可换多个 pid），pid 锚不住行，注册表才是把「同一会话
@@ -478,6 +487,7 @@ const WORKBUDDY_SESSION_ROW_IDLE_TTL_MS = 5 * 60 * 1000;
 const SESSION_ROW_PREFIXES = Object.freeze({
   codex: CODEX_SESSION_ID_PREFIX,
   opencode: OPENCODE_SESSION_ID_PREFIX,
+  zcode: ZCODE_SESSION_ID_PREFIX,
   // WorkBuddy 的行身份是产品自己的会话注册表（~/.workbuddy/sessions/<pid>.json
   // 的 sessionId），不是 pid：CLI 内核是池化 runtime，同一会话在一次运行里可以
   // 换任意多个 pid（回合间回收、预热池领养，真机 2026-11-01：同会话 20 分钟走
@@ -489,6 +499,9 @@ const SESSION_ROW_PREFIXES = Object.freeze({
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
   opencode: null,
+  // zcode 与 opencode 同理不设空闲档：CLI 关窗即家族灭、两轮缺席收行；开着的
+  // 终端只是静置时不该收行（opencode 现场：静置 5 分钟行消失、绑定回落 null）。
+  zcode: null,
   // WB 会话行的生死正源是注册表：注册表列着（环境活着）的行不吃空闲淘汰，
   // 注册表不再列出的行走缺席轮次确认（数秒级，与家族缺席同口径）。环境语义：
   // 每次发请求才给会话起新环境，请求间隔里环境本就不在——不存在「暂停待命」
@@ -507,7 +520,7 @@ const SESSION_ROW_FAMILY_MISS_ROUNDS = 2;
 
 function isSessionRowId(id) {
   return id.startsWith(CODEX_SESSION_ID_PREFIX) || id.startsWith(OPENCODE_SESSION_ID_PREFIX)
-    || id.startsWith(WORKBUDDY_SESSION_ROW_PREFIX);
+    || id.startsWith(WORKBUDDY_SESSION_ROW_PREFIX) || id.startsWith(ZCODE_SESSION_ID_PREFIX);
 }
 
 export function getTtftColor(ttftMs) {
@@ -980,6 +993,16 @@ export function claudeSurfaceLabel(surface) {
   return CLAUDE_SURFACE_LABELS[surface];
 }
 
+// zcode 会话行的形态徽标：字面量与 claude 先例共用（desktop→Desktop、
+// cli→TUI），来源不同——claude 读进程扫描的逐 pid 分型，zcode 读请求 socket
+// 属主 pid 的谱系定档（zcodeSurfaceFromOwnerPid）。
+const ZCODE_SURFACE_LABELS = { desktop: "Desktop", cli: "TUI" };
+
+export function zcodeSurfaceLabel(surface) {
+  if (typeof surface !== "string" || !(surface in ZCODE_SURFACE_LABELS)) return null;
+  return ZCODE_SURFACE_LABELS[surface];
+}
+
 // The card summary follows logical client groups, not raw process count: one
 // Desktop app may own several claude.exe processes. CLI rows remain one group
 // per client PID, matching the instance rows below.
@@ -1090,6 +1113,30 @@ const WORKBUDDY_SURFACE_LABELS = { desktop: "Desktop", cli: "CLI" };
 export function workbuddySurfaceLabel(surface) {
   if (typeof surface !== "string" || !(surface in WORKBUDDY_SURFACE_LABELS)) return DSH_UNKNOWN_SURFACE_LABEL;
   return WORKBUDDY_SURFACE_LABELS[surface];
+}
+
+// zcode 会话行的面：从请求 socket 的属主 pid 沿谱系（ppidByPid / imageByPid，
+// 与 workbuddySessionSurface 同一对表）向上走，链上（含自身）见到 zcode.exe
+// 主镜像 → desktop（桌面端 Electron 的连接由它名下的 utility 进程持有）；走完
+// 整条链都没见到 → cli（终端里 node 拉起的 bin\zcode.mjs）。属主 pid 不在本轮
+// 谱系表里（tasklist 兜底轮无父指针列、或快照 miss 后进程已退出）判不出 →
+// null：不贴面，不猜（与 kimi/workbuddy 同款纪律）。imageByPid 的值在收集处
+// 已小写化（resolveProbeRow 读的是 lower 行），直接等值比。
+export function zcodeSurfaceFromOwnerPid(pid, procCounts) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const ppidByPid = procCounts?.ppidByPid;
+  const imageByPid = procCounts?.imageByPid;
+  if (!(ppidByPid instanceof Map) || !(imageByPid instanceof Map) || !ppidByPid.has(pid)) return null;
+  let current = pid;
+  const seen = new Set([current]);
+  for (let depth = 0; depth < INSTANCE_LINEAGE_MAX_DEPTH; depth += 1) {
+    if (imageByPid.get(current) === "zcode.exe") return "desktop";
+    const parent = ppidByPid.get(current);
+    if (parent === undefined || seen.has(parent)) return "cli";
+    seen.add(parent);
+    current = parent;
+  }
+  return null;
 }
 
 // 卡内分面汇总（"Desktop ×1 · CLI ×1"），与 DSH / kimi 同形同源：面由进程扫描的
@@ -1811,14 +1858,25 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
           if (pid) result.workbuddyEnginePids.add(pid);
         }
       }
-      // 兜底可观测位：五组谓词全失配、但命令行带 npm 安装路径形状（node_modules）
+      // zcode CLI 形态（桌面端在跑即 zcode.exe 家族在，纯 CLI 场景此前全盲）：
+      // 入口是 node 拉起的 bin\zcode.mjs，镜像名是 node.exe——只认 ZCode.exe 的
+      // 桶分支对这条形态看不到进程，会话行的家族生死（连续缺席两轮收行）也就没
+      // 有真值。两种路径分隔符都认；同机其它 node 系 agent（kimi-code 等同架构
+      // CLI）的安装路径不含 zcode.mjs，不误伤。桌面端 --type= 辅助进程与 .cjs
+      // bundle 宿主的排除留在 zcode 桶分支，这里只认 CLI 入口路径段。
+      const isZcodeNode = lower.includes("bin\\zcode.mjs") || lower.includes("bin/zcode.mjs");
+      if (isZcodeNode) {
+        result.zcode += 1;
+        if (pid) result.zcodePids.add(pid);
+      }
+      // 兜底可观测位：六组谓词全失配、但命令行带 npm 安装路径形状（node_modules）
       // 的 node 行（口径见 createEmptyProcessScan 上方第三道护栏）。既有计数语义
       // 不动——镜像名 node.exe 不构成任何端点的会话证据（本注释块开头的 npm view
       // 例子就是反证），失配行照旧不计数、不进任何桶；这个计数只回答「本轮有没有
       // 认不出的 npm 形 node 行」，上游改包名的会话行正是这个形状，静默归零从此
       // 有处可查，读侧护栏也以此为闸。自进程与裸 node 脚本不带 node_modules，
       // 不入计数。
-      if (!isClaudeNode && !isDshNode && !isPiNode && !isKimiNode && !isWorkbuddyNode
+      if (!isClaudeNode && !isDshNode && !isPiNode && !isKimiNode && !isWorkbuddyNode && !isZcodeNode
         && lower.includes("node_modules")) {
         result.unclaimedNodeRows += 1;
       }
@@ -3353,7 +3411,7 @@ export function createAgentMetricsCollector(options = {}) {
   // Served from the cached scan (≤ scan TTL old); an empty lineage table
   // (tasklist fallback path) yields empty ancestor lists — the panel then
   // cannot attribute and sessions stay plain shells.
-  const DETECTED_CLIENT_ENDPOINTS = ["codex", "dsh", "kimi", "claude", "opencode", "grok", "pi", "qoder", "workbuddy"];
+  const DETECTED_CLIENT_ENDPOINTS = ["codex", "dsh", "kimi", "claude", "opencode", "grok", "pi", "qoder", "workbuddy", "zcode"];
 
   function getDetectedClientProcesses() {
     const counts = cachedProcessCounts ?? createEmptyProcessScan();
@@ -3628,10 +3686,16 @@ export function createAgentMetricsCollector(options = {}) {
   const unattributedState = createAggregateState(sparkWindowPoints);
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi / codex / grok / dsh / qoder / claude): instanceId -> { state, firstSeen }.
-  // Only requests carrying a valid instanceId land here, and they ALSO land in the
-  // endpoint aggregate above, so the existing cards are unchanged. zcode stays
-  // aggregate-only by design. qoder joined the multi-instance set 2026-10-15:
+  // pi / codex / grok / dsh / qoder / claude / workbuddy / zcode): instanceId
+  // -> { state, firstSeen }. Only requests carrying a valid instanceId land
+  // here, and they ALSO land in the endpoint aggregate above, so the existing
+  // cards are unchanged. zcode joined the multi-instance set with session-
+  // granular rows: every zcode CLI/桌面端 model request carries the
+  // x-session-id header, so the relay mints zcode-sess-<会话 id> rows (the
+  // opencode precedent); socket reverse lookup is deliberately NOT its
+  // identity source — the desktop app's Electron utility processes share one
+  // connection pool across sessions, so a pid can never name the session.
+  // qoder joined the multi-instance set 2026-10-15:
   // its provider config cannot carry custom request headers, so the netstat
   // socket reverse lookup (SOCKET_FALLBACK_AGENT_IDS in late-socket-instance,
   // same list as this map) is the only instance identity its CLI has — without
@@ -3652,7 +3716,7 @@ export function createAgentMetricsCollector(options = {}) {
   // the late-attach mechanism and the PID housekeeping all work unmodified —
   // the desktop app points its gateway straight at the resident relay, so it
   // has no session reporter and the socket reverse lookup is its only identity.
-  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map(), workbuddy: new Map() };
+  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map(), workbuddy: new Map(), zcode: new Map() };
 
   // Consecutive trusted scan rounds in which a session row's endpoint family was
   // absent, keyed "<bucket>:<instId>". A session row names a conversation, not
@@ -4209,6 +4273,12 @@ export function createAgentMetricsCollector(options = {}) {
         markMetricsDirty();
       }
       if (norm.label !== null) entry.label = norm.label;
+      if (bucketAgentId === "zcode" && entry.zcodeSurface === undefined) {
+        // 会话行的面按行缓存：undici 空闲约 4s 断连，断连期查不到连接属主；
+        // 首请求必有活连接，定档一次即可。判不出（null）不缓存，下个请求再试。
+        const surface = zcodeSurfaceFromOwnerPid(meta.surfacePid, cachedProcessCounts);
+        if (surface !== null) entry.zcodeSurface = surface;
+      }
       if (bucketAgentId === "workbuddy" && norm.clientPid !== null) {
         // 行活跃三选一之三的锚：记下扛过本行流量的引擎 pid。长工具调用期间会话
         // 文件与在途都静默，这条保住正跑的会话；预取/待释放的过渡态 runtime 从未
@@ -5023,7 +5093,8 @@ export function createAgentMetricsCollector(options = {}) {
     // (launcher-injected "<cwd>-<launcher pid>" rows that never folded): the
     // tail pid is no client of the endpoint, so it reconciles against every
     // process the scan saw, and a dead pid drops the leftover row now.
-    // Session-granular rows (codex-sess- / opencode-sess-) declare no PID at
+    // Session-granular rows (codex-sess- / opencode-sess- / workbuddy-sess- /
+    // zcode-sess-) declare no PID at
     // all: they clear the moment the whole endpoint's process family exits, or
     // after their idle TTL without traffic — whichever comes first.
     // DSH 的桌面稳定行（DSH_DESKTOP_INSTANCE_ID）与 kimi 的桌面稳定行
@@ -5296,13 +5367,14 @@ export function createAgentMetricsCollector(options = {}) {
       // Mirrors the claude placeholder sessions in getActiveClaudeSessions:
       // a real request with the same "<agentId>-<pid>" id takes the entry
       // over in startRequest, and once the process dies the reconciliation
-      // above evicts it on the next read. codex and opencode are the
+      // above evicts it on the next read. codex, opencode and zcode are the
       // exceptions: their rows are session-scoped (traffic-born), so their
       // processes — codex's shared GUI engine, opencode's resident
-      // `serve --service` — never spawn placeholder rows. A placeholder there
+      // `serve --service`, zcode 的桌面主进程与 CLI node — never spawn
+      // placeholder rows. A placeholder there
       // would sit beside the session row with a permanent 0 请求, and the
       // terminal panel (which reads its row by id) would show the empty one.
-      if (bucket !== "codex" && bucket !== "opencode" && bucket !== "workbuddy") {
+      if (bucket !== "codex" && bucket !== "opencode" && bucket !== "workbuddy" && bucket !== "zcode") {
         for (const pid of placeholderPids) {
           // 桌面宿主（dsh 宿主引擎 / kimi 桌面主进程）的占位行挂稳定 id：起进
           // 程即可见的那一行，就是请求将要落的那一行——换代换 pid 不换行。其
@@ -5447,6 +5519,12 @@ export function createAgentMetricsCollector(options = {}) {
       if (bucket === "dsh") return dshInstanceSurface(instId);
       if (bucket === "kimi") return kimiInstanceSurface(instId);
       if (bucket === "workbuddy") return workbuddyInstanceSurface(instId);
+      // zcode 会话行的面在请求路径上定档、按行缓存（bindInstance 处的注释），
+      // 读侧只翻译字面量；未定档的行不贴面。
+      if (bucket === "zcode") {
+        const surface = instanceBuckets.zcode.get(instId)?.zcodeSurface ?? null;
+        return surface === null ? null : zcodeSurfaceLabel(surface);
+      }
       return null;
     };
 
@@ -5503,7 +5581,9 @@ export function createAgentMetricsCollector(options = {}) {
         });
     }
 
-    // 1. ZCode Agent Status
+    // 1. ZCode Agent Status（汇总卡 + 实例桶；实例按会话一行 zcode-sess-<会话
+    // id>，身份正源是 x-session-id 请求头——桌面端 utility 进程跨会话共享连接
+    // 池，pid 到不了会话。进程家族只决定卡片运行状态与会话行的生灭）
     const zcodeAgent = buildAggregateAgentStatus({
       id: "zcode",
       name: "ZCode",
@@ -5511,6 +5591,7 @@ export function createAgentMetricsCollector(options = {}) {
       processCount: procCounts.zcode || 0,
       tpsWindow: recentSampleWindow,
       nowFn,
+      instances: instanceSnapshots("zcode"),
     });
 
     // 2. Claude Code Agent Status

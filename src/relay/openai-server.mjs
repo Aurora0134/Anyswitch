@@ -104,8 +104,11 @@ function explicitInstanceId(headers) {
 // 不进进程身份的随机标签——头照发但不采用，身份一律以连接属主进程归一，socket
 // 未解析时按无身份处理、走迟到绑定。opencode 属于同一档但另加会话头：它 2.x 起
 // 用一个常驻服务代发所有终端的请求，环境标签被首个启动器冻住，所以会话头
-// （opencode-sess-<会话 id>）才是正源，头值同样不采用。zcode 保持聚合一桶，一律
-// 不兜底。
+// （opencode-sess-<会话 id>）才是正源，头值同样不采用。zcode 的实例身份正源
+// 同样是会话头（x-session-id → zcode-sess-<会话 id>，见 zcodeSessionInstanceId）；
+// 它不进 socket 兜底集合——桌面端 Electron utility 进程跨会话共享连接池，pid
+// 粒度到不了会话；连接属主 pid 只用于给会话行定 surface（desktop/cli），不做
+// 身份。会话头缺失/非法时回落聚合桶，不拒绝请求。
 // claude 在列是因为它的桌面端不经过本机启动器：桌面端把网关直接指向常驻中继
 // （没有每会话上报器），反查属主进程是它唯一的身份来源；经启动器起的 Claude
 // Code 仍走自己的 per-launch 中继、仍有上报器行，两条路径互斥不重复计数。
@@ -117,14 +120,19 @@ function explicitInstanceId(headers) {
 // 本已规范，归一对它是恒等映射。
 function instanceIdForRequest(req, agentId, deps) {
   const id = agentId ?? "";
-  // 会话头优先于一切：opencode 与 workbuddy 的实例身份只能是会话粒度
-  // （见 opencodeSessionInstanceId / workbuddySessionInstanceId）。
+  // 会话头优先于一切：opencode、workbuddy 与 zcode 的实例身份只能是会话粒度
+  // （见 opencodeSessionInstanceId / workbuddySessionInstanceId /
+  // zcodeSessionInstanceId）。
   if (id === "opencode") {
     const sessionId = opencodeSessionInstanceId(req.headers);
     if (sessionId !== null) return sessionId;
   }
   if (id === "workbuddy") {
     const sessionId = workbuddySessionInstanceId(req.headers);
+    if (sessionId !== null) return sessionId;
+  }
+  if (id === "zcode") {
+    const sessionId = zcodeSessionInstanceId(req.headers);
     if (sessionId !== null) return sessionId;
   }
   // override 端点（pi）与头值不可信的端点（opencode 的环境标签被共用服务冻住，
@@ -185,6 +193,27 @@ function opencodeSessionInstanceId(headers) {
 const WORKBUDDY_SESSION_PREFIX = "workbuddy-sess-";
 function workbuddySessionInstanceId(headers) {
   return sessionRowId(WORKBUDDY_SESSION_PREFIX, headers?.["x-conversation-id"]);
+}
+
+// zcode 会话粒度的实例身份正源。zcode CLI/桌面端（同一份 adapters 代码）发往
+// relay 的每个模型请求都带 x-session-id 会话头（zcode-src 的
+// runner-attribution.ts，值形如 sess_<id>）。桌面端 Electron utility 进程跨
+// 会话共享连接池、CLI 进程随终端窗口生灭，pid 粒度两头都锚不住会话——这与
+// opencode 的处境同构，会话头是唯一能区分同台多会话的稳定身份。头缺失或清洗
+// 后无有效字符时返回 null，归属回落聚合桶，与今天完全一致。
+const ZCODE_SESSION_PREFIX = "zcode-sess-";
+function zcodeSessionInstanceId(headers) {
+  return sessionRowId(ZCODE_SESSION_PREFIX, headers?.["x-session-id"]);
+}
+
+// zcode 会话行的 surface（desktop/cli）定档原料：请求 socket 的连接属主 pid。
+// pid 不做实例身份（见上方头值注释段），只供 agent-metrics 沿进程谱系判面
+// （zcodeSurfaceFromOwnerPid）；快照 miss 判不了就返回 null，行不贴面、不猜。
+// 仅 zcode 会话行的请求需要它，其余请求恒 null。
+function zcodeSurfacePidForRequest(req, instanceId, deps) {
+  if (typeof instanceId !== "string" || !instanceId.startsWith(ZCODE_SESSION_PREFIX)) return null;
+  const pid = deps.socketOwner?.lookup({ localPort: req.socket.localPort, remotePort: req.socket.remotePort }) ?? null;
+  return typeof pid === "number" && Number.isFinite(pid) && pid > 0 && pid !== process.pid ? pid : null;
 }
 
 // 会话扫描结果 → 终端归属桥的 feed 行：与请求路径同一套行 id 形状（join 两端
@@ -863,6 +892,7 @@ export function createOpenAIRelayServer(deps) {
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
           instanceId: requestInstanceId,
+          surfacePid: zcodeSurfacePidForRequest(req, requestInstanceId, deps),
           stream: body.stream === true,
           path: "openai",
         });
@@ -1070,6 +1100,7 @@ export function createOpenAIRelayServer(deps) {
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
           instanceId: requestInstanceId,
+          surfacePid: zcodeSurfacePidForRequest(req, requestInstanceId, deps),
           stream: true,
           path: "openai",
           background: codexBackground,
@@ -1231,6 +1262,7 @@ export function createOpenAIRelayServer(deps) {
           userAgent: req.headers["user-agent"],
           agentId,
           instanceId: requestInstanceId,
+          surfacePid: zcodeSurfacePidForRequest(req, requestInstanceId, deps),
           stream: body.stream === true,
           path: "anthropic",
           background: claudeBackground,

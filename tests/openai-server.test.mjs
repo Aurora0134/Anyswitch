@@ -477,6 +477,85 @@ describe("openai relay transport", () => {
     });
   });
 
+  // zcode 会话身份：CLI/桌面端（同一份 adapters 代码）的每个模型请求都带
+  // x-session-id 会话头（zcode-src 的 runner-attribution.ts，值形如 sess_<id>）。
+  // 身份正源就是这个会话头；桌面端 Electron utility 进程跨会话共享连接池，
+  // socket 反查到不了会话粒度——属主 pid 只随 meta.surfacePid 去给行定
+  // surface（desktop/cli），绝不作身份。
+  describe("zcode instance identity (x-session-id session header)", () => {
+    async function instanceMetaForChat(headers = {}) {
+      let startedMeta = null;
+      const fakeCollector = {
+        startRequest: (meta) => {
+          startedMeta = meta;
+          return { recordFirstChunk: () => {}, recordEnd: () => {} };
+        },
+      };
+      const server = createOpenAIRelayServer({
+        ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
+        metricsCollector: fakeCollector,
+        // 与 opencode 组同款纪律：生产宿主恒注入 socketOwner，不接桩测出的是
+        // 夹具残缺而非产品行为。
+        socketOwner: { lookup: () => 4242, onRefresh: () => () => {} },
+      });
+      const { port, close } = await listenTestPort(server);
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            authorization: TOKEN,
+            "content-type": "application/json",
+            "x-agent-id": "zcode",
+            ...headers,
+          },
+          body: JSON.stringify({
+            model: "claude-opus-5",
+            stream: true,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+        assert.ok(startedMeta, "metricsCollector.startRequest was called");
+        return startedMeta;
+      } finally {
+        await close();
+      }
+    }
+
+    it("derives the row id from the x-session-id header", async () => {
+      const meta = await instanceMetaForChat({ "x-session-id": "sess_ea6a8ca43ffernu8SA9nmQVzQa" });
+      assert.equal(meta.agentId, "zcode");
+      assert.equal(meta.instanceId, "zcode-sess-sess_ea6a8ca43ffernu8SA9nmQVzQa");
+    });
+
+    it("splits two concurrent sessions into two rows", async () => {
+      const a = await instanceMetaForChat({ "x-session-id": "sess_aaa" });
+      const b = await instanceMetaForChat({ "x-session-id": "sess_bbb" });
+      assert.equal(a.instanceId, "zcode-sess-sess_aaa");
+      assert.equal(b.instanceId, "zcode-sess-sess_bbb");
+    });
+
+    it("keeps headerless requests on the aggregate bucket — no socket-pid identity", async () => {
+      // 无会话头（旧版本/非会话流量）：zcode 不在 SOCKET_FALLBACK_AGENT_IDS，
+      // 连接属主 pid（桩在，返回 4242）绝不能被合成实例身份，请求落聚合桶。
+      const meta = await instanceMetaForChat();
+      assert.equal(meta.instanceId, null);
+      assert.equal(meta.surfacePid, null, "非会话行不带定档原料");
+    });
+
+    it("sanitizes noisy header values through the shared session cleaner", async () => {
+      const meta = await instanceMetaForChat({ "x-session-id": "sess_a b!c" });
+      assert.equal(meta.instanceId, "zcode-sess-sess_a-b-c");
+    });
+
+    it("passes the socket owner pid along as surfacePid for session rows", async () => {
+      const meta = await instanceMetaForChat({ "x-session-id": "sess_surf" });
+      assert.equal(meta.instanceId, "zcode-sess-sess_surf");
+      assert.equal(meta.surfacePid, 4242, "属主 pid 随行下发，供 collector 沿谱系定 surface");
+    });
+  });
+
   it("serves unidentified requests without attributing them to any endpoint", async () => {
     // 无身份头、无 URL 前缀、UA 不可识别的请求：照常服务，但归属记 null——
     // 不落任何端点桶、不进统计页端点维度（「未知来源不显示」），兜底时打一条
