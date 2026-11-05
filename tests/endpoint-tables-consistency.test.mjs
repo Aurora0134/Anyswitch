@@ -105,9 +105,9 @@ describe("端点表跨表成员一致性", () => {
     assert.deepEqual([...byok].sort(), expected, "BYOK_IMPORT_AGENTS 应为全集去掉 claude");
   });
 
-  it("终端会话归属面不含 zcode（zcode 聚合口径，见 agent-metrics 内注释）", () => {
-    const expected = UNIVERSE.filter((id) => id !== "zcode").sort();
-    assert.deepEqual([...detectedClientEndpoints].sort(), expected, "DETECTED_CLIENT_ENDPOINTS 应为全集去掉 zcode");
+  it("终端会话归属面覆盖全部十个端点（zcode 会话行升级后归入，见 agent-metrics 内注释）", () => {
+    const expected = [...UNIVERSE].sort();
+    assert.deepEqual([...detectedClientEndpoints].sort(), expected, "DETECTED_CLIENT_ENDPOINTS 应与十个真实端点全集一致");
   });
 
   it("两张超集表：routing 多两个仅存量 id，skills 多全局端点", () => {

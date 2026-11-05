@@ -154,7 +154,7 @@ describe("per-instance aggregate tracking", () => {
     assert.equal(wsB.tokens.prompt, 10);
   });
 
-  it("exposes instances for every scoped endpoint and none for the aggregate-only ones", async () => {
+  it("exposes instances for every scoped endpoint; untagged zcode traffic stays on the aggregate", async () => {
     let t = 1000;
     const collector = testCollector({ nowFn: () => t });
     for (const agentId of ["kimi", "opencode", "pi", "dsh", "qoder"]) {
@@ -165,8 +165,10 @@ describe("per-instance aggregate tracking", () => {
       t += 100;
       req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
     }
-    // Aggregate-only endpoints must not sprout instance buckets even when tagged.
-    const z = collector.startRequest({ agentId: "zcode", instanceId: "z-1", model: "m1" });
+    // zcode 已升级为会话粒度实例行（x-session-id → zcode-sess-<会话 id>，见
+    // openai-server 的 zcodeSessionInstanceId）：instances 数组从此存在。无会话
+    // 头的请求（这里不带 instanceId）仍只落聚合桶、不开实例行——与升级前一致。
+    const z = collector.startRequest({ agentId: "zcode", model: "m1" });
     z.recordEnd({ status: 200, usage: {} });
     const c = collector.startRequest({ agentId: "claude", instanceId: "c-1", model: "m1" });
     c.recordEnd({ status: 200, usage: {} });
@@ -180,15 +182,17 @@ describe("per-instance aggregate tracking", () => {
     // 进程); qoder became instance-capable with the terminal-sidebar fix
     // (2026-10-15: qodercli.exe 的实例身份只能来自 socket 反查——它的 provider
     // 配置写不进自定义请求头，聚合-only 等于虚拟终端 Qoder 会话永远绑不上实例
-    // 行)。只有 zcode 仍是聚合-only 形状：它没有 instanceBuckets 桶，带
-    // instanceId 的请求也不会开出实例行。claude 则**会**下发 instances 数组，
-    // 但来源与本组不同——它就是 per-session 报表行本身（claudeSessionsFormatted
-    // 同时填入 sessions 与 instances），而不是 instanceSnapshots("claude")；
-    // instanceBuckets.claude 只承载常驻中继的流量，由 getActiveClaudeSessions
-    // 按 PID 并进会话行，自身不产生实例行（见本文件「claude 常驻中继流量按连接
-    // 属主进程落会话行」一组）。
+    // 行)。zcode 随本次会话行升级不再是聚合-only：会话行的全生命周期（家族两轮
+    // 缺席收行、surface 定档）见 agent-metrics.test.mjs 的 zcode 组。claude 则
+    // **会**下发 instances 数组，但来源与本组不同——它就是 per-session 报表行
+    // 本身（claudeSessionsFormatted 同时填入 sessions 与 instances），而不是
+    // instanceSnapshots("claude")；instanceBuckets.claude 只承载常驻中继的流
+    // 量，由 getActiveClaudeSessions 按 PID 并进会话行，自身不产生实例行（见本
+    // 文件「claude 常驻中继流量按连接属主进程落会话行」一组）。
     const zcodeAgent = status.find((a) => a.id === "zcode");
-    assert.equal("instances" in zcodeAgent, false, "zcode must stay aggregate-only");
+    assert.ok(Array.isArray(zcodeAgent.instances), "zcode exposes the unified instance contract");
+    assert.deepEqual(zcodeAgent.instances, [], "无会话头的 zcode 请求只落聚合桶");
+    assert.equal(zcodeAgent.metrics.totalRequests, 1, "聚合账照常记");
     const claude = status.find((a) => a.id === "claude");
     assert.ok(Array.isArray(claude.instances), "claude exposes the unified instance contract");
   });

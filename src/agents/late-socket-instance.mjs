@@ -5,14 +5,17 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // opencode have: each DSH surface (web UI, TUI, custom profile) is its own
 // process holding its own keep-alive connection to the loopback relay, and it
 // sends no instance header of its own — the terminal user launches `dsh`/`dst`,
-// not an Anyswitch launcher. zcode stays aggregate-only.
+// not an Anyswitch launcher. zcode 不在此列：它的实例身份正源是 x-session-id
+// 会话头（zcode-sess-<会话 id>），桌面端 Electron utility 进程跨会话共享连接
+// 池，pid 粒度到不了会话——socket 反查只用于给会话行定 surface，不做身份。
 // qoder joins from the client side for the same reason: its provider config
 // (settings.json openai-compatible connections) cannot carry custom request
 // headers, so the CLI's keep-alive connection is its only instance identity —
 // without the fallback the virtual terminal's Qoder sessions never bind an
 // instance row (2026-10-15 forensics; the terminal one-click launch ships no
 // tag either, so the synthesized qoder-<pid> is the row the process scan and
-// the terminal join both key on). This set mirrors agent-metrics' instanceBuckets.
+// the terminal join both key on). This set mirrors agent-metrics' instanceBuckets
+// minus zcode, whose rows are session-granular (header-minted, see above).
 //
 // claude joins because its desktop app never crosses our launcher: the app
 // points its gateway at the resident relay itself (no per-launch relay, hence no

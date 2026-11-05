@@ -1769,6 +1769,185 @@ describe("createAgentMetricsCollector", () => {
     });
   });
 
+  describe("zcode session rows (x-session-id identity)", () => {
+    // 5-column WMIC shape, same fixture family as the opencode group above.
+    // 桌面端形态：主进程 ZCode.exe（计数）+ --type=utility 辅助子进程（跨会话
+    // 共享连接池的属主候选，不计数但进谱系表）；CLI 形态：powershell 下 node
+    // 拉起的 bin\zcode.mjs。
+    const wmicZc = (...rows) => `Node,CommandLine,Name,ParentProcessId,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+    const ZC_HOME = String.raw`C:\Users\tester\AppData\Local\Programs\zcode`;
+    const zcExplorerRow = "LAPTOP,C:\\WINDOWS\\explorer.exe,explorer.exe,3999,4000";
+    const zcDesktopRows = [
+      zcExplorerRow,
+      `LAPTOP,${ZC_HOME}\\ZCode.exe,zcode.exe,4000,5000`,
+      `LAPTOP,${ZC_HOME}\\ZCode.exe --type=utility,zcode.exe,5000,5001`,
+    ];
+    const ZC_DESKTOP_SCAN = wmicZc(...zcDesktopRows);
+    const zcCliRows = [
+      zcExplorerRow,
+      "LAPTOP,C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,4000,6000",
+      `LAPTOP,C:\\Program Files\\nodejs\\node.exe ${ZC_HOME}\\bin\\zcode.mjs,node.exe,6000,6001`,
+    ];
+    const ZC_CLI_SCAN = wmicZc(...zcCliRows);
+
+    it("mints a session row from the request, with no placeholder rows for live family processes", async () => {
+      // zcode 的行是流量生的、按会话划分（codex/opencode 同款）：扫描到活的
+      // 桌面主进程不起占位行——否则 0 请求的占位行会常驻在会话行旁边。
+      let t = 3000;
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      await collector.scanProcesses();
+      const r = collector.startRequest({
+        agentId: "zcode", providerId: "north-main", model: "glm-5.3",
+        instanceId: "zcode-sess-sess_one", surfacePid: 5001, path: "openai", stream: true,
+      });
+      t = 4200; r.recordFirstChunk();
+      t = 5200; r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 4 } });
+      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-sess-sess_one"], "只有会话行，没有进程占位行");
+      assert.equal(zcode.instances[0].requests, 1);
+      assert.equal(zcode.metrics.totalRequests, 1, "聚合口径不变");
+    });
+
+    it("badges a desktop-owned session row Desktop and a terminal one TUI", async () => {
+      // 面从请求 socket 的属主 pid 沿谱系定档：utility 子进程（5001）自身即
+      // zcode.exe → Desktop；CLI node（6001）走完整条链见不到 zcode.exe → TUI。
+      let t = 3000;
+      const desktop = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      await desktop.scanProcesses();
+      const r1 = desktop.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_d", surfacePid: 5001, model: "m1", stream: true, path: "openai" });
+      r1.recordEnd({ status: 200, usage: {} });
+      const rowD = (await desktop.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
+      assert.equal(rowD.surface, "Desktop");
+
+      const cli = testCollector({ execFn: (c, o, cb) => cb(null, ZC_CLI_SCAN), nowFn: () => t });
+      await cli.scanProcesses();
+      const r2 = cli.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_c", surfacePid: 6001, model: "m1", stream: true, path: "openai" });
+      r2.recordEnd({ status: 200, usage: {} });
+      const rowC = (await cli.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
+      assert.equal(rowC.surface, "TUI");
+    });
+
+    it("leaves the row unbadged when the owner pid is unresolvable, and retries on the next request", async () => {
+      // 判不出不贴（kimi/workbuddy 同款纪律）：属主 pid 不在本轮谱系表里就不
+      // 定档；也不缓存——下一个请求带着可判的 pid 再定档。
+      let t = 3000;
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      await collector.scanProcesses();
+      const r1 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_u", surfacePid: 9999, model: "m1", stream: true, path: "openai" });
+      r1.recordEnd({ status: 200, usage: {} });
+      let row = (await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
+      assert.equal("surface" in row, false, "属主 pid 判不出，行不贴面");
+
+      const r2 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_u", surfacePid: 5001, model: "m1", stream: true, path: "openai" });
+      r2.recordEnd({ status: 200, usage: {} });
+      row = (await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
+      assert.equal(row.surface, "Desktop", "未定的档不缓存，下个请求再定");
+    });
+
+    it("caches the classification per row once decided", async () => {
+      // undici 空闲约 4s 断连，断连期查不到属主：已定档的行不随后续请求的
+      // surfacePid 缺失/变化而翻案。
+      let t = 3000;
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      await collector.scanProcesses();
+      const r1 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_k", surfacePid: 5001, model: "m1", stream: true, path: "openai" });
+      r1.recordEnd({ status: 200, usage: {} });
+      const r2 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_k", model: "m1", stream: true, path: "openai" });
+      r2.recordEnd({ status: 200, usage: {} });
+      const row = (await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
+      assert.equal(row.surface, "Desktop");
+    });
+
+    it("counts the zcode CLI node process into the zcode family (both path separators)", async () => {
+      // 纯 CLI 场景：家族 = bin\zcode.mjs 的 node 进程。两种分隔符都认；同机
+      // 其它 node 系 agent（kimi-code）与裸 zcode.mjs 路径不误伤。
+      const scan = wmicZc(
+        zcExplorerRow,
+        `LAPTOP,C:\\Program Files\\nodejs\\node.exe ${ZC_HOME}\\bin\\zcode.mjs,node.exe,4000,6001`,
+        `LAPTOP,C:\\Program Files\\nodejs\\node.exe C:/Users/tester/scoop/apps/zcode/bin/zcode.mjs,node.exe,4000,6002`,
+        "LAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,4000,6003",
+        "LAPTOP,C:\\Tools\\node.exe C:\\tools\\zcode.mjs,node.exe,4000,6004",
+      );
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, scan), nowFn: () => 10000 });
+      const procs = await collector.scanProcesses();
+      assert.equal(procs.zcode, 2, "只认 bin\\zcode.mjs 入口的 node 行");
+      assert.ok(procs.zcodePids.has(6001));
+      assert.ok(procs.zcodePids.has(6002));
+      assert.ok(!procs.zcodePids.has(6003), "kimi-code 的 node 行不归 zcode");
+      assert.ok(!procs.zcodePids.has(6004), "无 bin\\ 段的裸 zcode.mjs 路径不认");
+    });
+
+    it("feeds the zcode CLI process into the detected-client feed with a busy flag", async () => {
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_CLI_SCAN), nowFn: () => 10000 });
+      await collector.scanProcesses();
+      const detected = collector.getDetectedClientProcesses();
+      const entry = detected.find((d) => d.agentId === "zcode");
+      assert.ok(entry, "zcode CLI 进 detected feed");
+      assert.equal(entry.pid, 6001);
+      assert.ok(entry.ancestors.includes(6000), "谱系带给终端 join");
+      assert.ok("busy" in entry, "忙闲位随行下发");
+    });
+
+    it("drops a session row after two consecutive trusted rounds see no family", async () => {
+      // 与 opencode 同一判据：单轮「家族不在」不是判决（探针可能被时间预算截断），
+      // 连续两轮都看不到才收行。
+      let t = 3000;
+      let alive = true;
+      const execFn = (c, o, cb) => cb(null, alive ? ZC_CLI_SCAN : wmicZc());
+      const collector = testCollector({ execFn, nowFn: () => t });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_x", model: "m1", stream: true, path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances.map((i) => i.id);
+      assert.deepEqual(await read(), ["zcode-sess-sess_x"]);
+
+      alive = false;
+      t += 3000;
+      await collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(await read(), ["zcode-sess-sess_x"], "单轮空白不收行");
+      assert.deepEqual(await read(), [], "连续两轮看不到家族，会话行收走");
+    });
+
+    it("keeps an idle session row while its family is still alive", async () => {
+      // 与 opencode 同款不设空闲档：开着的终端只是静置，对话还在屏幕上——按
+      // codex 的 5 分钟档收行会让看板与终端右栏突然认不出这条会话。
+      let t = 3000;
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_CLI_SCAN), nowFn: () => t });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_idle", model: "m1", stream: true, path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      t += 2 * 60 * 60 * 1000;
+      await collector.scanProcesses();
+      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-sess-sess_idle"]);
+    });
+
+    it("serves the zcode session metas through the terminal-join getter", async () => {
+      // 与 codex/opencode 同形：透传扫描原值（含 sess_ 前缀的 meta.id——剥前缀
+      // 对齐在出口层 openai-server 做），吃 15 秒 per-endpoint 缓存。
+      const metas = [{ id: "sess_join", project: "C:\\work\\alpha", lastActive: 2000 }];
+      let calls = 0;
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => 10000,
+        zcodeSessionLookup: async () => { calls += 1; return metas; },
+      });
+      assert.deepEqual(await collector.getZcodeSessionsForTerminalJoin(), metas);
+      await collector.getZcodeSessionsForTerminalJoin();
+      assert.equal(calls, 1, "缓存窗口内不重扫");
+    });
+
+    it("degrades the terminal-join feed to an empty list when the session scan fails", async () => {
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => 10000,
+        zcodeSessionLookup: async () => { throw new Error("db locked"); },
+      });
+      assert.deepEqual(await collector.getZcodeSessionsForTerminalJoin(), [], "扫描失败绝不弄坏读取面");
+    });
+  });
+
   it("routes Codex traffic by x-agent-id and counts the codex.exe engine family", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;

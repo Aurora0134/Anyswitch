@@ -477,6 +477,152 @@ describe("openai relay transport", () => {
     });
   });
 
+  // zcode 会话身份：CLI/桌面端（同一份 adapters 代码）的每个模型请求都带
+  // x-session-id 会话头（zcode-src 的 runner-attribution.ts，值形如 sess_<id>）。
+  // 身份正源就是这个会话头；桌面端 Electron utility 进程跨会话共享连接池，
+  // socket 反查到不了会话粒度——属主 pid 只随 meta.surfacePid 去给行定
+  // surface（desktop/cli），绝不作身份。
+  describe("zcode instance identity (x-session-id session header)", () => {
+    async function instanceMetaForChat(headers = {}) {
+      let startedMeta = null;
+      const fakeCollector = {
+        startRequest: (meta) => {
+          startedMeta = meta;
+          return { recordFirstChunk: () => {}, recordEnd: () => {} };
+        },
+      };
+      const server = createOpenAIRelayServer({
+        ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
+        metricsCollector: fakeCollector,
+        // 与 opencode 组同款纪律：生产宿主恒注入 socketOwner，不接桩测出的是
+        // 夹具残缺而非产品行为。
+        socketOwner: { lookup: () => 4242, onRefresh: () => () => {} },
+      });
+      const { port, close } = await listenTestPort(server);
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            authorization: TOKEN,
+            "content-type": "application/json",
+            "x-agent-id": "zcode",
+            ...headers,
+          },
+          body: JSON.stringify({
+            model: "claude-opus-5",
+            stream: true,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+        assert.ok(startedMeta, "metricsCollector.startRequest was called");
+        return startedMeta;
+      } finally {
+        await close();
+      }
+    }
+
+    it("derives the row id from the x-session-id header", async () => {
+      const meta = await instanceMetaForChat({ "x-session-id": "sess_ea6a8ca43ffernu8SA9nmQVzQa" });
+      assert.equal(meta.agentId, "zcode");
+      assert.equal(meta.instanceId, "zcode-sess-sess_ea6a8ca43ffernu8SA9nmQVzQa");
+    });
+
+    it("splits two concurrent sessions into two rows", async () => {
+      const a = await instanceMetaForChat({ "x-session-id": "sess_aaa" });
+      const b = await instanceMetaForChat({ "x-session-id": "sess_bbb" });
+      assert.equal(a.instanceId, "zcode-sess-sess_aaa");
+      assert.equal(b.instanceId, "zcode-sess-sess_bbb");
+    });
+
+    it("keeps headerless requests on the aggregate bucket — no socket-pid identity", async () => {
+      // 无会话头（旧版本/非会话流量）：zcode 不在 SOCKET_FALLBACK_AGENT_IDS，
+      // 连接属主 pid（桩在，返回 4242）绝不能被合成实例身份，请求落聚合桶。
+      const meta = await instanceMetaForChat();
+      assert.equal(meta.instanceId, null);
+      assert.equal(meta.surfacePid, null, "非会话行不带定档原料");
+    });
+
+    it("sanitizes noisy header values through the shared session cleaner", async () => {
+      const meta = await instanceMetaForChat({ "x-session-id": "sess_a b!c" });
+      assert.equal(meta.instanceId, "zcode-sess-sess_a-b-c");
+    });
+
+    it("passes the socket owner pid along as surfacePid for session rows", async () => {
+      const meta = await instanceMetaForChat({ "x-session-id": "sess_surf" });
+      assert.equal(meta.instanceId, "zcode-sess-sess_surf");
+      assert.equal(meta.surfacePid, 4242, "属主 pid 随行下发，供 collector 沿谱系定 surface");
+    });
+
+    // zcodeSessions 终端归属桥 feed（/api/internal/detected-processes）：pid 形
+    // join 绑不上会话行（桌面端 utility 进程跨会话共享连接池），面板按 cwd 匹配。
+    // feed 行 id 必须与请求路径铸的行 id 同源——扫描出的 meta.id 带 sess_ /
+    // subagent_agent_ 内部前缀，而请求头里的值已被客户端剥掉。
+    describe("zcodeSessions terminal-join feed", () => {
+      async function fetchDetected(collectorOverrides = {}) {
+        const fakeCollector = {
+          getDetectedClientProcesses: () => [],
+          ...collectorOverrides,
+        };
+        const server = createOpenAIRelayServer({
+          ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
+          metricsCollector: fakeCollector,
+        });
+        const { port, close } = await listenTestPort(server);
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/api/internal/detected-processes`, {
+            headers: { authorization: TOKEN },
+          });
+          assert.equal(res.status, 200);
+          return await res.json();
+        } finally {
+          await close();
+        }
+      }
+
+      it("shapes scanned metas into row-id form, stripping internal prefixes like the client", async () => {
+        const body = await fetchDetected({
+          getZcodeSessionsForTerminalJoin: async () => [
+            { id: "sess_abc", project: "C:\\work\\alpha", lastActive: 2000, originator: "zcode" },
+            { id: "subagent_agent_xyz", project: "C:\\work\\beta", lastActive: 1000, originator: null },
+          ],
+        });
+        assert.deepEqual(body.zcodeSessions, [
+          { id: "zcode-sess-abc", cwd: "C:\\work\\alpha", lastActive: 2000, originator: "zcode" },
+          { id: "zcode-sess-xyz", cwd: "C:\\work\\beta", lastActive: 1000, originator: null },
+        ], "sess_/subagent_agent_ 剥除后与请求路径同 id；cwd/lastActive/originator 透传");
+      });
+
+      it("mints the same row id as the request path for the same session", async () => {
+        // join 两端同源断言：请求头值（客户端已剥前缀）铸的行 id，与 feed 里
+        // 带前缀 meta.id 的行 id 必须逐字相等，否则终端归属永远对不上。
+        const meta = await instanceMetaForChat({ "x-session-id": "abc123" });
+        const body = await fetchDetected({
+          getZcodeSessionsForTerminalJoin: async () => [
+            { id: "sess_abc123", project: "C:\\work\\alpha", lastActive: 2000 },
+          ],
+        });
+        assert.equal(meta.instanceId, "zcode-sess-abc123");
+        assert.equal(body.zcodeSessions[0].id, meta.instanceId, "feed 行 id 与请求路径铸的行 id 同源");
+      });
+
+      it("drops metas without a readable project and degrades to an empty list without the getter", async () => {
+        // sessionJoinRows 契约：cwd 是 join 的匹配键，读不出 project 的会话
+        // 没有可匹配面，不出行。getter 缺失（旧 collector）时 feed 降级为空表。
+        const body = await fetchDetected({
+          getZcodeSessionsForTerminalJoin: async () => [
+            { id: "sess_noproj", project: null, lastActive: 2000 },
+            { id: "sess_ok", project: "C:\\work\\alpha", lastActive: 1000 },
+          ],
+        });
+        assert.deepEqual(body.zcodeSessions.map((s) => s.id), ["zcode-sess-ok"]);
+        const noGetter = await fetchDetected();
+        assert.deepEqual(noGetter.zcodeSessions, [], "无 getter 时降级为空表");
+      });
+    });
+  });
+
   it("serves unidentified requests without attributing them to any endpoint", async () => {
     // 无身份头、无 URL 前缀、UA 不可识别的请求：照常服务，但归属记 null——
     // 不落任何端点桶、不进统计页端点维度（「未知来源不显示」），兜底时打一条
