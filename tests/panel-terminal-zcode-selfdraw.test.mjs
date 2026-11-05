@@ -204,20 +204,28 @@ describe("A 口径：聚合汇总数不进单条终端状态（读数一个不�
 });
 
 // ── P-D 后台回收器 ──
-function recycleSandbox({ sessions, agents = [], apiImpl } = {}) {
+function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {}) {
   const calls = { posts: [], closes: 0, saves: 0 };
-  const fn = new Function("calls", "sessions", "agents", "apiImpl", `
+  const warns = [];
+  const fn = new Function("calls", "sessions", "agents", "apiImpl", "viewportIds", "warnImpl", `
     const terminalBackgroundIds = new Set();
     const terminalBackgroundSince = new Map();
     const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
+    const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;
+    const terminalBackgroundRecycleRetryAfter = new Map();
     let terminalBackgroundRecycleInFlight = false;
     let terminalAgentsPayload = agents;
+    const console = { warn: (...args) => warnImpl(...args) };
     const terminalBackendSessions = sessions;
     const terminalHollowStreak = new Map();
     const terminalDoneUnread = new Map();
     const terminalPrevWorking = new Map();
     const terminalTurnArmed = new Set();
+    const viewportIdsInUse = new Set(viewportIds);
     function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+    function terminalViewportForTerminal(id) {
+      return viewportIdsInUse.has(id) ? { id: "v-1", terminalId: id } : null;
+    }
     function saveTerminalViewports() { calls.saves += 1; }
     function api(method, path) { calls.posts.push(method + " " + path); return apiImpl(method, path); }
     function terminalCloseTerminal() { calls.closes += 1; }
@@ -230,9 +238,13 @@ function recycleSandbox({ sessions, agents = [], apiImpl } = {}) {
       mark: (id, at, endpointId) => { terminalBackgroundIds.add(id); terminalBackgroundSince.set(id, { at, endpointId }); },
       drop: (id) => { terminalBackgroundIds.delete(id); terminalBackgroundSince.delete(id); },
       since: (id) => terminalBackgroundSince.get(id) || null,
+      viewport: (id) => viewportIdsInUse.add(id),
+      retryAt: (id) => terminalBackgroundRecycleRetryAfter.get(id) || null,
+      payload: (next) => { terminalAgentsPayload = next; },
     };
-  `)(calls, sessions, agents, apiImpl || (() => Promise.resolve({ ok: true })));
-  return { calls, fn };
+  `)(calls, sessions, agents, apiImpl || (() => Promise.resolve({ ok: true })), viewportIds,
+    (...args) => warns.push(args));
+  return { calls, warns, fn };
 }
 
 const zcodeBack = (over = {}) => ({
@@ -354,9 +366,9 @@ describe("P-D zcode 后台回收器", () => {
     assert.deepEqual(fn.background(), [], "集合里也没了");
   });
 
-  it("/close 失败静默：不抛、不重试同拍、会话仍留在后台集合等下一轮", async () => {
+  it("/close 失败：留一条开发者日志、30s 退避，退避满后再试", async () => {
     const sessions = { "t-z": zcodeBack() };
-    const { calls, fn } = recycleSandbox({
+    const { calls, warns, fn } = recycleSandbox({
       sessions,
       apiImpl: () => Promise.reject(new Error("HTTP 500")),
     });
@@ -366,8 +378,50 @@ describe("P-D zcode 后台回收器", () => {
     assert.equal(calls.closes, 0, "失败也不许回落到确认通路");
     assert.deepEqual(fn.background(), ["t-z"], "宿主拒关就让它在后台留着");
     assert.ok(sessions["t-z"], "本地登记不清");
+    assert.equal(warns.length, 1, "失败留痕，便于区分拒关／404／网络失败");
+    assert.equal(fn.retryAt("t-z"), NOW + 30 * 1000, "退避起点按本拍时刻记");
     fn.scan(NOW + 1000);
-    assert.equal(calls.posts.length, 2, "下一拍照常重试（不吐错、不卡死）");
+    assert.equal(calls.posts.length, 1, "退避窗内不重试，不再 1 req/s 空转");
+    fn.scan(NOW + 31 * 1000);
+    assert.equal(calls.posts.length, 2, "退避满后再试一次（不吐错、不卡死）");
+  });
+
+  it("本拍 /api/agents 取数失败（payload=null）：整拍跳过，不把看不见当零", () => {
+    const { calls, fn } = recycleSandbox({ sessions: { "t-z": zcodeBack() } });
+    fn.mark("t-z", NOW - 30 * MIN, "zcode");
+    fn.payload(null);
+    fn.scan(NOW);
+    assert.deepEqual(calls.posts, [], "取数失败的那一拍不回收");
+    fn.payload([]);
+    fn.scan(NOW);
+    assert.deepEqual(calls.posts, ["POST /api/terminal/sessions/t-z/close"], "下一拍取到数照常判");
+  });
+
+  it("存档列表不一致：id 仍占着视口时跳过，不误关正看着的终端", () => {
+    const { calls, fn } = recycleSandbox({ sessions: { "t-z": zcodeBack() } });
+    fn.mark("t-z", NOW - 30 * MIN, "zcode");
+    fn.viewport("t-z");
+    fn.scan(NOW);
+    assert.deepEqual(calls.posts, [], "视口里的终端绝不回收");
+  });
+
+  it("源码契约：attach / create / close / clear 四处都同拍清掉回收记账", () => {
+    const cleanupFns = [
+      ["terminalViewportAttach", extractFn("terminalViewportAttach")],
+      ["terminalViewportCreate", extractFn("terminalViewportCreate")],
+      ["terminalCloseTerminal", extractFn("terminalCloseTerminal")],
+      ["clearTerminalLocalSessions", extractFn("clearTerminalLocalSessions")],
+    ];
+    for (const [name, src] of cleanupFns) {
+      assert.ok(src.includes("terminalBackgroundIds.delete(") || src.includes("terminalBackgroundIds.clear("),
+        `${name} 要清后台集合`);
+      assert.ok(src.includes("terminalBackgroundSince.delete(") || src.includes("terminalBackgroundSince.clear("),
+        `${name} 要清回收记账`);
+    }
+    const recycle = extractFn("maybeRecycleTerminalBackground");
+    assert.ok(recycle.includes("terminalViewportForTerminal(id)"), "回收器认视口占用");
+    assert.ok(recycle.includes("terminalAgentsPayload === null"), "取数失败整拍跳过");
+    assert.ok(recycle.includes("terminalBackgroundRecycleRetryAfter"), "失败退避在册");
   });
 
   it("源码契约：回收走直连 api POST，且不引用 terminalCloseTerminal", () => {
@@ -376,6 +430,7 @@ describe("P-D zcode 后台回收器", () => {
     assert.ok(!src.includes("terminalCloseTerminal"), "绝不复用带 window.confirm 的关闭通路");
     assert.ok(!/toast|panelError|confirm/.test(src), "零新增文案、零弹窗");
     assert.ok(panelJs.includes("const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;"), "10 分钟常量在册");
+    assert.ok(panelJs.includes("const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;"), "退避常量在册");
     assert.ok(panelJs.includes("const terminalBackgroundSince = new Map();"), "记账表在册");
     // 扫描挂点：轮询拍上、取数之后
     assert.ok(/pollTerminalSessions\(\)\.then\(\(\) => \{[\s\S]{0,200}?maybeRecycleTerminalBackground\(\)/

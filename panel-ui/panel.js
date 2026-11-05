@@ -5561,7 +5561,15 @@ async function api(method, path, body) {
   // 的桩环境惯例）；闸护落空即视为桩环境，不记账。
   const terminalBackgroundSince = new Map();
   // zcode 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧。
+  // 10min 是经验值、不是实测出的精确阈值：调小会撞上两类残余误杀面——停在权限确认框
+  // 等用户超过 10min 的会话，以及 MCP 宿主内不起子进程的长工具（进程树看不到、在途数
+  // 也是 0，现有信号区分不了）。另两条既定取舍：刷新恢复的后台集合无起点记账，本页
+  // 永不回收；面板隐藏／不在终端页时整拍跳过，拿陈旧计数做杀判据等于盲杀。
   const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
+  // /close 被宿主拒关后的重试间隔：轮询 1s 一拍，持续失败不能变成每僵住一条终端
+  // 就 1 req/s 空转。失败只留一条开发者日志（不是界面文案），退避满再试。
+  const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;
+  const terminalBackgroundRecycleRetryAfter = new Map();
   let terminalViewportSeq = 0;
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
@@ -5832,8 +5840,21 @@ async function api(method, path, body) {
   function maybeRecycleTerminalBackground(now = Date.now()) {
     if (terminalBackgroundRecycleInFlight) return;
     if (!terminalBackgroundIds.size) return;
+    // 本拍 /api/agents 没取到（请求失败或首拍未拉）＝看不见在途数，不能把「看不见」
+    // 当成「零」。归属未绑定是「有 payload 但查不到实例行」，那仍按无证据处理；这里
+    // 只挡取数失败这一拍，下一拍取到数自然会继续判。
+    if (typeof terminalAgentsPayload === "undefined" || terminalAgentsPayload === null) return;
+    // 惰性清退避表：已不在后台集合（切回视口／已关闭／清场）的 id 别留旧时间戳。
+    for (const rid of Array.from(terminalBackgroundRecycleRetryAfter.keys())) {
+      if (!terminalBackgroundIds.has(rid)) terminalBackgroundRecycleRetryAfter.delete(rid);
+    }
     const targets = [];
     for (const id of terminalBackgroundIds) {
+      // 存档两份列表不一致（异常退出／手改）时，页签里正显示的 id 也可能同时在后台
+      // 集合里；只要还占着视口就不回收，避免把用户正看着的终端关掉。
+      if (terminalViewportForTerminal(id)) continue;
+      const retryAt = terminalBackgroundRecycleRetryAfter.get(id);
+      if (Number.isFinite(retryAt) && now < retryAt) continue;
       const since = typeof terminalBackgroundSince !== "undefined" ? terminalBackgroundSince.get(id) : null;
       // 无起点记账（刷新恢复的后台集合）＝不知道它何时进的后台，不回收。
       if (!since || !Number.isFinite(since.at)) continue;
@@ -5862,6 +5883,7 @@ async function api(method, path, body) {
     terminalBackgroundRecycleInFlight = true;
     Promise.all(targets.map((id) => api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`)
       .then(() => {
+        terminalBackgroundRecycleRetryAfter.delete(id);
         terminalBackgroundIds.delete(id);
         if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(id);
         delete terminalBackendSessions[id];
@@ -5871,7 +5893,11 @@ async function api(method, path, body) {
         terminalTurnArmed.delete(id);
         saveTerminalViewports();
       })
-      .catch(() => {})))
+      .catch((error) => {
+        terminalBackgroundRecycleRetryAfter.set(id, now + TERMINAL_BACKGROUND_RECYCLE_RETRY_MS);
+        // 纯开发者日志：静默是用户裁决，但宿主拒关／路由 404／网络失败排障时需要留痕。
+        console.warn("[terminal] background recycle /close failed", id, error);
+      })))
       .finally(() => { terminalBackgroundRecycleInFlight = false; });
   }
 
