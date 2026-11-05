@@ -6808,12 +6808,16 @@ async function api(method, path, body) {
   // 把上限放宽；放而不是取消，是因为会话卡死时仍要退回既有三态覆盖层，不能把一帧旧画
   // 面永久留在屏上。普通切页签（垫片底下确实是另一条会话）仍走 2000ms。
   const TERMINAL_SWITCH_STALE_SCREEN_MAX_MS = 6000;
+  // 换绑在飞时兜底计时器最多续几窗：/switch 实测 6~12s，一窗 6s，四窗 ≈24s 覆盖并
+  // 留余量。到点仍强制撤（退回既有三态覆盖层），不能把一帧旧画面永久留在屏上。
+  const TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = 4;
   let terminalStaleScreen = null;
-  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：内部信号，只用来标记
-  // 「宿主已经交代过一屏」。**它不再是垫片的揭幕判据**（2026-11-05 A4）：换绑清屏帧
-  // （\e[0m\e[2J\e[H）、新 PTY 的空回放、TUI 自己的清屏序列都算「首帧」，拿它揭幕等于
-  // 在擦除那一刻撤掉垫片——与 2026-11-02 给「正在加载」占位做的修正（撤层只认新画面
-  // 真的出字）正好相反。现在揭幕只认 terminalContentEpoch，见 terminalStaleScreenReady。
+  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：**不再是垫片的揭幕判据**
+  // （2026-11-05 A4）——换绑清屏帧（\e[0m\e[2J\e[H）、新 PTY 的空回放、TUI 自己的
+  // 清屏序列都算「首帧」，拿它揭幕等于在擦除那一刻撤掉垫片，与 2026-11-02 给「正在
+  // 加载」占位做的修正（撤层只认新画面真的出字）正好相反。保留它是因为几何闸等回归
+  // 用例把它当「首帧确实发生过」的可观测信号（world.epoch()），不是产品侧的活状态；
+  // 产品揭幕只认 terminalContentEpoch，见 terminalStaleScreenReady。
   let terminalReplayEpoch = 0;
   // 「新画面真的开始出字」的单调计数（2026-11-05 F2）：只在**当前实例**第一次
   // terminalScreenHasContent 为真时 +1。实例一换就重新等（terminalContentTerm），否则
@@ -6917,10 +6921,28 @@ async function api(method, path, body) {
     //
     // 窗口在后台时不撤：隐藏期 rAF 停摆，观察循环叫不醒，撤了就等于把「切回时的那一
     // 屏」也撤了。此时重新起一次计时，回前台由观察循环（按「新画面有内容」揭幕）接手。
+    let capRenewals = 0;
     const armCap = () => {
       stale.timer = setTimeout(() => {
         stale.timer = null;
         if (typeof document !== "undefined" && document.hidden) { armCap(); return; }
+        // /switch 还在飞：POST 自己要 6~12s（探针＋terminate＋spawn），而「正在加载」
+        // 占位是 POST **落地之后**才武装的。此刻撤垫片会露出一块既没有旧帧、也没有
+        // 占位的纯底色——正是这次要消灭的那块空白。续一窗等落地：落地后由占位层
+        // 或新流接管，观察循环仍按「新画面真的出字」揭幕。续窗有次数上限，防 POST
+        // 永不落地（宿主卡死）时把一屏旧画面永久留在屏上。
+        // 判据只认「在飞」，不认 terminalSwitchStaleWidened 的第二个信号（占位武装）：
+        // 占位已经武装说明 POST 落地了，那一拍正该撤垫片让占位露出来，不能继续盖着。
+        // 用 try 兜 TDZ 与单测桩环境（typeof 对 let/const 不豁免 TDZ）。
+        let switchStillInFlight = false;
+        try {
+          switchStillInFlight = !!terminalSwitchInFlight && terminalSwitchInFlightSessionId === parkSessionId;
+        } catch { /* 沙箱无换绑设施：按不在飞处置 */ }
+        if (switchStillInFlight && capRenewals < TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS) {
+          capRenewals += 1;
+          armCap();
+          return;
+        }
         dropTerminalStaleScreen();
       }, staleCapMs());
     };
@@ -8348,10 +8370,10 @@ async function api(method, path, body) {
         // 它自带完整画面，进合并器只会平白多等一个静默窗口。
         if (terminalReplayFramePending) {
           terminalReplayFramePending = false;
-          // 首帧回放落地即记一拍。这只是**内部信号**（「宿主已经交代过一屏」），垫片的
-          // 揭幕判据已经不用它了——换绑清屏帧同样走这条路，拿它揭幕就等于在擦除那一
-          // 刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸护单测桩
-          // 环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑。
+          // 首帧回放落地即记一拍。它只是「宿主已经交代过一屏」的可观测内部信号，
+          // 垫片的揭幕判据已经不用它了——换绑清屏帧同样走这条路，拿它揭幕就等于在
+          // 擦除那一刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸
+          // 护只切本函数真跑的单测桩环境（那些沙箱不声明模块级变量）。
           if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
           term.write(text);
           return;
@@ -12272,6 +12294,18 @@ async function api(method, path, body) {
       // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：
       // 本地记录原样，页签还是原来那条，只给一句提示。
       const code = error && (error.serverCode || error.code);
+      // 失败必须把流接回来（2026-11-05，评审 blocker）：进本函数时为了「先停帧」已经
+      // park 过一次，而 park 内部会拆流（dispose xterm、关 SSE）。只 toast 不重挂，屏上
+      // 就只剩那块垫片、背后没有任何活流——兜底计时器到点撤走垫片，剩一块没有覆盖层
+      // 的空白，直到用户手动切页签。这与宿主侧「spawn 抛错时保住旧屏」正好配套：宿主
+      // 保住的画面要有人去取，否则等于白保。
+      // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
+      // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
+      const resumeStream = () => {
+        try { renderTerminalPreviewSession({ revive: false }); } catch (error) {
+          console.warn("[terminal] stream reattach after failed switch failed:", error);
+        }
+      };
       if (code === "switch_busy") {
         // 服务端杀前复核拒换（会话树里有活着的命令进程）：这就是「旧终端在跑」的
         // 服务端判据。改走保活分支——旧终端不杀、目标终端挂进当前视口，页签数不变
@@ -12281,24 +12315,25 @@ async function api(method, path, body) {
         // （live 行接任），此处清会让高亮先弹回旧行；全新内切不同——兜底行锚在本次
         // 点击换上的终端上，照旧撤掉旧瞄准。
         if (!resume) terminalRailEndSelect(null);
+        // 保活不是「另一条路自己会建流」的保证：terminalRailKeepAliveSwitch 走的是
+        // createAgentTerminal，它的 POST 失败出口只 toast、不重建任何流（2026-11-05
+        // 重审 major）。而 F1 已经把流拆了，那条路上屏上只剩一块垫片，兜底撤走后
+        // 就是纯空白，所以先把本会话的流接回来当底。
+        //
+        // 但这条出口的视口紧接着就会换成**另一条会话 B**：屏上这帧 A 的旧画面已经
+        // 不再满足「垫片底下是同一条会话」这个放宽档的唯一正当性（2026-10-27），
+        // 也不能续窗。提前清在飞闸，让 resumeStream 里那次 park 落回普通 2s 档。
+        // 清得早一点不引入并发：finally 本来也是 return 表达式求值后立刻清、并不等
+        // 保活 POST 回来，这里只是把同一件事挪到重挂之前。
+        terminalSwitchInFlight = false;
+        terminalSwitchInFlightSessionId = null;
+        resumeStream();
         return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       // 失败清点：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
       // 继续说它选中就是说谎。不放 finally 清：working 转新开等落点经 finally
       // 会让高亮弹回旧行。
       terminalRailEndSelect(null);
-      // 失败必须把流接回来（2026-11-05，评审 blocker）：进本函数时为了「先停帧」已经
-      // park 过一次，而 park 内部会拆流（dispose xterm、关 SSE）。stop 在失败分支上
-      // 只 toast 不重挂，屏上就只剩那块垫片、背后没有任何活流——兜底计时器到点撤走
-      // 垫片，剩一块没有覆盖层的空白，直到用户手动切页签。这与宿主侧「spawn 抛错时
-      // 保住旧屏」正好配套：宿主保住的画面要有人去取，否则等于白保。
-      // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
-      // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
-      const resumeStream = () => {
-        try { renderTerminalPreviewSession({ revive: false }); } catch (error) {
-          console.warn("[terminal] stream reattach after failed switch failed:", error);
-        }
-      };
       if (typeof code === "string" && code.startsWith("resume-")) {
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
         resumeStream();
