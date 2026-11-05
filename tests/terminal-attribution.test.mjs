@@ -503,19 +503,32 @@ describe("attributeTerminalSessions", () => {
     const cwdSession = { ...baseSession, cwd: "D:\\dev\\bridge" };
     const detected = [{ agentId: "zcode", pid: 6400, ancestors: [8888] }];
 
-    it("binds the latest same-cwd zcode-sess row", () => {
+    it("binds the same-cwd zcode-sess row when it is the only match", () => {
       const out = attributeTerminalSessions(
         [cwdSession],
         detected,
-        zcAgents(["zcode-sess-old", "zcode-sess-new", "zcode-sess-other"]),
+        zcAgents(["zcode-sess-new", "zcode-sess-other"]),
         { zcode: [
-          { id: "zcode-sess-old", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null },
           { id: "zcode-sess-new", cwd: "d:/dev/bridge/", lastActive: 2000, originator: null },
           { id: "zcode-sess-other", cwd: "E:\\elsewhere", lastActive: 3000, originator: null },
         ] },
       );
       assert.equal(out[0].agent.instanceId, "zcode-sess-new",
-        "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
+        "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与");
+    });
+
+    it("two same-cwd rows are ambiguous and stay unbound", () => {
+      // 修前按 lastActive 猜最近一条；现在多行同 cwd 就是判不准，不绑。
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        zcAgents(["zcode-sess-old", "zcode-sess-new"]),
+        { zcode: [
+          { id: "zcode-sess-old", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null },
+          { id: "zcode-sess-new", cwd: "d:/dev/bridge/", lastActive: 2000, originator: null },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, null);
     });
 
     it("excludes desktop-originated sessions from the bridge", () => {

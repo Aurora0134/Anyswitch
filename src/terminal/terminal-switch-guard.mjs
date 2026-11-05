@@ -80,6 +80,16 @@ const SHELL_IMAGES = new Set(["cmd.exe", "powershell.exe", "pwsh.exe"]);
 // 这类终端永久判忙，2026-10-28 实测定案的假阳性源之一（自建 conhost 的引擎底下
 // 挂一条 conhost，判据恒 true，从此换不了内容）。它自己没有子进程，跳过即止。
 const CONSOLE_HOST_IMAGES = new Set(["conhost.exe"]);
+// zcode 常驻派生的基础设施行：`__zcode-plugin-host`（插件宿主）与 `node-repl-host`
+// （REPL 宿主）。它们的命令行与本体没有前缀关系，isDerivedProcess 认不出；按证据
+// 判会让 agent.busy 恒真（2026-11-05 实测 14500 名下 8 条这样的行、零用户命令）。
+// 与 conhost 同口径：不算证据，但子树照走——宿主底下真起的命令仍要抓得到。
+const INFRA_COMMAND_MARKERS = ["__zcode-plugin-host", "node-repl-host"];
+
+function isInfrastructureCommand(cmd) {
+  if (cmd === null) return false;
+  return INFRA_COMMAND_MARKERS.some((marker) => cmd.includes(marker));
+}
 // 一次性包装形态的命令行特征（cmd /c /k、powershell/pwsh -Command/-c）：命中即
 // 「这个 shell 是拉起器，子进程是受拉程序」；不命中则是交互 shell，用户在提示
 // 符下跑的命令就是它的直接子进程。
@@ -157,6 +167,13 @@ export function hasRunningCommand(table, { rootPid, anchorPid = null }) {
       if (image !== null && CONSOLE_HOST_IMAGES.has(image)) {
         const infra = new Set(ancestorCmds);
         if (cmd) infra.add(cmd);
+        queue.push({ pid: child, ancestorCmds: infra, depth: depth + 1 });
+        continue;
+      }
+      // 插件宿主 / REPL 宿主同理：跳过证据位，但不跳过遍历。
+      if (isInfrastructureCommand(cmd)) {
+        const infra = new Set(ancestorCmds);
+        infra.add(cmd);
         queue.push({ pid: child, ancestorCmds: infra, depth: depth + 1 });
         continue;
       }

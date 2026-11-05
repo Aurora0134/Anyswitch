@@ -486,7 +486,7 @@ async function defaultFetchRelayChainRuntime(root, token) {
 // whose instance rows name a conversation rather than a process;
 // workbuddy-sess-* is the third (WB 的 runtime 是池化的，同一会话换 pid 不换行）。
 // Returns
-// { processes, codexSessions, opencodeSessions, workbuddySessions }, or null on failure — the
+// { processes, codexSessions, opencodeSessions, workbuddySessions, zcodeSessions }, or null on failure — the
 // caller degrades to unannotated sessions rather than erroring the whole
 // session list. An old relay without a given field yields an empty list (that
 // bridge then simply never binds, same as before).
@@ -505,6 +505,9 @@ async function defaultFetchRelayDetectedProcesses(root, token) {
         codexSessions: Array.isArray(data.codexSessions) ? data.codexSessions : [],
         opencodeSessions: Array.isArray(data.opencodeSessions) ? data.opencodeSessions : [],
         workbuddySessions: Array.isArray(data.workbuddySessions) ? data.workbuddySessions : [],
+        // zcode-sess-* 是第四个会话粒度端点（桌面端共享 utility 进程，实例行按会话
+        // 一行）。漏了这一项，feeds.zcode 恒空，zcode 终端 instanceId 恒 null。
+        zcodeSessions: Array.isArray(data.zcodeSessions) ? data.zcodeSessions : [],
       };
     }
     return null;
@@ -1285,6 +1288,7 @@ export function createPanelRouter({
           codexSessions: await pull("getCodexSessionsForTerminalJoin"),
           opencodeSessions: await pull("getOpencodeSessionsForTerminalJoin"),
           workbuddySessions: await pull("getWorkbuddySessionsForTerminalJoin"),
+          zcodeSessions: await pull("getZcodeSessionsForTerminalJoin"),
         };
       } catch {
         return null;

@@ -522,6 +522,9 @@ function snapshot(session) {
     exitCode: session.exitCode,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
+    // 最近一次「可见文本」变化（毫秒 epoch）：纯颜色重绘不刷新它。老宿主快照没有
+    // 这个字段，下发时缺席、前端按 undefined 处理（契约字段名不可改）。
+    ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
     // 工作态判定的两只输入信号（面板 terminalBusyByOutput 消费）：
     // lastInputAt＝最近一次用户键入（键入抑制窗的锚点，出生起未键入则缺省）；
     // spawnedAt＝最近一次进程出生（孵化豁免窗的锚点——内切/复活保记录换进程，
@@ -819,6 +822,8 @@ export function createTerminalHost({
       pid: session.pid,
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt,
+      // 与 snapshot 同源（契约字段）：老记录没有这一项，恢复时缺省为 undefined。
+      ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
       spawnedAt: session.spawnedAt,
       cols: session.cols,
       rows: session.rows,
@@ -1387,10 +1392,29 @@ export function createTerminalHost({
       try {
         if (!session.screen) return;
         if (!session.screen.drain(MIRROR_SLICE_MS).done) scheduleMirrorDrain(session);
+        touchVisibleAt(session);
       } catch (error) {
         skipMirrorChunk(session, error);
       }
     });
+  }
+
+  // 画面可见内容变没变：只看整屏字符＋光标＋备屏位（见 visibleSignature），纯 SGR
+  // 颜色重绘（欢迎屏 logo 扫光）不算。lastActiveAt 保持「任何输出块都算活跃」的
+  // 原语义不动，这一只信号专供面板判「这屏还在动吗」。
+  // 签名缓存只在进程内（lastVisibleSignature）；lastVisibleAt 随快照/落盘记录带出，
+  // 老记录缺这一项即 undefined。拿不到签名就静默跳过（诊断面不能反过来伤主链路）。
+  function touchVisibleAt(session) {
+    let signature;
+    try {
+      signature = session.screen?.visibleSignature?.();
+    } catch {
+      return;
+    }
+    if (typeof signature !== "string") return;
+    if (signature === session.lastVisibleSignature) return;
+    session.lastVisibleSignature = signature;
+    session.lastVisibleAt = Date.now();
   }
 
   // 终端询问的应答侧（清单见文件头）：宿主是唯一应答者，浏览器渲染器只会看到
@@ -1447,6 +1471,9 @@ export function createTerminalHost({
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     feedMirror(session, text);
     session.lastActiveAt = Date.now();
+    // 可见文本指纹与 lastActiveAt 分开：扫光这类纯颜色帧不能算「画面有新内容」，
+    // 只刷新真正看得见的变化（面板据此判「这屏还在动吗」）。
+    touchVisibleAt(session);
     // 每个输出块都改写这条会话的记录（镜像快照与 lastActiveAt；记录正文不含原始
     // 字节，见 sessionRecord）：只置这一条
     // 会话的脏标，250ms 防抖到点的那一拍只重写它自己那份文件——别的会话空闲与

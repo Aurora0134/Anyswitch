@@ -1702,6 +1702,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       // 按当前宽裁剪：备屏收窄时行会保长（xterm 不截断备屏行），多出列的内容客户端看不见。
       return grid.map((line) => line.chars.slice(0, width).map((ch) => (ch === null ? " " : ch)).join("").replace(/\s+$/, ""));
     },
+    // 可见文本指纹：整屏可见字符 ＋ 光标 ＋ 备屏位。刻意**不含 SGR**——欢迎屏
+    // logo 扫光（12.5fps）只改 38;2;r;g;b、字符一格不动：字节指纹与颜色指纹都会
+    // 把扫光帧当成「有变化」，可见文本指纹不会。整屏取指纹（不是 chunk 字节），
+    // 分块边界抖动天然免疫。
+    // 不 flush：本函数在 emit 的同步路径上，排空积压会把切片解析整个按住（与
+    // info() 同款理由）；签名至多落后一个切片，排空完成后由宿主补一次。
+    visibleSignature() {
+      const lines = grid.map((line) => line.chars.slice(0, width).map((ch) => (ch === null ? " " : ch)).join(""));
+      return `${inAlt ? "alt" : "main"}:${row}:${col}\n${lines.join("\n")}`;
+    },
     // Same grid, one cell at a time, so a repaint can be checked for colour and
     // not just for text. Background is whatever background SGR the cell carries.
     // 38/48/58 的扩展色子参数必须整组跳过：58;2;40;90;30 里的 40 是下划线色的
