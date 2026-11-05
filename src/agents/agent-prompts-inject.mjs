@@ -68,10 +68,10 @@ export const PROMPT_ENDPOINTS = Object.freeze([
 
 /**
  * Normalize a preset title into one heading line: newlines fold to spaces,
- * whitespace collapses, and a trailing ATX closing sequence is dropped so the
- * title cannot nest inside the host document's own heading structure. The
- * closing `#`s must be preceded by whitespace — `C#` is a word, not a closing
- * sequence.
+ * whitespace collapses, a leading `#` run is dropped, and a trailing ATX
+ * closing sequence is dropped — so the title cannot nest inside the host
+ * document's own heading structure. The closing `#`s must be preceded by
+ * whitespace: `C#` is a word, not a closing sequence.
  */
 function normalizeTitle(title) {
   if (typeof title !== "string") return "";
