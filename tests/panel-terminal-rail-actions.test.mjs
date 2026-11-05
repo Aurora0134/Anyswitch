@@ -4613,15 +4613,16 @@ describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未�
     status: "idle", label: "Kimi Code", backendState: { status: "running", spawnedAt: Date.now() - 5_000, lastInputAt: 0 },
   };
 
-  it("内切：未使用的 agent 终端→新开页签承载目标会话，原终端不改写、零 /switch（A4）", async () => {
+  it("内切：未使用的 agent 终端→旧终端保活、目标挂当前视口，页签不增、零 /switch（A4）", async () => {
     const { fn, log } = runSwitch({
       sessions: { "t-a": { ...UNUSED } }, activeId: "t-a",
       agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
     });
     fn.go(HISTORY_ROW);
     await flush();
-    assert.equal(log.creates.length, 1, "新开一个终端承载目标会话");
-    assert.deepEqual(log.placements[0], { placement: "new" }, "落新页签，不挂当前视口");
+    assert.equal(log.creates.length, 1, "新建一条终端承载目标会话");
+    assert.deepEqual(log.placements[0], { placement: "viewport", keepPrevious: true },
+      "目标挂当前视口、旧终端保活进后台，页签数不变");
     assert.deepEqual(log.switchBodies, [], "不换绑原终端");
     assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "零 /switch（那条链路会整树 terminate）");
   });
