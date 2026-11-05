@@ -222,6 +222,7 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
     const terminalPrevWorking = new Map();
     const terminalTurnArmed = new Set();
     const viewportIdsInUse = new Set(viewportIds);
+    const terminalViewports = [];
     function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
     function terminalViewportForTerminal(id) {
       return viewportIdsInUse.has(id) ? { id: "v-1", terminalId: id } : null;
@@ -229,6 +230,7 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
     function saveTerminalViewports() { calls.saves += 1; }
     function api(method, path) { calls.posts.push(method + " " + path); return apiImpl(method, path); }
     function terminalCloseTerminal() { calls.closes += 1; }
+    ${extractFn("terminalViewportRefDrop")}
     ${extractFn("terminalInstanceRow")}
     ${extractFn("terminalCommandRunning")}
     ${extractFn("maybeRecycleTerminalBackground")}
@@ -409,11 +411,13 @@ describe("P-D zcode 后台回收器", () => {
     const cleanupFns = [
       ["terminalViewportAttach", extractFn("terminalViewportAttach")],
       ["terminalViewportCreate", extractFn("terminalViewportCreate")],
-      ["terminalCloseTerminal", extractFn("terminalCloseTerminal")],
+      ["terminalCloseTerminalNow", extractFn("terminalCloseTerminalNow")],
       ["clearTerminalLocalSessions", extractFn("clearTerminalLocalSessions")],
     ];
     for (const [name, src] of cleanupFns) {
-      assert.ok(src.includes("terminalBackgroundIds.delete(") || src.includes("terminalBackgroundIds.clear("),
+      // 后台集合的撤销统一收口到 terminalViewportRefDrop（引用记账），清场仍可整表 clear。
+      assert.ok(src.includes("terminalViewportRefDrop(")
+        || src.includes("terminalBackgroundIds.delete(") || src.includes("terminalBackgroundIds.clear("),
         `${name} 要清后台集合`);
       assert.ok(src.includes("terminalBackgroundSince.delete(") || src.includes("terminalBackgroundSince.clear("),
         `${name} 要清回收记账`);

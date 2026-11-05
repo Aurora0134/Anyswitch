@@ -34,6 +34,9 @@ const VIEWPORT_FNS = [
   "terminalViewportForTerminal", "terminalViewportAttach", "terminalViewportCreate",
   "terminalViewportDestroy", "terminalViewportActivate", "terminalSessionRunning",
   "terminalViewportRetire", "terminalViewportPlaceTerminal", "terminalCloseTerminal",
+  "terminalCloseTerminalNow", "terminalViewportRefs", "terminalViewportRefAdd",
+  "terminalViewportRefDrop", "terminalSessionIdentity", "terminalSessionSupportedElsewhere",
+  "terminalTerminalShownElsewhere",
   "terminalCloseViewportTab", "terminalViewportSyncFromHost",
   "loadTerminalViewports", "saveTerminalViewports", "terminalRailKeepAliveSwitch",
 ];
@@ -4109,8 +4112,8 @@ describe("视口化验收（页签＝视口）", () => {
   });
 
   function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE } = {}) {
-    const log = { creates: [], switchBodies: [], closes: [], toasts: [], renders: 0, tabs: 0, empty: 0, rails: 0, streams: 0 };
-    const state = { store, agents, items, created: 0 };
+    const log = { creates: [], switchBodies: [], closes: [], confirms: [], toasts: [], renders: 0, tabs: 0, empty: 0, rails: 0, streams: 0 };
+    const state = { store, agents, items, created: 0, confirm: true };
     const createdTerminal = (body) => {
       state.created += 1;
       const id = `t-created-${state.created}`;
@@ -4145,6 +4148,7 @@ describe("视口化验收（页签＝视口）", () => {
         setItem: (k, v) => { state.store[k] = String(v); },
         removeItem: (k) => { delete state.store[k]; },
       };
+      const window = { confirm: (msg) => { log.confirms.push(msg); return state.confirm !== false; } };
       ${viewportPrelude()}
       function $(id) { return null; }
       function storedTerminalSessionId() { try { return localStorage.getItem("panel-terminal-session"); } catch { return null; } }
@@ -4230,7 +4234,12 @@ describe("视口化验收（页签＝视口）", () => {
       return {
         beat: (items) => { rebuildTerminalBackendSessions(items); enrichTerminalSessions(state.agents.agents); },
         setAgents: (payload) => { state.agents = payload; },
-        viewports: () => terminalViewports.map((viewport) => ({ ...viewport })),
+        enrich: () => enrichTerminalSessions(state.agents.agents),
+        viewports: () => terminalViewports.map((viewport) => ({ id: viewport.id, terminalId: viewport.terminalId })),
+        viewportBackgrounds: (viewportId) => {
+          const viewport = terminalViewports.find((row) => row.id === viewportId);
+          return viewport && Array.isArray(viewport.background) ? viewport.background.slice() : [];
+        },
         background: () => Array.from(terminalBackgroundIds),
         activeTerminal: () => activeTerminalPreviewId,
         activeViewport: () => terminalViewportActiveId,
@@ -4330,24 +4339,20 @@ describe("视口化验收（页签＝视口）", () => {
     assert.equal(log.switchBodies.length, 3, "空闲路径三次都走 /switch");
   });
 
-  it("A8 关页签只结束它显示的终端；后台保活会话不动、可回到；零视口落空态", async () => {
+  it("A8 关页签＝撤掉入口：连带结束它引用的后台终端，零页签落空态", async () => {
     const { sandbox, log } = viewportHarness({ items: [TERM_ITEM("t-old")] });
     sandbox.beat([TERM_ITEM("t-old")]);
     sandbox.setAgents(agentsWorking("inst-t-old"));
     sandbox.switchTo(HISTORY);
     await flush();
     const viewportId = sandbox.viewports()[0].id;
+    assert.deepEqual(sandbox.viewportBackgrounds(viewportId), ["t-old"], "切走的旧终端记在这个页签名下");
     sandbox.closeTab(viewportId);
-    assert.deepEqual(log.closes, ["t-created-1"], "只结束视口显示的终端");
+    assert.deepEqual(log.closes, ["t-created-1", "t-old"], "当屏的与它换下来的后台一并结束");
     assert.equal(sandbox.viewports().length, 0, "视口销毁");
-    assert.deepEqual(sandbox.background(), ["t-old"], "后台保活终端不受牵连");
-    assert.ok(sandbox.sessions()["t-old"], "它还在宿主会话表（左栏能回到）");
+    assert.deepEqual(sandbox.background(), [], "后台引用随页签撤销，不留无主行");
     assert.equal(log.empty, 1, "零视口落空态（零会话遗规原样，不静默起进程）");
-    sandbox.activate("t-old");
-    await flush();
-    assert.equal(sandbox.viewports().length, 1, "从左栏点回后台会话：重建一个视口显示它");
-    assert.equal(log.closes.length, 1, "切回不结束任何人");
-    assert.equal(sandbox.activeTerminal(), "t-old");
+    assert.equal(log.confirms.length, 1, "两条都没有别的入口、其中一条在跑：只问一次");
   });
 
   it("A9 刷新恢复：视口布局与后台保活集合按存档还原，后台不被误建成新页签", async () => {
@@ -4385,6 +4390,63 @@ describe("视口化验收（页签＝视口）", () => {
     const saved = JSON.parse(store["panel-terminal-viewports"]);
     assert.deepEqual(saved, { active: null, viewports: [], background: [] }, "视口存档改写为空布局");
     assert.equal(log.streams, 1, "终端流一并收掉");
+  });
+
+  // ── 页签只是入口：关页签要不要问，取决于这条对话还有没有别的活页签 ──
+  it("A12 同对话两个页签：关一个零确认、只结束它自己的终端，另一个照常跑", async () => {
+    const shared = { endpoint: "kimi", id: "c-shared" };
+    const items = [TERM_ITEM("t-a", { bound: shared }), TERM_ITEM("t-b", { bound: shared })];
+    const { sandbox, log } = viewportHarness({ items });
+    sandbox.beat(items);
+    assert.equal(sandbox.viewports().length, 2, "两条宿主会话各一个页签");
+    sandbox.setAgents(agentsWorking("inst-t-a"));
+    sandbox.enrich();
+    const viewportA = sandbox.viewports().find((row) => row.terminalId === "t-a");
+    sandbox.closeTab(viewportA.id);
+    assert.deepEqual(log.confirms, [], "同一条对话还有另一个活页签：不问");
+    assert.deepEqual(log.closes, ["t-a"], "只结束这个入口自己的终端（对话由另一个页签承载）");
+    assert.deepEqual(sandbox.viewports().map((row) => row.terminalId), ["t-b"], "另一个页签原样");
+    assert.ok(sandbox.sessions()["t-b"], "它的终端仍在宿主会话表");
+  });
+
+  it("A13 同 agent 不同对话：仍按自己那条是否最后入口判，取消则一个不动", async () => {
+    const items = [
+      TERM_ITEM("t-a", { bound: { endpoint: "kimi", id: "c-one" } }),
+      TERM_ITEM("t-b", { bound: { endpoint: "kimi", id: "c-two" } }),
+    ];
+    const { sandbox, log, state } = viewportHarness({ items });
+    sandbox.beat(items);
+    sandbox.setAgents(agentsWorking("inst-t-a"));
+    sandbox.enrich();
+    const viewportA = sandbox.viewports().find((row) => row.terminalId === "t-a");
+    state.confirm = false;
+    sandbox.closeTab(viewportA.id);
+    assert.deepEqual(log.confirms, ["当前终端仍在运行，关闭后将中断任务。确定继续吗？"],
+      "两条不同对话互不支持：最后入口在跑，复用既有文案问一次");
+    assert.deepEqual(log.closes, [], "取消＝一条都不关");
+    assert.equal(sandbox.viewports().length, 2, "页签一个不动");
+    assert.ok(sandbox.sessions()["t-a"], "终端仍在");
+  });
+
+  it("A14 同一终端被两个页签显示（共享兜底）：关一个不结束它", async () => {
+    const store = {
+      "panel-terminal-viewports": JSON.stringify({
+        active: "viewport-1",
+        viewports: [
+          { id: "viewport-1", terminalId: "t-a" },
+          { id: "viewport-2", terminalId: "t-a" },
+        ],
+        background: [],
+      }),
+    };
+    const items = [TERM_ITEM("t-a")];
+    const { sandbox, log } = viewportHarness({ store, items });
+    sandbox.beat(items);
+    assert.equal(sandbox.viewports().length, 2, "存档里两个视口都显示同一条终端");
+    sandbox.closeTab("viewport-1");
+    assert.deepEqual(log.closes, [], "仍被另一个页签显示的终端不得结束");
+    assert.ok(sandbox.sessions()["t-a"], "终端仍在");
+    assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-2"], "只销毁这个页签");
   });
 });
 
@@ -4566,6 +4628,7 @@ describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未�
     const returned = new Function("log", "session", "terminalXterm", `
       const terminalBackendSessions = { [session.id]: session };
       let activeTerminalPreviewId = session.id;
+      let terminalViewports = [];
       const terminalBackgroundIds = new Set();
       const terminalHollowStreak = new Map();
       const terminalDoneUnread = new Set();
@@ -4582,6 +4645,8 @@ describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未�
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
       ${extractFn("terminalSessionRunning")}
+      ${extractFn("terminalViewportRefDrop")}
+      ${extractFn("terminalCloseTerminalNow")}
       ${extractFn("terminalCloseTerminal")}
       return terminalCloseTerminal(session.id);
     `)(log, session, term);
@@ -4741,15 +4806,18 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
     const log = { closed: [], saved: 0 };
     const fn = new Function("session", "log", `
       const terminalBackgroundIds = new Set();
+      const viewport = { id: "viewport-1", terminalId: null, background: [] };
       function saveTerminalViewports() { log.saved += 1; }
       function terminalSessionFor() { return session; }
       function terminalCloseTerminal(id) { log.closed.push(id); }
+      ${extractFn("terminalViewportRefs")}
+      ${extractFn("terminalViewportRefAdd")}
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
       ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalViewportRetire")}
       return {
-        go: (id) => terminalViewportRetire(id),
+        go: (id) => terminalViewportRetire(viewport, id),
         background: () => Array.from(terminalBackgroundIds),
       };
     `)(session, log);
@@ -4781,6 +4849,7 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
     const returned = new Function("log", "session", "confirmResult", `
       const terminalBackendSessions = { [session.id]: session };
       let activeTerminalPreviewId = session.id;
+      let terminalViewports = [];
       const terminalBackgroundIds = new Set();
       const terminalHollowStreak = new Map();
       const terminalDoneUnread = new Set();
@@ -4795,6 +4864,8 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
       ${extractFn("terminalSessionRunning")}
+      ${extractFn("terminalViewportRefDrop")}
+      ${extractFn("terminalCloseTerminalNow")}
       ${extractFn("terminalCloseTerminal")}
       return terminalCloseTerminal(session.id);
     `)(log, session, confirmResult);
