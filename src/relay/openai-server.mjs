@@ -206,6 +206,21 @@ function zcodeSessionInstanceId(headers) {
   return sessionRowId(ZCODE_SESSION_PREFIX, headers?.["x-session-id"]);
 }
 
+// 终端归属桥 feed 的行 id 对齐：客户端发到 x-session-id 的值已被
+// runner-attribution.ts 的 normalizeModelSessionIdForAttribution 剥掉内部前缀
+//（sess_ 与 subagent_agent_ 顺序各剥一次、剥空不算），而 session-scan 扫出的
+// 会话 meta.id 带原始前缀——不先做同一套剥除，请求路径铸的 zcode-sess-<uuid>
+// 与 feed 行 id 永远对不上。规则与客户端逐字一致。
+const ZCODE_SESSION_INTERNAL_PREFIXES = ["sess_", "subagent_agent_"];
+function zcodeSessionRowIdForJoin(rawId) {
+  if (typeof rawId !== "string") return null;
+  let id = rawId;
+  for (const prefix of ZCODE_SESSION_INTERNAL_PREFIXES) {
+    if (id.startsWith(prefix) && id.length > prefix.length) id = id.slice(prefix.length);
+  }
+  return sessionRowId(ZCODE_SESSION_PREFIX, id);
+}
+
 // zcode 会话行的 surface（desktop/cli）定档原料：请求 socket 的连接属主 pid。
 // pid 不做实例身份（见上方头值注释段），只供 agent-metrics 沿进程谱系判面
 // （zcodeSurfaceFromOwnerPid）；快照 miss 判不了就返回 null，行不贴面、不猜。
@@ -673,6 +688,10 @@ export function createOpenAIRelayServer(deps) {
     // opencode-sess-<session id> for the identical reason (one resident
     // `serve --service` carries every TUI's traffic, so no pid-shaped row can
     // name the session that sent a request).
+    // zcodeSessions 同理（zcode-sess-<id> 行；桌面端 utility 进程跨会话共享
+    // 连接池）。特有的坑：扫描出的 meta.id 带 sess_/subagent_agent_ 内部前缀、
+    // 请求头里的值已剥——toRowId 先做同款剥除（zcodeSessionRowIdForJoin），
+    // join 两端才同源。
     if (path === "/api/internal/detected-processes" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
@@ -707,7 +726,14 @@ export function createOpenAIRelayServer(deps) {
             (id) => sessionRowId(WORKBUDDY_SESSION_PREFIX, id),
           );
         }
-        sendJson(res, 200, { ok: true, processes, codexSessions, opencodeSessions, workbuddySessions });
+        let zcodeSessions = [];
+        if (typeof deps.metricsCollector.getZcodeSessionsForTerminalJoin === "function") {
+          zcodeSessions = sessionJoinRows(
+            await deps.metricsCollector.getZcodeSessionsForTerminalJoin(),
+            zcodeSessionRowIdForJoin,
+          );
+        }
+        sendJson(res, 200, { ok: true, processes, codexSessions, opencodeSessions, workbuddySessions, zcodeSessions });
       } catch (err) {
         sendJson(res, 500, openAIError("api_error", `failed to get detected client processes: ${err.message}`));
       }

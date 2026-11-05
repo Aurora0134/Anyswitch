@@ -3453,15 +3453,20 @@ export function createAgentMetricsCollector(options = {}) {
   }
 
   // Session-metadata lookup for session-granular rows (codex-sess- /
-  // opencode-sess-): row titles and the terminal join both read it. The default
-  // walks the endpoint's own store through session-scan's adapter — far too
+  // opencode-sess- / zcode-sess-): row titles and the terminal join both read
+  // it. The default walks the endpoint's own store through session-scan's
+  // adapter — far too
   // heavy for the panel's 1s poll, so the result is cached per endpoint and the
   // import is lazy (launchers and the watchdog import this module too; they
   // never list session rows and must not pay session-scan's sqlite/zlib imports
-  // for nothing). Tests inject codexSessionLookup / opencodeSessionLookup.
+  // for nothing). Tests inject codexSessionLookup / opencodeSessionLookup /
+  // zcodeSessionLookup.
   const sessionLookups = {
     codex: options.codexSessionLookup ?? null,
     opencode: options.opencodeSessionLookup ?? null,
+    // zcode 没有自己的会话标题消费面（行标题回落行 id），这个 lookup 只喂终端
+    // 归属桥的 feed；默认实现走 session-scan 的 zcode 适配器（sqlite session 表）。
+    zcode: options.zcodeSessionLookup ?? null,
     // WB 会话行的标题正源：产品注册表全目录（cwd 基名当标题），不是逐 pid 查。
     // 默认实现直接扫 sessions/ 目录；测试注入 workbuddySessionDirectory 遮蔽。
     workbuddy: options.workbuddySessionDirectory ?? null,
@@ -3559,6 +3564,14 @@ export function createAgentMetricsCollector(options = {}) {
 
   async function getOpencodeSessionsForTerminalJoin() {
     return [...(await loadSessionInfo("opencode")).values()];
+  }
+
+  // zcode 同处境同形：实例行是 zcode-sess-<id>（桌面端 utility 进程跨会话共享
+  // 连接池，pid 形 join 永远绑不上），桥按 cwd 匹配。注意 meta.id 带 sess_ /
+  // subagent_agent_ 内部前缀、请求头里的值已剥——对齐在出口层做（openai-server
+  // 的 zcodeSessionRowIdForJoin），这里只透传扫描原值。
+  async function getZcodeSessionsForTerminalJoin() {
+    return [...(await loadSessionInfo("zcode")).values()];
   }
 
   // WB 与 codex/opencode 同处境：实例行已是 workbuddy-sess-<sessionId>，pid 形
@@ -5926,6 +5939,7 @@ export function createAgentMetricsCollector(options = {}) {
     // by the exposure layer.
     getCodexSessionsForTerminalJoin,
     getOpencodeSessionsForTerminalJoin,
+    getZcodeSessionsForTerminalJoin,
     getWorkbuddySessionsForTerminalJoin,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of

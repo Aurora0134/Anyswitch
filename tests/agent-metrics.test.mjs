@@ -1922,6 +1922,30 @@ describe("createAgentMetricsCollector", () => {
       const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
       assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-sess-sess_idle"]);
     });
+
+    it("serves the zcode session metas through the terminal-join getter", async () => {
+      // 与 codex/opencode 同形：透传扫描原值（含 sess_ 前缀的 meta.id——剥前缀
+      // 对齐在出口层 openai-server 做），吃 15 秒 per-endpoint 缓存。
+      const metas = [{ id: "sess_join", project: "C:\\work\\alpha", lastActive: 2000 }];
+      let calls = 0;
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => 10000,
+        zcodeSessionLookup: async () => { calls += 1; return metas; },
+      });
+      assert.deepEqual(await collector.getZcodeSessionsForTerminalJoin(), metas);
+      await collector.getZcodeSessionsForTerminalJoin();
+      assert.equal(calls, 1, "缓存窗口内不重扫");
+    });
+
+    it("degrades the terminal-join feed to an empty list when the session scan fails", async () => {
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => 10000,
+        zcodeSessionLookup: async () => { throw new Error("db locked"); },
+      });
+      assert.deepEqual(await collector.getZcodeSessionsForTerminalJoin(), [], "扫描失败绝不弄坏读取面");
+    });
   });
 
   it("routes Codex traffic by x-agent-id and counts the codex.exe engine family", async () => {
