@@ -351,3 +351,81 @@ it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改�
     }
   }
 });
+
+// 代理回退（net-proxy.mjs）：直连传输层倒下才走代理；服务端已作答的形态
+// （HTTP 错误、响应非法、超限）换条路答案不会变，不白付第二跳。
+it("falls back to the configured proxy only on transport failure, resolving it once per service", async () => {
+  const releases = () => json([release("v0.5.0")]);
+
+  // 直连成功：代理腿从不出现，解析都不做。
+  let resolveCalls = 0;
+  let proxyCalls = 0;
+  const direct = createReleaseService({ currentVersion: "0.4.3", now,
+    fetchFn: async () => releases(),
+    proxyResolveFn: async () => { resolveCalls++; return "http://127.0.0.1:7890/"; },
+    proxyFetchFn: async () => { proxyCalls++; return releases(); },
+  });
+  assert.equal((await direct.getAppUpdate()).state, "update_available");
+  assert.equal(resolveCalls, 0);
+  assert.equal(proxyCalls, 0);
+
+  // 直连传输失败 + 有代理：代理腿拿到完整 URL 与解析出的代理地址，结果照常。
+  // force 再查一次时代理解析不重复（每服务实例一次）。
+  const seen = [];
+  const viaProxy = createReleaseService({ currentVersion: "0.4.3", now,
+    fetchFn: async () => { throw new TypeError("fetch failed"); },
+    proxyResolveFn: async () => { resolveCalls++; return "http://127.0.0.1:7890/"; },
+    proxyFetchFn: async ({ url, proxyUrl }) => { seen.push({ url, proxyUrl }); return releases(); },
+  });
+  assert.equal((await viaProxy.getAppUpdate()).state, "update_available");
+  assert.equal((await viaProxy.getAppUpdate({ force: true })).state, "update_available");
+  assert.deepEqual(seen, [
+    { url: appEndpoint, proxyUrl: "http://127.0.0.1:7890/" },
+    { url: appEndpoint, proxyUrl: "http://127.0.0.1:7890/" },
+  ]);
+  assert.equal(resolveCalls, 1);
+
+  // 直连超时同样回退（慢网络配代理正是要救的情形）：fetchFn 随中止信号失败，
+  // 代理腿应答即恢复。
+  const timedOut = createReleaseService({ currentVersion: "0.4.3", now, timeoutMs: 10,
+    fetchFn: (_url, { signal }) => new Promise((_, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }),
+    proxyResolveFn: async () => "http://127.0.0.1:7890/",
+    proxyFetchFn: async () => releases(),
+  });
+  assert.equal((await timedOut.getAppUpdate()).state, "update_available");
+
+  // 没配代理：维持直连的原结论，代理腿不出现。
+  const noProxy = createReleaseService({ currentVersion: "0.4.3", now,
+    fetchFn: async () => { throw new TypeError("fetch failed"); },
+    proxyResolveFn: async () => null,
+    proxyFetchFn: async () => { proxyCalls++; return releases(); },
+  });
+  const unreachable = await noProxy.getAppUpdate();
+  assert.equal(unreachable.state, "error");
+  assert.equal(unreachable.errorCode, "network_error");
+  assert.equal(proxyCalls, 0);
+
+  // 代理也倒：如实报错，不粉饰成别的形态。
+  const proxyDown = createReleaseService({ currentVersion: "0.4.3", now,
+    fetchFn: async () => { throw new TypeError("fetch failed"); },
+    proxyResolveFn: async () => "http://127.0.0.1:7890/",
+    proxyFetchFn: async () => { throw new Error("proxy_connect_failed_407"); },
+  });
+  const stillDown = await proxyDown.getAppUpdate();
+  assert.equal(stillDown.state, "error");
+  assert.equal(stillDown.errorCode, "network_error");
+
+  // 服务端已作答（429 限额）：不回退、不放大请求量，错误码原样透出。
+  let limitedProxyCalls = 0;
+  const limited = createReleaseService({ currentVersion: "0.4.3", now,
+    fetchFn: async () => json({}, { status: 429 }),
+    proxyResolveFn: async () => "http://127.0.0.1:7890/",
+    proxyFetchFn: async () => { limitedProxyCalls++; return releases(); },
+  });
+  const rateLimited = await limited.getAppUpdate();
+  assert.equal(rateLimited.state, "error");
+  assert.equal(rateLimited.errorCode, "rate_limited");
+  assert.equal(limitedProxyCalls, 0);
+});

@@ -1,4 +1,5 @@
 import { compareVersions, parseVersion } from "./version-check.mjs";
+import { resolveHttpProxy as resolveHttpProxyDefault, fetchViaProxy as fetchViaProxyDefault } from "./net-proxy.mjs";
 
 const npmSource = (name, repository, url) => ({
   endpoint: `https://registry.npmjs.org/-/package/${encodeURIComponent(name)}/dist-tags`,
@@ -120,7 +121,7 @@ function nextPage(link, page) {
   } catch { throw new ReleaseError("invalid_pagination"); }
 }
 
-export function createReleaseService({ currentVersion, fetchFn = fetch, now = Date.now, cacheTtlMs = 10 * 60 * 1000, maxConcurrent = 4, timeoutMs = 8000, maxResponseBytes = 1024 * 1024 } = {}) {
+export function createReleaseService({ currentVersion, fetchFn = fetch, proxyResolveFn = resolveHttpProxyDefault, proxyFetchFn = fetchViaProxyDefault, now = Date.now, cacheTtlMs = 10 * 60 * 1000, maxConcurrent = 4, timeoutMs = 8000, maxResponseBytes = 1024 * 1024 } = {}) {
   const cache = new Map();
   const pending = new Map();
 
@@ -147,25 +148,50 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, now = Da
   let active = 0;
   const queue = [];
 
+  // 单次尝试：直连与代理回退共用同一副超时/限量骨架，每次尝试各自计满
+  // timeoutMs（最坏 2×，检查是异步便览，不为快而砍预算）。
+  async function attempt(call, endpoint, options) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await call(endpoint, { ...options, signal: controller.signal });
+      const declared = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > maxResponseBytes) throw new ReleaseError("response_too_large");
+      const text = await response.text();
+      if (controller.signal.aborted) throw new ReleaseError("timeout");
+      if (text.length > maxResponseBytes) throw new ReleaseError("response_too_large");
+      return { response, text };
+    } catch (error) {
+      if (controller.signal.aborted) throw new ReleaseError("timeout");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // 代理解析只在直连真的倒下后才做，且整个服务实例只解析一次：环境变量
+  // 与 git 配置都是会话期内不变的量，重复询问纯属空转。
+  let proxyResolution = null;
+  const resolveProxyOnce = () => {
+    proxyResolution ??= Promise.resolve().then(() => proxyResolveFn()).catch(() => null);
+    return proxyResolution;
+  };
+
   async function request(endpoint, options) {
     if (active >= maxConcurrent) await new Promise((resolve) => queue.push(resolve));
     active++;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await fetchFn(endpoint, { ...options, signal: controller.signal });
-        const declared = Number(response.headers.get("content-length"));
-        if (Number.isFinite(declared) && declared > maxResponseBytes) throw new ReleaseError("response_too_large");
-        const text = await response.text();
-        if (controller.signal.aborted) throw new ReleaseError("timeout");
-        if (text.length > maxResponseBytes) throw new ReleaseError("response_too_large");
-        return { response, text };
+        return await attempt(fetchFn, endpoint, options);
       } catch (error) {
-        if (controller.signal.aborted) throw new ReleaseError("timeout");
-        throw error;
-      } finally {
-        clearTimeout(timer);
+        // 只在传输层倒下（网络不通、超时）时回退代理：HTTP 错误、响应非法、
+        // 超限都是服务端已作答的形态，换条路答案不会变，还白付一次等待。
+        // 有代理配置的机器上这一跳把检查腿补齐到与下载腿（git fetch 认环境
+        // 变量与 git http.proxy）同一口径；没配置就维持直连的原结论。
+        if (error instanceof ReleaseError && error.code !== "timeout") throw error;
+        const proxyUrl = await resolveProxyOnce();
+        if (!proxyUrl) throw error;
+        return await attempt((url, opts) => proxyFetchFn({ url, proxyUrl, headers: opts.headers, signal: opts.signal }), endpoint, options);
       }
     } finally {
       active--;

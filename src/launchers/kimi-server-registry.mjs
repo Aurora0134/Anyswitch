@@ -4,7 +4,7 @@
 // server/instances/ 下登记一条 <server_id>.json（字段 server_id / pid / host /
 // port / started_at / heartbeat_at / host_version，多实例共用同一份家目录、各取
 // 下一个空闲端口）。写入方一共四条，全部经过客户端里唯一的那个 register 调用点
-// （2026-09-23 读自本机实际执行的 @moonshot-ai/kimi-code 安装包）：`kimi web`、
+// （2026-09-23 读自实装的 @moonshot-ai/kimi-code 安装包）：`kimi web`、
 // `kimi rc`（远程控制面板）、在 TUI 里把当前会话交给浏览器（TUI 退出后同一个
 // 进程就地变成 server），以及内嵌同一份 server 代码的官方桌面端。纯交互式 TUI
 // 不起 server、不留记录。于是这条注册表是 anyswitch 现有所有端点里第一份

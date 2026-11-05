@@ -1205,7 +1205,7 @@ export function diffLocalSkill({ endpointId, skillName, repoPath }, { homeDir = 
   return { ok: true, diffs: diffDirs(repoSkill.absPath, localPath) };
 }
 
-// 逐行对照的读盘边界。上限按本机实测的最重 skill 定：仓库侧最大的一个 55 个
+// 逐行对照的读盘边界。上限按实测的最重 skill 定：仓库侧最大的一个 55 个
 // 文件、3.8MB、15 个二进制、单文件最大 3954 行（内置三方 JS）。越过边界的
 // 文件一律如实标"未比对"并给原因，而不是从清单里悄悄漏掉。
 const DIFF_MAX_FILE_BYTES = 256 * 1024;

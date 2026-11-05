@@ -1757,7 +1757,7 @@ function createGrokAdapter(roots) {
 
 // ---------------------------------------------------------------------------
 // workbuddy — ~/.workbuddy/projects/<cwd-slug>/<sessionId>.jsonl（2026-10-31
-// 本机实测）。cwd-slug 是项目
+// 实测）。cwd-slug 是项目
 // 路径小写、`\`→`-`（`C:\Users\me\proj` → `c-users-me-proj`）；同名目录
 // <sessionId>/ 只放 subagents/ 与 tool-results/，是会话的旁挂数据，不是会话
 // 本身，因此扫描只认 <project>/<sessionId>.jsonl 这一层。

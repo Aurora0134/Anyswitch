@@ -41,7 +41,7 @@ export const APP_REPO_URL = "https://github.com/Aurora0134/Anyswitch.git";
 const PANEL_DOWN_TIMEOUT_MS = 20_000;
 const PANEL_UP_TIMEOUT_MS = 30_000;
 const POLL_MS = 500;
-// git fetch 经 SNIBypass 通道，慢但不能没有上限；npm 与 client-lifecycle 同一量级。
+// git fetch 走外网，慢链路上一次浅拉可能拖到分钟级，但不能没有上限；npm 与 client-lifecycle 同一量级。
 const GIT_TIMEOUT_MS = 10 * 60_000;
 const NPM_TIMEOUT_MS = 10 * 60_000;
 const MAX_OUTPUT_CHARS = 2000;
@@ -210,7 +210,7 @@ export async function runSelfUpdate({
   const gitFailure = (stepName, r) => r.missing
     ? `未检测到 Git，请先安装 Git 后重试`
     : r.timedOut
-      ? `${stepName}用时过长被中止，请检查网络后重试`
+      ? `${stepName}用时过长被中止，请检查网络或代理设置后重试`
       : `${stepName}失败，请稍后重试`;
 
   if (track === "bleeding") {
@@ -369,7 +369,7 @@ export async function runSelfUpdate({
       const restored = await restoreTree();
       return finish({
         outcome: "failed",
-        message: `${npm.timedOut ? "新版本组件安装用时过长被中止，请检查网络后重试" : "新版本组件安装失败，请稍后重试"}${restored ? "；文件已还原到更新前状态" : ""}`,
+        message: `${npm.timedOut ? "新版本组件安装用时过长被中止，请检查网络或代理设置后重试" : "新版本组件安装失败，请稍后重试"}${restored ? "；文件已还原到更新前状态" : ""}`,
         detail: npm.output || undefined,
         beforeVersion,
         afterVersion: restored ? beforeVersion : treeVersion,
