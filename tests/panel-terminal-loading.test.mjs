@@ -982,7 +982,7 @@ describe("T12 换绑前停帧、退出帧落地", () => {
     // 必须先把在飞闸清掉，否则 resumeStream 里那次 park 还会拿 6s（还可能续窗）。
     const clearFlag = fn.indexOf("terminalSwitchInFlight = false;", busyAt);
     const clearId = fn.indexOf("terminalSwitchInFlightSessionId = null;", busyAt);
-    assert.ok(clearFlag > busyAt && clearFlag < busyResume, "重挂前清在飞闸（park 落回 2s 档）");
+    assert.ok(clearFlag > busyAt && clearFlag < busyResume, "重挂前清在飞闸（B 挂载那次 park 不再命中放宽档）");
     assert.ok(clearId > clearFlag && clearId < busyResume, "会话 id 一并清掉");
     // 两条 toast 出口各自「先提示、后重挂」；switch_busy 不提示，重挂排在保活之前
     assert.match(
