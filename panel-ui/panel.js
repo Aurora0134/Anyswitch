@@ -5668,14 +5668,36 @@ async function api(method, path, body) {
     return viewport;
   }
 
-  // 「在跑」判定（旧终端处置用）：exited 优先——迟到的活跃信号不能把已退出的进程重新
-  // 判忙。与内切判定门的 working 口径同源（status 已由轮询/SSE 按
-  // terminalSessionBusyFromSignals 算好）。
-  function terminalSessionRunning(session) {
-    if (!session) return false;
-    const state = session.backendState;
+  // 「在跑」统一判据（杀前用，2026-11-05）：切走回收、内切准入、关闭确认三处共用。
+  // 起因：kimi 双会话切走时，正在流式输出的那条被当空闲槽静默整树终止＋删记录。当时
+  // 它 activeRequests=0（端点级请求不落到具体会话实例）、回合闸刷新后丢失，显示层
+  // 只算出 idle；但 agent.busy=true、lastActiveAt 一直在刷新——旧口径只看
+  // status==="working"／在途请求，恰好抓不到「屏幕在出字、账上算空闲」。
+  // 口径：exited 优先（迟到的活跃信号不能把已退出的进程重新判忙）；此后任一信号命中
+  // 即按在跑处置，判不准也倒向在跑——宁可多留一个后台进程，不误杀用户正在做的事。
+  // 显示层的转圈仍走回合闸（terminalSessionBusyFromSignals），不受这里影响。
+  // 已知代价：空闲仍持续重绘的 TUI 会被留在后台，需用户自己点 × 结束（用户裁决：
+  // 宁可多留、不可误杀）。
+  function terminalSessionRunning(session, now = Date.now()) {
+    if (!session) return true; // 判不准：无会话记录＝不可杀
+    const state = session.backendState ? session.backendState : null;
     if (state && state.status === "exited") return false;
-    return session.status === "working" || !!(session.metrics && Number(session.metrics.activeRequests) > 0);
+    // 显示层 working 位与在途请求（既有口径）
+    if (session.status === "working") return true;
+    if (session.metrics && Number(session.metrics.activeRequests) > 0) return true;
+    // 进程树忙判据：不看回合闸。流式输出／后台命令期间请求计数可能已归零或漏记，
+    // relay 下发的 busy 位仍看得见进程在忙。
+    if (terminalCommandRunning(session)) return true;
+    // 最近确有非回显输出：输出窗自带孵化豁免与键入回显抑制，且不带回合闸——刷新页面
+    // 丢掉内存里的闸、或请求从未归属到这条会话时，仍能保住正在出字的终端。
+    if (terminalBusyByOutput(session, undefined, now)) return true;
+    // 手开终端屏尾护栏（A1）：屏实例只在终端视图挂载后才有；没屏就交回上面四条信号，
+    // 不把「判不了」当「判为不在跑」。
+    if (typeof terminalXterm !== "undefined" && typeof activeTerminalPreviewId !== "undefined"
+      && typeof terminalManualShellBusy === "function" && terminalManualShellBusy(session)) return true;
+    // 判不准：后端记录在、却连状态位／现态／指标都拿不到——按在跑处置。
+    if (session.backend && !state && session.status == null && !session.metrics) return true;
+    return false;
   }
 
   // 旧终端处置（用户口径「在跑的不杀、没在跑的杀」）：在跑 → 进后台保活集合继续活着，
@@ -5684,7 +5706,7 @@ async function api(method, path, body) {
     if (!terminalId) return false;
     if (terminalBackgroundIds.has(terminalId)) return true;
     const session = terminalSessionFor(terminalId);
-    if (!session) return false;
+    if (!session) return true; // 判不准（无会话记录）＝按在跑处置，不可杀
     if (terminalSessionRunning(session)) {
       terminalBackgroundIds.add(terminalId);
       saveTerminalViewports();
@@ -5733,10 +5755,11 @@ async function api(method, path, body) {
   function terminalCloseTerminal(terminalId) {
     if (!terminalId) return true;
     const session = terminalSessionFor(terminalId);
-    // 「在跑」的确认面＝既有 working 位 ＋ 手开终端的屏尾判据。后者补的是 working 位
-    // 的结构盲区：同进程 cmdlet 不产生输出、新壳 15s 孵化豁免——2026-11-03 A2 实测
-    // 新壳跑 Start-Sleep 时点 ✕ 无任何确认即整树杀掉。
-    const running = !!session && (session.status === "working" || terminalManualShellBusy(session));
+    // 「在跑」的确认面＝统一判据（working／在途请求／进程树忙／最近非回显输出／
+    // 屏尾护栏，判不准倒向在跑）。屏尾补的是 working 位的结构盲区：同进程 cmdlet
+    // 不产生输出、新壳 15s 孵化豁免——2026-11-03 A2 实测新壳跑 Start-Sleep 时点 ✕
+    // 无任何确认即整树杀掉。确认句沿用既有字面量，零新增文案。
+    const running = !!session && terminalSessionRunning(session);
     if (running
       && typeof window !== "undefined" && typeof window.confirm === "function"
       && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return false;
@@ -12163,13 +12186,13 @@ async function api(method, path, body) {
       enrichTerminalSessions(agents.agents);
       // 已退出不是 working：迟到的请求/输出信号不能把它重新判忙。宿主现态优先于缓存信号。
       const exited = hostRead.status === "exited" || active.backendState?.status === "exited";
-      const working = !exited && (active.status === "working" || (active.metrics && active.metrics.activeRequests > 0));
+      // 统一在跑判据（2026-11-05）：working／在途请求／进程树忙／最近非回显输出／
+      // 屏尾护栏，判不准倒向在跑；与切走回收、关闭确认同源。手开终端的屏尾判据已并入
+      // 其中——进程树看不见同进程 cmdlet（Start-Sleep / 循环 / 写文件），屏尾不在提示符
+      // 就当还在跑（2026-11-03 A1：静默长命令期间内切被整树 terminate，切回来找不回）。
+      const working = !exited && terminalSessionRunning(active);
       // 旧终端在跑：留后台保活、不杀；目标终端挂进当前视口，页签数不变。
       if (working) return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
-      // 手开终端同理：进程树看不见同进程 cmdlet（Start-Sleep / 循环 / 写文件），
-      // 屏尾不在提示符就当还在跑，与 working 同路保活（2026-11-03 A1：静默长命令
-      // 期间内切被整树 terminate，切回来找不回）。
-      if (terminalManualShellBusy(active)) return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       // 全新内切乐观选中（补口）：没有历史身份可亮，activeTerminalPreviewId 又不
       // 换（同记录换内容）——不武装的话，高亮要等 POST 返回、spawnedAt 刷新、兜底行
       // 出现才挪过去（实测小半秒）。确定要内切（过了 working 门）后、POST 之前点亮：

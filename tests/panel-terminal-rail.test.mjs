@@ -40,10 +40,13 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
   // 屏尾/未使用槽判据是关闭、内切、新开三处闸门的共用依赖（2026-11-03 A1/A2/A4）。
   // 桩环境的 xterm 实例为空：屏尾判据对 null 返回 false，行为面由专用用例覆盖。
+  // 统一在跑判据（2026-11-05）另需输出窗与进程树忙两个纯函数，随源抽出。
   let terminalXterm = null;
   ${extractFn("terminalScreenAtPrompt")}
   ${extractFn("terminalManualShellBusy")}
   ${extractFn("terminalSessionUnusedAgentSlot")}
+  ${extractFn("terminalBusyByOutput")}
+  ${extractFn("terminalCommandRunning")}
   ${names.map(extractFn).join("\n")}
 `;
 

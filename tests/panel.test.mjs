@@ -112,6 +112,10 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
+  // 统一在跑判据（2026-11-05）的两个纯函数依赖：视口纯函数按名抽出后模块级符号
+  // 不跟着来，随源补上；屏尾判据依赖 xterm 实例，桩里没有时由生产实现自己降级跳过。
+  ${panelFnSrc("terminalBusyByOutput")}
+  ${panelFnSrc("terminalCommandRunning")}
   ${names.map(panelFnSrc).join("\n")}
 `;
 // 回放突发合并器的阈值常量：沙箱按函数名切源码，常量不在其中，单独取出注入——

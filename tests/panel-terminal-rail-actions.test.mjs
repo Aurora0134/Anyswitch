@@ -47,10 +47,13 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
   // 屏尾/未使用槽判据是关闭、内切、新开三处闸门的共用依赖（2026-11-03 A1/A2/A4）。
   // 桩环境的 xterm 实例为空：屏尾判据对 null 返回 false，行为面由专用用例覆盖。
+  // 统一在跑判据（2026-11-05）另需输出窗与进程树忙两个纯函数，随源抽出。
   let terminalXterm = null;
   ${extractFn("terminalScreenAtPrompt")}
   ${extractFn("terminalManualShellBusy")}
   ${extractFn("terminalSessionUnusedAgentSlot")}
+  ${extractFn("terminalBusyByOutput")}
+  ${extractFn("terminalCommandRunning")}
   ${names.map(extractFn).join("\n")}
 `;
 
@@ -888,7 +891,7 @@ describe("组头三件（dsh 工作区行按钮）", () => {
         let terminalSwitchInFlight = false;
         let activeTerminalPreviewId = activeId;
         const terminalBackendSessions = sessions;
-        ${viewportPrelude(["terminalViewportNextId", "terminalViewportCreate", "terminalViewportActive", "terminalViewportForTerminal", "terminalRailKeepAliveSwitch"])}
+        ${viewportPrelude(["terminalViewportNextId", "terminalViewportCreate", "terminalViewportActive", "terminalViewportForTerminal", "terminalRailKeepAliveSwitch", "terminalSessionRunning"])}
         function armTerminalBootingOverlay() {}
         function terminalRailFindOpenSession() { return null; }
         const terminalRailCollapsedGroups = log.collapsed;
@@ -2906,10 +2909,11 @@ describe("内切判定矩阵（vm 真跑）", () => {
     }
   });
 
-  it("已归属会话空闲自绘不误判 working：点历史仍就地内切，不多开（真实富化链路）", async () => {
-    // 用户报的症状 1 主路径：新会话页挂着不动（TUI 自绘让输出窗一直「新鲜」），
-    // 点历史会话却多开一页。桩式 enrich 把 working 重写成「有请求」，覆盖不到这
-    // 条；这里走真 enrich（经回合闸）：零请求 + 输出新鲜但未入回合 → idle → 内切。
+  it("空闲自绘仍不点亮 working，但杀前按输出活跃保活：点历史不发 /switch（2026-11-05 取舍）", async () => {
+    // 显示层与杀前判据分开（2026-11-05 用户裁决）：TUI 自绘让输出窗一直「新鲜」，真
+    // enrich 经回合闸仍算 idle（不转圈）；但统一杀前判据不看回合闸——正在写 PTY 的
+    // 终端一律按在跑处置，点历史时旧终端进后台保活而不是被整树 terminate。旧断言
+    // 「就地内切」随裁决改写：代价是空闲自绘的会话会留在后台，需用户自己点 × 结束。
     const { fn, log } = runSwitch({
       sessions: {
         "t-a": {
@@ -2923,8 +2927,9 @@ describe("内切判定矩阵（vm 真跑）", () => {
     });
     fn.go(HISTORY_ROW);
     await flush();
-    assert.equal(log.creates.length, 0, "空闲自绘不点亮：就地内切，不开新页签");
-    assert.equal(log.switchBodies.length, 1, "走 /switch");
+    assert.equal(fn.sessions["t-a"].status, "idle", "显示层仍不点亮（回合闸没武装）");
+    assert.equal(log.creates.length, 1, "旧终端保活，目标终端新建挂进当前视口");
+    assert.equal(log.switchBodies.length, 0, "不发 /switch（换绑＝整树 terminate）");
   });
 
   it("回合内（请求曾在途）输出新鲜：仍判 working，点历史新开页签保护在跑任务", async () => {
@@ -3353,22 +3358,24 @@ describe("进程树忙判据（agent.busy）进 working 口径与内切判定门
     assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "前端自己就判得出忙，不再等守卫 409");
   });
 
-  it("回合外 busy=true 不点亮：会话打开时的 runtime 自查不算 agent 在跑", async () => {
+  it("回合外 busy=true：显示层不点亮，杀前仍保活（2026-11-05 两条口径分离）", async () => {
     // 同一条 BUSY_SESSION，唯一差别是这条页面生命周期里没有出现过在途请求（没入
-    // 闸）。dsh / dsh-tui 在会话打开时会自己跑环境自查（where / codex / git），进程
-    // 树与 agent 命令同像，旧口径在这一下闪转圈（2026-10-29 用户回报）。
-    let release;
+    // 闸）。dsh / dsh-tui 会话打开时会自己跑环境自查（where / codex / git），进程树与
+    // agent 命令同像，显示层只认回合闸，所以这里仍是 idle、不闪转圈（2026-10-29 用户
+    // 回报）。但杀前判据不看回合闸：busy 位是 relay 看到的「进程在忙」，刷新页面丢了
+    // 闸或请求没归属到这条会话时，它是唯一抓得住的信号——2026-11-05 kimi 双会话误杀
+    // 就出在这里。故行为断言由「照旧就地内切」改为「保活、不发 /switch」；代价是启动
+    // 自查那一刻点历史会多留一个后台终端，用户已按「宁可多留、不可误杀」裁决。
     const { fn, log } = runSwitch({
       sessions: { "t-a": { ...BUSY_SESSION } }, activeId: "t-a",
       agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
-      switchImpl: () => new Promise((resolve) => { release = resolve; }), realEnrich: true,
+      switchImpl: async () => SWITCH_OK, realEnrich: true,
     });
     fn.go(HISTORY_ROW);
     await flush();
-    assert.equal(fn.sessions["t-a"].status, "idle", "回合外的树忙不点亮");
-    assert.equal(log.creates.length, 0, "不转新开，照旧就地内切");
-    release(SWITCH_OK);
-    await flush();
+    assert.equal(fn.sessions["t-a"].status, "idle", "显示层：回合外的树忙不点亮");
+    assert.equal(log.creates.length, 1, "杀前：旧终端保活，目标终端挂进当前视口");
+    assert.equal(log.switchBodies.length, 0, "不发 /switch（换绑＝整树 terminate）");
   });
 
   it("busy 为 false / null：都不点亮，照旧就地内切（判据不猜、不常亮）", async () => {
@@ -4572,6 +4579,9 @@ describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未�
       function panelError(err, fallback) { return fallback; }
       ${extractFn("terminalScreenAtPrompt")}
       ${extractFn("terminalManualShellBusy")}
+      ${extractFn("terminalBusyByOutput")}
+      ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalCloseTerminal")}
       return terminalCloseTerminal(session.id);
     `)(log, session, term);
@@ -4670,4 +4680,159 @@ describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未�
     assert.ok(fn.sessions["t-a"], "原终端记录还在（没被结束）");
   });
 });
+
+// ── 2026-11-05 误杀回归：kimi 双会话切走，活跃输出态被当空闲槽回收 ──
+// 现场（20:08 实时快照）：两条 kimi 终端都在刷新输出，其中 kimi-19260 的
+// activeRequests=0（最近 10 条 kimi 请求有 3 条是端点级，面板规定不落到任何单条会话
+// 实例）、agent.busy=true、回合闸（纯内存、刷新即丢）不在，显示层只算出 idle。旧口径
+// （status==="working" || activeRequests>0）判空闲 → 切走时静默发 /close → 宿主整树
+// terminate + 从索引和盘上删记录，会话行随之消失。
+// 夹具保留当晚原始时间戳与数值差：判据层用原始值＋固定 now；行为层把同一组时间差
+// 相对化，避免日后输出窗过期让用例自己失效。
+describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () => {
+  const SNAP = {
+    id: "d8206ecb-ef03-4647-ba51-25bde3fe80fa",
+    label: "Kimi Code", backend: true, agentId: "kimi",
+    agent: { endpointId: "kimi", instanceId: "kimi-19260", busy: true },
+    status: "idle", metrics: { activeRequests: 0 },
+    backendState: {
+      status: "running",
+      lastActiveAt: 1793880619764,
+      lastInputAt: 1793880474312,
+      spawnedAt: 1793862187201,
+      createdAt: 1793862187197,
+    },
+  };
+  const SNAP_NOW = 1793880620764; // lastActiveAt + 1s
+  const LIVE = (now = Date.now()) => ({
+    ...SNAP,
+    backendState: {
+      ...SNAP.backendState,
+      lastActiveAt: now - 1000,
+      lastInputAt: now - 145452,
+      spawnedAt: now - 18432563,
+      createdAt: now - 18432567,
+    },
+  });
+
+  // 判据层台架：屏尾判据依赖 xterm 实例，桩里没有时由生产实现自己降级跳过。
+  const running = (session, now = SNAP_NOW) => new Function("session", "now", `
+    ${extractFn("terminalBusyByOutput")}
+    ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalSessionRunning")}
+    return terminalSessionRunning(session, now);
+  `)(session, now);
+
+  it("现场快照：旧口径判空闲，统一判据按在跑（busy 位 / 非回显输出单变量对照）", () => {
+    const oldVerdict = SNAP.status === "working" || SNAP.metrics.activeRequests > 0;
+    assert.equal(oldVerdict, false, "旧口径：0 请求 + idle → 空闲（误杀起点）");
+    assert.equal(running(SNAP), true, "统一判据保住它");
+    const noBusy = { ...SNAP, agent: { ...SNAP.agent, busy: false } };
+    const staleOutput = { ...SNAP, backendState: { ...SNAP.backendState, lastActiveAt: SNAP_NOW - 60_000 } };
+    assert.equal(running(noBusy), true, "只留非回显输出：仍保活（刷新丢闸、请求没归属）");
+    assert.equal(running(staleOutput), true, "只留 busy 位：仍保活（输出静默的长命令）");
+    assert.equal(running({ ...noBusy, backendState: staleOutput.backendState }), false, "两条都没有＝确定空闲，照旧可收");
+    assert.equal(running({ ...SNAP, backendState: { ...SNAP.backendState, status: "exited" } }), false,
+      "exited 优先：迟到的活跃信号不救已退出的进程");
+  });
+
+  const retire = (session) => {
+    const log = { closed: [], saved: 0 };
+    const fn = new Function("session", "log", `
+      const terminalBackgroundIds = new Set();
+      function saveTerminalViewports() { log.saved += 1; }
+      function terminalSessionFor() { return session; }
+      function terminalCloseTerminal(id) { log.closed.push(id); }
+      ${extractFn("terminalBusyByOutput")}
+      ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSessionRunning")}
+      ${extractFn("terminalViewportRetire")}
+      return {
+        go: (id) => terminalViewportRetire(id),
+        background: () => Array.from(terminalBackgroundIds),
+      };
+    `)(session, log);
+    return { log, fn };
+  };
+
+  it("切走回收：正在输出的会话进后台保活、零 /close；确定空闲与已退出仍照旧回收", () => {
+    const live = retire(LIVE());
+    assert.equal(live.fn.go(SNAP.id), true, "按在跑处置");
+    assert.deepEqual(live.fn.background(), [SNAP.id], "旧终端进后台集合，仍在左栏");
+    assert.deepEqual(live.log.closed, [], "不发关闭请求（宿主不 tree-kill、不删记录）");
+
+    const base = LIVE();
+    const idleSession = {
+      ...base, agent: { ...SNAP.agent, busy: false },
+      backendState: { ...base.backendState, lastActiveAt: Date.now() - 60_000 },
+    };
+    const idle = retire(idleSession);
+    assert.equal(idle.fn.go(SNAP.id), false, "确定空闲＝照旧回收，不是一律保活");
+    assert.deepEqual(idle.log.closed, [SNAP.id], "空闲槽仍走既有 /close");
+
+    const exited = retire({ ...base, backendState: { ...base.backendState, status: "exited" } });
+    assert.equal(exited.fn.go(SNAP.id), false, "已退出＝按空闲槽处置");
+    assert.deepEqual(exited.log.closed, [SNAP.id], "已退出照旧回收");
+  });
+
+  const close = (session, confirmResult) => {
+    const log = { confirms: [], posts: [] };
+    const returned = new Function("log", "session", "confirmResult", `
+      const terminalBackendSessions = { [session.id]: session };
+      let activeTerminalPreviewId = session.id;
+      const terminalBackgroundIds = new Set();
+      const terminalHollowStreak = new Map();
+      const terminalDoneUnread = new Set();
+      const terminalPrevWorking = new Map();
+      const terminalTurnArmed = new Set();
+      const window = { confirm: (msg) => { log.confirms.push(msg); return confirmResult; } };
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function saveTerminalViewports() {}
+      function api(method, path) { log.posts.push({ method, path }); return Promise.resolve({ ok: true }); }
+      function toast() {}
+      function panelError(err, fallback) { return fallback; }
+      ${extractFn("terminalBusyByOutput")}
+      ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSessionRunning")}
+      ${extractFn("terminalCloseTerminal")}
+      return terminalCloseTerminal(session.id);
+    `)(log, session, confirmResult);
+    return { returned, log };
+  };
+
+  it("用户点 ×：同一会话弹既有确认，确认后仍照常关（关闭通路不变、零新增文案）", () => {
+    const cancelled = close(LIVE(), false);
+    assert.deepEqual(cancelled.log.confirms, ["当前终端仍在运行，关闭后将中断任务。确定继续吗？"],
+      "确认句逐字复用既有字面量");
+    assert.equal(cancelled.returned, false, "取消＝不关");
+    assert.deepEqual(cancelled.log.posts, [], "取消不发 /close");
+
+    const confirmed = close(LIVE(), true);
+    assert.equal(confirmed.returned, true, "确认＝照常关");
+    assert.deepEqual(confirmed.log.posts.map((p) => p.path), [`/api/terminal/sessions/${SNAP.id}/close`],
+      "宿主 /close 通路原样保留，要关还是能关");
+  });
+
+  it("内切：正在输出的会话不发 /switch，走保活分支（旧终端不换绑、记录不删）", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { [SNAP.id]: LIVE() }, activeId: SNAP.id,
+      agentsImpl: async () => AGENTS_IDLE,
+      hostReadImpl: async () => ({ id: SNAP.id, status: "running" }),
+      switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.deepEqual(log.switchBodies, [], "零 /switch（同记录 terminate+spawn 会杀掉它）");
+    assert.equal(log.creates.length, 1, "目标终端新建挂进当前视口");
+    assert.equal(log.placements[0].keepPrevious, true, "旧终端保活，页签不增");
+    assert.ok(fn.sessions[SNAP.id], "旧会话记录还在（会话行不会消失）");
+  });
+
+  it("源码契约：切走回收／内切准入／关闭确认三处共用同一判据，不许各自退回旧口径", () => {
+    assert.ok(extractFn("terminalViewportRetire").includes("terminalSessionRunning(session)"), "切走回收");
+    assert.ok(extractFn("terminalRailSwitchOrCreateCore").includes("!exited && terminalSessionRunning(active)"), "内切准入");
+    assert.ok(extractFn("terminalCloseTerminal").includes("!!session && terminalSessionRunning(session)"), "关闭确认");
+  });
+});
+
 
