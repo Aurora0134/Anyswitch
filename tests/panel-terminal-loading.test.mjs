@@ -346,6 +346,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     let terminalContentTerm = null;
     let terminalContentSeen = false;
     let terminalSwitchInFlight = false;
+    let terminalSwitchInFlightSessionId = null;
     let terminalBooting = null;
     let terminalUnavailableRenders = 0;
     function renderTerminalUnavailableState() { terminalUnavailableRenders += 1; }
@@ -374,7 +375,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
       epoch: () => terminalReplayEpoch,
       contentEpoch: () => terminalContentEpoch,
       unavailableRenders: () => terminalUnavailableRenders,
-      setSwitchInFlight: (v) => { terminalSwitchInFlight = v; },
+      setSwitchInFlight: (v, sessionId = null) => { terminalSwitchInFlight = v; terminalSwitchInFlightSessionId = sessionId; },
       setBooting: (v) => { terminalBooting = v; },
       openNext() {
         const term = nextTerminal();
@@ -664,16 +665,22 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     // 「读不到就按普通档」这条路；这里直接调，抛了就红。
     const fn = new Function(`${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`)();
     assert.equal(fn(), false, "名字一个都不存在：按普通档，且不抛");
+    assert.equal(fn("s1"), false, "给了会话 id 但设施不存在：同样按普通档，且不抛");
+    // 在飞 + 同一会话 → 放宽；在飞但是别的会话 → 不放宽（这条是 2026-11-05 评审 major 的钉子）
     const fn2 = new Function(
-      "terminalSwitchInFlight",
+      "terminalSwitchInFlight", "terminalSwitchInFlightSessionId",
       `let terminalBooting = null;\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
-    )(true);
-    assert.equal(fn2(), true, "换绑在飞 → 放宽");
+    )(true, "s1");
+    assert.equal(fn2("s1"), true, "这条会话自己在换绑 → 放宽");
+    assert.equal(fn2("s2"), false, "别的会话在换绑 → 不放宽（不许把别人的旧帧盖 6s）");
+    // 占位武装：按占位自己的会话 id 判
     const fn3 = new Function(
-      "terminalSwitchInFlight",
-      `let terminalBooting = { sessionId: "x" };\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
-    )(false);
-    assert.equal(fn3(), true, "占位还武装着 → 放宽");
+      "terminalSwitchInFlight", "terminalSwitchInFlightSessionId",
+      `let terminalBooting = { sessionId: "s1" };\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
+    )(false, null);
+    assert.equal(fn3("s1"), true, "本会话的占位还武装着 → 放宽");
+    assert.equal(fn3("s2"), false, "占位是别的会话的 → 不放宽");
+    assert.equal(fn3(), false, "没有会话 id → 一律普通档");
   });
 
   it("判据本身：只有「新画面真的出字」才算就绪（换回计数比较这条必红）", () => {
@@ -732,27 +739,46 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     w.world.parkTerminalScreen();
     assert.deepEqual(w.clock.timerDelays(), [plainMax], "普通档：兜底登记 2000ms");
 
-    // 换绑期（/switch 在飞）
+    // 换绑期（/switch 在飞，且飞的就是这条会话）
     const w2 = makeTerminalWorld();
     await primeSession(w2, terminalSession("A"));
-    w2.world.setSwitchInFlight(true);
+    w2.world.setSwitchInFlight(true, "A");
     w2.world.parkTerminalScreen();
-    assert.deepEqual(w2.clock.timerDelays(), [switchMax], "换绑在飞：兜底登记 6000ms");
+    assert.deepEqual(w2.clock.timerDelays(), [switchMax], "本会话换绑在飞：兜底登记 6000ms");
 
-    // 换绑已落地、占位还武装着（/switch 回来了但新会话还没出字）
+    // 换绑已落地、占位还武装着（/switch 回来了但新会话还没出字）——占位是本会话的
     const w3 = makeTerminalWorld();
     await primeSession(w3, terminalSession("A"));
-    w3.world.setBooting({ sessionId: "B" });
+    w3.world.setBooting({ sessionId: "A" });
     w3.world.parkTerminalScreen();
-    assert.deepEqual(w3.clock.timerDelays(), [switchMax], "占位武装中：同样按 6000ms");
+    assert.deepEqual(w3.clock.timerDelays(), [switchMax], "本会话的占位武装中：同样按 6000ms");
 
-    // 三只世界都照旧会在到点时撤（放宽不是取消）
+    // 别人的占位/在飞一律不放宽（2026-11-05 评审 major）：terminalBooting 是单例，
+    // 新建页签会武装自己的占位并靠 TTL 自然过期；不按会话判，此刻切到旧页签就会让
+    // **另一条会话**的旧帧盖 6 秒，正是 2026-10-27 明令禁止的形态。
+    const w4 = makeTerminalWorld();
+    await primeSession(w4, terminalSession("A"));
+    w4.world.setBooting({ sessionId: "B" });
+    w4.world.parkTerminalScreen();
+    assert.deepEqual(w4.clock.timerDelays(), [plainMax], "别的会话的占位：仍走 2000ms");
+
+    const w5 = makeTerminalWorld();
+    await primeSession(w5, terminalSession("A"));
+    w5.world.setSwitchInFlight(true, "B");
+    w5.world.parkTerminalScreen();
+    assert.deepEqual(w5.clock.timerDelays(), [plainMax], "别的会话在换绑：同样 2000ms");
+
+    // 五只世界都照旧会在到点时撤（放宽不是取消）
     w.clock.flushAll();
     w2.clock.flushAll();
     w3.clock.flushAll();
+    w4.clock.flushAll();
+    w5.clock.flushAll();
     assert.equal(w.world.stale(), null, "普通档到点撤");
     assert.equal(w2.world.stale(), null, "换绑档到点也撤（不把旧帧永久留屏）");
     assert.equal(w3.world.stale(), null, "占位撤了之后同样退回既有三态");
+    assert.equal(w4.world.stale(), null, "别人的占位不放宽，到点照撤");
+    assert.equal(w5.world.stale(), null, "别人的换绑不放宽，到点照撤");
   });
 
   it("真跑：新画面迟迟不来时兜底撤垫片（不把旧画面永久留在屏上）", async () => {
@@ -825,9 +851,48 @@ describe("T12 换绑前停帧、退出帧落地", () => {
     assert.doesNotMatch(extractFn("terminalStaleScreenReady"), /terminalSwitchStaleWidened/);
   });
 
-  it("真跑：空屏收到 exit 帧 → 落既有不可用卡片（零新增文案）", async () => {
+  it("源码：换绑期上限放宽必须绑会话，不许被别人的占位/在飞顶走", () => {
+    // 2026-11-05 评审 major：terminalBooting 是单例、在飞原本只是布尔。不比对会话 id，
+    // 新建页签武装的占位会让别的会话的旧帧也拿到 6s 档——屏上是另一条会话盖 6 秒，
+    // 正是 2026-10-27 明令禁止的形态。放宽档的正当性只建立在「同一会话」上。
+    const fn = extractFn("terminalSwitchStaleWidened");
+    assert.match(fn, /terminalSwitchBooting|terminalBooting\.sessionId/, "占位按会话 id 比");
+    assert.match(fn, /terminalSwitchInFlightSessionId/, "在飞要记是哪条会话");
+    assert.match(fn, /if \(!sessionId\) return false/, "拿不到会话 id 一律普通档");
+    // 停放处必须在拆流之前取会话 id：closeTerminalStream 会把定投会话归零
+    const park = extractFn("parkTerminalScreen");
+    const idAt = park.indexOf("parkSessionId");
+    const closeAt = park.indexOf("closeTerminalStream()");
+    assert.ok(idAt >= 0 && closeAt > idAt, "会话 id 在拆流之前取（之后取恒为 null）");
+    assert.match(park, /terminalSwitchStaleWidened\(parkSessionId\)/, "判据收到会话 id");
+  });
+
+  it("源码：/switch 失败的两条 return 之前都把流接回来（否则垫片到点就是纯空白）", () => {
+    // 2026-11-05 评审 blocker：进函数时为了先停帧已经拆了流（park 内部 closeTerminalStream）。
+    // 失败分支只 toast 不重挂，屏上就只剩垫片；兜底计时器一到就撤，剩一块没有覆盖层的
+    // 空白。宿主侧 F3 保住的旧屏也就此到不了用户眼前。
+    const fn = extractFn("terminalRailSwitchOrCreateCore");
+    const resumeAt = fn.indexOf("const resumeStream = () =>");
+    assert.ok(resumeAt >= 0, "失败路径有重挂入口");
+    assert.match(fn, /renderTerminalPreviewSession\(\{ revive: false \}\)/, "被动重挂：不替用户重启进程");
+    // 两条失败出口各自「先提示、后重挂」
+    assert.match(
+      fn,
+      /"这个 Agent 的会话暂时不能在终端里续接", true\);\s*resumeStream\(\);/,
+      "resume-* 分支：toast 之后重挂",
+    );
+    assert.match(
+      fn,
+      /toast\(panelError\(error, "无法启动这个终端"\), true\);\s*resumeStream\(\);/,
+      "兜底分支：toast 之后重挂",
+    );
+    assert.equal((fn.match(/resumeStream\(\)/g) || []).length, 2, "恰好两处调用（switch_busy 那条自己建流，不挂）");
+  });
+
+  it("真跑：空屏收到 exit 帧 → 只翻状态位，不挂任何覆盖层（会话级退出提示待文案批准）", async () => {
     const w = makeTerminalWorld();
-    await w.world.connectTerminalStream(terminalSession("S"));
+    const session = terminalSession("S");
+    await w.world.connectTerminalStream(session);
     const es = w.sources[w.sources.length - 1];
     es.emit("snapshot", JSON.stringify({ pid: 1, cols: 120, rows: 34 }));
     // 只来了一帧清屏，屏上仍没有字
@@ -836,7 +901,10 @@ describe("T12 换绑前停帧、退出帧落地", () => {
     assert.equal(w.created[0].screenText, "", "前置：屏上确实什么都没有");
     assert.equal(w.world.unavailableRenders(), 0, "退出之前不落卡片");
     es.emit("exit", "{}");
-    assert.equal(w.world.unavailableRenders(), 1, "空屏退出：落到既有不可用卡片");
+    // 2026-11-05 评审 major：宿主级降级页会把全部页签清空、藏底栏、禁新建键，而服务
+    // 明明在跑——一个会话退出绝不能触发它。会话级提示需要新措辞，文案批准前不做。
+    assert.equal(w.world.unavailableRenders(), 0, "空屏退出也不挂宿主级降级页（服务在跑）");
+    assert.equal(session.backendState.status, "exited", "状态位仍翻成 exited（1s 轮询之外的第二条感知）");
     assert.equal(w.created[0].disposed, false, "不动实例（页签保留，停在最后一帧）");
   });
 
