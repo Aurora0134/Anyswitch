@@ -5554,6 +5554,14 @@ async function api(method, path, body) {
   // 后台保活集合：宿主里仍活着、但不属于任何视口的终端。两条约束——(a) 宿主快照同步
   // 不会把它自动补成新页签；(b) 关页签只结束该视口显示的终端，绝不顺着这里杀。
   const terminalBackgroundIds = new Set();
+  // 后台回收器记账：terminalId → { at, endpointId }（进后台的时刻与端点归属）。
+  // 与 terminalBackgroundIds 同生共死：两处 add 时写入，attach/create/close/清场时删。
+  // 不持久化——刷新后恢复的后台集合没有记账，一律不回收（不知道它何时进的后台）。
+  // 单测按函数体抽取，模块级量不随行，故各读写点用 typeof 闸护（同 renderTerminalRail
+  // 的桩环境惯例）；闸护落空即视为桩环境，不记账。
+  const terminalBackgroundSince = new Map();
+  // zcode 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧。
+  const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
   let terminalViewportSeq = 0;
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
@@ -5634,6 +5642,10 @@ async function api(method, path, body) {
     if (!viewport) return null;
     viewport.terminalId = terminalId || null;
     if (viewport.terminalId) terminalBackgroundIds.delete(viewport.terminalId);
+    // 回到视口＝不再是后台会话，回收记账同拍取消（否则会拿旧的进后台时刻去杀它）。
+    if (viewport.terminalId && typeof terminalBackgroundSince !== "undefined") {
+      terminalBackgroundSince.delete(viewport.terminalId);
+    }
     saveTerminalViewports();
     return viewport;
   }
@@ -5642,6 +5654,9 @@ async function api(method, path, body) {
     const viewport = { id: terminalViewportNextId(), terminalId: terminalId || null };
     terminalViewports.push(viewport);
     if (viewport.terminalId) terminalBackgroundIds.delete(viewport.terminalId);
+    if (viewport.terminalId && typeof terminalBackgroundSince !== "undefined") {
+      terminalBackgroundSince.delete(viewport.terminalId);
+    }
     saveTerminalViewports();
     return viewport;
   }
@@ -5709,6 +5724,13 @@ async function api(method, path, body) {
     if (!session) return true; // 判不准（无会话记录）＝按在跑处置，不可杀
     if (terminalSessionRunning(session)) {
       terminalBackgroundIds.add(terminalId);
+      // 进后台起点记账（后台回收器逐拍扫这张表）。
+      if (typeof terminalBackgroundSince !== "undefined") {
+        terminalBackgroundSince.set(terminalId, {
+          at: Date.now(),
+          endpointId: (session.agent && session.agent.endpointId) || session.agentId || null,
+        });
+      }
       saveTerminalViewports();
       return true;
     }
@@ -5734,6 +5756,15 @@ async function api(method, path, body) {
         if (previous && previous !== terminalId) {
           if (keepPrevious) {
             terminalBackgroundIds.add(previous);
+            // 内切保活路径的进后台起点：端点归属当场取，取不到记 null，由扫描拍按
+            // 当时的会话归属复核（不能因为归档慢一拍就永久放弃回收）。
+            if (typeof terminalBackgroundSince !== "undefined") {
+              const kept = typeof terminalSessionFor === "function" ? terminalSessionFor(previous) : null;
+              terminalBackgroundSince.set(previous, {
+                at: Date.now(),
+                endpointId: (kept && kept.agent && kept.agent.endpointId) || (kept && kept.agentId) || null,
+              });
+            }
             saveTerminalViewports();
           } else {
             terminalViewportRetire(previous);
@@ -5775,12 +5806,73 @@ async function api(method, path, body) {
       delete terminalPreviewSessions[terminalId];
     }
     terminalBackgroundIds.delete(terminalId);
+    if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(terminalId);
     terminalHollowStreak.delete(terminalId);
     terminalDoneUnread.delete(terminalId);
     terminalPrevWorking.delete(terminalId);
     terminalTurnArmed.delete(terminalId);
     saveTerminalViewports();
     return true;
+  }
+
+  // 后台回收器（P-D）：zcode 这类自绘终端进后台空转时宿主不会自己退（zcode-global
+  // 的在途数恒挂、输出窗恒热），攒成僵尸会话白烧资源。只对同时命中的终端直接发
+  // /close：① 在后台集合且有进后台起点；② 端点归属 zcode；③ 实例行在途数为零；
+  // ④ 进程树不忙；⑤ 最近可见活动已静默 10min；⑥ 最近无键入（或已过去 10min）；
+  // ⑦ 进后台已满 10min。
+  // 为什么不走 terminalCloseTerminal：它会对「在跑」的会话弹 window.confirm——回收
+  // 是后台自洁动作，弹窗即新增交互与文案（本轮硬约束零新增文案、零 toast）。失败
+  // 静默等下一拍（宿主拒关就留着，绝不重复提示）。
+  // 判据用 lastVisibleAt 而不是 lastActiveAt：后者被自绘刷新（欢迎屏扫光）恒新，
+  // 拿它做判据回收器永不触发；lastVisibleAt 缺位（老宿主快照）＝不知道有没有人在看，
+  // 保守不回收。
+  // 取舍：面板隐藏／不在终端页时整拍跳过——这两种状态下会话数据停在上一拍快照，
+  // 拿陈旧计数做杀判据等于盲杀；宁可晚回收，不可误杀。
+  let terminalBackgroundRecycleInFlight = false;
+  function maybeRecycleTerminalBackground(now = Date.now()) {
+    if (terminalBackgroundRecycleInFlight) return;
+    if (!terminalBackgroundIds.size) return;
+    const targets = [];
+    for (const id of terminalBackgroundIds) {
+      const since = typeof terminalBackgroundSince !== "undefined" ? terminalBackgroundSince.get(id) : null;
+      // 无起点记账（刷新恢复的后台集合）＝不知道它何时进的后台，不回收。
+      if (!since || !Number.isFinite(since.at)) continue;
+      // 记账里的端点只是快筛；null（内切保活时取不到）留给下面按会话归属复核。
+      if (since.endpointId && since.endpointId !== "zcode") continue;
+      if (now - since.at <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      const session = terminalSessionFor(id);
+      if (!session) continue;
+      const endpointId = (session.agent && session.agent.endpointId) || session.agentId || null;
+      if (endpointId !== "zcode") continue;
+      // 计数只认实例行：聚合端点的 <endpoint>-global 是整机合计，不是这条终端的在途量。
+      const instance = terminalInstanceRow(typeof terminalAgentsPayload !== "undefined" ? terminalAgentsPayload : null, session.agent);
+      const count = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
+      if (count > 0) continue;
+      if (terminalCommandRunning(session)) continue;
+      const state = session.backendState || null;
+      const visibleAt = Number.isFinite(session.lastVisibleAt)
+        ? session.lastVisibleAt
+        : (state && Number.isFinite(state.lastVisibleAt) ? state.lastVisibleAt : null);
+      if (!(Number.isFinite(visibleAt) && now - visibleAt > TERMINAL_BACKGROUND_ZCODE_IDLE_MS)) continue;
+      const inputAt = state ? state.lastInputAt : undefined;
+      if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      targets.push(id);
+    }
+    if (!targets.length) return;
+    terminalBackgroundRecycleInFlight = true;
+    Promise.all(targets.map((id) => api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`)
+      .then(() => {
+        terminalBackgroundIds.delete(id);
+        if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(id);
+        delete terminalBackendSessions[id];
+        terminalHollowStreak.delete(id);
+        terminalDoneUnread.delete(id);
+        terminalPrevWorking.delete(id);
+        terminalTurnArmed.delete(id);
+        saveTerminalViewports();
+      })
+      .catch(() => {})))
+      .finally(() => { terminalBackgroundRecycleInFlight = false; });
   }
 
   // 关页签的完整语义（点击委托只负责认出是哪颗页签）：结束该视口当前显示的终端 →
@@ -5842,7 +5934,10 @@ async function api(method, path, body) {
     }
     terminalViewports = kept;
     for (const id of Array.from(terminalBackgroundIds)) {
-      if (!terminalBackendSessions[id]) terminalBackgroundIds.delete(id);
+      if (!terminalBackendSessions[id]) {
+        terminalBackgroundIds.delete(id);
+        if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(id);
+      }
     }
     for (const id of Object.keys(terminalBackendSessions)) {
       if (terminalViewportForTerminal(id)) continue;
@@ -5958,6 +6053,10 @@ async function api(method, path, body) {
   // 「该实例出现在途请求」，终点取「无在途请求且输出窗过期」。内存态、不持久化，
   // 与上面两张表同生命周期（关会话、轮询重建后消失即清）。
   const terminalTurnArmed = new Set();
+  // 计数即真值的端点：zcode 这类自绘 TUI 空闲时也持续往 PTY 重绘（欢迎屏扫光、
+  // 光标/动画帧），5s 输出窗在它身上恒热——「出过字节」不是「在跑」的证据。
+  // 在途请求数与进程树忙位才是真值（判据见 terminalSessionBusyFromSignals 首支）。
+  const TERMINAL_COUNT_TRUTH_ENDPOINTS = new Set(["zcode"]);
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
@@ -5985,6 +6084,9 @@ async function api(method, path, body) {
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
   let terminalPollTimer = null;
   let terminalPollInFlight = false;
+  // 最近一拍的 agents 负载：后台回收器要按实例行（不是聚合汇总行）复核在途数，
+  // 与 enrichTerminalSessions 吃同一份数据，避免再造第二条取数口径。
+  let terminalAgentsPayload = null;
   let terminalFontSize = 13;
 
   function clampTerminalFontSize(value) {
@@ -6151,6 +6253,11 @@ async function api(method, path, body) {
         && typeof item.boundConversation.endpoint === "string" && typeof item.boundConversation.id === "string"
         ? { endpoint: item.boundConversation.endpoint, id: item.boundConversation.id }
         : null,
+      // 最近一次「用户可见活动」的时刻（毫秒 epoch，宿主随快照下发）。后台回收器的
+      // 静默判据只认它——不用 lastActiveAt：自绘 TUI 的重绘会把 lastActiveAt 刷成
+      // 恒新，拿它做判据回收器永不触发。老宿主快照不带此键：缺位记 null，回收器按
+      // 「不知道有没有人在看」保守跳过。
+      lastVisibleAt: Number.isFinite(item.lastVisibleAt) && item.lastVisibleAt > 0 ? item.lastVisibleAt : null,
       // status 两支同值是刻意的，不是笔误：后端快照的 status 只有 running/exited
       //（terminal-host.mjs 的 snapshot 只产这两值），这里一律不采用，先落 idle；
       // 真正的 working/idle 由信号在 terminalActivityApplyToSession /
@@ -6501,6 +6608,17 @@ async function api(method, path, body) {
   // 已知代价：面板刷新/新开页丢掉内存里的回合闸后，正在静默跑的命令会显示空闲——
   // 显示层降级；服务端杀前守卫自带按需探测，不受这一位影响，不会因此误杀。
   function terminalSessionBusyFromSignals(session, count, now = Date.now()) {
+    // 计数即真值的端点（zcode）：输出窗在这里恒热，只在途请求／进程树忙位算数。
+    // 判据取 session.agentId 而不是 agent.endpointId——归属缺失（agent===null）恰是
+    // zcode-global 汇总数唯一能接上「这条终端」的分支（聚合兜底只在无归属时命中）；
+    // 取 endpointId 会把它漏到下面「无归属＝输出窗即真值」，自绘恒热又判成 working。
+    // 这一支**不入回合闸也不留闸位**：闸是为了压住空闲 TUI 的自绘输出，而这个端点
+    // 压根不看输出窗；给恒热会话入闸只会把它锁死在 working（M3 台架证实的自锁）。
+    // typeof 闸护单测桩环境（按函数体抽取的沙盒没有这个模块级量）。
+    if (session && typeof TERMINAL_COUNT_TRUTH_ENDPOINTS !== "undefined"
+      && TERMINAL_COUNT_TRUTH_ENDPOINTS.has(session.agentId)) {
+      return count > 0 || terminalCommandRunning(session);
+    }
     const id = session && typeof session.id === "string" ? session.id : null;
     if (count > 0) {
       if (id) terminalTurnArmed.add(id);
@@ -8766,11 +8884,16 @@ async function api(method, path, body) {
       // 状态口径与活跃真值流同源：请求在途，或输出活跃窗内且本回合已入闸
       // （terminalSessionBusyFromSignals）。
       // 算完过 noteTerminalWorkingStatus（done 未读标记的翻转观测，同 SSE 写点）。
-      const instance = terminalInstanceRow(agentsPayload, agent) || aggregateSource?.row || null;
+      // 状态只认真实例行：聚合端点的 <endpoint>-global 汇总数（如 zcode-global 恒挂
+      // 的在途数）是整机合计，不是这条终端的在途量——让它进 status 就把「别的实例
+      // 在干活」画成「这条终端在转圈」。读数侧不受影响（下面 metricsSource 仍可兜底），
+      // 端点卡合计来自 endpoint.metrics，与本行无关。
+      const instance = terminalInstanceRow(agentsPayload, agent);
       const activeRequests = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
       session.status = terminalSessionBusyFromSignals(session, activeRequests) ? "working" : "idle";
       noteTerminalWorkingStatus(session, session.status);
-      session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
+      const metricsSource = instance || aggregateSource?.row || null;
+      session.metrics = metricsSource ? terminalMetricsFromInstance(metricsSource) : null;
       // 折叠行（claude 会话行）的成员实例键：journal 账目是逐进程的，「最近
       // 请求」按成员键集合过滤才不漏行。非折叠行没有 memberPids，维持单键。
       session.memberInstanceIds = instance && agent && Array.isArray(instance.memberPids) && instance.memberPids.length > 0
@@ -8818,6 +8941,7 @@ async function api(method, path, body) {
       rebuildTerminalBackendSessions(data.sessions);
       await refreshRouteRuntimeCache();
       const agentsData = await api("GET", "/api/agents").catch(() => null);
+      terminalAgentsPayload = agentsData?.agents ?? null;
       enrichTerminalSessions(agentsData?.agents ?? null);
       await refreshActiveTerminalRequests();
       renderTerminalPreviewTabs();
@@ -9199,6 +9323,7 @@ async function api(method, path, body) {
     terminalViewports = [];
     terminalViewportActiveId = null;
     terminalBackgroundIds.clear();
+    if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.clear();
     activeTerminalPreviewId = null;
     rememberTerminalSessionId(null);
     saveTerminalViewports();
@@ -9886,7 +10011,9 @@ async function api(method, path, body) {
         }
         if (document.hidden) return;
         if (currentView !== "terminal") return;
-        pollTerminalSessions();
+        // 后台回收器垫在本拍取数之后：判据要的是刚拉回来的实例行在途数与
+        // lastVisibleAt，拿上一拍的陈旧计数做杀判据就是盲杀（见函数内取舍说明）。
+        pollTerminalSessions().then(() => maybeRecycleTerminalBackground()).catch(() => {});
       }, 1000);
     }
     syncTerminalActivityStream();
