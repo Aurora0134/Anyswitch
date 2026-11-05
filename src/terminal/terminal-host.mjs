@@ -530,8 +530,23 @@ function snapshot(session) {
     spawnedAt: session.spawnedAt,
     cols: session.cols,
     rows: session.rows,
+    // 回放的坐标系：整屏回放（toReplay）是按**镜像**当前尺寸算的绝对定位定宽行，
+    // 不是 PTY 尺寸。两者正常一致，但 resize 失败被跳过（见 resize 路由的 warn 分支）
+    // 或镜像尚未建时就会分叉——面板的几何闸若拿 cols/rows 判「回放能不能画进这块屏」，
+    // 判的就是错的那只尺寸。旧宿主不带这两个字段，面板按缺失走原逻辑。
+    ...screenGeometry(session),
     ...agentMetadata(session),
   };
+}
+
+// 镜像的行列（回放坐标系）。镜像不存在时省略字段：snapshot 的读者把它当「旧宿主」。
+function screenGeometry(session) {
+  const info = session.screen?.info?.();
+  if (!info) return {};
+  const cols = Number(info.cols);
+  const rows = Number(info.rows);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) return {};
+  return { screenCols: cols, screenRows: rows };
 }
 
 // ---------------------------------------------------------------------------

@@ -628,6 +628,59 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
   }
 });
 
+// G2(a)：快照带的是**镜像**的行列，回放坐标系跟着它走。宿主把 PTY 尺寸与镜像
+// 尺寸分开后，面板的几何闸才判得对「这份回放能不能画进这块屏」——resize 失败被
+// 跳过时两者会分叉，只报 cols/rows 等于让面板拿错的那只尺寸去判。
+test("G2(a) 快照带镜像行列：与 PTY 尺寸一致；镜像缺失/非法时不带这两个字段", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-screengeom-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "几何", cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+    // 先在 PTY 上画出点东西，让镜像真的按 100×30 建起来。
+    calls[0].pty.dataListener?.("hello\r\n");
+    await sleep(10);
+
+    const snap = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.equal(snap.screenCols, 100, "镜像列宽随快照下发");
+    assert.equal(snap.screenRows, 30, "镜像行宽随快照下发");
+
+    // resize 之后两个字段跟着镜像走（这里 PTY 与镜像同步变，等价于正常路径）。
+    await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 120, rows: 40 }),
+    });
+    const resized = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.equal(resized.screenCols, 120);
+    assert.equal(resized.screenRows, 40);
+
+    // 镜像被抹掉（解析面故障后的降级形态）：快照退成旧宿主形态——不带这两个字段，
+    // 面板据此回到「按 cols/rows 判」的原逻辑，而不是拿 0 去判错配。
+    host.sessions.get(created.id).screen = null;
+    const degraded = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.equal("screenCols" in degraded, false, "镜像缺失：不带 screenCols（旧宿主形态）");
+    assert.equal("screenRows" in degraded, false, "镜像缺失：不带 screenRows（旧宿主形态）");
+    assert.equal(degraded.cols, 120, "PTY 尺寸字段照旧在，原逻辑仍可判");
+
+    // info() 返回非法值（0/NaN）：同样省略，绝不下发一个「不可用」的坐标系。
+    host.sessions.get(created.id).screen = { info: () => ({ cols: 0, rows: Number.NaN }) };
+    const bogus = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.equal("screenCols" in bogus, false, "非法列宽不下发");
+    assert.equal("screenRows" in bogus, false, "非法行宽不下发");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ②-a 合帧本体：同一窗口内的多块输出合并成一个 data 帧（拼接语义不变），且
 // 多连接共享同一会话时各自独立合帧；下一批输出进入下一个窗口，节律持续。
 test("② SSE data 帧合帧：一个窗口多块合一帧、多连接各自独立", async () => {

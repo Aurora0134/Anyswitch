@@ -324,12 +324,19 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
   assert.ok(switchStaleConst, "TERMINAL_SWITCH_STALE_SCREEN_MAX_MS 在 panel.js 里（换绑放宽档）");
   const renewalsConst = panelJs.match(/const TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = [^;]+;/)?.[0];
   assert.ok(renewalsConst, "TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS 在 panel.js 里（续窗上限）");
+  // 几何闸的常量从真身取原句：本文件只跑切签，但 close/absorb 会读它们。
+  const declOfGeom = (name) => {
+    const decl = panelJs.match(new RegExp(`const ${name} = [^;]+;`))?.[0];
+    assert.ok(decl, `${name} 在 panel.js 里`);
+    return decl;
+  };
   const factory = new Function(
     "$", "EventSource", "API_BASE", "setTimeout", "clearTimeout",
     "requestAnimationFrame", "cancelAnimationFrame", "document",
     "ensureTerminalXterm", "fitTerminalXterm", "sendTerminalInput", "reviveTerminalSession",
     "flushTerminalBurst", "discardTerminalBurst", "queueTerminalChunk",
     "disarmTerminalDprWatch", "nextTerminal", "terminalHostMeasurable",
+    "postTerminalResize", "console",
     `
     let terminalXterm = null;
     let terminalEventSource = null;
@@ -360,6 +367,21 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     let terminalSwitchInFlightSessionId = null;
     let terminalBooting = null;
     let terminalUnavailableRenders = 0;
+    // 几何闸的收尾设施（G2b）：closeTerminalStream / absorbTerminalSnapshot 会碰它们。
+    // 本文件只关心垫片与切签，会话查找给空表——补挂路径在这里永远早退，不参与断言。
+    let terminalGeometryRealignPending = false;
+    let terminalGeometryRealignAt = 0;
+    let terminalGeometryRealignStreak = 0;
+    let terminalGeometryReplayDrop = false;
+    let terminalStreamDeferred = false;
+    let terminalStreamRemounting = false;
+    let terminalDeferredSessionId = null;
+    let terminalGeometryRealignTimer = null;
+    let activeTerminalPreviewId = null;
+    function terminalSessionFor() { return null; }
+    ${declOfGeom("TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS")}
+    ${declOfGeom("TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS")}
+    ${declOfGeom("TERMINAL_GEOMETRY_REALIGN_STALL_MS")}
     function renderTerminalUnavailableState() { terminalUnavailableRenders += 1; }
     ${staleConst}
     ${switchStaleConst}
@@ -374,6 +396,11 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     ${extractFn("revealTerminalStaleScreen")}
     ${extractFn("parkTerminalScreen")}
     ${extractFn("absorbTerminalSnapshot")}
+    ${extractFn("dropTerminalReplayFrame")}
+    ${extractFn("deferTerminalStream")}
+    ${extractFn("remountDeferredTerminalStream")}
+    ${extractFn("finishTerminalGeometryRealign")}
+    ${extractFn("scheduleTerminalGeometryRealign")}
     ${extractFn("connectTerminalStream")}
     return {
       connectTerminalStream,
@@ -439,6 +466,9 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     },
     // 几何闸的「尺寸可信」判据：本文件的世界里宿主总是可测的（与真身默认路径一致）。
     () => true,
+    // 几何重对齐的 resize POST 面：本文件的用例不走这条路径，只保证不炸。
+    () => Promise.resolve(null),
+    console,
   );
   function openTerm() {
     log.push("open_new");

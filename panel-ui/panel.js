@@ -6768,6 +6768,18 @@ async function api(method, path, body) {
     // 护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，没有
     // 这套列宽设施。
     if (typeof resetTerminalReflowRepaint === "function") resetTerminalReflowRepaint();
+    // 几何闸的待办同样随流销毁（见 scheduleTerminalGeometryRealign / deferTerminalStream）。
+    // 注意 deferTerminalStream 是「先拆后挂」：它调本函数时挂起标记还是零值，拆完才置位，
+    // 所以这里清标记不会把刚挂上的那一条自己抹掉。try 兜住两种「名字读不到」：沙箱把本
+    // 函数整段切出真跑时没有这套设施，以及声明在本文后文造成的 TDZ（typeof 不豁免 TDZ，
+    // 同一坑见 terminalSwitchStaleWidened）。读不到就说明这拍本来就没有待办。
+    try {
+      if (terminalGeometryRealignTimer !== null) clearTimeout(terminalGeometryRealignTimer);
+      terminalGeometryRealignTimer = null;
+      terminalGeometryReplayDrop = false;
+      terminalStreamDeferred = false;
+      terminalDeferredSessionId = null;
+    } catch { /* 沙箱无几何设施或无定时器：没有待办可清 */ }
     terminalXterm?.dispose();
     terminalXterm = null;
     terminalFitAddon = null;
@@ -7182,7 +7194,14 @@ async function api(method, path, body) {
     // 「别窗关掉当前会话、活跃指针已回落而流未拆」的窗口期向未在观看
     // 的新会话误投 resize。
     const session = terminalBoundSessionId ? terminalSessionFor(terminalBoundSessionId) : null;
-    if (!session?.backend || !terminalXterm) return;
+    if (!session?.backend || !terminalXterm) {
+      // 挂起中的流在这里补挂：deferTerminalStream 拆流时连同实例一起收掉了，
+      // terminalBoundSessionId 也归零，于是这条「没有可对齐目标」的早退是它唯一
+      // 可见的通路——上面的量测与列宽记账已经跑过，此刻几何正是可信的。
+      // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱只切 fit 本身。
+      if (typeof remountDeferredTerminalStream === "function") remountDeferredTerminalStream();
+      return;
+    }
     // fit 后尺寸与 PTY 侧已知尺寸完全一致就跳过这次 POST：PTY 收到 resize（哪怕
     // 同值）也会让承载的 TUI 整屏重排一次，1s 轮询的兜底 fit、inspector 收放、字
     // 号微调等入口在尺寸实际没变时重复 POST 同值，就是用户看到的「终端没动却抽
@@ -7204,13 +7223,15 @@ async function api(method, path, body) {
   // 一次；安排与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的
   // 更新测量优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
   // 返回 promise 落定（成功或失败已处置），不覆盖 250ms 后的第二次尝试——那只兜
-  // 极端失败，建连不必等它。
+  // 极端失败，建连不必等它。成功时兑现宿主回的 result（含夹取后的 cols/rows），
+  // 失败路径兑现 undefined：调用方（几何重对齐）要拿它把夹过的值回夹进 xterm。
   function postTerminalResize(session, cols, rows, attempt = 0) {
     return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
           session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
         }
+        return result;
       })
       .catch((error) => {
         const stillCurrent = () => terminalXterm && terminalXterm.cols === cols && terminalXterm.rows === rows;
@@ -7642,12 +7663,25 @@ async function api(method, path, body) {
   // 重画一遍，不如退回原逻辑让用户至少看到画面。
   const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
   const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
-  // POST 挂住不落定（api() 没有超时）时的兜底：先放开数据闸让回放照常落屏。这时回放
-  // 仍是错宽度（同修复前的形态），但画面在；POST 真落定后 finally 仍会重连重画一帧对的。
+  // POST 挂住不落定（api() 没有超时）时的兜底：先放开数据闸让实时字节继续流。回放已被
+  // 丢弃（见下），这里放开只影响其后的增量输出，不会把一份错宽整屏帧画进来。
   const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
   let terminalGeometryRealignPending = false;
   let terminalGeometryRealignAt = 0;
   let terminalGeometryRealignStreak = 0;
+  // 「下一条 data 帧是整屏回放、必须整帧丢弃」的一次性标记（G2b）。错宽回放不能画，
+  // 但同一条流其后的增量帧是应用自己的正常输出，照画（那是今天本来就在发生的事）。
+  // 每个 snapshot 都显式置位或清零，不会跨连接漂移。
+  let terminalGeometryReplayDrop = false;
+  // 建流被几何闸挡下（容器不可测 / 组字期）后的补挂标记（G2b）。挡下只是「这一拍量
+  // 不准」，不是「不要这条流」；RO / window resize / 组字释放随后都会再走一次 fit，
+  // 那时几何已经可信，由 fit 把流接上（见 remountDeferredTerminalStream）。
+  let terminalStreamDeferred = false;
+  let terminalStreamRemounting = false;
+  // 挂起时记下的会话 id：补挂只认这一条（期间用户可能已切到别的页签）。
+  let terminalDeferredSessionId = null;
+  // 冷却窗内的延后对齐定时器。与 terminalReflowRepaintTimer 同一套处置：拆流即撤。
+  let terminalGeometryRealignTimer = null;
 
   // 行高量取：.xterm-screen 盒高 / 行数（渲染器行高的构造性来源）。缓存按行数与
   // 2s 时效失效——字号变化不一定改行数，时效兜底自愈。
@@ -8144,48 +8178,56 @@ async function api(method, path, body) {
   // 次 snapshot、心跳是注释帧，不会因此误清屏。reset-on-snapshot 也是浏览器
   // 侧唯一可靠的重连信号（onerror 之后浏览器自动重连，前端没有钩子）。
   function absorbTerminalSnapshot(term, session, state) {
-    // 几何闸：宿主按它自己的列宽发整屏绝对定位回放（每行 CUP+2K+内容），客户端这一拍
-    // 若停在出厂 80×24 或旧尺寸（隐藏闸 / 量不到 / 与缓存 PTY 同值早退都会让建流那次
-    // fit 空转），回放就会按错宽度折行。TUI 只「定位光标 + 写字符」、从不发擦除序列，
-    // 错位会永久留在缓冲里，只有再整屏重建才擦得掉。两侧都量得到尺寸且不一致时，先按
-    // 客户端真实尺寸把 PTY 对齐、重开一条流，而不是把这份回放画进错宽度的屏。旧宿主
-    // 不带 cols/rows 时走原逻辑。
-    const hostCols = Number(state?.cols);
-    const hostRows = Number(state?.rows);
+    // 几何闸：宿主按镜像自己的列宽发整屏绝对定位回放（每行 CUP+2K+内容），客户端这一拍
+    // 若停在出厂 80×24 或旧尺寸，回放就会按错宽度折行。TUI 只「定位光标 + 写字符」、
+    // 从不发擦除序列，错位会永久留在缓冲里，只有再整屏重建才擦得掉。
+    //
+    // 取向（2026-11-05 M5）：错宽回放**一个字节都不许进屏**。此前这条闸的四个放行口
+    // 全都按「宁可画错也不空白」收尾——那是垫片时代的取向，代价是一块永久错位的屏，
+    // 而用户报的正是这块屏。区别要讲清，别当成违反 2026-10-27 裁决把它改回去：
+    //   · 2026-10-27 那条约束的是「垫片底下其实是**另一个会话**」——看错会话比空白糟；
+    //   · 这里从头到尾是**同一条会话**，只是这份回放的列宽和这块屏对不上。画进去既
+    //     不提供任何信息（内容本来就有，只是位置错），还会让之后每一帧都叠在残行上。
+    // 极端情况下的代价是短暂空白（切开流到重连拿到正确回放之间的这一拍）。这是刻意
+    // 用「短暂空白」换「不再永久错位」，与 2026-10-27 的取向同源（错信息比慢更糟）。
+    //
+    // 坐标系：回放是按**镜像**尺寸算的，宿主给了 screenCols/screenRows 就只认它；
+    // 旧宿主没有这两个字段时退回 cols/rows（PTY 尺寸，正常与镜像一致）。
+    const hostCols = Number(state?.screenCols ?? state?.cols);
+    const hostRows = Number(state?.screenRows ?? state?.rows);
     const clientCols = Number(term?.cols);
     const clientRows = Number(term?.rows);
     const hostSized = Number.isFinite(hostCols) && Number.isFinite(hostRows);
-    // 客户端量不到尺寸时没有可对齐的目标（POST 也没有真实参数），宁可照旧画。
+    // 客户端尺寸得是「真量到的」：容器不可测或正在组字（inputmethod 组字期会冻结几何）时，
+    // 这一拍的 cols/rows 只是 xterm 出厂值或旧值，拿它 POST 等于把猜测写进 PTY。
     const clientSized = Number.isFinite(clientCols) && Number.isFinite(clientRows)
       && clientCols > 0 && clientRows > 0
-      // 尺寸还得是「真量到的」：容器不可测或正在组字（inputmethod 组字期会冻结几何）时，
-      // 这一拍的 cols/rows 只是 xterm 出厂值或旧值，拿它 POST 等于把猜测写进 PTY。
-      // 不判也就不纠错，照原逻辑落屏——不可测本来就没有可对齐的目标。
       && terminalHostMeasurable() && !terminalImeHold;
     const geometryMismatch = hostSized && clientSized
       && (hostCols !== clientCols || hostRows !== clientRows);
     // 对上了就清账：下一次错配重新从 0 起算（计数只认「连续」）。
     if (hostSized && clientSized && !geometryMismatch) terminalGeometryRealignStreak = 0;
+    if (hostSized && !clientSized) {
+      // 判不了就不能画（M5 收紧的第一处退让）：此前这里 clientSized=false 便让整闸失效，
+      // 回放照原逻辑落进一个几何未知的屏——量不到尺寸恰恰是「列宽可能对不上」的信号，
+      // 不是「不用担心」的信号。改成拆流挂起：终端页可见时 RO / window resize / 组字
+      // 释放都会再走一次 fit，那时量准了由 fit 把流接回来（见 remountDeferredTerminalStream），
+      // 屏幕空白只持续到那一拍。
+      dropTerminalReplayFrame();
+      session.backendState = state;
+      session.shell.pid = state.pid || "—";
+      deferTerminalStream(session);
+      return;
+    }
     if (geometryMismatch) {
-      // 两条刹车：连续超过上限（宿主尺寸真改不动）与冷却窗内（刚重连过）都不再重开流，
-      // 这一帧按原逻辑照常落屏——拖窗口/连续重连的那一拍不能让屏停在空白上。
+      // 两条刹车：连续超过上限（宿主尺寸真改不动）与冷却窗内（刚重连过）都不再重开流。
       const realignable = terminalGeometryRealignStreak < TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS
         && Date.now() - terminalGeometryRealignAt >= TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS;
-      if (terminalGeometryRealignStreak >= TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
-        // 连续几次都没对上：宿主侧尺寸多半改不动（进程拒绝 resize 等）。再重连只会把同
-        // 一份错位回放重画一遍，退回原逻辑至少让用户看到画面；只告警一次。
-        if (terminalGeometryRealignStreak === TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
-          terminalGeometryRealignStreak += 1;
-          console.warn("[terminal] geometry realign abandoned", {
-            host: [hostCols, hostRows], client: [clientCols, clientRows],
-          });
-        }
-      }
       if (realignable) {
-        terminalGeometryRealignAt = Date.now();
-        terminalGeometryRealignStreak += 1;
         // 重对齐在飞期间到达的回放一律丢弃（见 data 帧处理器的第一行），否则它仍会写进
         // 错宽度的屏。
+        terminalGeometryRealignAt = Date.now();
+        terminalGeometryRealignStreak += 1;
         terminalGeometryRealignPending = true;
         discardTerminalBurst();
         term.reset();
@@ -8198,21 +8240,32 @@ async function api(method, path, body) {
             host: [hostCols, hostRows], client: [clientCols, clientRows], realign: true,
           });
         }
-        // 用客户端真实尺寸强制对齐：postTerminalResize 内部已处理失败重试与 backendState
-        // 回写。落定后重开一条流，拿宿主按新尺寸自绘的整屏帧——这份回放已经作废。
-        const realignStall = setTimeout(() => {
-          if (term === terminalXterm) terminalGeometryRealignPending = false;
-        }, TERMINAL_GEOMETRY_REALIGN_STALL_MS);
-        postTerminalResize(session, clientCols, clientRows).finally(() => {
-          clearTimeout(realignStall);
-          terminalGeometryRealignPending = false;
-          // 期间可能已切走 / 被拆流 / 换了实例：那些情况下这条重连都是多余的。
-          if (term !== terminalXterm || !terminalEventSource) return;
-          if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
-          connectTerminalStream(session, { revive: false });
-        });
+        // 用客户端真实尺寸强制对齐：postTerminalResize 内部已处理失败重试、backendState
+        // 回写与宿主夹取后的回夹。落定后重开一条流，拿宿主按新尺寸自绘的整屏帧。
+        finishTerminalGeometryRealign(term, session, clientCols, clientRows);
         return;
       }
+      // 刹车拦下的错配帧：同样是错宽回放，一个字节都不画（M5 收紧的第二、三处退让）。
+      // 屏上留在上一个 geometryRealign 里 reset 之后的空白，或者（超限那一路）上一帧
+      // 已经画好的正确画面——绝不留一屏错列宽的残行。
+      dropTerminalReplayFrame();
+      session.backendState = state;
+      session.shell.pid = state.pid || "—";
+      if (terminalGeometryRealignStreak >= TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
+        // 连续几次都没对上：宿主侧尺寸多半改不动（进程拒绝 resize 等）。再重连只会把同
+        // 一份错位回放重画一遍，于是不再画错宽回放、保留当前画面；只告警一次。
+        if (terminalGeometryRealignStreak === TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
+          terminalGeometryRealignStreak += 1;
+          console.warn("[terminal] geometry realign abandoned", {
+            host: [hostCols, hostRows], client: [clientCols, clientRows],
+          });
+        }
+        return;
+      }
+      // 冷却窗内：账还热着，等窗过去再对齐（此前这一帧按原逻辑照常落屏，等于拖窗口
+      // 的每一拍都往屏上糊一层错宽内容）。
+      scheduleTerminalGeometryRealign(term, session, clientCols, clientRows);
+      return;
     }
     // 攒着未落屏的突发属于上一条连接：新连接的整屏重绘会把同样的内容重发一遍，
     // 落屏反而画成双份，直接丢弃。
@@ -8231,6 +8284,106 @@ async function api(method, path, body) {
     terminalReplayFramePending = true;
     session.backendState = state;
     session.shell.pid = state.pid || "—";
+  }
+
+  // ---- 几何闸的收尾件（G2b，见 absorbTerminalSnapshot 的取向注释）----
+  //
+  // 三个动作的分工要分清，混用会退回到「永久错位」或「永久空白」：
+  //   · dropTerminalReplayFrame：这一份整屏回放作废，但**流继续**。只丢首帧。
+  //   · deferTerminalStream：这一拍判不了几何，连流一起拆掉挂起，等 fit 补挂。
+  //   · scheduleTerminalGeometryRealign：几何能判、只是冷却窗还热，等到点再对齐。
+
+  // 丢掉「紧接着这一帧 snapshot 到达的首帧回放」。不 reset：屏上已有的画面是这处
+  // 收尾的关键——错配时若把屏擦了又画不进新内容，用户看到的是空白；保留上一帧至
+  // 少还有内容。terminalReplayFramePending 一并清零，否则 data 处理器会把首帧当成
+  // 「自足整屏重绘」直写，正好绕过合并器也绕过丢弃标记。
+  function dropTerminalReplayFrame() {
+    terminalGeometryReplayDrop = true;
+    terminalReplayFramePending = false;
+    discardTerminalBurst();
+  }
+
+  // 几何判不了（容器不可测 / 组字期）时拆流挂起。挡下只是「这一拍量不准」，不是
+  // 「不要这条流」：记下 session.id，等 fit 在几何可信时补挂（见
+  // remountDeferredTerminalStream）。不碰 session.backendState——调用方已经写过，
+  // 这里再写会把刚收到的状态覆盖成旧值。
+  function deferTerminalStream(session) {
+    // 顺序要紧：closeTerminalStream 会清掉挂起标记（那是「主动拆流」的正常语义），
+    // 所以先拆完再挂上去，否则这一拍刚记下就被自己清掉了。
+    closeTerminalStream();
+    terminalStreamDeferred = true;
+    terminalDeferredSessionId = session?.id ?? null;
+  }
+
+  // 几何已可信时把挂起的流接回来。由 fit 在「量准并 POST 完」那条路径末尾调用：
+  // 那时 xterm 已按真实尺寸落定、PTY 也已对齐，此刻开流收到的首帧回放才是对的。
+  // 拿不到会话就保留标记，下一次 fit 再试——挂起是「这一拍量不准」，不是终态。
+  function remountDeferredTerminalStream() {
+    if (!terminalStreamDeferred || terminalStreamRemounting) return;
+    const session = terminalDeferredSessionId
+      ? terminalSessionFor(terminalDeferredSessionId)
+      : (activeTerminalPreviewId ? terminalSessionFor(activeTerminalPreviewId) : null);
+    if (!session?.backend) return;
+    if ($("terminalView")?.hidden) return;
+    if (!terminalHostMeasurable()) return;
+    // revive:false——这是被动补挂，不是用户挑了这条会话：进程已退就只回放最后一屏。
+    terminalStreamRemounting = true;
+    terminalStreamDeferred = false;
+    terminalDeferredSessionId = null;
+    try {
+      connectTerminalStream(session, { revive: false });
+    } finally {
+      terminalStreamRemounting = false;
+    }
+  }
+
+  // 强制对齐：POST 客户端真实尺寸，落定后重开一条流拿宿主按新尺寸自绘的整屏帧。
+  // 调用方已 reset 并竖起数据闸（terminalGeometryRealignPending），这里只负责收尾。
+  function finishTerminalGeometryRealign(term, session, clientCols, clientRows) {
+    // POST 挂住不落定时的兜底：放开数据闸让其后增量继续流。回放已被丢弃，放开不会
+    // 把错宽整屏帧画进来。
+    const realignStall = setTimeout(() => {
+      if (term === terminalXterm) terminalGeometryRealignPending = false;
+    }, TERMINAL_GEOMETRY_REALIGN_STALL_MS);
+    postTerminalResize(session, clientCols, clientRows)
+      .then((result) => {
+        // 宿主把 cols 夹在 240 / rows 夹在 120（见 resize 路由），POST 成功也不保证
+        // 两侧相等。不把夹过的值回夹进 xterm，下一次 snapshot 仍是「错配」，连续几拍
+        // 之后就撞上上限刹车——「连续两次对不齐后放弃」正是这么来的。回夹一次即收敛。
+        if (result && term && term !== null
+          && Number.isFinite(result.cols) && Number.isFinite(result.rows)
+          && (term.cols !== result.cols || term.rows !== result.rows)) {
+          try { term.resize(result.cols, result.rows); } catch { /* 实例已换人，忽略 */ }
+        }
+      })
+      .finally(() => {
+        clearTimeout(realignStall);
+        terminalGeometryRealignPending = false;
+        // 期间可能已切走 / 被拆流 / 换了实例：那些情况下这条重连都是多余的。
+        if (term !== terminalXterm || !terminalEventSource) return;
+        if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
+        connectTerminalStream(session, { revive: false });
+      });
+  }
+
+  // 冷却窗内不立刻重连（刚重连过，再来一次只会把同一份回放重画一遍），等窗过去
+  // 再走一次对齐。窗内到达的错配回放已被丢弃，屏上是上一帧的画面（不是空白）。
+  function scheduleTerminalGeometryRealign(term, session, clientCols, clientRows) {
+    if (terminalGeometryRealignTimer !== null) clearTimeout(terminalGeometryRealignTimer);
+    const wait = Math.max(0, TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS - (Date.now() - terminalGeometryRealignAt));
+    terminalGeometryRealignTimer = setTimeout(() => {
+      terminalGeometryRealignTimer = null;
+      // 实例换人 / 页不可见：这次对齐作废，切回终端页会走整屏重建。
+      if (term !== terminalXterm || !terminalEventSource) return;
+      if (document.hidden || $("terminalView")?.hidden) return;
+      terminalGeometryRealignAt = Date.now();
+      terminalGeometryRealignStreak += 1;
+      terminalGeometryRealignPending = true;
+      discardTerminalBurst();
+      term.reset();
+      terminalReplayFramePending = false;
+      finishTerminalGeometryRealign(term, session, clientCols, clientRows);
+    }, wait);
   }
 
   async function connectTerminalStream(session, { revive = true } = {}) {
@@ -8398,6 +8551,13 @@ async function api(method, path, body) {
     terminalEventSource.addEventListener("data", (event) => {
       // 重对齐在飞时到达的回放属于旧几何，写进去就是一屏错宽度；新流会重发一份。
       if (terminalGeometryRealignPending) return;
+      // 错配 snapshot 的作废回放：只丢这一帧。其后的增量是应用自己的正常输出，
+      // 与这份回放无关，照画（见 dropTerminalReplayFrame）。
+      if (terminalGeometryReplayDrop) {
+        terminalGeometryReplayDrop = false;
+        terminalReplayFramePending = false;
+        return;
+      }
       // 迟到的旧流帧不得消费回放闩 / 推进揭幕计数（后者是垫片的就绪判据）。
       if (term !== terminalXterm) return;
       if (typeof terminalLastStreamDataAt === "number") terminalLastStreamDataAt = Date.now();

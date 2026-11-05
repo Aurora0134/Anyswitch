@@ -339,8 +339,58 @@ test("resize 保留画面与历史，畸形/未知序列吞掉且不影响后续
   assert.equal(mirror.toReplay().length > 0, true, "吐完垃圾仍要能出回放");
 });
 
-test("纯背景行不算空行：只刷背景色的行也进回放", () => {
-  const mirror = createScreenMirror({ cols: 10, rows: 4 });
+// G1：rebuild() 的历史行文本缓存（_text，回放与跨重启快照的唯一来源）必须按**新**
+// 列宽重算。旧实现先重算再赋值 width，于是加宽时历史行被旧宽截断——右半内容从回放
+// 与快照里永久丢失（用户报的「同一批文本两种宽度各留一份」就是它）。
+const stripSgr = (text) => text.replace(/\u001b\[[0-9;]*m/g, "");
+
+test("G1 加宽：历史行右半不丢，快照/回放都按新列宽输出", () => {
+  const mirror = createScreenMirror({ cols: 82, rows: 10 });
+  // 一条 129 字符的行：82 列下软折成两行，标记落在**旧宽度之外**（90..98 列）。
+  // 放宽到 135 后应重排回一行；旧实现的 _text 停在 82 宽，标记正好被截掉。
+  const long = `${"X".repeat(90)}RIGHTHALF${"Y".repeat(30)}`;
+  mirror.write(long);
+  mirror.write("\r\n");
+  for (let i = 0; i < 30; i += 1) mirror.write(`hist ${i}\r\n`);
+  mirror.resize(135, 12);
+
+  const snapshot = mirror.serializeSnapshot();
+  const history = snapshot.history.map((entry) => stripSgr(entry.t));
+  assert.equal(snapshot.cols, 135, "快照自报新列宽");
+  const reflowed = history.filter((text) => text.includes("RIGHTHALF"));
+  assert.equal(reflowed.length, 1, "放宽后重排回一行，不重复");
+  assert.equal(reflowed[0].length, 129, "整行 129 字符内容都在：旧宽度之外的右半没被截掉");
+  assert.ok(mirror.toReplay().includes("RIGHTHALF"), "回放同样带得出右半内容");
+
+  // 旧实现会在这里红：_text 停在 82 宽度，RIGHTHALF 已被截掉。
+  assert.ok(history.every((text) => text.length <= 135), "历史行不超过新列宽");
+});
+
+// 收窄方向在旧实现里恰好不显形：newCols < oldCols 时 resizeRow 已先把格子截到新宽，
+// 所以 serializeRow 里 min(chars.length, 旧width) 仍等于新宽。这条钉的是「重算必须
+// 用新宽」这条规则本身——它保护的是加宽那侧的修法不被回退，不是复现另一个 bug。
+test("G1 收窄：历史行按新列宽重新折行，不按旧宽输出", () => {
+  const mirror = createScreenMirror({ cols: 135, rows: 10 });
+  const long = `${"X".repeat(60)}RIGHTHALF${"Y".repeat(60)}`; // 126 字符
+  mirror.write(long);
+  mirror.write("\r\n");
+  for (let i = 0; i < 30; i += 1) mirror.write(`hist ${i}\r\n`);
+  mirror.resize(82, 12);
+
+  const snapshot = mirror.serializeSnapshot();
+  assert.equal(snapshot.cols, 82, "快照自报新列宽");
+  const history = snapshot.history.map((entry) => stripSgr(entry.t));
+  assert.equal(history.every((text) => text.length <= 82), true,
+    "历史行不超过新列宽：否则客户端按 82 折行、宿主按 126 定位，纵向错位");
+  // 内容按新宽折到多行，字符一个不少（X 前段、RIGHTHALF 中段、Y 后段都要在）。
+  const joined = history.join("");
+  for (const piece of ["RIGHTHALF", "Y".repeat(60)]) {
+    assert.ok(joined.includes(piece), `收窄后仍能找到「${piece.slice(0, 9)}…」`);
+  }
+  assert.ok(mirror.toReplay().length > 0, "收窄后回放照常出帧");
+});
+
+test("纯背景行不算空行：只刷背景色的行也进回放", () => {  const mirror = createScreenMirror({ cols: 10, rows: 4 });
   mirror.write("\u001b[2;1H\u001b[48;5;240m     \u001b[0m");
   const replay = mirror.toReplay();
   assert.ok(replay.includes("48;5;240"), "纯背景行的背景属性必须出现在回放里");

@@ -9972,13 +9972,27 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
     const src = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "absorbTerminalSnapshot found in panel.js");
     const seen = { resets: 0 };
-    const term = { reset: () => { seen.resets += 1; } };
-    const session = { backendState: null, shell: { pid: null } };
+    const term = { cols: 120, rows: 34, reset: () => { seen.resets += 1; } };
+    const session = { id: "S1", backend: true, backendState: null, shell: { pid: null } };
     const fn = new Function(`
       let terminalReplayRestoring = false;
       let terminalReplayRestoreArm = null;
       let terminalReplayFramePending = false;
+      let terminalGeometryRealignPending = false;
+      let terminalGeometryRealignAt = 0;
+      let terminalGeometryRealignStreak = 0;
+      let terminalGeometryReplayDrop = false;
+      let terminalStreamDeferred = false;
+      const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
+      const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
+      const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
       function discardTerminalBurst() {}
+      function terminalHostMeasurable() { return true; }
+      let terminalImeHold = null;
+      function dropTerminalReplayFrame() { terminalGeometryReplayDrop = true; terminalReplayFramePending = false; }
+      function deferTerminalStream() { terminalStreamDeferred = true; }
+      function finishTerminalGeometryRealign() {}
+      function scheduleTerminalGeometryRealign() {}
       ${src}
       return absorbTerminalSnapshot;
     `)();
@@ -10024,6 +10038,8 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
       "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput",
+      "dropTerminalReplayFrame", "deferTerminalStream", "remountDeferredTerminalStream",
+      "finishTerminalGeometryRealign", "scheduleTerminalGeometryRealign",
       "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
@@ -10063,6 +10079,19 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       let terminalStreamWrite = null;
       let terminalWriteBurst = null;
       let terminalReplayFramePending = false;
+      // 几何闸的账与收尾设施（absorbTerminalSnapshot 与 data 处理器引用它们）。
+      let terminalGeometryRealignPending = false;
+      let terminalGeometryRealignAt = 0;
+      let terminalGeometryRealignStreak = 0;
+      let terminalGeometryReplayDrop = false;
+      let terminalStreamDeferred = false;
+      let terminalStreamRemounting = false;
+      let terminalDeferredSessionId = null;
+      let terminalGeometryRealignTimer = null;
+      const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
+      const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
+      const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
+      function terminalHostMeasurable() { return true; }
       const host = {};
       const $ = (id) => (id === "terminalXtermHost" ? host : null);
       const document = { documentElement: {} };

@@ -655,6 +655,13 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       row = Math.min(newRows - 1, Math.max(0, res.y));
     }
     mainSaved.abs = mainRef.value;
+    // 几何先落地再重算缓存：serializeRow 按闭包 width 截断，重算排在赋值之前就会用
+    // 旧列宽把历史行裁成旧宽——加宽时右半内容从这里起永久丢失（回放与跨重启快照都
+    // 只读这份 _text），收窄时又按旧宽输出、客户端按新宽折行。上面所有 resizeBuffer
+    // 都显式收到 (width, height) 参数，不读闭包，搬动不影响重排本身；下面的裁行循环
+    // 与 mainSaved.abs 上提都只认 _bytes 与 historyLines/historyBytes，同样不受影响。
+    width = newCols;
+    height = newRows;
     // resize 后重算滚动区的文本缓存与字节预算
     historyTotal = 0;
     for (const line of history) {
@@ -667,8 +674,6 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       // 顶部裁行把缓冲内容整体上移：保存点的绝对行跟着减（xterm 的 trimStart 调 savedY）。
       mainSaved.abs = Math.max(0, mainSaved.abs - 1);
     }
-    width = newCols;
-    height = newRows;
     top = 0;
     bottom = height - 1;
     // xterm 的 resize 末尾把 x 夹回 cols-1：满行哨兵到此为止。保存的列同样夹（savedX =
