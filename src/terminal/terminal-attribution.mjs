@@ -15,12 +15,14 @@
 // read command lines, null when it could not (degraded round) — never a guess.
 
 // Endpoints whose instance rows are session-granular (see sessionRowInstanceIdFor).
-const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode", "workbuddy"]);
+const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode", "workbuddy", "zcode"]);
 // Of those, the endpoints whose session row beats a pid-shaped row when both
 // exist (see the priority note in attributeTerminalSessions).
 // workbuddy 同 opencode：它的 pid 形行是 socket 兜底合成（runtime 是池化的，
 // 同一会话换 pid 不换行），pid 形行的语义是「某个 runtime 进程」，而会话行
 // 才是「哪条对话」——会话行是更准的答案，优先。
+// zcode 不在此列：它不进 socket 兜底白名单（late-socket-instance.mjs），pid
+// 形行从不存在，pidRowId 恒 null，先后次序无从谈起。
 const SESSION_ROW_FIRST_AGENT_IDS = new Set(["opencode", "workbuddy"]);
 
 // Windows-path key for cwd matching: lowercase, one separator, no trailing
@@ -31,11 +33,12 @@ function cwdKey(value) {
   return normalized === "" ? null : normalized;
 }
 
-// Session-row bridge: codex and opencode mint session-granular instance rows
-// (<agent>-sess-<session id>) because the process behind their traffic is
-// shared across sessions — codex's GUI engine, opencode's resident
-// `serve --service` — so the join's canonical "<agentId>-<pid>" shape can never
-// bind them. The relay's per-endpoint session feeds (row-id-shaped ids with
+// Session-row bridge: codex, opencode and zcode mint session-granular instance
+// rows (<agent>-sess-<session id>) because the pid-shaped canonical join can
+// never name their conversations — codex's traffic runs in a GUI engine shared
+// across sessions, opencode's in a resident `serve --service`, and zcode 从不
+// 产 pid 形行（relay 按请求头 x-session-id 铸会话行，进程身份对它没有实例
+// 语义）. The relay's per-endpoint session feeds (row-id-shaped ids with
 // cwd/lastActive/originator, from the on-disk session scan) bridge the gap: a
 // terminal session binds the most-recently-active session of that endpoint
 // whose cwd matches the session's. Desktop-originated sessions are excluded
@@ -109,13 +112,13 @@ function soleInteractiveTui(detected, candidates, agentId) {
 //   agents:   [{ id, name, instances?: [{ id, ... }], sessions?: [{ id, ... }] }]
 //             (display names + the pid-tailed rows that decide instanceId
 //             binding; Claude publishes both `instances` and legacy `sessions`)
-//   sessionFeeds: { codex?: [...], opencode?: [...] } | null (relay feed;
-//             the session-row bridges above; absent/empty on old relays)
+//   sessionFeeds: { codex?: [...], opencode?: [...], zcode?: [...] } | null
+//             (relay feed; the session-row bridges above; absent/empty on old relays)
 // Returns a NEW array; each attributed session gains
 //   agent: { endpointId, name, pid, instanceId | null }
 // instanceId binds only when a matching row exists in the agents payload's
 // instances or sessions: the pid-shaped "<agentId>-<pid>" row for every
-// endpoint but the session-row ones, and — for codex and opencode only, after
+// endpoint but the session-row ones, and — for the session-row endpoints, after
 // the pid shape misses — the bridged <agent>-sess-<id> row (see
 // sessionRowInstanceIdFor). Neither ships placeholder rows, so a freshly
 // detected client attributes with instanceId null until its first request

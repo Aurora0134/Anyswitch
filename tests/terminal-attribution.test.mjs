@@ -494,6 +494,78 @@ describe("attributeTerminalSessions", () => {
       assert.equal(out[0].agent.pid, 5120);
     });
   });
+
+  // zcode 的实例行全是会话粒度（zcode-sess-<id>，relay 按请求头 x-session-id
+  // 铸行）；它不进 socket 兜底白名单，pid 形行从不存在——没有 feed 时没有
+  // 任何东西可退，归属停在「检测到」层。
+  describe("zcode session bridge (session-granular instance ids)", () => {
+    const zcAgents = (rows) => [{ id: "zcode", name: "ZCode", instances: rows.map((id) => ({ id })) }];
+    const cwdSession = { ...baseSession, cwd: "D:\\dev\\bridge" };
+    const detected = [{ agentId: "zcode", pid: 6400, ancestors: [8888] }];
+
+    it("binds the latest same-cwd zcode-sess row", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        zcAgents(["zcode-sess-old", "zcode-sess-new", "zcode-sess-other"]),
+        { zcode: [
+          { id: "zcode-sess-old", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null },
+          { id: "zcode-sess-new", cwd: "d:/dev/bridge/", lastActive: 2000, originator: null },
+          { id: "zcode-sess-other", cwd: "E:\\elsewhere", lastActive: 3000, originator: null },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "zcode-sess-new",
+        "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
+    });
+
+    it("excludes desktop-originated sessions from the bridge", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        zcAgents(["zcode-sess-cli", "zcode-sess-desktop"]),
+        { zcode: [
+          { id: "zcode-sess-cli", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null },
+          { id: "zcode-sess-desktop", cwd: "D:\\dev\\bridge", lastActive: 9000, originator: "desktop" },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "zcode-sess-cli",
+        "桌面 GUI 会话更近也不能抢走终端会话的绑定");
+    });
+
+    it("bridge only binds rows present in the agents payload", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        zcAgents([]),
+        { zcode: [{ id: "zcode-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null }] },
+      );
+      assert.equal(out[0].agent.instanceId, null, "行不存在不绑，与 pid 路同一判据");
+    });
+
+    it("an old relay without the zcode feed attributes but stays unbound", () => {
+      const out = attributeTerminalSessions([cwdSession], detected, zcAgents(["zcode-sess-x"]));
+      assert.deepEqual(out[0].agent, {
+        endpointId: "zcode",
+        name: "ZCode",
+        pid: 6400,
+        instanceId: null,
+        busy: null,
+      }, "没有 pid 形行可退：无 feed 即无绑定");
+    });
+
+    it("the busy verdict rides through a feed-bound zcode session", () => {
+      // 多报/少报闭环的另一半：归属打通后 busy 透传不该有额外门槛——它只挂在
+      // detected 条目上，与实例行走哪座桥无关。
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "zcode", pid: 6400, ancestors: [8888], busy: true }],
+        zcAgents(["zcode-sess-x"]),
+        { zcode: [{ id: "zcode-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null }] },
+      );
+      assert.equal(out[0].agent.instanceId, "zcode-sess-x");
+      assert.equal(out[0].agent.busy, true);
+    });
+  });
 });
 
 describe("filterTerminalRequestRows", () => {
@@ -529,6 +601,20 @@ describe("filterTerminalRequestRows", () => {
     assert.deepEqual(filterTerminalRequestRows(rows, {}), []);
     assert.deepEqual(filterTerminalRequestRows(rows, { agentId: "" }), []);
     assert.deepEqual(filterTerminalRequestRows(null, { agentId: "kimi" }), []);
+  });
+
+  it("filters zcode session rows by their instance key", () => {
+    // zcode 会话行的 journal 账目键就是 zcode-sess-<id>：按绑定的实例键过滤时
+    // 只回本行，聚合桶（zcode-global）与别的会话行都不进集。
+    const zcodeRows = [
+      { ts: 1, agentId: "zcode", instanceId: "zcode-global", model: "m1", ok: true },
+      { ts: 2, agentId: "zcode", instanceId: "zcode-sess-a", model: "m2", ok: true },
+      { ts: 3, agentId: "zcode", instanceId: "zcode-sess-b", model: "m3", ok: true },
+    ];
+    assert.deepEqual(
+      filterTerminalRequestRows(zcodeRows, { agentId: "zcode", instanceId: "zcode-sess-a" }).map((r) => r.ts),
+      [2],
+    );
   });
 });
 

@@ -1689,6 +1689,35 @@ test("zcode: scans the session table read-only and loads messages", async () => 
   check.close();
 });
 
+test("zcode: desktop-driven sessions are tagged originator=desktop, CLI sessions are not", async () => {
+  const root = makeTmp();
+  mkdirSync(join(root, "cli", "db"), { recursive: true });
+  const dbPath = makeSessionDb(join(root, "cli", "db"));
+  // 桌面端与 CLI 同库，区分看输入通道：桌面渲染端（client-*）与 host 服务进程
+  // （host-services-*）的输入走 v4 command 通道，user message 落库带
+  // metadata.inputIntent.clientId；CLI TUI 直调 runtime，从不写这个字段。
+  const db = new DatabaseSync(dbPath);
+  const insertSession = db.prepare("INSERT INTO session VALUES (?, ?, ?, ?, ?)");
+  const insertMessage = db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)");
+  insertSession.run("sess_gui", "C:\\work\\dbproj", "桌面会话", 1788000100000, 1788000109000);
+  insertMessage.run("msg_gui", "sess_gui", 1788000101000, 1788000101000, JSON.stringify({
+    role: "user",
+    metadata: { inputIntent: { clientId: "client-01j00000000000000000000", kind: "sendText" } },
+  }));
+  insertSession.run("sess_host", "C:\\work\\dbproj", "host 代发会话", 1788000200000, 1788000209000);
+  insertMessage.run("msg_host", "sess_host", 1788000201000, 1788000201000, JSON.stringify({
+    role: "user",
+    metadata: { inputIntent: { clientId: "host-services-01j00000000000000000000", kind: "sendText" } },
+  }));
+  db.close();
+  const scanner = testScanner({ zcode: [root] });
+  const { sessions } = await scanner.scanAll();
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  assert.equal(byId.get("sess_gui").originator, "desktop");
+  assert.equal(byId.get("sess_host").originator, "desktop");
+  assert.equal(byId.get("sess_db1").originator, null, "CLI 会话无 inputIntent，不排除");
+});
+
 test("opencode: scans its own db and builds a verified resume command", async () => {
   const root = makeTmp();
   makeSessionDb(root, "opencode.db");

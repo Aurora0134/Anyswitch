@@ -1345,6 +1345,7 @@ export function createPanelRouter({
       codex: feed && Array.isArray(feed.codexSessions) ? feed.codexSessions : [],
       opencode: feed && Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
       workbuddy: feed && Array.isArray(feed.workbuddySessions) ? feed.workbuddySessions : [],
+      zcode: feed && Array.isArray(feed.zcodeSessions) ? feed.zcodeSessions : [],
     };
     sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, sessionFeeds) });
   }
