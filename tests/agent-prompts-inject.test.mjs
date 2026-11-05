@@ -68,12 +68,57 @@ describe("agent-prompts-inject endpoint table", () => {
 });
 
 describe("agent-prompts-inject block rendering and application", () => {
-  it("renders preset bodies only, never titles, inside the managed markers", () => {
+  it("renders each preset as a titled section inside the managed markers", () => {
     const block = buildManagedBlock([PRESET_A, PRESET_B]);
     assert.equal(
       block,
-      [MANAGED_BEGIN, "", "先读文件再修改", "", "第二行\n第三行", "", MANAGED_END].join("\n"),
+      [
+        MANAGED_BEGIN,
+        "",
+        "## 规则A",
+        "",
+        "先读文件再修改",
+        "",
+        "## 规则B",
+        "",
+        "第二行\n第三行",
+        "",
+        MANAGED_END,
+      ].join("\n"),
     );
+  });
+
+  it("normalizes a messy title into a single heading line", () => {
+    const block = buildManagedBlock([{ title: "  规则\nA ## ", content: "正文" }]);
+    assert.equal(
+      block,
+      [MANAGED_BEGIN, "", "## 规则 A", "", "正文", "", MANAGED_END].join("\n"),
+    );
+  });
+
+  it("falls back to a body paragraph when the preset carries no title", () => {
+    const block = buildManagedBlock([{ content: "只有正文" }]);
+    assert.equal(block, [MANAGED_BEGIN, "", "只有正文", "", MANAGED_END].join("\n"));
+  });
+
+  it("keeps a hash that is part of the word, not a closing sequence", () => {
+    const block = buildManagedBlock([{ title: "C#", content: "正文" }]);
+    assert.equal(block, [MANAGED_BEGIN, "", "## C#", "", "正文", "", MANAGED_END].join("\n"));
+  });
+
+  it("drops the heading when the title normalizes to nothing", () => {
+    const block = buildManagedBlock([{ title: "###", content: "正文" }]);
+    assert.equal(block, [MANAGED_BEGIN, "", "正文", "", MANAGED_END].join("\n"));
+  });
+
+  it("ignores a non-string title", () => {
+    const block = buildManagedBlock([{ title: 42, content: "正文" }]);
+    assert.equal(block, [MANAGED_BEGIN, "", "正文", "", MANAGED_END].join("\n"));
+  });
+
+  it("keeps the heading for a preset whose body is empty", () => {
+    const block = buildManagedBlock([{ title: "规则A", content: "   " }]);
+    assert.equal(block, [MANAGED_BEGIN, "", "## 规则A", "", MANAGED_END].join("\n"));
   });
 
   it("creates a missing file only when there is content to inject", () => {

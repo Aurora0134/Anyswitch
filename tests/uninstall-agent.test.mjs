@@ -667,7 +667,7 @@ test("claude: prompt block removed, junctions removed, real dirs and targets kep
   mkdirSync(claudeDir, { recursive: true });
   const claudeMd = join(claudeDir, "CLAUDE.md");
   writeFileSync(claudeMd, "# My notes\n");
-  createPromptsInjector({ homeDir: home }).syncEndpoint("claude", [{ content: "Always answer in Chinese." }]);
+  createPromptsInjector({ homeDir: home }).syncEndpoint("claude", [{ title: "回答语言", content: "Always answer in Chinese." }]);
   assert.ok(readFileSync(claudeMd, "utf8").includes(MANAGED_BEGIN));
 
   // seed skills: one junction into a repo lookalike, one real local dir
@@ -695,7 +695,7 @@ test("claude: prompt block removed, junctions removed, real dirs and targets kep
 test("claude: a CLAUDE.md holding only the managed block is deleted", async () => {
   const home = mkTestDir("uninstall-claude-only-");
   const { driver } = testDriver(home);
-  createPromptsInjector({ homeDir: home }).syncEndpoint("claude", [{ content: "preset body" }]);
+  createPromptsInjector({ homeDir: home }).syncEndpoint("claude", [{ title: "规则", content: "preset body" }]);
   const claudeMd = join(home, ".claude", "CLAUDE.md");
   assert.ok(existsSync(claudeMd));
 
@@ -729,12 +729,12 @@ function seedWorkbuddy(home, sidecarRoot, { sidecar = true } = {}) {
   mkdirSync(dirname(rulesFile), { recursive: true });
   writeFileSync(
     rulesFile,
-    "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n",
+    "# My notes\n\n" + buildManagedBlock([{ title: "规则", content: "preset body" }]) + "\n",
   );
   // 旧版落点（≤0.7.1 写 ~/.workbuddy/AGENTS.md，WorkBuddy 从不读它）：残留也要清。
   writeFileSync(
     join(home, ".workbuddy", "AGENTS.md"),
-    buildManagedBlock([{ content: "preset body" }]) + "\n",
+    buildManagedBlock([{ title: "规则", content: "preset body" }]) + "\n",
   );
   if (sidecar) seedSidecar(sidecarRoot, "workbuddy-sidecar.json", ["chan1"]);
   return modelsPath;
@@ -819,7 +819,7 @@ test("workbuddy: WORKBUDDY_CONFIG_DIR 只挪 models，提示词与 skills 仍按
   // 提示词与 skills 落在注入/部署侧的静态 home 目录里。
   const rulesFile = join(home, ".workbuddy", "rules", "anyswitch-managed-prompts.md");
   mkdirSync(dirname(rulesFile), { recursive: true });
-  writeFileSync(rulesFile, "# My notes\n\n" + buildManagedBlock([{ content: "preset body" }]) + "\n");
+  writeFileSync(rulesFile, "# My notes\n\n" + buildManagedBlock([{ title: "规则", content: "preset body" }]) + "\n");
   const repo = mkTestDir("workbuddy-skills-repo-envroot-");
   mkdirSync(join(repo, "my-skill"), { recursive: true });
   writeFileSync(join(repo, "my-skill", "SKILL.md"), "---\nname: my-skill\n---\n");
