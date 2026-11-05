@@ -68,6 +68,64 @@ function sessionRowInstanceIdFor(cwd, feed, instanceRow) {
   return best === null ? null : best.id;
 }
 
+// zcode 的会话行 id 与请求路径同源的构造规则：resume.id 是客户端原始值（带
+// sess_ / subagent_agent_ 内部前缀），relay 铸行前会把这两个前缀顺序各剥一次再
+// 清洗字符集。这里逐字复刻，只用于「拿终端自带的身份去 instanceRow 里精确查」，
+// 对不上就返回 null（不命中比错绑安全）。规则出处见 relay/openai-server.mjs 的
+// zcodeSessionRowIdForJoin / sessionRowId。
+const ZCODE_SESSION_INTERNAL_PREFIXES = ["sess_", "subagent_agent_"];
+const ZCODE_SESSION_ROW_PREFIX = "zcode-sess-";
+const INSTANCE_ID_MAX_LEN = 64;
+function zcodeSessionRowIdForJoin(rawId) {
+  if (typeof rawId !== "string") return null;
+  let id = rawId;
+  for (const prefix of ZCODE_SESSION_INTERNAL_PREFIXES) {
+    if (id.startsWith(prefix) && id.length > prefix.length) id = id.slice(prefix.length);
+  }
+  const cleaned = id.trim().replace(/[^A-Za-z0-9._:-]+/g, "-");
+  if (cleaned.length === 0) return null;
+  const rowId = ZCODE_SESSION_ROW_PREFIX + cleaned.slice(0, INSTANCE_ID_MAX_LEN - ZCODE_SESSION_ROW_PREFIX.length);
+  if (rowId.length > INSTANCE_ID_MAX_LEN || !/^[A-Za-z0-9._:-]+$/.test(rowId)) return null;
+  return rowId;
+}
+
+// 终端的续接身份就是「这条终端在跑哪段会话」的正源：能精确命中时，优先于任何
+// cwd 猜测。endpoint 必须同为 zcode——resume 是跨端点共用的字段，别的端点的
+// 会话 id 在 zcode 行里必然查不到，先挡掉免得白查。
+function zcodeResumeRowId(session, instanceRow) {
+  const resume = session?.resume;
+  if (!resume || resume.endpoint !== "zcode") return null;
+  const rowId = zcodeSessionRowIdForJoin(resume.id);
+  if (rowId === null) return null;
+  return instanceRow.has(`zcode:${rowId}`) ? rowId : null;
+}
+
+// actor / subagent 行是**辅助执行者**，不是用户在这条终端里打开的会话：现场
+// 1058 行里 254 条 actor 行，且它们恰好最热、originator 为 null——按 cwd+最近
+// 活跃挑必中它们（M13 已复现 activeRequests=8 抢绑）。它们一律不参与 cwd 兜底。
+function isZcodeAuxiliaryRow(id) {
+  const lower = id.toLowerCase();
+  return lower.endsWith("-actor") || lower.includes("subagent");
+}
+
+// zcode 的 cwd 兜底：排除 actor/subagent 与 desktop 行后，**唯一**命中才绑。
+// 多行同 cwd 是同机多会话的常态，按最近活跃挑就是猜——判不准返回 null，与
+// 「归属判不准不猜」的既有裁决一致。
+function zcodeCwdRowId(cwd, feed, instanceRow) {
+  const key = cwdKey(cwd);
+  if (key === null) return null;
+  const matches = new Set();
+  for (const meta of feed) {
+    if (!meta || typeof meta.id !== "string") continue;
+    if (cwdKey(meta.cwd) !== key) continue;
+    if (String(meta.originator ?? "").toLowerCase().includes("desktop")) continue;
+    if (isZcodeAuxiliaryRow(meta.id)) continue;
+    if (!instanceRow.has(`zcode:${meta.id}`)) continue;
+    matches.add(meta.id);
+  }
+  return matches.size === 1 ? matches.values().next().value : null;
+}
+
 // Recency pick over one endpoint's session feed: the most-recently-active row
 // that exists in the agents payload (ties on lastActive resolve by id, same as
 // the cwd bridge). Used by the sole-owner fallback below.
@@ -186,9 +244,16 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
       ? canonicalId
       : (memberPidRow.get(`${best.agentId}:${best.pid}`) ?? null);
     const feed = feeds[best.agentId];
-    const bridgedId = feed !== undefined && feed.length > 0
-      ? sessionRowInstanceIdFor(session.cwd, feed, instanceRow)
-      : null;
+    // zcode 走精确绑定：终端自带的 resume.id 命中优先（feed 有没有都能用）；未命中
+    // 才走「排除 actor/subagent 后唯一 cwd」兜底，判不准返回 null。其它端点保持
+    // 原行为一字不变。
+    let bridgedId = null;
+    if (best.agentId === "zcode") {
+      const resumeId = zcodeResumeRowId(session, instanceRow);
+      bridgedId = resumeId ?? (feed !== undefined && feed.length > 0 ? zcodeCwdRowId(session.cwd, feed, instanceRow) : null);
+    } else if (feed !== undefined && feed.length > 0) {
+      bridgedId = sessionRowInstanceIdFor(session.cwd, feed, instanceRow);
+    }
     // opencode only: when this terminal runs the machine's only interactive
     // TUI, recency is the authoritative answer (see soleInteractiveTui) and
     // beats a cwd match — the TUI may be working in a session whose directory
