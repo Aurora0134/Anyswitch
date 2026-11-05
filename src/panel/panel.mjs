@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadStore, storePaths as defaultStorePaths } from "../store/store-io.mjs";
 import { enableAutostart, disableAutostart, isAutostartEnabled, enableWatchdogAutostart, disableWatchdogAutostart, isWatchdogAutostartEnabled } from "../ops/autostart.mjs";
+import { createDesktopShortcut } from "../ops/desktop-shortcut.mjs";
 import { spawnWatchdog, stopWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
 import { loadSettings, saveSettings, defaultSettingsPath, createLogLevelGate } from "../relay/relay-settings.mjs";
 import { logLevelAllows } from "../shared/logger.mjs";
@@ -3200,6 +3201,11 @@ export function createPanelRouter({
     sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.error ?? null });
   }
 
+  async function handleDesktopShortcutCreate(res) {
+    const result = await createDesktopShortcut();
+    sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.error ?? null });
+  }
+
   // 状态检测的号池聚合：号池是单一统计单元，按 store 的 pools 把池行和
   // 成员直连行（过渡期存量客户端仍指成员渠道）合并为每 (池, 模型) 一行，
   // 尝试级口径——成功、失败尝试都计入。计数/延迟/缓存命中率按 total 加权
@@ -3796,6 +3802,7 @@ export function createPanelRouter({
     if (path === "/panel/api/autostart" && method === "GET") return handleAutostartStatus(res);
     if (path === "/panel/api/autostart/enable" && method === "POST") return handleAutostartEnable(res);
     if (path === "/panel/api/autostart/disable" && method === "POST") return handleAutostartDisable(res);
+    if (path === "/panel/api/desktop-shortcut/create" && method === "POST") return handleDesktopShortcutCreate(res);
 
     if (path === "/panel/api/settings" && method === "GET") {
       try {
