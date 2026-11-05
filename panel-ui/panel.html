@@ -794,12 +794,13 @@ if (window.panelStartupController) panelStartupPlay();
                   </div>
                   <div class="agent-headings">
                     <h3>ZCode</h3>
+                    <span class="instance-count-badge" id="zcInstanceCount" hidden></span>
                   </div>
                 </div>
                 <div class="agent-actions">
                   <div id="zcModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <span class="badge badge-ok" id="zcStateBadge">运行中</span>
-                  <button type="button" class="agent-detail-fold" id="zcDetailFoldBtn" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                  <button type="button" class="agent-detail-fold" id="zcDetailFoldBtn" data-prefix="zc" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
               </div>
 
@@ -897,6 +898,7 @@ if (window.panelStartupController) panelStartupPlay();
                 </div>
 
                 <div class="session-table-wrapper">
+                  <div id="zcInstancesList"></div>
                   <div class="session-row" id="zcSessionRow">
                     <div class="session-main">
                       <div class="session-name-line">

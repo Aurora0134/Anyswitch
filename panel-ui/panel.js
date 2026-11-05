@@ -1082,6 +1082,10 @@ async function api(method, path, body) {
   // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
   // 未运行时折叠钮由 card-collapsed CSS 隐藏。
   // dsh/pi/kimi/opencode/codex 已从此旧机制摘除，改走下方 data-prefix 事件委托。
+  // zc 是双接线：折叠钮同时带 data-prefix="zc"，实例行四宫格与「全局汇总」
+  // 静态行（detail-open-only）的收放、实例折线的展开补绘走统一委托
+  //（applyDetailFold，同多实例栏），本段只管端点级四宫格/简要栏/整盒。
+  // 两侧同写一个 localStorage 键、每次点击各翻一次各自缓存，状态天然同步。
   ["zc", "qoder"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
@@ -1891,6 +1895,19 @@ async function api(method, path, body) {
       $("zcDurationVal").textContent = formatDurationSeconds(dur);
 
       const tokens = m.tokens || sess.tokens || {};
+
+      // 实例按行排列：会话粒度行（zcode-sess-<会话 id>，relay 按 x-session-id
+      // 铸行）。showSurface：行上可带后端按连接属主谱系定档的面徽标
+      //（Desktop/TUI，与 claude/kimi 同一渲染位、同一 token），未定档不贴；
+      // 无实例时用端点聚合量渲染一行「全局汇总」伪实例行。实例盒与静态
+      // 「全局汇总」行同盒，随本卡旧折叠钮整盒收放；盒内静态行的展开门控
+      // 与其他多实例栏同款（gateAggregateRow，须在 applyDetailFold 之后）。
+      const instances = Array.isArray(z.instances) ? z.instances : [];
+      setInstanceCount("zc", instances.length);
+      renderInstanceRows({ prefix: "zc", listEl: $("zcInstancesList"), instances, showSurface: true, aggregateFallback: buildAggregateFallback(m, z, isGenerating) });
+      applyDetailFold("zc");
+      gateAggregateRow("zc", $("zcSessionRow"), instances.length);
+
       updateDetailBrief("zc", {
         isGenerating,
         ttft: (typeof ttft === "number" && ttft > 0) ? ttft : null,
@@ -1931,6 +1948,7 @@ async function api(method, path, body) {
         lastModelTag.textContent = "模型: 待命";
       }
     } else {
+      setInstanceCount("zc", 0);
       stateBadge.className = "badge badge-neutral";
       stateBadge.textContent = "未运行";
       empty.hidden = false;
@@ -8423,10 +8441,13 @@ async function api(method, path, body) {
   // 优先、路由当前跳后备）；最近请求只查活动标签的那一个实例。普通终端
   //（无归属）session.agent 恒为 null，监测区按规范整列隐藏。
 
-  // 只按端点（而非实例）出读数的端点：relay 的 detected 进程白名单与 socket
-  // 实例兜底都不含 zcode，其 journal 行不带 instanceId、agents 负载只有一条
-  // <endpoint>-global 汇总行。这些端点的一键启动会话永远拿不到进程归属，但宿主
-  // 快照带着 agentId，右栏可以按端点级读数接线——不伪造实例身份。
+  // 端点级读数兜底名单：zcode 已升级会话粒度实例行（zcode-sess-<会话 id>，
+  // relay 按 x-session-id 铸行）并进了 detected 归属面，正常路径下归属会话
+  // 按实例行取数。但老 relay（无 zcodeSessions feed、detected 不含 zcode）下
+  // 一键启动的会话 session.agent 恒为 null，宿主快照仍带 agentId——仅这种
+  // 真无归属会话按 <endpoint>-global 汇总行接线，不伪造实例身份。已归属
+  // 未绑定（agent 在场、instanceId 为 null，等首发请求建行）不进此兜底，
+  // 与 codex 流量前状态同形态，按空态呈现。
   const TERMINAL_AGGREGATE_ONLY_ENDPOINTS = new Set(["zcode"]);
 
   function enrichTerminalSessions(agentsPayload) {

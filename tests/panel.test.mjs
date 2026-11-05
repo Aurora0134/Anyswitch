@@ -4796,6 +4796,128 @@ describe("panel.html 静态卡（zc/qoder）收起态简要栏与多实例实例
 });
 
 
+describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () => {
+  // zcode 从聚合-only 升级为会话粒度实例行（relay 按 x-session-id 铸
+  // zcode-sess-<会话 id> 行，surface 徽标 Desktop/TUI 由后端定档下发）：卡片照
+  // codex/kimi 先例接 renderInstanceRows + showSurface；端点级四宫格/简要栏/
+  // 旧折叠钮原样保留（汇总读数仍有去处），实例盒与静态「全局汇总」行同盒、
+  // 随旧折叠钮整盒收放。
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"),
+    "utf8",
+  );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
+    "utf8",
+  );
+
+  it("zcode 卡声明实例行容器与计数胶囊，实例盒排在静态「全局汇总」行之前", () => {
+    const cardStart = panelHtml.indexOf('data-agent-id="zcode"');
+    assert.ok(cardStart > 0, "zcode card container exists");
+    const cardEnd = panelHtml.indexOf('data-agent-id="', cardStart + 20);
+    const zcCard = panelHtml.slice(cardStart, cardEnd);
+    assert.ok(zcCard.includes('id="zcInstanceCount"'), "实例计数胶囊");
+    assert.ok(zcCard.includes('id="zcInstancesList"'), "实例行容器");
+    assert.ok(
+      zcCard.indexOf('id="zcInstancesList"') < zcCard.indexOf('id="zcSessionRow"'),
+      "实例盒排在「全局汇总」行之前（与多实例栏同序）");
+  });
+
+  const renderZcodeSrc = panelJs.match(/function renderZcode\(z\) \{[\s\S]*?\n  \}/)?.[0];
+
+  it("renderZcode 接 renderInstanceRows + showSurface，停态清零计数", () => {
+    assert.ok(renderZcodeSrc, "renderZcode found in panel.js");
+    assert.ok(renderZcodeSrc.includes('renderInstanceRows({ prefix: "zc"'), "渲染实例行");
+    assert.ok(renderZcodeSrc.includes("showSurface: true"), "行上贴面徽标（Desktop/TUI，后端下发值直贴）");
+    assert.ok(renderZcodeSrc.includes('setInstanceCount("zc", instances.length)'), "驱动实例计数胶囊");
+    assert.ok(renderZcodeSrc.includes('applyDetailFold("zc")'), "折叠态应用走统一管线");
+    assert.ok(renderZcodeSrc.includes('gateAggregateRow("zc", $("zcSessionRow"), instances.length)'), "「全局汇总」行同其他卡门控");
+    assert.ok(renderZcodeSrc.includes('setInstanceCount("zc", 0)'), "未运行分支清零计数");
+  });
+
+  function runZcode(payload) {
+    const els = new Map();
+    const calls = { instance: [], count: [], fold: [], gate: [] };
+    const get = (id) => {
+      if (!els.has(id)) {
+        els.set(id, {
+          id, hidden: false, textContent: "", className: "",
+          closest: () => ({ classList: { toggle() {} } }),
+        });
+      }
+      return els.get(id);
+    };
+    const fn = new Function(
+      "$", "renderModelBadges", "applyFaultBanner", "isEndpointStale", "endpointStaleFlags",
+      "dimEndpointRateCards", "formatDurationSeconds", "formatTokens", "updateDetailBrief",
+      "pushMetricPoint", "redrawEndpointSparklines", "formatRelativeAge",
+      "setInstanceCount", "renderInstanceRows", "applyDetailFold", "gateAggregateRow", "buildAggregateFallback",
+      `${renderZcodeSrc}\nreturn renderZcode;`,
+    )(
+      get,
+      () => {}, () => {}, () => false, {},
+      () => {}, () => "0秒", (v) => String(v ?? 0), () => {},
+      () => {}, () => {}, () => "",
+      (prefix, n) => calls.count.push([prefix, n]),
+      (opts) => calls.instance.push(opts),
+      (prefix) => calls.fold.push(prefix),
+      (...args) => calls.gate.push(args),
+      () => ({ requests: 0 }),
+    );
+    fn(payload);
+    return { calls, els };
+  }
+
+  it("renderZcode 桩环境真跑：实例原样透传、聚合兜底随行、停态不渲实例", () => {
+    const running = runZcode({
+      id: "zcode", status: "running",
+      instances: [{ id: "zcode-sess-abc", surface: "Desktop", requests: 3 }],
+      metrics: { totalRequests: 3, tokens: { prompt: 10, completion: 20, cached: 5 } },
+    });
+    assert.deepEqual(running.calls.count, [["zc", 1]], "实例计数按行数");
+    assert.equal(running.calls.instance.length, 1, "跑态渲一次实例行");
+    assert.equal(running.calls.instance[0].prefix, "zc", "实例行用本卡前缀");
+    assert.equal(running.calls.instance[0].showSurface, true, "实例行贴面徽标");
+    assert.equal(running.calls.instance[0].instances[0].id, "zcode-sess-abc", "实例原样下发");
+    assert.equal(running.calls.instance[0].instances[0].surface, "Desktop", "surface 字段原样透传给渲染器");
+    assert.ok(running.calls.instance[0].aggregateFallback, "聚合兜底随行（零实例时伪行有数据）");
+    assert.deepEqual(running.calls.fold, ["zc"], "折叠态按本卡应用");
+    assert.equal(running.calls.gate.length, 1, "聚合行闸门按实例数放行");
+    assert.equal(running.calls.gate[0][2], 1, "闸门收到实例数");
+
+    const stopped = runZcode({ id: "zcode", status: "stopped" });
+    assert.deepEqual(stopped.calls.count, [["zc", 0]], "停态清零实例计数");
+    assert.equal(stopped.calls.instance.length, 0, "停态不渲实例行");
+  });
+
+  it("surface 徽标复用既有渲染位：showSurface 门 + 后端字面量直贴，聚合伪行不贴", () => {
+    const m = panelJs.match(/const surfaceBadge = ([\s\S]*?);/);
+    assert.ok(m, "surfaceBadge expression found in panel.js");
+    const badge = (isAggregate, showSurface, surface) =>
+      new Function("isAggregate", "showSurface", "inst", "escapeHtml", `return (${m[1]});`)(
+        isAggregate, showSurface, { surface }, (s) => s);
+    const desktop = badge(false, true, "Desktop");
+    assert.ok(desktop.includes("badge badge-neutral") && desktop.includes("Desktop"), "Desktop 直贴既有 token");
+    assert.ok(badge(false, true, "TUI").includes("TUI"), "TUI 直贴");
+    assert.equal(badge(false, false, "Desktop"), "", "showSurface 关的端点不贴");
+    assert.equal(badge(true, true, "Desktop"), "", "聚合伪行不贴");
+    assert.equal(badge(false, true, undefined), "", "未定档不贴（不猜）");
+  });
+
+  it("zc 折叠钮双接线：旧机制管端点级四宫格/整盒，实例行收放走 data-prefix 统一委托", () => {
+    const cardStart = panelHtml.indexOf('data-agent-id="zcode"');
+    const cardEnd = panelHtml.indexOf('data-agent-id="', cardStart + 20);
+    const zcCard = panelHtml.slice(cardStart, cardEnd);
+    assert.ok(/id="zcDetailFoldBtn"[^>]*data-prefix="zc"/.test(zcCard),
+      "zc 折叠钮带 data-prefix，实例行四宫格/detail-open-only 收放与展开补绘走 applyDetailFold");
+    const m = panelJs.match(/\["zc", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
+    assert.ok(m, "static fold wiring found in panel.js");
+    assert.ok(m[0].includes("if (aggWrap) aggWrap.hidden = !open;"), "旧机制仍管整盒收放");
+    assert.ok(!m[0].includes("detailFoldState") && !m[0].includes("redrawInstanceSparklines"),
+      "旧机制不碰实例行折叠闸（实例行归 applyDetailFold，见 panel-instance-fold 契约）");
+  });
+});
+
 describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a11y", () => {
   const panelJs = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
@@ -9395,6 +9517,105 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.equal(metrics.providerId, "a6api-pool");
   });
 
+  // zcode 升级会话粒度实例行（zcode-sess-<id>）后：归属已绑定的会话全部走实例行
+  // 路径，端点级汇总行只保留给真无归属会话（老 relay 降级，见上两条用例）。
+  function makeEnrich() {
+    return new Function("session", `
+      const terminalBackendSessions = { zc: session };
+      const TERMINAL_AGGREGATE_ONLY_ENDPOINTS = new Set(["zcode"]);
+      const boardRoutingChains = () => ({});
+      const routeRuntimeState = "ok";
+      const routeRuntimeCache = {};
+      const terminalRouteForEndpoint = () => ({ route: [], routeCurrent: 0 });
+      const noteTerminalWorkingStatus = () => {};
+      const terminalSessionBusyFromSignals = (s, count) => count > 0;
+      const terminalMetricsFromInstance = (row) => ({ requestCount: row.requests, tps: row.tps });
+      ${extractFn("terminalInstanceRow")}
+      ${extractFn("enrichTerminalSessions")}
+      return enrichTerminalSessions;
+    `);
+  }
+
+  it("zcode 归属已绑定：读 zcode-sess 实例行，不碰端点汇总行", () => {
+    // 负载同拍带着汇总行与实例行：归属会话必须命中实例行，汇总行只服务无归属兜底。
+    const agents = [{
+      id: "zcode", sessionMode: "aggregate",
+      sessions: [{ id: "zcode-global", activeRequests: 9, requests: 99, tps: 99 }],
+      instances: [{ id: "zcode-sess-abc", activeRequests: 1, requests: 3, tps: 12.3 }],
+    }];
+    const session = {
+      id: "zc", backend: true, agentId: "zcode",
+      agent: { endpointId: "zcode", pid: 4321, instanceId: "zcode-sess-abc", busy: false },
+      status: "idle", metrics: null, requests: [],
+    };
+    makeEnrich()(session)(agents);
+    assert.equal(session.aggregateSource, null, "有归属不接端点级读数来源");
+    assert.equal(session.metrics?.requestCount, 3, "四宫格取 zcode-sess 实例行的请求数");
+    assert.equal(session.metrics?.tps, 12.3, "速率取实例行而非汇总行");
+    assert.equal(session.status, "working", "在途请求按实例行派生忙态");
+  });
+
+  it("zcode 已归属未绑定（instanceId 为 null）：不落端点级兜底，等首发请求建行", () => {
+    const agents = [{
+      id: "zcode", sessionMode: "aggregate",
+      sessions: [{ id: "zcode-global", activeRequests: 2, requests: 7, tps: 12.3 }],
+    }];
+    const session = {
+      id: "zc", backend: true, agentId: "zcode",
+      agent: { endpointId: "zcode", pid: 4321, instanceId: null, busy: false },
+      status: "idle", metrics: null, requests: [],
+    };
+    makeEnrich()(session)(agents);
+    assert.equal(session.aggregateSource, null, "已归属未绑定不接端点级读数来源（codex 流量前同形态）");
+    assert.equal(session.metrics, null, "无实例行即空态，不拿汇总行冒充");
+    assert.equal(session.status, "idle", "汇总行的在途请求不点亮未绑定会话");
+  });
+
+  it("zcode 已归属未绑定：最近请求清空且不发查询（不拿端点级请求冒充）", async () => {
+    const calls = [];
+    const session = {
+      id: "zc", backend: true, agentId: "zcode",
+      agent: { endpointId: "zcode", pid: 4321, instanceId: null, busy: false },
+      requests: [{ model: "stale" }],
+    };
+    const run = new Function("calls", "session", `
+      const activeTerminalPreviewId = "zc";
+      const terminalSessionFor = () => session;
+      const api = async (method, url) => { calls.push([method, url]); return { requests: [] }; };
+      const terminalRequestsFromRows = (rows) => rows;
+      ${extractFn("refreshActiveTerminalRequests")}
+      return refreshActiveTerminalRequests;
+    `)(calls, session);
+    await run();
+    assert.equal(calls.length, 0, "未绑定不发请求日志查询");
+    assert.deepEqual(session.requests, [], "旧请求清空，等首发请求建行后按实例键查");
+  });
+
+  it("zcode 归属已绑定：最近请求按实例键查（与其他端点同款）", async () => {
+    const calls = [];
+    const session = {
+      id: "zc", backend: true, agentId: "zcode",
+      agent: { endpointId: "zcode", pid: 4321, instanceId: "zcode-sess-abc", busy: false },
+      requests: [],
+    };
+    const run = new Function("calls", "session", `
+      const activeTerminalPreviewId = "zc";
+      const terminalSessionFor = () => session;
+      const api = async (method, url) => {
+        calls.push([method, url]);
+        return { requests: [{ ts: 1, agentId: "zcode", instanceId: "zcode-sess-abc", model: "glm-5.3", providerId: "pool", ok: true }] };
+      };
+      const terminalRequestsFromRows = (rows) => rows.map((r) => ({ model: r.model }));
+      ${extractFn("refreshActiveTerminalRequests")}
+      return refreshActiveTerminalRequests;
+    `)(calls, session);
+    await run();
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0][1].includes("agentId=zcode") && calls[0][1].includes("instanceId=zcode-sess-abc"),
+      "归属且绑定后按实例键查");
+    assert.deepEqual(session.requests, [{ model: "glm-5.3" }]);
+  });
+
   it("接线结构：渲染拆成数据层与结构层、最后一页签可关（空态判据＝视口数）", () => {
     assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
     const renderBody = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
@@ -13633,6 +13854,34 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
       [{ type: "activity", endpointId: "dsh", instanceId: "dsh-6100", activeRequests: 2, at: 2 }, { t1: bound }], deps);
     assert.equal(hit, true, "实例级帧命中");
     assert.equal(bound.status, "working");
+  });
+
+  it("前端：zcode 实例级帧落到归属会话（zcode-sess 键无特殊跳过），端点级帧不点亮未绑定会话", async () => {
+    const deps = ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalActivityKey"];
+    const now = Date.now();
+    const backendState = { status: "running", lastActiveAt: now - 60_000, createdAt: now - 600_000, spawnedAt: now - 600_000 };
+    const bound = {
+      status: "idle", metrics: { activeRequests: 0 },
+      agent: { endpointId: "zcode", pid: 4321, instanceId: "zcode-sess-abc", busy: false },
+      backendState,
+    };
+    const unbound = {
+      status: "idle", metrics: null,
+      agent: { endpointId: "zcode", pid: 4322, instanceId: null, busy: false },
+      backendState: { ...backendState },
+    };
+    const hit = await vmFn("terminalActivityApplyFrame",
+      [{ type: "activity", endpointId: "zcode", instanceId: "zcode-sess-abc", activeRequests: 1, at: 1 },
+        { t1: bound, t2: unbound }], deps);
+    assert.equal(hit, true, "zcode 实例级帧命中归属会话");
+    assert.equal(bound.status, "working", "归属会话转圈");
+    assert.equal(unbound.status, "idle", "未绑定会话不被别人的会话行点亮");
+    // 端点级帧（zcode-global 合计在途）：不落到任何单会话（含未绑定新会话）。
+    const agg = await vmFn("terminalActivityApplyFrame",
+      [{ type: "activity", endpointId: "zcode", instanceId: null, activeRequests: 5, at: 2 },
+        { t1: unbound }], deps);
+    assert.equal(agg, false, "zcode 端点级帧不落到任何单会话");
+    assert.equal(unbound.status, "idle");
   });
 
   it("前端：terminalActivityApplyFrame 定点更新不串键、snapshot 整帧对齐", async () => {
