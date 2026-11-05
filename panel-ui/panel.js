@@ -3787,7 +3787,7 @@ async function api(method, path, body) {
       const copy = bleedingTrack ? {
         current: "已是先行版最新",
         update_available: `发现先行新提交 ${update?.remoteCommit || ""}`,
-        error: "暂时无法检查，请重试",
+        error: "暂时无法检查，请检查网络或代理设置后重试",
       } : {
         update_available: update?.release?.prerelease ? `发现新预览版 ${update?.release?.version || ""}` : `发现新版本 ${update?.release?.version || ""}`,
         // 不一致家族（ahead / 安装游离）：状态行只交代检查发生过，事实在不一致
@@ -3795,7 +3795,7 @@ async function api(method, path, body) {
         current: drift ? "已检查更新" : "当前已是最新",
         ahead: "已检查更新",
         no_releases: "暂无发布版本",
-        error: "暂时无法检查，请重试", unknown_version: "当前版本无法比较",
+        error: "暂时无法检查，请检查网络或代理设置后重试", unknown_version: "当前版本无法比较",
       };
       if (!keepOutcome) {
         status.textContent = checking ? "正在检查更新…" : copy[state] || "尚未检查更新";
@@ -5217,7 +5217,7 @@ async function api(method, path, body) {
           }
           let plan = null;
           try { plan = await api("GET", "/api/self-update/bleeding-plan"); } catch { plan = null; }
-          if (!plan?.ok) { revert(); toast("暂时无法检查，请重试", true); return; }
+          if (!plan?.ok) { revert(); toast("暂时无法检查，请检查网络或代理设置后重试", true); return; }
           let confirmed, rollback = false;
           if (plan.onStableNode) {
             const body = plan.baseVersion
