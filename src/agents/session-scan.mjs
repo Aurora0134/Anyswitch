@@ -20,8 +20,9 @@
 //   createdAt / lastActive / resumeCommand
 // `originator` is the client-surface tag the codex CLI writes into its
 // session_meta (`codex-tui` for CLI / VS Code surfaces, `codex_work_desktop`
-// for the desktop GUI). Only the codex adapter fills it — every other adapter
-// passes null, because no other CLI records an equivalent. The terminal
+// for the desktop GUI). The zcode adapter derives the same tag from its
+// message store (see zcodeDesktopSessionIds); every other adapter passes null,
+// because no other CLI records an equivalent. The terminal
 // attribution join (terminal-attribution.mjs, terminal-conversation-bindings.mjs)
 // reads it to stop a desktop session from winning a cwd match that belongs to a
 // terminal CLI session, so dropping the field is not a cosmetic change.
@@ -2026,6 +2027,31 @@ function sqliteTableExists(db, name) {
 
 // Shared row shape for zcode/opencode `session` tables (same columns on both):
 // id / title / directory / time_created / time_updated (ms since epoch).
+// zcode 桌面会话判据。桌面端与 CLI 共用一个会话库（桌面的
+// ZCODE_DESKTOP_SESSION_DATA_DIR 只是 Electron 的 Chromium sessionData，agent
+// 会话库恒为 ~/.zcode/cli/db/db.sqlite），session 表本身没有 surface 列。能区分
+// 的是输入通道：桌面渲染端（client-<uuidv7>，zcode-src packages/ui
+// commandFactory）与 host 服务进程（host-services-<uuidv7>，zcodeV4HostCommand）
+// 的输入走 v4 command 通道，落库的 user message 带
+// metadata.inputIntent.clientId；CLI TUI 直调 runtime submitPrompt，从不写
+// inputIntent。命中即桌面来源，终端归属桥据此把桌面会话排除出 cwd 匹配，
+// 防止它抢走同目录终端会话的绑定。判不出（无 message 表）按 CLI 处置——不排除。
+// json_valid 前置是防个别损坏行的 JSON 让 json_extract 抛错、拖垮整个扫描；
+// LIKE 预筛把 json_extract 的调用面收窄到真正带 inputIntent 的行。
+function zcodeDesktopSessionIds(db) {
+  if (!sqliteTableExists(db, "message")) return new Set();
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT session_id FROM message
+       WHERE data LIKE '%"inputIntent"%' AND json_valid(data) AND (
+         json_extract(data, '$.metadata.inputIntent.clientId') LIKE 'client-%'
+         OR json_extract(data, '$.metadata.inputIntent.clientId') LIKE 'host-services-%'
+       )`,
+    )
+    .all();
+  return new Set(rows.map((row) => String(row.session_id)));
+}
+
 function scanSessionTable({ endpoint, dbPath }) {
   if (!sqliteStorePresent(dbPath)) return [];
   const db = openSqliteReadOnly(dbPath);
@@ -2037,12 +2063,14 @@ function scanSessionTable({ endpoint, dbPath }) {
         "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
       )
       .all();
+    const desktopIds = endpoint === "zcode" ? zcodeDesktopSessionIds(db) : null;
     return rows.map((row) =>
       makeMeta({
         endpoint,
         id: String(row.id),
         title: typeof row.title === "string" && row.title.trim() !== "" ? truncateText(row.title, TITLE_MAX_CHARS) : null,
         project: typeof row.directory === "string" ? row.directory : null,
+        originator: desktopIds !== null && desktopIds.has(String(row.id)) ? "desktop" : null,
         file: `sqlite:${dbPath}#${row.id}`,
         createdAt: typeof row.time_created === "number" ? row.time_created : null,
         lastActive: typeof row.time_updated === "number" ? row.time_updated : null,
