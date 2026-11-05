@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { createSessionScanner } from "./session-scan.mjs";
 
 const WORKER_FILE = fileURLToPath(import.meta.url);
-// 单次扫描上限：本机最坏实测 8s（2927 条会话），给到 120s 只用于兜住「worker
+// 单次扫描上限：参考机最坏实测 8s（2927 条会话），给到 120s 只用于兜住「worker
 // 挂死」这种不该发生的情形——超时后退回进程内扫，宁可卡一拍也不无限等。
 const SCAN_TIMEOUT_MS = 120_000;
 // 降级后的冷却窗：期间一律本进程扫，到点允许重建一次 worker。

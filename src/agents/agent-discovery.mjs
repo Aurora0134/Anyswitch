@@ -203,7 +203,7 @@ function opencodeDeclaredBinary(manifest) {
   return typeof target === "string" && target ? basename(target) : "opencode.exe";
 }
 
-// 包自己的 bin 在 postinstall 被 npm 的脚本白名单拦下时是一个文本桩（本机 2.0.28 即
+// 包自己的 bin 在 postinstall 被 npm 的脚本白名单拦下时是一个文本桩（实测 2.0.28 即
 // 如此），Windows 拒绝执行它，历史表现为「与你运行的 Windows 版本不兼容」。只认 PE。
 function isPortableExecutable(path, io) {
   let fd;

@@ -21,7 +21,7 @@ export const CLIENT_PACKAGES = Object.freeze({
 // 执行体不是 npm 全局包、但官方分发在 npm 上的客户端（Grok Build）：先跑它自身的
 // 升级命令，失败才降级到 npm 安装。npm 那一跳必须钉住服务端查到的官方版本、并把
 // registry 显式指回官方源——用户 npm 配置的 registry 可能停在同步落后的镜像上
-// （本机镜像的 @xai-official/grok latest 落后了整条大版本），`@latest` 在那种机器上
+// （实测有镜像源的 @xai-official/grok latest 落后整条大版本），`@latest` 在那种机器上
 // 会把执行体降级。allowScripts 同理不能省：把新二进制安置进 ~/.grok/bin 的正是该包的
 // postinstall，而 npm 的脚本白名单默认不放行它，被拦下就成「命令成功、版本没动」。
 // qoder 同型（Bun 单文件 qodercli.exe）但只跑自身的 `qodercli update`：spec 里没有
