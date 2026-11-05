@@ -44,10 +44,21 @@ export const SOCKET_OVERRIDE_AGENT_IDS = new Set(["pi"]);
 // opencodeSessionInstanceId）；会话头缺失时才退回连接属主进程。
 export const UNTRUSTED_INSTANCE_HEADER_AGENT_IDS = new Set(["opencode"]);
 
-export function instanceIdFromSocket(req, agentId, deps) {
+// 连接属主进程号（socket 兜底同源的裸 pid）。instanceIdFromSocket 合成的是
+// "<agentId>-<pid>" 字符串；会话头通道命中时身份已是会话粒度、不经过兜底，
+// 但「这条流量由哪个引擎进程扛」仍然只有这条 netstat 反查能回答（WB 会话行
+// 的 wbTrafficPid 锚与徽标回落都吃它）。守卫与兜底同一套：白名单端点、pid
+// 有效、不是 relay 自己。
+export function socketFallbackClientPid(req, agentId, deps) {
   if (!deps.socketOwner || !SOCKET_FALLBACK_AGENT_IDS.has(agentId ?? "")) return null;
   const pid = deps.socketOwner.lookup({ localPort: req.socket.localPort, remotePort: req.socket.remotePort });
   if (typeof pid !== "number" || !Number.isFinite(pid) || pid <= 0 || pid === process.pid) return null;
+  return pid;
+}
+
+export function instanceIdFromSocket(req, agentId, deps) {
+  const pid = socketFallbackClientPid(req, agentId, deps);
+  if (pid === null) return null;
   return sanitizeInstanceId(`${agentId}-${pid}`) ?? null;
 }
 

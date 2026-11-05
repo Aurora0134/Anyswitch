@@ -725,6 +725,42 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     }
   });
 
+  it("workbuddy 会话头命中时仍捎带连接属主 pid（子代理会话行拿到 runtime 的面）", async () => {
+    // WB 头通道身份是会话粒度（x-conversation-id → workbuddy-sess-<id>）；子代理
+    // 会话行注册表永远缺席（进程内子会话不入册），徽标回落吃「扛流量的引擎
+    // pid」。头身份解析不出属主 pid，relay 在头通道命中时仍反查连接属主并随
+    // meta 捎带——这条把头身份、pid 捎带、锚落行、徽标回落整段链钉住。
+    const INSTALL = "C:\\Users\\tester\\AppData\\Local\\Programs\\WorkBuddy";
+    const RUNTIME = `${INSTALL}\\resources\\app.asar.unpacked\\cli\\bin\\codebuddy`;
+    const wbScan = "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" + [
+      `LAPTOP,"${INSTALL}\\WorkBuddy.exe",workbuddy.exe,800,60`,
+      `LAPTOP,"${INSTALL}\\WorkBuddy.exe" --optimize-for-size --max-semi-space-size=2 ${RUNTIME} --resume abc,workbuddy.exe,60,4321`,
+    ].join("\r\n") + "\r\n";
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, wbScan),
+      workbuddySessionLookup: (p) => (p === 4321 ? { kind: "interactive", sessionId: "main-sess", cwd: "C:\\dev\\bridge" } : null),
+      workbuddySessionDirectory: async () => [{ id: "main-sess", title: "bridge", pid: 4321, startedAt: 1000 }],
+      workbuddySessionActivity: async () => new Map(),
+    });
+    const { seen, socketOwner } = stubOwner(4321);
+    const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postChat(port, { "x-agent-id": "workbuddy", "x-conversation-id": "sub-conversation-1" });
+      assert.equal(res.status, 200);
+      await res.text();
+
+      assert.ok(seen.length >= 1, "头通道命中也查一次连接属主（pid 捎带的来源）");
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "workbuddy");
+      const subRow = card.instances.find((i) => i.id === "workbuddy-sess-sub-conversation-1");
+      assert.ok(subRow, "子代理会话行在列");
+      assert.equal(subRow.surface, "Desktop", "徽标＝扛流量的引擎 pid 的面");
+      assert.equal(subRow.requests, 1);
+    } finally {
+      await close();
+    }
+  });
+
   it("pi 头照发但值不采用：身份按连接属主进程归一（socket override）", async () => {
     // pi 的 models.json 写死 ${ANYSWITCH_INSTANCE_ID} 占位符（缺变量启动即抛错，
     // pi-launcher.mjs 头注），头只能照发；值是 "work-t3db95104" 形随机

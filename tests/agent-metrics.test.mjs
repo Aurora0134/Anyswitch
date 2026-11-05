@@ -6343,6 +6343,109 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
         "请求落定后缺席满 2 轮：下一拍收行");
     });
 
+    // ---- 子代理会话行（2026-11-05）：WorkBuddy 的子代理跑在主 runtime 进程内，
+    // 各带独立 x-conversation-id 头，注册表永远只记主会话——子会话行注册表
+    // 配不上键，徽标与存活都只能吃「扛过本行流量的引擎 pid」（wbTrafficPid），
+    // relay 侧在头通道命中时随 meta 捎带（workbuddyClientPid）。
+    it("badges a subagent conversation row via the traffic pid (registry never lists sub-conversations)", async () => {
+      let t = 3000;
+      const registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => new Map(),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-sub1", workbuddyClientPid: 100, model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+      const card = wb(await collector.getAgentsStatus());
+      const subRow = card.instances.find((i) => i.id === "workbuddy-sess-sub1");
+      assert.ok(subRow, "子代理会话行在列");
+      assert.equal(subRow.surface, "Desktop", "徽标回落到扛流量的引擎 pid 的面（与主会话同进程同面）");
+    });
+
+    it("keeps a registry-absent subagent row between requests while its engine pid lives", async () => {
+      // 子代理行注册表永远缺席：缺席轮次照收＝请求间隙行下场、下一笔请求再起
+      // 新行、计数清零（真机：同一行 65→3 请求）。扛过流量的引擎 pid 还活着时
+      // 行钉住不下场；引擎退场后照旧 2 轮确认收走。
+      let t = 3000;
+      let withEngine = true;
+      const registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => new Map(),
+        execFn: (cmd, opts, cb) => cb(null, wmic(
+          row(60, 800),
+          ...(withEngine ? [agentRow(100, 60)] : []),
+        )),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-sub1", workbuddyClientPid: 100, model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+      // 请求间隙（引擎活着）：行与账都保持，不抖。
+      for (let i = 0; i < 3; i++) {
+        t += 5 * 1000;
+        await collector.scanProcesses();
+        await collector.getAgentsStatus();
+      }
+      const mid = wb(await collector.getAgentsStatus());
+      const midRow = mid.instances.find((i) => i.id === "workbuddy-sess-sub1");
+      assert.ok(midRow, "引擎活着：请求间隙行不下场");
+      assert.equal(midRow.requests, 1, "计数不清零");
+
+      // 引擎退场：扫描是 stale-while-revalidate（当拍吐旧快照、后台换新），先
+      // 让无引擎那一轮落地，再数缺席轮次。
+      withEngine = false;
+      t += 5 * 1000;
+      await collector.scanProcesses();
+      await collector.getAgentsStatus(); // 无引擎快照落地（这拍仍伺服旧快照）
+      t += 5 * 1000;
+      await collector.scanProcesses();
+      assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-sub1"),
+        "缺席第 1 轮：行还在（1 轮不成判决）");
+      t += 5 * 1000;
+      await collector.scanProcesses();
+      assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-sub1"),
+        "引擎退场后缺席满 2 轮：行收走");
+    });
+
+    it("keeps the main session row and the process count while its engine serves subagents", async () => {
+      // 子代理整段跑：主会话自己的流量停、会话文件静默、注册表还开着——行
+      // 活跃只剩「扛过本行流量的引擎 pid 活着」一臂。头通道身份解析不出 pid，
+      // relay 捎带的 workbuddyClientPid 把锚补上：主行不下场、processCount 不
+      // 归零、分面副行不空（真机：主行被收走、卡上进程数 0、surfaces 空）。
+      let t = 3000;
+      const registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
+      const collector = wbCollector({
+        nowFn: () => t,
+        workbuddySessionLookup: (p) => registry[p] ?? null,
+        workbuddySessionDirectory: async () => [{ id: "6d2c", title: "bridge", pid: 100, startedAt: 1000 }],
+        workbuddySessionActivity: async () => new Map(),
+        execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "workbuddy", instanceId: "workbuddy-sess-6d2c", workbuddyClientPid: 100, model: "m1" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+      // 主会话流量停（子代理在跑）：文件静默超过 2 分钟活跃窗、无在途。
+      t += 3 * 60 * 1000;
+      await collector.scanProcesses();
+      await collector.getAgentsStatus(); // 不活跃确认第 1 轮
+      t += 5 * 1000;
+      await collector.scanProcesses();
+      const card = wb(await collector.getAgentsStatus()); // 第 2 轮：旧机制此处已收行
+      const mainRow = card.instances.find((i) => i.id === "workbuddy-sess-6d2c");
+      assert.ok(mainRow, "流量 pid 活着：主行不下场");
+      assert.equal(mainRow.requests, 1, "账不清零");
+      assert.equal(card.processCount, 1, "会话行活着 → 进程计数不归零");
+      assert.deepEqual(card.surfaces.map((s) => [s.label, s.count]), [["Desktop", 1]], "分面副行保持");
+    });
+
     it("falls open when the registry directory cannot be read (TTL fallback intact)", async () => {
       // 目录读不出 ≠ 没有会话：fail-open 不判生死，行按 5 分钟兜底 TTL 走
       //（判不了生死就不按缺席收，只按静默收）。
