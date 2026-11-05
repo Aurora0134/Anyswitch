@@ -28,6 +28,9 @@ const VIEWPORT_FNS = [
   "terminalViewportForTerminal", "terminalViewportAttach", "terminalViewportCreate",
   "terminalViewportDestroy", "terminalViewportActivate", "terminalSessionRunning",
   "terminalViewportRetire", "terminalViewportPlaceTerminal", "terminalCloseTerminal",
+  "terminalCloseTerminalNow", "terminalViewportRefs", "terminalViewportRefAdd",
+  "terminalViewportRefDrop", "terminalSessionIdentity", "terminalSessionSupportedElsewhere",
+  "terminalTerminalShownElsewhere",
   "terminalRailKeepAliveSwitch", "loadTerminalViewports", "saveTerminalViewports",
 ];
 const viewportPrelude = (names = VIEWPORT_FNS) => `
@@ -2347,14 +2350,15 @@ describe("done（跑完未读）标记与绿点（dsh completed/completionUnread
     const sendAt = panelJs.indexOf("function sendTerminalInput");
     const sendBlock = panelJs.slice(sendAt, sendAt + 700);
     assert.ok(sendBlock.includes("terminalDoneUnread.delete(sessionId)"), "键入即读：sendTerminalInput 清标");
-    // 关页签那一路的真身是 terminalCloseTerminal（页签 × 与左栏 live 行 × 共用），
-    // 它用 terminalId 逐表清；不能锚「terminalHollowStreak.delete(id);」的首次出现——
-    // 那落在 pruneTerminalHollowStreak 里，钉的不是关页签（回归也不会红）。
-    const closeFn = extractFn("terminalCloseTerminal");
+    // 关页签那一路的真身是 terminalCloseTerminalNow（terminalCloseTerminal 只剩确认，
+    // 实体与页签 ×、左栏 live 行 × 共用），它用 terminalId 逐表清；不能锚
+    // 「terminalHollowStreak.delete(id);」的首次出现——那落在 pruneTerminalHollowStreak
+    // 里，钉的不是关页签（回归也不会红）。
+    const closeFn = extractFn("terminalCloseTerminalNow");
     assert.ok(closeFn.includes("terminalHollowStreak.delete(terminalId)")
       && closeFn.includes("terminalDoneUnread.delete(terminalId)")
       && closeFn.includes("terminalPrevWorking.delete(terminalId)"),
-      "关页签即失效：done 标记与上一拍状态两表同清（terminalCloseTerminal 用 terminalId 逐表清）");
+      "关页签即失效：done 标记与上一拍状态两表同清（terminalCloseTerminalNow 用 terminalId 逐表清）");
     // 整表换血的孤儿清理本体：pruneTerminalDoneState 同清两表（rebuild 调用点由下方一条钉）。
     const pruneFn = extractFn("pruneTerminalDoneState");
     assert.ok(pruneFn.includes("terminalDoneUnread.delete(id)") && pruneFn.includes("terminalPrevWorking.delete(id)"),

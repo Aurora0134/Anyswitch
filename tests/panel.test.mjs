@@ -102,6 +102,9 @@ const VIEWPORT_FNS = [
   "terminalViewportAttach", "terminalViewportCreate", "terminalViewportDestroy",
   "terminalViewportActivate", "terminalSessionRunning", "terminalViewportRetire",
   "terminalViewportPlaceTerminal", "terminalCloseTerminal", "terminalCloseViewportTab",
+  "terminalCloseTerminalNow", "terminalViewportRefs", "terminalViewportRefAdd",
+  "terminalViewportRefDrop", "terminalSessionIdentity", "terminalSessionSupportedElsewhere",
+  "terminalTerminalShownElsewhere",
   "terminalViewportSyncFromHost",
 ];
 const viewportPrelude = (names = VIEWPORT_FNS) => `
@@ -13258,13 +13261,13 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     const init = extractFn("initTerminalPreview");
     const closeAt = init.indexOf('event.target.closest(".terminal-tab-close")');
     assert.ok(closeAt > 0, "关标签分支可取样");
-    // 视口化：关页签＝结束该视口显示的终端再销毁视口，结束动作收敛在
-    // terminalCloseViewportTab / terminalCloseTerminal 里（页签 × 与左栏 live 行 ×
-    // 共用，一处清计数）。
+    // 视口化：关页签＝撤掉该视口引用的终端再销毁视口，结束动作收敛在
+    // terminalCloseViewportTab / terminalCloseTerminalNow 里（页签 × 与左栏 live 行 ×
+    // 共用同一条实体，一处清计数；terminalCloseTerminal 只剩确认）。
     const closeCall = "terminalCloseViewportTab(viewportId)";
     const closeBranch = init.slice(closeAt, init.indexOf(closeCall) + closeCall.length);
     assert.ok(closeBranch.includes(closeCall), "关页签委托给共用的视口关闭语义");
-    const closeFn = extractFn("terminalCloseTerminal");
+    const closeFn = extractFn("terminalCloseTerminalNow");
     assert.ok(closeFn.includes("terminalHollowStreak.delete(terminalId)"), "结束终端同步清该会话计数");
     assert.ok(closeFn.includes("terminalDoneUnread.delete(terminalId)") && closeFn.includes("terminalPrevWorking.delete(terminalId)"),
       "done 未读标记与上一拍状态一并清（会话没了，未读态随之失效）");
@@ -15583,7 +15586,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let terminalBooting = null;
       // 落点：createAgentTerminal / 空白终端都经 terminalViewportPlaceTerminal 决定
       // 页签数（「+」＝新视口）。沙盒补视口状态与纯函数，旧终端处置打桩（这里不走重挂）。
-      ${viewportPrelude(["terminalViewportNextId", "terminalViewportCreate", "terminalViewportAttach", "terminalViewportPlaceTerminal", "saveTerminalViewports"])}
+      ${viewportPrelude(["terminalViewportNextId", "terminalViewportCreate", "terminalViewportAttach", "terminalViewportRefDrop", "terminalViewportPlaceTerminal", "saveTerminalViewports"])}
       function terminalViewportRetire() { return false; }
       ${bodies}
       return {
@@ -15596,7 +15599,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         agents: () => terminalAddMenuAgents,
         booting: () => terminalBooting,
         activeId: () => activeTerminalPreviewId,
-        viewports: () => terminalViewports.map((viewport) => ({ ...viewport })),
+        viewports: () => terminalViewports.map((viewport) => ({ id: viewport.id, terminalId: viewport.terminalId })),
         sessions: terminalBackendSessions,
       };
     `)((id) => els[id] ?? null, api,
