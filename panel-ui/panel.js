@@ -15371,7 +15371,13 @@ async function api(method, path, body) {
   const PRESET_GREEN_MAX = 200;      // 单预设：≤200 绿
   const PRESET_YELLOW_MAX = 500;     // 201–500 黄，>500 红
   const CTX_TIER_NAME = { empty: "空", low: "少", mid: "中", high: "多", over: "超过 100%" };
-  function presetCharCount(p) { return ((p && p.content) || "").length; }
+  // 注入量口径＝正文＋标题＋标题行开销（“## ”3 字＋两个换行）。标题也进端点
+  // 指令文件，只数正文会低报真实注入量。
+  function presetCharCount(p) {
+    const content = ((p && p.content) || "").length;
+    const title = ((p && p.title) || "").length;
+    return content + title + 6;
+  }
   function formatChars(n) {
     if (n < 1000) return n + " 字";
     if (n < 1e6) return (n / 1000).toFixed(1) + "k 字";
@@ -15412,7 +15418,7 @@ async function api(method, path, body) {
     if (totalEl) totalEl.textContent = formatChars(total);
     if (pctEl) pctEl.textContent = Math.round(pct * 100) + "%";
     if (bar) bar.setAttribute("title",
-      `注入中的预设正文合计 ${total.toLocaleString()} 字，约为建议上限 ${CTX_BUDGET.toLocaleString()} 字的 ${Math.round(pct * 100)}%；超出仍可正常注入（${CTX_TIER_NAME[tier]}）`);
+      `注入文本合计 ${total.toLocaleString()} 字（含标题），约为建议上限 ${CTX_BUDGET.toLocaleString()} 字的 ${Math.round(pct * 100)}%；超出仍可正常注入（${CTX_TIER_NAME[tier]}）`);
   }
 
   function renderPresetsList() {
@@ -15445,7 +15451,7 @@ async function api(method, path, body) {
         ? ""
         : `<span class="skills-ep-count${n >= epTotal ? " full" : n ? " some" : ""}" title="注入 ${n}/${epTotal} 个 Agent">${n}/${epTotal}</span>`;
       const chars = presetCharCount(p);
-      const lenBadge = `<span class="badge ctx-preset-badge ${presetBadgeClass(chars)}" title="正文 ${chars} 字">${formatCharsCompact(chars)}</span>`;
+      const lenBadge = `<span class="badge ctx-preset-badge ${presetBadgeClass(chars)}" title="注入 ${chars} 字">${formatCharsCompact(chars)}</span>`;
       const tagBadge = p.tag ? `<span class="badge badge-neutral">${escapeHtml(p.tag)}</span>` : "";
       const firstLine = (p.content || "").split("\n").find((l) => l.trim()) || "（无内容）";
       // 未启用的预设行整体压暗（内联透明度）；--i 供 cascade 交错（窗口内重基见 playSkillsListCascade）
