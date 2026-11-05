@@ -657,6 +657,25 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     assert.equal(termA.disposed, true);
   });
 
+  it("真跑：判据函数在没有换绑/占位设施的环境里也不抛（typeof 不豁免 TDZ）", () => {
+    // 两个信号声明在 panel.js 后文（12130 / 9148 附近），而 parkTerminalScreen 可能被更早
+    // 的调用路径问到。typeof 对 let/const 不豁免 TDZ——用 typeof 闸写这条判据会在真机上
+    // 抛 ReferenceError（垫片兜底计时器整条失效）。沙箱里两个名字完全不存在，等价于
+    // 「读不到就按普通档」这条路；这里直接调，抛了就红。
+    const fn = new Function(`${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`)();
+    assert.equal(fn(), false, "名字一个都不存在：按普通档，且不抛");
+    const fn2 = new Function(
+      "terminalSwitchInFlight",
+      `let terminalBooting = null;\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
+    )(true);
+    assert.equal(fn2(), true, "换绑在飞 → 放宽");
+    const fn3 = new Function(
+      "terminalSwitchInFlight",
+      `let terminalBooting = { sessionId: "x" };\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
+    )(false);
+    assert.equal(fn3(), true, "占位还武装着 → 放宽");
+  });
+
   it("判据本身：只有「新画面真的出字」才算就绪（换回计数比较这条必红）", () => {
     const factory = new Function(
       "requestAnimationFrame",

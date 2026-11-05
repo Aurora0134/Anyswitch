@@ -6844,11 +6844,18 @@ async function api(method, path, body) {
 
   // 「这条会话正在换绑」的判据（垫片上限放宽档，见 parkTerminalScreen 的 staleCapMs）：
   // /switch 在飞，或已落地且「正在加载」占位还武装着（armTerminalBootingOverlay 同一个
-  // 标记，撤层即失效）。两处都是 typeof 闸：单测沙箱把 parkTerminalScreen 整段切出真跑，
-  // 那里既没有换绑闸也没有占位设施，缺省一律按普通切页签的 2000ms 档走。
+  // 标记，撤层即失效）。
+  // 两个信号都声明在后文（换绑判定门 / 占位设施），本函数可能被更早的调用路径问到，
+  // 所以用 try 兜住 TDZ 与「沙箱里根本没有这两个名字」两种情形——**typeof 对 let/const
+  // 不豁免 TDZ**（照样抛 ReferenceError），单靠 typeof 闸不成立。兜底方向是安全的：
+  // 读不到就按普通档 2000ms 走，也就是更严格的那一档。
   function terminalSwitchStaleWidened() {
-    if (typeof terminalSwitchInFlight !== "undefined" && terminalSwitchInFlight) return true;
-    return typeof terminalBooting !== "undefined" && terminalBooting !== null;
+    try {
+      if (terminalSwitchInFlight) return true;
+      return terminalBooting !== null;
+    } catch {
+      return false;
+    }
   }
 
   // 停放当前实例当垫片：返回垫片句柄；没有可停的画面时照旧整条拆流（首连、或上次
