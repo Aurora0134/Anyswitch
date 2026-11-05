@@ -316,11 +316,13 @@ describe("createPromptsPanelService facade", () => {
     const text = readFileSync(join(homeDir, ".claude", "CLAUDE.md"), "utf8");
     assert.equal(text.startsWith(MANAGED_BEGIN), true);
     assert.match(text, /内容/);
-    assert.doesNotMatch(text, /规则A/, "title must not be injected");
+    assert.match(text, /^## 规则A$/m, "the preset title reaches the endpoint file as a heading");
+    assert.equal((text.match(/规则A/g) || []).length, 1, "the title appears only as that heading");
     // qoder reaches its user-level rules file through the same path.
     const qoderText = readFileSync(join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"), "utf8");
     assert.equal(qoderText.startsWith(MANAGED_BEGIN), true);
     assert.match(qoderText, /内容/);
+    assert.match(qoderText, /^## 规则A$/m, "qoder gets the same titled section");
 
     facade.setOverride({ endpointId: "claude", presetId: preset.id, off: true });
     assert.equal(existsSync(join(homeDir, ".claude", "CLAUDE.md")), false, "off override removes claude's block");

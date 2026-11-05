@@ -166,7 +166,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 
 ### 预设注入层
 - `src/agents/agent-prompts.mjs` — 预设数据面：数据根下的 `prompts.json`（总开关、预设增删改查、逐端点 off 覆盖），文件损坏时严格隔离不连带覆写。某端点的生效集＝总开关 ∧ 预设 enabled ∧ 未被该端点 off。
-- `src/agents/agent-prompts-inject.mjs` — 预设注入面：把各端点的生效集渲染进该端点自家的全局指令文件，写成带 `# >>> anyswitch-managed-prompts` / `# <<< anyswitch-managed-prompts` 标记的托管块；只注正文不注标题，幂等、只剩托管块时删文件以字节级还原，单端点失败互不影响。各端点目标文件与时机见 `skills/anyswitch-preset/SKILL.md`。
+- `src/agents/agent-prompts-inject.mjs` — 预设注入面：把各端点的生效集渲染进该端点自家的全局指令文件，写成带 `# >>> anyswitch-managed-prompts` / `# <<< anyswitch-managed-prompts` 标记的托管块；每条预设以「`## 标题` + 正文」成段注入，标题与正文一并进入 agent 上下文（标题须净化成单行），幂等、只剩托管块时删文件以字节级还原，单端点失败互不影响。各端点目标文件与时机见 `skills/anyswitch-preset/SKILL.md`。
 
 ### 进程与运维
 - `src/agents/agent-watchdog.mjs` — followAgent 的独立看门狗进程（占用 47822 标记端口）：不依赖面板是否开着，检测到 coding agent 在跑而 relay 未启时拉起。认领标记端口后**立刻写下自己的 pid**、退出时清除：这条路径正是开机自启走的，而写 pid 原先只发生在面板拉起的 `spawnWatchdog` 里，于是开机起的 watchdog 从不写盘，磁盘上长期留着一个早已死掉的 pid（`stopWatchdog` 的 pid 候选因此长期是错的，只靠标记端口属主兜住）。

@@ -1,6 +1,7 @@
 // Prompt presets injection plane: renders the effective preset set of each
 // endpoint into that endpoint's home-level global instructions file as a
-// managed block.
+// managed block. Every preset is rendered as a titled section (heading +
+// body) — the agent reads the preset's subject and its rules together.
 //
 // Target facts this module depends on:
 //   - kimi/opencode re-read their file at runtime (hot); the other six read
@@ -65,13 +66,43 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "workbuddy", label: "WorkBuddy", hotReload: false, targetRel: "~/.workbuddy/rules/anyswitch-managed-prompts.md", home: [".workbuddy", "rules", "anyswitch-managed-prompts.md"] },
 ]);
 
-// Bodies only: the title lives in prompts.json for the panel; it never
-// reaches the endpoint instruction files.
-/** Render the managed block for a non-empty preset set. */
+/**
+ * Normalize a preset title into one heading line: newlines fold to spaces,
+ * whitespace collapses, a leading `#` run is dropped, and a trailing ATX
+ * closing sequence is dropped — so the title cannot nest inside the host
+ * document's own heading structure. The closing `#`s must be preceded by
+ * whitespace: `C#` is a word, not a closing sequence.
+ */
+function normalizeTitle(title) {
+  if (typeof title !== "string") return "";
+  return title
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^#+\s*/, "")
+    .replace(/\s+#+$/, "")
+    .trim();
+}
+
+/**
+ * Render the managed block for a non-empty preset set. Each preset becomes a
+ * titled section — the heading carries the preset's subject, the body its
+ * rules — so the agent reads subject and rules together instead of a wall of
+ * unlabelled paragraphs. A preset with no usable title falls back to a body
+ * paragraph (no empty heading); a preset with a title but no body keeps the
+ * heading, so every enabled preset stays countable in the file.
+ *
+ * Bodies are injected verbatim: a body carrying its own markdown heading would
+ * break out of the preset's section, so the authoring rules keep headings out
+ * of bodies rather than the injector rewriting user text.
+ */
 export function buildManagedBlock(presets) {
   const lines = [MANAGED_BEGIN];
   for (const preset of presets) {
-    lines.push("", preset.content.trimEnd());
+    const title = normalizeTitle(preset.title);
+    const body = typeof preset.content === "string" ? preset.content.trimEnd() : "";
+    if (title) lines.push("", `## ${title}`);
+    if (body) lines.push("", body);
   }
   lines.push("", MANAGED_END);
   return lines.join("\n");
