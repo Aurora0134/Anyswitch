@@ -9451,7 +9451,10 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     enrich(agents);
     assert.deepEqual(session.aggregateSource, { endpointId: "zcode" }, "端点级读数来源落地");
     assert.equal(session.metrics?.requestCount, 7, "四宫格取端点聚合行的请求数");
-    assert.equal(session.status, "working", "在途请求按聚合行派生忙态");
+    // 2026-11-05 A 口径（用户裁决）：读数一个不动，但整机合计不再派生单条终端状态
+    // ——zcode-global 的 2 个在途是端点合计，不是这条终端的在途量；它进 status 会把
+    // 「别的实例在干活」画成「这条终端在转圈」。状态只认真实例行（此处无 → idle）。
+    assert.equal(session.status, "idle", "聚合行只供读数，不进状态");
   });
 
   it("端点级读数来源在场时状态面板不按空壳收拢", () => {
@@ -9972,13 +9975,27 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
     const src = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "absorbTerminalSnapshot found in panel.js");
     const seen = { resets: 0 };
-    const term = { reset: () => { seen.resets += 1; } };
-    const session = { backendState: null, shell: { pid: null } };
+    const term = { cols: 120, rows: 34, reset: () => { seen.resets += 1; } };
+    const session = { id: "S1", backend: true, backendState: null, shell: { pid: null } };
     const fn = new Function(`
       let terminalReplayRestoring = false;
       let terminalReplayRestoreArm = null;
       let terminalReplayFramePending = false;
+      let terminalGeometryRealignPending = false;
+      let terminalGeometryRealignAt = 0;
+      let terminalGeometryRealignStreak = 0;
+      let terminalGeometryReplayDrop = false;
+      let terminalStreamDeferred = false;
+      const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
+      const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
+      const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
       function discardTerminalBurst() {}
+      function terminalHostMeasurable() { return true; }
+      let terminalImeHold = null;
+      function dropTerminalReplayFrame() { terminalGeometryReplayDrop = true; terminalReplayFramePending = false; }
+      function deferTerminalStream() { terminalStreamDeferred = true; }
+      function finishTerminalGeometryRealign() {}
+      function scheduleTerminalGeometryRealign() {}
       ${src}
       return absorbTerminalSnapshot;
     `)();
@@ -10024,6 +10041,8 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
       "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput",
+      "dropTerminalReplayFrame", "deferTerminalStream", "remountDeferredTerminalStream",
+      "finishTerminalGeometryRealign", "scheduleTerminalGeometryRealign",
       "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
@@ -10063,6 +10082,19 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       let terminalStreamWrite = null;
       let terminalWriteBurst = null;
       let terminalReplayFramePending = false;
+      // 几何闸的账与收尾设施（absorbTerminalSnapshot 与 data 处理器引用它们）。
+      let terminalGeometryRealignPending = false;
+      let terminalGeometryRealignAt = 0;
+      let terminalGeometryRealignStreak = 0;
+      let terminalGeometryReplayDrop = false;
+      let terminalStreamDeferred = false;
+      let terminalStreamRemounting = false;
+      let terminalDeferredSessionId = null;
+      let terminalGeometryRealignTimer = null;
+      const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
+      const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
+      const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
+      function terminalHostMeasurable() { return true; }
       const host = {};
       const $ = (id) => (id === "terminalXtermHost" ? host : null);
       const document = { documentElement: {} };
@@ -13946,7 +13978,11 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
       "活性门控与轮询一致：backend 就绪 + 页面可见 +（终端页 或 看板）");
     const tick = panelJs.match(/terminalPollTimer = setInterval\(\(\) => \{[\s\S]*?\}, 1000\);/)?.[0];
     assert.ok(tick?.includes("syncTerminalActivityStream();"), "推送流开关随每秒轮询节拍走");
-    assert.ok(tick?.includes("pollTerminalSessions();"), "1s 轮询原样保留");
+    assert.ok(tick?.includes("pollTerminalSessions()"), "1s 轮询原样保留（每拍一次，频率不变）");
+    // 2026-11-05 P-D：后台回收器挂同一拍，且排在取数之后（判据吃刚拉回来的
+    // 实例行在途数与 lastVisibleAt，不吃上一拍的陈旧计数）。
+    assert.ok(/pollTerminalSessions\(\)\.then\(\(\) => \{[\s\S]{0,200}?maybeRecycleTerminalBackground\(\)/.test(tick || ""),
+      "后台回收器垫在轮询取数之后");
   });
 });
 

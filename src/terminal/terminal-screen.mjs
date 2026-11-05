@@ -655,6 +655,13 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       row = Math.min(newRows - 1, Math.max(0, res.y));
     }
     mainSaved.abs = mainRef.value;
+    // 几何先落地再重算缓存：serializeRow 按闭包 width 截断，重算排在赋值之前就会用
+    // 旧列宽把历史行裁成旧宽——加宽时右半内容从这里起永久丢失（回放与跨重启快照都
+    // 只读这份 _text），收窄时又按旧宽输出、客户端按新宽折行。上面所有 resizeBuffer
+    // 都显式收到 (width, height) 参数，不读闭包，搬动不影响重排本身；下面的裁行循环
+    // 与 mainSaved.abs 上提都只认 _bytes 与 historyLines/historyBytes，同样不受影响。
+    width = newCols;
+    height = newRows;
     // resize 后重算滚动区的文本缓存与字节预算
     historyTotal = 0;
     for (const line of history) {
@@ -667,8 +674,6 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       // 顶部裁行把缓冲内容整体上移：保存点的绝对行跟着减（xterm 的 trimStart 调 savedY）。
       mainSaved.abs = Math.max(0, mainSaved.abs - 1);
     }
-    width = newCols;
-    height = newRows;
     top = 0;
     bottom = height - 1;
     // xterm 的 resize 末尾把 x 夹回 cols-1：满行哨兵到此为止。保存的列同样夹（savedX =
@@ -1696,6 +1701,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       flush();
       // 按当前宽裁剪：备屏收窄时行会保长（xterm 不截断备屏行），多出列的内容客户端看不见。
       return grid.map((line) => line.chars.slice(0, width).map((ch) => (ch === null ? " " : ch)).join("").replace(/\s+$/, ""));
+    },
+    // 可见文本指纹：整屏可见字符 ＋ 光标 ＋ 备屏位。刻意**不含 SGR**——欢迎屏
+    // logo 扫光（12.5fps）只改 38;2;r;g;b、字符一格不动：字节指纹与颜色指纹都会
+    // 把扫光帧当成「有变化」，可见文本指纹不会。整屏取指纹（不是 chunk 字节），
+    // 分块边界抖动天然免疫。
+    // 不 flush：本函数在 emit 的同步路径上，排空积压会把切片解析整个按住（与
+    // info() 同款理由）；签名至多落后一个切片，排空完成后由宿主补一次。
+    visibleSignature() {
+      const lines = grid.map((line) => line.chars.slice(0, width).map((ch) => (ch === null ? " " : ch)).join(""));
+      return `${inAlt ? "alt" : "main"}:${row}:${col}\n${lines.join("\n")}`;
     },
     // Same grid, one cell at a time, so a repaint can be checked for colour and
     // not just for text. Background is whatever background SGR the cell carries.

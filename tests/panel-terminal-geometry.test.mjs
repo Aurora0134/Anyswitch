@@ -29,10 +29,14 @@ function declOf(pattern, name) {
   return decl;
 }
 
+// 会话注册表：沙箱里的 terminalSessionFor 按 id 从这里取（补挂路径要按 id 找回会话）。
+const registry = {};
+
 // 桩世界：真跑 closeTerminalStream / absorbTerminalSnapshot / connectTerminalStream，
 // 只把 xterm 构造、EventSource、resize POST 面替成桩。真实几何由 state.client 决定
 // （桩 xterm 建出来就带着它，等价于「建流那次 fit 已经落定」的稳态）。
 function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
+  for (const id of Object.keys(registry)) delete registry[id];
   const state = {
     client: { cols: 120, rows: 34 },
     docHidden,
@@ -41,6 +45,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     posts: [],
     writes: [],
     disposed: 0,
+    resizes: [],
     warnings: [],
     measurable: true,
     fitImpl: () => null,
@@ -70,6 +75,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     "postTerminalResize", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst",
     "disarmTerminalDprWatch", "cancelAnimationFrame", "console",
     "Date", "setTimeout", "clearTimeout", "terminalHostMeasurable",
+    "terminalSessionFor", "activeTerminalPreviewId",
     `
     let terminalXterm = null;
     let terminalEventSource = null;
@@ -96,11 +102,21 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     let terminalGeometryRealignPending = false;
     let terminalGeometryRealignAt = 0;
     let terminalGeometryRealignStreak = 0;
+    let terminalGeometryReplayDrop = false;
+    let terminalStreamDeferred = false;
+    let terminalStreamRemounting = false;
+    let terminalDeferredSessionId = null;
+    let terminalGeometryRealignTimer = null;
     ${declOf(COOLDOWN_DECL, "TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS")}
     ${declOf(MAX_ATTEMPTS_DECL, "TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS")}
     ${declOf(STALL_DECL, "TERMINAL_GEOMETRY_REALIGN_STALL_MS")}
     ${extractFn("closeTerminalStream")}
     ${extractFn("absorbTerminalSnapshot")}
+    ${extractFn("dropTerminalReplayFrame")}
+    ${extractFn("deferTerminalStream")}
+    ${extractFn("remountDeferredTerminalStream")}
+    ${extractFn("finishTerminalGeometryRealign")}
+    ${extractFn("scheduleTerminalGeometryRealign")}
     ${extractFn("connectTerminalStream")}
     return {
       connect: connectTerminalStream,
@@ -112,6 +128,8 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
       cooldown: () => TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS,
       maxAttempts: () => TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS,
       stall: () => TERMINAL_GEOMETRY_REALIGN_STALL_MS,
+      deferred: () => terminalStreamDeferred,
+      remount: remountDeferredTerminalStream,
       setPending: (v) => { terminalGeometryRealignPending = v; },
       // 尺寸可信度两个开关：默认「可测 + 不在组字」（与真身常态一致），用例 9 按需拨。
       measurable: (v) => { state.measurable = v; },
@@ -146,6 +164,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
         reset() {},
         onData() { return { dispose() {} }; },
         write(text) { state.writes.push(text); },
+        resize(cols, rows) { state.resizes.push({ cols, rows }); term.cols = cols; term.rows = rows; },
         dispose() { term.disposed = true; state.disposed += 1; },
       };
       world.swapTerm(term);
@@ -173,6 +192,8 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     },
     (id) => { clock.timers = clock.timers.filter((timer) => timer.id !== id); },
     () => state.measurable,
+    (id) => registry[id] || null,
+    "S1",
   );
   world.state = state;
   world.clock = clock;
@@ -188,8 +209,11 @@ async function prime(world, session) {
   return { es, term: world.term() };
 }
 
-const sessionOf = (id) => ({ id, backend: true, backendState: { status: "running" }, shell: {} });
-
+const sessionOf = (id) => {
+  const session = { id, backend: true, backendState: { status: "running" }, shell: {} };
+  registry[id] = session;
+  return session;
+};
 async function flushMicrotasks() {
   for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
@@ -222,7 +246,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.sources[1].url, world.state.sources[0].url, "重连的是同一条会话的流");
   });
 
-  it("同一实例 1500ms 内的第二帧错配不再触发（不重复 POST/重连，画面照常喂）", async () => {
+  it("同一实例 1500ms 内的第二帧错配不立刻重连，但回放不落屏且排了后续对齐", async () => {
     const world = makeGeometryWorld();
     const session = sessionOf("S1");
     const { es, term } = await prime(world, session);
@@ -241,10 +265,19 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     es2.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
     assert.equal(world.state.posts.length, 1, "冷却期内不再 POST");
     assert.equal(world.state.sources.length, 2, "也不重连");
-    assert.equal(world.pending(), false, "冷却帧不占住回放闩（后续帧照常落屏）");
-    // 冷却期只是「不重复重连」，画面照常喂：拖窗口那一拍不能把屏停成空白。
+    assert.equal(world.pending(), false, "冷却帧不占住回放闩（后续增量照常落屏）");
+    // 冷却期不再重连，但这一帧仍然是错宽回放：不画。排一次延后对齐，等窗过去再对齐。
     es2.emit("data", "冷却期的回放");
-    assert.deepEqual(world.state.writes, ["冷却期的回放"], "冷却期的帧照常画（与改动前一致）");
+    assert.deepEqual(world.state.writes, [], "冷却窗内的错宽回放同样不落屏");
+    es2.emit("data", "冷却期的增量");
+    assert.deepEqual(world.state.writes, ["冷却期的增量"], "只丢回放首帧，其后的增量照画");
+
+    const postsBefore = world.state.posts.length;
+    const sourcesBefore = world.state.sources.length;
+    world.clock.advance(world.cooldown() + 1);
+    await flushMicrotasks();
+    assert.equal(world.state.posts.length, postsBefore + 1, "窗过去后补一次 resize POST");
+    assert.equal(world.state.sources.length, sourcesBefore + 1, "并重连一次拿正确回放");
   });
 
   it("尺寸匹配的 snapshot 走原逻辑：置回放闩、不 POST 不重连", async () => {
@@ -303,7 +336,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.disposed, 1, "半成品实例当场收掉，不留悬空 xterm");
   });
 
-  it("连续错配超出上限后不再 POST/重连，只告警一次，那一帧照常落屏", async () => {
+  it("连续错配超出上限后不再 POST/重连，只告警一次，错宽回放不落屏", async () => {
     const world = makeGeometryWorld();
     const session = sessionOf("S1");
     await prime(world, session);
@@ -328,7 +361,8 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.streak(), max, "连续计数顶到上限");
     assert.deepEqual(world.state.warnings, [], "上限那一拍是正常重对齐，还不告警");
 
-    // 第三次错配：超限刹车。不 POST、不重连，只告警一次，且这一帧按原逻辑落屏。
+    // 第三次错配：超限刹车。不 POST、不重连，只告警一次，且这一份错宽回放不画——
+    // 屏上保留的是上一帧已经画好的（正确）画面，不是空白，也不是错列宽的残行。
     world.clock.advance(world.cooldown() + 1);
     term = world.term();
     term.cols = 129;
@@ -341,10 +375,43 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.pending(), false, "超限帧不占回放闩");
     assert.equal(world.state.warnings.length, 1, "告警一次");
     assert.match(world.state.warnings[0][0], /geometry realign abandoned/);
-    assert.deepEqual(world.state.writes, ["超限后的回放"], "超限那一帧照常落屏，不是空白");
+    assert.deepEqual(world.state.writes, [], "超限后的错宽回放不落屏");
+    // 只丢首帧：其后的增量是应用自己的正常输出，照画。
+    es.emit("data", "超限后的增量");
+    assert.deepEqual(world.state.writes, ["超限后的增量"], "回放之后的增量照画");
 
     es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
     assert.equal(world.state.warnings.length, 1, "接续的错配不再重复告警");
+  });
+
+  it("宿主把 cols 夹在 240 上限时把夹过的值回夹进 xterm", async () => {
+    // 宿主 resize 路由把 cols 夹在 240、rows 夹在 120。客户端量到 250 列时 POST 250，
+    // 回包却是 240——不回夹就永远「错配」，连续两拍后撞上限刹车放弃（原来的放弃形态）。
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    const { es, term } = await prime(world, session);
+    world.state.postImpl = () => Promise.resolve({ cols: 240, rows: 34 });
+    term.cols = 250;
+    world.state.writes.length = 0;
+
+    es.emit("snapshot", { pid: 1, cols: 200, rows: 34 });
+    es.emit("data", "错宽回放");
+    assert.deepEqual(world.state.writes, [], "错配回放不落屏");
+    assert.deepEqual(world.state.posts, [{ id: "S1", cols: 250, rows: 34 }], "POST 的是客户端真实尺寸");
+    await flushMicrotasks();
+
+    assert.deepEqual(world.state.resizes, [{ cols: 240, rows: 34 }], "把宿主夹过的值回夹进 xterm");
+    assert.equal(term.cols, 240, "回夹发生在实例被换掉之前（同一实例上生效）");
+
+    // 回包与客户端一致时不回夹（不多余改动尺寸）。
+    const world2 = makeGeometryWorld();
+    const session2 = sessionOf("S2");
+    const p2 = await prime(world2, session2);
+    world2.state.postImpl = () => Promise.resolve({ cols: 123, rows: 34 });
+    p2.term.cols = 123;
+    p2.es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    await flushMicrotasks();
+    assert.deepEqual(world2.state.resizes, [], "回包已等于客户端尺寸：不调 resize");
   });
 
   it("重对齐 POST 在飞时视图隐藏：落定后拆掉旧流，不留实例", async () => {
@@ -395,7 +462,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.sources.length, 1, "不新建流");
   });
 
-  it("容器不可测时不判错配：不 POST 不重连不告警，回放照常落屏", async () => {
+  it("容器不可测时不画错宽回放：拆流挂起，几何可信后由 fit 补挂", async () => {
     const world = makeGeometryWorld();
     const session = sessionOf("S1");
     const { es, term } = await prime(world, session);
@@ -408,22 +475,48 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     // snapshot 本身不写屏，回放帧必须跟一发，writes 断言才有落点。
     es.emit("data", "不可测时的回放");
 
-    assert.equal(world.state.posts.length, 0, "不可测时不 POST");
-    assert.equal(world.state.sources.length, 1, "不可测时不重连");
+    assert.equal(world.state.posts.length, 0, "不可测时不 POST（没有可对齐的目标）");
     assert.deepEqual(world.state.warnings, [], "不可测时不告警");
-    assert.equal(world.pending(), false, "不可测时不占回放闩");
+    assert.equal(world.pending(), false, "不可测时不占重对齐闩");
     assert.equal(world.streak(), 1, "不可测的一帧既不归零也不累加：只认「判得了且没对上」的连续失败");
-    assert.deepEqual(world.state.writes, ["不可测时的回放"], "照原逻辑落屏：屏上有内容");
+    assert.deepEqual(world.state.writes, [], "几何未知时的回放一个字节都不画");
+    assert.equal(world.deferred(), true, "流被挂起而非丢弃：标记留到几何可信那一拍");
+    assert.equal(es.closed, true, "旧流当场拆掉");
+    assert.equal(world.term(), null, "实例一并收掉（与拆流同一套收尾）");
 
-    // 组字期几何被冻结（terminalImeHold 非空），同样不可信，同样不判。
+    // 几何恢复：fit 在「量准」那条路径上补挂，拿宿主按客户端尺寸自绘的整屏帧。
     world.measurable(true);
+    world.remount();
+    assert.equal(world.deferred(), false, "补挂后清标记");
+    assert.equal(world.state.sources.length, 2, "重新建了一条流");
+    assert.notEqual(world.term(), null, "新实例已建");
+  });
+
+  it("组字期（几何被冻结）同样不画，同样拆流挂起", async () => {
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    const { es, term } = await prime(world, session);
+    world.setStreak(1);
     world.imeHold({});
     term.cols = 81;
+    world.state.writes.length = 0;
     es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
-    assert.equal(world.state.posts.length, 0, "组字期也不 POST");
-    assert.equal(world.state.sources.length, 1, "组字期也不重连");
-    assert.equal(world.pending(), false, "组字期也不占回放闩");
+    es.emit("data", "组字期回放");
+    assert.equal(world.state.posts.length, 0, "组字期不 POST");
+    assert.equal(world.pending(), false, "组字期不占重对齐闩");
     assert.equal(world.streak(), 1, "组字期那一帧同样不动账");
+    assert.deepEqual(world.state.writes, [], "组字期的回放不落屏");
+    assert.equal(world.deferred(), true, "挂起等组字释放后的 fit");
+
+    // 组字释放但几何还没量到：fit 不补挂，标记保留等下一拍。
     world.imeHold(null);
+    world.measurable(false);
+    world.remount();
+    assert.equal(world.deferred(), true, "量不准就保持挂起，下次 fit 再试");
+    assert.equal(world.state.sources.length, 1, "没有新建流");
+    world.measurable(true);
+    world.remount();
+    assert.equal(world.deferred(), false, "量准后补挂");
+    assert.equal(world.state.sources.length, 2, "补挂建了新流");
   });
 });

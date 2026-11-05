@@ -5554,6 +5554,22 @@ async function api(method, path, body) {
   // 后台保活集合：宿主里仍活着、但不属于任何视口的终端。两条约束——(a) 宿主快照同步
   // 不会把它自动补成新页签；(b) 关页签只结束该视口显示的终端，绝不顺着这里杀。
   const terminalBackgroundIds = new Set();
+  // 后台回收器记账：terminalId → { at, endpointId }（进后台的时刻与端点归属）。
+  // 与 terminalBackgroundIds 同生共死：两处 add 时写入，attach/create/close/清场时删。
+  // 不持久化——刷新后恢复的后台集合没有记账，一律不回收（不知道它何时进的后台）。
+  // 单测按函数体抽取，模块级量不随行，故各读写点用 typeof 闸护（同 renderTerminalRail
+  // 的桩环境惯例）；闸护落空即视为桩环境，不记账。
+  const terminalBackgroundSince = new Map();
+  // zcode 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧。
+  // 10min 是经验值、不是实测出的精确阈值：调小会撞上两类残余误杀面——停在权限确认框
+  // 等用户超过 10min 的会话，以及 MCP 宿主内不起子进程的长工具（进程树看不到、在途数
+  // 也是 0，现有信号区分不了）。另两条既定取舍：刷新恢复的后台集合无起点记账，本页
+  // 永不回收；面板隐藏／不在终端页时整拍跳过，拿陈旧计数做杀判据等于盲杀。
+  const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
+  // /close 被宿主拒关后的重试间隔：轮询 1s 一拍，持续失败不能变成每僵住一条终端
+  // 就 1 req/s 空转。失败只留一条开发者日志（不是界面文案），退避满再试。
+  const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;
+  const terminalBackgroundRecycleRetryAfter = new Map();
   let terminalViewportSeq = 0;
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
@@ -5634,6 +5650,10 @@ async function api(method, path, body) {
     if (!viewport) return null;
     viewport.terminalId = terminalId || null;
     if (viewport.terminalId) terminalBackgroundIds.delete(viewport.terminalId);
+    // 回到视口＝不再是后台会话，回收记账同拍取消（否则会拿旧的进后台时刻去杀它）。
+    if (viewport.terminalId && typeof terminalBackgroundSince !== "undefined") {
+      terminalBackgroundSince.delete(viewport.terminalId);
+    }
     saveTerminalViewports();
     return viewport;
   }
@@ -5642,6 +5662,9 @@ async function api(method, path, body) {
     const viewport = { id: terminalViewportNextId(), terminalId: terminalId || null };
     terminalViewports.push(viewport);
     if (viewport.terminalId) terminalBackgroundIds.delete(viewport.terminalId);
+    if (viewport.terminalId && typeof terminalBackgroundSince !== "undefined") {
+      terminalBackgroundSince.delete(viewport.terminalId);
+    }
     saveTerminalViewports();
     return viewport;
   }
@@ -5709,6 +5732,13 @@ async function api(method, path, body) {
     if (!session) return true; // 判不准（无会话记录）＝按在跑处置，不可杀
     if (terminalSessionRunning(session)) {
       terminalBackgroundIds.add(terminalId);
+      // 进后台起点记账（后台回收器逐拍扫这张表）。
+      if (typeof terminalBackgroundSince !== "undefined") {
+        terminalBackgroundSince.set(terminalId, {
+          at: Date.now(),
+          endpointId: (session.agent && session.agent.endpointId) || session.agentId || null,
+        });
+      }
       saveTerminalViewports();
       return true;
     }
@@ -5734,6 +5764,15 @@ async function api(method, path, body) {
         if (previous && previous !== terminalId) {
           if (keepPrevious) {
             terminalBackgroundIds.add(previous);
+            // 内切保活路径的进后台起点：端点归属当场取，取不到记 null，由扫描拍按
+            // 当时的会话归属复核（不能因为归档慢一拍就永久放弃回收）。
+            if (typeof terminalBackgroundSince !== "undefined") {
+              const kept = typeof terminalSessionFor === "function" ? terminalSessionFor(previous) : null;
+              terminalBackgroundSince.set(previous, {
+                at: Date.now(),
+                endpointId: (kept && kept.agent && kept.agent.endpointId) || (kept && kept.agentId) || null,
+              });
+            }
             saveTerminalViewports();
           } else {
             terminalViewportRetire(previous);
@@ -5775,12 +5814,91 @@ async function api(method, path, body) {
       delete terminalPreviewSessions[terminalId];
     }
     terminalBackgroundIds.delete(terminalId);
+    if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(terminalId);
     terminalHollowStreak.delete(terminalId);
     terminalDoneUnread.delete(terminalId);
     terminalPrevWorking.delete(terminalId);
     terminalTurnArmed.delete(terminalId);
     saveTerminalViewports();
     return true;
+  }
+
+  // 后台回收器（P-D）：zcode 这类自绘终端进后台空转时宿主不会自己退（zcode-global
+  // 的在途数恒挂、输出窗恒热），攒成僵尸会话白烧资源。只对同时命中的终端直接发
+  // /close：① 在后台集合且有进后台起点；② 端点归属 zcode；③ 实例行在途数为零；
+  // ④ 进程树不忙；⑤ 最近可见活动已静默 10min；⑥ 最近无键入（或已过去 10min）；
+  // ⑦ 进后台已满 10min。
+  // 为什么不走 terminalCloseTerminal：它会对「在跑」的会话弹 window.confirm——回收
+  // 是后台自洁动作，弹窗即新增交互与文案（本轮硬约束零新增文案、零 toast）。失败
+  // 静默等下一拍（宿主拒关就留着，绝不重复提示）。
+  // 判据用 lastVisibleAt 而不是 lastActiveAt：后者被自绘刷新（欢迎屏扫光）恒新，
+  // 拿它做判据回收器永不触发；lastVisibleAt 缺位（老宿主快照）＝不知道有没有人在看，
+  // 保守不回收。
+  // 取舍：面板隐藏／不在终端页时整拍跳过——这两种状态下会话数据停在上一拍快照，
+  // 拿陈旧计数做杀判据等于盲杀；宁可晚回收，不可误杀。
+  let terminalBackgroundRecycleInFlight = false;
+  function maybeRecycleTerminalBackground(now = Date.now()) {
+    if (terminalBackgroundRecycleInFlight) return;
+    if (!terminalBackgroundIds.size) return;
+    // 本拍 /api/agents 没取到（请求失败或首拍未拉）＝看不见在途数，不能把「看不见」
+    // 当成「零」。归属未绑定是「有 payload 但查不到实例行」，那仍按无证据处理；这里
+    // 只挡取数失败这一拍，下一拍取到数自然会继续判。
+    if (typeof terminalAgentsPayload === "undefined" || terminalAgentsPayload === null) return;
+    // 惰性清退避表：已不在后台集合（切回视口／已关闭／清场）的 id 别留旧时间戳。
+    for (const rid of Array.from(terminalBackgroundRecycleRetryAfter.keys())) {
+      if (!terminalBackgroundIds.has(rid)) terminalBackgroundRecycleRetryAfter.delete(rid);
+    }
+    const targets = [];
+    for (const id of terminalBackgroundIds) {
+      // 存档两份列表不一致（异常退出／手改）时，页签里正显示的 id 也可能同时在后台
+      // 集合里；只要还占着视口就不回收，避免把用户正看着的终端关掉。
+      if (terminalViewportForTerminal(id)) continue;
+      const retryAt = terminalBackgroundRecycleRetryAfter.get(id);
+      if (Number.isFinite(retryAt) && now < retryAt) continue;
+      const since = typeof terminalBackgroundSince !== "undefined" ? terminalBackgroundSince.get(id) : null;
+      // 无起点记账（刷新恢复的后台集合）＝不知道它何时进的后台，不回收。
+      if (!since || !Number.isFinite(since.at)) continue;
+      // 记账里的端点只是快筛；null（内切保活时取不到）留给下面按会话归属复核。
+      if (since.endpointId && since.endpointId !== "zcode") continue;
+      if (now - since.at <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      const session = terminalSessionFor(id);
+      if (!session) continue;
+      const endpointId = (session.agent && session.agent.endpointId) || session.agentId || null;
+      if (endpointId !== "zcode") continue;
+      // 计数只认实例行：聚合端点的 <endpoint>-global 是整机合计，不是这条终端的在途量。
+      const instance = terminalInstanceRow(typeof terminalAgentsPayload !== "undefined" ? terminalAgentsPayload : null, session.agent);
+      const count = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
+      if (count > 0) continue;
+      if (terminalCommandRunning(session)) continue;
+      const state = session.backendState || null;
+      const visibleAt = Number.isFinite(session.lastVisibleAt)
+        ? session.lastVisibleAt
+        : (state && Number.isFinite(state.lastVisibleAt) ? state.lastVisibleAt : null);
+      if (!(Number.isFinite(visibleAt) && now - visibleAt > TERMINAL_BACKGROUND_ZCODE_IDLE_MS)) continue;
+      const inputAt = state ? state.lastInputAt : undefined;
+      if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      targets.push(id);
+    }
+    if (!targets.length) return;
+    terminalBackgroundRecycleInFlight = true;
+    Promise.all(targets.map((id) => api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`)
+      .then(() => {
+        terminalBackgroundRecycleRetryAfter.delete(id);
+        terminalBackgroundIds.delete(id);
+        if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(id);
+        delete terminalBackendSessions[id];
+        terminalHollowStreak.delete(id);
+        terminalDoneUnread.delete(id);
+        terminalPrevWorking.delete(id);
+        terminalTurnArmed.delete(id);
+        saveTerminalViewports();
+      })
+      .catch((error) => {
+        terminalBackgroundRecycleRetryAfter.set(id, now + TERMINAL_BACKGROUND_RECYCLE_RETRY_MS);
+        // 纯开发者日志：静默是用户裁决，但宿主拒关／路由 404／网络失败排障时需要留痕。
+        console.warn("[terminal] background recycle /close failed", id, error);
+      })))
+      .finally(() => { terminalBackgroundRecycleInFlight = false; });
   }
 
   // 关页签的完整语义（点击委托只负责认出是哪颗页签）：结束该视口当前显示的终端 →
@@ -5842,7 +5960,10 @@ async function api(method, path, body) {
     }
     terminalViewports = kept;
     for (const id of Array.from(terminalBackgroundIds)) {
-      if (!terminalBackendSessions[id]) terminalBackgroundIds.delete(id);
+      if (!terminalBackendSessions[id]) {
+        terminalBackgroundIds.delete(id);
+        if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(id);
+      }
     }
     for (const id of Object.keys(terminalBackendSessions)) {
       if (terminalViewportForTerminal(id)) continue;
@@ -5958,6 +6079,10 @@ async function api(method, path, body) {
   // 「该实例出现在途请求」，终点取「无在途请求且输出窗过期」。内存态、不持久化，
   // 与上面两张表同生命周期（关会话、轮询重建后消失即清）。
   const terminalTurnArmed = new Set();
+  // 计数即真值的端点：zcode 这类自绘 TUI 空闲时也持续往 PTY 重绘（欢迎屏扫光、
+  // 光标/动画帧），5s 输出窗在它身上恒热——「出过字节」不是「在跑」的证据。
+  // 在途请求数与进程树忙位才是真值（判据见 terminalSessionBusyFromSignals 首支）。
+  const TERMINAL_COUNT_TRUTH_ENDPOINTS = new Set(["zcode"]);
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
@@ -5985,6 +6110,9 @@ async function api(method, path, body) {
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
   let terminalPollTimer = null;
   let terminalPollInFlight = false;
+  // 最近一拍的 agents 负载：后台回收器要按实例行（不是聚合汇总行）复核在途数，
+  // 与 enrichTerminalSessions 吃同一份数据，避免再造第二条取数口径。
+  let terminalAgentsPayload = null;
   let terminalFontSize = 13;
 
   function clampTerminalFontSize(value) {
@@ -6151,6 +6279,11 @@ async function api(method, path, body) {
         && typeof item.boundConversation.endpoint === "string" && typeof item.boundConversation.id === "string"
         ? { endpoint: item.boundConversation.endpoint, id: item.boundConversation.id }
         : null,
+      // 最近一次「用户可见活动」的时刻（毫秒 epoch，宿主随快照下发）。后台回收器的
+      // 静默判据只认它——不用 lastActiveAt：自绘 TUI 的重绘会把 lastActiveAt 刷成
+      // 恒新，拿它做判据回收器永不触发。老宿主快照不带此键：缺位记 null，回收器按
+      // 「不知道有没有人在看」保守跳过。
+      lastVisibleAt: Number.isFinite(item.lastVisibleAt) && item.lastVisibleAt > 0 ? item.lastVisibleAt : null,
       // status 两支同值是刻意的，不是笔误：后端快照的 status 只有 running/exited
       //（terminal-host.mjs 的 snapshot 只产这两值），这里一律不采用，先落 idle；
       // 真正的 working/idle 由信号在 terminalActivityApplyToSession /
@@ -6501,6 +6634,17 @@ async function api(method, path, body) {
   // 已知代价：面板刷新/新开页丢掉内存里的回合闸后，正在静默跑的命令会显示空闲——
   // 显示层降级；服务端杀前守卫自带按需探测，不受这一位影响，不会因此误杀。
   function terminalSessionBusyFromSignals(session, count, now = Date.now()) {
+    // 计数即真值的端点（zcode）：输出窗在这里恒热，只在途请求／进程树忙位算数。
+    // 判据取 session.agentId 而不是 agent.endpointId——归属缺失（agent===null）恰是
+    // zcode-global 汇总数唯一能接上「这条终端」的分支（聚合兜底只在无归属时命中）；
+    // 取 endpointId 会把它漏到下面「无归属＝输出窗即真值」，自绘恒热又判成 working。
+    // 这一支**不入回合闸也不留闸位**：闸是为了压住空闲 TUI 的自绘输出，而这个端点
+    // 压根不看输出窗；给恒热会话入闸只会把它锁死在 working（M3 台架证实的自锁）。
+    // typeof 闸护单测桩环境（按函数体抽取的沙盒没有这个模块级量）。
+    if (session && typeof TERMINAL_COUNT_TRUTH_ENDPOINTS !== "undefined"
+      && TERMINAL_COUNT_TRUTH_ENDPOINTS.has(session.agentId)) {
+      return count > 0 || terminalCommandRunning(session);
+    }
     const id = session && typeof session.id === "string" ? session.id : null;
     if (count > 0) {
       if (id) terminalTurnArmed.add(id);
@@ -6768,6 +6912,18 @@ async function api(method, path, body) {
     // 护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，没有
     // 这套列宽设施。
     if (typeof resetTerminalReflowRepaint === "function") resetTerminalReflowRepaint();
+    // 几何闸的待办同样随流销毁（见 scheduleTerminalGeometryRealign / deferTerminalStream）。
+    // 注意 deferTerminalStream 是「先拆后挂」：它调本函数时挂起标记还是零值，拆完才置位，
+    // 所以这里清标记不会把刚挂上的那一条自己抹掉。try 兜住两种「名字读不到」：沙箱把本
+    // 函数整段切出真跑时没有这套设施，以及声明在本文后文造成的 TDZ（typeof 不豁免 TDZ，
+    // 同一坑见 terminalSwitchStaleWidened）。读不到就说明这拍本来就没有待办。
+    try {
+      if (terminalGeometryRealignTimer !== null) clearTimeout(terminalGeometryRealignTimer);
+      terminalGeometryRealignTimer = null;
+      terminalGeometryReplayDrop = false;
+      terminalStreamDeferred = false;
+      terminalDeferredSessionId = null;
+    } catch { /* 沙箱无几何设施或无定时器：没有待办可清 */ }
     terminalXterm?.dispose();
     terminalXterm = null;
     terminalFitAddon = null;
@@ -6842,10 +6998,31 @@ async function api(method, path, body) {
   // 同一个已可见宿主里按原尺寸布局与测量（不是 display:none、也不是 0×0），建流前的
   // 同步 fit 照旧把尺寸 POST 进 PTY；垫片不参与布局，也不改变任何测量结果。
   const TERMINAL_STALE_SCREEN_MAX_MS = 2000;
+  // 换绑期的放宽档（2026-11-05 A4/F2）：/switch 是 terminate+spawn，实测 6~12s，
+  // 而这段里屏上停着的是**同一条会话的旧帧**——会话 id 没换、页签没换、终端记录没换，
+  // 只是进程换了一代。2026-10-27 那条裁决（「判不出就按不能换；宁可短暂空白也不长时间
+  // 显示别的会话」）约束的是「垫片底下其实是另一个会话」的情形，这里不成立，所以可以
+  // 把上限放宽；放而不是取消，是因为会话卡死时仍要退回既有三态覆盖层，不能把一帧旧画
+  // 面永久留在屏上。普通切页签（垫片底下确实是另一条会话）仍走 2000ms。
+  const TERMINAL_SWITCH_STALE_SCREEN_MAX_MS = 6000;
+  // 换绑在飞时兜底计时器最多**续**几窗：/switch 实测 6~12s，一窗 6s，首窗＋4 次续窗
+  // ＝5 窗＝30s 覆盖并留余量。到点仍强制撤（退回既有三态覆盖层），不能把一帧旧画面
+  // 永久留在屏上。注意这个上限只管「在飞续窗」，窗口隐藏那条分支见下、不计入次数。
+  const TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = 4;
   let terminalStaleScreen = null;
-  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：垫片观察者拿停放时的值与
-  // 当前值比较，变了就是新画面已经交代过一屏。见 connectTerminalStream 的 data 处理器。
+  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：**不再是垫片的揭幕判据**
+  // （2026-11-05 A4）——换绑清屏帧（\e[0m\e[2J\e[H）、新 PTY 的空回放、TUI 自己的
+  // 清屏序列都算「首帧」，拿它揭幕等于在擦除那一刻撤掉垫片，与 2026-11-02 给「正在
+  // 加载」占位做的修正（撤层只认新画面真的出字）正好相反。保留它是因为几何闸等回归
+  // 用例把它当「首帧确实发生过」的可观测信号（world.epoch()），不是产品侧的活状态；
+  // 产品揭幕只认 terminalContentEpoch，见 terminalStaleScreenReady。
   let terminalReplayEpoch = 0;
+  // 「新画面真的开始出字」的单调计数（2026-11-05 F2）：只在**当前实例**第一次
+  // terminalScreenHasContent 为真时 +1。实例一换就重新等（terminalContentTerm），否则
+  // 上一只实例出过字会让新实例一建出来就被判成就绪——垫片在新画面写入前就被撤走。
+  let terminalContentEpoch = 0;
+  let terminalContentTerm = null;
+  let terminalContentSeen = false;
   // 延后重建流的帧令牌（live 行快路径）：renderTerminalPreviewSession 的
   // deferScreen 把停放＋建流＋fit 整组推到双 rAF 之后，连点两条会话时旧帧
   // 醒来发现令牌已变即整组退场——不拿旧会话的流覆盖新会话。
@@ -6867,6 +7044,32 @@ async function api(method, path, body) {
     if (stale.el?.parentNode) stale.el.parentNode.removeChild(stale.el);
   }
 
+  // 「这条会话正在换绑」的判据（垫片上限放宽档，见 parkTerminalScreen 的 staleCapMs）：
+  // /switch 在这条会话上在飞，或它已落地且「正在加载」占位还武装着（armTerminalBootingOverlay
+  // 同一个标记，撤层即失效）。
+  //
+  // **必须按会话判**（2026-11-05 评审 major）：terminalBooting 是单例、只记最近一次武装的
+  // 会话，terminalSwitchInFlight 原本更只是一个布尔。拿它们当「有换绑在发生」用，会把
+  // 「这条会话正换绑」错读成「随便哪条在换绑」——新建一个页签（会武装自己的占位，未挂
+  // DOM 时靠 10s TTL 自然过期）之后立刻切另一个页签，那条垫片就因为别人的占位拿到 6s
+  // 档：屏上是**另一条会话**的旧帧盖 6 秒。这正是 2026-10-27「宁可短暂空白也不长时间
+  // 显示别的会话」明令禁止的形态，而放宽档的全部正当性都建立在「垫片底下是同一条会话」
+  // 之上（换绑换进程不换身份）。会话 id 对不上就按普通档走，宁可早点撤也不看错会话。
+  //
+  // 两个信号都声明在后文（换绑判定门 / 占位设施），本函数可能被更早的调用路径问到，
+  // 所以用 try 兜住 TDZ 与「沙箱里根本没有这两个名字」两种情形——**typeof 对 let/const
+  // 不豁免 TDZ**（照样抛 ReferenceError），单靠 typeof 闸不成立。兜底方向是安全的：
+  // 读不到就按普通档 2000ms 走，也就是更严格的那一档。
+  function terminalSwitchStaleWidened(sessionId) {
+    if (!sessionId) return false;
+    try {
+      if (terminalSwitchInFlight && terminalSwitchInFlightSessionId === sessionId) return true;
+      return !!terminalBooting && terminalBooting.sessionId === sessionId;
+    } catch {
+      return false;
+    }
+  }
+
   // 停放当前实例当垫片：返回垫片句柄；没有可停的画面时照旧整条拆流（首连、或上次
   // 就没建出实例）。
   function parkTerminalScreen() {
@@ -6875,6 +7078,10 @@ async function api(method, path, body) {
     if ($("terminalView")?.hidden) return null;
     const term = terminalXterm;
     const el = term && term.element ? term.element : null;
+    // 这只实例服务的是哪条会话：必须在下面拆流**之前**取，closeTerminalStream 会把
+    // 定投会话归零，之后再取恒为 null。它只服务垫片的放宽档判据（见 staleCapMs）。
+    // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱只切本函数，不声明这个名字。
+    const parkSessionId = typeof terminalBoundSessionId === "string" ? terminalBoundSessionId : null;
     if (!term || !el) {
       // 没有可停的画面（首连；或后台切回时实例已在隐藏期拆掉）：**不撤**已有的垫片
       // ——它正是此刻屏上唯一的内容，撤了就是一块底色。照旧整条拆流。
@@ -6894,39 +7101,69 @@ async function api(method, path, body) {
     } finally {
       term.dispose = originalDispose;
     }
-    const stale = { term, el, timer: null, frame: null, done: false, epochAtPark: terminalReplayEpoch };
+    const stale = { term, el, timer: null, frame: null, done: false, contentEpochAtPark: terminalContentEpoch };
     terminalStaleScreen = stale;
     // 兜底撤垫片：新画面迟迟不来（握手失败、宿主在飞）时不能把旧画面永久留在屏上
     // ——那是一屏别的会话的内容，看久了就是错的信息。到点撤走，退回既有三态覆盖层，
     // 也就是今天的行为，不是新增的中间态。
     //
+    // 上限分两档（2026-11-05 F2）：普通切页签 2000ms；这条会话正在换绑时放宽到 6000。
+    // 放宽的依据是「垫片永远是同一条会话的旧帧」——/switch 换的是进程不是身份，会话
+    // id、页签、视口全都没动，所以 2026-10-27 那条「宁可短暂空白也不长时间显示别的
+    // 会话」的前提（垫片底下是另一个会话）在这里不成立；而实测换绑本身要 6~12s，
+    // 2000ms 的档会在新会话画出第一屏之前就把旧帧撤掉，剩下的正是用户报的那块空白。
+    // 判据复用既有的两个信号：/switch 在这条会话上在飞，或它已落地并武装了「正在加载」
+    // 占位（terminalBooting，见 armTerminalBootingOverlay）。会话 id 是上面在拆流前取下的
+    // 那只（terminalBoundSessionId），拿不到时按普通档走（见 terminalSwitchStaleWidened）。
+    const staleCapMs = () => (terminalSwitchStaleWidened(parkSessionId) ? TERMINAL_SWITCH_STALE_SCREEN_MAX_MS : TERMINAL_STALE_SCREEN_MAX_MS);
+    //
     // 窗口在后台时不撤：隐藏期 rAF 停摆，观察循环叫不醒，撤了就等于把「切回时的那一
     // 屏」也撤了。此时重新起一次计时，回前台由观察循环（按「新画面有内容」揭幕）接手。
+    // 这一支**不计入 capRenewals**：隐藏期本来就无法撤，回前台后的第一次到点才重新
+    // 按上面的续窗上限处置（5 窗＝30s 的「有界」承诺从回前台那一拍起算）。
+    let capRenewals = 0;
     const armCap = () => {
       stale.timer = setTimeout(() => {
         stale.timer = null;
         if (typeof document !== "undefined" && document.hidden) { armCap(); return; }
+        // /switch 还在飞：POST 自己要 6~12s（探针＋terminate＋spawn），而「正在加载」
+        // 占位是 POST **落地之后**才武装的。此刻撤垫片会露出一块既没有旧帧、也没有
+        // 占位的纯底色——正是这次要消灭的那块空白。续一窗等落地：落地后由占位层
+        // 或新流接管，观察循环仍按「新画面真的出字」揭幕。续窗有次数上限，防 POST
+        // 永不落地（宿主卡死）时把一屏旧画面永久留在屏上。
+        // 判据只认「在飞」，不认 terminalSwitchStaleWidened 的第二个信号（占位武装）：
+        // 占位已经武装说明 POST 落地了，那一拍正该撤垫片让占位露出来，不能继续盖着。
+        // 用 try 兜 TDZ 与单测桩环境（typeof 对 let/const 不豁免 TDZ）。
+        let switchStillInFlight = false;
+        try {
+          switchStillInFlight = !!terminalSwitchInFlight && terminalSwitchInFlightSessionId === parkSessionId;
+        } catch { /* 沙箱无换绑设施：按不在飞处置 */ }
+        if (switchStillInFlight && capRenewals < TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS) {
+          capRenewals += 1;
+          armCap();
+          return;
+        }
         dropTerminalStaleScreen();
-      }, TERMINAL_STALE_SCREEN_MAX_MS);
+      }, staleCapMs());
     };
     armCap();
     watchTerminalStaleScreen(stale);
     return stale;
   }
 
-  // 就绪判据（两条任一）：
-  //  a) 新实例的缓冲区里真的**有字**——首帧回放的字节被解析了（空屏会话走 b）；
-  //  b) **首帧回放那一拍已经发生过**：拿「停放时的计数」与当前值比，变了即成立。
+  // 就绪判据（唯一一条）：新实例的缓冲区里真的**有字**——首帧回放的字节被解析了。
   //
   // 判「有字」不能看 buffer.active.length：xterm 一开屏就有 rows 行空行，length 恒
   // ≥ rows，拿它当判据等于「实例一建出来就算就绪」——CDP 实测这条错判据会
   // 让垫片在新画面写入前约 340ms 就被撤走，空白照旧。必须逐行看有没有非空白字符。
   //
-  // b 为什么是「计数」而不是「逐帧看 terminalReplayFramePending」：snapshot 与首帧 data
-  // 实测只隔 0.6ms、同帧到达，rAF 逐帧采样永远采不到那个中间态——判据于是恒假，空屏
-  // 会话只能等 2s 兜底（评审实测 2009ms，那 2 秒里用户看的是上一个会话的画面）。改成
-  // 在 data 处理器消费标志的那一拍自增计数（见 connectTerminalStream），观察循环只做
-  // 「变了没有」的比较，同帧发生也照样算数。
+  // 旧版还有第二条判据「首帧回放那一拍已经发生过」（terminalReplayEpoch 变了）。它
+  // 成立的年代，垫片只在切页签时挂，首帧就是一条会话的真实画面；换绑内切（/switch
+  // 的 terminate+spawn）上线后，同一拍先到的是**换绑清屏帧**——那条判据于是在屏上
+  // 什么都没有的那一刻就揭幕（2026-11-05 A4，用户报的「切过去一片空白」）。现在
+  // 只认字：清屏帧写进去不带字，判据不成立，垫片继续盖着（上面那条换绑放宽上限
+  // 保证它不会盖太久）。这与 2026-11-02 「正在加载」占位撤层只认新画面出字的修正
+  // （见 watchTerminalBootingOverlay）是同一条取向。
   function terminalScreenHasContent(term) {
     const buf = term && term.buffer ? term.buffer.active : null;
     if (!buf || typeof buf.getLine !== "function") return false;
@@ -6939,17 +7176,30 @@ async function api(method, path, body) {
     return false;
   }
 
+  // 首帧出字的记号：每个实例只记一次（terminalContentTerm 换人就重新等）。观察循环
+  // 每帧调它一次，出字当拍计数 +1，垫片拿停放时的值与它比。typeof 闸护单测桩环境。
+  function noteTerminalContent(term) {
+    if (term !== terminalContentTerm) {
+      terminalContentTerm = term;
+      terminalContentSeen = false;
+    }
+    if (terminalContentSeen) return;
+    if (!terminalScreenHasContent(term)) return;
+    terminalContentSeen = true;
+    terminalContentEpoch += 1;
+  }
+
   // 垫片就绪判据（唯一一处判定，观察循环与单测都调它）：
-  //   有字（首帧回放的字节被解析了）或「首帧回放那一拍已经发生过」（计数变了）。
+  //   有字（首帧回放的字节被解析了）。
   // 抽成纯函数是为了它能被直接钉住——判据写死在观察循环里时，测试只能整条链路跑，
-  // 而「删掉计数比较」这种变异会被兜底计时器掩盖掉，测不出来。
+  // 而「删掉字判据、换成计数比较」这种变异会被兜底计时器掩盖掉，测不出来。
   function terminalStaleScreenReady(stale) {
     if (!stale) return false;
     // 闲剪重建（见 triggerTerminalIdleTrim）：视口位置落定才算新画面就绪——垫片多盖
-    // 到落位那一刻，用户看到的新帧直接就在原阅读位。2s 兜底计时器仍限总时长。
+    // 到落位那一刻，用户看到的新帧直接就在原阅读位。兜底计时器仍限总时长。
     if (stale.restorePending) return false;
-    if (terminalReplayEpoch !== stale.epochAtPark) return true;
-    return terminalScreenHasContent(terminalXterm);
+    noteTerminalContent(terminalXterm);
+    return terminalContentEpoch !== stale.contentEpochAtPark;
   }
 
   // 逐帧观察新画面何时就绪，就绪后再等两帧（一帧给渲染器排程、一帧给合成器上屏）
@@ -7091,7 +7341,14 @@ async function api(method, path, body) {
     // 「别窗关掉当前会话、活跃指针已回落而流未拆」的窗口期向未在观看
     // 的新会话误投 resize。
     const session = terminalBoundSessionId ? terminalSessionFor(terminalBoundSessionId) : null;
-    if (!session?.backend || !terminalXterm) return;
+    if (!session?.backend || !terminalXterm) {
+      // 挂起中的流在这里补挂：deferTerminalStream 拆流时连同实例一起收掉了，
+      // terminalBoundSessionId 也归零，于是这条「没有可对齐目标」的早退是它唯一
+      // 可见的通路——上面的量测与列宽记账已经跑过，此刻几何正是可信的。
+      // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱只切 fit 本身。
+      if (typeof remountDeferredTerminalStream === "function") remountDeferredTerminalStream();
+      return;
+    }
     // fit 后尺寸与 PTY 侧已知尺寸完全一致就跳过这次 POST：PTY 收到 resize（哪怕
     // 同值）也会让承载的 TUI 整屏重排一次，1s 轮询的兜底 fit、inspector 收放、字
     // 号微调等入口在尺寸实际没变时重复 POST 同值，就是用户看到的「终端没动却抽
@@ -7113,13 +7370,15 @@ async function api(method, path, body) {
   // 一次；安排与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的
   // 更新测量优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
   // 返回 promise 落定（成功或失败已处置），不覆盖 250ms 后的第二次尝试——那只兜
-  // 极端失败，建连不必等它。
+  // 极端失败，建连不必等它。成功时兑现宿主回的 result（含夹取后的 cols/rows），
+  // 失败路径兑现 undefined：调用方（几何重对齐）要拿它把夹过的值回夹进 xterm。
   function postTerminalResize(session, cols, rows, attempt = 0) {
     return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
           session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
         }
+        return result;
       })
       .catch((error) => {
         const stillCurrent = () => terminalXterm && terminalXterm.cols === cols && terminalXterm.rows === rows;
@@ -7551,12 +7810,25 @@ async function api(method, path, body) {
   // 重画一遍，不如退回原逻辑让用户至少看到画面。
   const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
   const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
-  // POST 挂住不落定（api() 没有超时）时的兜底：先放开数据闸让回放照常落屏。这时回放
-  // 仍是错宽度（同修复前的形态），但画面在；POST 真落定后 finally 仍会重连重画一帧对的。
+  // POST 挂住不落定（api() 没有超时）时的兜底：先放开数据闸让实时字节继续流。回放已被
+  // 丢弃（见下），这里放开只影响其后的增量输出，不会把一份错宽整屏帧画进来。
   const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
   let terminalGeometryRealignPending = false;
   let terminalGeometryRealignAt = 0;
   let terminalGeometryRealignStreak = 0;
+  // 「下一条 data 帧是整屏回放、必须整帧丢弃」的一次性标记（G2b）。错宽回放不能画，
+  // 但同一条流其后的增量帧是应用自己的正常输出，照画（那是今天本来就在发生的事）。
+  // 每个 snapshot 都显式置位或清零，不会跨连接漂移。
+  let terminalGeometryReplayDrop = false;
+  // 建流被几何闸挡下（容器不可测 / 组字期）后的补挂标记（G2b）。挡下只是「这一拍量
+  // 不准」，不是「不要这条流」；RO / window resize / 组字释放随后都会再走一次 fit，
+  // 那时几何已经可信，由 fit 把流接上（见 remountDeferredTerminalStream）。
+  let terminalStreamDeferred = false;
+  let terminalStreamRemounting = false;
+  // 挂起时记下的会话 id：补挂只认这一条（期间用户可能已切到别的页签）。
+  let terminalDeferredSessionId = null;
+  // 冷却窗内的延后对齐定时器。与 terminalReflowRepaintTimer 同一套处置：拆流即撤。
+  let terminalGeometryRealignTimer = null;
 
   // 行高量取：.xterm-screen 盒高 / 行数（渲染器行高的构造性来源）。缓存按行数与
   // 2s 时效失效——字号变化不一定改行数，时效兜底自愈。
@@ -8053,48 +8325,56 @@ async function api(method, path, body) {
   // 次 snapshot、心跳是注释帧，不会因此误清屏。reset-on-snapshot 也是浏览器
   // 侧唯一可靠的重连信号（onerror 之后浏览器自动重连，前端没有钩子）。
   function absorbTerminalSnapshot(term, session, state) {
-    // 几何闸：宿主按它自己的列宽发整屏绝对定位回放（每行 CUP+2K+内容），客户端这一拍
-    // 若停在出厂 80×24 或旧尺寸（隐藏闸 / 量不到 / 与缓存 PTY 同值早退都会让建流那次
-    // fit 空转），回放就会按错宽度折行。TUI 只「定位光标 + 写字符」、从不发擦除序列，
-    // 错位会永久留在缓冲里，只有再整屏重建才擦得掉。两侧都量得到尺寸且不一致时，先按
-    // 客户端真实尺寸把 PTY 对齐、重开一条流，而不是把这份回放画进错宽度的屏。旧宿主
-    // 不带 cols/rows 时走原逻辑。
-    const hostCols = Number(state?.cols);
-    const hostRows = Number(state?.rows);
+    // 几何闸：宿主按镜像自己的列宽发整屏绝对定位回放（每行 CUP+2K+内容），客户端这一拍
+    // 若停在出厂 80×24 或旧尺寸，回放就会按错宽度折行。TUI 只「定位光标 + 写字符」、
+    // 从不发擦除序列，错位会永久留在缓冲里，只有再整屏重建才擦得掉。
+    //
+    // 取向（2026-11-05 M5）：错宽回放**一个字节都不许进屏**。此前这条闸的四个放行口
+    // 全都按「宁可画错也不空白」收尾——那是垫片时代的取向，代价是一块永久错位的屏，
+    // 而用户报的正是这块屏。区别要讲清，别当成违反 2026-10-27 裁决把它改回去：
+    //   · 2026-10-27 那条约束的是「垫片底下其实是**另一个会话**」——看错会话比空白糟；
+    //   · 这里从头到尾是**同一条会话**，只是这份回放的列宽和这块屏对不上。画进去既
+    //     不提供任何信息（内容本来就有，只是位置错），还会让之后每一帧都叠在残行上。
+    // 极端情况下的代价是短暂空白（切开流到重连拿到正确回放之间的这一拍）。这是刻意
+    // 用「短暂空白」换「不再永久错位」，与 2026-10-27 的取向同源（错信息比慢更糟）。
+    //
+    // 坐标系：回放是按**镜像**尺寸算的，宿主给了 screenCols/screenRows 就只认它；
+    // 旧宿主没有这两个字段时退回 cols/rows（PTY 尺寸，正常与镜像一致）。
+    const hostCols = Number(state?.screenCols ?? state?.cols);
+    const hostRows = Number(state?.screenRows ?? state?.rows);
     const clientCols = Number(term?.cols);
     const clientRows = Number(term?.rows);
     const hostSized = Number.isFinite(hostCols) && Number.isFinite(hostRows);
-    // 客户端量不到尺寸时没有可对齐的目标（POST 也没有真实参数），宁可照旧画。
+    // 客户端尺寸得是「真量到的」：容器不可测或正在组字（inputmethod 组字期会冻结几何）时，
+    // 这一拍的 cols/rows 只是 xterm 出厂值或旧值，拿它 POST 等于把猜测写进 PTY。
     const clientSized = Number.isFinite(clientCols) && Number.isFinite(clientRows)
       && clientCols > 0 && clientRows > 0
-      // 尺寸还得是「真量到的」：容器不可测或正在组字（inputmethod 组字期会冻结几何）时，
-      // 这一拍的 cols/rows 只是 xterm 出厂值或旧值，拿它 POST 等于把猜测写进 PTY。
-      // 不判也就不纠错，照原逻辑落屏——不可测本来就没有可对齐的目标。
       && terminalHostMeasurable() && !terminalImeHold;
     const geometryMismatch = hostSized && clientSized
       && (hostCols !== clientCols || hostRows !== clientRows);
     // 对上了就清账：下一次错配重新从 0 起算（计数只认「连续」）。
     if (hostSized && clientSized && !geometryMismatch) terminalGeometryRealignStreak = 0;
+    if (hostSized && !clientSized) {
+      // 判不了就不能画（M5 收紧的第一处退让）：此前这里 clientSized=false 便让整闸失效，
+      // 回放照原逻辑落进一个几何未知的屏——量不到尺寸恰恰是「列宽可能对不上」的信号，
+      // 不是「不用担心」的信号。改成拆流挂起：终端页可见时 RO / window resize / 组字
+      // 释放都会再走一次 fit，那时量准了由 fit 把流接回来（见 remountDeferredTerminalStream），
+      // 屏幕空白只持续到那一拍。
+      dropTerminalReplayFrame();
+      session.backendState = state;
+      session.shell.pid = state.pid || "—";
+      deferTerminalStream(session);
+      return;
+    }
     if (geometryMismatch) {
-      // 两条刹车：连续超过上限（宿主尺寸真改不动）与冷却窗内（刚重连过）都不再重开流，
-      // 这一帧按原逻辑照常落屏——拖窗口/连续重连的那一拍不能让屏停在空白上。
+      // 两条刹车：连续超过上限（宿主尺寸真改不动）与冷却窗内（刚重连过）都不再重开流。
       const realignable = terminalGeometryRealignStreak < TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS
         && Date.now() - terminalGeometryRealignAt >= TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS;
-      if (terminalGeometryRealignStreak >= TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
-        // 连续几次都没对上：宿主侧尺寸多半改不动（进程拒绝 resize 等）。再重连只会把同
-        // 一份错位回放重画一遍，退回原逻辑至少让用户看到画面；只告警一次。
-        if (terminalGeometryRealignStreak === TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
-          terminalGeometryRealignStreak += 1;
-          console.warn("[terminal] geometry realign abandoned", {
-            host: [hostCols, hostRows], client: [clientCols, clientRows],
-          });
-        }
-      }
       if (realignable) {
-        terminalGeometryRealignAt = Date.now();
-        terminalGeometryRealignStreak += 1;
         // 重对齐在飞期间到达的回放一律丢弃（见 data 帧处理器的第一行），否则它仍会写进
         // 错宽度的屏。
+        terminalGeometryRealignAt = Date.now();
+        terminalGeometryRealignStreak += 1;
         terminalGeometryRealignPending = true;
         discardTerminalBurst();
         term.reset();
@@ -8107,21 +8387,32 @@ async function api(method, path, body) {
             host: [hostCols, hostRows], client: [clientCols, clientRows], realign: true,
           });
         }
-        // 用客户端真实尺寸强制对齐：postTerminalResize 内部已处理失败重试与 backendState
-        // 回写。落定后重开一条流，拿宿主按新尺寸自绘的整屏帧——这份回放已经作废。
-        const realignStall = setTimeout(() => {
-          if (term === terminalXterm) terminalGeometryRealignPending = false;
-        }, TERMINAL_GEOMETRY_REALIGN_STALL_MS);
-        postTerminalResize(session, clientCols, clientRows).finally(() => {
-          clearTimeout(realignStall);
-          terminalGeometryRealignPending = false;
-          // 期间可能已切走 / 被拆流 / 换了实例：那些情况下这条重连都是多余的。
-          if (term !== terminalXterm || !terminalEventSource) return;
-          if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
-          connectTerminalStream(session, { revive: false });
-        });
+        // 用客户端真实尺寸强制对齐：postTerminalResize 内部已处理失败重试、backendState
+        // 回写与宿主夹取后的回夹。落定后重开一条流，拿宿主按新尺寸自绘的整屏帧。
+        finishTerminalGeometryRealign(term, session, clientCols, clientRows);
         return;
       }
+      // 刹车拦下的错配帧：同样是错宽回放，一个字节都不画（M5 收紧的第二、三处退让）。
+      // 屏上留在上一个 geometryRealign 里 reset 之后的空白，或者（超限那一路）上一帧
+      // 已经画好的正确画面——绝不留一屏错列宽的残行。
+      dropTerminalReplayFrame();
+      session.backendState = state;
+      session.shell.pid = state.pid || "—";
+      if (terminalGeometryRealignStreak >= TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
+        // 连续几次都没对上：宿主侧尺寸多半改不动（进程拒绝 resize 等）。再重连只会把同
+        // 一份错位回放重画一遍，于是不再画错宽回放、保留当前画面；只告警一次。
+        if (terminalGeometryRealignStreak === TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
+          terminalGeometryRealignStreak += 1;
+          console.warn("[terminal] geometry realign abandoned", {
+            host: [hostCols, hostRows], client: [clientCols, clientRows],
+          });
+        }
+        return;
+      }
+      // 冷却窗内：账还热着，等窗过去再对齐（此前这一帧按原逻辑照常落屏，等于拖窗口
+      // 的每一拍都往屏上糊一层错宽内容）。
+      scheduleTerminalGeometryRealign(term, session, clientCols, clientRows);
+      return;
     }
     // 攒着未落屏的突发属于上一条连接：新连接的整屏重绘会把同样的内容重发一遍，
     // 落屏反而画成双份，直接丢弃。
@@ -8140,6 +8431,106 @@ async function api(method, path, body) {
     terminalReplayFramePending = true;
     session.backendState = state;
     session.shell.pid = state.pid || "—";
+  }
+
+  // ---- 几何闸的收尾件（G2b，见 absorbTerminalSnapshot 的取向注释）----
+  //
+  // 三个动作的分工要分清，混用会退回到「永久错位」或「永久空白」：
+  //   · dropTerminalReplayFrame：这一份整屏回放作废，但**流继续**。只丢首帧。
+  //   · deferTerminalStream：这一拍判不了几何，连流一起拆掉挂起，等 fit 补挂。
+  //   · scheduleTerminalGeometryRealign：几何能判、只是冷却窗还热，等到点再对齐。
+
+  // 丢掉「紧接着这一帧 snapshot 到达的首帧回放」。不 reset：屏上已有的画面是这处
+  // 收尾的关键——错配时若把屏擦了又画不进新内容，用户看到的是空白；保留上一帧至
+  // 少还有内容。terminalReplayFramePending 一并清零，否则 data 处理器会把首帧当成
+  // 「自足整屏重绘」直写，正好绕过合并器也绕过丢弃标记。
+  function dropTerminalReplayFrame() {
+    terminalGeometryReplayDrop = true;
+    terminalReplayFramePending = false;
+    discardTerminalBurst();
+  }
+
+  // 几何判不了（容器不可测 / 组字期）时拆流挂起。挡下只是「这一拍量不准」，不是
+  // 「不要这条流」：记下 session.id，等 fit 在几何可信时补挂（见
+  // remountDeferredTerminalStream）。不碰 session.backendState——调用方已经写过，
+  // 这里再写会把刚收到的状态覆盖成旧值。
+  function deferTerminalStream(session) {
+    // 顺序要紧：closeTerminalStream 会清掉挂起标记（那是「主动拆流」的正常语义），
+    // 所以先拆完再挂上去，否则这一拍刚记下就被自己清掉了。
+    closeTerminalStream();
+    terminalStreamDeferred = true;
+    terminalDeferredSessionId = session?.id ?? null;
+  }
+
+  // 几何已可信时把挂起的流接回来。由 fit 在「量准并 POST 完」那条路径末尾调用：
+  // 那时 xterm 已按真实尺寸落定、PTY 也已对齐，此刻开流收到的首帧回放才是对的。
+  // 拿不到会话就保留标记，下一次 fit 再试——挂起是「这一拍量不准」，不是终态。
+  function remountDeferredTerminalStream() {
+    if (!terminalStreamDeferred || terminalStreamRemounting) return;
+    const session = terminalDeferredSessionId
+      ? terminalSessionFor(terminalDeferredSessionId)
+      : (activeTerminalPreviewId ? terminalSessionFor(activeTerminalPreviewId) : null);
+    if (!session?.backend) return;
+    if ($("terminalView")?.hidden) return;
+    if (!terminalHostMeasurable()) return;
+    // revive:false——这是被动补挂，不是用户挑了这条会话：进程已退就只回放最后一屏。
+    terminalStreamRemounting = true;
+    terminalStreamDeferred = false;
+    terminalDeferredSessionId = null;
+    try {
+      connectTerminalStream(session, { revive: false });
+    } finally {
+      terminalStreamRemounting = false;
+    }
+  }
+
+  // 强制对齐：POST 客户端真实尺寸，落定后重开一条流拿宿主按新尺寸自绘的整屏帧。
+  // 调用方已 reset 并竖起数据闸（terminalGeometryRealignPending），这里只负责收尾。
+  function finishTerminalGeometryRealign(term, session, clientCols, clientRows) {
+    // POST 挂住不落定时的兜底：放开数据闸让其后增量继续流。回放已被丢弃，放开不会
+    // 把错宽整屏帧画进来。
+    const realignStall = setTimeout(() => {
+      if (term === terminalXterm) terminalGeometryRealignPending = false;
+    }, TERMINAL_GEOMETRY_REALIGN_STALL_MS);
+    postTerminalResize(session, clientCols, clientRows)
+      .then((result) => {
+        // 宿主把 cols 夹在 240 / rows 夹在 120（见 resize 路由），POST 成功也不保证
+        // 两侧相等。不把夹过的值回夹进 xterm，下一次 snapshot 仍是「错配」，连续几拍
+        // 之后就撞上上限刹车——「连续两次对不齐后放弃」正是这么来的。回夹一次即收敛。
+        if (result && term && term !== null
+          && Number.isFinite(result.cols) && Number.isFinite(result.rows)
+          && (term.cols !== result.cols || term.rows !== result.rows)) {
+          try { term.resize(result.cols, result.rows); } catch { /* 实例已换人，忽略 */ }
+        }
+      })
+      .finally(() => {
+        clearTimeout(realignStall);
+        terminalGeometryRealignPending = false;
+        // 期间可能已切走 / 被拆流 / 换了实例：那些情况下这条重连都是多余的。
+        if (term !== terminalXterm || !terminalEventSource) return;
+        if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
+        connectTerminalStream(session, { revive: false });
+      });
+  }
+
+  // 冷却窗内不立刻重连（刚重连过，再来一次只会把同一份回放重画一遍），等窗过去
+  // 再走一次对齐。窗内到达的错配回放已被丢弃，屏上是上一帧的画面（不是空白）。
+  function scheduleTerminalGeometryRealign(term, session, clientCols, clientRows) {
+    if (terminalGeometryRealignTimer !== null) clearTimeout(terminalGeometryRealignTimer);
+    const wait = Math.max(0, TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS - (Date.now() - terminalGeometryRealignAt));
+    terminalGeometryRealignTimer = setTimeout(() => {
+      terminalGeometryRealignTimer = null;
+      // 实例换人 / 页不可见：这次对齐作废，切回终端页会走整屏重建。
+      if (term !== terminalXterm || !terminalEventSource) return;
+      if (document.hidden || $("terminalView")?.hidden) return;
+      terminalGeometryRealignAt = Date.now();
+      terminalGeometryRealignStreak += 1;
+      terminalGeometryRealignPending = true;
+      discardTerminalBurst();
+      term.reset();
+      terminalReplayFramePending = false;
+      finishTerminalGeometryRealign(term, session, clientCols, clientRows);
+    }, wait);
   }
 
   async function connectTerminalStream(session, { revive = true } = {}) {
@@ -8307,6 +8698,13 @@ async function api(method, path, body) {
     terminalEventSource.addEventListener("data", (event) => {
       // 重对齐在飞时到达的回放属于旧几何，写进去就是一屏错宽度；新流会重发一份。
       if (terminalGeometryRealignPending) return;
+      // 错配 snapshot 的作废回放：只丢这一帧。其后的增量是应用自己的正常输出，
+      // 与这份回放无关，照画（见 dropTerminalReplayFrame）。
+      if (terminalGeometryReplayDrop) {
+        terminalGeometryReplayDrop = false;
+        terminalReplayFramePending = false;
+        return;
+      }
       // 迟到的旧流帧不得消费回放闩 / 推进揭幕计数（后者是垫片的就绪判据）。
       if (term !== terminalXterm) return;
       if (typeof terminalLastStreamDataAt === "number") terminalLastStreamDataAt = Date.now();
@@ -8320,11 +8718,10 @@ async function api(method, path, body) {
         // 它自带完整画面，进合并器只会平白多等一个静默窗口。
         if (terminalReplayFramePending) {
           terminalReplayFramePending = false;
-          // 首帧回放落地即记一拍（垫片观察者的就绪判据 b，见 watchTerminalStaleScreen）。
-          // 必须在这里记而不是让观察循环逐帧看 terminalReplayFramePending：snapshot 与
-          // 首帧 data 实测只隔 0.6ms、同帧到达，rAF 采样永远看不见那个中间态。
-          // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，
-          // 没有这条计数设施。
+          // 首帧回放落地即记一拍。它只是「宿主已经交代过一屏」的可观测内部信号，
+          // 垫片的揭幕判据已经不用它了——换绑清屏帧同样走这条路，拿它揭幕就等于在
+          // 擦除那一刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸
+          // 护只切本函数真跑的单测桩环境（那些沙箱不声明模块级变量）。
           if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
           term.write(text);
           return;
@@ -8333,6 +8730,22 @@ async function api(method, path, body) {
         // 大段历史攒成一次写入，逐块写就是「飞速滚到底」。
         queueTerminalChunk(term, text);
       } catch {}
+    });
+    terminalEventSource.addEventListener("exit", () => {
+      // 迟到的旧流：已被拆掉/顶替的连接不消费退出帧（同 data 处理器的第一道闸）。
+      if (term !== terminalXterm) return;
+      // 消费退出帧（2026-11-05 F4）：在此之前面板对进程退出只有一个 1s 轮询，而它对
+      // 「屏上什么都没有」没有任何呈现动作（见 applyTerminalHostState 的 exited 口径：
+      // 页签保留不动、停在最后一帧）——最后一帧恰好是空白时，那块空白就永久留在屏上。
+      //
+      // 这里只把本会话的状态位翻成 exited，**不挂任何覆盖层**：有内容就停在那（最后一帧
+      // 就是用户要的现场），空屏也维持原样。会话级的退出提示要一句新措辞（「这个终端已
+      // 退出」之类），属前端文案，需另行批准后按 PANEL-COPY-SPEC 落地——本轮不做，绝不
+      // 借宿主级的 renderTerminalUnavailableState 顶替：那是「整个终端服务没运行」的
+      // 降级页，会把全部页签清空、藏掉会话栏与底栏、禁用新建键，而这里服务明明在跑。
+      if (session && session.backendState) session.backendState.status = "exited";
+      // 回放闩一并收：退出之后不会再有首帧，留着它只会让下一次建连把第一帧误当回放。
+      terminalReplayFramePending = false;
     });
     terminalEventSource.onerror = () => {
     };
@@ -8497,11 +8910,16 @@ async function api(method, path, body) {
       // 状态口径与活跃真值流同源：请求在途，或输出活跃窗内且本回合已入闸
       // （terminalSessionBusyFromSignals）。
       // 算完过 noteTerminalWorkingStatus（done 未读标记的翻转观测，同 SSE 写点）。
-      const instance = terminalInstanceRow(agentsPayload, agent) || aggregateSource?.row || null;
+      // 状态只认真实例行：聚合端点的 <endpoint>-global 汇总数（如 zcode-global 恒挂
+      // 的在途数）是整机合计，不是这条终端的在途量——让它进 status 就把「别的实例
+      // 在干活」画成「这条终端在转圈」。读数侧不受影响（下面 metricsSource 仍可兜底），
+      // 端点卡合计来自 endpoint.metrics，与本行无关。
+      const instance = terminalInstanceRow(agentsPayload, agent);
       const activeRequests = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
       session.status = terminalSessionBusyFromSignals(session, activeRequests) ? "working" : "idle";
       noteTerminalWorkingStatus(session, session.status);
-      session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
+      const metricsSource = instance || aggregateSource?.row || null;
+      session.metrics = metricsSource ? terminalMetricsFromInstance(metricsSource) : null;
       // 折叠行（claude 会话行）的成员实例键：journal 账目是逐进程的，「最近
       // 请求」按成员键集合过滤才不漏行。非折叠行没有 memberPids，维持单键。
       session.memberInstanceIds = instance && agent && Array.isArray(instance.memberPids) && instance.memberPids.length > 0
@@ -8549,6 +8967,7 @@ async function api(method, path, body) {
       rebuildTerminalBackendSessions(data.sessions);
       await refreshRouteRuntimeCache();
       const agentsData = await api("GET", "/api/agents").catch(() => null);
+      terminalAgentsPayload = agentsData?.agents ?? null;
       enrichTerminalSessions(agentsData?.agents ?? null);
       await refreshActiveTerminalRequests();
       renderTerminalPreviewTabs();
@@ -8930,6 +9349,7 @@ async function api(method, path, body) {
     terminalViewports = [];
     terminalViewportActiveId = null;
     terminalBackgroundIds.clear();
+    if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.clear();
     activeTerminalPreviewId = null;
     rememberTerminalSessionId(null);
     saveTerminalViewports();
@@ -9617,7 +10037,12 @@ async function api(method, path, body) {
         }
         if (document.hidden) return;
         if (currentView !== "terminal") return;
-        pollTerminalSessions();
+        // 后台回收器垫在本拍取数之后：判据要的是刚拉回来的实例行在途数与
+        // lastVisibleAt，拿上一拍的陈旧计数做杀判据就是盲杀（见函数内取舍说明）。
+        // 未就绪时轮询根本不取数（提前返回），这一拍也跳过回收。
+        pollTerminalSessions().then(() => {
+          if (terminalBackendReady) maybeRecycleTerminalBackground();
+        }).catch(() => {});
       }, 1000);
     }
     syncTerminalActivityStream();
@@ -12111,6 +12536,10 @@ async function api(method, path, body) {
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
+  // 在飞的是哪一条会话（垫片上限放宽档的会话级判据，见 terminalSwitchStaleWidened）：
+  // 只有「这条会话自己」正在换绑才放宽，否则新建页签武装的占位会让别的会话的旧帧
+  // 也跟着盖 6 秒——那正是 2026-10-27 明令禁止的「长时间显示别的会话」。
+  let terminalSwitchInFlightSessionId = null;
   // 「刚启动、还没用过」的 agent 终端：作为 agent 起的、还没产生任何对话身份
   // （resume 与 boundConversation 皆空），且出生在窗内。这种终端在说出第一句话之前
   // 结构上恒为 idle（回合闸要有过请求才入闸，出生 15s 内还有孵化豁免），内切准入会把
@@ -12159,6 +12588,7 @@ async function api(method, path, body) {
       return createAgentTerminal({ agentId, cwd, resume }, { placement: activeViewport ? "viewport" : "new" });
     }
     terminalSwitchInFlight = true;
+    terminalSwitchInFlightSessionId = active.id;
     try {
       // 未使用的 agent 终端不能被就地 /switch（2026-11-03 A4）：它还没有任何对话身份
       // （resume / boundConversation 皆空），换绑会整树 terminate，刚开的会话连对话文件
@@ -12202,6 +12632,13 @@ async function api(method, path, body) {
       // 不变，视口/页签都不变）。切换期进行态（A6）不排在这一拍：在飞的 6~12s 里屏上还是
       // 上一屏的画面，这会儿挂「正在加载」占位就是叠在没擦的旧画面上（2026-11-02 用户
       // 报告的错位现场），武装排到 /switch 落地之后（见下）。
+      // 先停帧再换绑（2026-11-05 F1）：宿主的 /switch 是「terminate + spawn + 换绑清屏」，
+      // 清屏字节经同一条 SSE 先落到旧实例上——等响应回来才停放，停到手的已经是一张
+      // 被清空的图，垫片于是等于空白。停放必须排在 POST 之前：此刻 terminalXterm 还是
+      // 上一条会话的真画面，停下来的垫片才有内容。随后的 renderTerminalPreviewSession
+      // 会再停一次，那次 terminalXterm 已为 null，走的是「不撤已有垫片」的幂等空转
+      // （见 parkTerminalScreen 里对应的注释），不会把这一帧弄丢。
+      if (typeof parkTerminalScreen === "function") parkTerminalScreen();
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
       // 成功即收武装：兜底行的真实身份已经由宿主快照接手（spawnedAt 刷新、resume
@@ -12219,6 +12656,18 @@ async function api(method, path, body) {
       // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：
       // 本地记录原样，页签还是原来那条，只给一句提示。
       const code = error && (error.serverCode || error.code);
+      // 失败必须把流接回来（2026-11-05，评审 blocker）：进本函数时为了「先停帧」已经
+      // park 过一次，而 park 内部会拆流（dispose xterm、关 SSE）。只 toast 不重挂，屏上
+      // 就只剩那块垫片、背后没有任何活流——兜底计时器到点撤走垫片，剩一块没有覆盖层
+      // 的空白，直到用户手动切页签。这与宿主侧「spawn 抛错时保住旧屏」正好配套：宿主
+      // 保住的画面要有人去取，否则等于白保。
+      // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
+      // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
+      const resumeStream = () => {
+        try { renderTerminalPreviewSession({ revive: false }); } catch (error) {
+          console.warn("[terminal] stream reattach after failed switch failed:", error);
+        }
+      };
       if (code === "switch_busy") {
         // 服务端杀前复核拒换（会话树里有活着的命令进程）：这就是「旧终端在跑」的
         // 服务端判据。改走保活分支——旧终端不杀、目标终端挂进当前视口，页签数不变
@@ -12228,6 +12677,23 @@ async function api(method, path, body) {
         // （live 行接任），此处清会让高亮先弹回旧行；全新内切不同——兜底行锚在本次
         // 点击换上的终端上，照旧撤掉旧瞄准。
         if (!resume) terminalRailEndSelect(null);
+        // 保活不是「另一条路自己会建流」的保证：terminalRailKeepAliveSwitch 走的是
+        // createAgentTerminal，它的 POST 失败出口只 toast、不重建任何流（2026-11-05
+        // 重审 major）。而 F1 已经把流拆了，那条路上屏上只剩一块垫片，兜底撤走后
+        // 就是纯空白，所以先把本会话的流接回来当底。
+        //
+        // 但这条出口的视口紧接着就会换成**另一条会话 B**：屏上这帧 A 的旧画面已经
+        // 不再满足「垫片底下是同一条会话」这个放宽档的唯一正当性（2026-10-27），
+        // 也不能续窗。提前清在飞闸，切断「A 的旧帧按 A 的在飞状态盖 6~30s」这条路。
+        // 机制要说准：resumeStream 里那次 park 是幂等空转（POST 前那次停放已把
+        // terminalXterm 置空，park 走「没有可停的画面→不撤已有垫片」早退），并不登记
+        // 计时器；真正落回普通 2s 档的是 **B 挂载时**那次 park——它首行先丢掉 A 的
+        // 旧垫片，再以在飞为假重挂。清闸是让这次 park 不再命中放宽档的前提。
+        // 清得早一点不引入并发：finally 本来也是 return 表达式求值后立刻清、并不等
+        // 保活 POST 回来，这里只是把同一件事挪到重挂之前。
+        terminalSwitchInFlight = false;
+        terminalSwitchInFlightSessionId = null;
+        resumeStream();
         return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       // 失败清点：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
@@ -12236,11 +12702,14 @@ async function api(method, path, body) {
       terminalRailEndSelect(null);
       if (typeof code === "string" && code.startsWith("resume-")) {
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
+        resumeStream();
         return;
       }
       toast(panelError(error, "无法启动这个终端"), true);
+      resumeStream();
     } finally {
       terminalSwitchInFlight = false;
+      terminalSwitchInFlightSessionId = null;
     }
   }
 

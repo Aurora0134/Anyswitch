@@ -54,6 +54,10 @@ const TERMINAL_BUFFER_MAX_CHUNKS = 4000;
 // per session. The budget counts serialized rows (screen rows always kept — they
 // are the minimum viable picture; scrollback rows are dropped oldest-first).
 const TERMINAL_SNAPSHOT_PERSIST_MAX_BYTES = 128 * 1024;
+// 首帧告警窗（2026-11-05 A6）：spawn 之后这么久还没收到任何一个字节，就打一行
+// 归因日志。它只解释「进程活着但屏上什么都没有」这一种形态，不做任何处置——处置
+// 归面板（垫片兜底 / exit 帧 / 不可用卡片）。
+const FIRST_FRAME_WARN_MS = 5000;
 // SSE data 帧合帧的冲刷阈值：单连接待发缓冲累计超过这个字节数立即冲，不等窗口
 // 定时器。窗口是给「TUI 把一帧拆成好几个小块」省帧数用的，不是给一次粘贴一大
 // 屏白添延迟用的——大块输出攒在缓冲里只会推迟它到达浏览器的时间。
@@ -471,6 +475,22 @@ function trimReplayBuffer(session, maxBytes, maxChunks) {
   }
 }
 
+// 从字节窗尾部按预算取一份拷贝（不就地裁）：快照生成失败时落盘的降级原料
+// （见 sessionRecord 的 catch）。与 trimReplayBuffer 同一条纪律——只许整块丢，
+// 留下的每块都完整；最新一块无论如何都留（否则这份原料等于空）。
+function tailChunks(buffer, maxBytes) {
+  const kept = [];
+  let bytes = 0;
+  for (let i = buffer.length - 1; i >= 0; i -= 1) {
+    const chunk = String(buffer[i]);
+    const size = chunkBytes(chunk);
+    if (kept.length > 0 && bytes + size > maxBytes) break;
+    kept.unshift(chunk);
+    bytes += size;
+  }
+  return kept;
+}
+
 // Non-secret session metadata for agent-launched sessions: what runs here and
 // how it was started. The env delta is deliberately absent — credentials stay
 // in memory, never in a snapshot, never on disk.
@@ -502,6 +522,9 @@ function snapshot(session) {
     exitCode: session.exitCode,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
+    // 最近一次「可见文本」变化（毫秒 epoch）：纯颜色重绘不刷新它。老宿主快照没有
+    // 这个字段，下发时缺席、前端按 undefined 处理（契约字段名不可改）。
+    ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
     // 工作态判定的两只输入信号（面板 terminalBusyByOutput 消费）：
     // lastInputAt＝最近一次用户键入（键入抑制窗的锚点，出生起未键入则缺省）；
     // spawnedAt＝最近一次进程出生（孵化豁免窗的锚点——内切/复活保记录换进程，
@@ -510,8 +533,23 @@ function snapshot(session) {
     spawnedAt: session.spawnedAt,
     cols: session.cols,
     rows: session.rows,
+    // 回放的坐标系：整屏回放（toReplay）是按**镜像**当前尺寸算的绝对定位定宽行，
+    // 不是 PTY 尺寸。两者正常一致，但 resize 失败被跳过（见 resize 路由的 warn 分支）
+    // 或镜像尚未建时就会分叉——面板的几何闸若拿 cols/rows 判「回放能不能画进这块屏」，
+    // 判的就是错的那只尺寸。旧宿主不带这两个字段，面板按缺失走原逻辑。
+    ...screenGeometry(session),
     ...agentMetadata(session),
   };
+}
+
+// 镜像的行列（回放坐标系）。镜像不存在时省略字段：snapshot 的读者把它当「旧宿主」。
+function screenGeometry(session) {
+  const info = session.screen?.info?.();
+  if (!info) return {};
+  const cols = Number(info.cols);
+  const rows = Number(info.rows);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) return {};
+  return { screenCols: cols, screenRows: rows };
 }
 
 // ---------------------------------------------------------------------------
@@ -761,6 +799,20 @@ export function createTerminalHost({
       // 快照失败不拦落盘：恢复侧对缺 screen 的记录回落字节重放（老格式同款）。
       logger.warn?.(`[terminal-host] screen snapshot failed (${session.id}): ${error.message}`);
     }
+    // 快照生成失败时的降级原料（2026-11-05 A5）：v2 记录平时不带字节尾，恢复侧对
+    // screen 缺失走 feedMirrorSync 重放 buffer——而盘上没有 buffer，那条分支恒为空，
+    // 于是「快照这一拍失败」会变成「这个会话跨宿主重启后永远空白，且面板无提示」。
+    // 这里按与快照同一条尾窗预算裁一份字节尾进记录，恢复侧既有分支即可重建出近似
+    // 画面（顶部可能被裁，这是字节重放的已知上界）。只在这一条降级路径上写，不改
+    // 快照格式，也不改正常记录的体积。
+    let buffer = null;
+    if (!screen && Array.isArray(session.buffer) && session.buffer.length > 0) {
+      try {
+        buffer = tailChunks(session.buffer, TERMINAL_SNAPSHOT_PERSIST_MAX_BYTES);
+      } catch {
+        buffer = null;
+      }
+    }
     return {
       version: 2,
       id: session.id,
@@ -770,10 +822,13 @@ export function createTerminalHost({
       pid: session.pid,
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt,
+      // 与 snapshot 同源（契约字段）：老记录没有这一项，恢复时缺省为 undefined。
+      ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
       spawnedAt: session.spawnedAt,
       cols: session.cols,
       rows: session.rows,
       screen,
+      ...(buffer ? { buffer } : {}),
       status: session.pty ? "running" : "exited",
       exitCode: session.exitCode,
       ...agentMetadata(session),
@@ -1337,10 +1392,29 @@ export function createTerminalHost({
       try {
         if (!session.screen) return;
         if (!session.screen.drain(MIRROR_SLICE_MS).done) scheduleMirrorDrain(session);
+        touchVisibleAt(session);
       } catch (error) {
         skipMirrorChunk(session, error);
       }
     });
+  }
+
+  // 画面可见内容变没变：只看整屏字符＋光标＋备屏位（见 visibleSignature），纯 SGR
+  // 颜色重绘（欢迎屏 logo 扫光）不算。lastActiveAt 保持「任何输出块都算活跃」的
+  // 原语义不动，这一只信号专供面板判「这屏还在动吗」。
+  // 签名缓存只在进程内（lastVisibleSignature）；lastVisibleAt 随快照/落盘记录带出，
+  // 老记录缺这一项即 undefined。拿不到签名就静默跳过（诊断面不能反过来伤主链路）。
+  function touchVisibleAt(session) {
+    let signature;
+    try {
+      signature = session.screen?.visibleSignature?.();
+    } catch {
+      return;
+    }
+    if (typeof signature !== "string") return;
+    if (signature === session.lastVisibleSignature) return;
+    session.lastVisibleSignature = signature;
+    session.lastVisibleAt = Date.now();
   }
 
   // 终端询问的应答侧（清单见文件头）：宿主是唯一应答者，浏览器渲染器只会看到
@@ -1397,6 +1471,9 @@ export function createTerminalHost({
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     feedMirror(session, text);
     session.lastActiveAt = Date.now();
+    // 可见文本指纹与 lastActiveAt 分开：扫光这类纯颜色帧不能算「画面有新内容」，
+    // 只刷新真正看得见的变化（面板据此判「这屏还在动吗」）。
+    touchVisibleAt(session);
     // 每个输出块都改写这条会话的记录（镜像快照与 lastActiveAt；记录正文不含原始
     // 字节，见 sessionRecord）：只置这一条
     // 会话的脏标，250ms 防抖到点的那一拍只重写它自己那份文件——别的会话空闲与
@@ -1490,18 +1567,44 @@ export function createTerminalHost({
       session.livePids.add(session.pid);
     }
     const isCurrent = () => session.ptyGeneration === generation;
+    // 首字节归因（2026-11-05 A6）：空白屏的下一次现场只能靠日志分辨「进程根本没起
+    // 来 / 起来了但一个字节都没画 / 画了又被清掉」。这里只在**本代**第一次收到数据
+    // 时记一拍，退出日志与首帧超时日志都读它。
+    let firstByteAt = null;
+    // 5 秒无首字节的告警：TUI 出首帧通常远快于此（ConPTY 冷启动 + agent banner），
+    // 只剩「进程活着但没画任何东西」这一种解释。定时器 unref——它只是日志，不该拖住
+    // 宿主退出；代际不符或会话已退时自行作废。
+    const firstFrameTimer = setTimeout(() => {
+      if (firstByteAt !== null || !isCurrent()) return;
+      logger.warn?.(`[terminal-host] session first frame timeout (id=${session.id}, msSinceSpawn=${Date.now() - (session.spawnedAt ?? Date.now())})`);
+    }, FIRST_FRAME_WARN_MS);
+    firstFrameTimer.unref?.();
     child.onData((data) => {
       if (!isCurrent()) return;
+      if (firstByteAt === null) {
+        firstByteAt = Date.now();
+        clearTimeout(firstFrameTimer);
+      }
       emit(session, data);
     });
     child.onExit(({ exitCode }) => {
       // 这一代进程已经结束：无论是不是当前代，都把它从待杀清单里摘掉——死 pid
       // 会被系统复用，留在清单里就等于把号发给别人的进程当成本会话的树。
       if (Number.isInteger(child.pid)) session.livePids?.delete(child.pid);
+      clearTimeout(firstFrameTimer);
       if (!isCurrent()) {
         logger.warn?.(`[terminal-host] stale exit ignored (pid=${child.pid}, generation=${generation}, current=${session.ptyGeneration})`);
         return;
       }
+      // 退出归因（2026-11-05 A6）：空白屏的下一次现场只能靠这三项分辨——秒退（退出码
+      // 非零 / msSinceSpawn 极小）是启动失败，活了一段时间是正常结束，firstByte=false
+      // 说明这个进程从头到尾一个字节都没画（面板那条「切过去一片空白」的典型形态）。
+      // 只记日志，不改任何状态。
+      logger.warn?.(
+        `[terminal-host] session exited (id=${session.id}, code=${exitCode}, `
+        + `msSinceSpawn=${Date.now() - (session.spawnedAt ?? Date.now())}, `
+        + `firstByte=${firstByteAt !== null})`,
+      );
       session.exitCode = exitCode;
       session.pty = null;
       session.lastActiveAt = Date.now();
@@ -1591,9 +1694,16 @@ export function createTerminalHost({
       // 内切换身份变了：旧画面整屏作废、换一只新镜像，否则新会话页上方
       // 会回填老会话的完整内容——见 resetSessionScreen。
       if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
-      else if (identityChanged) resetSessionScreen(session);
-      else restartHygiene(session);
+      // 清屏/衔接卫生排在 spawn 成功之后（2026-11-05 A1）：旧实现的顺序是「先擦屏再
+      // 起进程」，spawn 一抛（可执行文件没了、权限被拒、ConPTY 起不来）就只剩一块
+      // 不可逆的空白——路由回 500 时面板虽有 toast，屏上却已经什么都没有了，之后任何
+      // 一条路径都拿不回旧画面。反过来排：进程没起来就一个字节都不发，旧屏原样留着，
+      // 用户看到的仍是上一屏（失败是显式的 toast，不是静默空屏）。
+      // 同步语义不变：hygiene 的合成字节仍早于新 PTY 的首块数据——onData 是异步回调，
+      // 本函数在 spawn 之后同步跑完（见 attach 的 onData 注册）。
       spawnSession(session);
+      if (identityChanged) resetSessionScreen(session);
+      else restartHygiene(session);
       // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
       // 只等这一条会话的记录——重开不改成员表，不必替别的会话的尾部欠账付账。
       await persistSession(session);
