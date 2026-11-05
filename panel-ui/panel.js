@@ -12160,14 +12160,13 @@ async function api(method, path, body) {
     }
     terminalSwitchInFlight = true;
     try {
-      // 未使用的 agent 终端不是「可回收的空槽」（2026-11-03 A4）：点历史会话时，它还没
-      // 产生任何对话身份（resume / boundConversation 皆空）、用户也没敲过字——就地
-      // /switch 会把用户刚开的会话换成别人的对话，终端 id 与页签数都不变，被杀的新会话
-      // 连对话文件都没写成（1s/20s/40s/已有对话四组实测全中）。改新开页签：原会话原样
-      // 留着，页签 +1 是可见的代价。只拦「换内容」的内切，不拦「新建会话」——两个空会话
-      // 互换不丢东西，拦了反而点一次多一个页签。
+      // 未使用的 agent 终端不能被就地 /switch（2026-11-03 A4）：它还没有任何对话身份
+      // （resume / boundConversation 皆空），换绑会整树 terminate，刚开的会话连对话文件
+      // 都没写成。保护落成保活：旧终端进后台、目标终端挂当前视口——页签数不变（用户
+      // 2026-11-05 裁决「单一页签内切」），旧会话仍可从左栏 live 行点回；此处不复判
+      // 杀前口径，与「宁可多留、不可误杀」同向。只拦「换内容」的内切，不拦「新建会话」。
       if (resume && terminalSessionUnusedAgentSlot(active)) {
-        return createAgentTerminal({ agentId, cwd, resume }, { placement: "new" });
+        return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       // 补读两拍（规格时序防线）：活跃面即时取（防 SSE 活跃流一拍延迟误杀在跑
       // 任务）＋宿主单读（PTY 现态，顺带确认记录还在）。判不出就按「在跑」处置：
