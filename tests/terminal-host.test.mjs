@@ -3627,3 +3627,177 @@ test("无 resume 的普通创建不新增字段；坏 resume 一律 400 不建�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/* ============================================================
+   换绑清屏晚于 spawn 成功（2026-11-05 A1/F3）
+   ============================================================ */
+// 顺序改动的判别力全在「spawn 抛错这一拍有没有发过字节」：旧顺序先 resetSessionScreen
+// 再 spawn，抛错前清屏字节已经进了字节窗、发了在线客户端、换了镜像——三条来源同时
+// 丢画面且不可逆，路由回 500 也只有一句 toast。新顺序下进程没起来就一个字节都不发。
+test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留（失败不留不可逆空白）", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-switch-spawn-fail-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({
+        label: "老会话", cwd: root, shell: "cmd", cols: 20, rows: 4,
+        agentId: "claude", agentName: "Claude Code",
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:////////fake////////claude.cmd"] },
+      }),
+    }).then((r) => r.json());
+    calls[0].pty.dataListener?.("CLAUDE帧-1\r\nCLAUDE帧-2\r\n");
+    const session = host.sessions.get(created.id);
+    const bufferBefore = session.buffer.join("");
+    const screenBefore = session.screen.toReplay();
+    assert.ok(bufferBefore.includes("CLAUDE帧-2"), "前置：旧画面在字节窗里");
+    assert.ok(screenBefore.includes("CLAUDE帧-2"), "前置：旧画面在镜像里");
+
+    // 在线客户端：这一拍里它收到的每一帧都要记下来——清屏帧会经同一条流先到。
+    // 流是常开的，收尾必须 abort，否则 server.close 会一直等这条连接（整个文件挂死）。
+    const streamAbort = new AbortController();
+    const streamRes = await fetch(url(`/terminal/sessions/${created.id}/stream`), {
+      headers: headers(host), signal: streamAbort.signal,
+    });
+    const collector = startSseCollector(streamRes);
+    assert.equal(await waitForSseFrame(collector, "snapshot"), true, "前置：流已建、快照帧已到");
+    const framesBefore = collector.frames.length;
+
+    // 换身份：这一拍本该走 resetSessionScreen（旧顺序下先清屏再 spawn）。
+    // spawn 抛错（可执行文件没了/权限被拒/ConPTY 起不来）。
+    ptyModule.spawn = () => { throw new Error("spawn failed"); };
+    const switched = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ agentId: "kimi", agentName: "Kimi Code", clearResume: true }),
+    });
+    assert.equal(switched.status, 500, "spawn 失败回 500（面板有 toast，不是静默）");
+
+    // ① 一个字都没发：字节窗、镜像、在线客户端三处全部保持失败前的样子
+    assert.equal(session.buffer.join(""), bufferBefore, "字节窗原样（没有清屏序列进去）");
+    assert.equal(session.screen.toReplay(), screenBefore, "镜像原样（没被换成空镜像）");
+    assert.ok(!session.buffer.join("").includes("\u001b[2J"), "字节窗里没有清屏字节");
+    const after = collector.frames.slice(framesBefore);
+    const clearedFrames = after.filter((frame) => frame.event === "data" && String(frame.data || "").includes("\u001b[2J"));
+    assert.deepEqual(clearedFrames, [], `在线客户端没收到任何清屏帧（收到 ${clearedFrames.length} 帧）`);
+
+    // ② 会话记录里的画面原料完好：下一次重挂/恢复仍然拿得到这一屏。
+    // 身份字段的改写发生在 terminate/spawn 之前（/switch 的既有语义，本改动不碰），
+    // 所以这里只钉画面，不钉身份——那个语义有它自己的一组用例。
+    assert.equal(session.pty, null, "原地那一代已经 terminate 掉了（这是 /switch 的既有语义）");
+    assert.ok(session.screen.toReplay().includes("CLAUDE帧-2"), "镜像仍带着旧画面");
+    streamAbort.abort();
+    await collector.settled;
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("换绑 spawn 成功时清屏照旧在 spawn 之后、且同步早于 PTY 首块数据", async () => {
+  // 顺序改动的另一半：不能为了「失败保留画面」把 hygiene 整个挪到异步尾巴上。
+  // PTY 的首块数据是异步回调（ConPTY 至少要过一个事件循环），同步跑完的 reset 天然
+  // 排在它前面——这里用「写镜像的时机 vs 首块数据的时机」钉住这条不变式。
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-switch-order-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({
+        label: "老会话", cwd: root, shell: "cmd", cols: 20, rows: 4,
+        agentId: "claude", agentName: "Claude Code",
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:////////fake////////claude.cmd"] },
+      }),
+    }).then((r) => r.json());
+    calls[0].pty.dataListener?.("CLAUDE旧屏\r\n");
+
+    // spawn 当拍就记录「清屏是否已经落地」：spawn 内部同步检查镜像，而不是事后看。
+    let clearedAtSpawn = null;
+    const realSpawn = ptyModule.spawn;
+    ptyModule.spawn = (file, args, options) => {
+      clearedAtSpawn = !host.sessions.get(created.id).buffer.join("").includes("CLAUDE旧屏");
+      return realSpawn(file, args, options);
+    };
+    const switched = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ agentId: "kimi", agentName: "Kimi Code", clearResume: true }),
+    });
+    assert.equal(switched.status, 200, "换绑成功");
+    assert.equal(clearedAtSpawn, false, "spawn 那一刻还没清屏（成功路径的新顺序：先起进程后擦）");
+    const session = host.sessions.get(created.id);
+    assert.equal(session.buffer.join(""), "\u001b[0m\u001b[2J\u001b[H", "spawn 之后清屏照旧发生，字节窗只剩清屏序列");
+    // 首块数据到达时镜像已经是新的：旧帧一个都不回填
+    calls[1].pty.dataListener?.("KIMI开场\r\n");
+    assert.ok(!session.screen.toReplay().includes("CLAUDE"), "新进程首块数据落在干净屏上（旧帧不回填）");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/* ============================================================
+   快照生成失败时留字节尾（2026-11-05 A5/F5）
+   ============================================================ */
+test("快照序列化失败：记录里带字节尾，restore 据此恢复出非空镜像", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-snapshot-fallback-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  let restoredHost = null;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "脆快照", cwd: root, shell: "cmd", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    const session = host.sessions.get(created.id);
+    calls[0].pty.dataListener?.("FBLINE\r\n");
+    // 让这一条会话的快照序列化抛错——这是「渲染面坏了」这一类故障的最小替身。
+    session.screen.serializeSnapshot = () => { throw new Error("snapshot boom"); };
+    await host.persistNow();
+
+    const record = readSessionRecord(host, created.id);
+    assert.equal(record.screen, null, "快照字段照旧写 null（不改格式语义）");
+    assert.ok(Array.isArray(record.buffer) && record.buffer.length > 0, "降级原料：记录里带字节尾");
+    assert.ok(record.buffer.join("").includes("FBLINE"), "字节尾里是真实画面内容");
+    await host.close();
+
+    // 从盘上恢复：restore 对 screen 缺失走既有 buffer 分支，画面不该是空的
+    const second = capturingPtyModule();
+    restoredHost = createTerminalHost({ root, port: 0, ptyModule: second.ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+    const restored = restoredHost.sessions.get(created.id);
+    assert.ok(restored, "会话照旧在册");
+    assert.ok(restored.screen.toReplay().includes("FBLINE"), "恢复出非空画面（改前是永久空白）");
+  } finally {
+    if (restoredHost) await restoredHost.close();
+    else await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("快照正常时记录里不带字节尾（降级原料不侵占正常记录的体积）", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-snapshot-normal-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "正常", cwd: root, shell: "cmd", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    calls[0].pty.dataListener?.("NORMAL-SNAPSHOT\r\n");
+    await host.persistNow();
+    const record = readSessionRecord(host, created.id);
+    assert.ok(record.screen && typeof record.screen === "object", "快照照旧落盘");
+    assert.equal(record.buffer, undefined, "正常路径不写字节尾（既有口径不变）");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

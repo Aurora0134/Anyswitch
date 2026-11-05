@@ -60,6 +60,18 @@ function makeClock() {
     },
     pendingFrames: () => frames.length,
     pendingTimers: () => timers.length,
+    // 只触发最早登记的那一个定时器：续窗逻辑要靠「到点那一刻垫片还在不在」来验，
+    // flushAll 一口气冲到静默会把中间态跳过去。
+    fireOldestTimer() {
+      const t = timers.shift();
+      if (!t) return false;
+      stats.timersFired += 1;
+      t.fn();
+      return true;
+    },
+    // 在册定时器的延时值（升序）：上限分档这类「只差一个常数」的判据不能靠推进时钟
+    // 来验——手动时钟一冲就是把所有定时器一起跑完，2s 与 6s 没有区别。读登记值才分得开。
+    timerDelays: () => timers.map((t) => t.ms).sort((a, b) => a - b),
   };
 }
 
@@ -308,6 +320,10 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
   const created = [];
   const staleConst = panelJs.match(/const TERMINAL_STALE_SCREEN_MAX_MS = [^;]+;/)?.[0];
   assert.ok(staleConst, "TERMINAL_STALE_SCREEN_MAX_MS 在 panel.js 里");
+  const switchStaleConst = panelJs.match(/const TERMINAL_SWITCH_STALE_SCREEN_MAX_MS = [^;]+;/)?.[0];
+  assert.ok(switchStaleConst, "TERMINAL_SWITCH_STALE_SCREEN_MAX_MS 在 panel.js 里（换绑放宽档）");
+  const renewalsConst = panelJs.match(/const TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = [^;]+;/)?.[0];
+  assert.ok(renewalsConst, "TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS 在 panel.js 里（续窗上限）");
   const factory = new Function(
     "$", "EventSource", "API_BASE", "setTimeout", "clearTimeout",
     "requestAnimationFrame", "cancelAnimationFrame", "document",
@@ -337,10 +353,22 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     let terminalReplayFramePending = false;
     let terminalStaleScreen = null;
     let terminalReplayEpoch = 0;
+    let terminalContentEpoch = 0;
+    let terminalContentTerm = null;
+    let terminalContentSeen = false;
+    let terminalSwitchInFlight = false;
+    let terminalSwitchInFlightSessionId = null;
+    let terminalBooting = null;
+    let terminalUnavailableRenders = 0;
+    function renderTerminalUnavailableState() { terminalUnavailableRenders += 1; }
     ${staleConst}
+    ${switchStaleConst}
+    ${renewalsConst}
+    ${extractFn("terminalSwitchStaleWidened")}
     ${extractFn("closeTerminalStream")}
     ${extractFn("dropTerminalStaleScreen")}
     ${extractFn("terminalScreenHasContent")}
+    ${extractFn("noteTerminalContent")}
     ${extractFn("terminalStaleScreenReady")}
     ${extractFn("watchTerminalStaleScreen")}
     ${extractFn("revealTerminalStaleScreen")}
@@ -357,6 +385,10 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
       bound: () => terminalBoundSessionId,
       pending: () => terminalReplayFramePending,
       epoch: () => terminalReplayEpoch,
+      contentEpoch: () => terminalContentEpoch,
+      unavailableRenders: () => terminalUnavailableRenders,
+      setSwitchInFlight: (v, sessionId = null) => { terminalSwitchInFlight = v; terminalSwitchInFlightSessionId = sessionId; },
+      setBooting: (v) => { terminalBooting = v; },
       openNext() {
         const term = nextTerminal();
         terminalXterm = term;
@@ -467,10 +499,17 @@ function makeStubTerm(log, n) {
       if (term.options.disableStdin) { log.push(`${id}.reply_blocked`); return; }
       for (const fn of [...listeners]) fn(payload);
     },
+    // 写入按 xterm 的解析面复刻：CSI/OSC 控制序列不落字，ED（2J/3J）清屏。桩早期
+    // 是「原样拼字节」，于是清屏帧也变成「屏上有内容」——那条判据在真实 xterm 上
+    // 恒不成立，用桩钉它只会把 bug 钉成期望值。
     write(data, cb) {
       term.written.push(data);
       log.push(`${id}.write`);
-      if (data) term.screenText += String(data);
+      const text = data === undefined || data === null ? "" : String(data);
+      if (/\u001b\[[0-3]?J/.test(text)) term.screenText = "";
+      term.screenText += text
+        .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
+        .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
       if (cb) cb();
     },
   };
@@ -586,37 +625,89 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     w.clock.flushAll();
   });
 
-  it("真跑：空屏会话在「首帧回放那一拍」就揭幕——不是靠 2s 兜底", async () => {
+  it("真跑：换绑清屏帧不算就绪——垫片继续盖着，直到新画面真的出字", async () => {
+    // 病灶（2026-11-05 A4）：旧判据「首帧回放那一拍发生过」在换绑内切时命中的是宿主
+    // 发来的清屏帧（\e[0m\e[2J\e[H），于是在屏上什么都没有的那一刻就揭幕——用户看到
+    // 的就是那块空白。这里钉住：清屏帧到了、缓冲区一个字都没有 ⇒ 垫片不撤。
     const w = makeTerminalWorld();
     const { term: termA } = await primeSession(w, terminalSession("A"));
-    const epochAtPark = w.world.epoch();
+    const contentEpochAtPark = w.world.contentEpoch();
     w.world.parkTerminalScreen();
     await w.world.connectTerminalStream(terminalSession("B"));
-    assert.equal(w.world.epoch(), epochAtPark, "还没收到首帧：计数没动");
     w.sources[1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
-    // 空屏会话：回放帧是空串，缓冲区里永远没有字，判据 a 不成立
-    w.sources[1].emit("data", JSON.stringify(""));
-    assert.equal(w.world.epoch(), epochAtPark + 1, "首帧回放那一拍记了数（同帧也算）");
-    assert.equal(w.created[1].screenText, "", "新实例缓冲区里一个字都没有");
-    // 关键：只推进「帧」，一个定时器都不跑。兜底计时器仍在册 ⇒ 揭幕不可能来自兜底。
-    assert.ok(w.clock.pendingTimers() >= 1, "兜底计时器在册");
-    assert.equal(termA.disposed, false, "帧推进之前垫片还在");
+    // 换绑清屏帧：真实字节就是这样，写进去缓冲区里仍然没有字
+    w.sources[1].emit("data", JSON.stringify("\u001b[0m\u001b[2J\u001b[H"));
+    assert.equal(w.created[1].written.join(""), "\u001b[0m\u001b[2J\u001b[H", "清屏帧确实写进了新实例");
+    assert.equal(w.world.contentEpoch(), contentEpochAtPark, "清屏帧不出字：首帧出字计数没动");
     w.clock.flushFrames();
-    assert.equal(w.clock.stats.timersFired, 0, "全程没有跑过任何定时器（兜底从未参与）");
-    assert.equal(termA.disposed, true, "帧一到就揭幕");
+    assert.equal(termA.disposed, false, "清屏帧不算就绪：垫片还在（旧判据在这一步就撤了）");
+    assert.notEqual(w.world.stale(), null, "垫片还在册");
+    assert.equal(w.world.stale().term, termA, "在册的仍是停放时那只旧实例");
+
+    // 新会话画出第一屏：这时候才揭幕
+    w.sources[1].emit("data", JSON.stringify("dsh > \n"));
+    w.clock.flushAll();
+    assert.equal(termA.disposed, true, "新画面真的出字后垫片才销毁");
+    assert.equal(w.world.stale(), null, "垫片已撤");
   });
 
-  it("判据本身：只有计数变了或真有字才算就绪（删掉计数比较这条必红）", () => {
+  it("真跑：空屏会话不再靠「首帧回放」揭幕，交给兜底上限撤", async () => {
+    // 首帧回放是空串（宿主镜像本来就空）时没有任何字可认——这正是旧判据的用武
+    // 之地，也是它在换绑场景误伤的来源。现在一律等兜底：宁可多盖一会儿同一条会话
+    // 的旧帧（换绑档 6s，见下一条用例），也不在屏上还没东西时就把垫片撤掉。
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    w.world.parkTerminalScreen();
+    await w.world.connectTerminalStream(terminalSession("B"));
+    w.sources[1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
+    w.sources[1].emit("data", JSON.stringify(""));
+    assert.equal(w.created[1].screenText, "", "新实例缓冲区里一个字都没有");
+    w.clock.flushFrames();
+    assert.equal(termA.disposed, false, "空回放不揭幕");
+    assert.equal(w.clock.stats.timersFired, 0, "帧推进期间一个定时器都没跑（不是兜底撤的）");
+    w.clock.flushAll();
+    assert.equal(w.world.stale(), null, "最终由兜底计时器撤垫片");
+    assert.equal(termA.disposed, true);
+  });
+
+  it("真跑：判据函数在没有换绑/占位设施的环境里也不抛（typeof 不豁免 TDZ）", () => {
+    // 两个信号声明在 panel.js 后文（12130 / 9148 附近），而 parkTerminalScreen 可能被更早
+    // 的调用路径问到。typeof 对 let/const 不豁免 TDZ——用 typeof 闸写这条判据会在真机上
+    // 抛 ReferenceError（垫片兜底计时器整条失效）。沙箱里两个名字完全不存在，等价于
+    // 「读不到就按普通档」这条路；这里直接调，抛了就红。
+    const fn = new Function(`${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`)();
+    assert.equal(fn(), false, "名字一个都不存在：按普通档，且不抛");
+    assert.equal(fn("s1"), false, "给了会话 id 但设施不存在：同样按普通档，且不抛");
+    // 在飞 + 同一会话 → 放宽；在飞但是别的会话 → 不放宽（这条是 2026-11-05 评审 major 的钉子）
+    const fn2 = new Function(
+      "terminalSwitchInFlight", "terminalSwitchInFlightSessionId",
+      `let terminalBooting = null;\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
+    )(true, "s1");
+    assert.equal(fn2("s1"), true, "这条会话自己在换绑 → 放宽");
+    assert.equal(fn2("s2"), false, "别的会话在换绑 → 不放宽（不许把别人的旧帧盖 6s）");
+    // 占位武装：按占位自己的会话 id 判
+    const fn3 = new Function(
+      "terminalSwitchInFlight", "terminalSwitchInFlightSessionId",
+      `let terminalBooting = { sessionId: "s1" };\n${extractFn("terminalSwitchStaleWidened")}\nreturn terminalSwitchStaleWidened;`,
+    )(false, null);
+    assert.equal(fn3("s1"), true, "本会话的占位还武装着 → 放宽");
+    assert.equal(fn3("s2"), false, "占位是别的会话的 → 不放宽");
+    assert.equal(fn3(), false, "没有会话 id → 一律普通档");
+  });
+
+  it("判据本身：只有「新画面真的出字」才算就绪（换回计数比较这条必红）", () => {
     const factory = new Function(
       "requestAnimationFrame",
       `
-      let terminalReplayEpoch = 0;
       let terminalXterm = null;
+      let terminalContentEpoch = 0;
+      let terminalContentTerm = null;
+      let terminalContentSeen = false;
       ${extractFn("terminalScreenHasContent")}
+      ${extractFn("noteTerminalContent")}
       ${extractFn("terminalStaleScreenReady")}
       return {
         ready: terminalStaleScreenReady,
-        setEpoch: (v) => { terminalReplayEpoch = v; },
         setTerm: (t) => { terminalXterm = t; },
       };
       `
@@ -630,16 +721,130 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
       rows: 4,
       buffer: { active: { length: 4, viewportY: 0, getLine: (y) => ({ translateToString: () => (y === 0 ? "hello" : "") }) } },
     };
-    const stale = { epochAtPark: 7 };
+    // 空屏实例：停放时记下的计数是 0
     api.setTerm(blankTerm);
-    api.setEpoch(7);
-    assert.equal(api.ready(stale), false, "计数没动、屏上没字 → 未就绪");
+    const stale = { contentEpochAtPark: 0 };
+    assert.equal(api.ready(stale), false, "屏上没字 → 未就绪");
     assert.equal(api.ready(null), false, "没有垫片就不谈就绪");
-    api.setEpoch(8);
-    assert.equal(api.ready(stale), true, "首帧回放那一拍发生过 → 就绪（空屏会话的全部依据）");
-    api.setEpoch(7);
+    // 换成有字的实例：出字当拍计数 +1，判据成立
     api.setTerm(filledTerm);
-    assert.equal(api.ready(stale), true, "计数没变但屏上有字 → 也就绪");
+    assert.equal(api.ready(stale), true, "新画面出字 → 就绪");
+    // 再换一只空实例：计数不因「上一只出过字」而白涨（实例换了就重新等）
+    const beforeEpoch = 1;
+    api.setTerm(blankTerm);
+    assert.equal(api.ready({ contentEpochAtPark: beforeEpoch }), false, "新实例空屏 → 仍未就绪");
+  });
+
+  it("真跑：换绑期上限放宽到 6s，普通切页签仍是 2s", async () => {
+    // 放宽的正当性：垫片永远是**同一条会话**的旧帧（/switch 换进程不换身份），
+    // 不违反 2026-10-27 「宁可短暂空白也不长时间显示别的会话」那条裁决。
+    // 断言读的是登记进时钟的延时值，不是「推多久才撤」——手动时钟一冲就把所有定时器
+    // 跑完，2s 与 6s 在那里没有区别。
+    const plainMax = Number(/TERMINAL_STALE_SCREEN_MAX_MS = (\d+)/.exec(panelJs)[1]);
+    const switchMax = Number(/TERMINAL_SWITCH_STALE_SCREEN_MAX_MS = (\d+)/.exec(panelJs)[1]);
+    assert.equal(plainMax, 2000, "普通切页签维持 2s");
+    assert.equal(switchMax, 6000, "换绑放宽到 6s");
+
+    // 普通切页签：没有 /switch 在飞、也没有占位武装
+    const w = makeTerminalWorld();
+    await primeSession(w, terminalSession("A"));
+    w.world.parkTerminalScreen();
+    assert.deepEqual(w.clock.timerDelays(), [plainMax], "普通档：兜底登记 2000ms");
+
+    // 换绑期（/switch 在飞，且飞的就是这条会话）
+    const w2 = makeTerminalWorld();
+    await primeSession(w2, terminalSession("A"));
+    w2.world.setSwitchInFlight(true, "A");
+    w2.world.parkTerminalScreen();
+    assert.deepEqual(w2.clock.timerDelays(), [switchMax], "本会话换绑在飞：兜底登记 6000ms");
+
+    // 换绑已落地、占位还武装着（/switch 回来了但新会话还没出字）——占位是本会话的
+    const w3 = makeTerminalWorld();
+    await primeSession(w3, terminalSession("A"));
+    w3.world.setBooting({ sessionId: "A" });
+    w3.world.parkTerminalScreen();
+    assert.deepEqual(w3.clock.timerDelays(), [switchMax], "本会话的占位武装中：同样按 6000ms");
+
+    // 别人的占位/在飞一律不放宽（2026-11-05 评审 major）：terminalBooting 是单例，
+    // 新建页签会武装自己的占位并靠 TTL 自然过期；不按会话判，此刻切到旧页签就会让
+    // **另一条会话**的旧帧盖 6 秒，正是 2026-10-27 明令禁止的形态。
+    const w4 = makeTerminalWorld();
+    await primeSession(w4, terminalSession("A"));
+    w4.world.setBooting({ sessionId: "B" });
+    w4.world.parkTerminalScreen();
+    assert.deepEqual(w4.clock.timerDelays(), [plainMax], "别的会话的占位：仍走 2000ms");
+
+    const w5 = makeTerminalWorld();
+    await primeSession(w5, terminalSession("A"));
+    w5.world.setSwitchInFlight(true, "B");
+    w5.world.parkTerminalScreen();
+    assert.deepEqual(w5.clock.timerDelays(), [plainMax], "别的会话在换绑：同样 2000ms");
+
+    // 五只世界都照旧会在到点时撤（放宽不是取消）
+    w.clock.flushAll();
+    w2.clock.flushAll();
+    w3.clock.flushAll();
+    w4.clock.flushAll();
+    w5.clock.flushAll();
+    assert.equal(w.world.stale(), null, "普通档到点撤");
+    assert.equal(w2.world.stale(), null, "换绑档到点也撤（不把旧帧永久留屏）");
+    assert.equal(w3.world.stale(), null, "占位撤了之后同样退回既有三态");
+    assert.equal(w4.world.stale(), null, "别人的占位不放宽，到点照撤");
+    assert.equal(w5.world.stale(), null, "别人的换绑不放宽，到点照撤");
+  });
+
+  it("真跑：/switch 在飞时兜底到点只续窗，不撤出纯底色；续窗用尽后强制撤", async () => {
+    // 2026-11-05 重审 major：6s 是从 POST **之前**的 park 起算的，而 /switch 自身要
+    // 6~12s；「正在加载」占位是 POST 落地之后才武装。第一窗到点就撤，屏上既没有旧帧
+    // 也没有占位，正是要消灭的那块空白。到点续窗等落地，但必须有上限——POST 永不
+    // 落地（宿主卡死）时不能把一屏旧画面永久留在屏上。
+    const switchMax = Number(/TERMINAL_SWITCH_STALE_SCREEN_MAX_MS = (\d+)/.exec(panelJs)[1]);
+    const maxRenewals = Number(/TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = (\d+)/.exec(panelJs)[1]);
+    assert.ok(Number.isInteger(maxRenewals) && maxRenewals > 0, "续窗上限是个正的常数");
+
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    w.world.setSwitchInFlight(true, "A");
+    w.world.parkTerminalScreen();
+    assert.deepEqual(w.clock.timerDelays(), [switchMax], "首窗按换绑档登记");
+
+    w.clock.fireOldestTimer();
+    assert.notEqual(w.world.stale(), null, "第一窗到点：POST 还没落地，垫片不撤");
+    assert.equal(termA.disposed, false, "旧帧仍盖着，没有露出纯底色");
+    assert.deepEqual(w.clock.timerDelays(), [switchMax], "只续了一窗，且仍是换绑档");
+
+    for (let i = 1; i < maxRenewals; i += 1) {
+      w.clock.fireOldestTimer();
+      assert.notEqual(w.world.stale(), null, `第 ${i + 1} 窗到点仍只续窗`);
+    }
+    w.clock.fireOldestTimer();
+    assert.equal(w.world.stale(), null, "续窗次数用尽：强制撤，退回既有三态覆盖层");
+    assert.equal(termA.disposed, true, "旧实例随之销毁");
+    assert.equal(w.clock.pendingTimers(), 0, "不再登记新的兜底计时器");
+
+    // 别人的会话在飞：既不放宽也不续窗（会话 id 对不上就按普通档，宁可早点撤）
+    const w2 = makeTerminalWorld();
+    await primeSession(w2, terminalSession("A"));
+    w2.world.setSwitchInFlight(true, "B");
+    w2.world.parkTerminalScreen();
+    w2.clock.fireOldestTimer();
+    assert.equal(w2.world.stale(), null, "别人的 /switch 在飞不给这条会话续窗");
+  });
+
+  it("真跑：/switch 落地后下一窗到点即撤，让「正在加载」占位露出来", async () => {
+    // 续窗只认「在飞」，不认第二个信号（占位已武装）：占位武装说明 POST 落地了，
+    // 那一拍正该撤垫片让占位露出来，继续盖着会把占位一直闷在旧帧底下。
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    w.world.setSwitchInFlight(true, "A");
+    w.world.parkTerminalScreen();
+    w.clock.fireOldestTimer();
+    assert.notEqual(w.world.stale(), null, "前置：第一窗续上了");
+    w.world.setSwitchInFlight(false, null);
+    w.world.setBooting({ sessionId: "A" });
+    w.clock.fireOldestTimer();
+    assert.equal(w.world.stale(), null, "落地后不再续窗，到点撤");
+    assert.equal(termA.disposed, true);
   });
 
   it("真跑：新画面迟迟不来时兜底撤垫片（不把旧画面永久留在屏上）", async () => {
@@ -686,6 +891,115 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     w.clock.flushAll();
     assert.equal(termA.disposed, true, "新画面画出内容后揭幕");
     assert.equal(w.world.stale(), null);
+  });
+});
+
+/* ============================================================
+   T12 · 换绑前先停帧 + exit 帧消费（2026-11-05 A1/A2）
+   ============================================================ */
+describe("T12 换绑前停帧、退出帧落地", () => {
+  it("源码：POST /switch 之前先停帧（清屏字节先到旧实例，停晚了只能停到空白）", () => {
+    const decide = extractFn("terminalRailSwitchOrCreateCore");
+    const parkAt = decide.indexOf('if (typeof parkTerminalScreen === "function") parkTerminalScreen();');
+    const postAt = decide.indexOf("/switch`");
+    assert.ok(parkAt >= 0, "换绑前有一次停放");
+    assert.ok(postAt > parkAt, "停放排在 POST 之前（反了就等于停到一张刚被清空的图）");
+    // render 里那次停放置于 POST 之后仍保留：此刻 terminalXterm 已是 null，走幂等空转
+    assert.match(extractFn("renderTerminalPreviewSession"), /parkTerminalScreen\(\)/);
+  });
+
+  it("源码：换绑期判据复用既有两个信号，不新起状态位", () => {
+    const fn = extractFn("terminalSwitchStaleWidened");
+    assert.match(fn, /terminalSwitchInFlight/, "/switch 在飞");
+    assert.match(fn, /terminalBooting/, "已落地且「正在加载」占位还武装着（armTerminalBootingOverlay 同一标记）");
+    // 上限放宽只作用在垫片兜底计时器上，不改判据
+    assert.match(extractFn("parkTerminalScreen"), /TERMINAL_SWITCH_STALE_SCREEN_MAX_MS/);
+    assert.doesNotMatch(extractFn("terminalStaleScreenReady"), /terminalSwitchStaleWidened/);
+  });
+
+  it("源码：换绑期上限放宽必须绑会话，不许被别人的占位/在飞顶走", () => {
+    // 2026-11-05 评审 major：terminalBooting 是单例、在飞原本只是布尔。不比对会话 id，
+    // 新建页签武装的占位会让别的会话的旧帧也拿到 6s 档——屏上是另一条会话盖 6 秒，
+    // 正是 2026-10-27 明令禁止的形态。放宽档的正当性只建立在「同一会话」上。
+    const fn = extractFn("terminalSwitchStaleWidened");
+    assert.match(fn, /terminalSwitchBooting|terminalBooting\.sessionId/, "占位按会话 id 比");
+    assert.match(fn, /terminalSwitchInFlightSessionId/, "在飞要记是哪条会话");
+    assert.match(fn, /if \(!sessionId\) return false/, "拿不到会话 id 一律普通档");
+    // 停放处必须在拆流之前取会话 id：closeTerminalStream 会把定投会话归零
+    const park = extractFn("parkTerminalScreen");
+    const idAt = park.indexOf("parkSessionId");
+    const closeAt = park.indexOf("closeTerminalStream()");
+    assert.ok(idAt >= 0 && closeAt > idAt, "会话 id 在拆流之前取（之后取恒为 null）");
+    assert.match(park, /terminalSwitchStaleWidened\(parkSessionId\)/, "判据收到会话 id");
+  });
+
+  it("源码：/switch 失败的三条出口都把流接回来（否则垫片到点就是纯空白）", () => {
+    // 2026-11-05 评审 blocker：进函数时为了先停帧已经拆了流（park 内部 closeTerminalStream）。
+    // 失败分支只 toast 不重挂，屏上就只剩垫片；兜底计时器一到就撤，剩一块没有覆盖层的
+    // 空白。宿主侧 F3 保住的旧屏也就此到不了用户眼前。
+    const fn = extractFn("terminalRailSwitchOrCreateCore");
+    const resumeAt = fn.indexOf("const resumeStream = () =>");
+    assert.ok(resumeAt >= 0, "失败路径有重挂入口");
+    assert.match(fn, /renderTerminalPreviewSession\(\{ revive: false \}\)/, "被动重挂：不替用户重启进程");
+    // switch_busy 走保活（createAgentTerminal），它的 POST 失败出口只 toast、不建流，
+    // 所以这条出口同样必须先把本会话的流接回来当底（2026-11-05 重审 major）。
+    const busyAt = fn.indexOf('code === "switch_busy"');
+    const busyReturn = fn.indexOf("return terminalRailKeepAliveSwitch(", busyAt);
+    const busyResume = fn.indexOf("resumeStream();", busyAt);
+    assert.ok(busyAt >= 0 && busyReturn > busyAt, "switch_busy 出口存在");
+    assert.ok(busyResume > busyAt && busyResume < busyReturn, "switch_busy：重挂排在保活之前");
+    // 视口马上换成另一条会话 B，垫片不再满足「同一会话旧帧」的放宽档前提：重挂前
+    // 必须先把在飞闸清掉，否则 resumeStream 里那次 park 还会拿 6s（还可能续窗）。
+    const clearFlag = fn.indexOf("terminalSwitchInFlight = false;", busyAt);
+    const clearId = fn.indexOf("terminalSwitchInFlightSessionId = null;", busyAt);
+    assert.ok(clearFlag > busyAt && clearFlag < busyResume, "重挂前清在飞闸（park 落回 2s 档）");
+    assert.ok(clearId > clearFlag && clearId < busyResume, "会话 id 一并清掉");
+    // 两条 toast 出口各自「先提示、后重挂」；switch_busy 不提示，重挂排在保活之前
+    assert.match(
+      fn,
+      /"这个 Agent 的会话暂时不能在终端里续接", true\);\s*resumeStream\(\);/,
+      "resume-* 分支：toast 之后重挂",
+    );
+    assert.match(
+      fn,
+      /toast\(panelError\(error, "无法启动这个终端"\), true\);\s*resumeStream\(\);/,
+      "兜底分支：toast 之后重挂",
+    );
+    assert.equal((fn.match(/resumeStream\(\)/g) || []).length, 3, "恰好三处调用（含 switch_busy）");
+  });
+
+  it("真跑：空屏收到 exit 帧 → 只翻状态位，不挂任何覆盖层（会话级退出提示待文案批准）", async () => {
+    const w = makeTerminalWorld();
+    const session = terminalSession("S");
+    await w.world.connectTerminalStream(session);
+    const es = w.sources[w.sources.length - 1];
+    es.emit("snapshot", JSON.stringify({ pid: 1, cols: 120, rows: 34 }));
+    // 只来了一帧清屏，屏上仍没有字
+    es.emit("data", JSON.stringify("\u001b[0m\u001b[2J\u001b[H"));
+    w.clock.flushFrames();
+    assert.equal(w.created[0].screenText, "", "前置：屏上确实什么都没有");
+    assert.equal(w.world.unavailableRenders(), 0, "退出之前不落卡片");
+    es.emit("exit", "{}");
+    // 2026-11-05 评审 major：宿主级降级页会把全部页签清空、藏底栏、禁新建键，而服务
+    // 明明在跑——一个会话退出绝不能触发它。会话级提示需要新措辞，文案批准前不做。
+    assert.equal(w.world.unavailableRenders(), 0, "空屏退出也不挂宿主级降级页（服务在跑）");
+    assert.equal(session.backendState.status, "exited", "状态位仍翻成 exited（1s 轮询之外的第二条感知）");
+    assert.equal(w.created[0].disposed, false, "不动实例（页签保留，停在最后一帧）");
+  });
+
+  it("真跑：有内容收到 exit 帧 → 什么都不动（最后一帧就是用户要的现场）", async () => {
+    const w = makeTerminalWorld();
+    const session = terminalSession("S");
+    await w.world.connectTerminalStream(session);
+    const es = w.sources[w.sources.length - 1];
+    es.emit("snapshot", JSON.stringify({ pid: 1, cols: 120, rows: 34 }));
+    es.emit("data", JSON.stringify("ERROR: build failed\n"));
+    w.clock.flushFrames();
+    assert.ok(w.created[0].screenText.includes("ERROR"), "前置：屏上有内容");
+    es.emit("exit", "{}");
+    assert.equal(w.world.unavailableRenders(), 0, "有内容不盖卡片（不遮掉最后一屏）");
+    assert.equal(session.backendState.status, "exited", "状态位翻成 exited（轮询之外的即时真值）");
+    assert.equal(w.world.pending(), false, "回放闩一并收掉");
   });
 });
 

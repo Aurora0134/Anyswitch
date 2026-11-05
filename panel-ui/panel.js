@@ -6842,10 +6842,30 @@ async function api(method, path, body) {
   // 同一个已可见宿主里按原尺寸布局与测量（不是 display:none、也不是 0×0），建流前的
   // 同步 fit 照旧把尺寸 POST 进 PTY；垫片不参与布局，也不改变任何测量结果。
   const TERMINAL_STALE_SCREEN_MAX_MS = 2000;
+  // 换绑期的放宽档（2026-11-05 A4/F2）：/switch 是 terminate+spawn，实测 6~12s，
+  // 而这段里屏上停着的是**同一条会话的旧帧**——会话 id 没换、页签没换、终端记录没换，
+  // 只是进程换了一代。2026-10-27 那条裁决（「判不出就按不能换；宁可短暂空白也不长时间
+  // 显示别的会话」）约束的是「垫片底下其实是另一个会话」的情形，这里不成立，所以可以
+  // 把上限放宽；放而不是取消，是因为会话卡死时仍要退回既有三态覆盖层，不能把一帧旧画
+  // 面永久留在屏上。普通切页签（垫片底下确实是另一条会话）仍走 2000ms。
+  const TERMINAL_SWITCH_STALE_SCREEN_MAX_MS = 6000;
+  // 换绑在飞时兜底计时器最多续几窗：/switch 实测 6~12s，一窗 6s，四窗 ≈24s 覆盖并
+  // 留余量。到点仍强制撤（退回既有三态覆盖层），不能把一帧旧画面永久留在屏上。
+  const TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = 4;
   let terminalStaleScreen = null;
-  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：垫片观察者拿停放时的值与
-  // 当前值比较，变了就是新画面已经交代过一屏。见 connectTerminalStream 的 data 处理器。
+  // 「首帧回放已经落地」的单调计数（只增不减，跨实例累加）：**不再是垫片的揭幕判据**
+  // （2026-11-05 A4）——换绑清屏帧（\e[0m\e[2J\e[H）、新 PTY 的空回放、TUI 自己的
+  // 清屏序列都算「首帧」，拿它揭幕等于在擦除那一刻撤掉垫片，与 2026-11-02 给「正在
+  // 加载」占位做的修正（撤层只认新画面真的出字）正好相反。保留它是因为几何闸等回归
+  // 用例把它当「首帧确实发生过」的可观测信号（world.epoch()），不是产品侧的活状态；
+  // 产品揭幕只认 terminalContentEpoch，见 terminalStaleScreenReady。
   let terminalReplayEpoch = 0;
+  // 「新画面真的开始出字」的单调计数（2026-11-05 F2）：只在**当前实例**第一次
+  // terminalScreenHasContent 为真时 +1。实例一换就重新等（terminalContentTerm），否则
+  // 上一只实例出过字会让新实例一建出来就被判成就绪——垫片在新画面写入前就被撤走。
+  let terminalContentEpoch = 0;
+  let terminalContentTerm = null;
+  let terminalContentSeen = false;
   // 延后重建流的帧令牌（live 行快路径）：renderTerminalPreviewSession 的
   // deferScreen 把停放＋建流＋fit 整组推到双 rAF 之后，连点两条会话时旧帧
   // 醒来发现令牌已变即整组退场——不拿旧会话的流覆盖新会话。
@@ -6867,6 +6887,32 @@ async function api(method, path, body) {
     if (stale.el?.parentNode) stale.el.parentNode.removeChild(stale.el);
   }
 
+  // 「这条会话正在换绑」的判据（垫片上限放宽档，见 parkTerminalScreen 的 staleCapMs）：
+  // /switch 在这条会话上在飞，或它已落地且「正在加载」占位还武装着（armTerminalBootingOverlay
+  // 同一个标记，撤层即失效）。
+  //
+  // **必须按会话判**（2026-11-05 评审 major）：terminalBooting 是单例、只记最近一次武装的
+  // 会话，terminalSwitchInFlight 原本更只是一个布尔。拿它们当「有换绑在发生」用，会把
+  // 「这条会话正换绑」错读成「随便哪条在换绑」——新建一个页签（会武装自己的占位，未挂
+  // DOM 时靠 10s TTL 自然过期）之后立刻切另一个页签，那条垫片就因为别人的占位拿到 6s
+  // 档：屏上是**另一条会话**的旧帧盖 6 秒。这正是 2026-10-27「宁可短暂空白也不长时间
+  // 显示别的会话」明令禁止的形态，而放宽档的全部正当性都建立在「垫片底下是同一条会话」
+  // 之上（换绑换进程不换身份）。会话 id 对不上就按普通档走，宁可早点撤也不看错会话。
+  //
+  // 两个信号都声明在后文（换绑判定门 / 占位设施），本函数可能被更早的调用路径问到，
+  // 所以用 try 兜住 TDZ 与「沙箱里根本没有这两个名字」两种情形——**typeof 对 let/const
+  // 不豁免 TDZ**（照样抛 ReferenceError），单靠 typeof 闸不成立。兜底方向是安全的：
+  // 读不到就按普通档 2000ms 走，也就是更严格的那一档。
+  function terminalSwitchStaleWidened(sessionId) {
+    if (!sessionId) return false;
+    try {
+      if (terminalSwitchInFlight && terminalSwitchInFlightSessionId === sessionId) return true;
+      return !!terminalBooting && terminalBooting.sessionId === sessionId;
+    } catch {
+      return false;
+    }
+  }
+
   // 停放当前实例当垫片：返回垫片句柄；没有可停的画面时照旧整条拆流（首连、或上次
   // 就没建出实例）。
   function parkTerminalScreen() {
@@ -6875,6 +6921,10 @@ async function api(method, path, body) {
     if ($("terminalView")?.hidden) return null;
     const term = terminalXterm;
     const el = term && term.element ? term.element : null;
+    // 这只实例服务的是哪条会话：必须在下面拆流**之前**取，closeTerminalStream 会把
+    // 定投会话归零，之后再取恒为 null。它只服务垫片的放宽档判据（见 staleCapMs）。
+    // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱只切本函数，不声明这个名字。
+    const parkSessionId = typeof terminalBoundSessionId === "string" ? terminalBoundSessionId : null;
     if (!term || !el) {
       // 没有可停的画面（首连；或后台切回时实例已在隐藏期拆掉）：**不撤**已有的垫片
       // ——它正是此刻屏上唯一的内容，撤了就是一块底色。照旧整条拆流。
@@ -6894,39 +6944,67 @@ async function api(method, path, body) {
     } finally {
       term.dispose = originalDispose;
     }
-    const stale = { term, el, timer: null, frame: null, done: false, epochAtPark: terminalReplayEpoch };
+    const stale = { term, el, timer: null, frame: null, done: false, contentEpochAtPark: terminalContentEpoch };
     terminalStaleScreen = stale;
     // 兜底撤垫片：新画面迟迟不来（握手失败、宿主在飞）时不能把旧画面永久留在屏上
     // ——那是一屏别的会话的内容，看久了就是错的信息。到点撤走，退回既有三态覆盖层，
     // 也就是今天的行为，不是新增的中间态。
     //
+    // 上限分两档（2026-11-05 F2）：普通切页签 2000ms；这条会话正在换绑时放宽到 6000。
+    // 放宽的依据是「垫片永远是同一条会话的旧帧」——/switch 换的是进程不是身份，会话
+    // id、页签、视口全都没动，所以 2026-10-27 那条「宁可短暂空白也不长时间显示别的
+    // 会话」的前提（垫片底下是另一个会话）在这里不成立；而实测换绑本身要 6~12s，
+    // 2000ms 的档会在新会话画出第一屏之前就把旧帧撤掉，剩下的正是用户报的那块空白。
+    // 判据复用既有的两个信号：/switch 在这条会话上在飞，或它已落地并武装了「正在加载」
+    // 占位（terminalBooting，见 armTerminalBootingOverlay）。会话 id 是上面在拆流前取下的
+    // 那只（terminalBoundSessionId），拿不到时按普通档走（见 terminalSwitchStaleWidened）。
+    const staleCapMs = () => (terminalSwitchStaleWidened(parkSessionId) ? TERMINAL_SWITCH_STALE_SCREEN_MAX_MS : TERMINAL_STALE_SCREEN_MAX_MS);
+    //
     // 窗口在后台时不撤：隐藏期 rAF 停摆，观察循环叫不醒，撤了就等于把「切回时的那一
     // 屏」也撤了。此时重新起一次计时，回前台由观察循环（按「新画面有内容」揭幕）接手。
+    let capRenewals = 0;
     const armCap = () => {
       stale.timer = setTimeout(() => {
         stale.timer = null;
         if (typeof document !== "undefined" && document.hidden) { armCap(); return; }
+        // /switch 还在飞：POST 自己要 6~12s（探针＋terminate＋spawn），而「正在加载」
+        // 占位是 POST **落地之后**才武装的。此刻撤垫片会露出一块既没有旧帧、也没有
+        // 占位的纯底色——正是这次要消灭的那块空白。续一窗等落地：落地后由占位层
+        // 或新流接管，观察循环仍按「新画面真的出字」揭幕。续窗有次数上限，防 POST
+        // 永不落地（宿主卡死）时把一屏旧画面永久留在屏上。
+        // 判据只认「在飞」，不认 terminalSwitchStaleWidened 的第二个信号（占位武装）：
+        // 占位已经武装说明 POST 落地了，那一拍正该撤垫片让占位露出来，不能继续盖着。
+        // 用 try 兜 TDZ 与单测桩环境（typeof 对 let/const 不豁免 TDZ）。
+        let switchStillInFlight = false;
+        try {
+          switchStillInFlight = !!terminalSwitchInFlight && terminalSwitchInFlightSessionId === parkSessionId;
+        } catch { /* 沙箱无换绑设施：按不在飞处置 */ }
+        if (switchStillInFlight && capRenewals < TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS) {
+          capRenewals += 1;
+          armCap();
+          return;
+        }
         dropTerminalStaleScreen();
-      }, TERMINAL_STALE_SCREEN_MAX_MS);
+      }, staleCapMs());
     };
     armCap();
     watchTerminalStaleScreen(stale);
     return stale;
   }
 
-  // 就绪判据（两条任一）：
-  //  a) 新实例的缓冲区里真的**有字**——首帧回放的字节被解析了（空屏会话走 b）；
-  //  b) **首帧回放那一拍已经发生过**：拿「停放时的计数」与当前值比，变了即成立。
+  // 就绪判据（唯一一条）：新实例的缓冲区里真的**有字**——首帧回放的字节被解析了。
   //
   // 判「有字」不能看 buffer.active.length：xterm 一开屏就有 rows 行空行，length 恒
   // ≥ rows，拿它当判据等于「实例一建出来就算就绪」——CDP 实测这条错判据会
   // 让垫片在新画面写入前约 340ms 就被撤走，空白照旧。必须逐行看有没有非空白字符。
   //
-  // b 为什么是「计数」而不是「逐帧看 terminalReplayFramePending」：snapshot 与首帧 data
-  // 实测只隔 0.6ms、同帧到达，rAF 逐帧采样永远采不到那个中间态——判据于是恒假，空屏
-  // 会话只能等 2s 兜底（评审实测 2009ms，那 2 秒里用户看的是上一个会话的画面）。改成
-  // 在 data 处理器消费标志的那一拍自增计数（见 connectTerminalStream），观察循环只做
-  // 「变了没有」的比较，同帧发生也照样算数。
+  // 旧版还有第二条判据「首帧回放那一拍已经发生过」（terminalReplayEpoch 变了）。它
+  // 成立的年代，垫片只在切页签时挂，首帧就是一条会话的真实画面；换绑内切（/switch
+  // 的 terminate+spawn）上线后，同一拍先到的是**换绑清屏帧**——那条判据于是在屏上
+  // 什么都没有的那一刻就揭幕（2026-11-05 A4，用户报的「切过去一片空白」）。现在
+  // 只认字：清屏帧写进去不带字，判据不成立，垫片继续盖着（上面那条换绑放宽上限
+  // 保证它不会盖太久）。这与 2026-11-02 「正在加载」占位撤层只认新画面出字的修正
+  // （见 watchTerminalBootingOverlay）是同一条取向。
   function terminalScreenHasContent(term) {
     const buf = term && term.buffer ? term.buffer.active : null;
     if (!buf || typeof buf.getLine !== "function") return false;
@@ -6939,17 +7017,30 @@ async function api(method, path, body) {
     return false;
   }
 
+  // 首帧出字的记号：每个实例只记一次（terminalContentTerm 换人就重新等）。观察循环
+  // 每帧调它一次，出字当拍计数 +1，垫片拿停放时的值与它比。typeof 闸护单测桩环境。
+  function noteTerminalContent(term) {
+    if (term !== terminalContentTerm) {
+      terminalContentTerm = term;
+      terminalContentSeen = false;
+    }
+    if (terminalContentSeen) return;
+    if (!terminalScreenHasContent(term)) return;
+    terminalContentSeen = true;
+    terminalContentEpoch += 1;
+  }
+
   // 垫片就绪判据（唯一一处判定，观察循环与单测都调它）：
-  //   有字（首帧回放的字节被解析了）或「首帧回放那一拍已经发生过」（计数变了）。
+  //   有字（首帧回放的字节被解析了）。
   // 抽成纯函数是为了它能被直接钉住——判据写死在观察循环里时，测试只能整条链路跑，
-  // 而「删掉计数比较」这种变异会被兜底计时器掩盖掉，测不出来。
+  // 而「删掉字判据、换成计数比较」这种变异会被兜底计时器掩盖掉，测不出来。
   function terminalStaleScreenReady(stale) {
     if (!stale) return false;
     // 闲剪重建（见 triggerTerminalIdleTrim）：视口位置落定才算新画面就绪——垫片多盖
-    // 到落位那一刻，用户看到的新帧直接就在原阅读位。2s 兜底计时器仍限总时长。
+    // 到落位那一刻，用户看到的新帧直接就在原阅读位。兜底计时器仍限总时长。
     if (stale.restorePending) return false;
-    if (terminalReplayEpoch !== stale.epochAtPark) return true;
-    return terminalScreenHasContent(terminalXterm);
+    noteTerminalContent(terminalXterm);
+    return terminalContentEpoch !== stale.contentEpochAtPark;
   }
 
   // 逐帧观察新画面何时就绪，就绪后再等两帧（一帧给渲染器排程、一帧给合成器上屏）
@@ -8320,11 +8411,10 @@ async function api(method, path, body) {
         // 它自带完整画面，进合并器只会平白多等一个静默窗口。
         if (terminalReplayFramePending) {
           terminalReplayFramePending = false;
-          // 首帧回放落地即记一拍（垫片观察者的就绪判据 b，见 watchTerminalStaleScreen）。
-          // 必须在这里记而不是让观察循环逐帧看 terminalReplayFramePending：snapshot 与
-          // 首帧 data 实测只隔 0.6ms、同帧到达，rAF 采样永远看不见那个中间态。
-          // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，
-          // 没有这条计数设施。
+          // 首帧回放落地即记一拍。它只是「宿主已经交代过一屏」的可观测内部信号，
+          // 垫片的揭幕判据已经不用它了——换绑清屏帧同样走这条路，拿它揭幕就等于在
+          // 擦除那一刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸
+          // 护只切本函数真跑的单测桩环境（那些沙箱不声明模块级变量）。
           if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
           term.write(text);
           return;
@@ -8333,6 +8423,22 @@ async function api(method, path, body) {
         // 大段历史攒成一次写入，逐块写就是「飞速滚到底」。
         queueTerminalChunk(term, text);
       } catch {}
+    });
+    terminalEventSource.addEventListener("exit", () => {
+      // 迟到的旧流：已被拆掉/顶替的连接不消费退出帧（同 data 处理器的第一道闸）。
+      if (term !== terminalXterm) return;
+      // 消费退出帧（2026-11-05 F4）：在此之前面板对进程退出只有一个 1s 轮询，而它对
+      // 「屏上什么都没有」没有任何呈现动作（见 applyTerminalHostState 的 exited 口径：
+      // 页签保留不动、停在最后一帧）——最后一帧恰好是空白时，那块空白就永久留在屏上。
+      //
+      // 这里只把本会话的状态位翻成 exited，**不挂任何覆盖层**：有内容就停在那（最后一帧
+      // 就是用户要的现场），空屏也维持原样。会话级的退出提示要一句新措辞（「这个终端已
+      // 退出」之类），属前端文案，需另行批准后按 PANEL-COPY-SPEC 落地——本轮不做，绝不
+      // 借宿主级的 renderTerminalUnavailableState 顶替：那是「整个终端服务没运行」的
+      // 降级页，会把全部页签清空、藏掉会话栏与底栏、禁用新建键，而这里服务明明在跑。
+      if (session && session.backendState) session.backendState.status = "exited";
+      // 回放闩一并收：退出之后不会再有首帧，留着它只会让下一次建连把第一帧误当回放。
+      terminalReplayFramePending = false;
     });
     terminalEventSource.onerror = () => {
     };
@@ -12111,6 +12217,10 @@ async function api(method, path, body) {
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
+  // 在飞的是哪一条会话（垫片上限放宽档的会话级判据，见 terminalSwitchStaleWidened）：
+  // 只有「这条会话自己」正在换绑才放宽，否则新建页签武装的占位会让别的会话的旧帧
+  // 也跟着盖 6 秒——那正是 2026-10-27 明令禁止的「长时间显示别的会话」。
+  let terminalSwitchInFlightSessionId = null;
   // 「刚启动、还没用过」的 agent 终端：作为 agent 起的、还没产生任何对话身份
   // （resume 与 boundConversation 皆空），且出生在窗内。这种终端在说出第一句话之前
   // 结构上恒为 idle（回合闸要有过请求才入闸，出生 15s 内还有孵化豁免），内切准入会把
@@ -12159,6 +12269,7 @@ async function api(method, path, body) {
       return createAgentTerminal({ agentId, cwd, resume }, { placement: activeViewport ? "viewport" : "new" });
     }
     terminalSwitchInFlight = true;
+    terminalSwitchInFlightSessionId = active.id;
     try {
       // 未使用的 agent 终端不是「可回收的空槽」（2026-11-03 A4）：点历史会话时，它还没
       // 产生任何对话身份（resume / boundConversation 皆空）、用户也没敲过字——就地
@@ -12203,6 +12314,13 @@ async function api(method, path, body) {
       // 不变，视口/页签都不变）。切换期进行态（A6）不排在这一拍：在飞的 6~12s 里屏上还是
       // 上一屏的画面，这会儿挂「正在加载」占位就是叠在没擦的旧画面上（2026-11-02 用户
       // 报告的错位现场），武装排到 /switch 落地之后（见下）。
+      // 先停帧再换绑（2026-11-05 F1）：宿主的 /switch 是「terminate + spawn + 换绑清屏」，
+      // 清屏字节经同一条 SSE 先落到旧实例上——等响应回来才停放，停到手的已经是一张
+      // 被清空的图，垫片于是等于空白。停放必须排在 POST 之前：此刻 terminalXterm 还是
+      // 上一条会话的真画面，停下来的垫片才有内容。随后的 renderTerminalPreviewSession
+      // 会再停一次，那次 terminalXterm 已为 null，走的是「不撤已有垫片」的幂等空转
+      // （见 parkTerminalScreen 里对应的注释），不会把这一帧弄丢。
+      if (typeof parkTerminalScreen === "function") parkTerminalScreen();
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
       // 成功即收武装：兜底行的真实身份已经由宿主快照接手（spawnedAt 刷新、resume
@@ -12220,6 +12338,18 @@ async function api(method, path, body) {
       // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：
       // 本地记录原样，页签还是原来那条，只给一句提示。
       const code = error && (error.serverCode || error.code);
+      // 失败必须把流接回来（2026-11-05，评审 blocker）：进本函数时为了「先停帧」已经
+      // park 过一次，而 park 内部会拆流（dispose xterm、关 SSE）。只 toast 不重挂，屏上
+      // 就只剩那块垫片、背后没有任何活流——兜底计时器到点撤走垫片，剩一块没有覆盖层
+      // 的空白，直到用户手动切页签。这与宿主侧「spawn 抛错时保住旧屏」正好配套：宿主
+      // 保住的画面要有人去取，否则等于白保。
+      // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
+      // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
+      const resumeStream = () => {
+        try { renderTerminalPreviewSession({ revive: false }); } catch (error) {
+          console.warn("[terminal] stream reattach after failed switch failed:", error);
+        }
+      };
       if (code === "switch_busy") {
         // 服务端杀前复核拒换（会话树里有活着的命令进程）：这就是「旧终端在跑」的
         // 服务端判据。改走保活分支——旧终端不杀、目标终端挂进当前视口，页签数不变
@@ -12229,6 +12359,19 @@ async function api(method, path, body) {
         // （live 行接任），此处清会让高亮先弹回旧行；全新内切不同——兜底行锚在本次
         // 点击换上的终端上，照旧撤掉旧瞄准。
         if (!resume) terminalRailEndSelect(null);
+        // 保活不是「另一条路自己会建流」的保证：terminalRailKeepAliveSwitch 走的是
+        // createAgentTerminal，它的 POST 失败出口只 toast、不重建任何流（2026-11-05
+        // 重审 major）。而 F1 已经把流拆了，那条路上屏上只剩一块垫片，兜底撤走后
+        // 就是纯空白，所以先把本会话的流接回来当底。
+        //
+        // 但这条出口的视口紧接着就会换成**另一条会话 B**：屏上这帧 A 的旧画面已经
+        // 不再满足「垫片底下是同一条会话」这个放宽档的唯一正当性（2026-10-27），
+        // 也不能续窗。提前清在飞闸，让 resumeStream 里那次 park 落回普通 2s 档。
+        // 清得早一点不引入并发：finally 本来也是 return 表达式求值后立刻清、并不等
+        // 保活 POST 回来，这里只是把同一件事挪到重挂之前。
+        terminalSwitchInFlight = false;
+        terminalSwitchInFlightSessionId = null;
+        resumeStream();
         return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       // 失败清点：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
@@ -12237,11 +12380,14 @@ async function api(method, path, body) {
       terminalRailEndSelect(null);
       if (typeof code === "string" && code.startsWith("resume-")) {
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
+        resumeStream();
         return;
       }
       toast(panelError(error, "无法启动这个终端"), true);
+      resumeStream();
     } finally {
       terminalSwitchInFlight = false;
+      terminalSwitchInFlightSessionId = null;
     }
   }
 
