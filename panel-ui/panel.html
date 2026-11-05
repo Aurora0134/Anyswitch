@@ -2281,6 +2281,15 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="slider"></span>
             </label>
           </div>
+          <!-- 桌面快捷方式：一次性动作钮而非开关——点击即在桌面创建 Anyswitch.lnk，
+               已存在则覆盖重建（顺带修复指向）；反馈走 toast，不做持续状态回显。 -->
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">桌面快捷方式</div>
+              <div class="modal-item-desc">在桌面创建 Anyswitch 快捷方式。</div>
+            </div>
+            <button type="button" class="btn btn-mini" id="desktopShortcutBtn">创建快捷方式</button>
+          </div>
         </div>
       </div>
 

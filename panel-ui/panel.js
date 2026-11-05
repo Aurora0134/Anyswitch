@@ -5144,6 +5144,30 @@ async function api(method, path, body) {
       };
     }
 
+    // ── 桌面快捷方式：一次性动作钮。点击即创建/覆盖重建 Anyswitch.lnk（服务端
+    // 幂等），结果只走 toast——没有持续状态可回显。防重入用 aria-busy + 本地标志，
+    // 与即时保存开关同套手法，但不占 settingsSaving（它不写 /api/settings）。
+    let desktopShortcutBusy = false;
+    const desktopShortcutBtn = $("desktopShortcutBtn");
+    if (desktopShortcutBtn) {
+      desktopShortcutBtn.onclick = async () => {
+        if (desktopShortcutBusy) return;
+        desktopShortcutBusy = true;
+        desktopShortcutBtn.setAttribute("aria-busy", "true");
+        desktopShortcutBtn.disabled = true;
+        try {
+          await api("POST", "/api/desktop-shortcut/create");
+          toast("已创建桌面快捷方式");
+        } catch (e) {
+          toast(panelError(e, "创建失败"), true);
+        } finally {
+          desktopShortcutBusy = false;
+          desktopShortcutBtn.removeAttribute("aria-busy");
+          desktopShortcutBtn.disabled = false;
+        }
+      };
+    }
+
     // ── 先行版（更新通道）：开=确认后只切检测通道（换装仍走关于页的两步更新）；
     // 关=按回退计划确认——已在稳定节点上直接关，否则先换装回「本地之下的最近
     // 稳定版本」再关。回退的进度与终态结论都在关于页呈现（换装本来就要换掉本
