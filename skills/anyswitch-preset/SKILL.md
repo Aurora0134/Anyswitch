@@ -8,7 +8,7 @@ description: 规范 Anyswitch（原 apicred）提示词预设的写入流程与�
 ## 机制
 
 - 预设存 `%LOCALAPPDATA%\Anyswitch\prompts.json`；端点文件的注入只由 panel API 变更触发，手改它不生效——禁止手改。
-- 托管块 `# >>> anyswitch-managed-prompts` … `# <<< anyswitch-managed-prompts` 内只写正文；title 只存 prompts.json 供面板展示，标题行不该出现在端点文件里。
+- 托管块 `# >>> anyswitch-managed-prompts` … `# <<< anyswitch-managed-prompts` 内，每条预设以「`## 标题` + 正文」成段写入——标题与正文一并进 agent 上下文，标题即该条的主题线索。
 - 端点清单（id、名称、目标文件、是否热加载）查 `GET state` 的 `endpoints`，不凭记忆或旧笔记。
 - 某端点生效集 = 总开关 ∧ 预设 enabled ∧ 未被该端点 off override。
 - `hotReload` 为真的端点写完即生效，其余下次会话启动才读到——报告生效时机按此说，不要一律说"已生效"。
@@ -37,7 +37,7 @@ curl -s -X POST http://127.0.0.1:47820/panel/api/prompts/preset/create \
 返回 `{ok:true, preset:{id,…}}`，记下 id。
 
 4. 端点范围默认全部，不必问；用户点名"只给某端点 / 不给某端点"时才设 off override。
-5. 写完必验证：`GET state` 确认在列表且 enabled；抽查一个端点文件（路径取自 state），确认托管块内有正文、无标题行；向用户报告 id、命中端点、生效时机。
+5. 写完必验证：`GET state` 确认在列表且 enabled；抽查一个端点文件（路径取自 state），确认托管块内每条预设都有「`## 标题`」行，其下是该条正文；向用户报告 id、命中端点、生效时机。
 
 ## 分支操作
 
@@ -57,7 +57,7 @@ curl -s -X POST http://127.0.0.1:47820/panel/api/prompts/preset/create \
 - 祈使句，"必须 / 禁止 / 不要"，写对 agent 行为的约束，不写背景介绍；
 - 带一句"为什么"，让 agent 能外推到未列举的情形；
 - 结尾给可自查判据（如"读起来像在向开发者解释代码为什么这么写，就是错的"）；
-- title ≤10 字动宾短语；content 默认中文、500 字以内，能一句说清的不写三句；tag 一般留空。
+- title ≤10 字动宾短语，单行不含 `#`；标题进 agent 上下文，是该条预设的主题线索，须能独立成立；content 默认中文、500 字以内，能一句说清的不写三句；正文不写 markdown 标题行（`#` 开头）——正文里的标题会脱离本条的标题段；tag 一般留空。
 
 API 硬限（超出 400，中文报错）：title ≤200 字符、tag ≤50 字符、content ≤32 KiB。
 
