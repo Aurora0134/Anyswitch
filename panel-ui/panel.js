@@ -10013,7 +10013,10 @@ async function api(method, path, body) {
         if (currentView !== "terminal") return;
         // 后台回收器垫在本拍取数之后：判据要的是刚拉回来的实例行在途数与
         // lastVisibleAt，拿上一拍的陈旧计数做杀判据就是盲杀（见函数内取舍说明）。
-        pollTerminalSessions().then(() => maybeRecycleTerminalBackground()).catch(() => {});
+        // 未就绪时轮询根本不取数（提前返回），这一拍也跳过回收。
+        pollTerminalSessions().then(() => {
+          if (terminalBackendReady) maybeRecycleTerminalBackground();
+        }).catch(() => {});
       }, 1000);
     }
     syncTerminalActivityStream();

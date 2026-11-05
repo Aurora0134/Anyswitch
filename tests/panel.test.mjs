@@ -13981,7 +13981,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.ok(tick?.includes("pollTerminalSessions()"), "1s 轮询原样保留（每拍一次，频率不变）");
     // 2026-11-05 P-D：后台回收器挂同一拍，且排在取数之后（判据吃刚拉回来的
     // 实例行在途数与 lastVisibleAt，不吃上一拍的陈旧计数）。
-    assert.ok(/pollTerminalSessions\(\)\.then\(\(\) => maybeRecycleTerminalBackground\(\)\)/.test(tick || ""),
+    assert.ok(/pollTerminalSessions\(\)\.then\(\(\) => \{[\s\S]{0,200}?maybeRecycleTerminalBackground\(\)/.test(tick || ""),
       "后台回收器垫在轮询取数之后");
   });
 });

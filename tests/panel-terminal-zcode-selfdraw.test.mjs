@@ -378,7 +378,7 @@ describe("P-D zcode 后台回收器", () => {
     assert.ok(panelJs.includes("const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;"), "10 分钟常量在册");
     assert.ok(panelJs.includes("const terminalBackgroundSince = new Map();"), "记账表在册");
     // 扫描挂点：轮询拍上、取数之后
-    assert.ok(/pollTerminalSessions\(\)\.then\(\(\) => maybeRecycleTerminalBackground\(\)\)/
+    assert.ok(/pollTerminalSessions\(\)\.then\(\(\) => \{[\s\S]{0,200}?maybeRecycleTerminalBackground\(\)/
       .test(panelJs), "挂在 terminalPollTimer 每拍（取数之后，不吃陈旧计数）");
   });
 });
