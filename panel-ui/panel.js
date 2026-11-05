@@ -6062,6 +6062,9 @@ async function api(method, path, body) {
       // 归属接线：panel 层已按 shell pid ↔ 检测进程祖先链注入 agent 字段
       //（无归属的会话不带此键，保持纯外壳）。
       agent: item.agent && typeof item.agent === "object" ? item.agent : null,
+      // 端点级读数来源：富化轮询对「没有进程归属、但宿主声明了 agentId」的
+      // 聚合端点会话落地（见 enrichTerminalSessions）；null 表示仍按实例接线。
+      aggregateSource: null,
       // 一键启动的 CLI Agent 会话：terminal-host 快照直接带这两个非密字段，
       // 归属轮询落地前标签就能显示是哪个 agent。
       agentId: typeof item.agentId === "string" ? item.agentId : null,
@@ -6140,9 +6143,16 @@ async function api(method, path, body) {
       ...terminalWorkTime(inst.activeDurationMs),
       requestCount: typeof inst.requests === "number" ? inst.requests : 0,
       // 实例身份（reporter 快照的 model/providerId，null 直至上报）：实况行
-      // 「谁在服务」的首选数据源，auto 链缺位时回落路由当前跳。
-      model: typeof inst.model === "string" ? inst.model : "",
-      providerId: typeof inst.providerId === "string" ? inst.providerId : "",
+      // 「谁在服务」的首选数据源，auto 链缺位时回落路由当前跳。聚合端点的
+      // <endpoint>-global 汇总行用 currentModel/currentProvider 命名同一份
+      // 身份，实例行的字段名优先；请求间隙 current* 归 null 时再回落 last*，
+      // 「最近由谁服务」仍说得出话；三者都缺才留空。
+      model: typeof inst.model === "string" ? inst.model
+        : (typeof inst.currentModel === "string" ? inst.currentModel
+          : (typeof inst.lastModel === "string" ? inst.lastModel : "")),
+      providerId: typeof inst.providerId === "string" ? inst.providerId
+        : (typeof inst.currentProvider === "string" ? inst.currentProvider
+          : (typeof inst.lastProvider === "string" ? inst.lastProvider : "")),
       tokens: `Prompt: ${fmt(tokens.prompt)} · Completion: ${fmt(tokens.completion)} · Cached: ${fmt(tokens.cached)}`,
       sparkTtft: Array.isArray(inst.sparkHistory?.ttft) ? inst.sparkHistory.ttft : [],
       sparkTps: Array.isArray(inst.sparkHistory?.tps) ? inst.sparkHistory.tps : [],
@@ -8389,27 +8399,49 @@ async function api(method, path, body) {
   // 优先、路由当前跳后备）；最近请求只查活动标签的那一个实例。普通终端
   //（无归属）session.agent 恒为 null，监测区按规范整列隐藏。
 
+  // 只按端点（而非实例）出读数的端点：relay 的 detected 进程白名单与 socket
+  // 实例兜底都不含 zcode，其 journal 行不带 instanceId、agents 负载只有一条
+  // <endpoint>-global 汇总行。这些端点的一键启动会话永远拿不到进程归属，但宿主
+  // 快照带着 agentId，右栏可以按端点级读数接线——不伪造实例身份。
+  const TERMINAL_AGGREGATE_ONLY_ENDPOINTS = new Set(["zcode"]);
+
   function enrichTerminalSessions(agentsPayload) {
     const chains = boardRoutingChains();
     const runtime = routeRuntimeState === "ok" ? routeRuntimeCache : null;
     for (const session of Object.values(terminalBackendSessions)) {
       if (!session?.backend) continue;
       const agent = session.agent || null;
-      const instance = terminalInstanceRow(agentsPayload, agent);
+      // 端点级读数兜底：仅在「无归属 + 宿主声明了 agentId + 该端点确为聚合桶且
+      // 有汇总行」三条同时成立时接上，普通外壳与其他端点的归属闪断一律不碰。
+      let aggregateSource = null;
+      if (!agent && TERMINAL_AGGREGATE_ONLY_ENDPOINTS.has(session.agentId) && Array.isArray(agentsPayload)) {
+        const endpoint = agentsPayload.find((item) => item && item.id === session.agentId);
+        if (endpoint && endpoint.sessionMode === "aggregate" && Array.isArray(endpoint.sessions)) {
+          const row = endpoint.sessions.find((item) => item && item.id === `${session.agentId}-global`);
+          if (row) aggregateSource = {
+            endpointId: session.agentId,
+            // 汇总行的折线挂在端点 metrics 上，四宫格折线与数值同源补齐。
+            row: { ...row, sparkHistory: endpoint.metrics?.sparkHistory },
+          };
+        }
+      }
+      session.aggregateSource = aggregateSource ? { endpointId: aggregateSource.endpointId } : null;
       // 状态口径与活跃真值流同源：请求在途，或输出活跃窗内且本回合已入闸
       // （terminalSessionBusyFromSignals）。
       // 算完过 noteTerminalWorkingStatus（done 未读标记的翻转观测，同 SSE 写点）。
+      const instance = terminalInstanceRow(agentsPayload, agent) || aggregateSource?.row || null;
       const activeRequests = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
       session.status = terminalSessionBusyFromSignals(session, activeRequests) ? "working" : "idle";
       noteTerminalWorkingStatus(session, session.status);
       session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
       // 折叠行（claude 会话行）的成员实例键：journal 账目是逐进程的，「最近
       // 请求」按成员键集合过滤才不漏行。非折叠行没有 memberPids，维持单键。
-      session.memberInstanceIds = instance && Array.isArray(instance.memberPids) && instance.memberPids.length > 0
+      session.memberInstanceIds = instance && agent && Array.isArray(instance.memberPids) && instance.memberPids.length > 0
         ? instance.memberPids.map((pid) => `${agent.endpointId}-${pid}`)
         : null;
-      const { route, routeCurrent } = agent
-        ? terminalRouteForEndpoint(agent.endpointId, chains, runtime)
+      const endpointId = agent ? agent.endpointId : aggregateSource?.endpointId;
+      const { route, routeCurrent } = endpointId
+        ? terminalRouteForEndpoint(endpointId, chains, runtime)
         : { route: [], routeCurrent: 0 };
       session.route = route;
       session.routeCurrent = routeCurrent;
@@ -8418,13 +8450,23 @@ async function api(method, path, body) {
 
   async function refreshActiveTerminalRequests() {
     const session = terminalSessionFor(activeTerminalPreviewId);
-    if (!session?.backend || !session.agent?.instanceId) {
-      if (session?.backend) session.requests = [];
+    if (!session?.backend) return;
+    const agent = session.agent || null;
+    // 端点级读数兜底：聚合端点没有实例身份，按端点取今天的最近请求（服务端
+    // 不带 instanceId 时只按 agentId 过滤）；其余端点仍按绑定实例严格过滤。
+    const aggregate = !agent && typeof session.aggregateSource?.endpointId === "string"
+      ? session.aggregateSource
+      : null;
+    if (!agent?.instanceId && !aggregate) {
+      session.requests = [];
       return;
     }
-    const query = new URLSearchParams({ agentId: session.agent.endpointId, instanceId: session.agent.instanceId });
-    if (Array.isArray(session.memberInstanceIds) && session.memberInstanceIds.length > 0) {
-      query.set("instanceIds", session.memberInstanceIds.join(","));
+    const query = new URLSearchParams({ agentId: agent ? agent.endpointId : aggregate.endpointId });
+    if (agent?.instanceId) {
+      query.set("instanceId", agent.instanceId);
+      if (Array.isArray(session.memberInstanceIds) && session.memberInstanceIds.length > 0) {
+        query.set("instanceIds", session.memberInstanceIds.join(","));
+      }
     }
     const data = await api("GET", `/api/terminal/requests?${query.toString()}`).catch(() => null);
     if (!data || !Array.isArray(data.requests)) return; // 失败帧保留上一帧
@@ -8484,11 +8526,12 @@ async function api(method, path, body) {
     // 空壳侧栏：无归属会话没有 Agent 监测数据可展示——不再整列 display:none
     //（收放开关在列内，藏列即藏唯一拉回入口，刷新落到无归属页签后侧栏就无痕
     // 消失），改自动收成 48px 细条：开关保留可随时拉回，展开后指标照实显「—」。
+    // 端点级读数来源（聚合端点兜底）同样有监测数据可展示，不算空壳。
     // 收放都改变终端区宽度（340↔48px）且不经 window resize，须补一次重排。
     const inspector = $("terminalInspector");
     const workspace = $("terminalWorkspace");
     if (inspector && workspace) {
-      const hollow = !session.agent;
+      const hollow = !session.agent && !session.aggregateSource;
       const wasEmpty = workspace.classList.contains("is-empty");
       const wasCollapsed = inspector.classList.contains("is-collapsed");
       let collapsed = wasCollapsed;

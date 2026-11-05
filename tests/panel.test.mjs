@@ -9272,6 +9272,129 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.equal(unbound, null, "未绑定实例不出行（codex 流量前状态）");
   });
 
+  // 端点级读数兜底（zcode CLI 形态）：relay 的 detected 进程白名单与 socket 实例
+  // 兜底都不含 zcode，一键启动的会话拿不到 agent 归属、journal 行也没有
+  // instanceId。右栏改按端点聚合行取指标、按端点取最近请求，不伪造实例身份。
+  it("无归属的聚合端点会话按端点拉取最近请求（不带 instanceId）", async () => {
+    const calls = [];
+    const session = {
+      id: "zc", backend: true, agent: null, agentId: "zcode",
+      aggregateSource: { endpointId: "zcode" }, requests: [],
+    };
+    const run = new Function("calls", "session", `
+      const activeTerminalPreviewId = "zc";
+      const terminalSessionFor = () => session;
+      const api = async (method, url) => {
+        calls.push([method, url]);
+        return { requests: [{ ts: 1, agentId: "zcode", model: "glm-5.3", providerId: "pool", ok: true }] };
+      };
+      const terminalRequestsFromRows = (rows) => rows.map((r) => ({ model: r.model }));
+      ${extractFn("refreshActiveTerminalRequests")}
+      return refreshActiveTerminalRequests;
+    `)(calls, session);
+    await run();
+    assert.equal(calls.length, 1, "按端点发一次请求，不是无归属直接清空");
+    assert.ok(calls[0][1].includes("agentId=zcode"), "查询带端点 id");
+    assert.ok(!calls[0][1].includes("instanceId"), "端点级查询不伪造实例键");
+    assert.deepEqual(session.requests, [{ model: "glm-5.3" }], "journal 行进会话请求列表");
+  });
+
+  it("无归属的聚合端点会话按 -global 行补四宫格指标与端点读数来源", () => {
+    const agents = [{
+      id: "zcode", sessionMode: "aggregate",
+      sessions: [{ id: "zcode-global", activeRequests: 2, requests: 7, tps: 12.3 }],
+    }];
+    const session = {
+      id: "zc", backend: true, agent: null, agentId: "zcode",
+      status: "idle", metrics: null, requests: [],
+    };
+    const enrich = new Function("agents", "session", `
+      const terminalBackendSessions = { zc: session };
+      const TERMINAL_AGGREGATE_ONLY_ENDPOINTS = new Set(["zcode"]);
+      const boardRoutingChains = () => ({});
+      const routeRuntimeState = "ok";
+      const routeRuntimeCache = {};
+      const terminalRouteForEndpoint = () => ({ route: [], routeCurrent: 0 });
+      const noteTerminalWorkingStatus = () => {};
+      const terminalSessionBusyFromSignals = (s, count) => count > 0;
+      const terminalMetricsFromInstance = (row) => ({ requestCount: row.requests, tps: row.tps });
+      ${extractFn("terminalInstanceRow")}
+      ${extractFn("enrichTerminalSessions")}
+      return enrichTerminalSessions;
+    `)(agents, session);
+    enrich(agents);
+    assert.deepEqual(session.aggregateSource, { endpointId: "zcode" }, "端点级读数来源落地");
+    assert.equal(session.metrics?.requestCount, 7, "四宫格取端点聚合行的请求数");
+    assert.equal(session.status, "working", "在途请求按聚合行派生忙态");
+  });
+
+  it("端点级读数来源在场时状态面板不按空壳收拢", () => {
+    const elCache = {};
+    const el = (id) => elCache[id] ??= {
+      textContent: "", innerHTML: "", title: "", hidden: false, style: {}, className: "",
+      classes: new Set(),
+      classList: {
+        add: (c) => elCache[id].classes.add(c),
+        remove: (c) => elCache[id].classes.delete(c),
+        contains: (c) => elCache[id].classes.has(c),
+        toggle: (c, on) => {
+          if (on === undefined) on = !elCache[id].classes.has(c);
+          if (on) elCache[id].classes.add(c); else elCache[id].classes.delete(c);
+          return on;
+        },
+      },
+      setAttribute() {},
+      getAttribute: () => null,
+    };
+    const state = {
+      session: {
+        id: "s1", label: "ZCode", cwd: "C:\\", branch: "", shell: { name: "命令提示符" },
+        status: "idle", metrics: null, requests: [], agent: null,
+        aggregateSource: { endpointId: "zcode" },
+      },
+    };
+    const render = new Function("$", "state", `
+      const document = { querySelector: () => null };
+      const activeTerminalPreviewId = "s1";
+      const terminalSessionFor = () => state.session;
+      const terminalRequestExpanded = new Set();
+      const terminalHollowStreak = new Map([["s1", 3]]);
+      const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
+      let terminalInspectorHollowCollapsed = false;
+      const terminalInspectorUserPinned = new Set();
+      let terminalRequestListRenderedHtml = "";
+      const scheduleTerminalFit = () => {};
+      const updateSparkline = () => {};
+      const routeNodeName = (x) => x;
+      const terminalServingLabel = () => "";
+      const terminalRequestItemHtml = () => "";
+      ${extractFn("renderTerminalSessionData")}
+      return renderTerminalSessionData;
+    `)(el, state);
+    render();
+    assert.equal(el("terminalInspector").classes.has("is-collapsed"), false,
+      "有端点级读数就不算空壳，状态面板保持展开");
+  });
+
+  it("聚合端点汇总行的服务方身份按 currentModel/currentProvider 回落", async () => {
+    const metrics = await vmFn("terminalMetricsFromInstance", [{
+      activeRequests: 1, requests: 7, currentModel: "glm-5.3", currentProvider: "a6api-pool",
+      tokens: {}, lastTtftMs: 1200, ttftColor: "green", tps: 12.3, cacheHitRate: 95.3,
+      sparkHistory: { ttft: [1.2], tps: [12.3], cache: [95.3] },
+    }], ["terminalMetricNum", "terminalWorkTime"]);
+    assert.equal(metrics.model, "glm-5.3", "实况行「谁在服务」拿到模型名");
+    assert.equal(metrics.providerId, "a6api-pool", "实况行「谁在服务」拿到来源 id");
+  });
+
+  it("空闲的聚合端点汇总行按 lastModel/lastProvider 回落服务方身份", async () => {
+    const metrics = await vmFn("terminalMetricsFromInstance", [{
+      activeRequests: 0, requests: 7, currentModel: null, currentProvider: null,
+      lastModel: "glm-5.3", lastProvider: "a6api-pool", tokens: {},
+    }], ["terminalMetricNum", "terminalWorkTime"]);
+    assert.equal(metrics.model, "glm-5.3", "回合结束后实况行仍有「最近由谁服务」");
+    assert.equal(metrics.providerId, "a6api-pool");
+  });
+
   it("接线结构：渲染拆成数据层与结构层、最后一页签可关（空态判据＝视口数）", () => {
     assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
     const renderBody = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
