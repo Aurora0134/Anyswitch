@@ -4209,11 +4209,17 @@ export function createAgentMetricsCollector(options = {}) {
         markMetricsDirty();
       }
       if (norm.label !== null) entry.label = norm.label;
-      if (bucketAgentId === "workbuddy" && norm.clientPid !== null) {
+      if (bucketAgentId === "workbuddy") {
         // 行活跃三选一之三的锚：记下扛过本行流量的引擎 pid。长工具调用期间会话
         // 文件与在途都静默，这条保住正跑的会话；预取/待释放的过渡态 runtime 从未
         // 扛过流量，永远拿不到它——幽灵行与活会话行的分界就在这。
-        entry.wbTrafficPid = norm.clientPid;
+        // 会话头身份（x-conversation-id → workbuddy-sess-<id>，子代理会话行正是
+        // 这种）无 pid 尾、norm.clientPid 恒 null，锚得靠 relay 在头通道命中时
+        // 反查连接属主随 meta 捎带（workbuddyClientPid）；解析得出 pid 的通道
+        //（socket 兜底形折叠）仍以 norm.clientPid 为准，两源同值无冲突。
+        const wbTrafficPid = norm.clientPid !== null ? norm.clientPid
+          : (Number.isInteger(meta.workbuddyClientPid) && meta.workbuddyClientPid > 0 ? meta.workbuddyClientPid : null);
+        if (wbTrafficPid !== null) entry.wbTrafficPid = wbTrafficPid;
       }
       const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId,
         (count) => {
@@ -5228,10 +5234,22 @@ export function createAgentMetricsCollector(options = {}) {
                   evict = misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
                 }
               } else {
-                const misses = (sessionRowRegistryMisses.get(missKey) ?? 0) + 1;
-                sessionRowRegistryMisses.set(missKey, misses);
-                evict = entry.state.activeRequests === 0
-                  && misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
+                // 缺席分支的流量锚钉：子代理会话行（进程内子会话）注册表永远
+                // 缺席，请求间隙按缺席收行＝行下场、下一笔请求再起新行、计数
+                // 清零的抖动（真机：同一行 65→3 请求）。扛过本行流量的引擎 pid
+                // 还活着＝这条运行还有活进程在服务，行不下场；进程退场（或从未
+                // 解析出锚）照旧缺席轮次确认收口。空闲 TTL 不受此钉影响——子代
+                // 理结束后行至多再留一个 5 分钟空闲档，不是永挂。
+                const wbTrafficPidAlive = Number.isInteger(entry.wbTrafficPid)
+                  && procCounts.seenPids instanceof Set && procCounts.seenPids.has(entry.wbTrafficPid);
+                if (wbTrafficPidAlive) {
+                  sessionRowRegistryMisses.delete(missKey);
+                } else {
+                  const misses = (sessionRowRegistryMisses.get(missKey) ?? 0) + 1;
+                  sessionRowRegistryMisses.set(missKey, misses);
+                  evict = entry.state.activeRequests === 0
+                    && misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
+                }
               }
             }
           }
@@ -5425,7 +5443,7 @@ export function createAgentMetricsCollector(options = {}) {
     // WorkBuddy row badge: the surface is decided by the process scan's parent
     // chain (desktop GUI host vs terminal), never by the request plane. A row
     // the scan could not classify stays unbadged.
-    const workbuddyInstanceSurface = (instId) => {
+    const workbuddyInstanceSurface = (instId, entry = null) => {
       // 会话行的面：该会话注册表当前指向的 runtime pid 的面（父链判定的
       // workbuddySurfaceByPid）。注册表行已删（暂停窗）时读不到 pid，行不贴面
       // ——面是会话当下的运行形态，不是行的固有属性，读不出就不猜。
@@ -5435,6 +5453,15 @@ export function createAgentMetricsCollector(options = {}) {
           const rowId = workbuddySessionRowIdForPid(pid);
           if (rowId === instId) return workbuddySurfaceLabel(surface);
         }
+        // 注册表配不上的会话行（子代理会话行：产品注册表只记 runtime 的主会
+        // 话，进程内子会话永不入册）回落取「扛过本行流量的引擎 pid」的面——
+        // 同一进程扛的主会话与子会话同面。锚上的 pid 没被本轮扫描分类（缺席
+        // 或读不出）时照旧不贴，读得出才贴。
+        const trafficPid = Number.isInteger(entry?.wbTrafficPid) ? entry.wbTrafficPid : null;
+        if (trafficPid !== null) {
+          const surface = procCounts.workbuddySurfaceByPid?.get(trafficPid) ?? null;
+          if (surface !== null) return workbuddySurfaceLabel(surface);
+        }
         return null;
       }
       const pidMatch = instId.match(/^workbuddy-(\d+)$/);
@@ -5443,10 +5470,10 @@ export function createAgentMetricsCollector(options = {}) {
       return surface === null ? null : workbuddySurfaceLabel(surface);
     };
 
-    const instanceSurfaceFor = (bucket, instId) => {
+    const instanceSurfaceFor = (bucket, instId, entry = null) => {
       if (bucket === "dsh") return dshInstanceSurface(instId);
       if (bucket === "kimi") return kimiInstanceSurface(instId);
-      if (bucket === "workbuddy") return workbuddyInstanceSurface(instId);
+      if (bucket === "workbuddy") return workbuddyInstanceSurface(instId, entry);
       return null;
     };
 
@@ -5466,7 +5493,7 @@ export function createAgentMetricsCollector(options = {}) {
             nowFn,
           });
           const s = built.sessions[0];
-          const rowSurface = instanceSurfaceFor(bucket, instId);
+          const rowSurface = instanceSurfaceFor(bucket, instId, entry);
           return {
             ...s,
             // Authoritative spark history (same shape as the endpoint-level

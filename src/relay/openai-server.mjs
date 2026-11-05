@@ -8,7 +8,7 @@ import { validateStore } from "../store/store-schema.mjs";
 import { isPoolFailoverStatus } from "../channels/pool-routing.mjs";
 import { isChainFailoverStatus, buildChainRuntime } from "../channels/chain-routing.mjs";
 import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
-import { instanceIdFromSocket, bindLateSocketInstance, SOCKET_OVERRIDE_AGENT_IDS, UNTRUSTED_INSTANCE_HEADER_AGENT_IDS } from "../agents/late-socket-instance.mjs";
+import { instanceIdFromSocket, bindLateSocketInstance, socketFallbackClientPid, SOCKET_OVERRIDE_AGENT_IDS, UNTRUSTED_INSTANCE_HEADER_AGENT_IDS } from "../agents/late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
 import { unpackChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "../channels/channel-model-slug.mjs";
 
@@ -857,12 +857,18 @@ export function createOpenAIRelayServer(deps) {
         if (openaiAgentId === null) logUnattributedRequest(deps, "openai chat", req, body?.model);
         // 无归属的请求连实例身份也不携带：journal 行与桶都不该留半个身份。
         const requestInstanceId = openaiAgentId === null ? null : instanceIdForRequest(req, openaiAgentId, deps);
+        // WB 头通道身份是会话粒度（x-conversation-id），解析不出属主 pid；子代理
+        // 会话行注册表永远缺席，徽标与存活判定都靠「扛流量的引擎 pid」锚。头通
+        // 道命中与否都反查一次连接属主并随 meta 捎带（socket 兜底形身份与它同
+        // 值，无冲突）；查不出（netstat 未命中）不捎带，collector 侧按无锚处理。
+        const wbClientPid = openaiAgentId === "workbuddy" ? socketFallbackClientPid(req, openaiAgentId, deps) : null;
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : chatMatch[1],
           model: body?.model,
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
           instanceId: requestInstanceId,
+          workbuddyClientPid: wbClientPid ?? undefined,
           stream: body.stream === true,
           path: "openai",
         });
