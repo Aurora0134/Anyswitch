@@ -303,6 +303,7 @@ async function api(method, path, body) {
     const tags = [$("brandVersion"), $("railBrandVersion")].filter(Boolean);
     const footer = $("footerBrandVersion");
     if (!tags.length && !footer) return;
+    if (footer && footer.parentNode && Math.random() < 1 / 25) footer.parentNode.textContent = "Ciallo～(∠・ω< )⌒☆";
     try {
       const info = await api("GET", "/api/app-info");
       const version = info && typeof info.version === "string" ? info.version.trim() : "";
