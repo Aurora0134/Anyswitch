@@ -533,13 +533,18 @@ function isPathUnder(file, root) {
   return f === r || f.startsWith(r + sep) || f.startsWith(r + "/") || f.startsWith(r + "\\");
 }
 
-function makeMeta({ endpoint, id, title = null, summary = null, project = null, cwd = null, originator = null, file = null, createdAt = null, lastActive = null }) {
+function makeMeta({ endpoint, id, title = null, summary = null, project = null, cwd = null, originator = null, file = null, createdAt = null, lastActive = null, parentId = null, surface = null }) {
   // cwd 是「续接要在哪个目录起」的唯一依据（additive 字段）：调用方给的权威值优先，
   // 没给就取 project（两者历来同源同值），都没有落空串——绝不猜。
   const resolvedCwd = typeof cwd === "string" && cwd.trim() !== ""
     ? cwd
     : (typeof project === "string" && project.trim() !== "" ? project : "");
   const meta = { endpoint, id, title, summary, project, cwd: resolvedCwd, originator, file, createdAt, lastActive, resumeCommand: "" };
+  // zcode 专属：parent_id 是子会话（workflow actor / subagent / 侧聊）→ 母会话的
+  // 正源，surface 是桌面/CLI 的扫描判据。两者只在判得出时挂上，别家 adapter 与
+  // 旧版库的 meta 形状保持一字不变（makeMeta 字段白名单有单测钉着）。
+  if (typeof parentId === "string" && parentId.trim() !== "") meta.parentId = parentId;
+  if (surface === "desktop" || surface === "cli") meta.surface = surface;
   meta.resumeCommand = resumeCommandFor(endpoint, meta);
   return meta;
 }
@@ -2058,9 +2063,19 @@ function scanSessionTable({ endpoint, dbPath }) {
   try {
     // 刚装好的客户端可能先建库、后建表：没有会话表就等于还没有会话。
     if (!sqliteTableExists(db, "session")) return [];
+    // zcode 的 session.parent_id 是 workflow / subagent 子会话归母的正源；
+    // opencode 共用这张表但版本间列不同，先探列再查，缺列按「无父子关系」处理，
+    // 绝不让一次列缺失毁掉整轮扫描。
+    const hasParentColumn = endpoint === "zcode"
+      && db.prepare("PRAGMA table_info(session)").all().some((col) => col.name === "parent_id");
+    // 桌面判据依赖 message 表里的 inputIntent：表不存在时「非 desktop」不可当
+    // CLI 的确证，surface 留空，交给请求 socket 谱系兜底（见 agent-metrics）。
+    const surfaceKnown = endpoint === "zcode" && sqliteTableExists(db, "message");
     const rows = db
       .prepare(
-        "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
+        hasParentColumn
+          ? "SELECT id, title, directory, time_created, time_updated, parent_id FROM session ORDER BY time_updated DESC"
+          : "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
       )
       .all();
     const desktopIds = endpoint === "zcode" ? zcodeDesktopSessionIds(db) : null;
@@ -2071,6 +2086,8 @@ function scanSessionTable({ endpoint, dbPath }) {
         title: typeof row.title === "string" && row.title.trim() !== "" ? truncateText(row.title, TITLE_MAX_CHARS) : null,
         project: typeof row.directory === "string" ? row.directory : null,
         originator: desktopIds !== null && desktopIds.has(String(row.id)) ? "desktop" : null,
+        parentId: hasParentColumn && typeof row.parent_id === "string" ? row.parent_id : null,
+        surface: surfaceKnown ? (desktopIds.has(String(row.id)) ? "desktop" : "cli") : null,
         file: `sqlite:${dbPath}#${row.id}`,
         createdAt: typeof row.time_created === "number" ? row.time_created : null,
         lastActive: typeof row.time_updated === "number" ? row.time_updated : null,

@@ -795,12 +795,12 @@ if (window.panelStartupController) panelStartupPlay();
                   <div class="agent-headings">
                     <h3>ZCode</h3>
                     <span class="instance-count-badge" id="zcInstanceCount" hidden></span>
+                    <span class="badge badge-neutral" id="zcSurfaceSummary" hidden></span>
                   </div>
                 </div>
                 <div class="agent-actions">
                   <div id="zcModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
-                  <span class="badge badge-ok" id="zcStateBadge">运行中</span>
-                  <button type="button" class="agent-detail-fold" id="zcDetailFoldBtn" data-prefix="zc" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                  <button type="button" class="agent-detail-fold" data-prefix="zc" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
               </div>
 
@@ -821,85 +821,15 @@ if (window.panelStartupController) panelStartupPlay();
                 <div class="time" id="zcErrorTime">刚刚</div>
               </div>
 
-              <div id="zcEmpty" class="empty-hint" hidden>未检测到运行中的 ZCode 客户端</div>
+              <div id="zcEmpty" class="empty-hint">未检测到运行中的 ZCode 客户端</div>
 
-              <div id="zcMetricsBlock">
-                <!-- 收起态简要信息栏：与多实例端点实例行同构（状态徽标 + 请求数徽标 + tokens 行 + 遥测胶囊），展开四宫格时隐藏 -->
-                <div class="session-table-wrapper agent-detail-brief" id="zcDetailBrief">
-                  <div class="session-row">
-                    <div class="session-main">
-                      <div class="session-name-line">
-                        <span>实时遥测</span>
-                        <span class="badge badge-neutral" id="zcBriefState">待命</span>
-                        <span class="badge badge-neutral" id="zcBriefReqs">0 请求</span>
-                      </div>
-                      <div class="session-tokens-line" id="zcBriefTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
-                    </div>
-                    <div class="session-tags-line">
-                      <span class="tag-bubble tag-stale" id="zcBriefStale" hidden></span>
-                      <span class="tag-bubble" id="zcBriefTps" hidden></span>
-                      <span class="tag-bubble" id="zcBriefTtft" hidden></span>
-                      <span class="tag-bubble" id="zcBriefCache" hidden></span>
-                      <span class="tag-bubble" id="zcBriefDuration" hidden></span>
-                    </div>
-                  </div>
-                </div>
-                <div class="telemetry-grid" id="zcTelemetryGrid">
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">首字响应时间</span>
-                      <div class="telemetry-sparkline" id="zcSparkTtft"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <i class="lamp lamp-gray" id="zcTtftLamp"></i>
-                        <span id="zcTtftVal">-</span>
-                        <span class="telemetry-unit" id="zcTtftUnit">s</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">生成速度</span>
-                      <div class="telemetry-sparkline" id="zcSparkTps"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="zcTpsVal">-</span>
-                        <span class="telemetry-unit" id="zcTpsUnit">tok/s</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">缓存命中率</span>
-                      <div class="telemetry-sparkline" id="zcSparkCache"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="zcCacheVal">-</span>
-                        <span class="telemetry-unit" id="zcCacheUnit">%</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">已工作时间</span>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="zcDurationVal">0秒</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
+              <!-- 与其余会话级端点（claude/codex/workbuddy…）同构：卡内只有实例行列表 +
+                   展开态「全局汇总」行，共用同一个 wrapper。端点级简要栏/四宫格是聚合
+                   时代残留，会话行本来各自带一套四宫格，再叠一层即是重复展示。 -->
+              <div id="zcMetricsBlock" hidden>
                 <div class="session-table-wrapper">
                   <div id="zcInstancesList"></div>
-                  <div class="session-row" id="zcSessionRow">
+                  <div class="session-row detail-open-only" id="zcSessionRow">
                     <div class="session-main">
                       <div class="session-name-line">
                         <span>全局汇总</span>

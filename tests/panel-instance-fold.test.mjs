@@ -204,7 +204,7 @@ describe("panel.js 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
   });
 });
 
-describe("panel.js 端点级旧机制（zcode/qoder）收起不绘制、展开补绘", () => {
+describe("panel.js 端点级旧机制（只剩 qoder）收起不绘制、展开补绘", () => {
   function makeRedrawEndpoint(env) {
     const m = panelJs.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "redrawEndpointSparklines found in panel.js");
@@ -224,28 +224,28 @@ describe("panel.js 端点级旧机制（zcode/qoder）收起不绘制、展开�
       keys,
       env.endpointStaleFlags,
     );
-    return { fn, historyBuffers, gridEls };
+    return { fn, historyBuffers, gridEls, keys };
   }
 
   it("四宫格隐藏（收起）时不绘制；可见时按端点级 buffer 画三条（cache 锁 0-100）", () => {
     const env = makeEnv();
-    const { fn } = makeRedrawEndpoint(env);
+    const { fn, keys } = makeRedrawEndpoint(env);
+    assert.equal(keys.zc, undefined, "zc 已无端点级四宫格，不再登记端点折线容器");
     fn("zc");
-    assert.equal(env.calls.update.length, 0, "收起态零绘制");
+    assert.equal(env.calls.update.length, 0, "zc 零绘制（端点级折线整块摘除）");
     fn("qoder");
     assert.deepEqual(env.calls.update.map((c) => c.id), ["qoderSparkTtft", "qoderSparkTps", "qoderSparkCache"], "可见栏照常绘制");
-    const zc = env.calls.update.filter((c) => c.id === "zcSparkTtft");
-    assert.equal(zc.length, 0, "zc 全程收起，不得出现 zc 折线调用");
   });
 
-  it("renderZcode/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
-    for (const fnName of ["renderZcode", "renderQoder"]) {
-      const m = panelJs.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
-      assert.ok(m, fnName + " found in panel.js");
-      assert.ok(!m[0].includes("updateSparkline("), fnName + " 不得裸调 updateSparkline（收起态会直写隐藏 DOM）");
-      const prefix = fnName === "renderZcode" ? "zc" : "qoder";
-      assert.ok(m[0].includes(`redrawEndpointSparklines("${prefix}")`), fnName + " 改走 redrawEndpointSparklines");
-    }
+  it("renderZcode 无端点级折线路径；renderQoder 仍走 redrawEndpointSparklines 门控", () => {
+    const zc = panelJs.match(/function renderZcode\(z\) \{[\s\S]*?\n  \}/);
+    assert.ok(zc, "renderZcode found in panel.js");
+    assert.ok(!zc[0].includes("updateSparkline("), "renderZcode 不裸调 updateSparkline");
+    assert.ok(!zc[0].includes("redrawEndpointSparklines("), "renderZcode 不再触发端点级补绘（与会话级端点同构）");
+    const q = panelJs.match(/function renderQoder\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(q, "renderQoder found in panel.js");
+    assert.ok(!q[0].includes("updateSparkline("), "renderQoder 不裸调 updateSparkline（收起态会直写隐藏 DOM）");
+    assert.ok(q[0].includes('redrawEndpointSparklines("qoder")'), "renderQoder 改走 redrawEndpointSparklines");
   });
 
   it("renderDsh 并入统一管线后，端点级补绘路径不得回潮", () => {
@@ -267,13 +267,13 @@ describe("panel.js 端点级旧机制（zcode/qoder）收起不绘制、展开�
     const fn = new Function(
       "grid", "brief", "foldBtn", "prefix", "redrawEndpointSparklines", "aggWrap",
       `return (${arrow});`,
-    )(grid, brief, foldBtn, "zc", env.redrawEndpointSparklines, aggWrap);
+    )(grid, brief, foldBtn, "qoder", env.redrawEndpointSparklines, aggWrap);
     fn(true);
-    assert.deepEqual(env.calls.redrawEp, ["zc"], "展开瞬间补绘");
+    assert.deepEqual(env.calls.redrawEp, ["qoder"], "展开瞬间补绘");
     assert.equal(grid.hidden, false);
     assert.equal(aggWrap.hidden, false, "展开态显示「全局汇总」行");
     fn(false);
-    assert.deepEqual(env.calls.redrawEp, ["zc"], "收起方向不补绘");
+    assert.deepEqual(env.calls.redrawEp, ["qoder"], "收起方向不补绘");
     assert.equal(aggWrap.hidden, true, "收起态隐藏「全局汇总」行（tokens/请求数由简要栏承载）");
     // setFold 未注入实例级补绘依赖，运行时断言恒真；改断源码文本：旧机制折叠
     // 不得回潮挂实例行补绘（实例行归 data-prefix 栏的 applyDetailFold）。

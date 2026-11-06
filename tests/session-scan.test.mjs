@@ -1718,6 +1718,29 @@ test("zcode: desktop-driven sessions are tagged originator=desktop, CLI sessions
   assert.equal(byId.get("sess_db1").originator, null, "CLI 会话无 inputIntent，不排除");
 });
 
+test("zcode: parent_id / surface 随 meta 透出（子会话归母与面判据的正源）", async () => {
+  const root = makeTmp();
+  mkdirSync(join(root, "cli", "db"), { recursive: true });
+  const dbPath = makeSessionDb(join(root, "cli", "db"));
+  const db = new DatabaseSync(dbPath);
+  // 真机库带 parent_id；夹具默认表没有，用 ALTER 补上——同时验证探列分支。
+  db.exec("ALTER TABLE session ADD COLUMN parent_id text");
+  db.prepare("INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("sess_dwf-dwfrun-1-actor_1_1", "C:\\work\\dbproj", "workflow actor", 1788000300000, 1788000309000, "sess_db1");
+  db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+    "msg_gui2", "sess_db1", 1788000301000, 1788000301000,
+    JSON.stringify({ role: "user", metadata: { inputIntent: { clientId: "client-01j00000000000000000000" } } }),
+  );
+  db.close();
+  const scanner = testScanner({ zcode: [root] });
+  const { sessions } = await scanner.scanAll();
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  assert.equal(byId.get("sess_dwf-dwfrun-1-actor_1_1").parentId, "sess_db1", "子会话带出母会话原始 id");
+  assert.equal(byId.get("sess_db1").parentId, undefined, "母会话不挂 parentId");
+  assert.equal(byId.get("sess_db1").surface, "desktop", "桌面输入通道判 desktop");
+  assert.equal(byId.get("sess_dwf-dwfrun-1-actor_1_1").surface, "cli", "无桌面输入通道判 cli");
+});
+
 test("opencode: scans its own db and builds a verified resume command", async () => {
   const root = makeTmp();
   makeSessionDb(root, "opencode.db");

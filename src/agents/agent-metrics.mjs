@@ -460,6 +460,25 @@ export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 // 档——静置未关的会话不该丢行。
 export const ZCODE_SESSION_ID_PREFIX = "zcode-sess-";
 
+// 会话扫描里的原始 id → 请求路径的行 id，逐字复刻 openai-server 的
+// zcodeSessionRowIdForJoin（sess_ / subagent_agent_ 顺序各剥一次、同款清洗与
+// 64 字符截断）。父子映射两端必须同源：子会话的 parent_id 是带前缀的原始 id，
+// 请求头里的值已剥前缀，且 64 字符截断会把同一 workflow run 的 N 个 actor
+// 压成同一个行 id——不先归一就永远对不上。
+const ZCODE_SESSION_INTERNAL_PREFIXES = ["sess_", "subagent_agent_"];
+export function zcodeRowIdFromScanId(rawId) {
+  if (typeof rawId !== "string") return null;
+  let id = rawId;
+  for (const prefix of ZCODE_SESSION_INTERNAL_PREFIXES) {
+    if (id.startsWith(prefix) && id.length > prefix.length) id = id.slice(prefix.length);
+  }
+  const cleaned = id.trim().replace(/[^A-Za-z0-9._:-]+/g, "-");
+  if (cleaned.length === 0) return null;
+  return sanitizeInstanceId(
+    ZCODE_SESSION_ID_PREFIX + cleaned.slice(0, INSTANCE_ID_MAX_LEN - ZCODE_SESSION_ID_PREFIX.length),
+  );
+}
+
 // WorkBuddy 会话行（id "workbuddy-sess-<产品会话 id>"）。身份正源是产品自己的
 // 进程注册表（~/.workbuddy/sessions/<pid>.json 的 sessionId）：runtime 是池化的
 // （一个会话在一次运行里可换多个 pid），pid 锚不住行，注册表才是把「同一会话
@@ -499,9 +518,11 @@ const SESSION_ROW_PREFIXES = Object.freeze({
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
   opencode: null,
-  // zcode 与 opencode 同理不设空闲档：CLI 关窗即家族灭、两轮缺席收行；开着的
-  // 终端只是静置时不该收行（opencode 现场：静置 5 分钟行消失、绑定回落 null）。
-  zcode: null,
+  // zcode 对齐通用后台回收档 INSTANCE_IDLE_TTL_MS（10min）。原先不设空闲档是
+  // 「开着的终端静置不该收行」，但桌面端常驻让家族永不灭，2 小时前的会话行会
+  // 一直挂「2 小时前」；行收走后的累计由 zcode 退役账接住，端点账不丢。
+  // 不用 codex/WB 的 5min 档：那是注册表判生死之外的兜底，桌面端常驻场景过短。
+  zcode: INSTANCE_IDLE_TTL_MS,
   // WB 会话行的生死正源是注册表：注册表列着（环境活着）的行不吃空闲淘汰，
   // 注册表不再列出的行走缺席轮次确认（数秒级，与家族缺席同口径）。环境语义：
   // 每次发请求才给会话起新环境，请求间隔里环境本就不在——不存在「暂停待命」
@@ -1003,6 +1024,22 @@ export function zcodeSurfaceLabel(surface) {
   return ZCODE_SURFACE_LABELS[surface];
 }
 
+// 卡头分面汇总（与 claude/dsh/kimi 同形）：一行一票，字面量复用
+// zcodeSurfaceLabel 的既有取值，不新写显示名；判不出面的行不计票。
+export function summarizeZcodeSurfaces(rows) {
+  const counts = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || (row.surface !== "desktop" && row.surface !== "cli")) continue;
+    counts.set(row.surface, (counts.get(row.surface) ?? 0) + 1);
+  }
+  const out = [];
+  for (const surface of ["desktop", "cli"]) {
+    const count = counts.get(surface) ?? 0;
+    if (count > 0) out.push({ surface, label: zcodeSurfaceLabel(surface), count });
+  }
+  return out;
+}
+
 // The card summary follows logical client groups, not raw process count: one
 // Desktop app may own several claude.exe processes. CLI rows remain one group
 // per client PID, matching the instance rows below.
@@ -1132,6 +1169,9 @@ export function zcodeSurfaceFromOwnerPid(pid, procCounts) {
   for (let depth = 0; depth < INSTANCE_LINEAGE_MAX_DEPTH; depth += 1) {
     if (imageByPid.get(current) === "zcode.exe") return "desktop";
     const parent = ppidByPid.get(current);
+    // 谱系兜底的既有语义不变（链走完没见 zcode.exe ＝ CLI）。生产现场桌面
+    // utility 进程被误贴 TUI 的根因是 netstat 快照 miss 时压根没调到这里；
+    // 会话扫描的 surface 正源优先即可纠正，无需改这条既有判据。
     if (parent === undefined || seen.has(parent)) return "cli";
     seen.add(parent);
     current = parent;
@@ -2631,7 +2671,7 @@ function sparkHistoryForState(state) {
   };
 }
 
-function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = RECENT_SAMPLE_WINDOW, nowFn = Date.now, instances = null }) {
+function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = RECENT_SAMPLE_WINDOW, nowFn = Date.now, instances = null, surfaces = null, retiredMetrics = null }) {
   const isRunning = processCount > 0 || state.activeRequests > 0;
 
   // Display duration = settled busy intervals + the still-running tail, so the
@@ -2750,6 +2790,9 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
     // Per-instance snapshots for multi-instance endpoints (null elsewhere —
     // aggregate-only endpoints never carry the key).
     ...(instances === null ? {} : { instances }),
+    // 卡头分面汇总 / 退役账：只有会话粒度端点带，别家形状一字不变。
+    ...(surfaces === null ? {} : { surfaces }),
+    ...(retiredMetrics === null ? {} : { retiredMetrics }),
   };
 }
 
@@ -3474,6 +3517,51 @@ export function createAgentMetricsCollector(options = {}) {
   const SESSION_LOOKUP_TTL_MS = 15000;
   const sessionInfoCache = new Map(); // agentId -> { at, byId }
 
+  // zcode 会话库派生出的两张同步表，请求热路径只读它们、绝不新起扫描：
+  //   parentRowById: 子会话行 id → 母会话行 id（workflow actor / subagent /
+  //     侧聊的 session.parent_id 正源；截断后同键多父＝判不准，整键丢弃）
+  //   surfaceByRowId: 行 id → desktop / cli（会话扫描 inputIntent 的判据）
+  // 两份都随 loadSessionInfo("zcode") 的 15s 缓存刷新，面板轮询保持热。
+  let zcodeParentRowById = new Map();
+  let zcodeSurfaceByRowId = new Map();
+
+  function resolveZcodeParentRowId(rowId) {
+    if (typeof rowId !== "string") return rowId;
+    return zcodeParentRowById.get(rowId) ?? rowId;
+  }
+
+  function zcodeSurfaceForRow(rowId, entry) {
+    return zcodeSurfaceByRowId.get(rowId) ?? entry?.zcodeSurface ?? null;
+  }
+
+  // 冷缓存或旧快照里已经落在子行上的账，父子映射一到位就并回母行：目标行不存在
+  // 时整行改名归位（在途镜像写的是同一 state 对象），已存在时用既有的
+  // absorbAggregateState 并账。有在途请求的行留到下一轮，避免踩未收尾的请求。
+  function foldZcodeChildRows() {
+    if (zcodeParentRowById.size === 0) return;
+    const instMap = instanceBuckets.zcode;
+    const keep = Math.max(recentSampleWindow, DEFAULT_SPARK_WINDOW_POINTS);
+    for (const [childId, parentId] of zcodeParentRowById) {
+      const child = instMap.get(childId);
+      if (child === undefined || child.state.activeRequests > 0) continue;
+      const parent = instMap.get(parentId);
+      const parentSurface = zcodeSurfaceByRowId.get(parentId) ?? null;
+      if (parent === undefined) {
+        instMap.delete(childId);
+        if (parentSurface !== null) child.zcodeSurface = parentSurface;
+        instMap.set(parentId, child);
+      } else {
+        absorbAggregateState(parent.state, child.state, keep);
+        parent.zcodeSurface = parentSurface ?? parent.zcodeSurface ?? child.zcodeSurface;
+        if (parent.label === null && child.label !== null) parent.label = child.label;
+        parent.firstSeen = Math.min(parent.firstSeen, child.firstSeen);
+        instMap.delete(childId);
+      }
+      sessionRowFamilyMisses.delete(`zcode:${childId}`);
+      markMetricsDirty();
+    }
+  }
+
   async function loadSessionInfo(agentId) {
     const now = nowFn();
     const cached = sessionInfoCache.get(agentId);
@@ -3510,6 +3598,35 @@ export function createAgentMetricsCollector(options = {}) {
       if (meta && typeof meta.id === "string") byId.set(meta.id, meta);
     }
     sessionInfoCache.set(agentId, { at: now, byId, ok: scanOk });
+    if (agentId === "zcode") {
+      const parents = new Map();
+      const ambiguous = new Set();
+      const surfaces = new Map();
+      for (const meta of byId.values()) {
+        const rowId = zcodeRowIdFromScanId(meta.id);
+        if (rowId === null) continue;
+        // 面：会话扫描的 surface 是正源；旧形状（只有 originator）只认
+        // desktop 确证，originator 为 null 不当 CLI 判据（判不出就不贴）。
+        const surface = meta.surface === "desktop" || meta.surface === "cli"
+          ? meta.surface
+          : (typeof meta.originator === "string" && meta.originator.toLowerCase().includes("desktop") ? "desktop" : null);
+        if (surface === "desktop" || (surface === "cli" && !surfaces.has(rowId))) surfaces.set(rowId, surface);
+        if (typeof meta.parentId !== "string" || meta.parentId === "" || ambiguous.has(rowId)) continue;
+        const parentRowId = zcodeRowIdFromScanId(meta.parentId);
+        if (parentRowId === null || parentRowId === rowId) continue;
+        const previous = parents.get(rowId);
+        if (previous === undefined) parents.set(rowId, parentRowId);
+        else if (previous !== parentRowId) {
+          // 64 字符截断把同一 run 的多个 actor 压成同一行 id：它们同父才安全。
+          // 一旦出现两个不同的母行，归属判不准，整键丢弃（回落到原行、不猜）。
+          parents.delete(rowId);
+          ambiguous.add(rowId);
+        }
+      }
+      zcodeParentRowById = parents;
+      zcodeSurfaceByRowId = surfaces;
+      foldZcodeChildRows();
+    }
     return byId;
   }
 
@@ -3572,6 +3689,14 @@ export function createAgentMetricsCollector(options = {}) {
   // 的 zcodeSessionRowIdForJoin），这里只透传扫描原值。
   async function getZcodeSessionsForTerminalJoin() {
     return [...(await loadSessionInfo("zcode")).values()];
+  }
+
+  // 出口层把 feed 压到「看板上真有实例行」的行 id：终端桥的 cwd 兜底本就要求
+  // 行存在于 agents payload（instanceRow.has），扫描出的千条历史 / 子会话一行
+  // 也绑不上，却让「同 cwd 唯一命中」恒失效。子会话并入母行后其行 id 不再存在，
+  // 自然被滤掉。getter 仍保持「透传扫描原值」的既有契约。
+  function getZcodeLiveRowIds() {
+    return new Set(instanceBuckets.zcode.keys());
   }
 
   // WB 与 codex/opencode 同处境：实例行已是 workbuddy-sess-<sessionId>，pid 形
@@ -3815,6 +3940,35 @@ export function createAgentMetricsCollector(options = {}) {
     }
   }
 
+  // zcode 退役账：会话行被 10min 空闲档 / 家族连失两轮收走时，行的累计并进来。
+  // 端点卡的读数由「活会话行 + 退役账」派生（见 deriveZcodeDisplayState），
+  // 于是端点账与会话行账不会再出现 0 vs 1493 的断裂。与 claude 同形同生死。
+  const zcodeRetiredLedger = {
+    requests: 0,
+    activeDurationMs: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cachedTokens: 0,
+    lastTtftMs: null,
+    lastSeen: null,
+  };
+
+  function absorbZcodeRetiredRow(entry) {
+    const state = entry.state;
+    zcodeRetiredLedger.requests += state.totalRequests;
+    zcodeRetiredLedger.activeDurationMs += state.activeWallClockMs;
+    zcodeRetiredLedger.promptTokens += state.totalPromptTokens;
+    zcodeRetiredLedger.completionTokens += state.totalCompletionTokens;
+    zcodeRetiredLedger.cachedTokens += state.totalCachedTokens;
+    if (state.lastTtftMs !== null) zcodeRetiredLedger.lastTtftMs = state.lastTtftMs;
+    const lastSeen = state.lastRequestAt ?? entry.firstSeen;
+    if (typeof lastSeen === "number"
+      && (zcodeRetiredLedger.lastSeen === null || lastSeen > zcodeRetiredLedger.lastSeen)) {
+      zcodeRetiredLedger.lastSeen = lastSeen;
+    }
+    markMetricsDirty();
+  }
+
   // 端点全账清零：原位重置（保住对象身份，在途请求/看板持有的引用随之归零），
   // claude 连会话行与退役账一起清。实例桶不清——行有独立的生死机制（见
   // settleAndResetRunAccount 注释），恢复的旧行（无活 pid）由逐行淘汰收走。
@@ -3835,6 +3989,15 @@ export function createAgentMetricsCollector(options = {}) {
       claudeRetiredLedger.cachedTokens = 0;
       claudeRetiredLedger.lastTtftMs = null;
       claudeRetiredLedger.lastSeen = null;
+    }
+    if (id === "zcode") {
+      zcodeRetiredLedger.requests = 0;
+      zcodeRetiredLedger.activeDurationMs = 0;
+      zcodeRetiredLedger.promptTokens = 0;
+      zcodeRetiredLedger.completionTokens = 0;
+      zcodeRetiredLedger.cachedTokens = 0;
+      zcodeRetiredLedger.lastTtftMs = null;
+      zcodeRetiredLedger.lastSeen = null;
     }
     markMetricsDirty();
   }
@@ -3901,6 +4064,10 @@ export function createAgentMetricsCollector(options = {}) {
         if (Number.isFinite(entry.wbTrafficPid)) {
           row.wbTrafficPid = entry.wbTrafficPid;
         }
+        // zcode 会话行的面随行落盘：重启恢复的行不必等下个请求才补回徽标。
+        if (entry.zcodeSurface === "desktop" || entry.zcodeSurface === "cli") {
+          row.zcodeSurface = entry.zcodeSurface;
+        }
         return row;
       });
     }
@@ -3924,6 +4091,15 @@ export function createAgentMetricsCollector(options = {}) {
         cachedTokens: claudeRetiredLedger.cachedTokens,
         lastTtftMs: claudeRetiredLedger.lastTtftMs,
         lastSeen: claudeRetiredLedger.lastSeen,
+      },
+      zcodeRetiredLedger: {
+        requests: zcodeRetiredLedger.requests,
+        activeDurationMs: zcodeRetiredLedger.activeDurationMs,
+        promptTokens: zcodeRetiredLedger.promptTokens,
+        completionTokens: zcodeRetiredLedger.completionTokens,
+        cachedTokens: zcodeRetiredLedger.cachedTokens,
+        lastTtftMs: zcodeRetiredLedger.lastTtftMs,
+        lastSeen: zcodeRetiredLedger.lastSeen,
       },
     };
   }
@@ -3994,6 +4170,10 @@ export function createAgentMetricsCollector(options = {}) {
           if (Number.isFinite(row.wbTrafficPid)) {
             entry.wbTrafficPid = row.wbTrafficPid;
           }
+          // 旧版快照没有面字段：容忍缺字段，下一笔请求或会话扫描会补档。
+          if (row.zcodeSurface === "desktop" || row.zcodeSurface === "cli") {
+            entry.zcodeSurface = row.zcodeSurface;
+          }
           instMap.set(row.id, entry);
         }
       }
@@ -4020,6 +4200,17 @@ export function createAgentMetricsCollector(options = {}) {
       claudeRetiredLedger.cachedTokens = snapshotFinite(ledger.cachedTokens);
       claudeRetiredLedger.lastTtftMs = snapshotNullableNumber(ledger.lastTtftMs);
       claudeRetiredLedger.lastSeen = snapshotNullableNumber(ledger.lastSeen);
+    }
+    // zcode 退役账还原：与 claude 同款字段级防御，旧版快照缺字段即全 0。
+    const zcLedger = raw.zcodeRetiredLedger;
+    if (zcLedger && typeof zcLedger === "object") {
+      zcodeRetiredLedger.requests = snapshotFinite(zcLedger.requests);
+      zcodeRetiredLedger.activeDurationMs = snapshotFinite(zcLedger.activeDurationMs);
+      zcodeRetiredLedger.promptTokens = snapshotFinite(zcLedger.promptTokens);
+      zcodeRetiredLedger.completionTokens = snapshotFinite(zcLedger.completionTokens);
+      zcodeRetiredLedger.cachedTokens = snapshotFinite(zcLedger.cachedTokens);
+      zcodeRetiredLedger.lastTtftMs = snapshotNullableNumber(zcLedger.lastTtftMs);
+      zcodeRetiredLedger.lastSeen = snapshotNullableNumber(zcLedger.lastSeen);
     }
     // Liveness reconciliation is deliberately NOT repeated here: the first
     // getAgentsStatus read already evicts rows whose owning PID is dead (the
@@ -4286,10 +4477,13 @@ export function createAgentMetricsCollector(options = {}) {
         markMetricsDirty();
       }
       if (norm.label !== null) entry.label = norm.label;
-      if (bucketAgentId === "zcode" && entry.zcodeSurface === undefined) {
-        // 会话行的面按行缓存：undici 空闲约 4s 断连，断连期查不到连接属主；
-        // 首请求必有活连接，定档一次即可。判不出（null）不缓存，下个请求再试。
-        const surface = zcodeSurfaceFromOwnerPid(meta.surfacePid, cachedProcessCounts);
+      if (bucketAgentId === "zcode") {
+        // 会话扫描的 surface 是正源（inputIntent 判据，与 netstat 快照是否命中
+        // 无关）；每个请求重判，换界面不钉死。扫不到才用请求 socket 属主谱系
+        // 兜底。两源都判不出就不贴面，下个请求再试；字段随行落盘，重启恢复的
+        // 行也能立刻补回。
+        const fromScan = zcodeSurfaceByRowId.get(instanceId) ?? null;
+        const surface = fromScan ?? zcodeSurfaceFromOwnerPid(meta.surfacePid, cachedProcessCounts);
         if (surface !== null) entry.zcodeSurface = surface;
       }
       if (bucketAgentId === "workbuddy") {
@@ -4946,6 +5140,9 @@ export function createAgentMetricsCollector(options = {}) {
     // 「零进程」是看不见而不是不在：据进程归属做的破坏性收敛整批跳过，实例淘汰
     // 降级为「本轮全量 pid」存活判定。可信轮一切照旧。
     const countsTrusted = procCounts.countsAuthoritative === true;
+    // 父子映射已在、但冷缓存期间（或还原快照里）落在子行上的账，每轮读取都补并
+    // 一次，不依赖 15s 会话缓存恰好刷新。
+    foldZcodeChildRows();
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
@@ -5355,6 +5552,9 @@ export function createAgentMetricsCollector(options = {}) {
           // counted in the endpoint aggregate, so settle that share there;
           // the instance's own counters vanish with the entry.
           settleLeakedInstanceRequests(bucket, entry.state, now);
+          // zcode 会话行下场前把累计并入退役账：端点账 = 活行 + 退役账，
+          // 家族连失两轮收行不该让历史凭空消失。
+          if (bucket === "zcode" && isSessionRow) absorbZcodeRetiredRow(entry);
           instMap.delete(instId);
           sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
           sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
@@ -5385,6 +5585,8 @@ export function createAgentMetricsCollector(options = {}) {
           // 按静默收行）；TTL 只兜注册表读不出/判不了生死那档的场。
           if (idleTtlMs !== null && wbSessionOpen !== true
             && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
+            // 10min 空闲档收 zcode 会话行同样先并账，端点总读数不随行蒸发。
+            if (bucket === "zcode" && isSessionRow) absorbZcodeRetiredRow(entry);
             instMap.delete(instId);
             sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
             sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
@@ -5483,6 +5685,13 @@ export function createAgentMetricsCollector(options = {}) {
       }
     }
 
+    // zcode 的父子映射与面判据由会话库扫描派生：有会话行时才过一次 15s 缓存，
+    // 让冷缓存期间落在子行上的账尽快并回母行、恢复的行尽早补上面徽标——不依赖
+    // 终端右栏是否打开（那条路才调 getZcodeSessionsForTerminalJoin）。fire-and-
+    // forget：绝不把一次 sqlite 全表扫描挂进看板 1s 轮询的 await 链，无会话行
+    // 的端点/测试也不会凭空付这次扫描。
+    if (instanceBuckets.zcode.size > 0) void loadSessionInfo("zcode");
+
     // Session-granular rows get user-readable titles from the endpoint's own
     // session scan (codex rollouts / opencode's db). Worth the walk only when
     // such a row is actually listed.
@@ -5559,10 +5768,10 @@ export function createAgentMetricsCollector(options = {}) {
       if (bucket === "dsh") return dshInstanceSurface(instId);
       if (bucket === "kimi") return kimiInstanceSurface(instId);
       if (bucket === "workbuddy") return workbuddyInstanceSurface(instId, entry);
-      // zcode 会话行的面在请求路径上定档、按行缓存（bindInstance 处的注释），
-      // 读侧只翻译字面量；未定档的行不贴面。
+      // zcode 会话行的面：会话扫描正源优先，其次是请求路径定档并随行落盘的
+      // 值（bindInstance 处的注释）。读侧只翻译既有字面量；未定档的行不贴面。
       if (bucket === "zcode") {
-        const surface = instanceBuckets.zcode.get(instId)?.zcodeSurface ?? null;
+        const surface = zcodeSurfaceForRow(instId, entry);
         return surface === null ? null : zcodeSurfaceLabel(surface);
       }
       return null;
@@ -5621,17 +5830,85 @@ export function createAgentMetricsCollector(options = {}) {
         });
     }
 
+    // 端点卡读数由「活会话行 + 退役账」派生：zcodeState 只当在途累加器，重启
+    // 续账判决会把它整体归零，而实例行保留历史——这正是 0 vs 1493 的断裂来源。
+    // 每轮读取现算一份展示态，四宫格/简要栏/折线/静态汇总/模型徽标/
+    // zcode-global 全部与展开的会话行同源，两套生死口径不再各算各的。
+    function deriveZcodeDisplayState() {
+      // 无会话行、也无退役账时（老 relay / 无归属 zcode 流量 / 纯聚合桶形态），
+      // 端点态就是唯一账本，原样返回——别把 untagged 流量派生没了。
+      if (instanceBuckets.zcode.size === 0 && zcodeRetiredLedger.requests === 0) return zcodeState;
+      const derived = createAggregateState(zcodeState.sparkWindowPoints);
+      const keep = Math.max(recentSampleWindow, derived.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS);
+      // 按最近请求时间升序：absorbAggregateState 的「最近模型/渠道/TTFT」由
+      // 最后一个源覆盖，升序才能让真正最新的那一行说了算。
+      const rows = [...instanceBuckets.zcode.values()]
+        .sort((a, b) => (a.state.lastRequestAt ?? a.firstSeen) - (b.state.lastRequestAt ?? b.firstSeen));
+      for (const entry of rows) {
+        const row = entry.state;
+        absorbAggregateState(derived, row, keep);
+        derived.activeRequests += row.activeRequests;
+        for (const [key, count] of row.activeModels) {
+          derived.activeModels.set(key, (derived.activeModels.get(key) ?? 0) + count);
+        }
+        for (const [key, target] of row.activeTargets) {
+          const current = derived.activeTargets.get(key);
+          derived.activeTargets.set(key, current === undefined ? { ...target } : {
+            ...current,
+            count: current.count + target.count,
+            autoCount: current.autoCount + target.autoCount,
+          });
+        }
+        for (const [key, fault] of row.activeFaults) derived.activeFaults.set(key, fault);
+        if (row.activeWallStart !== null) {
+          derived.activeWallStart = derived.activeWallStart === null
+            ? row.activeWallStart : Math.min(derived.activeWallStart, row.activeWallStart);
+        }
+        if (row.keylessFaultAt !== null) {
+          derived.keylessFaultAt = Math.max(derived.keylessFaultAt ?? 0, row.keylessFaultAt);
+        }
+        if (row.lastKeepAliveAt !== null) {
+          derived.lastKeepAliveAt = Math.max(derived.lastKeepAliveAt ?? 0, row.lastKeepAliveAt);
+        }
+        if (row.activeRequests > 0) {
+          derived.currentModel = row.currentModel;
+          derived.currentProvider = row.currentProvider;
+          derived.currentViaAuto = row.currentViaAuto;
+          derived.currentChainKey = row.currentChainKey;
+        }
+      }
+      derived.errorActive = derived.activeFaults.size > 0 || derived.keylessFaultAt !== null;
+      // 退役账：行被空闲档 / 家族连失收走后累计不蒸发，端点账恒等于活行+退役账。
+      derived.totalRequests += zcodeRetiredLedger.requests;
+      derived.activeWallClockMs += zcodeRetiredLedger.activeDurationMs;
+      derived.totalPromptTokens += zcodeRetiredLedger.promptTokens;
+      derived.totalCompletionTokens += zcodeRetiredLedger.completionTokens;
+      derived.totalCachedTokens += zcodeRetiredLedger.cachedTokens;
+      if (zcodeRetiredLedger.lastTtftMs !== null && derived.lastTtftMs === null) {
+        derived.lastTtftMs = zcodeRetiredLedger.lastTtftMs;
+      }
+      if (zcodeRetiredLedger.lastSeen !== null
+        && (derived.lastRequestAt === null || zcodeRetiredLedger.lastSeen > derived.lastRequestAt)) {
+        derived.lastRequestAt = zcodeRetiredLedger.lastSeen;
+      }
+      return derived;
+    }
+
     // 1. ZCode Agent Status（汇总卡 + 实例桶；实例按会话一行 zcode-sess-<会话
     // id>，身份正源是 x-session-id 请求头——桌面端 utility 进程跨会话共享连接
     // 池，pid 到不了会话。进程家族只决定卡片运行状态与会话行的生灭）
     const zcodeAgent = buildAggregateAgentStatus({
       id: "zcode",
       name: "ZCode",
-      state: zcodeState,
+      state: deriveZcodeDisplayState(),
       processCount: procCounts.zcode || 0,
       tpsWindow: recentSampleWindow,
       nowFn,
       instances: instanceSnapshots("zcode"),
+      surfaces: summarizeZcodeSurfaces([...instanceBuckets.zcode.keys()].map((instId) => ({
+        surface: zcodeSurfaceForRow(instId, instanceBuckets.zcode.get(instId)),
+      }))),
+      retiredMetrics: { ...zcodeRetiredLedger },
     });
 
     // 2. Claude Code Agent Status
@@ -5968,6 +6245,9 @@ export function createAgentMetricsCollector(options = {}) {
     getOpencodeSessionsForTerminalJoin,
     getZcodeSessionsForTerminalJoin,
     getWorkbuddySessionsForTerminalJoin,
+    // zcode 子会话流量铸行时并回母行：同步读 15s 会话缓存派生表，不新起扫描。
+    resolveZcodeParentRowId,
+    getZcodeLiveRowIds,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of
     // accounting exactly when a restart is about to need it.

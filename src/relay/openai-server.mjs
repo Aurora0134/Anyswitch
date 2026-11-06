@@ -133,7 +133,13 @@ function instanceIdForRequest(req, agentId, deps) {
   }
   if (id === "zcode") {
     const sessionId = zcodeSessionInstanceId(req.headers);
-    if (sessionId !== null) return sessionId;
+    // workflow actor / subagent / 侧聊一律铸在母会话行上：会话库的 parent_id
+    // 是确定性的正源，collector 把它折成同步映射（15s 会话缓存），这里只做
+    // 一次查表。journal、实例桶、端点账、面徽标、终端归属随之全部同源。
+    // 映射未就绪（冷缓存 / 老 relay 注入）时原样回落，绝不丢请求。
+    if (sessionId !== null) {
+      return deps.metricsCollector?.resolveZcodeParentRowId?.(sessionId) ?? sessionId;
+    }
   }
   // override 端点（pi）与头值不可信的端点（opencode 的环境标签被共用服务冻住，
   // 见上）跳过「头值」这一档，身份一律由连接属主进程归一。
@@ -233,20 +239,28 @@ function zcodeSurfacePidForRequest(req, instanceId, deps) {
 
 // 会话扫描结果 → 终端归属桥的 feed 行：与请求路径同一套行 id 形状（join 两端
 // 必须同源，否则永远对不上），project 必须可读才能按 cwd 匹配。
-function sessionJoinRows(metas, toRowId) {
-  return (Array.isArray(metas) ? metas : [])
-    .map((meta) => {
-      if (!meta || typeof meta.id !== "string") return null;
-      const rowId = toRowId(meta.id);
-      if (rowId === null || typeof meta.project !== "string" || meta.project === "") return null;
-      return {
-        id: rowId,
-        cwd: meta.project,
-        lastActive: typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : null,
-        originator: typeof meta.originator === "string" ? meta.originator : null,
-      };
-    })
-    .filter(Boolean);
+function sessionJoinRows(metas, toRowId, allowRowIds = null) {
+  // 同一行 id 可能因 64 字符截断或多次扫描出现多条（zcode 现场 1067 行里
+  // 253 条重键）。桥的判据是「唯一命中」，重复行只会让唯一匹配恒失效：按行
+  // id 去重、保留 lastActive 最大的那条，顺序仍按首次出现（面板输出稳定）。
+  // allowRowIds 非空时只留「看板上真有实例行」的 row id——历史会话与已并入
+  // 母行的子会话本来就绑不上，留着只会让唯一命中判据恒失效。
+  const byRowId = new Map();
+  for (const meta of Array.isArray(metas) ? metas : []) {
+    if (!meta || typeof meta.id !== "string") continue;
+    const rowId = toRowId(meta.id);
+    if (rowId === null || typeof meta.project !== "string" || meta.project === "") continue;
+    if (allowRowIds instanceof Set && !allowRowIds.has(rowId)) continue;
+    const row = {
+      id: rowId,
+      cwd: meta.project,
+      lastActive: typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : null,
+      originator: typeof meta.originator === "string" ? meta.originator : null,
+    };
+    const previous = byRowId.get(rowId);
+    if (previous === undefined || (row.lastActive ?? 0) > (previous.lastActive ?? 0)) byRowId.set(rowId, row);
+  }
+  return [...byRowId.values()];
 }
 
 // WB 会话注册表 → 桥 feed 行。通用 sessionJoinRows 的形状够用（id/cwd/
@@ -728,9 +742,12 @@ export function createOpenAIRelayServer(deps) {
         }
         let zcodeSessions = [];
         if (typeof deps.metricsCollector.getZcodeSessionsForTerminalJoin === "function") {
+          const liveRowIds = typeof deps.metricsCollector.getZcodeLiveRowIds === "function"
+            ? deps.metricsCollector.getZcodeLiveRowIds() : null;
           zcodeSessions = sessionJoinRows(
             await deps.metricsCollector.getZcodeSessionsForTerminalJoin(),
             zcodeSessionRowIdForJoin,
+            liveRowIds,
           );
         }
         sendJson(res, 200, { ok: true, processes, codexSessions, opencodeSessions, workbuddySessions, zcodeSessions });

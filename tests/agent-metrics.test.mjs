@@ -1788,7 +1788,7 @@ describe("createAgentMetricsCollector", () => {
       "LAPTOP,C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,4000,6000",
       `LAPTOP,C:\\Program Files\\nodejs\\node.exe ${ZC_HOME}\\bin\\zcode.mjs,node.exe,6000,6001`,
     ];
-    const ZC_CLI_SCAN = wmicZc(...zcCliRows);
+    const CLI_SCAN = wmicZc(...zcCliRows);
 
     it("mints a session row from the request, with no placeholder rows for live family processes", async () => {
       // zcode 的行是流量生的、按会话划分（codex/opencode 同款）：扫描到活的
@@ -1819,7 +1819,7 @@ describe("createAgentMetricsCollector", () => {
       const rowD = (await desktop.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
       assert.equal(rowD.surface, "Desktop");
 
-      const cli = testCollector({ execFn: (c, o, cb) => cb(null, ZC_CLI_SCAN), nowFn: () => t });
+      const cli = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t });
       await cli.scanProcesses();
       const r2 = cli.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_c", surfacePid: 6001, model: "m1", stream: true, path: "openai" });
       r2.recordEnd({ status: 200, usage: {} });
@@ -1878,7 +1878,7 @@ describe("createAgentMetricsCollector", () => {
     });
 
     it("feeds the zcode CLI process into the detected-client feed with a busy flag", async () => {
-      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_CLI_SCAN), nowFn: () => 10000 });
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => 10000 });
       await collector.scanProcesses();
       const detected = collector.getDetectedClientProcesses();
       const entry = detected.find((d) => d.agentId === "zcode");
@@ -1893,7 +1893,7 @@ describe("createAgentMetricsCollector", () => {
       // 连续两轮都看不到才收行。
       let t = 3000;
       let alive = true;
-      const execFn = (c, o, cb) => cb(null, alive ? ZC_CLI_SCAN : wmicZc());
+      const execFn = (c, o, cb) => cb(null, alive ? CLI_SCAN : wmicZc());
       const collector = testCollector({ execFn, nowFn: () => t });
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_x", model: "m1", stream: true, path: "openai" });
@@ -1909,18 +1909,28 @@ describe("createAgentMetricsCollector", () => {
       assert.deepEqual(await read(), [], "连续两轮看不到家族，会话行收走");
     });
 
-    it("keeps an idle session row while its family is still alive", async () => {
-      // 与 opencode 同款不设空闲档：开着的终端只是静置，对话还在屏幕上——按
-      // codex 的 5 分钟档收行会让看板与终端右栏突然认不出这条会话。
+    it("10min 空闲档收走常驻家族下的静置行，累计并入退役账", async () => {
+      // 桌面端常驻使家族永不灭，原先「不设空闲档」会让 2 小时前的会话行一直挂着。
+      // 现在对齐通用后台回收档 INSTANCE_IDLE_TTL_MS（10min）；行下场前把累计并进
+      // 退役账，端点账 = 活行 + 退役账，读数不随行蒸发。
       let t = 3000;
-      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_CLI_SCAN), nowFn: () => t });
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t });
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_idle", model: "m1", stream: true, path: "openai" });
       r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
-      t += 2 * 60 * 60 * 1000;
+      const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.equal((await read()).instances.length, 1, "刚发完请求行在");
+
+      t += 9 * 60 * 1000;
       await collector.scanProcesses();
-      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
-      assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-sess-sess_idle"]);
+      assert.deepEqual((await read()).instances.map((i) => i.id), ["zcode-sess-sess_idle"], "空闲档内不收行");
+
+      t += 2 * 60 * 1000;
+      await collector.scanProcesses();
+      const zcode = await read();
+      assert.deepEqual(zcode.instances.map((i) => i.id), [], "过 10min 空闲档收行");
+      assert.equal(zcode.retiredMetrics.requests, 1, "行的累计并入退役账");
+      assert.equal(zcode.metrics.totalRequests, 1, "端点账 = 活行 + 退役账，不归零");
     });
 
     it("serves the zcode session metas through the terminal-join getter", async () => {
@@ -1945,6 +1955,82 @@ describe("createAgentMetricsCollector", () => {
         zcodeSessionLookup: async () => { throw new Error("db locked"); },
       });
       assert.deepEqual(await collector.getZcodeSessionsForTerminalJoin(), [], "扫描失败绝不弄坏读取面");
+    });
+  });
+
+  describe("zcode 子会话归母 / 面正源 / 端点账同源", () => {
+    const MOTHER = "zcode-sess-93b5c395-8a19-4401-bb4c-ddbb096750a1";
+    const CHILD = "zcode-sess-dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor";
+    // 独立夹具：5 列 WMIC 形状，活着的 zcode CLI 家族（行不被家族缺席判定收走）。
+    const CLI_SCAN = "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n"
+      + "LAPTOP,C:\\WINDOWS\\explorer.exe,explorer.exe,3999,4000\r\n"
+      + "LAPTOP,C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\powershell.exe,powershell.exe,4000,6000\r\n"
+      + "LAPTOP,C:\\Program Files\\nodejs\\node.exe C:\\zcode\\bin\\zcode.mjs,node.exe,6000,6001\r\n";
+    // 同一 workflow run 的两个 actor 经 64 字符截断压成同一个行 id，且同父。
+    const metas = [
+      { id: "sess_93b5c395-8a19-4401-bb4c-ddbb096750a1", project: "C:\\work\\alpha", lastActive: 5000, originator: "desktop", surface: "desktop" },
+      { id: "sess_dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor_1_1", project: "C:\\work\\alpha", lastActive: 6000, originator: null, surface: "cli", parentId: "sess_93b5c395-8a19-4401-bb4c-ddbb096750a1" },
+      { id: "sess_dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor_2_5", project: "C:\\work\\alpha", lastActive: 7000, originator: null, surface: "cli", parentId: "sess_93b5c395-8a19-4401-bb4c-ddbb096750a1" },
+    ];
+    const zcodeOf = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+
+    it("截断后同键同父 → 映射确定；母行不被改写", async () => {
+      const collector = testCollector({ execFn: () => {}, nowFn: () => 10000, zcodeSessionLookup: async () => metas });
+      await collector.getZcodeSessionsForTerminalJoin();
+      assert.equal(collector.resolveZcodeParentRowId(CHILD), MOTHER, "同键多 actor 同父，映射唯一");
+      assert.equal(collector.resolveZcodeParentRowId(MOTHER), MOTHER);
+      assert.deepEqual([...collector.getZcodeLiveRowIds()], [], "尚无流量时不放行任何 feed 行");
+    });
+
+    it("冷缓存落在子行上的账补并回母行，端点账恒等于活行 + 退役账", async () => {
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, CLI_SCAN),
+        nowFn: () => 10000,
+        zcodeSessionLookup: async () => metas,
+      });
+      await collector.scanProcesses();
+      await collector.getZcodeSessionsForTerminalJoin(); // 父子/面映射就位
+      // 映射到位前（或旧快照还原）已经落在子行上的账：读取时补并，不靠新请求。
+      const child = collector.startRequest({ agentId: "zcode", instanceId: CHILD, model: "m1", stream: true, path: "openai" });
+      child.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 20 } });
+      const mother = collector.startRequest({ agentId: "zcode", instanceId: MOTHER, model: "m1", stream: true, path: "openai" });
+      mother.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 10 } });
+      const card = await zcodeOf(collector);
+      assert.deepEqual(card.instances.map((i) => i.id), [MOTHER], "子行不再出现在看板");
+      assert.equal(card.instances[0].requests, 2, "母行接住子会话流量");
+      assert.equal(card.instances[0].tokens.prompt, 150);
+      assert.equal(card.metrics.totalRequests, 2, "端点账 = 活会话行 + 退役账");
+      assert.equal(card.metrics.tokens.prompt, 150);
+      assert.equal(card.retiredMetrics.requests, 0, "本次没有行退役");
+    });
+
+    it("会话扫描的 surface 正源给恢复行补徽标，并随快照落盘", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "anyswitch-zcode-surface-"));
+      try {
+        const opts = () => ({
+          execFn: (c, o, cb) => cb(null, CLI_SCAN),
+          nowFn: () => 10000,
+          persistRoot: dir,
+          zcodeSessionLookup: async () => metas,
+        });
+        const first = testCollector(opts());
+        await first.scanProcesses();
+        await first.getZcodeSessionsForTerminalJoin();
+        const r = first.startRequest({ agentId: "zcode", instanceId: MOTHER, model: "m1", stream: true, path: "openai" });
+        r.recordEnd({ status: 200, usage: { prompt_tokens: 1 } });
+        const card = await zcodeOf(first);
+        assert.equal(card.instances[0].surface, "Desktop", "无 socket 属主 pid 也贴面");
+        assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }], "卡头汇总同源");
+        assert.equal(first.persistMetricsSnapshot(), true);
+        const snap = JSON.parse(readFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), "utf8"));
+        assert.equal(snap.instances.zcode.find((row) => row.id === MOTHER).zcodeSurface, "desktop", "面字段随行落盘");
+        const second = testCollector(opts());
+        const restored = await zcodeOf(second);
+        assert.equal(restored.instances.find((row) => row.id === MOTHER).surface, "Desktop",
+          "重启恢复的行不必等下个请求才补回徽标");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

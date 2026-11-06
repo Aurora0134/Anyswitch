@@ -483,13 +483,14 @@ describe("openai relay transport", () => {
   // socket 反查到不了会话粒度——属主 pid 只随 meta.surfacePid 去给行定
   // surface（desktop/cli），绝不作身份。
   describe("zcode instance identity (x-session-id session header)", () => {
-    async function instanceMetaForChat(headers = {}) {
+    async function instanceMetaForChat(headers = {}, collectorOverrides = {}) {
       let startedMeta = null;
       const fakeCollector = {
         startRequest: (meta) => {
           startedMeta = meta;
           return { recordFirstChunk: () => {}, recordEnd: () => {} };
         },
+        ...collectorOverrides,
       };
       const server = createOpenAIRelayServer({
         ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
@@ -553,6 +554,20 @@ describe("openai relay transport", () => {
       const meta = await instanceMetaForChat({ "x-session-id": "sess_surf" });
       assert.equal(meta.instanceId, "zcode-sess-sess_surf");
       assert.equal(meta.surfacePid, 4242, "属主 pid 随行下发，供 collector 沿谱系定 surface");
+    });
+
+    it("folds a workflow child session request straight onto its mother row", async () => {
+      const child = "zcode-sess-dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor";
+      const mother = "zcode-sess-93b5c395-8a19-4401-bb4c-ddbb096750a1";
+      const meta = await instanceMetaForChat(
+        { "x-session-id": "dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor_3_1" },
+        { resolveZcodeParentRowId: (id) => (id === child ? mother : id) },
+      );
+      assert.equal(meta.instanceId, mother,
+        "铸行时即改写身份：journal / 实例桶 / 端点账 / 面徽标全部落在母行");
+      // 老 relay（无映射 getter）原样回落，绝不丢请求。
+      const legacy = await instanceMetaForChat({ "x-session-id": "dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor_3_1" });
+      assert.equal(legacy.instanceId, child);
     });
 
     // zcodeSessions 终端归属桥 feed（/api/internal/detected-processes）：pid 形
@@ -619,6 +634,22 @@ describe("openai relay transport", () => {
         assert.deepEqual(body.zcodeSessions.map((s) => s.id), ["zcode-sess-ok"]);
         const noGetter = await fetchDetected();
         assert.deepEqual(noGetter.zcodeSessions, [], "无 getter 时降级为空表");
+      });
+
+      it("dedups by row id and keeps only live instance rows", async () => {
+        // 64 字符截断把同一 workflow run 的多个 actor 压成同一行 id；重复行让
+        // 「唯一命中」恒失效。历史会话（无活实例行）本就绑不上，同样不留。
+        const body = await fetchDetected({
+          getZcodeSessionsForTerminalJoin: async () => [
+            { id: "sess_dup", project: "C:\\work\\alpha", lastActive: 1000 },
+            { id: "sess_dup", project: "C:\\work\\alpha", lastActive: 3000 },
+            { id: "sess_gone", project: "C:\\work\\alpha", lastActive: 9000 },
+          ],
+          getZcodeLiveRowIds: () => new Set(["zcode-sess-dup"]),
+        });
+        assert.deepEqual(body.zcodeSessions, [
+          { id: "zcode-sess-dup", cwd: "C:\\work\\alpha", lastActive: 3000, originator: null },
+        ], "按行 id 去重留最大 lastActive，且只留看板上真有的行");
       });
     });
   });

@@ -267,9 +267,9 @@ async function api(method, path, body) {
     pruneSparkBuffer(buf);
   }
 
-  // 端点级四宫格折线：prefix → [容器 id, historyBuffers 键]，旧机制四栏共用。
+  // 端点级四宫格折线：prefix → [容器 id, historyBuffers 键]。zc 已改为会话级
+  // 端点（端点四宫格整块摘除），只剩 qoder 还走旧机制。
   const ENDPOINT_SPARK_KEYS = {
-    zc: [["zcSparkTtft", "ttft"], ["zcSparkTps", "tps"], ["zcSparkCache", "cache"]],
     qoder: [["qoderSparkTtft", "qoder_ttft"], ["qoderSparkTps", "qoder_tps"], ["qoderSparkCache", "qoder_cache"]],
   };
 
@@ -1074,19 +1074,14 @@ async function api(method, path, body) {
     setPill("BriefDuration", true, `工作 ${durationText}`);
   }
 
-  // 端点详情折叠（zcode/qoder）：运行中默认收起——
-  // 详细遥测四宫格换成与多实例端点实例行同构的简要信息栏（含 tokens 行/请求数徽标），
-  // 「全局汇总」行改仅展开态显示（与多实例栏 detail-open-only 同范式：收起态 tokens/请求数
-  // 已由简要栏承载，双行并存属重复展示）；
-  // 展开后换回四宫格。展开态记 localStorage（与 route-fold 同交互语义），刷新不回落；
-  // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
-  // 未运行时折叠钮由 card-collapsed CSS 隐藏。
-  // dsh/pi/kimi/opencode/codex 已从此旧机制摘除，改走下方 data-prefix 事件委托。
-  // zc 是双接线：折叠钮同时带 data-prefix="zc"，实例行四宫格与「全局汇总」
-  // 静态行（detail-open-only）的收放、实例折线的展开补绘走统一委托
-  //（applyDetailFold，同多实例栏），本段只管端点级四宫格/简要栏/整盒。
-  // 两侧同写一个 localStorage 键、每次点击各翻一次各自缓存，状态天然同步。
-  ["zc", "qoder"].forEach((prefix) => {
+  // 端点详情折叠（仅 qoder 保留旧机制）：运行中默认收起——详细遥测四宫格换成
+  // 简要信息栏，展开后换回四宫格；展开态记 localStorage，刷新不回落。
+  // dsh/pi/kimi/opencode/codex 与 zc 都已摘除，改走下方 data-prefix 事件委托
+  //（applyDetailFold 单一状态机）。zc 原先是双接线：本段和委托各翻一次同一个
+  // localStorage 键、两套缓存各写各的，跨状态会分裂；且本段按 #zcSessionRow 的
+  // wrapper 整盒收放，把同盒的会话行也藏了。现在端点级简要栏/四宫格/静态
+  // 汇总行统一标 detail-open-only，会话行独立成盒、收起态直接可见。
+  ["qoder"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
     const foldBtn = $(prefix + "DetailFoldBtn");
@@ -1175,7 +1170,11 @@ async function api(method, path, body) {
       // 展开瞬间补绘：折叠期间 buffer 照常累积但不绘制，这里用已攒数据立刻上屏，
       // 不等下一轮 1s 轮询（renderInstanceRows 渲染后调用时 open 已正确，重复补绘被
       // updateSparkline 的路径级 diff 吸收为零 DOM 写）。
-      if (open) redrawInstanceSparklines(prefix);
+      if (open) {
+        // zc 与其余会话级端点同构：展开只补绘各行自己的实例折线，端点级
+        // 四宫格已整块摘除，不再触发端点级补绘。
+        redrawInstanceSparklines(prefix);
+      }
     });
   }
 
@@ -1849,8 +1848,11 @@ async function api(method, path, body) {
     timeEl.textContent = latest.time ? new Date(latest.time).toLocaleTimeString() : "刚刚";
   }
 
+  // 与 WorkBuddy / Codex / Claude 等会话级端点逐字同构：卡内只有实例行列表 +
+  // 展开态「全局汇总」行，共用同一 wrapper；没有端点级简要栏/四宫格/卡头状态
+  // 徽标。端点读数由活会话行 + 退役账派生（deriveZcodeDisplayState），因此
+  // 「全局汇总」行与展开的实例行同源，不再另起一套端点账。
   function renderZcode(z) {
-    const stateBadge = $("zcStateBadge");
     const modelBadgesList = $("zcModelBadgesList");
     const errorBanner = $("zcErrorBanner");
     const empty = $("zcEmpty");
@@ -1859,75 +1861,26 @@ async function api(method, path, body) {
     if (modelBadgesList) renderModelBadges(modelBadgesList, "zcode", z);
 
     applyFaultBanner(z, errorBanner, $("zcErrorMsg"), $("zcErrorTime"));
-    stateBadge.closest(".panel-card").classList.toggle("card-collapsed", z.status !== "running");
+    empty.closest(".panel-card").classList.toggle("card-collapsed", z.status !== "running");
 
     if (z.status === "running") {
       empty.hidden = true;
       metricsBlock.hidden = false;
       const isGenerating = (z.metrics && z.metrics.activeRequests > 0) || (z.activeRequests > 0);
-      stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
-      stateBadge.textContent = isGenerating ? "生成中" : "待命";
 
       const m = z.metrics || {};
       const sess = (z.sessions && z.sessions[0]) || {};
-      // 陈旧端点：速率类置 —、压暗、折线停绘，简要栏换相对时间胶囊；工时等累计量不动。
-      const stale = isEndpointStale(z, isGenerating);
-      endpointStaleFlags.zc = stale;
-      dimEndpointRateCards("zc", stale);
-      const ttft = m.lastTtftMs || z.lastTtftMs;
-      if (!stale && typeof ttft === "number" && ttft > 0) {
-        $("zcTtftVal").textContent = (ttft / 1000).toFixed(2);
-        $("zcTtftUnit").textContent = "s";
-        const color = m.ttftColor || "green";
-        $("zcTtftLamp").className = "lamp lamp-" + color;
-      } else {
-        $("zcTtftVal").textContent = "-";
-        $("zcTtftLamp").className = "lamp lamp-gray";
-      }
-
-      const tps = m.tps !== undefined ? m.tps : z.tps;
-      $("zcTpsVal").textContent = (!stale && typeof tps === "number" && tps > 0) ? tps.toFixed(1) : "-";
-
-      const hit = m.cacheHitRate !== undefined ? m.cacheHitRate : z.cacheHitRate;
-      $("zcCacheVal").textContent = (!stale && typeof hit === "number") ? hit.toFixed(1) : "-";
-
-      const dur = m.activeDurationMs || z.activeDurationMs;
-      $("zcDurationVal").textContent = formatDurationSeconds(dur);
-
       const tokens = m.tokens || sess.tokens || {};
 
       // 实例按行排列：会话粒度行（zcode-sess-<会话 id>，relay 按 x-session-id
-      // 铸行）。showSurface：行上可带后端按连接属主谱系定档的面徽标
-      //（Desktop/TUI，与 claude/kimi 同一渲染位、同一 token），未定档不贴；
-      // 无实例时用端点聚合量渲染一行「全局汇总」伪实例行。实例盒与静态
-      // 「全局汇总」行同盒，随本卡旧折叠钮整盒收放；盒内静态行的展开门控
-      // 与其他多实例栏同款（gateAggregateRow，须在 applyDetailFold 之后）。
+      // 铸行；workflow / subagent 子会话已并入母行）。showSurface 让每一行贴
+      // 自己的面徽标（Desktop / TUI，由会话扫描的 surface 正源定档，与
+      // claude/kimi/workbuddy 同一渲染位、同一 token）；判不出面的行不贴徽标。
+      // 无实例时用端点聚合量渲染一行「全局汇总」伪实例行，收起态不为空。
       const instances = Array.isArray(z.instances) ? z.instances : [];
       setInstanceCount("zc", instances.length);
       renderInstanceRows({ prefix: "zc", listEl: $("zcInstancesList"), instances, showSurface: true, aggregateFallback: buildAggregateFallback(m, z, isGenerating) });
-      applyDetailFold("zc");
-      gateAggregateRow("zc", $("zcSessionRow"), instances.length);
-
-      updateDetailBrief("zc", {
-        isGenerating,
-        ttft: (typeof ttft === "number" && ttft > 0) ? ttft : null,
-        ttftColor: m.ttftColor || "green",
-        tps: (typeof tps === "number" && tps > 0) ? tps : null,
-        hit: (typeof hit === "number") ? hit : null,
-        durationText: formatDurationSeconds(dur),
-        staleText: stale ? formatRelativeAge(sess.lastSeen) : null,
-        requests: m.totalRequests || z.totalRequests || 0,
-        tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,
-      });
-
-      if (!stale) {
-        pushMetricPoint("ttft", typeof ttft === "number" ? ttft / 1000 : null, m.sparkHistory?.ttft);
-        pushMetricPoint("tps", tps, m.sparkHistory?.tps);
-        pushMetricPoint("cache", hit, m.sparkHistory?.cache);
-
-        redrawEndpointSparklines("zc");
-      }
-
+      renderSurfaceSummary("zc", z.surfaces);
       $("zcSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
       $("zcSessionReqs").textContent = `${m.totalRequests || z.totalRequests || 0} 次请求`;
 
@@ -1947,12 +1900,15 @@ async function api(method, path, body) {
       } else {
         lastModelTag.textContent = "模型: 待命";
       }
+      applyDetailFold("zc");
+      gateAggregateRow("zc", $("zcSessionRow"), instances.length);
     } else {
-      setInstanceCount("zc", 0);
-      stateBadge.className = "badge badge-neutral";
-      stateBadge.textContent = "未运行";
       empty.hidden = false;
       metricsBlock.hidden = true;
+      setInstanceCount("zc", 0);
+      // 停止态必须显式清掉副行：卡收起时 CSS 不藏徽标，脏值会一直挂到下一轮
+      // running 刷新（WorkBuddy / Claude / Kimi 同一处置）。
+      renderSurfaceSummary("zc", []);
     }
   }
 

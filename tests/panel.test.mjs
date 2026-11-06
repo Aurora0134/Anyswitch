@@ -1262,8 +1262,8 @@ describe("panel.html codex endpoint card", () => {
     assert.ok(!panelJs.includes("codexTelemetryGrid"), "no endpoint-level telemetry grid");
     const keys = panelJs.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
     assert.ok(keys && !keys[0].includes("codex"), "ENDPOINT_SPARK_KEYS stays legacy-only (no codex)");
-    const legacyFold = panelJs.match(/\["zc", "qoder"\]\.forEach/);
-    assert.ok(legacyFold, "legacy id-wired fold list = zc/qoder only (codex not in it)");
+    const legacyFold = panelJs.match(/\["qoder"\]\.forEach/);
+    assert.ok(legacyFold, "legacy id-wired fold list = qoder only (codex / zc 都归 data-prefix 委托)");
   });
 
   it("keeps the stop-relay display name and stats label for codex", () => {
@@ -4708,17 +4708,22 @@ describe("panel.html 静态卡（zc/qoder）端点级陈旧语义", () => {
     assert.ok(m[1].includes("INSTANCE_STALE_MS"), "same threshold as instance rows");
   });
 
-  it("三个静态渲染函数同口径接线：判定 + 置位 flag + 压暗 + staleText + 停绘", () => {
-    for (const [fnName, prefix, arg] of [["renderZcode", "zc", "z"], ["renderQoder", "qoder", "p"]]) {
-      const m = panelJs.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
-      assert.ok(m, fnName + " found in panel.js");
-      assert.ok(m[0].includes(`const stale = isEndpointStale(${arg}, isGenerating);`), fnName + " computes stale");
-      assert.ok(m[0].includes(`endpointStaleFlags.${prefix} = stale;`), fnName + " sets stale flag");
-      assert.ok(m[0].includes(`dimEndpointRateCards("${prefix}", stale);`), fnName + " dims rate cards");
-      assert.ok(m[0].includes(`staleText: stale ? formatRelativeAge(sess.lastSeen) : null,`), fnName + " brief gets relative-age pill");
-      assert.ok(/if \(!stale\) \{[\s\S]*?pushMetricPoint[\s\S]*?redrawEndpointSparklines/.test(m[0]),
-        fnName + " gates metric push + sparkline redraw on !stale");
-      assert.ok(m[0].includes(`(!stale && typeof tps === "number" && tps > 0)`), fnName + " tps hidden when stale");
+  it("端点级陈旧接线只剩 qoder；zc 升级为会话级端点后不留端点级读数", () => {
+    const m = panelJs.match(/function renderQoder\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderQoder found in panel.js");
+    assert.ok(m[0].includes("const stale = isEndpointStale(p, isGenerating);"), "renderQoder computes stale");
+    assert.ok(m[0].includes("endpointStaleFlags.qoder = stale;"), "renderQoder sets stale flag");
+    assert.ok(m[0].includes('dimEndpointRateCards("qoder", stale);'), "renderQoder dims rate cards");
+    assert.ok(m[0].includes("staleText: stale ? formatRelativeAge(sess.lastSeen) : null,"), "renderQoder brief gets relative-age pill");
+    assert.ok(/if \(!stale\) \{[\s\S]*?pushMetricPoint[\s\S]*?redrawEndpointSparklines/.test(m[0]),
+      "renderQoder gates metric push + sparkline redraw on !stale");
+    assert.ok(m[0].includes('(!stale && typeof tps === "number" && tps > 0)'), "renderQoder tps hidden when stale");
+
+    const zc = panelJs.match(/function renderZcode\(z\) \{[\s\S]*?\n  \}/);
+    assert.ok(zc, "renderZcode found in panel.js");
+    for (const residue of ["isEndpointStale", "dimEndpointRateCards", "updateDetailBrief",
+      "redrawEndpointSparklines", "zcTtftVal", "zcStateBadge"]) {
+      assert.ok(!zc[0].includes(residue), `renderZcode 不得再引用端点级残留 ${residue}`);
     }
   });
 
@@ -4738,15 +4743,13 @@ describe("panel.html 静态卡（zc/qoder）端点级陈旧语义", () => {
       "rate pill html no longer eager-evaluated (null-safe)");
   });
 
-  it("两张静态卡的简要栏都有 tag-stale 相对时间胶囊", () => {
-    for (const prefix of ["zc", "qoder"]) {
-      assert.ok(
-        new RegExp(`<span class="tag-bubble tag-stale" id="${prefix}BriefStale" hidden></span>`).test(panelHtml),
-        prefix + "BriefStale pill exists");
-    }
+  it("qoder 简要栏保留 tag-stale 相对时间胶囊；zc 已摘除端点级简要栏", () => {
+    assert.ok(/<span class="tag-bubble tag-stale" id="qoderBriefStale" hidden><\/span>/.test(panelHtml),
+      "qoderBriefStale pill exists");
+    assert.ok(!/id="zcBriefStale"/.test(panelHtml), "zc 不再有端点级简要栏胶囊");
   });
 });
-describe("panel.html 静态卡（zc/qoder）收起态简要栏与多实例实例行同范式", () => {
+describe("panel.html qoder 收起态简要栏 + zc 与会话级端点同构", () => {
   // 收起态主信息栏对齐多实例端点实例行：名称行挂请求数徽标、名称行下挂 tokens 行
   // （Prompt/Completion/Cached），「全局汇总」行改仅展开态显示（避免同数据双行并存）。
   const panelHtml = readFileSync(
@@ -4758,15 +4761,13 @@ describe("panel.html 静态卡（zc/qoder）收起态简要栏与多实例实例
     "utf8",
   );
 
-  it("两张静态卡简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
-    for (const prefix of ["zc", "qoder"]) {
-      assert.ok(
-        new RegExp(`<span class="badge badge-neutral" id="${prefix}BriefReqs">0 请求</span>`).test(panelHtml),
-        prefix + "BriefReqs badge exists");
-      assert.ok(
-        new RegExp(`<div class="session-tokens-line" id="${prefix}BriefTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>`).test(panelHtml),
-        prefix + "BriefTokens line exists");
-    }
+  it("qoder 简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
+    assert.ok(/<span class="badge badge-neutral" id="qoderBriefReqs">0 请求<\/span>/.test(panelHtml),
+      "qoderBriefReqs badge exists");
+    assert.ok(/<div class="session-tokens-line" id="qoderBriefTokens">Prompt: 0 · Completion: 0 · Cached: 0<\/div>/.test(panelHtml),
+      "qoderBriefTokens line exists");
+    assert.ok(!/id="zcBriefReqs"/.test(panelHtml) && !/id="zcBriefTokens"/.test(panelHtml),
+      "zc 不再有端点级简要栏读数");
   });
 
   it("updateDetailBrief 驱动请求数徽标与 tokens 行（累计量，不受 staleMode 门控）", () => {
@@ -4779,26 +4780,48 @@ describe("panel.html 静态卡（zc/qoder）收起态简要栏与多实例实例
     assert.ok(m[0].includes("`${requests || 0} 请求`"), "badge text matches instance-row 「N 请求」 wording");
   });
 
-  it("三个静态渲染函数把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
-    for (const [fnName, arg, totalReq] of [["renderZcode", "z", "z.totalRequests"], ["renderQoder", "p", "p.totalRequests"]]) {
-      const m = panelJs.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
-      assert.ok(m, fnName + " found in panel.js");
-      assert.ok(m[0].includes(`requests: m.totalRequests || ${totalReq} || 0,`), fnName + " passes requests");
-      assert.ok(
-        m[0].includes("tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,"),
-        fnName + " passes tokensText");
-      const declIdx = m[0].indexOf("const tokens = m.tokens || sess.tokens || {};");
-      const callIdx = m[0].indexOf("updateDetailBrief(");
-      assert.ok(declIdx !== -1 && callIdx !== -1 && declIdx < callIdx, fnName + " declares tokens before the brief call");
-    }
+  it("renderQoder 把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
+    const m = panelJs.match(/function renderQoder\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderQoder found in panel.js");
+    assert.ok(m[0].includes("requests: m.totalRequests || p.totalRequests || 0,"), "renderQoder passes requests");
+    assert.ok(
+      m[0].includes("tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,"),
+      "renderQoder passes tokensText");
+    const declIdx = m[0].indexOf("const tokens = m.tokens || sess.tokens || {};");
+    const callIdx = m[0].indexOf("updateDetailBrief(");
+    assert.ok(declIdx !== -1 && callIdx !== -1 && declIdx < callIdx, "renderQoder declares tokens before the brief call");
   });
 
-  it("「全局汇总」行仅展开态显示：旧机制 setFold 门控其 session-table-wrapper", () => {
-    const m = panelJs.match(/\["zc", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
-    assert.ok(m, "static fold wiring found in panel.js");
-    assert.ok(m[0].includes('$(prefix + "SessionRow")'), "resolves the aggregate row");
-    assert.ok(m[0].includes('closest(".session-table-wrapper")'), "toggles the wrapper");
-    assert.ok(m[0].includes("if (aggWrap) aggWrap.hidden = !open;"), "collapsed hides the aggregate row");
+  it("zc 与 WorkBuddy 卡片逐字同构：只有实例行 + 展开态「全局汇总」行", () => {
+    // 沙箱实证：同构端点没有端点级「实时遥测」简要栏 / 四宫格 / 卡头状态徽标，
+    // 每个实例行各自带一套四宫格与自己的面徽标；端点级那两层是聚合时代残留。
+    const card = (id) => {
+      const start = panelHtml.indexOf(`data-agent-id="${id}"`);
+      const next = panelHtml.indexOf('data-agent-id="', start + 20);
+      // WorkBuddy 是容器最后一张卡，后面没有下一张 data-agent-id；以看板图标行
+      // 注释收尾，避免把设置页整段吃进切片。
+      const containerEnd = panelHtml.indexOf('<!-- 看板「图标行」', start);
+      const end = next > 0 ? next : (containerEnd > 0 ? containerEnd : panelHtml.length);
+      return panelHtml.slice(start, end);
+    };
+    const zc = card("zcode");
+    const wb = card("workbuddy");
+    // 只比结构骨架：去掉注释、内联样式、base64 头像与 id/data-prefix 前缀差异。
+    const skeleton = (html) => [...html
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/\s+style="[^"]*"/g, "")
+      .replace(/\s+src="[^"]*"/g, "")
+      .replace(/id="(?:zc|workbuddy)/g, 'id="PREFIX')
+      .replace(/data-prefix="(?:zc|workbuddy)"/g, 'data-prefix="PREFIX"')
+      .replace(/ZCode|WorkBuddy/g, "AGENT")
+      .matchAll(/<(?:div|span|button|h3)\b[^>]*>/g)].map((m) => m[0]);
+    assert.deepEqual(skeleton(zc), skeleton(wb), "zcode 卡结构与 WorkBuddy 一致（仅 id 前缀/名称/头像不同）");
+    for (const residue of ["zcDetailBrief", "zcTelemetryGrid", "zcTtftVal", "zcStateBadge", "实时遥测"]) {
+      assert.ok(!zc.includes(residue), `zcode 卡不得残留 ${residue}`);
+    }
+    assert.ok(zc.includes('class="session-row detail-open-only" id="zcSessionRow"'),
+      "「全局汇总」行仅展开态显示，与实例行共用一个 wrapper");
+    assert.ok(!/\["zc", "qoder"\]\.forEach/.test(panelJs), "zc 不再挂旧折叠状态机");
   });
 });
 
@@ -4806,9 +4829,9 @@ describe("panel.html 静态卡（zc/qoder）收起态简要栏与多实例实例
 describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () => {
   // zcode 从聚合-only 升级为会话粒度实例行（relay 按 x-session-id 铸
   // zcode-sess-<会话 id> 行，surface 徽标 Desktop/TUI 由后端定档下发）：卡片照
-  // codex/kimi 先例接 renderInstanceRows + showSurface；端点级四宫格/简要栏/
-  // 旧折叠钮原样保留（汇总读数仍有去处），实例盒与静态「全局汇总」行同盒、
-  // 随旧折叠钮整盒收放。
+  // codex/kimi 先例接 renderInstanceRows + showSurface + 卡头分面汇总。端点级
+  // 四宫格/简要栏/静态汇总行归同一 data-prefix 折叠状态机的展开态，会话行
+  // 独立成盒、收起态直接可见（旧整盒收放把会话行藏了，属聚合时代残留）。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"),
     "utf8",
@@ -4844,7 +4867,7 @@ describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () =
 
   function runZcode(payload) {
     const els = new Map();
-    const calls = { instance: [], count: [], fold: [], gate: [] };
+    const calls = { instance: [], count: [], fold: [], gate: [], surface: [] };
     const get = (id) => {
       if (!els.has(id)) {
         els.set(id, {
@@ -4859,6 +4882,7 @@ describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () =
       "dimEndpointRateCards", "formatDurationSeconds", "formatTokens", "updateDetailBrief",
       "pushMetricPoint", "redrawEndpointSparklines", "formatRelativeAge",
       "setInstanceCount", "renderInstanceRows", "applyDetailFold", "gateAggregateRow", "buildAggregateFallback",
+      "renderSurfaceSummary",
       `${renderZcodeSrc}\nreturn renderZcode;`,
     )(
       get,
@@ -4870,6 +4894,7 @@ describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () =
       (prefix) => calls.fold.push(prefix),
       (...args) => calls.gate.push(args),
       () => ({ requests: 0 }),
+      (prefix, surfaces) => calls.surface.push([prefix, surfaces]),
     );
     fn(payload);
     return { calls, els };
@@ -4879,6 +4904,7 @@ describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () =
     const running = runZcode({
       id: "zcode", status: "running",
       instances: [{ id: "zcode-sess-abc", surface: "Desktop", requests: 3 }],
+      surfaces: [{ surface: "desktop", label: "Desktop", count: 1 }],
       metrics: { totalRequests: 3, tokens: { prompt: 10, completion: 20, cached: 5 } },
     });
     assert.deepEqual(running.calls.count, [["zc", 1]], "实例计数按行数");
@@ -4891,6 +4917,9 @@ describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () =
     assert.deepEqual(running.calls.fold, ["zc"], "折叠态按本卡应用");
     assert.equal(running.calls.gate.length, 1, "聚合行闸门按实例数放行");
     assert.equal(running.calls.gate[0][2], 1, "闸门收到实例数");
+    assert.equal(running.calls.surface.length, 1, "卡头分面汇总渲染一次");
+    assert.equal(running.calls.surface[0][0], "zc", "卡头汇总按本卡前缀渲染");
+    assert.equal(running.calls.surface[0][1][0].label, "Desktop", "汇总徽标沿用后端下发的既有字面量");
 
     const stopped = runZcode({ id: "zcode", status: "stopped" });
     assert.deepEqual(stopped.calls.count, [["zc", 0]], "停态清零实例计数");
@@ -4911,17 +4940,30 @@ describe("panel.html zcode 卡接入会话粒度实例行（zcode-sess）", () =
     assert.equal(badge(false, true, undefined), "", "未定档不贴（不猜）");
   });
 
-  it("zc 折叠钮双接线：旧机制管端点级四宫格/整盒，实例行收放走 data-prefix 统一委托", () => {
+  it("zc 折叠状态机合一：单一 data-prefix 委托，收起态会话行不被整盒隐藏", () => {
     const cardStart = panelHtml.indexOf('data-agent-id="zcode"');
     const cardEnd = panelHtml.indexOf('data-agent-id="', cardStart + 20);
     const zcCard = panelHtml.slice(cardStart, cardEnd);
-    assert.ok(/id="zcDetailFoldBtn"[^>]*data-prefix="zc"/.test(zcCard),
-      "zc 折叠钮带 data-prefix，实例行四宫格/detail-open-only 收放与展开补绘走 applyDetailFold");
-    const m = panelJs.match(/\["zc", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
-    assert.ok(m, "static fold wiring found in panel.js");
-    assert.ok(m[0].includes("if (aggWrap) aggWrap.hidden = !open;"), "旧机制仍管整盒收放");
-    assert.ok(!m[0].includes("detailFoldState") && !m[0].includes("redrawInstanceSparklines"),
-      "旧机制不碰实例行折叠闸（实例行归 applyDetailFold，见 panel-instance-fold 契约）");
+    assert.ok(/<button type="button" class="agent-detail-fold" data-prefix="zc"/.test(zcCard),
+      "zc 折叠钮只挂 data-prefix 委托（与 WorkBuddy 同形，不再带旧 id）");
+    assert.ok(!/id="zcDetailFoldBtn"/.test(zcCard), "旧 id 接线已摘除");
+    assert.ok(/\["qoder"\]\.forEach/.test(panelJs), "旧折叠机制只剩 qoder，不再与 zc 双写同一 localStorage 键");
+    assert.ok(!/\["zc", "qoder"\]\.forEach/.test(panelJs), "zc 已从旧机制摘除");
+    assert.ok(zcCard.includes('id="zcSurfaceSummary"'), "卡头分面汇总徽标位已补齐");
+    assert.ok(renderZcodeSrc.includes('applyDetailFold("zc")'),
+      "每轮渲染按统一折叠态重设可见性");
+    const foldFn = panelJs.match(/function applyDetailFold\(prefix\) \{[\s\S]*?\n  \}/);
+    assert.ok(foldFn, "applyDetailFold found");
+    assert.ok(foldFn[0].includes("redrawInstanceSparklines(prefix)"), "展开只补绘实例行折线");
+    assert.ok(!foldFn[0].includes("redrawEndpointSparklines"), "端点级补绘已随四宫格摘除");
+  });
+
+  it("每个实例行各自带面徽标：zcode 接 showSurface，后端 surface 字段直贴", () => {
+    // 沙箱实证：Desktop/TUI 徽标在行内「会话 #N」旁，不是卡头汇总能替代的。
+    assert.ok(renderZcodeSrc.includes("showSurface: true"), "zcode 打开行级面徽标");
+    assert.ok(!/id="zcStateBadge"/.test(panelHtml), "卡头不再有端点级状态徽标冒充行徽标");
+    const wb = panelJs.match(/function renderWorkbuddy\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(wb && wb[0].includes("showSurface: true"), "与 WorkBuddy 同一渲染位");
   });
 });
 
