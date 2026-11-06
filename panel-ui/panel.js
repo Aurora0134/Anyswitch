@@ -297,9 +297,12 @@ async function api(method, path, body) {
   // 取不到就保持隐藏：宁可没有徽标，也不显示占位符或可能过期的数字。
   // 两处同源：头行品牌（旧版可见）与新版左栏栏顶品牌，一次取值写两个 id——新版下
   // 头行品牌已让位给栏顶那一份，各写各的就得请求两次、还可能一处成功一处失败。
+  // 页脚品牌行同这一份取值：版本号取不到时后半段留空，页脚只剩品牌名，不留悬空
+  // 分隔点（分隔点跟版本号一起下发，两者同生共死）。
   async function initBrandVersion() {
     const tags = [$("brandVersion"), $("railBrandVersion")].filter(Boolean);
-    if (!tags.length) return;
+    const footer = $("footerBrandVersion");
+    if (!tags.length && !footer) return;
     try {
       const info = await api("GET", "/api/app-info");
       const version = info && typeof info.version === "string" ? info.version.trim() : "";
@@ -308,6 +311,7 @@ async function api(method, path, body) {
         tag.textContent = "v" + version;
         tag.hidden = false;
       }
+      if (footer) footer.textContent = " · v" + version;
     } catch { /* 接口不可达（面板服务换新中）：不显示版本，不进控制台噪音 */ }
   }
 

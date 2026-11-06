@@ -2965,9 +2965,11 @@ if (window.panelStartupController) panelStartupPlay();
 
 <div class="toast" id="toast"></div>
 
+<!-- 页脚品牌行：品牌名常驻，版本号由 /api/app-info 下发后填进后半段（页里不写死
+     版本号，写死就得每次发版记得手改）。版本取不到时后半段留空，只剩品牌名。 -->
 <footer>
   <div class="layout-container">
-    <p>Anyswitch · 实时遥测与状态看板 · 127.0.0.1 独占回路</p>
+    <p>Anyswitch<span id="footerBrandVersion"></span></p>
   </div>
 </footer>
 

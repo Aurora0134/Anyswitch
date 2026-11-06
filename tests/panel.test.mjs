@@ -8570,6 +8570,60 @@ describe("panel.html 品牌版本徽标（左上角取真实版本，不写死�
   });
 });
 
+describe("页脚品牌行（品牌名＋版本号，版本取自 app-info）", () => {
+  // 页脚那一行只摆品牌名与版本号：品牌名常驻，版本号由 /api/app-info 下发后填进去。
+  // 页面里写死版本号必然过期；版本取不到时后半段整段留空，不留悬空分隔点。
+  const html = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"),
+    "utf8",
+  );
+  const js = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
+    "utf8",
+  );
+  const pkg = JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+  );
+  const body = js.match(/async function initBrandVersion\(\) \{[\s\S]*?\n  \}/)[0];
+
+  it("页脚是品牌名＋一个空位，旧定位语与旧回路说明整段移除", () => {
+    const footer = html.match(/<footer>[\s\S]*?<\/footer>/)[0];
+    assert.ok(footer.includes("Anyswitch"), "品牌名留在页脚");
+    assert.ok(footer.includes('id="footerBrandVersion"'), "页脚有可填版本号的位");
+    assert.ok(!footer.includes("实时遥测与状态看板"), "旧定位语已移除");
+    assert.ok(!footer.includes("独占回路"), "旧回路说明已移除");
+    assert.ok(!html.includes(pkg.version), "panel.html 不含写死的版本号");
+  });
+
+  it("版本号与徽标同源：一次取值写进页脚，格式为「· v+版本」", async () => {
+    assert.ok(body.includes('api("GET", "/api/app-info")'), "版本取自 app-info 唯一来源");
+    assert.ok(body.includes('footer.textContent = " · v" + version'), "页脚写法为「· v+版本」");
+    const tag = { textContent: null, hidden: true };
+    const initBrandVersion = await vm.runInNewContext(
+      `(async () => { ${body} ; return initBrandVersion; })()`,
+      {
+        api: async () => ({ version: " 0.7.1 " }),
+        $: (id) => (id === "footerBrandVersion" ? tag : null),
+      },
+    );
+    await initBrandVersion();
+    assert.equal(tag.textContent, " · v0.7.1");
+  });
+
+  it("版本取不到：页脚后半段留空，不留悬空分隔点", async () => {
+    const tag = { textContent: null, hidden: true };
+    const initBrandVersion = await vm.runInNewContext(
+      `(async () => { ${body} ; return initBrandVersion; })()`,
+      {
+        api: async () => { throw new Error("HTTP 500"); },
+        $: (id) => (id === "footerBrandVersion" ? tag : null),
+      },
+    );
+    await initBrandVersion();
+    assert.equal(tag.textContent, null);
+  });
+});
+
 describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序）", () => {
   // 症状：刷新看板页，端点卡先以「zcode 在顶」画出一帧，取数落地后再整屏跳一次。
   // 根因：卡序由「生成中 / 待命 / 未启动」三段分层决定，只有主脚本拿到
