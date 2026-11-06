@@ -1909,10 +1909,10 @@ describe("createAgentMetricsCollector", () => {
       assert.deepEqual(await read(), [], "连续两轮看不到家族，会话行收走");
     });
 
-    it("10min 空闲档收走常驻家族下的静置行，累计并入退役账", async () => {
+    it("5min 空闲档收走常驻家族下的静置行，累计并入退役账", async () => {
       // 桌面端常驻使家族永不灭，原先「不设空闲档」会让 2 小时前的会话行一直挂着。
-      // 现在对齐通用后台回收档 INSTANCE_IDLE_TTL_MS（10min）；行下场前把累计并进
-      // 退役账，端点账 = 活行 + 退役账，读数不随行蒸发。
+      // 空闲档对齐 codex / WorkBuddy 的 5min；行下场前把累计并进退役账，端点账 =
+      // 活行 + 退役账，读数不随行蒸发。
       let t = 3000;
       const collector = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t });
       await collector.scanProcesses();
@@ -1921,14 +1921,14 @@ describe("createAgentMetricsCollector", () => {
       const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
       assert.equal((await read()).instances.length, 1, "刚发完请求行在");
 
-      t += 9 * 60 * 1000;
+      t += 4 * 60 * 1000;
       await collector.scanProcesses();
       assert.deepEqual((await read()).instances.map((i) => i.id), ["zcode-sess-sess_idle"], "空闲档内不收行");
 
       t += 2 * 60 * 1000;
       await collector.scanProcesses();
       const zcode = await read();
-      assert.deepEqual(zcode.instances.map((i) => i.id), [], "过 10min 空闲档收行");
+      assert.deepEqual(zcode.instances.map((i) => i.id), [], "过 5min 空闲档收行");
       assert.equal(zcode.retiredMetrics.requests, 1, "行的累计并入退役账");
       assert.equal(zcode.metrics.totalRequests, 1, "端点账 = 活行 + 退役账，不归零");
     });

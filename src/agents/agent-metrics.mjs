@@ -456,9 +456,15 @@ export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
 // header — see zcodeSessionInstanceId in openai-server.mjs). 与 opencode 同构的
 // 无属主 pid 处境：桌面端 Electron utility 进程跨会话共享连接池，CLI 进程随终端
 // 窗口生灭，pid 粒度两头都锚不住会话。生死随端点家族（zcode.exe 主进程 +
-// bin\zcode.mjs 的 CLI node 进程，连续缺席两轮收行），与 opencode 一样不设空闲
-// 档——静置未关的会话不该丢行。
+// bin\zcode.mjs 的 CLI node 进程，连续缺席两轮收行）。
 export const ZCODE_SESSION_ID_PREFIX = "zcode-sess-";
+
+// zcode 会话行的空闲档：桌面端常驻让端点家族永不灭，只靠家族缺席判生死会让
+// 开机以来的会话行一直挂着，因此必须有一道空闲档。档值对齐 codex 与 WorkBuddy
+// 的 5 分钟档——三家的会话行同属「声明不了属主 pid、判不了单行生死」这一类，
+// 空闲档在三家身上都是同一件事：无流量即收行。行收走后的累计由 zcode 退役账
+// 接住，端点账不丢。
+const ZCODE_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
 
 // 会话扫描里的原始 id → 请求路径的行 id，逐字复刻 openai-server 的
 // zcodeSessionRowIdForJoin（sess_ / subagent_agent_ 顺序各剥一次、同款清洗与
@@ -518,11 +524,9 @@ const SESSION_ROW_PREFIXES = Object.freeze({
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
   opencode: null,
-  // zcode 对齐通用后台回收档 INSTANCE_IDLE_TTL_MS（10min）。原先不设空闲档是
-  // 「开着的终端静置不该收行」，但桌面端常驻让家族永不灭，2 小时前的会话行会
-  // 一直挂「2 小时前」；行收走后的累计由 zcode 退役账接住，端点账不丢。
-  // 不用 codex/WB 的 5min 档：那是注册表判生死之外的兜底，桌面端常驻场景过短。
-  zcode: INSTANCE_IDLE_TTL_MS,
+  // zcode 会话行走 5 分钟空闲档：桌面端常驻使家族永不灭，没有这道档，2 小时前
+  // 的会话行会一直挂着「2 小时前」。行收走后的累计由 zcode 退役账接住，端点账不丢。
+  zcode: ZCODE_SESSION_IDLE_TTL_MS,
   // WB 会话行的生死正源是注册表：注册表列着（环境活着）的行不吃空闲淘汰，
   // 注册表不再列出的行走缺席轮次确认（数秒级，与家族缺席同口径）。环境语义：
   // 每次发请求才给会话起新环境，请求间隔里环境本就不在——不存在「暂停待命」
@@ -3940,7 +3944,7 @@ export function createAgentMetricsCollector(options = {}) {
     }
   }
 
-  // zcode 退役账：会话行被 10min 空闲档 / 家族连失两轮收走时，行的累计并进来。
+  // zcode 退役账：会话行被空闲档 / 家族连失两轮收走时，行的累计并进来。
   // 端点卡的读数由「活会话行 + 退役账」派生（见 deriveZcodeDisplayState），
   // 于是端点账与会话行账不会再出现 0 vs 1493 的断裂。与 claude 同形同生死。
   const zcodeRetiredLedger = {
@@ -5579,13 +5583,14 @@ export function createAgentMetricsCollector(options = {}) {
           // 只能靠空闲档收行，否则每次开机以来的会话行都会挂着。
           const idleTtlMs = isSessionRow ? SESSION_ROW_IDLE_TTL_MS[bucket] : INSTANCE_IDLE_TTL_MS;
           // 空闲 TTL 只管剩下这档「声明不了属主、判不了进程生死」的自定义行
-          // （启动器注入的临时 id 等）；codex 会话行用自己的 5 分钟档。稳定
+          // （启动器注入的临时 id 等）；codex / zcode / WorkBuddy 会话行各用自己的
+          // 5 分钟档。稳定
           // 桌面行的生死走上面的进程家族判据，与空闲时长无关。WB 会话行在
           // 注册表说「开着」时整条跳过（生死归注册表缺席轮次管，开着就不该
           // 按静默收行）；TTL 只兜注册表读不出/判不了生死那档的场。
           if (idleTtlMs !== null && wbSessionOpen !== true
             && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
-            // 10min 空闲档收 zcode 会话行同样先并账，端点总读数不随行蒸发。
+            // 空闲档收 zcode 会话行同样先并账，端点总读数不随行蒸发。
             if (bucket === "zcode" && isSessionRow) absorbZcodeRetiredRow(entry);
             instMap.delete(instId);
             sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
