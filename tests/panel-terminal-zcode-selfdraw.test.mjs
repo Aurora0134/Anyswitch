@@ -6,8 +6,10 @@
 //     ——归属缺失时 agent===null，取 endpointId 会把它漏回输出窗）；分支不入回合闸。
 //  2) A 口径：状态只认真实例行，聚合端点（zcode-global）的整机合计不再把单条终端
 //     画成 working；读数侧照旧可用汇总行兜底（activeRequests 等一个不动）。
-//  3) 后台回收器：进后台 ≥10min ＋ 实例行计数 0 ＋ 无进程树忙 ＋ lastVisibleAt 静默
-//     >10min ＋ 无键入 → 直接 POST /close（不走会弹 window.confirm 的关闭通路）。
+//  3) 后台回收器（2026-11-07 从 zcode 扩到全部 agent 会话）：进后台 ≥10min ＋ 实例
+//     行计数 0 ＋ 无进程树忙 ＋ lastVisibleAt 静默 >10min ＋ 无键入 → 直接 POST /close
+//     （不走会弹 window.confirm 的关闭通路）。手开 shell（无 agent 归属）不收——用户
+//     可能在后台跑静默长命令，进程树与输出窗都看不见它。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -210,7 +212,7 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
   const fn = new Function("calls", "sessions", "agents", "apiImpl", "viewportIds", "warnImpl", `
     const terminalBackgroundIds = new Set();
     const terminalBackgroundSince = new Map();
-    const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
+    const TERMINAL_BACKGROUND_IDLE_MS = 10 * 60 * 1000;
     const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;
     const terminalBackgroundRecycleRetryAfter = new Map();
     let terminalBackgroundRecycleInFlight = false;
@@ -237,9 +239,10 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
     return {
       scan: (now) => maybeRecycleTerminalBackground(now),
       background: () => Array.from(terminalBackgroundIds),
-      mark: (id, at, endpointId) => { terminalBackgroundIds.add(id); terminalBackgroundSince.set(id, { at, endpointId }); },
+      // 记账形态与生产同款（2026-11-07 瘦身后只记起点时刻）：若回归重新读写
+      // since.endpointId，这里因字段缺位而暴露，不会静默通过。
+      mark: (id, at) => { terminalBackgroundIds.add(id); terminalBackgroundSince.set(id, { at }); },
       drop: (id) => { terminalBackgroundIds.delete(id); terminalBackgroundSince.delete(id); },
-      since: (id) => terminalBackgroundSince.get(id) || null,
       viewport: (id) => viewportIdsInUse.add(id),
       retryAt: (id) => terminalBackgroundRecycleRetryAfter.get(id) || null,
       payload: (next) => { terminalAgentsPayload = next; },
@@ -249,15 +252,15 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
   return { calls, warns, fn };
 }
 
-const zcodeBack = (over = {}) => ({
+const agentBack = (over = {}) => ({
   id: "t-z", backend: true, agentId: "zcode", agentName: "ZCode", agent: null,
   status: "idle", metrics: { activeRequests: 9 }, lastVisibleAt: NOW - 20 * MIN,
   backendState: hotState(), ...over,
 });
 
-describe("P-D zcode 后台回收器", () => {
+describe("P-D 后台回收器（agent 会话）", () => {
   it("静默 >10min 且计数为零：直接发 /close，不走会弹确认的关闭通路", async () => {
-    const sessions = { "t-z": zcodeBack() };
+    const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 11 * MIN, "zcode");
     fn.scan(NOW);
@@ -269,7 +272,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("回收动作是幂等的单飞：同一拍再扫不会重复发", async () => {
-    const sessions = { "t-z": zcodeBack() };
+    const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 11 * MIN, "zcode");
     fn.scan(NOW);
@@ -279,7 +282,7 @@ describe("P-D zcode 后台回收器", () => {
 
   it("进程树忙（busy=true）不回收：那是真在干活", () => {
     const sessions = {
-      "t-z": zcodeBack({ agent: { endpointId: "zcode", instanceId: "zcode-7", busy: true } }),
+      "t-z": agentBack({ agent: { endpointId: "zcode", instanceId: "zcode-7", busy: true } }),
     };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
@@ -288,7 +291,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("实例行计数 > 0 不回收；只有汇总行的 9 不算数", () => {
-    const busySession = zcodeBack({ agent: { endpointId: "zcode", instanceId: "zcode-7", busy: false } });
+    const busySession = agentBack({ agent: { endpointId: "zcode", instanceId: "zcode-7", busy: false } });
     const agents = [{ id: "zcode", instances: [{ id: "zcode-7", activeRequests: 2 }] }];
     const one = recycleSandbox({ sessions: { "t-z": busySession }, agents });
     one.fn.mark("t-z", NOW - 30 * MIN, "zcode");
@@ -296,7 +299,7 @@ describe("P-D zcode 后台回收器", () => {
     assert.deepEqual(one.calls.posts, [], "实例行 2 个在途 → 留着");
 
     // 同一条会话：实例行缺失（只有 zcode-global 的 9 挂在 session.metrics 上）→ 可回收
-    const orphan = recycleSandbox({ sessions: { "t-z": zcodeBack() }, agents: [] });
+    const orphan = recycleSandbox({ sessions: { "t-z": agentBack() }, agents: [] });
     orphan.fn.mark("t-z", NOW - 30 * MIN, "zcode");
     orphan.fn.scan(NOW);
     assert.deepEqual(orphan.calls.posts, ["POST /api/terminal/sessions/t-z/close"],
@@ -304,7 +307,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("进后台不满 10min 不回收", () => {
-    const sessions = { "t-z": zcodeBack() };
+    const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 5 * MIN, "zcode");
     fn.scan(NOW);
@@ -312,14 +315,14 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("老快照无 lastVisibleAt：不回收（不知道有没有人在看，保守跳过）", () => {
-    const sessions = { "t-z": zcodeBack({ lastVisibleAt: null }) };
+    const sessions = { "t-z": agentBack({ lastVisibleAt: null }) };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
     fn.scan(NOW);
     assert.deepEqual(calls.posts, [], "缺位＝不回收");
 
     // lastVisibleAt 只在 backendState 里（老形状）同样认
-    const nested = { "t-z": zcodeBack({ lastVisibleAt: undefined, backendState: hotState({ lastVisibleAt: NOW - 30 * MIN }) }) };
+    const nested = { "t-z": agentBack({ lastVisibleAt: undefined, backendState: hotState({ lastVisibleAt: NOW - 30 * MIN }) }) };
     const alt = recycleSandbox({ sessions: nested });
     alt.fn.mark("t-z", NOW - 30 * MIN, "zcode");
     alt.fn.scan(NOW);
@@ -328,7 +331,7 @@ describe("P-D zcode 后台回收器", () => {
 
   it("最近有键入：不回收（用户可能正贴着这个后台终端敲）", () => {
     const sessions = {
-      "t-z": zcodeBack({ backendState: hotState({ lastInputAt: NOW - 30 * 1000 }) }),
+      "t-z": agentBack({ backendState: hotState({ lastInputAt: NOW - 30 * 1000 }) }),
     };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
@@ -336,18 +339,37 @@ describe("P-D zcode 后台回收器", () => {
     assert.deepEqual(calls.posts, []);
   });
 
-  it("非 zcode 端点不回收（本条只治自绘恒热）", () => {
+  it("2026-11-07 扩展：非 zcode 的 agent 会话同样回收（误判保留的僵尸不止 zcode 攒）", () => {
+    // kimi：归属在、实例行计数 0、全静默——与 zcode 同判据链，照收。
     const sessions = {
-      "t-k": zcodeBack({ id: "t-k", agentId: "kimi", agent: { endpointId: "kimi", instanceId: "kimi-1" } }),
+      "t-k": agentBack({ id: "t-k", agentId: "kimi", agent: { endpointId: "kimi", instanceId: "kimi-1" } }),
+    };
+    const kimi = recycleSandbox({ sessions });
+    kimi.fn.mark("t-k", NOW - 30 * MIN, "kimi");
+    kimi.fn.scan(NOW);
+    assert.deepEqual(kimi.calls.posts, ["POST /api/terminal/sessions/t-k/close"],
+      "kimi 后台静默 10min+ 照收（22 分钟僵尸的收尸兜底）");
+
+    // dsh：归属丢了的兜底形态（agent=null、只剩 agentId）也收——归属丢失不该给僵尸续命。
+    const orphan = recycleSandbox({ sessions: { "t-d": agentBack({ id: "t-d", agentId: "dsh", agent: null }) } });
+    orphan.fn.mark("t-d", NOW - 30 * MIN, "dsh");
+    orphan.fn.scan(NOW);
+    assert.deepEqual(orphan.calls.posts, ["POST /api/terminal/sessions/t-d/close"],
+      "无归属的 dsh（agentId 兜底形态）同样回收");
+  });
+
+  it("手开 shell（无 agent 归属）不回收：用户可能在后台跑静默长命令", () => {
+    const sessions = {
+      "t-s": agentBack({ id: "t-s", agentId: null, agent: null }),
     };
     const { calls, fn } = recycleSandbox({ sessions });
-    fn.mark("t-k", NOW - 30 * MIN, "kimi");
+    fn.mark("t-s", NOW - 30 * MIN, null);
     fn.scan(NOW);
-    assert.deepEqual(calls.posts, []);
+    assert.deepEqual(calls.posts, [], "手开 shell 不在回收面（进程树与输出窗都看不见的静默长命令只有这一条防线）");
   });
 
   it("没有进后台记账（刷新恢复的后台集合）不回收", () => {
-    const sessions = { "t-z": zcodeBack() };
+    const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
     // 只进集合、没有起点：模拟 loadTerminalViewports 从存档恢复
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
@@ -358,7 +380,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("切回该终端即取消：记账删除后不再发 /close", () => {
-    const sessions = { "t-z": zcodeBack() };
+    const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
     // terminalViewportAttach / Create 的同一拍：集合与记账一起删
@@ -369,7 +391,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("/close 失败：留一条开发者日志、30s 退避，退避满后再试", async () => {
-    const sessions = { "t-z": zcodeBack() };
+    const sessions = { "t-z": agentBack() };
     const { calls, warns, fn } = recycleSandbox({
       sessions,
       apiImpl: () => Promise.reject(new Error("HTTP 500")),
@@ -389,7 +411,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("本拍 /api/agents 取数失败（payload=null）：整拍跳过，不把看不见当零", () => {
-    const { calls, fn } = recycleSandbox({ sessions: { "t-z": zcodeBack() } });
+    const { calls, fn } = recycleSandbox({ sessions: { "t-z": agentBack() } });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
     fn.payload(null);
     fn.scan(NOW);
@@ -400,7 +422,7 @@ describe("P-D zcode 后台回收器", () => {
   });
 
   it("存档列表不一致：id 仍占着视口时跳过，不误关正看着的终端", () => {
-    const { calls, fn } = recycleSandbox({ sessions: { "t-z": zcodeBack() } });
+    const { calls, fn } = recycleSandbox({ sessions: { "t-z": agentBack() } });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
     fn.viewport("t-z");
     fn.scan(NOW);
@@ -433,7 +455,7 @@ describe("P-D zcode 后台回收器", () => {
     assert.ok(src.includes("/api/terminal/sessions/${encodeURIComponent(id)}/close"), "既有 /close 路径");
     assert.ok(!src.includes("terminalCloseTerminal"), "绝不复用带 window.confirm 的关闭通路");
     assert.ok(!/toast|panelError|confirm/.test(src), "零新增文案、零弹窗");
-    assert.ok(panelJs.includes("const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;"), "10 分钟常量在册");
+    assert.ok(panelJs.includes("const TERMINAL_BACKGROUND_IDLE_MS = 10 * 60 * 1000;"), "10 分钟常量在册（2026-11-07 去 zcode 限定名）");
     assert.ok(panelJs.includes("const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;"), "退避常量在册");
     assert.ok(panelJs.includes("const terminalBackgroundSince = new Map();"), "记账表在册");
     // 扫描挂点：轮询拍上、取数之后
