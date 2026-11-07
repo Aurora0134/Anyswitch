@@ -461,12 +461,12 @@ async function api(method, path, body) {
       return;
     }
     if (currentView === "terminal") {
-      // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。
-      pollTerminalSessions();
-      // 隐藏期这条流连同它的未解析积压已经被拆掉，画面按宿主镜像重建一次。
-      // revive:false——切回来不是"用户挑了这条会话"，进程已退就只回放最后一屏，
-      // 不因为回来了就替他重开一个空壳；要新壳仍然点页签，那是既有通路。
-      renderTerminalPreviewSession({ revive: false });
+      // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。画面重建排在
+      // 这拍数据之后——生死判定（terminalSessionShouldRevive）要用宿主现值，拿
+      // 隐藏前的旧「running」去判会把死于重启的会话漏成死屏干等。轮询早退（未
+      // 就绪/在飞）时这拍照旧立即重建，漏判由 1s 轮询里的
+      // maybeAutoReviveTerminalSession 兜住。
+      pollTerminalSessions().finally(() => renderTerminalPreviewSession({ revive: false }));
       return;
     }
     if (!boardVisible()) return;
@@ -8309,9 +8309,10 @@ async function api(method, path, body) {
 
   // 复活一条已退出的会话：走服务端 /revive，由它按当前安装与设置重新组装
   // 启动参数与凭据（env 从不落盘，宿主自己重启拿不到这些值，起来的就是
-  // agent 的原生实例）。只服务点页签等主动通路（键入不复活，见
-  // sendTerminalInput）；同一会话的并发复活合并成一次——快速重入时上一
-  // 次复活可能还在路上，重复打只会多起一个进程。
+  // agent 的原生实例）。服务显式通路与「死于重启」的自动复活（判据见
+  // terminalSessionShouldRevive；键入不复活，见 sendTerminalInput）；同一会话的
+  // 并发复活合并成一次——快速重入时上一次复活可能还在路上，重复打只会多起
+  // 一个进程。
   const terminalReviveInflight = new Map();
   function reviveTerminalSession(session) {
     if (!session?.backend) return Promise.resolve(null);
@@ -8329,6 +8330,34 @@ async function api(method, path, body) {
       .finally(() => terminalReviveInflight.delete(session.id));
     terminalReviveInflight.set(session.id, run);
     return run;
+  }
+
+  // 轮询驱动的自动复活触发（「正看着」面，2026-11-07 裁决的收口）：首连/切回的渲染
+  // 窗口之外，唯一漏掉的形态是「人就在终端页看着，宿主在眼皮底下换代」——流断了
+  // 走 EventSource 原生重连，画面停在旧帧，没有任何重建路径再经过
+  // terminalSessionShouldRevive。轮询是会话生死的唯一持续真值源，判据与渲染层同
+  // 口径：显示中的会话、死于重启（快照 deathUnobserved）、人正在看（终端页可见、
+  // 页面不隐藏）、没有在飞的复活。触发即走 renderTerminalPreviewSession——停放与
+  // 建流前缀在同一任务里跑完（垫片先挂后撤、旧帧不上屏），屏上表现仍是「空屏＋
+  // 正在加载、从无到有」。循环安全有两道：在飞去重挡住复活窗口内的重触发；
+  // terminalAutoReviveTried 挡住 HTTP 层反复失败的自动重试（起不来的进程留给
+  // 显式点击；服务端 spawn 即清标，成功路径天然收敛）。
+  const terminalAutoReviveTried = new Set();
+  function maybeAutoReviveTerminalSession() {
+    if (currentView !== "terminal" || document.hidden) return;
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session || terminalAutoReviveTried.has(session.id)) return;
+    if (!terminalSessionShouldRevive(session, { revive: false })) return;
+    if (terminalReviveInflight.has(session.id)) return;
+    terminalAutoReviveTried.add(session.id);
+    renderTerminalPreviewSession({ revive: false });
+  }
+  // 会话回到运行态即解除一次性的自动尝试记账：宿主再次换代时这一会话仍要能自动
+  // 复活（Set 只防 HTTP 层的反复失败，不防「死了又活」的正常轮回）。
+  function rearmTerminalAutoRevive() {
+    for (const session of Object.values(terminalBackendSessions)) {
+      if (session?.backend && session.backendState?.status === "running") terminalAutoReviveTried.delete(session.id);
+    }
   }
 
   // 键入的唯一出口。进程已退（服务端 409 session_exited）时不复活：退出可能
@@ -8589,7 +8618,8 @@ async function api(method, path, body) {
     if (!session?.backend) return;
     if ($("terminalView")?.hidden) return;
     if (!terminalHostMeasurable()) return;
-    // revive:false——这是被动补挂，不是用户挑了这条会话：进程已退就只回放最后一屏。
+    // revive:false＝被动补挂，不是用户挑了这条会话：正常退出的会话只回放最后一屏；
+    // 「死于重启」的照常自动复活（terminalSessionShouldRevive 的口径）。
     terminalStreamRemounting = true;
     terminalStreamDeferred = false;
     terminalDeferredSessionId = null;
@@ -8649,6 +8679,19 @@ async function api(method, path, body) {
     }, wait);
   }
 
+  // 复活判定（唯一口径，主动/被动两路都从这里走）：显式动作（revive:true，点页签
+  // /点左栏行等）对一切已退会话复活；被动重挂（首连、切回前台、回终端页补挂）只
+  // 认「死于重启」的会话——宿主换代连带杀掉、死未被观察到的那类（快照
+  // deathUnobserved，宿主按记录里有没有退出码算出）。正常跑完/主动退出的会话不
+  // 自动复活：最后一帧就是它留给用户的现场，自动拉起会把「退出→自动重启→再退出」
+  // 的循环请回来（2026-11-02 砍键入复活正是为了它）。
+  function terminalSessionShouldRevive(session, { revive = false } = {}) {
+    if (!session?.backend) return false;
+    const state = session.backendState;
+    if (!state || state.status !== "exited") return false;
+    return revive || state.deathUnobserved === true;
+  }
+
   async function connectTerminalStream(session, { revive = true } = {}) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
@@ -8693,14 +8736,20 @@ async function api(method, path, body) {
       for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
       return;
     }
-    // 从上次中断继续回来的会话进程已死（快照 status: exited）：点开页签先在原
-    // cwd/壳上重启它再建流——一次点击就是新壳，否则键入只会落进 409。
-    // revive:false 是被动重挂（切回前台、回终端页补挂），不等于用户挑了这条会话：
-    // 进程已退就只回放宿主镜像里的最后一屏，绝不替用户重开（挂流并不要求进程还在；
-    // revive 走的重开路由保史——历史归页签，新进程续写在旧画面下方）。
-    // 复活走 /revive 而不是裸 restart：agent 会话的凭据只在内存里，裸 restart 起来
-    // 的是没有 relay 地址与 token 的原生实例（也就是一次空白新对话）。
-    if (revive && session.backendState?.status === "exited") {
+    // 从上次中断继续回来的会话进程已死（快照 status: exited）：先在原 cwd/壳上
+    // 重启它再建流，否则键入只会落进 409。触发收口在 terminalSessionShouldRevive：
+    // 显式动作对一切已退会话复活；被动重挂只对「死于重启」的会话复活（2026-11-07
+    // 用户裁决：回来看到这一类就立刻自动拉起，不再摆死屏干等），正常退出的停帧
+    // 等点击。挂流并不要求进程还在；revive 走的重开路由保史——历史归页签，新进程
+    // 续写在旧画面下方。复活走 /revive 而不是裸 restart：agent 会话的凭据只在内存
+    // 里，裸 restart 起来的是没有 relay 地址与 token 的原生实例（也就是一次空白新
+    // 对话）。
+    if (terminalSessionShouldRevive(session, { revive })) {
+      // 复活期间屏上不留旧帧（同一条用户裁决）：垫片在此刻撤掉，停放与建流前缀
+      // 在同一任务里同步跑完、旧帧没机会上屏，重置后的空屏与「正在加载」占位
+      // 直接露出来——死屏注定被新进程的画面替掉，垫着只多看几秒旧信息。复活
+      // 失败时流照开，宿主保住的镜像照旧回放出最后一帧（见 restart 路由 A1）。
+      dropTerminalStaleScreen();
       await reviveTerminalSession(session);
       // await 期间入口那道闸已经过期：可能已转后台/页被藏起，也可能已被新的连接顶替
       // （closeTerminalStream 换掉了实例）。这两种情况下都不该再开流。
@@ -9081,6 +9130,10 @@ async function api(method, path, body) {
     try {
       const data = await api("GET", "/api/terminal/sessions");
       rebuildTerminalBackendSessions(data.sessions);
+      // 生死先判再算读数：显示中的会话若在本拍被认定「死于重启」，先走自动复活
+      //（渲染层口径见 maybeAutoReviveTerminalSession），读数渲染随后照常跟进。
+      rearmTerminalAutoRevive();
+      maybeAutoReviveTerminalSession();
       await refreshRouteRuntimeCache();
       const agentsData = await api("GET", "/api/agents").catch(() => null);
       terminalAgentsPayload = agentsData?.agents ?? null;
@@ -9947,9 +10000,10 @@ async function api(method, path, body) {
     self.inFlight = fetchTerminalSessions().then(() => {
       terminalFirstConnectSettled = true;
       syncTerminalAddBtn();
-      // 首连是被动挂载：进程已退只回放最后一屏，不替用户重开。页面加载时
-      // 静默起一个新 agent 会让「历史还在」的会话看起来一切正常，实际已经
-      // 换成一个空白新对话；要新壳由用户点页签或点重开决定。
+      // 首连是被动挂载：正常退出的会话只回放最后一屏（点页签才复活，键入不复活）；
+      // 「死于重启」的会话由 terminalSessionShouldRevive 自动复活——宿主换代杀掉
+      // 的进程是意外死，回来即拉回（2026-11-07 用户裁决）。复活能接回原对话
+      //（凭据+续接身份在 /revive 重组装），不会变成空白新对话。
       renderTerminalPreviewSession({ revive: false });
       pollTerminalSessions();
       syncTerminalActivityStream();
@@ -12777,8 +12831,9 @@ async function api(method, path, body) {
       // 就只剩那块垫片、背后没有任何活流——兜底计时器到点撤走垫片，剩一块没有覆盖层
       // 的空白，直到用户手动切页签。这与宿主侧「spawn 抛错时保住旧屏」正好配套：宿主
       // 保住的画面要有人去取，否则等于白保。
-      // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
-      // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
+      // revive:false＝被动重挂——不是用户挑了这条会话，正常退出的会话不自动复活
+      //（口径见 terminalSessionShouldRevive；「死于重启」的照常自动复活）。重挂拿到
+      // 的是宿主镜像的整屏回放，画面随即恢复。
       const resumeStream = () => {
         try { renderTerminalPreviewSession({ revive: false }); } catch (error) {
           console.warn("[terminal] stream reattach after failed switch failed:", error);
@@ -13697,8 +13752,8 @@ async function api(method, path, body) {
       // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在
       // 离开本页后保持存活——已有实例的再次进入只补一次 fit，不重建不重放。
       // 例外是挂过后台：那条流连同实例已被可见性闸拆掉，这里就是它的重挂点。补挂
-      // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——进程已退只回放
-      // 最后一屏，要新壳仍然点页签。
+      // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——正常退出的会话
+      // 只回放最后一屏；「死于重启」的由 terminalSessionShouldRevive 自动复活。
       if (!terminalXterm) renderTerminalPreviewSession({ revive: false });
       else terminalXterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
