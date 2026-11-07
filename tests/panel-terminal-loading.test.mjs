@@ -963,28 +963,30 @@ describe("T12 换绑前停帧、退出帧落地", () => {
     assert.match(park, /terminalSwitchStaleWidened\(parkSessionId\)/, "判据收到会话 id");
   });
 
-  it("源码：/switch 失败的三条出口都把流接回来（否则垫片到点就是纯空白）", () => {
-    // 2026-11-05 评审 blocker：进函数时为了先停帧已经拆了流（park 内部 closeTerminalStream）。
-    // 失败分支只 toast 不重挂，屏上就只剩垫片；兜底计时器一到就撤，剩一块没有覆盖层的
-    // 空白。宿主侧 F3 保住的旧屏也就此到不了用户眼前。
+  it("源码：/switch 失败出口恢复旧流；switch_busy 由切换态接住到 B 落地", () => {
+    // 2026-11-05 评审 blocker：进函数时为了先停帧已经拆了流。2026-11-07 起拆流提前到
+    // 点击当拍（enterTerminalSwitchLoading），失败恢复走 abortTerminalSwitchLoading：撤
+    // 加载层＋被动重挂宿主镜像。switch_busy 不重挂 A——视口马上换成 B，A 的旧画面闪
+    // 一帧反而错；切换态继续盖着，B 失败时由 createAgentTerminal 的 catch 兜底恢复。
     const fn = extractFn("terminalRailSwitchOrCreateCore");
     const resumeAt = fn.indexOf("const resumeStream = () =>");
     assert.ok(resumeAt >= 0, "失败路径有重挂入口");
     assert.match(fn, /renderTerminalPreviewSession\(\{ revive: false \}\)/, "被动重挂：不替用户重启进程");
-    // switch_busy 走保活（createAgentTerminal），它的 POST 失败出口只 toast、不建流，
-    // 所以这条出口同样必须先把本会话的流接回来当底（2026-11-05 重审 major）。
+    assert.match(fn, /abortTerminalSwitchLoading\(\)/, "切换态在飞先撤层再重挂，一条龙恢复");
     const busyAt = fn.indexOf('code === "switch_busy"');
     const busyReturn = fn.indexOf("return terminalRailKeepAliveSwitch(", busyAt);
-    const busyResume = fn.indexOf("resumeStream();", busyAt);
     assert.ok(busyAt >= 0 && busyReturn > busyAt, "switch_busy 出口存在");
-    assert.ok(busyResume > busyAt && busyResume < busyReturn, "switch_busy：重挂排在保活之前");
-    // 视口马上换成另一条会话 B，垫片不再满足「同一会话旧帧」的放宽档前提：重挂前
-    // 必须先把在飞闸清掉，否则 resumeStream 里那次 park 还会拿 6s（还可能续窗）。
+    assert.equal(fn.slice(busyAt, busyReturn).includes("resumeStream();"), false,
+      "switch_busy 不重挂 A 的流（切换态继续盖到 B 落地，A 的旧帧不闪回）");
+    // 在飞闸在转保活之前清掉：B 挂载那次 park 不再命中「这条会话在换绑」放宽档。
     const clearFlag = fn.indexOf("terminalSwitchInFlight = false;", busyAt);
     const clearId = fn.indexOf("terminalSwitchInFlightSessionId = null;", busyAt);
-    assert.ok(clearFlag > busyAt && clearFlag < busyResume, "重挂前清在飞闸（B 挂载那次 park 不再命中放宽档）");
-    assert.ok(clearId > clearFlag && clearId < busyResume, "会话 id 一并清掉");
-    // 两条 toast 出口各自「先提示、后重挂」；switch_busy 不提示，重挂排在保活之前
+    assert.ok(clearFlag > busyAt && clearFlag < busyReturn, "转保活前清在飞闸");
+    assert.ok(clearId > clearFlag && clearId < busyReturn, "会话 id 一并清掉");
+    // B 的 POST 失败出口必须兜底恢复，否则切换态一直盖到 30s 兜底才撤。
+    assert.match(extractFn("createAgentTerminal"), /abortTerminalSwitchLoading\(\)/,
+      "B 的 POST 失败：撤层并重挂 A 的流");
+    // 两条 toast 出口各自「先提示、后重挂」；switch_busy 不提示。
     assert.match(
       fn,
       /"这个 Agent 的会话暂时不能在终端里续接", true\);\s*resumeStream\(\);/,
@@ -995,7 +997,7 @@ describe("T12 换绑前停帧、退出帧落地", () => {
       /toast\(panelError\(error, "无法启动这个终端"\), true\);\s*resumeStream\(\);/,
       "兜底分支：toast 之后重挂",
     );
-    assert.equal((fn.match(/resumeStream\(\)/g) || []).length, 3, "恰好三处调用（含 switch_busy）");
+    assert.equal((fn.match(/resumeStream\(\)/g) || []).length, 2, "恰好两处调用（switch_busy 不再重挂 A）");
   });
 
   it("真跑：空屏收到 exit 帧 → 只翻状态位，不挂任何覆盖层（会话级退出提示待文案批准）", async () => {
@@ -1422,6 +1424,154 @@ describe("T11 「正在加载」占位：只在旧屏已擦、新屏未出字那
     assert.ok(syncs[0] > connects[0] && syncs[1] > connects[1], "挂层排在建流之后");
     const data = extractFn("connectTerminalStream");
     assert.equal(data.includes("dropTerminalBootingOverlay"), false, "数据帧不是撤层判据");
+  });
+});
+
+/* ============================================================
+   T12 内切切换态：点击当拍擦屏，等待整段收进加载态
+   ============================================================ */
+// 左栏高亮是点击当拍的，中间屏却要等补读两拍＋进程探测＋PTY 重启（/switch 实测
+// 6~12s）才擦。旧行为让这整段继续显示上一条会话的画面（切换垫片特意留的旧帧），
+// 于是「点了没反应」。本组钉住：擦屏与高亮同拍、等待期是加载态、POST 落地交接、
+// 失败/超时恢复、零新增前端文案。
+describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态", () => {
+  function makeSwitchLoadingWorld() {
+    const clock = makeClock();
+    const screen = {
+      children: [],
+      appendChild(node) { node.parentNode = screen; screen.children.push(node); return node; },
+      removeChild(node) {
+        node.parentNode = null;
+        screen.children = screen.children.filter((c) => c !== node);
+        return node;
+      },
+    };
+    const calls = { streams: 0, stale: 0, bootingDrop: 0, renders: [] };
+    const factory = new Function(
+      "$", "document", "setTimeout", "clearTimeout", "Date", "calls",
+      `
+      const TERMINAL_SWITCH_LOADING_MAX_MS = 30000;
+      let terminalSwitchLoading = null;
+      let terminalBooting = null;
+      function dropTerminalStaleScreen() { calls.stale += 1; }
+      function closeTerminalStream() { calls.streams += 1; }
+      function dropTerminalBootingOverlay() { calls.bootingDrop += 1; terminalBooting = null; }
+      function renderTerminalPreviewSession(opts) { calls.renders.push(opts); }
+      ${extractFn("enterTerminalSwitchLoading")}
+      ${extractFn("leaveTerminalSwitchLoading")}
+      ${extractFn("abortTerminalSwitchLoading")}
+      ${extractFn("armTerminalBootingOverlay")}
+      return {
+        enter: enterTerminalSwitchLoading,
+        leave: leaveTerminalSwitchLoading,
+        abort: abortTerminalSwitchLoading,
+        arm: armTerminalBootingOverlay,
+        state: () => terminalSwitchLoading,
+        booting: () => terminalBooting,
+      };
+      `,
+    );
+    const world = factory(
+      (id) => (id === "terminalScreen" ? screen : null),
+      { createElement: () => ({ className: "", innerHTML: "", parentNode: null }) },
+      clock.setTimeout, clock.clearTimeout,
+      { now: () => 1_000_000 }, calls,
+    );
+    return { world, clock, screen, calls };
+  }
+
+  it("点击当拍：拆流＋撤垫片＋挂一层加载态，等待整段不再显示上一条会话", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    assert.equal(w.calls.streams, 1, "旧流这一拍拆掉（xterm dispose 后 DOM 随之摘除＝擦屏）");
+    assert.equal(w.calls.stale, 1, "旧帧垫片一并撤掉，不留上一屏");
+    assert.equal(w.screen.children.length, 1, "屏上落一层加载态");
+    assert.equal(w.screen.children[0].className, "terminal-booting");
+    assert.deepEqual(w.clock.timerDelays(), [30000], "30s 兜底撑得住 /switch 的 6~12s");
+  });
+
+  it("重复进入不叠层、不堆定时器", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    w.world.enter();
+    assert.equal(w.screen.children.length, 1);
+    assert.deepEqual(w.clock.timerDelays(), [30000]);
+  });
+
+  it("等待期（POST 未落地）加载态不撤：不按帧撤、不按 3s 撤", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    w.clock.flushFrames();
+    assert.equal(w.screen.children.length, 1);
+    assert.notEqual(w.world.state(), null);
+  });
+
+  it("POST 落地：arm 交接切换层，不残留两层、不残留兜底定时器", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    w.world.arm("t-new");
+    assert.equal(w.screen.children.length, 0, "切换层已撤，普通层由随后的 render→sync 挂");
+    assert.equal(w.world.state(), null);
+    assert.equal(w.clock.pendingTimers(), 0);
+    assert.equal(w.world.booting().sessionId, "t-new", "普通占位层武装在新会话上");
+  });
+
+  it("切换失败：撤层并重挂旧流（revive:false 被动重挂），幂等", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    assert.equal(w.world.abort(), true);
+    assert.equal(w.screen.children.length, 0);
+    assert.equal(w.world.state(), null);
+    assert.deepEqual(w.calls.renders, [{ revive: false }], "宿主镜像回放把上一屏接回来");
+    assert.equal(w.clock.pendingTimers(), 0);
+    assert.equal(w.world.abort(), false, "没有切换态时不重复重挂");
+    assert.equal(w.calls.renders.length, 1);
+  });
+
+  it("兜底超时：POST 永不落地也不永久白屏，到点按失败同路恢复", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    assert.equal(w.clock.fireOldestTimer(), true);
+    assert.equal(w.screen.children.length, 0);
+    assert.deepEqual(w.calls.renders, [{ revive: false }]);
+  });
+
+  it("没有切换态时 arm 行为不变（「+」新建页签 / 一键新建不受影响）", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.arm("t-plus");
+    assert.equal(w.world.booting().sessionId, "t-plus");
+    assert.equal(w.screen.children.length, 0);
+  });
+
+  it("零新增前端文案：切换层与既有占位的 HTML 逐字相同", () => {
+    const w = makeSwitchLoadingWorld();
+    w.world.enter();
+    const existing = extractFn("syncTerminalBootingOverlay").match(/el\.innerHTML = `([^`]*)`/)?.[1];
+    assert.ok(existing, "既有占位 HTML 在源码里");
+    assert.equal(w.screen.children[0].innerHTML, existing, "复用同一句，不另造词");
+    assert.match(existing, /正在加载/);
+  });
+
+  it("源码：切换态进入排在补读两拍与 POST 之前，两条落点分支都覆盖", () => {
+    const decide = extractFn("terminalRailSwitchOrCreateCore");
+    const enters = [...decide.matchAll(/enterTerminalSwitchLoading\(\);/g)].map((m) => m.index);
+    assert.equal(enters.length, 2, "空壳分支与有活跃终端分支各一次");
+    const probe = decide.indexOf('await api("GET", "/api/agents")');
+    const post = decide.indexOf("/switch`");
+    assert.ok(probe > 0 && post > 0);
+    assert.ok(enters[0] < probe, "空壳分支：进入在创建请求之前");
+    assert.ok(enters[1] < probe && enters[1] < post, "主分支：进入在补读与换绑请求之前");
+  });
+
+  it("源码：switch_busy 转保活不重挂 A 的流（切换态继续盖到 B 落地）", () => {
+    const decide = extractFn("terminalRailSwitchOrCreateCore");
+    const busy = decide.indexOf('if (code === "switch_busy")');
+    const keep = decide.indexOf("return terminalRailKeepAliveSwitch({ agentId, cwd, resume });", busy);
+    assert.ok(busy >= 0 && keep > busy);
+    assert.equal(decide.slice(busy, keep).includes("resumeStream();"), false,
+      "A 的旧画面不闪回一帧；B 失败由 createAgentTerminal 的 catch 兜底恢复");
+    assert.match(extractFn("createAgentTerminal"), /abortTerminalSwitchLoading\(\)/,
+      "B 的 POST 失败出口会撤层并重挂旧流");
   });
 });
 

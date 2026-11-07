@@ -4211,6 +4211,11 @@ describe("视口化验收（页签＝视口）", () => {
       ${extractFn("createAgentTerminal")}
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
+      function enterTerminalSwitchLoading() {
+        log.switchLoading = (log.switchLoading || []).concat("enter");
+        log.order = (log.order || []).concat("switch_enter");
+      }
+      function abortTerminalSwitchLoading() { return false; }
       function armTerminalBootingOverlay(id) {
         log.booting = (log.booting || []).concat(id);
         log.order = (log.order || []).concat("arm");
@@ -4272,9 +4277,10 @@ describe("视口化验收（页签＝视口）", () => {
       id: "t-old", body: { resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" }, cwd: "C:\\dev\\alpha" },
     }], "空闲走既有 /switch：同记录 terminate+spawn，页签不变");
     assert.deepEqual(sandbox.viewports(), [{ id: "viewport-1", terminalId: "t-old" }], "视口仍只有一个、仍指向原终端记录");
-    assert.deepEqual(log.booting, ["t-old"], "A6：内切换屏后武装「正在加载」占位（零新增文案）");
-    assert.deepEqual(log.order, ["switch_resolve", "arm"],
-      "武装排在 /switch 落地之后（2026-11-02 错位：在飞期间屏上还是上一屏，早挂就是压在没擦的旧画面上）");
+    assert.deepEqual(log.booting, ["t-old"], "A6：POST 落地后武装「正在加载」普通占位层（零新增文案）");
+    assert.deepEqual(log.switchLoading, ["enter"], "点击当拍进入切换态：拆流擦屏＋挂加载态");
+    assert.deepEqual(log.order, ["switch_enter", "switch_resolve", "arm"],
+      "切换态进入在点击当拍、早于 /switch 落地；arm 仍在落地之后（由普通占位层接手）");
   });
 
   it("A2 终端空闲点「新建会话」：就地换新会话，页签数不变", async () => {

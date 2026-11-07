@@ -9726,8 +9726,17 @@ async function api(method, path, body) {
   const TERMINAL_BOOTING_MAX_MS = 3000;
   const TERMINAL_BOOTING_ARM_TTL_MS = 10000;
   let terminalBooting = null;
+  // 内切切换态：点一条尚未打开过的会话，宿主侧的进程探测与 PTY 重启要数秒，而左栏
+  // 高亮是当拍的。这层盖住「点击当拍 → POST 落地」整段，与上面 terminalBooting 分工：
+  // 后者只管新实例建好到首帧出字那一小段，3s/10s 两档撑不住 /switch 的 6~12s。
+  const TERMINAL_SWITCH_LOADING_MAX_MS = 30000;
+  let terminalSwitchLoading = null;
 
   function armTerminalBootingOverlay(sessionId) {
+    // POST 落地这一拍由切换态交接给普通占位层：撤切换层与下面重武装在同一个同步调用栈，
+    // 紧接着 renderTerminalPreviewSession 会把普通层挂回去，中间不会被绘制。typeof 闸
+    // 护单测桩环境（同 renderTerminalRail）。
+    if (typeof leaveTerminalSwitchLoading === "function") leaveTerminalSwitchLoading();
     dropTerminalBootingOverlay();
     terminalBooting = { sessionId, armedAt: Date.now(), timer: null, el: null, frame: null };
   }
@@ -9772,6 +9781,55 @@ async function api(method, path, body) {
     booting.el = el;
     booting.timer = setTimeout(() => dropTerminalBootingOverlay(), TERMINAL_BOOTING_MAX_MS);
     watchTerminalBootingOverlay(booting);
+  }
+
+  // 切换态入口：确认这次点击真的要切走之后、补读两拍之前调用。旧行为让这整段继续显示
+  // 上一条会话的画面（切页签垫片特意留的旧帧），屏与当拍的左栏高亮因此对不上。这里在
+  // 同一拍拆流——xterm 被 dispose 后 DOM 随之摘除，屏即成终端底色——再盖一层加载态，
+  // 把等待整段收进白屏段。复用既有的 .terminal-booting 与「正在加载」四字，零新增文案。
+  function enterTerminalSwitchLoading() {
+    // 切页签留下的旧帧垫片一并撤掉：它服务的正是「继续显示上一条会话」，与本态相反。
+    if (typeof dropTerminalStaleScreen === "function") dropTerminalStaleScreen();
+    // 先拆流再挂层：/switch 的换绑清屏字节从此落不到旧实例上（2026-11-05 F1 的同一条
+    // 契约，只是不再把旧帧停成垫片）。typeof 闸护单测桩环境。
+    if (typeof closeTerminalStream === "function") closeTerminalStream();
+    if (typeof dropTerminalBootingOverlay === "function") dropTerminalBootingOverlay();
+    leaveTerminalSwitchLoading();
+    const screen = $("terminalScreen");
+    if (!screen) return;
+    const el = document.createElement("div");
+    el.className = "terminal-booting";
+    el.innerHTML = `<span class="terminal-booting-spin" aria-hidden="true"></span><span>正在加载</span>`;
+    screen.appendChild(el);
+    const state = { el, timer: null };
+    terminalSwitchLoading = state;
+    // 兜底：宿主卡死、POST 永不落地时不能永久留一层加载态，到点按失败同路恢复旧画面。
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      abortTerminalSwitchLoading();
+    }, TERMINAL_SWITCH_LOADING_MAX_MS);
+    if (state.timer && typeof state.timer.unref === "function") state.timer.unref();
+  }
+
+  function leaveTerminalSwitchLoading() {
+    const state = terminalSwitchLoading;
+    if (!state) return;
+    terminalSwitchLoading = null;
+    if (state.timer !== null) clearTimeout(state.timer);
+    if (state.el && state.el.parentNode) state.el.parentNode.removeChild(state.el);
+  }
+
+  // 切换彻底失败或兜底超时：撤加载层并把被拆掉的流接回来。宿主仍持有该会话的渲染镜像，
+  // 重挂即回放上一屏；revive:false 是被动重挂，不替用户重启已退的进程。
+  function abortTerminalSwitchLoading() {
+    if (!terminalSwitchLoading) return false;
+    leaveTerminalSwitchLoading();
+    try {
+      if (typeof renderTerminalPreviewSession === "function") renderTerminalPreviewSession({ revive: false });
+    } catch (error) {
+      console.warn("[terminal] switch loading abort reattach failed:", error);
+    }
+    return true;
   }
 
   function closeTerminalAddMenu() {
@@ -9894,6 +9952,9 @@ async function api(method, path, body) {
         renderTerminalPreviewSession();
       })
       .catch((error) => {
+        // 内切保活分支在这里失败：切换态还盖着，撤层并把被拆掉的旧流接回来，不留一屏
+        // 加载态。POST 落地那条出口由 armTerminalBootingOverlay 交接切换层，不走这里。
+        if (typeof abortTerminalSwitchLoading === "function") abortTerminalSwitchLoading();
         // 失败清点：续接新建失败即撤乐观高亮——点亮的那行没换成，继续说它
         // 选中就是说谎。不带 resume 的新建（⊕/新建终端）不碰 pending：没有哪一次
         // 点击预测过它，别误伤别人在飞的选中。
@@ -12701,10 +12762,14 @@ async function api(method, path, body) {
     // 无视口 / 视口没有终端 / 活跃是设计稿预览会话（没有宿主记录可换）：内切无处可
     // 换，就建目标终端——无视口才新开一个视口，有视口就挂进它，都不额外加页签。
     if (!active || !active.backend) {
+      if (typeof enterTerminalSwitchLoading === "function") enterTerminalSwitchLoading();
       return createAgentTerminal({ agentId, cwd, resume }, { placement: activeViewport ? "viewport" : "new" });
     }
     terminalSwitchInFlight = true;
     terminalSwitchInFlightSessionId = active.id;
+    // 点击当拍擦屏并挂加载态：补读两拍、/switch 或 agent-sessions 的 spawn 都还在后面，
+    // 这一整段屏上不再留上一条会话的画面。typeof 闸护单测桩环境。
+    if (typeof enterTerminalSwitchLoading === "function") enterTerminalSwitchLoading();
     try {
       // 未使用的 agent 终端不能被就地 /switch（2026-11-03 A4）：它还没有任何对话身份
       // （resume / boundConversation 皆空），换绑会整树 terminate，刚开的会话连对话文件
@@ -12748,12 +12813,11 @@ async function api(method, path, body) {
       // 不变，视口/页签都不变）。切换期进行态（A6）不排在这一拍：在飞的 6~12s 里屏上还是
       // 上一屏的画面，这会儿挂「正在加载」占位就是叠在没擦的旧画面上（2026-11-02 用户
       // 报告的错位现场），武装排到 /switch 落地之后（见下）。
-      // 先停帧再换绑（2026-11-05 F1）：宿主的 /switch 是「terminate + spawn + 换绑清屏」，
-      // 清屏字节经同一条 SSE 先落到旧实例上——等响应回来才停放，停到手的已经是一张
-      // 被清空的图，垫片于是等于空白。停放必须排在 POST 之前：此刻 terminalXterm 还是
-      // 上一条会话的真画面，停下来的垫片才有内容。随后的 renderTerminalPreviewSession
-      // 会再停一次，那次 terminalXterm 已为 null，走的是「不撤已有垫片」的幂等空转
-      // （见 parkTerminalScreen 里对应的注释），不会把这一帧弄丢。
+      // 先拆流再换绑（2026-11-05 F1）：宿主的 /switch 是「terminate + spawn + 换绑清屏」，
+      // 清屏字节经同一条 SSE 先落到旧实例上——等响应回来才拆，落到的就是还活着的旧实例。
+      // 拆流已在点击当拍由 enterTerminalSwitchLoading 完成（那一拍连同擦屏与加载态一起
+      // 落地），此处 park 在 terminalXterm 为 null 时走幂等空转、不再停出垫片；保留调用
+      // 是让「拆流排在 POST 之前」这条契约在本函数里仍有一处可验的落点。
       if (typeof parkTerminalScreen === "function") parkTerminalScreen();
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
@@ -12780,6 +12844,9 @@ async function api(method, path, body) {
       // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
       // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
       const resumeStream = () => {
+        // 切换态在飞：撤加载层并重挂宿主镜像回放，一条龙恢复旧画面；没有切换态时
+        // 走原有的被动重挂。typeof 闸护单测桩环境。
+        if (typeof abortTerminalSwitchLoading === "function" && abortTerminalSwitchLoading()) return;
         try { renderTerminalPreviewSession({ revive: false }); } catch (error) {
           console.warn("[terminal] stream reattach after failed switch failed:", error);
         }
@@ -12793,23 +12860,14 @@ async function api(method, path, body) {
         // （live 行接任），此处清会让高亮先弹回旧行；全新内切不同——兜底行锚在本次
         // 点击换上的终端上，照旧撤掉旧瞄准。
         if (!resume) terminalRailEndSelect(null);
-        // 保活不是「另一条路自己会建流」的保证：terminalRailKeepAliveSwitch 走的是
-        // createAgentTerminal，它的 POST 失败出口只 toast、不重建任何流（2026-11-05
-        // 重审 major）。而 F1 已经把流拆了，那条路上屏上只剩一块垫片，兜底撤走后
-        // 就是纯空白，所以先把本会话的流接回来当底。
-        //
-        // 但这条出口的视口紧接着就会换成**另一条会话 B**：屏上这帧 A 的旧画面已经
-        // 不再满足「垫片底下是同一条会话」这个放宽档的唯一正当性（2026-10-27），
-        // 也不能续窗。提前清在飞闸，切断「A 的旧帧按 A 的在飞状态盖 6~30s」这条路。
-        // 机制要说准：resumeStream 里那次 park 是幂等空转（POST 前那次停放已把
-        // terminalXterm 置空，park 走「没有可停的画面→不撤已有垫片」早退），并不登记
-        // 计时器；真正落回普通 2s 档的是 **B 挂载时**那次 park——它首行先丢掉 A 的
-        // 旧垫片，再以在飞为假重挂。清闸是让这次 park 不再命中放宽档的前提。
-        // 清得早一点不引入并发：finally 本来也是 return 表达式求值后立刻清、并不等
-        // 保活 POST 回来，这里只是把同一件事挪到重挂之前。
+        // 这条出口紧接着换成**另一条会话 B**，不把 A 的流接回来：切换态还盖着加载层，
+        // A 的旧画面一旦重挂就会闪一帧，且没有垫片为它续窗的合法性（2026-10-27）。
+        // B 的 POST 落地由 createAgentTerminal 的 arm 交接加载层并建流；B 若失败，那条
+        // catch 里的 abortTerminalSwitchLoading 会撤层并把 A 的流接回来兜底。提前清在飞
+        // 闸：B 挂载时的 park 不再命中「这条会话在换绑」的放宽档。finally 本来也在
+        // return 求值后立刻清，这里只是把同一件事挪到转保活之前。
         terminalSwitchInFlight = false;
         terminalSwitchInFlightSessionId = null;
-        resumeStream();
         return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
       }
       // 失败清点：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，
