@@ -407,3 +407,82 @@ export function resolveWorkbuddyExecutable(base = process.env) {
 export function resolveQoderCliExecutable(base = process.env) {
   return join(base.USERPROFILE ?? "", ".qoder", "bin", "qodercli", "qodercli.exe");
 }
+
+// Qoder 桌面端（IDE 本体）。~/.qoder/entry/qoder.cmd 是 IDE 自带的命令调度器
+// （IDE 安装器丢下的 code.cmd 式垫片），不是独立安装的 CLI 产品，不做检测目标；
+// CLI 形态的检测目标是 ~/.qoder/bin/qodercli/qodercli.exe（resolveQoderCliExecutable）。
+export function resolveQoderDesktopExecutable(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
+}
+
+// DSH 官方桌面端（Electron 包，安装器默认落点）。它在进程面上自带运行时，
+// 不经过我们的启动器，因此检测只认它自己的安装目录；未安装时这一行如实报未找到。
+export function resolveDshDesktopExecutable(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "DeepSeek Harness", "DeepSeek Harness.exe");
+}
+
+// Kimi Code 官方桌面端（Electron 包，electron-builder NSIS 安装器的默认落点，
+// 与 DSH 桌面端同型）。检测只认它自己的安装目录；未安装时这一行如实报未找到。
+export function resolveKimiDesktopExecutable(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Kimi Code", "Kimi Code.exe");
+}
+
+// WorkBuddy 的桌面壳（Electron 安装器的默认落点）。CLI 内核随包附带在
+// resources/app.asar.unpacked 内，由 resolveWorkbuddyExecutable 解析；这里只
+// 描述桌面端本体。
+export function resolveWorkbuddyDesktopExecutable(base = process.env) {
+  return join(
+    base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
+    "Programs", "WorkBuddy", "WorkBuddy.exe",
+  );
+}
+
+// agent-sync 闸门的安装形态表：每端点「任意一份形态在盘就算在装」的解析器清单。
+// 与 environment-service 的 CLIENTS 接线是同一批形态的两侧消费，改端点形态时
+// 两侧同步动；端点覆盖面由 agent-discovery.test.mjs 与 AGENT_ENDPOINTS 互钉。
+// 表里只收纯路径形态：codex/claude 的 Store MSIX 桌面形态要靠 PowerShell 查询，
+// 不进本表——同步子进程 store 一变就跑，spawn 探测会把探测进程喂进 relay 扫描
+// （qoder 幽灵卡的病根）；codex 桌面版自带 CLI 副本落 %LOCALAPPDATA%\OpenAI\Codex\bin，
+// resolveCodexExecutable 的原生分支已覆盖桌面-only 机器，无需求助 MSIX。
+export const AGENT_INSTALL_FORMS = Object.freeze({
+  zcode: Object.freeze([resolveZcodeExecutable, resolveZcodeCliExecutable]),
+  dsh: Object.freeze([resolveDshExecutable, resolveDshDesktopExecutable]),
+  pi: Object.freeze([resolvePiExecutable]),
+  kimi: Object.freeze([resolveKimiExecutable, resolveKimiDesktopExecutable]),
+  qoder: Object.freeze([resolveQoderCliExecutable, resolveQoderDesktopExecutable]),
+  codex: Object.freeze([resolveCodexExecutable]),
+  opencode: Object.freeze([resolveOpencodeExecutable]),
+  grok: Object.freeze([resolveGrokExecutable]),
+  workbuddy: Object.freeze([resolveWorkbuddyExecutable, resolveWorkbuddyDesktopExecutable]),
+});
+
+// 端点在盘判定，三态："installed"（任一形态解析出一个存在的文件）／"absent"
+// （所有形态都如实落空）／"uncertain"（表里没这个端点、覆盖变量写坏、解析器
+// 抛了不认识的错）。调用方对 uncertain 必须 fail-open 照写——宁可多写一份配置，
+// 也不让怪异安装形态漏掉同步。纯存在性检查：不 spawn、不读版本。
+export function agentInstallState(name, base = process.env) {
+  const forms = AGENT_INSTALL_FORMS[name];
+  if (!forms) return "uncertain";
+  for (const resolve of forms) {
+    let path;
+    try {
+      path = resolve(base);
+    } catch (error) {
+      // 解析器如实报「这形态没有」（codex 双形态皆空时抛 ENOENT）算落空，
+      // 其余异常一律拿不准。
+      if (["ENOENT", "ENOTDIR"].includes(error?.code)) continue;
+      return "uncertain";
+    }
+    // null 形态（zcode CLI 无覆盖）不算候选也不算在装，跳过。
+    if (typeof path !== "string" || !path) continue;
+    let stats;
+    try {
+      stats = statSync(path);
+    } catch (error) {
+      if (["ENOENT", "ENOTDIR"].includes(error?.code)) continue;
+      return "uncertain";
+    }
+    if (stats.isFile()) return "installed";
+  }
+  return "absent";
+}

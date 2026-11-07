@@ -6,37 +6,10 @@ import {
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
   resolveZcodeCliExecutable, resolveDshTuiExecutable, resolveWorkbuddyExecutable,
+  resolveQoderDesktopExecutable, resolveDshDesktopExecutable,
+  resolveKimiDesktopExecutable, resolveWorkbuddyDesktopExecutable,
 } from "../agents/agent-discovery.mjs";
 import { compareVersions, parseVersion } from "./version-check.mjs";
-
-// Qoder 桌面端在这里检测；~/.qoder/entry/qoder.cmd 是 IDE 自带的命令调度器
-// （IDE 安装器丢下的 code.cmd 式垫片），不是独立安装的 CLI 产品，不做检测目标。
-// CLI 形态的检测目标是 ~/.qoder/bin/qodercli/qodercli.exe（resolveQoderCliExecutable）。
-function resolveQoderExecutable(base = process.env) {
-  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
-}
-
-// DSH 官方桌面端（Electron 包，安装器默认落点）。它在进程面上自带运行时，
-// 不经过我们的启动器，因此检测只认它自己的安装目录；未安装时这一行如实报未找到。
-export function resolveDshDesktopExecutable(base = process.env) {
-  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "DeepSeek Harness", "DeepSeek Harness.exe");
-}
-
-// Kimi Code 官方桌面端（Electron 包，electron-builder NSIS 安装器的默认落点，
-// 与 DSH 桌面端同型）。检测只认它自己的安装目录；未安装时这一行如实报未找到。
-export function resolveKimiDesktopExecutable(base = process.env) {
-  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Kimi Code", "Kimi Code.exe");
-}
-
-// WorkBuddy 的桌面壳（Electron 安装器的默认落点）。CLI 内核随包附带在
-// resources/app.asar.unpacked 内，由 resolveWorkbuddyExecutable 解析；这里只
-// 描述桌面端本体，环境检测的第二条安装记录用。
-export function resolveWorkbuddyDesktopExecutable(base = process.env) {
-  return join(
-    base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-    "Programs", "WorkBuddy", "WorkBuddy.exe",
-  );
-}
 
 // The Codex CLI line must describe the same artifact the update button
 // installs — the npm-global @openai/codex package. Detection therefore follows
@@ -113,7 +86,7 @@ const CLIENTS = [
   ["kimi", "Kimi Code", resolveKimiExecutable],
   ["dsh", "DeepSeek Harness", resolveDshExecutable],
   ["zcode", "ZCode", resolveZcodeExecutable],
-  ["qoder", "Qoder", resolveQoderExecutable],
+  ["qoder", "Qoder", resolveQoderDesktopExecutable],
   // Grok Build is the remaining native binary: its local version comes from the
   // CLI's own --version report (probeVersion branch below), never an npm
   // package.json — `@xai-official/grok` is only how upstream ships it (and how

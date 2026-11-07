@@ -5,10 +5,14 @@
 // this module automatically updates downstream coding agent configurations
 // (ZCode, DSH, Pi, etc.) so agents immediately pick up store mutations
 // without requiring manual relay restarts or agent launcher re-invocations.
+// Endpoints whose executable is absent from the machine are skipped — nothing
+// is created for never-installed agents, and residue left by uninstalled ones
+// is left untouched (see agentInstallState).
 
 import { watch, existsSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { loadStore, storePaths as defaultStorePaths } from "../store/store-io.mjs";
+import { agentInstallState } from "./agent-discovery.mjs";
 import { writeZcodeConfig, zcodeConfigPath } from "../launchers/zcode-launcher.mjs";
 import { writeDshConfig, dshSettingsPath } from "../launchers/dsh-launcher.mjs";
 import { writePiModels, piModelsPath } from "../launchers/pi-launcher.mjs";
@@ -52,6 +56,7 @@ export function buildSyncSummary(result) {
   for (const name of [...AGENT_ENDPOINTS, ...Object.keys(results).filter((n) => !known.has(n))]) {
     const entry = results[name];
     if (!entry) continue; // 本轮没跑到：既不算成功也不算失败
+    if (entry.notInstalled) continue; // 未安装被跳过：不上任何名单，成败语义与退出码不受影响
     (entry.ok === true ? synced : failed).push(name);
   }
   const summary = { ok: true, synced, failed };
@@ -109,6 +114,17 @@ function relativeHomeFailure(configPath) {
   };
 }
 
+// 未安装端点的跳过结果（判定见 agent-discovery.mjs 的 agentInstallState）：ok 真
+// ——同步本身没有失败；unchanged 真——没写盘，让端点块自己的「没写就不记日志」
+// 分支保持安静；notInstalled 标记让 buildSyncSummary 不把它算进 synced/failed
+// 任何一边。字段名不能叫 skipped：grok/workbuddy 写手结果里的 skipped 是按模型
+// 的跳过清单（数组，可为空），同名不同义会在摘要里把成功端点挤出名单。
+// 这里负责留一行运行日志：运行日志是「为什么我的端点没被更新」唯一的可见面。
+function skippedEndpointResult(name, logger) {
+  logger?.info?.(`${name} config sync skipped: ${name} is not installed on this machine`);
+  return { ok: true, unchanged: true, notInstalled: true };
+}
+
 /**
  * Synchronize all supported coding agent configurations against the current store.
  *
@@ -147,9 +163,11 @@ export async function syncAllAgentConfigs({
   // 1. ZCode config sync (~/.zcode/v2/config.json)
   try {
     const zPath = zcodeConfigPath(base);
-    const zResult = isAbsolute(zPath)
-      ? await writeZcodeConfig(store, port, token, root, zPath, undefined, null, {}, { log: logger })
-      : relativeHomeFailure(zPath);
+    const zResult = !isAbsolute(zPath)
+      ? relativeHomeFailure(zPath)
+      : agentInstallState("zcode", base) === "absent"
+        ? skippedEndpointResult("zcode", logger)
+        : await writeZcodeConfig(store, port, token, root, zPath, undefined, null, {}, { log: logger });
     results.zcode = zResult;
     if (!zResult.ok) {
       logger?.warn?.(`zcode config.json not updated: ${zResult.reason ?? "unknown"}`);
@@ -165,9 +183,11 @@ export async function syncAllAgentConfigs({
   // retired the home-level settings.yaml; each existing profile reads its own.
   try {
     const dshPath = dshSettingsPath(base);
-    const dshResult = isAbsolute(dshPath)
-      ? await writeDshConfig(store, port, token, root, dshPath)
-      : relativeHomeFailure(dshPath);
+    const dshResult = !isAbsolute(dshPath)
+      ? relativeHomeFailure(dshPath)
+      : agentInstallState("dsh", base) === "absent"
+        ? skippedEndpointResult("dsh", logger)
+        : await writeDshConfig(store, port, token, root, dshPath);
     results.dsh = dshResult;
     if (!dshResult.ok) {
       logger?.warn?.(`dsh profile patch not updated: ${dshResult.reason ?? "unknown"}`);
@@ -182,9 +202,11 @@ export async function syncAllAgentConfigs({
   // 3. Pi models.json sync (~/.pi/agent/models.json)
   try {
     const piPath = piModelsPath(base);
-    const piResult = isAbsolute(piPath)
-      ? await writePiModels(store, port, root, piPath)
-      : relativeHomeFailure(piPath);
+    const piResult = !isAbsolute(piPath)
+      ? relativeHomeFailure(piPath)
+      : agentInstallState("pi", base) === "absent"
+        ? skippedEndpointResult("pi", logger)
+        : await writePiModels(store, port, root, piPath);
     results.pi = piResult;
     if (!piResult.ok) {
       logger?.warn?.(`pi models.json not updated: ${piResult.reason ?? "unknown"}`);
@@ -199,9 +221,11 @@ export async function syncAllAgentConfigs({
   // 4. Kimi Code config.toml sync (~/.kimi-code/config.toml)
   try {
     const kimiPath = kimiConfigPath(base);
-    const kimiResult = isAbsolute(kimiPath)
-      ? await writeKimiConfig(store, port, token, root, kimiPath)
-      : relativeHomeFailure(kimiPath);
+    const kimiResult = !isAbsolute(kimiPath)
+      ? relativeHomeFailure(kimiPath)
+      : agentInstallState("kimi", base) === "absent"
+        ? skippedEndpointResult("kimi", logger)
+        : await writeKimiConfig(store, port, token, root, kimiPath);
     results.kimi = kimiResult;
     if (!kimiResult.ok) {
       logger?.warn?.(`kimi config.toml not updated: ${kimiResult.reason ?? "unknown"}`);
@@ -223,9 +247,11 @@ export async function syncAllAgentConfigs({
   // 5. Qoder settings.json sync (~/.qoder/settings.json)
   try {
     const qPath = qoderSettingsPath(base.USERPROFILE ?? "");
-    const qoderResult = isAbsolute(qPath)
-      ? await writeQoderConfig(store, port, token, root, qPath)
-      : relativeHomeFailure(qPath);
+    const qoderResult = !isAbsolute(qPath)
+      ? relativeHomeFailure(qPath)
+      : agentInstallState("qoder", base) === "absent"
+        ? skippedEndpointResult("qoder", logger)
+        : await writeQoderConfig(store, port, token, root, qPath);
     results.qoder = qoderResult;
     if (!qoderResult.ok) {
       logger?.warn?.(`qoder settings.json not updated: ${qoderResult.reason ?? "unknown"}`);
@@ -240,9 +266,11 @@ export async function syncAllAgentConfigs({
   // 6. Codex config.toml sync (~/.codex/config.toml)
   try {
     const codexPath = codexConfigPath(base);
-    const codexResult = isAbsolute(codexPath)
-      ? await writeCodexConfig(store, port, token, root, codexPath)
-      : relativeHomeFailure(codexPath);
+    const codexResult = !isAbsolute(codexPath)
+      ? relativeHomeFailure(codexPath)
+      : agentInstallState("codex", base) === "absent"
+        ? skippedEndpointResult("codex", logger)
+        : await writeCodexConfig(store, port, token, root, codexPath);
     results.codex = codexResult;
     if (!codexResult.ok) {
       logger?.warn?.(`codex config.toml not updated: ${codexResult.reason ?? "unknown"}`);
@@ -261,9 +289,11 @@ export async function syncAllAgentConfigs({
   // 7. OpenCode opencode.json sync (~/.config/opencode/opencode.json)
   try {
     const ocPath = opencodeConfigPath(base);
-    const ocResult = isAbsolute(ocPath)
-      ? await writeOpencodeConfig(store, port, root, ocPath)
-      : relativeHomeFailure(ocPath);
+    const ocResult = !isAbsolute(ocPath)
+      ? relativeHomeFailure(ocPath)
+      : agentInstallState("opencode", base) === "absent"
+        ? skippedEndpointResult("opencode", logger)
+        : await writeOpencodeConfig(store, port, root, ocPath);
     results.opencode = ocResult;
     if (!ocResult.ok) {
       logger?.warn?.(`opencode.json not updated: ${ocResult.reason ?? "unknown"}`);
@@ -278,9 +308,11 @@ export async function syncAllAgentConfigs({
   // 8. Grok Build config.toml sync (~/.grok/config.toml)
   try {
     const grokPath = grokConfigPath(base);
-    const grokResult = isAbsolute(grokPath)
-      ? await writeGrokConfig(store, port, token, root, grokPath)
-      : relativeHomeFailure(grokPath);
+    const grokResult = !isAbsolute(grokPath)
+      ? relativeHomeFailure(grokPath)
+      : agentInstallState("grok", base) === "absent"
+        ? skippedEndpointResult("grok", logger)
+        : await writeGrokConfig(store, port, token, root, grokPath);
     results.grok = grokResult;
     if (!grokResult.ok) {
       logger?.warn?.(`grok config.toml not updated: ${grokResult.reason ?? "unknown"}`);
@@ -297,9 +329,11 @@ export async function syncAllAgentConfigs({
     // home 与其他端点同口径（base.USERPROFILE）：这里不是启动器，路径必须跟着
     // 注入的 base 走；home 缺失时解析成相对路径，由上面的闸门判失败。
     const workbuddyPath = workbuddyModelsPath(base, base.USERPROFILE ?? "");
-    const workbuddyResult = isAbsolute(workbuddyPath)
-      ? await writeWorkbuddyModels(store, port, token, root, workbuddyPath)
-      : relativeHomeFailure(workbuddyPath);
+    const workbuddyResult = !isAbsolute(workbuddyPath)
+      ? relativeHomeFailure(workbuddyPath)
+      : agentInstallState("workbuddy", base) === "absent"
+        ? skippedEndpointResult("workbuddy", logger)
+        : await writeWorkbuddyModels(store, port, token, root, workbuddyPath);
     results.workbuddy = workbuddyResult;
     if (!workbuddyResult.ok) {
       logger?.warn?.(`workbuddy models.json not updated: ${workbuddyResult.reason ?? "unknown"}`);
