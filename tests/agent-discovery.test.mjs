@@ -8,9 +8,21 @@ import {
   resolveDshExecutable, resolveDshTuiExecutable, resolveZcodeExecutable, resolveZcodeCliExecutable,
   resolveQoderExecutable,
   resolveQoderCliExecutable, resolveGrokExecutable, resolveWorkbuddyExecutable,
+  AGENT_INSTALL_FORMS, agentInstallState,
 } from "../src/agents/agent-discovery.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 import { resolveCodexShim } from "../src/ops/environment-service.mjs";
+import { AGENT_ENDPOINTS } from "../src/agents/agent-sync.mjs";
+
+test("同步闸门形态表覆盖 AGENT_ENDPOINTS 全部端点，未登记的端点判拿不准", () => {
+  // 互钉：AGENT_ENDPOINTS 加端点而没有登记形态表时，这里红——要么补表，要么
+  // 有意识地接受 fail-open（uncertain 不跳过）。漏登记会让新端点静默回落到
+  // 「永不判跳过」的旧语义，测试负责把它亮出来。
+  for (const name of AGENT_ENDPOINTS) {
+    assert.ok(AGENT_INSTALL_FORMS[name], `${name} 必须登记在盘判定形态`);
+  }
+  assert.equal(agentInstallState("never-registered", {}), "uncertain");
+});
 
 test("standalone discovery preserves all ten launcher installation choices", () => {
   const base = { USERPROFILE: "C:\\Users\\fixture", APPDATA: "C:\\roaming", LOCALAPPDATA: "C:\\local" };

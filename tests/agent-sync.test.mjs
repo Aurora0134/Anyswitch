@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import {
   syncAllAgentConfigs,
   createStoreWatcher,
@@ -16,11 +16,40 @@ import { atomicWriteFile } from "../src/store/atomic-write.mjs";
 import { managedConnectionId } from "../src/launchers/qoder-merge-config.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
+// 九端点「已安装」的盘上形状，落点取自 agent-discovery 各解析器的候选路径
+// （每端点一份主形态）。同步闸门上线后，happy-path 断言「配置被写入」的用例
+// 都要先让端点在盘上「在装」，否则整轮被跳过。opencode 的解析器不认 npm 垫片
+// （Anyswitch 接管 shim 会绕回启动器），须摆真实包布局。
+function installAgentShapes(home) {
+  const mark = (path) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "stub");
+  };
+  const npm = join(home.APPDATA, "npm");
+  mark(join(home.LOCALAPPDATA, "Programs", "zcode", "ZCode.exe"));
+  mark(join(npm, "dsh.cmd"));
+  mark(join(npm, "pi.cmd"));
+  mark(join(npm, "kimi.cmd"));
+  mark(join(home.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"));
+  mark(join(npm, "codex.cmd"));
+  const ocPkg = join(npm, "node_modules", "@opencode", "cli");
+  mkdirSync(ocPkg, { recursive: true });
+  writeFileSync(join(ocPkg, "package.json"), JSON.stringify({
+    name: "@opencode/cli",
+    bin: { opencode: "bin/opencode.js" },
+    optionalDependencies: { "@opencode/cli-windows-x64": "1.0.0" },
+  }));
+  mark(join(ocPkg, "node_modules", "@opencode", "cli-windows-x64", "bin", "opencode.js"));
+  mark(join(home.USERPROFILE, ".grok", "bin", "grok.exe"));
+  mark(join(home.LOCALAPPDATA, "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy"));
+}
+
 describe("agent-sync", () => {
   let tmpRoot;
 
   beforeEach(() => {
     tmpRoot = mkTestDir("agent-sync-test-");
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
   });
 
   afterEach(() => {
@@ -237,6 +266,7 @@ describe("agent-sync pools", () => {
 
   beforeEach(() => {
     tmpRoot = mkTestDir("agent-sync-pool-test-");
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
   });
 
   afterEach(() => {
@@ -351,6 +381,7 @@ describe("agent-sync auto routing channel", () => {
 
   beforeEach(() => {
     tmpRoot = mkTestDir("agent-sync-auto-test-");
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
   });
 
   afterEach(() => {
@@ -466,6 +497,7 @@ describe("agent-sync Anyswitch 渠道名（八端点回归闸）", () => {
 
   beforeEach(() => {
     tmpRoot = mkTestDir("agent-sync-channel-name-test-");
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
   });
 
   afterEach(() => {
@@ -574,6 +606,7 @@ describe("agent-sync 同步结果摘要", () => {
 
   beforeEach(() => {
     tmpRoot = mkTestDir("agent-sync-summary-test-");
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
   });
 
   afterEach(() => {
@@ -762,6 +795,92 @@ ${line}
     } else {
       assert.equal(summary.codexCatalog, undefined, "写入器没给目录状态时摘要里就不带这一项");
     }
+  });
+});
+
+describe("agent-sync 未安装端点闸门", () => {
+  let tmpRoot;
+
+  beforeEach(() => {
+    tmpRoot = mkTestDir("agent-sync-gate-test-");
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  const base = (extra) => ({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot, ...extra });
+  // store 必须带真渠道：空 store 是「无托管面可写」，写入器本来就不建文件，
+  // 那样「端点在装 → 配置被写入」的断言什么都证明不了。
+  const homeOpts = (extra) => ({
+    store: {
+      version: 2,
+      providers: {
+        alpha: {
+          displayName: "Alpha",
+          baseURL: "https://alpha.invalid/v1",
+          protocol: "openai-compatible",
+          credentialFile: "alpha.dpapi",
+          models: { "model-1": { contextWindow: 4096 } },
+        },
+      },
+    },
+    port: 47821,
+    token: "test-token",
+    root: tmpRoot,
+    base: base(extra),
+  });
+
+  it("空机器：九端点全部跳过，一个配置文件都不建", async () => {
+    const res = await syncAllAgentConfigs(homeOpts());
+    assert.equal(res.ok, true);
+    for (const name of AGENT_ENDPOINTS) {
+      assert.equal(res.results[name].ok, true, `${name} 跳过不是失败`);
+      assert.equal(res.results[name].notInstalled, true, `${name} 带跳过标记`);
+      assert.equal(res.results[name].unchanged, true, `${name} 没写盘`);
+    }
+    const summary = buildSyncSummary(res);
+    assert.deepEqual(summary.synced, [], "跳过不上成功名单");
+    assert.deepEqual(summary.failed, [], "跳过不上失败名单");
+    for (const dir of [".zcode", ".dsh", ".pi", ".kimi-code", ".qoder", ".codex", ".config", ".grok", ".workbuddy"]) {
+      assert.equal(existsSync(join(tmpRoot, dir)), false, `${dir} 不被凭空创建`);
+    }
+  });
+
+  it("卸载残留不被刷新：既有配置一字不动", async () => {
+    const stalePath = join(tmpRoot, ".kimi-code", "config.toml");
+    mkdirSync(dirname(stalePath), { recursive: true });
+    const residue = "# residue left by the uninstalled kimi\n";
+    writeFileSync(stalePath, residue);
+    await syncAllAgentConfigs(homeOpts());
+    assert.equal(readFileSync(stalePath, "utf8"), residue, "残留配置不被改写也不被清掉");
+  });
+
+  it("端点重新出现在盘上后，下一次同步恢复写入", async () => {
+    const first = await syncAllAgentConfigs(homeOpts());
+    assert.equal(first.results.zcode.notInstalled, true);
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
+    const second = await syncAllAgentConfigs(homeOpts());
+    assert.equal(second.results.zcode.notInstalled, undefined, "重装后不再跳过");
+    assert.equal(second.results.zcode.ok, true);
+    assert.ok(existsSync(join(tmpRoot, ".zcode", "v2", "config.json")), "端点回来后配置照写");
+  });
+
+  it("覆盖变量指向真实文件时视为在装", async () => {
+    const exe = join(tmpRoot, "tools", "grok.exe");
+    mkdirSync(dirname(exe), { recursive: true });
+    writeFileSync(exe, "stub");
+    const res = await syncAllAgentConfigs(homeOpts({ GROK_EXECUTABLE: exe }));
+    assert.equal(res.results.grok.notInstalled, undefined, "覆盖生效不跳过");
+    assert.equal(res.results.grok.ok, true);
+    assert.ok(existsSync(join(tmpRoot, ".grok", "config.toml")));
+  });
+
+  it("判定拿不准时 fail-open 照写：覆盖变量写坏不再作跳过依据", async () => {
+    const res = await syncAllAgentConfigs(homeOpts({ GROK_EXECUTABLE: "relative/grok.exe" }));
+    assert.equal(res.results.grok.notInstalled, undefined, "拿不准不跳过");
+    assert.equal(res.results.grok.ok, true);
+    assert.ok(existsSync(join(tmpRoot, ".grok", "config.toml")), "fail-open：宁可多写不误伤");
   });
 });
 
