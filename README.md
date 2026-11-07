@@ -9,7 +9,7 @@
 > *「渠道配一次，十个 agent 一起用。」*
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.1](https://img.shields.io/badge/Version-0.7.1-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.1)
+[![Version: 0.7.2](https://img.shields.io/badge/Version-0.7.2-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.2)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#这些边界要先接受)
 [![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
 
@@ -24,7 +24,7 @@
 这个工具存在的全部理由，是让「只配一次」「只存一份密文」「一眼看到谁在跑、走的哪条路」三件事同时成立。
 
 ```bat
-git clone --branch v0.7.1 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.2 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
@@ -281,8 +281,8 @@ Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills �
 ## 这些边界要先接受
 
 - **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows。
-- **没有安装器。** 0.7.1 以源码发行；首次安装与换机都是 git clone + `npm install`。安装好之后，面板「关于」页可以自更新。
-- **0.7 线已转正。** 稳定线从 `v0.6.6` 一路前进，当前是 `v0.7.1`：按正式版身份运行的安装会收到 `v0.7.1` 的升级提示；此前跟着 `v0.7.0-preview` 走的安装升到 `v0.7.0` 后已回到正式轨。
+- **没有安装器。** 0.7.2 以源码发行；首次安装与换机都是 git clone + `npm install`。安装好之后，面板「关于」页可以自更新。
+- **0.7 线已转正。** 稳定线从 `v0.6.6` 一路前进，当前是 `v0.7.2`：按正式版身份运行的安装会收到 `v0.7.2` 的升级提示；此前跟着 `v0.7.0-preview` 走的安装升到 `v0.7.0` 后已回到正式轨。
 - **虚拟终端仍是预览功能。** 它要单独装依赖；默认关的「底部自动对齐」与恢复策略都还在预览线上继续打磨。
 - **重启 relay 会中断在途请求，并结束当时所有终端进程。** 面板里的「重启」会先换 relay 再换面板宿主，请在空档执行。只重启面板宿主不会杀终端进程——终端宿主归 relay 托管。
 - **刷新恢复有范围。** 只恢复「停在终端页 + 哪个页签 + 镜像里还能重放的历史」；不恢复滚动位置，不回放会话开始以来的全部输出，进程已退的会话不会自动复活。
@@ -325,7 +325,7 @@ Anyswitch/
 想核对这一版的实际改动范围：
 
 ```bat
-git log --no-merges --oneline v0.7.0..v0.7.1
+git log --no-merges --oneline v0.7.1..v0.7.2
 ```
 
 ---
@@ -344,8 +344,8 @@ git status --short
 有输出就先处理自己的改动，别为了升级直接丢弃。工作树干净后，只取目标标签：
 
 ```bat
-git fetch --no-tags origin tag v0.7.1
-git switch --detach v0.7.1
+git fetch --no-tags origin tag v0.7.2
+git switch --detach v0.7.2
 npm install
 ```
 

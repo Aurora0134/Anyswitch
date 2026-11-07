@@ -9,7 +9,7 @@
 > *"Configure your channels once — every agent shares them."*
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.1](https://img.shields.io/badge/Version-0.7.1-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.1)
+[![Version: 0.7.2](https://img.shields.io/badge/Version-0.7.2-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.2)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#boundaries-to-accept-first)
 [![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
 
@@ -24,7 +24,7 @@ The first agent is easy — five minutes, fill in a baseURL and a key. By the te
 The entire reason this tool exists is to make "configure once", "one sealed key", and "see at a glance who is running and which route they take" true at the same time.
 
 ```bat
-git clone --branch v0.7.1 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.2 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
@@ -281,8 +281,8 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 ## Boundaries to accept first
 
 - **Windows only; no macOS or Linux.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows.
-- **No installer.** 0.7.1 ships as source; first installs and machine moves are git clone + `npm install`. After that, the panel's About page can self-update.
-- **The 0.7 line is now stable.** The stable line moved on from `v0.6.6` and now sits at `v0.7.1`: installations running a stable identity are offered `v0.7.1`, and installations that followed `v0.7.0-preview` already returned to the stable track at `v0.7.0`.
+- **No installer.** 0.7.2 ships as source; first installs and machine moves are git clone + `npm install`. After that, the panel's About page can self-update.
+- **The 0.7 line is now stable.** The stable line moved on from `v0.6.6` and now sits at `v0.7.2`: installations running a stable identity are offered `v0.7.2`, and installations that followed `v0.7.0-preview` already returned to the stable track at `v0.7.0`.
 - **The virtual terminal is still preview.** It needs its own `npm install` once; the default-off "bottom auto-alignment" and restore policy are still being polished on the preview line.
 - **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions. Restarting only the panel host does not kill terminals — the terminal host is owned by the relay.
 - **Refresh recovery has a scope.** It restores "still on the terminal page + which tab + whatever history the mirror can still replay"; it does not restore scroll position, does not replay everything since the session began, and does not resurrect sessions whose processes have exited.
@@ -325,7 +325,7 @@ Anyswitch/
 To check the actual change scope of this release:
 
 ```bat
-git log --no-merges --oneline v0.7.0..v0.7.1
+git log --no-merges --oneline v0.7.1..v0.7.2
 ```
 
 ---
@@ -344,8 +344,8 @@ git status --short
 If there is output, deal with your own changes first — never discard them for an upgrade. With a clean tree, fetch only the target tag:
 
 ```bat
-git fetch --no-tags origin tag v0.7.1
-git switch --detach v0.7.1
+git fetch --no-tags origin tag v0.7.2
+git switch --detach v0.7.2
 npm install
 ```
 
