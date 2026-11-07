@@ -4113,11 +4113,13 @@ describe("视口化验收（页签＝视口）", () => {
 
   // 桩钩（全部缺省＝既有行为不变）：agentsImpl/hostReadImpl/switchImpl/createImpl
   // 让夹具按格控制判定门的四个外部输入（agents 负载 / 宿主单读 / /switch 应答 /
-  // 新建 POST），可 resolve 也可 reject（409 switch_busy、500 等）；inFlightCounter
+  // 新建 POST），可 resolve 也可 reject（409 switch_busy、500 等）；blankCreateImpl
+  // 同理控制空白终端直连 POST（/api/terminal/sessions，「+」菜单与左栏「新建终端」
+  // 无 agent 分支共用）；inFlightCounter
   // 在沙盒里声明真在飞计数（缺省不声明＝typeof 闸落「未抑制」，与既有用例同义）。
-  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, inFlightCounter = false } = {}) {
+  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, blankCreateImpl = null, inFlightCounter = false } = {}) {
     const log = { creates: [], switchBodies: [], closes: [], confirms: [], toasts: [], renders: 0, tabs: 0, empty: 0, rails: 0, streams: 0 };
-    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl };
+    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl, blankCreateImpl };
     const createdTerminal = (body) => {
       state.created += 1;
       const id = `t-created-${state.created}`;
@@ -4177,6 +4179,12 @@ describe("视口化验收（页签＝视口）", () => {
           if (state.createImpl) return Promise.resolve().then(() => state.createImpl(body));
           return Promise.resolve(state.createdTerminal(body));
         }
+        // 空白终端直连 POST（「+」菜单与左栏「新建终端」无 agent 分支共用此路由）。
+        if (method === "POST" && path === "/api/terminal/sessions") {
+          log.blankCreates = (log.blankCreates || []).concat({ body });
+          if (state.blankCreateImpl) return Promise.resolve().then(() => state.blankCreateImpl(body));
+          return Promise.resolve(state.createdTerminal(body));
+        }
         if (method === "GET" && path.startsWith("/api/terminal/sessions/")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length));
           if (state.hostReadImpl) return Promise.resolve().then(() => state.hostReadImpl(id));
@@ -4226,6 +4234,15 @@ describe("视口化验收（页签＝视口）", () => {
       function terminalSwitchLog(event, detail) { log.switchEvents = (log.switchEvents || []).concat({ event, detail }); }
       ${extractFn("terminalSwitchBusySignals")}
       ${extractFn("createAgentTerminal")}
+      // 空白终端两条直连 POST 通路（P1 同伞用例）：菜单态固定未选 agent、目录解析
+      // 与记住上次都让位给桩——钉的是计数伞，不是菜单交互。
+      function terminalCwdInitial() { return "C:/dev/alpha"; }
+      function rememberTerminalCwd() {}
+      function terminalRailAgentId() { return null; }
+      let terminalAddMenuSelection = null;
+      function closeTerminalAddMenu() {}
+      ${extractFn("terminalRailCreateTerminal")}
+      ${extractFn("confirmTerminalAddMenu")}
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
       function enterTerminalSwitchLoading() {
@@ -4279,6 +4296,10 @@ describe("视口化验收（页签＝视口）", () => {
         sync: () => terminalViewportSyncFromHost(),
         rawViewports: () => terminalViewports,
         inFlight: () => (typeof terminalCreateInFlight === "number" ? terminalCreateInFlight : null),
+        // 空白终端两条直连 POST 的驱动口（P1 同伞用例）：左栏「新建终端」无 agent
+        // 分支与页签条「+」菜单分支。
+        createBlank: () => terminalRailCreateTerminal(),
+        confirmAdd: () => confirmTerminalAddMenu(),
       };
     `)(state, log);
     // 沙盒内的 api 在调用时才读 state.*，这里补上外部发放的终端快照即可（new Function
@@ -5041,6 +5062,57 @@ describe("视口化验收（页签＝视口）", () => {
       assert.equal(sandbox.inFlight(), null, "桩环境默认不带计数声明");
       sandbox.beat([TERM_ITEM("t-old"), TERM_ITEM("t-else")]);
       assert.equal(sandbox.viewports().length, 2, "未抑制：无所属会话当拍补建");
+    });
+
+    it("空白终端直连 POST 同伞：在飞不补建，落定（视口认领后）才放计数", async () => {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const { sandbox, log, state } = viewportHarness({
+        items: [], inFlightCounter: true,
+        blankCreateImpl: () => gate.then(() => state.createdTerminal({})),
+      });
+      sandbox.beat([]);
+      // 左栏「新建终端」无 agent 分支：直连 /api/terminal/sessions（不经 createAgentTerminal）。
+      sandbox.createBlank();
+      await flush(); // POST 发出并被夹具压住
+      assert.equal(sandbox.inFlight(), 1, "空白 POST 在飞计数 +1");
+      assert.equal(log.blankCreates.length, 1, "空白 POST 已发出（在飞）");
+      // 在飞窗口：宿主已把新会话入表（先 sessions.set 后回 201），轮询拍打到这一拍
+      sandbox.beat([TERM_ITEM("t-created-1")]);
+      assert.equal(sandbox.viewports().length, 0, "在飞抑制：空白终端不被补建成页签");
+      assert.ok(!(log.switchEvents || []).some((row) => row.event === "viewport-autocreate"), "在飞窗口零补建留痕");
+      // 落定：无视口时 placeTerminal 兜底建一个认领（placement "viewport" 的 fallback）
+      release();
+      await flush();
+      assert.equal(sandbox.inFlight(), 0, "落定 −1");
+      assert.equal(sandbox.viewports().length, 1, "落定后由 placeTerminal 认领，不是轮询补建");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-created-1");
+      // 页签条「+」菜单空白分支同一伞（placement "new"）
+      let release2;
+      const gate2 = new Promise((resolve) => { release2 = resolve; });
+      state.blankCreateImpl = () => gate2.then(() => state.createdTerminal({}));
+      sandbox.confirmAdd();
+      await flush();
+      assert.equal(sandbox.inFlight(), 1, "「+」菜单空白 POST 同伞 +1");
+      sandbox.beat([TERM_ITEM("t-created-1"), TERM_ITEM("t-created-2")]);
+      assert.equal(sandbox.viewports().length, 1, "在飞窗口内仍不补建");
+      release2();
+      await flush();
+      assert.equal(sandbox.inFlight(), 0);
+      assert.equal(sandbox.viewports().length, 2, "「+」落点 placement 'new'：新建视口认领");
+      assert.equal(sandbox.viewports()[1].terminalId, "t-created-2");
+    });
+
+    it("源码钉：两条空白 POST 通路都在计数伞下，−1 排在视口认领之后", () => {
+      for (const name of ["confirmTerminalAddMenu", "terminalRailCreateTerminal"]) {
+        const src = extractFn(name);
+        assert.ok(src.includes('api("POST", "/api/terminal/sessions"'), `${name}：直连空白 POST 在册`);
+        assert.match(src, /terminalCreateInFlight \+= 1/, `${name}：POST 发起前 +1`);
+        const placeAt = src.indexOf("terminalViewportPlaceTerminal(created.id");
+        const releaseAt = src.indexOf("terminalCreateInFlight -= 1");
+        assert.ok(placeAt >= 0 && releaseAt > placeAt,
+          `${name}：计数释放排在视口认领之后（finally 的 −1 在 .then 的 placeTerminal 之后）`);
+      }
     });
   });
 

@@ -6157,11 +6157,14 @@ async function api(method, path, body) {
         if (typeof terminalBackgroundSince !== "undefined") terminalBackgroundSince.delete(id);
       }
     }
-    // 在飞抑制（页签守恒）：本窗新建/保活的 POST 在飞期间，宿主已把新会话入表
-    // 而响应还没回到本窗（terminal-host 先 sessions.set 后回 201 的固有窗口），
-    // 这一拍按「无所属」补建会造出重复页签并落盘。整步跳过即可——下一个 1s 轮询
-    // 拍自然补建，宿主恢复/他窗新建场景只晚一拍，可接受。typeof 闸护单测桩环境
-    // （抽出的函数体不带模块级声明，桩里按未抑制跑，与既有断言一致）。
+    // 在飞抑制（页签守恒）：本窗新建 POST 在飞期间，宿主已把新会话入表而响应还
+    // 没回到本窗（terminal-host 先 sessions.set 后回 201 的固有窗口），这一拍按
+    // 「无所属」补建会造出重复页签并落盘。整步跳过即可——下一个 1s 轮询拍自然补建，
+    // 宿主恢复/他窗新建场景只晚一拍，可接受。伞下覆盖全部三条创建通路：
+    // createAgentTerminal（agent 新建/内切保活）＋两处空白终端直连 POST（页签条
+    // 「+」菜单、左栏「新建终端」无 agent 分支），计数都覆盖到视口认领之后。
+    // typeof 闸护单测桩环境（抽出的函数体不带模块级声明，桩里按未抑制跑，与既有
+    // 断言一致）。
     if (typeof terminalCreateInFlight !== "number" || terminalCreateInFlight === 0) {
       for (const id of Object.keys(terminalBackendSessions)) {
         if (terminalViewportForTerminal(id)) continue;
@@ -6801,7 +6804,8 @@ async function api(method, path, body) {
   //
   // 归属会话另过回合闸（terminalTurnArmed）：输出窗单独不足以证明「回合在跑」——
   // dsh 这类 Ink 自绘 TUI 空闲时也在写 PTY，只看字节会让空闲页周期性转圈，也会
-  // 让内切判定门误走「保护性新开页签」。所以输出窗只在「本回合」内有效：
+  // 让内切判定门把空闲误判在跑、平白走保活分支（旧终端留后台、目标挂当前视口
+  // ——页签数不变，但白留一条后台终端）。所以输出窗只在「本回合」内有效：
   // 该实例一出现在途请求即入回合，回落到无请求且输出窗过期即出回合；出回合后
   // 只有新的请求能重新入回合，界面自绘不再点亮。无归属的普通终端没有回合概念，
   // 维持原输出窗口径（用户在 shell 里跑命令照样看得到进行中）。
@@ -10073,6 +10077,11 @@ async function api(method, path, body) {
     rememberTerminalCwd(cwd);
     closeTerminalAddMenu();
     if (!terminalAddMenuSelection) {
+      // 在飞计数（页签守恒）：空白终端直连 POST 与 createAgentTerminal 同伞——宿主
+      // 同样先 sessions.set 后回 201，在飞窗口内轮询补建照样能造出双页签，且本条
+      // 落点是 placement "new"、不经 attach，absorb 自愈够不着。计数覆盖到视口
+      // 认领之后：placeTerminal 在 .then 里先跑，finally 的 −1 落在其后。
+      if (typeof terminalCreateInFlight === "number") terminalCreateInFlight += 1;
       api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", ...terminalCreateSize() })
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
@@ -10080,7 +10089,10 @@ async function api(method, path, body) {
           armTerminalBootingOverlay(created.id);
           renderTerminalPreviewSession();
         })
-        .catch((error) => toast(panelError(error, "无法新建终端"), true));
+        .catch((error) => toast(panelError(error, "无法新建终端"), true))
+        .finally(() => {
+          if (typeof terminalCreateInFlight === "number") terminalCreateInFlight -= 1;
+        });
       return;
     }
     createAgentTerminal({ agentId: terminalAddMenuSelection, cwd }, { placement: "new" });
@@ -12741,13 +12753,19 @@ async function api(method, path, body) {
       return terminalRailSwitchOrCreateCore({ agentId, cwd });
     }
     const size = terminalCreateSize();
+    // 在飞计数同伞（页签守恒，取舍见 confirmTerminalAddMenu 空白分支的注释）：
+    // 覆盖到视口认领之后，finally 的 −1 排在 .then 的 placeTerminal 之后。
+    if (typeof terminalCreateInFlight === "number") terminalCreateInFlight += 1;
     return api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", cols: size.cols, rows: size.rows })
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
         terminalViewportPlaceTerminal(created.id, "viewport");
         renderTerminalPreviewSession();
       })
-      .catch((error) => toast(panelError(error, "无法新建终端"), true));
+      .catch((error) => toast(panelError(error, "无法新建终端"), true))
+      .finally(() => {
+        if (typeof terminalCreateInFlight === "number") terminalCreateInFlight -= 1;
+      });
   }
 
   // 历史会话点击两分支：resumeCommand 非空 → 按续接契约带 resume 建会话（与一键启动
@@ -12812,10 +12830,11 @@ async function api(method, path, body) {
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
-  // 新建/保活 POST 的在飞计数（页签守恒）：createAgentTerminal 在飞期间 +1、
-  // 落定（含失败）−1；terminalViewportSyncFromHost 的自动补建分支在计数 >0 时
-  // 整步跳过（见该处注释）。模块级声明——createAgentTerminal 被单测按函数体抽
-  // 进桩环境真跑，读写一律走 typeof 闸，桩里等同未抑制（既有行为）。
+  // 新建 POST 的在飞计数（页签守恒）：伞下三条创建通路（createAgentTerminal、
+  // 页签条「+」菜单空白终端、左栏「新建终端」无 agent 分支）在飞期间 +1、落定
+  // （含失败）−1；terminalViewportSyncFromHost 的自动补建分支在计数 >0 时整步
+  // 跳过（见该处注释）。模块级声明——这些函数被单测按函数体抽进桩环境真跑，
+  // 读写一律走 typeof 闸，桩里等同未抑制（既有行为）。
   let terminalCreateInFlight = 0;
   // 在飞的是哪一条会话（垫片上限放宽档的会话级判据，见 terminalSwitchStaleWidened）：
   // 只有「这条会话自己」正在换绑才放宽，否则新建页签武装的占位会让别的会话的旧帧

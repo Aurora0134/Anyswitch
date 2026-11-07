@@ -23,8 +23,9 @@ import { dirname } from "node:path";
 export const TERMINAL_SWITCH_LOG_MAX_BYTES = 512 * 1024;
 
 const MAX_FIELDS = 20;
-const MAX_FIELD_KEY_BYTES = 64;
-const MAX_FIELD_STRING_BYTES = 300;
+// 键名与字符串的帽按 String.length（UTF-16 码元）计量——不是字节数，名随实。
+const MAX_FIELD_KEY_CHARS = 64;
+const MAX_FIELD_STRING_CHARS = 300;
 const MAX_FIELD_ARRAY_ITEMS = 10;
 
 // 字段净化：只留可 JSON 化的标量与标量数组（如命中信号清单），顶层 ts/event
@@ -36,11 +37,11 @@ function sanitizeFields(detail) {
   let count = 0;
   for (const [key, value] of Object.entries(detail)) {
     if (count >= MAX_FIELDS) break;
-    if (!key || key.length > MAX_FIELD_KEY_BYTES || key === "ts" || key === "event") continue;
+    if (!key || key.length > MAX_FIELD_KEY_CHARS || key === "ts" || key === "event") continue;
     if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) {
       out[key] = value;
     } else if (typeof value === "string") {
-      out[key] = value.length > MAX_FIELD_STRING_BYTES ? value.slice(0, MAX_FIELD_STRING_BYTES) : value;
+      out[key] = value.length > MAX_FIELD_STRING_CHARS ? value.slice(0, MAX_FIELD_STRING_CHARS) : value;
     } else if (Array.isArray(value)) {
       out[key] = value
         .filter((item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean")
