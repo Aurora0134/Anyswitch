@@ -5649,4 +5649,156 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
   });
 });
 
+// ── 2026-11-07 resize 回声回归：切到老会话→面板 fit 尺寸→TUI 适配新尺寸重渲染
+// →几秒内切走，统一判据把回声当「非回显输出」判在跑 → 老会话被保留成僵尸
+// （实测 22 分钟无人收尸）＋关页签误弹「仍在运行」确认 ──
+// 活体复现（dsh 终端，零输入零请求零真实工作）：空闲 dsh 静默 28s 后，一次 resize
+// 让 lastActiveAt 跳到 0.2s 新；面板把终端挂进视口的 fit 必然可能改尺寸。宿主随
+// 快照下发 lastResizeAt（真变尺寸的 resize 才打戳），判据把「紧跟 resize 的输出」
+// 豁免出「在跑」证据——那是换尺寸的回声，不是工作。
+describe("2026-11-07 resize 回声回归（切到→重渲染→快切走被误判在跑）", () => {
+  // 切到后 1.2s：面板 fit 触发 resize（此刻打戳），TUI 重渲染输出在 1s 前落地。
+  // 时刻按真实 Date.now() 相对化：判据层显式传 now，行为层台架内部用真时钟。
+  const ECHO = (now = Date.now()) => ({
+    id: "dsh-echo-1", label: "DeepSeek Harness", backend: true, agentId: "dsh",
+    agent: { endpointId: "dsh", instanceId: "dsh-1", busy: false },
+    status: "idle", metrics: { activeRequests: 0 },
+    backendState: {
+      status: "running",
+      lastActiveAt: now - 1000,
+      lastInputAt: now - 145452,
+      spawnedAt: now - 18432563,
+      createdAt: now - 18432567,
+      lastResizeAt: now - 1200,
+    },
+  });
+
+  const running = (session, now = Date.now()) => new Function("session", "now", `
+    ${extractFn("terminalBusyByOutput")}
+    ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalSessionRunning")}
+    return terminalSessionRunning(session, now);
+  `)(session, now);
+
+  it("回声判据：resize 后 2s 内落地的重渲染输出不当「在跑」（其余信号全静默）", () => {
+    const now = Date.now();
+    assert.equal(running(ECHO(now), now), false, "切到→重渲染→快切走：判不在跑，照旧可收");
+    // 戳缺位＝老宿主快照、或宿主静默门没打戳的流式形态：无回声可判，走原口径。
+    const noStamp = ECHO(now);
+    delete noStamp.backendState.lastResizeAt;
+    assert.equal(running(noStamp, now), true, "缺位＝回声判据不生效，不倒退既有保护");
+  });
+
+  it("顺序闸与窗值：流式会话不因 resize 被豁免误杀", () => {
+    const now = Date.now();
+    // 输出晚于戳 4s（回声窗 2s 之外还在出字）＝在流式，不是回声。
+    const streaming = ECHO(now);
+    streaming.backendState.lastResizeAt = now - 5000;
+    assert.equal(running(streaming, now), true, "输出晚于戳 4s（流式在续）：保活");
+    // 戳比最近一次输出还新＝输出停在 resize 之前、戳后没有新输出，不是回声（防御闸；
+    // 真流式的保护在宿主侧——出字中的 resize 根本不打戳，见 terminal-host 同名契约）。
+    const streamBefore = ECHO(now);
+    streamBefore.backendState.lastResizeAt = now - 200;
+    assert.equal(running(streamBefore, now), true, "顺序闸：resize 晚于输出的不算回声");
+  });
+
+  it("回声戳随 resize 响应即达：不等 1s 轮询换血，亚秒内切走也判得出", async () => {
+    const session = ECHO(Date.now());
+    const withStamp = new Function("session", `
+      function api() { return Promise.resolve({ cols: 120, rows: 40, lastResizeAt: 1794000000000 }); }
+      ${extractFn("postTerminalResize")}
+      return postTerminalResize(session, 120, 40);
+    `)(session);
+    await withStamp;
+    assert.equal(session.backendState.cols, 120, "cols 照旧合并");
+    assert.equal(session.backendState.rows, 40, "rows 照旧合并");
+    assert.equal(session.backendState.lastResizeAt, 1794000000000, "戳随响应落进 backendState");
+    // 无戳响应（流式形态宿主不打戳）：不抹既有旧值。
+    const noStamp = new Function("session", `
+      function api() { return Promise.resolve({ cols: 130, rows: 40 }); }
+      ${extractFn("postTerminalResize")}
+      return postTerminalResize(session, 130, 40);
+    `)(session);
+    await noStamp;
+    assert.equal(session.backendState.cols, 130, "二次 resize 照旧合并");
+    assert.equal(session.backendState.lastResizeAt, 1794000000000, "无戳响应不抹旧戳");
+  });
+
+  const retire = (session) => {
+    const log = { closed: [], saved: 0 };
+    const fn = new Function("session", "log", `
+      const terminalBackgroundIds = new Set();
+      const terminalBackgroundSince = new Map();
+      const viewport = { id: "viewport-1", terminalId: null, background: [] };
+      function saveTerminalViewports() { log.saved += 1; }
+      function terminalSessionFor() { return session; }
+      function terminalCloseTerminal(id) { log.closed.push(id); }
+      ${extractFn("terminalViewportRefs")}
+      ${extractFn("terminalViewportRefAdd")}
+      ${extractFn("terminalBusyByOutput")}
+      ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSessionRunning")}
+      ${extractFn("terminalViewportRetire")}
+      return {
+        go: (id) => terminalViewportRetire(viewport, id),
+        background: () => Array.from(terminalBackgroundIds),
+      };
+    `)(session, log);
+    return { log, fn };
+  };
+
+  it("切走回收：回声态的老会话照旧回收，不再进后台攒僵尸", () => {
+    const { log, fn } = retire(ECHO());
+    assert.equal(fn.go(ECHO().id), false, "判不在跑＝照旧回收");
+    assert.deepEqual(log.closed, ["dsh-echo-1"], "空闲槽走既有 /close（进程树收掉、看板卡随 pid 收行）");
+    assert.deepEqual(fn.background(), [], "不进后台集合");
+  });
+
+  const close = (session) => {
+    const log = { confirms: [], posts: [] };
+    const returned = new Function("log", "session", `
+      const terminalBackendSessions = { [session.id]: session };
+      let activeTerminalPreviewId = session.id;
+      let terminalViewports = [];
+      const terminalBackgroundIds = new Set();
+      const terminalBackgroundSince = new Map();
+      const terminalHollowStreak = new Map();
+      const terminalDoneUnread = new Set();
+      const terminalPrevWorking = new Map();
+      const terminalTurnArmed = new Set();
+      const window = { confirm: (msg) => { log.confirms.push(msg); return false; } };
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function saveTerminalViewports() {}
+      function api(method, path) { log.posts.push({ method, path }); return Promise.resolve({ ok: true }); }
+      function toast() {}
+      function panelError(err, fallback) { return fallback; }
+      ${extractFn("terminalBusyByOutput")}
+      ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSessionRunning")}
+      ${extractFn("terminalViewportRefDrop")}
+      ${extractFn("terminalCloseTerminalNow")}
+      ${extractFn("terminalCloseTerminal")}
+      return terminalCloseTerminal(session.id);
+    `)(log, session);
+    return { returned, log };
+  };
+
+  it("点 × 关闭：回声态的老会话不再误弹「仍在运行」确认", () => {
+    const { returned, log } = close(ECHO());
+    assert.deepEqual(log.confirms, [], "空闲老会话关页签零确认（证据 1 收口）");
+    assert.equal(returned, true, "照常关");
+    assert.deepEqual(log.posts.map((p) => p.path), ["/api/terminal/sessions/dsh-echo-1/close"], "宿主 /close 通路原样");
+  });
+
+  it("源码契约：回声豁免只挂在杀前判据里，且带顺序闸", () => {
+    const src = extractFn("terminalSessionRunning");
+    assert.ok(src.includes("lastResizeAt"), "判据读宿主的 resize 戳");
+    assert.ok(/resizedAt <= .*lastActiveAt|lastResizeAt\) <= |<= state\.lastActiveAt/.test(src),
+      "顺序闸：resize 必须早于输出（流式不误豁免）");
+    // 显示层口径不许动：回声只影响杀前判据，转圈仍走 terminalSessionBusyFromSignals。
+    assert.ok(!extractFn("terminalBusyByOutput").includes("lastResizeAt"),
+      "terminalBusyByOutput 本体不读 resize 戳（显示层口径零改动）");
+  });
+});
+
 

@@ -520,8 +520,17 @@ function snapshot(session) {
     pid: session.pid,
     status: session.pty ? "running" : "exited",
     exitCode: session.exitCode,
+    // 「死于重启」判定字段（restore 时按记录算出，见 restore 内 deathUnobserved 的
+    // 注释）：本代宿主没见过这条会话的死时为 true，面板据此在被动重挂时自动复活。
+    // 本代 spawn 过或 onExit 到过都会清标；只在快照出现、不进落盘记录（restore
+    // 每代重算）。老面板不认识此字段，缺位按 false 走原逻辑。
+    ...(session.deathUnobserved ? { deathUnobserved: true } : {}),
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
+    // resize 回声戳（2026-11-07）：真变尺寸的 resize 时刻。面板杀前判据拿它把「紧跟
+    // resize 的 TUI 重渲染输出」豁免出「在跑」证据。老宿主快照没有这个字段，缺席、
+    // 前端按缺位走原口径（契约字段名不可改）。
+    ...(session.lastResizeAt !== undefined ? { lastResizeAt: session.lastResizeAt } : {}),
     // 最近一次「可见文本」变化（毫秒 epoch）：纯颜色重绘不刷新它。老宿主快照没有
     // 这个字段，下发时缺席、前端按 undefined 处理（契约字段名不可改）。
     ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
@@ -826,6 +835,9 @@ export function createTerminalHost({
       pid: session.pid,
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt,
+      // 与 snapshot 同源（契约字段）：resize 回声判据的锚点。老记录没有这一项，
+      // 恢复时缺省为 undefined（面板按无回声走原口径）。
+      ...(session.lastResizeAt !== undefined ? { lastResizeAt: session.lastResizeAt } : {}),
       // 与 snapshot 同源（契约字段）：老记录没有这一项，恢复时缺省为 undefined。
       ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
       spawnedAt: session.spawnedAt,
@@ -1261,6 +1273,13 @@ export function createTerminalHost({
         const session = {
           ...rest,
           pty: null,
+          // 死得没人看见（2026-11-07 用户裁决：死于重启的会话，回来看到即自动复活）：
+          // 记录里没有退出码＝上一代宿主倒下时这个进程还活着、它的死从未被观察到
+          // ——宿主/面板重启连带杀掉的正是这一类。被观察过的死（正常跑完、用户退出、
+          // 崩溃）都会在记录里留下退出码，不在此列。快照随此字段下发，面板拿它决定
+          // 被动重挂要不要替用户复活；本代 spawn/onExit 即清标（见那两处），此后再死
+          // 只能是被观察到的死或下一次宿主换代的死（下次 restore 重算）。
+          deathUnobserved: item.exitCode == null,
           // 进程代际：每次 spawn 换一个记号，onExit/onData 只认自己那一代。
           // 盘上恢复的会话没有活进程，代际从 0 起。
           ptyGeneration: 0,
@@ -1595,6 +1614,9 @@ export function createTerminalHost({
       // 这一代进程已经结束：无论是不是当前代，都把它从待杀清单里摘掉——死 pid
       // 会被系统复用，留在清单里就等于把号发给别人的进程当成本会话的树。
       if (Number.isInteger(child.pid)) session.livePids?.delete(child.pid);
+      // 死被看到了（哪怕只是上一代迟到的退出通知）：「死于重启」资格就此失效，
+      // 之后的复活只认主动点击（见 restore 内 deathUnobserved 的注释）。
+      session.deathUnobserved = false;
       clearTimeout(firstFrameTimer);
       if (!isCurrent()) {
         logger.warn?.(`[terminal-host] stale exit ignored (pid=${child.pid}, generation=${generation}, current=${session.ptyGeneration})`);
@@ -1720,6 +1742,10 @@ export function createTerminalHost({
   }
 
   function spawnSession(session) {
+    // 进程换代即清「死于重启」标：这代宿主已接手过这条会话的死（复活即处置），
+    // 复活失败也照清——起不来的进程留给显式点击重试，被动回来不再反复自动拉
+    // （见 restore 内 deathUnobserved 的注释）。
+    session.deathUnobserved = false;
     // 进程生日（新建与 restart/内切/复活都走这一咽喉）：面板的孵化豁免窗锚点。
     // 记在这而不是 createdAt 上——restart 保记录换进程，createdAt 不动，拿它当
     // 生日会把换壳后的 banner/续接重放漏出豁免窗（误转圈＋内切门误判 working）。
@@ -2058,6 +2084,15 @@ export function createTerminalHost({
         const sizeChanged = cols !== session.cols || rows !== session.rows;
         session.cols = cols;
         session.rows = rows;
+        // resize 回声戳（2026-11-07）：真变尺寸、且 resize 时 PTY 已静默 ≥2s 才记
+        // 时刻——「静默后的重渲染」才是回声；跨 resize 持续出字的（流式）不打戳，
+        // 面板的输出窗照旧保它（面板的顺序闸拦不住持续流式：输出永远晚于戳，戳位
+        // 就是它的防线）。静默门槛与面板回声窗同值 2s——两只是同一份契约，改要一起
+        // 改。同尺寸 resize 走上面的短路天然不记：没动 PTY 就没有回声。放在
+        // pty.resize 之前，保证重渲染输出的时刻晚于它（面板的顺序闸才判得出「回声」）。
+        const stampedResizeEcho = sizeChanged
+          && !(Number.isFinite(session.lastActiveAt) && Date.now() - session.lastActiveAt < 2000);
+        if (stampedResizeEcho) session.lastResizeAt = Date.now();
         try {
           if (!session.screen) session.screen = createScreenMirror({ cols, rows });
           else session.screen.resize(cols, rows);
@@ -2070,7 +2105,12 @@ export function createTerminalHost({
         // 自己那份记录里，所以只置这一条会话的脏标。
         if (sizeChanged) markSessionDirty(session);
         await persistSession(session);
-        return json(res, 200, { ok: true, cols, rows });
+        return json(res, 200, {
+          ok: true, cols, rows,
+          // 戳随响应即达（不等面板 1s 轮询整表换血）：亚秒内切走也判得出回声。
+          // 只在本次打了戳才带字段——流式形态的响应不带，面板侧不抹旧值。
+          ...(stampedResizeEcho ? { lastResizeAt: session.lastResizeAt } : {}),
+        });
       }
       if (action === "restart" && req.method === "POST") {
         // Optional env re-injection: a caller that holds fresh credentials

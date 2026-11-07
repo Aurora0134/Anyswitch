@@ -461,12 +461,12 @@ async function api(method, path, body) {
       return;
     }
     if (currentView === "terminal") {
-      // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。
-      pollTerminalSessions();
-      // 隐藏期这条流连同它的未解析积压已经被拆掉，画面按宿主镜像重建一次。
-      // revive:false——切回来不是"用户挑了这条会话"，进程已退就只回放最后一屏，
-      // 不因为回来了就替他重开一个空壳；要新壳仍然点页签，那是既有通路。
-      renderTerminalPreviewSession({ revive: false });
+      // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。画面重建排在
+      // 这拍数据之后——生死判定（terminalSessionShouldRevive）要用宿主现值，拿
+      // 隐藏前的旧「running」去判会把死于重启的会话漏成死屏干等。轮询早退（未
+      // 就绪/在飞）时这拍照旧立即重建，漏判由 1s 轮询里的
+      // maybeAutoReviveTerminalSession 兜住。
+      pollTerminalSessions().finally(() => renderTerminalPreviewSession({ revive: false }));
       return;
     }
     if (!boardVisible()) return;
@@ -5525,12 +5525,14 @@ async function api(method, path, body) {
   // 单测按函数体抽取，模块级量不随行，故各读写点用 typeof 闸护（同 renderTerminalRail
   // 的桩环境惯例）；闸护落空即视为桩环境，不记账。
   const terminalBackgroundSince = new Map();
-  // zcode 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧。
-  // 10min 是经验值、不是实测出的精确阈值：调小会撞上两类残余误杀面——停在权限确认框
-  // 等用户超过 10min 的会话，以及 MCP 宿主内不起子进程的长工具（进程树看不到、在途数
-  // 也是 0，现有信号区分不了）。另两条既定取舍：刷新恢复的后台集合无起点记账，本页
-  // 永不回收；面板隐藏／不在终端页时整拍跳过，拿陈旧计数做杀判据等于盲杀。
-  const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
+  // agent 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧
+  //（2026-11-07 从 zcode 扩到全部 agent 会话：误判保留的僵尸不止 zcode 攒——dsh 这类
+  // 自绘终端同样宿主不自己退）。10min 是经验值、不是实测出的精确阈值：调小会撞上两类
+  // 残余误杀面——停在权限确认框等用户超过 10min 的会话，以及 MCP 宿主内不起子进程的
+  // 长工具（进程树看不到、在途数也是 0，现有信号区分不了）。另两条既定取舍：刷新恢复
+  // 的后台集合无起点记账，本页永不回收；面板隐藏／不在终端页时整拍跳过，拿陈旧计数做
+  // 杀判据等于盲杀。
+  const TERMINAL_BACKGROUND_IDLE_MS = 10 * 60 * 1000;
   // /close 被宿主拒关后的重试间隔：轮询 1s 一拍，持续失败不能变成每僵住一条终端
   // 就 1 req/s 空转。失败只留一条开发者日志（不是界面文案），退避满再试。
   const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;
@@ -5831,8 +5833,8 @@ async function api(method, path, body) {
   // 口径：exited 优先（迟到的活跃信号不能把已退出的进程重新判忙）；此后任一信号命中
   // 即按在跑处置，判不准也倒向在跑——宁可多留一个后台进程，不误杀用户正在做的事。
   // 显示层的转圈仍走回合闸（terminalSessionBusyFromSignals），不受这里影响。
-  // 已知代价：空闲仍持续重绘的 TUI 会被留在后台，需用户自己点 × 结束（用户裁决：
-  // 宁可多留、不可误杀）。
+  // 已知代价：空闲仍持续重绘的 TUI 会被留在后台（用户裁决：宁可多留、不可误杀）；
+  // 后台回收器（P-D）给 agent 会话兜一道 10 分钟静默收尸，手开 shell 仍只有用户点 ×。
   function terminalSessionRunning(session, now = Date.now()) {
     if (!session) return true; // 判不准：无会话记录＝不可杀
     const state = session.backendState ? session.backendState : null;
@@ -5845,7 +5847,23 @@ async function api(method, path, body) {
     if (terminalCommandRunning(session)) return true;
     // 最近确有非回显输出：输出窗自带孵化豁免与键入回显抑制，且不带回合闸——刷新页面
     // 丢掉内存里的闸、或请求从未归属到这条会话时，仍能保住正在出字的终端。
-    if (terminalBusyByOutput(session, undefined, now)) return true;
+    if (terminalBusyByOutput(session, undefined, now)) {
+      // resize 回声豁免（2026-11-07）：面板把终端挂进视口时会 fit 尺寸，宿主 resize
+      // 后 TUI 适配新尺寸的重渲染也走 emit、也顶热输出窗——切到老会话后几秒内切走
+      // 会被这里保成后台僵尸（实测：resize 让静默 28s 的 lastActiveAt 跳到 0.2s 新，
+      // 零输入零请求）。判据：最近一次输出紧跟在宿主 resize 之后＝回声，不当「在跑」。
+      // 两道闸保流式：宿主只对「resize 时已静默 ≥2s」的会话打戳（跨 resize 持续
+      // 出字的流式没有戳——顺序闸拦不住持续流式，戳位就是它的防线）；这里再要求
+      // 戳早于输出（输出停在 resize 前的不算回声）且落点距戳 2s 内（实测重渲染
+      // <0.2s 落地、再留一拍）。已知残余：静默暂停中被 resize、随后 2s 内恰好恢复
+      // 流式的会话，恢复输出的头 2s 仍会被误豁免——面板侧无法再细分，窄窗接受。
+      // 老宿主快照没有 lastResizeAt：缺位＝无回声可判，走原口径。
+      const resizedAt = state.lastResizeAt;
+      const echoOutput = Number.isFinite(resizedAt)
+        && resizedAt <= state.lastActiveAt
+        && state.lastActiveAt - resizedAt < 2000;
+      if (!echoOutput) return true;
+    }
     // 手开终端屏尾护栏（A1）：屏实例只在终端视图挂载后才有；没屏就交回上面四条信号，
     // 不把「判不了」当「判为不在跑」。
     if (typeof terminalXterm !== "undefined" && typeof activeTerminalPreviewId !== "undefined"
@@ -5888,12 +5906,9 @@ async function api(method, path, body) {
     if (terminalSessionRunning(session)) {
       // 引用记账：关页签时按它算「这条对话还有没有别的入口」。
       terminalViewportRefAdd(viewport, terminalId);
-      // 进后台起点记账（后台回收器逐拍扫这张表）。
+      // 进后台起点记账（后台回收器逐拍扫这张表；端点归属扫描拍按当拍会话数据现取）。
       if (typeof terminalBackgroundSince !== "undefined") {
-        terminalBackgroundSince.set(terminalId, {
-          at: Date.now(),
-          endpointId: (session.agent && session.agent.endpointId) || session.agentId || null,
-        });
+        terminalBackgroundSince.set(terminalId, { at: Date.now() });
       }
       return true;
     }
@@ -5922,14 +5937,9 @@ async function api(method, path, body) {
         if (previous && previous !== terminalId) {
           if (keepPrevious) {
             terminalViewportRefAdd(viewport, previous);
-            // 内切保活路径的进后台起点：端点归属当场取，取不到记 null，由扫描拍按
-            // 当时的会话归属复核（不能因为归档慢一拍就永久放弃回收）。
+            // 内切保活路径的进后台起点：回收判据扫描时按当拍会话归属现判。
             if (typeof terminalBackgroundSince !== "undefined") {
-              const kept = typeof terminalSessionFor === "function" ? terminalSessionFor(previous) : null;
-              terminalBackgroundSince.set(previous, {
-                at: Date.now(),
-                endpointId: (kept && kept.agent && kept.agent.endpointId) || (kept && kept.agentId) || null,
-              });
+              terminalBackgroundSince.set(previous, { at: Date.now() });
             }
           } else {
             terminalViewportRetire(viewport, previous);
@@ -5971,13 +5981,16 @@ async function api(method, path, body) {
     return true;
   }
 
-  // 后台回收器（P-D）：zcode 这类自绘终端进后台空转时宿主不会自己退（zcode-global
-  // 的在途数恒挂、输出窗恒热），攒成僵尸会话白烧资源。只对同时命中的终端直接发
-  // /close：① 在后台集合且有进后台起点；② 端点归属 zcode；③ 实例行在途数为零；
-  // ④ 进程树不忙；⑤ 最近可见活动已静默 10min；⑥ 最近无键入（或已过去 10min）；
-  // ⑦ 进后台已满 10min。
+  // 后台回收器（P-D）：agent 终端进后台后判据全静默即收尸。zcode 这类自绘终端空闲
+  // 也在写 PTY、宿主不会自己退（输出窗恒热），2026-11-07 起收面从 zcode 扩到全部
+  // agent 会话——切走误判保留的老会话（resize 回声修复前的主病灶）与 dsh/kimi 的
+  // 自绘空转同样攒僵尸白烧资源（实测 22 分钟无人收尸）。只对同时命中的终端直接发
+  // /close：① 在后台集合且有进后台起点；② 是 agent 会话（有端点归属——手开 shell
+  // 不收：用户可能在后台跑静默长命令，进程树与输出窗都看不见它）；③ 实例行在途数
+  // 为零；④ 进程树不忙；⑤ 最近可见活动已静默 10min；⑥ 最近无键入（或已过去
+  // 10min）；⑦ 进后台已满 10min。
   // 为什么不走 terminalCloseTerminal：它会对「在跑」的会话弹 window.confirm——回收
-  // 是后台自洁动作，弹窗即新增交互与文案（本轮硬约束零新增文案、零 toast）。失败
+  // 是后台自洁动作，弹窗即新增交互与文案（硬约束零新增文案、零 toast）。失败
   // 静默等下一拍（宿主拒关就留着，绝不重复提示）。
   // 判据用 lastVisibleAt 而不是 lastActiveAt：后者被自绘刷新（欢迎屏扫光）恒新，
   // 拿它做判据回收器永不触发；lastVisibleAt 缺位（老宿主快照）＝不知道有没有人在看，
@@ -6006,13 +6019,13 @@ async function api(method, path, body) {
       const since = typeof terminalBackgroundSince !== "undefined" ? terminalBackgroundSince.get(id) : null;
       // 无起点记账（刷新恢复的后台集合）＝不知道它何时进的后台，不回收。
       if (!since || !Number.isFinite(since.at)) continue;
-      // 记账里的端点只是快筛；null（内切保活时取不到）留给下面按会话归属复核。
-      if (since.endpointId && since.endpointId !== "zcode") continue;
-      if (now - since.at <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      if (now - since.at <= TERMINAL_BACKGROUND_IDLE_MS) continue;
       const session = terminalSessionFor(id);
       if (!session) continue;
+      // 只收 agent 会话（归属优先、agentId 兜底）：手开 shell 没有这一层归属，
+      // 用户可能在后台跑静默长命令——进程树与输出窗都看不见的它，唯一防线就是不收。
       const endpointId = (session.agent && session.agent.endpointId) || session.agentId || null;
-      if (endpointId !== "zcode") continue;
+      if (!endpointId) continue;
       // 计数只认实例行：聚合端点的 <endpoint>-global 是整机合计，不是这条终端的在途量。
       const instance = terminalInstanceRow(typeof terminalAgentsPayload !== "undefined" ? terminalAgentsPayload : null, session.agent);
       const count = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
@@ -6022,9 +6035,9 @@ async function api(method, path, body) {
       const visibleAt = Number.isFinite(session.lastVisibleAt)
         ? session.lastVisibleAt
         : (state && Number.isFinite(state.lastVisibleAt) ? state.lastVisibleAt : null);
-      if (!(Number.isFinite(visibleAt) && now - visibleAt > TERMINAL_BACKGROUND_ZCODE_IDLE_MS)) continue;
+      if (!(Number.isFinite(visibleAt) && now - visibleAt > TERMINAL_BACKGROUND_IDLE_MS)) continue;
       const inputAt = state ? state.lastInputAt : undefined;
-      if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt <= TERMINAL_BACKGROUND_IDLE_MS) continue;
       targets.push(id);
     }
     if (!targets.length) return;
@@ -7581,7 +7594,14 @@ async function api(method, path, body) {
     return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
-          session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
+          session.backendState = {
+            ...session.backendState,
+            cols: result.cols,
+            rows: result.rows,
+            // 回声戳随响应即达（不等 1s 轮询整表换血）：亚秒内切走也判得出回声。
+            // 只在宿主本次打了戳才带字段——流式形态的响应不带，这里不抹旧值。
+            ...(Number.isFinite(result.lastResizeAt) ? { lastResizeAt: result.lastResizeAt } : {}),
+          };
         }
         return result;
       })
@@ -8398,9 +8418,10 @@ async function api(method, path, body) {
 
   // 复活一条已退出的会话：走服务端 /revive，由它按当前安装与设置重新组装
   // 启动参数与凭据（env 从不落盘，宿主自己重启拿不到这些值，起来的就是
-  // agent 的原生实例）。只服务点页签等主动通路（键入不复活，见
-  // sendTerminalInput）；同一会话的并发复活合并成一次——快速重入时上一
-  // 次复活可能还在路上，重复打只会多起一个进程。
+  // agent 的原生实例）。服务显式通路与「死于重启」的自动复活（判据见
+  // terminalSessionShouldRevive；键入不复活，见 sendTerminalInput）；同一会话的
+  // 并发复活合并成一次——快速重入时上一次复活可能还在路上，重复打只会多起
+  // 一个进程。
   const terminalReviveInflight = new Map();
   function reviveTerminalSession(session) {
     if (!session?.backend) return Promise.resolve(null);
@@ -8418,6 +8439,34 @@ async function api(method, path, body) {
       .finally(() => terminalReviveInflight.delete(session.id));
     terminalReviveInflight.set(session.id, run);
     return run;
+  }
+
+  // 轮询驱动的自动复活触发（「正看着」面，2026-11-07 裁决的收口）：首连/切回的渲染
+  // 窗口之外，唯一漏掉的形态是「人就在终端页看着，宿主在眼皮底下换代」——流断了
+  // 走 EventSource 原生重连，画面停在旧帧，没有任何重建路径再经过
+  // terminalSessionShouldRevive。轮询是会话生死的唯一持续真值源，判据与渲染层同
+  // 口径：显示中的会话、死于重启（快照 deathUnobserved）、人正在看（终端页可见、
+  // 页面不隐藏）、没有在飞的复活。触发即走 renderTerminalPreviewSession——停放与
+  // 建流前缀在同一任务里跑完（垫片先挂后撤、旧帧不上屏），屏上表现仍是「空屏＋
+  // 正在加载、从无到有」。循环安全有两道：在飞去重挡住复活窗口内的重触发；
+  // terminalAutoReviveTried 挡住 HTTP 层反复失败的自动重试（起不来的进程留给
+  // 显式点击；服务端 spawn 即清标，成功路径天然收敛）。
+  const terminalAutoReviveTried = new Set();
+  function maybeAutoReviveTerminalSession() {
+    if (currentView !== "terminal" || document.hidden) return;
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session || terminalAutoReviveTried.has(session.id)) return;
+    if (!terminalSessionShouldRevive(session, { revive: false })) return;
+    if (terminalReviveInflight.has(session.id)) return;
+    terminalAutoReviveTried.add(session.id);
+    renderTerminalPreviewSession({ revive: false });
+  }
+  // 会话回到运行态即解除一次性的自动尝试记账：宿主再次换代时这一会话仍要能自动
+  // 复活（Set 只防 HTTP 层的反复失败，不防「死了又活」的正常轮回）。
+  function rearmTerminalAutoRevive() {
+    for (const session of Object.values(terminalBackendSessions)) {
+      if (session?.backend && session.backendState?.status === "running") terminalAutoReviveTried.delete(session.id);
+    }
   }
 
   // 键入的唯一出口。进程已退（服务端 409 session_exited）时不复活：退出可能
@@ -8678,7 +8727,8 @@ async function api(method, path, body) {
     if (!session?.backend) return;
     if ($("terminalView")?.hidden) return;
     if (!terminalHostMeasurable()) return;
-    // revive:false——这是被动补挂，不是用户挑了这条会话：进程已退就只回放最后一屏。
+    // revive:false＝被动补挂，不是用户挑了这条会话：正常退出的会话只回放最后一屏；
+    // 「死于重启」的照常自动复活（terminalSessionShouldRevive 的口径）。
     terminalStreamRemounting = true;
     terminalStreamDeferred = false;
     terminalDeferredSessionId = null;
@@ -8738,6 +8788,19 @@ async function api(method, path, body) {
     }, wait);
   }
 
+  // 复活判定（唯一口径，主动/被动两路都从这里走）：显式动作（revive:true，点页签
+  // /点左栏行等）对一切已退会话复活；被动重挂（首连、切回前台、回终端页补挂）只
+  // 认「死于重启」的会话——宿主换代连带杀掉、死未被观察到的那类（快照
+  // deathUnobserved，宿主按记录里有没有退出码算出）。正常跑完/主动退出的会话不
+  // 自动复活：最后一帧就是它留给用户的现场，自动拉起会把「退出→自动重启→再退出」
+  // 的循环请回来（2026-11-02 砍键入复活正是为了它）。
+  function terminalSessionShouldRevive(session, { revive = false } = {}) {
+    if (!session?.backend) return false;
+    const state = session.backendState;
+    if (!state || state.status !== "exited") return false;
+    return revive || state.deathUnobserved === true;
+  }
+
   async function connectTerminalStream(session, { revive = true } = {}) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
@@ -8782,14 +8845,20 @@ async function api(method, path, body) {
       for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
       return;
     }
-    // 从上次中断继续回来的会话进程已死（快照 status: exited）：点开页签先在原
-    // cwd/壳上重启它再建流——一次点击就是新壳，否则键入只会落进 409。
-    // revive:false 是被动重挂（切回前台、回终端页补挂），不等于用户挑了这条会话：
-    // 进程已退就只回放宿主镜像里的最后一屏，绝不替用户重开（挂流并不要求进程还在；
-    // revive 走的重开路由保史——历史归页签，新进程续写在旧画面下方）。
-    // 复活走 /revive 而不是裸 restart：agent 会话的凭据只在内存里，裸 restart 起来
-    // 的是没有 relay 地址与 token 的原生实例（也就是一次空白新对话）。
-    if (revive && session.backendState?.status === "exited") {
+    // 从上次中断继续回来的会话进程已死（快照 status: exited）：先在原 cwd/壳上
+    // 重启它再建流，否则键入只会落进 409。触发收口在 terminalSessionShouldRevive：
+    // 显式动作对一切已退会话复活；被动重挂只对「死于重启」的会话复活（2026-11-07
+    // 用户裁决：回来看到这一类就立刻自动拉起，不再摆死屏干等），正常退出的停帧
+    // 等点击。挂流并不要求进程还在；revive 走的重开路由保史——历史归页签，新进程
+    // 续写在旧画面下方。复活走 /revive 而不是裸 restart：agent 会话的凭据只在内存
+    // 里，裸 restart 起来的是没有 relay 地址与 token 的原生实例（也就是一次空白新
+    // 对话）。
+    if (terminalSessionShouldRevive(session, { revive })) {
+      // 复活期间屏上不留旧帧（同一条用户裁决）：垫片在此刻撤掉，停放与建流前缀
+      // 在同一任务里同步跑完、旧帧没机会上屏，重置后的空屏与「正在加载」占位
+      // 直接露出来——死屏注定被新进程的画面替掉，垫着只多看几秒旧信息。复活
+      // 失败时流照开，宿主保住的镜像照旧回放出最后一帧（见 restart 路由 A1）。
+      dropTerminalStaleScreen();
       await reviveTerminalSession(session);
       // await 期间入口那道闸已经过期：可能已转后台/页被藏起，也可能已被新的连接顶替
       // （closeTerminalStream 换掉了实例）。这两种情况下都不该再开流。
@@ -9170,6 +9239,10 @@ async function api(method, path, body) {
     try {
       const data = await api("GET", "/api/terminal/sessions");
       rebuildTerminalBackendSessions(data.sessions);
+      // 生死先判再算读数：显示中的会话若在本拍被认定「死于重启」，先走自动复活
+      //（渲染层口径见 maybeAutoReviveTerminalSession），读数渲染随后照常跟进。
+      rearmTerminalAutoRevive();
+      maybeAutoReviveTerminalSession();
       await refreshRouteRuntimeCache();
       const agentsData = await api("GET", "/api/agents").catch(() => null);
       terminalAgentsPayload = agentsData?.agents ?? null;
@@ -10115,9 +10188,10 @@ async function api(method, path, body) {
     self.inFlight = fetchTerminalSessions().then(() => {
       terminalFirstConnectSettled = true;
       syncTerminalAddBtn();
-      // 首连是被动挂载：进程已退只回放最后一屏，不替用户重开。页面加载时
-      // 静默起一个新 agent 会让「历史还在」的会话看起来一切正常，实际已经
-      // 换成一个空白新对话；要新壳由用户点页签或点重开决定。
+      // 首连是被动挂载：正常退出的会话只回放最后一屏（点页签才复活，键入不复活）；
+      // 「死于重启」的会话由 terminalSessionShouldRevive 自动复活——宿主换代杀掉
+      // 的进程是意外死，回来即拉回（2026-11-07 用户裁决）。复活能接回原对话
+      //（凭据+续接身份在 /revive 重组装），不会变成空白新对话。
       renderTerminalPreviewSession({ revive: false });
       pollTerminalSessions();
       syncTerminalActivityStream();
@@ -12983,8 +13057,9 @@ async function api(method, path, body) {
       // 就只剩那块垫片、背后没有任何活流——兜底计时器到点撤走垫片，剩一块没有覆盖层
       // 的空白，直到用户手动切页签。这与宿主侧「spawn 抛错时保住旧屏」正好配套：宿主
       // 保住的画面要有人去取，否则等于白保。
-      // revive:false 是被动重挂——不是用户挑了这条会话，不许替用户重启已退的进程
-      // （同上方 revive 口径）。重挂拿到的是宿主镜像的整屏回放，画面随即恢复。
+      // revive:false＝被动重挂——不是用户挑了这条会话，正常退出的会话不自动复活
+      //（口径见 terminalSessionShouldRevive；「死于重启」的照常自动复活）。重挂拿到
+      // 的是宿主镜像的整屏回放，画面随即恢复。
       const resumeStream = () => {
         // 切换态在飞：撤加载层并重挂宿主镜像回放，一条龙恢复旧画面；没有切换态时
         // 走原有的被动重挂。typeof 闸护单测桩环境。
@@ -13900,8 +13975,8 @@ async function api(method, path, body) {
       // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在
       // 离开本页后保持存活——已有实例的再次进入只补一次 fit，不重建不重放。
       // 例外是挂过后台：那条流连同实例已被可见性闸拆掉，这里就是它的重挂点。补挂
-      // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——进程已退只回放
-      // 最后一屏，要新壳仍然点页签。
+      // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——正常退出的会话
+      // 只回放最后一屏；「死于重启」的由 terminalSessionShouldRevive 自动复活。
       if (!terminalXterm) renderTerminalPreviewSession({ revive: false });
       else terminalXterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。

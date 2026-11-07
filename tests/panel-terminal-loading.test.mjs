@@ -401,6 +401,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     ${extractFn("remountDeferredTerminalStream")}
     ${extractFn("finishTerminalGeometryRealign")}
     ${extractFn("scheduleTerminalGeometryRealign")}
+    ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
     return {
       connectTerminalStream,

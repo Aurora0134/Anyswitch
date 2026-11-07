@@ -10137,7 +10137,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
   function syncSandbox() {
     const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme",
-      "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
+      "connectTerminalStream", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
       "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput",
       "dropTerminalReplayFrame", "deferTerminalStream", "remountDeferredTerminalStream",
@@ -10181,6 +10181,8 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       let terminalStreamWrite = null;
       let terminalWriteBurst = null;
       let terminalReplayFramePending = false;
+      // 垫片账本（connectTerminalStream 的复活分支会撤它；本组不验其行为，初值即可）
+      let terminalStaleScreen = null;
       // 几何闸的账与收尾设施（absorbTerminalSnapshot 与 data 处理器引用它们）。
       let terminalGeometryRealignPending = false;
       let terminalGeometryRealignAt = 0;
@@ -10533,7 +10535,7 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme", "connectTerminalStream", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -10572,6 +10574,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       let terminalStreamWrite = null;
       let terminalWriteBurst = null;
       let terminalReplayFramePending = false;
+      // 垫片账本（connectTerminalStream 的复活分支会撤它；测试经 setStale 塞假垫片）
+      let terminalStaleScreen = null;
       const host = {};
       const $ = (id) => (id === "terminalXtermHost" ? host : null);
       // xterm 主题读 --terminal-* token：沙箱无样式表，桩回空串走暗色兜底（等价旧行为）
@@ -10622,6 +10626,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
         xterm: () => terminalXterm, source: () => terminalEventSource,
         fitAddon: () => terminalFitAddon, input: () => terminalInputDisposable,
         send: (id, data) => sendTerminalInput(id, data),
+        setStale: (stale) => { terminalStaleScreen = stale; },
       };
     `)(state);
     return { sandbox, state };
@@ -10792,15 +10797,112 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.ok(init.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听收编到初始化一次性绑定");
   });
 
-  it("被动重挂不复活：exited 会话照挂流回放最后一屏，restart 仍只由主动通路发出", async () => {    const { sandbox, state } = streamSandbox();
-    const exitedSession = () => ({ id: "sess-x", backend: true, shell: {}, output: [], backendState: { status: "exited" } });
+  it("被动重挂只复活「死于重启」的会话：观察到的死停帧挂流，主动通路照旧", async () => {
+    const { sandbox, state } = streamSandbox();
+    const exitedSession = () => ({ id: "sess-x", backend: true, shell: {}, output: [], backendState: { status: "exited", exitCode: 0 } });
     await sandbox.connect(exitedSession(), { revive: false });
-    assert.deepEqual(state.posts, [], "切回前台/回页补挂这类被动重挂绝不发 restart");
+    assert.deepEqual(state.posts, [], "正常退出的会话：切回前台/回页补挂这类被动重挂不发复活");
     assert.equal(state.eventSources.length, 1, "仍然挂流：画面来自宿主镜像的最后一屏（挂流不要求进程还在）");
     await sandbox.connect(exitedSession(), { revive: true });
     const revives = state.posts.filter((p) => p.url.includes("/revive"));
     assert.equal(revives.length, 1, "点页签等主动通路照旧一次点击一个新壳");
     assert.equal(revives[0].url, "/api/terminal/sessions/sess-x/revive", "复活走重组装凭据的路由");
+  });
+
+  it("被动重挂遇「死于重启」的会话：立刻自动复活，不等用户点页签（2026-11-07 裁决）", async () => {
+    const { sandbox, state } = streamSandbox();
+    state.apiImpl = (method, url) => {
+      if (url.includes("/revive")) return Promise.resolve({ id: "sess-r", status: "running", pid: 77 });
+      return Promise.resolve({});
+    };
+    const session = backendSession("sess-r", { backendState: { status: "exited", deathUnobserved: true } });
+    state.sessions["sess-r"] = session;
+    await sandbox.connect(session, { revive: false });
+    const revives = state.posts.filter((p) => p.url.includes("/revive"));
+    assert.equal(revives.length, 1, "首连/切回这类被动重挂直接发复活：死屏挂等点击的旧形态退场");
+    assert.equal(revives[0].url, "/api/terminal/sessions/sess-r/revive");
+    assert.equal(session.backendState.status, "running", "复活结果回写会话状态");
+    assert.equal(state.eventSources.length, 1, "复活落定后照常开流");
+  });
+
+  it("复活分支先撤垫片：旧死屏不在复活等待期垫底，空屏与「正在加载」占位直接露出", async () => {
+    const { sandbox, state } = streamSandbox();
+    state.apiImpl = (method, url) => {
+      if (url.includes("/revive")) return Promise.resolve({ id: "sess-e", status: "running", pid: 78 });
+      return Promise.resolve({});
+    };
+    const reviveTarget = backendSession("sess-e", { backendState: { status: "exited", deathUnobserved: true } });
+    state.sessions["sess-e"] = reviveTarget;
+    const stale = { term: null, el: null, timer: null, frame: null, done: false, contentEpochAtPark: 0 };
+    sandbox.setStale(stale);
+    await sandbox.connect(reviveTarget, { revive: false });
+    assert.equal(stale.done, true, "垫片在复活 await 之前就撤（停放与建流前缀同一任务跑完，旧帧没机会上屏）");
+    // 对照：不复活的重挂不动垫片（揭幕仍由观察循环按「新画面出字」接管）。
+    const observed = backendSession("sess-f", { backendState: { status: "exited", exitCode: 0 } });
+    state.sessions["sess-f"] = observed;
+    const stale2 = { term: null, el: null, timer: null, frame: null, done: false, contentEpochAtPark: 0 };
+    sandbox.setStale(stale2);
+    await sandbox.connect(observed, { revive: false });
+    assert.equal(stale2.done, false, "不复活的重挂不撤垫片");
+  });
+
+  it("轮询触发自动复活（正看着时宿主换代）：重建走渲染层口径，一次性记账防反复失败、回 running 重新武装", () => {
+    // 真跑 maybeAutoReviveTerminalSession / rearmTerminalAutoRevive / 判定函数，其余全桩。
+    const bodies = [extractFn("terminalSessionShouldRevive"), extractFn("maybeAutoReviveTerminalSession"), extractFn("rearmTerminalAutoRevive")].join("\n");
+    assert.ok(bodies, "轮询触发三函数可在 panel.js 取到");
+    const state = { renders: [] };
+    const sandbox = new Function("state", `
+      let currentView = "terminal";
+      const document = { hidden: false };
+      let activeTerminalPreviewId = "sess-g";
+      const terminalReviveInflight = new Map();
+      const terminalAutoReviveTried = new Set();
+      const terminalBackendSessions = {
+        "sess-g": { id: "sess-g", backend: true, backendState: { status: "exited", deathUnobserved: true } },
+        "sess-o": { id: "sess-o", backend: true, backendState: { status: "exited", exitCode: 0 } },
+      };
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function renderTerminalPreviewSession(opts) { state.renders.push(opts && opts.revive); }
+      ${bodies}
+      return {
+        trigger: () => maybeAutoReviveTerminalSession(),
+        rearm: () => rearmTerminalAutoRevive(),
+        setActive: (id) => { activeTerminalPreviewId = id; },
+        setRunning: (v) => { terminalBackendSessions["sess-g"].backendState.status = v ? "running" : "exited"; },
+        setView: (v) => { currentView = v; },
+        setHidden: (v) => { document.hidden = v; },
+        setInflight: (v) => { if (v) terminalReviveInflight.set("sess-g", Promise.resolve()); else terminalReviveInflight.delete("sess-g"); },
+      };
+    `)(state);
+    sandbox.trigger();
+    assert.deepEqual(state.renders, [false], "死于重启＋正看着 → 轮询拍重建画面（渲染层 revive:false 走自动口径）");
+    sandbox.trigger();
+    assert.deepEqual(state.renders, [false], "同一死态不重复触发：HTTP 反复失败只在页面会话内自动试一次");
+    // 复活在飞：重建收敛进在飞去重，不再叠渲染。
+    sandbox.setRunning(true);
+    sandbox.rearm();
+    sandbox.setInflight(true);
+    sandbox.setRunning(false);
+    sandbox.trigger();
+    assert.deepEqual(state.renders, [false], "复活在飞时轮询拍不再重触发");
+    sandbox.setInflight(false);
+    sandbox.trigger();
+    assert.deepEqual(state.renders, [false, false], "在飞落定后下一拍照常接手（回 running 重新武装过的正常路径）");
+    // 不看它就不替它拉：切走视图/页面隐藏都停在原地。
+    sandbox.setRunning(true);
+    sandbox.rearm();
+    sandbox.setRunning(false);
+    sandbox.setView("settings");
+    sandbox.trigger();
+    sandbox.setView("terminal");
+    sandbox.setHidden(true);
+    sandbox.trigger();
+    sandbox.setHidden(false);
+    assert.deepEqual(state.renders, [false, false], "视图切走/页面隐藏不触发");
+    // 观察到的死不在触发面：正常退出的会话停最后一帧。
+    sandbox.setActive("sess-o");
+    sandbox.trigger();
+    assert.deepEqual(state.renders, [false, false], "正常退出的会话不自动复活");
   });
 
   it("输入落进 409：不复活不补发，前端状态同步为 exited", async () => {
@@ -12146,7 +12248,7 @@ describe("虚拟终端底部自动对齐", () => {
 
 // 挂后台/切回的总闸：终端页各数据源对 document.hidden 的分工在这一个处理器里。
 // 处理器整体抽进桩环境真跑——不靠字符串比对猜"接了线"，每个视图分支按调用序列钉。
-describe("虚拟终端后台转折：进后台拆流、切回按镜像重建且不复活", () => {
+describe("虚拟终端后台转折：进后台拆流、切回按镜像重建（「死于重启」的复活另见被动重挂组）", () => {
   const handlerBody = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(handlerBody, "visibilitychange 处理器可取样");
 
@@ -12157,7 +12259,7 @@ describe("虚拟终端后台转折：进后台拆流、切回按镜像重建且�
       function refreshAgents() { state.calls.push("refreshAgents"); }
       function refreshModelStability() { state.calls.push("refreshModelStability"); }
       function refreshStatsState() { state.calls.push("refreshStatsState"); }
-      function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); }
+      function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); return Promise.resolve(); }
       function renderTerminalPreviewSession(opts) { state.calls.push("renderPreview:revive=" + (opts && opts.revive)); }
       function syncTerminalDataStream() { state.calls.push("syncTerminalDataStream"); }
       function boardVisible() { return state.view === "board"; }
@@ -12173,8 +12275,11 @@ describe("虚拟终端后台转折：进后台拆流、切回按镜像重建且�
     assert.deepEqual(run("board", true), ["syncTerminalDataStream"]);
   });
 
-  it("切回终端页：先核一次闸（可见即空操作），补一拍归属数据，并按被动重挂口径重建画面", () => {
-    assert.deepEqual(run("terminal", false), [
+  it("切回终端页：先核一次闸（可见即空操作），补一拍归属数据，画面重建排在这拍数据之后", async () => {
+    const calls = run("terminal", false);
+    // 重建挂在 pollTerminalSessions 的落定拍上（桩为已落定）：让出一个宏任务再断言。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(calls, [
       "syncTerminalDataStream", "refreshStatus", "pollTerminalSessions", "renderPreview:revive=false",
     ]);
   });
@@ -12560,7 +12665,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -12677,6 +12782,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let terminalStreamWrite = null;
       let terminalWriteBurst = null;
       let terminalReplayFramePending = false;
+      // 垫片账本（connectTerminalStream 的复活分支会撤它；本组不验其行为，初值即可）
+      let terminalStaleScreen = null;
       return {
         connect: (session, opts) => connectTerminalStream(session, opts),
         close: () => closeTerminalStream(),
@@ -14533,6 +14640,9 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       let terminalViewports = [];
       async function api() { state.data += 1; return { sessions: [] }; }
       function rebuildTerminalBackendSessions() {}
+      // 自动复活的轮询触发（本用例只验零会话空态）：桩成空操作，触发面另有专项用例。
+      function rearmTerminalAutoRevive() {}
+      function maybeAutoReviveTerminalSession() {}
       async function refreshRouteRuntimeCache() {}
       async function refreshActiveTerminalRequests() { state.requested += 1; }
       function enrichTerminalSessions() { state.enriched += 1; }
