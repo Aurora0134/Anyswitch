@@ -117,6 +117,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     ${extractFn("remountDeferredTerminalStream")}
     ${extractFn("finishTerminalGeometryRealign")}
     ${extractFn("scheduleTerminalGeometryRealign")}
+    ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
     return {
       connect: connectTerminalStream,

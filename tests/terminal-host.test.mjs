@@ -195,6 +195,59 @@ test("PTY 已退出的会话 POST input 返回 409 session_exited", async () => 
   }
 });
 
+// 「死于重启」标记（2026-11-07 裁决）：宿主倒下时还在跑的会话，盘上没有退出码
+// （close 只冲盘不杀 PTY，树杀/崩溃更没人写）——恢复后快照带 deathUnobserved，
+// 面板据此在被动重挂时自动复活。观察到的死（上一代留下的退出码、本代 onExit）
+// 与复活的换代（spawn）都会清标：观察到的死停最后一帧等点击，spawn 失败的残留
+// 死态也不被反复自动拉起。
+test("「死于重启」的会话快照带 deathUnobserved：观察到的死不带，spawn/onExit 清标", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-death-unobserved-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const hostA = createTerminalHost({ root, port: 0, ptyModule, killTreeFn: async () => {}, isAliveFn: () => false, logger: { warn() {} } });
+  const portA = await listen(hostA);
+  const urlA = (path) => `http://127.0.0.1:${portA}${path}`;
+  let hostB = null;
+  try {
+    const hostDeathSession = await fetch(urlA("/terminal/sessions"), {
+      method: "POST", headers: headers(hostA),
+      body: JSON.stringify({ label: "host-death", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    const observedExitSession = await fetch(urlA("/terminal/sessions"), {
+      method: "POST", headers: headers(hostA),
+      body: JSON.stringify({ label: "observed-exit", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    calls[1].pty.kill(); // 正常退出：onExit 观察到死并记退出码
+    await hostA.close(); // 宿主换代：活会话没人杀、没人记死，记录停在 running/无退出码
+
+    hostB = createTerminalHost({ root, port: 0, ptyModule, killTreeFn: async () => {}, isAliveFn: () => false, logger: { warn() {} } });
+    const portB = await listen(hostB);
+    const urlB = (path) => `http://127.0.0.1:${portB}${path}`;
+    const listed = await fetch(urlB("/terminal/sessions"), { headers: headers(hostB) }).then((response) => response.json());
+    const byId = Object.fromEntries(listed.sessions.map((session) => [session.id, session]));
+    assert.equal(byId[hostDeathSession.id].status, "exited");
+    assert.equal(byId[hostDeathSession.id].deathUnobserved, true, "宿主换代连带杀掉的会话：死未被观察到");
+    assert.equal(byId[observedExitSession.id].status, "exited");
+    assert.equal(byId[observedExitSession.id].deathUnobserved, undefined, "被观察过的死没有自动复活资格");
+
+    // 复活即清标：这代宿主接手了这次死，之后的重挂不再自动拉。
+    const restarted = await fetch(urlB(`/terminal/sessions/${hostDeathSession.id}/restart`), {
+      method: "POST", headers: { ...headers(hostB), "content-type": "application/json" }, body: "{}",
+    }).then((response) => response.json());
+    assert.equal(restarted.status, "running");
+    assert.equal(restarted.deathUnobserved, undefined, "spawn 落地即清标");
+
+    // 复活后的再退出是被观察到的死：资格不回。
+    calls[calls.length - 1].pty.kill();
+    const afterExit = await fetch(urlB(`/terminal/sessions/${hostDeathSession.id}`), { headers: headers(hostB) }).then((response) => response.json());
+    assert.equal(afterExit.status, "exited");
+    assert.equal(afterExit.deathUnobserved, undefined, "onExit 清标");
+  } finally {
+    if (hostB) await hostB.close().catch(() => {});
+    await hostA.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // 工作态信号收窄（dsh 语义对齐·信号层）：出生不再播种 lastActiveAt（出生≠活跃，
 // 播种会让刚打开的空会话在前 5s 误转圈、内切门误判 working 走保护性新开）；
 // 键入改记 lastInputAt、不刷新 lastActiveAt（PTY 回显的判忙交给面板键入抑制窗）；
