@@ -59,6 +59,7 @@ import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSes
 import { createSessionScanOffload } from "../agents/session-scan-worker.mjs";
 import { TERMINAL_HOST_PORT } from "../terminal/terminal-process-manager.mjs";
 import { probeTerminalCommandTree as defaultProbeTerminalCommandTree, SWITCH_GUARD_PROBE_TIMEOUT_MS } from "../terminal/terminal-switch-guard.mjs";
+import { createTerminalSwitchLog } from "../terminal/terminal-switch-log.mjs";
 import {
   RESUMABLE_AGENTS,
   TERMINAL_CONVERSATION_BINDINGS_FILE,
@@ -990,6 +991,12 @@ export function createPanelRouter({
   // 修前复探 1200ms 名义、扣掉启动实得 ≈950ms，比首探窄一截，负载下最先倒）。
   // 默认直接取 guard 的常量，防止两处漂移。上界见 handleTerminalSessionSwitch 的注释。
   switchGuardRecheckTimeoutMs = SWITCH_GUARD_PROBE_TIMEOUT_MS,
+  // 切会话决策留痕（terminal-switch-log.mjs）：/switch 准入链各出口与前端埋点
+  // 上报（POST /panel/api/terminal/switch-log）共用的 JSONL 写者。默认 null＝
+  // 首次写入时按 relayRoot 惰性建真写者（<数据根>/logs/terminal-switch.log——
+  // relayRoot 在单测里是临时沙箱，落盘不会外溢到真实用户目录）；单测注入捕获
+  // 函数即可断言留痕且不落盘。
+  terminalSwitchLogFn = null,
    // 终端会话 ↔ agent 对话存档的绑定（terminal-conversation-bindings.mjs）：
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
@@ -1609,6 +1616,17 @@ export function createPanelRouter({
     }, bindingRefreshDelayMs);
   }
 
+  // 前端切会话埋点的收件口：浏览器写不了文件，前端 terminalSwitchLog 把事件
+  // POST 到这里，与 /switch 服务端埋点经同一个写者进同一份 JSONL。事件名限
+  // 机读形态（小写/数字/连字符），字段由写者净化——这是留痕管道，不是任意
+  // 内容的垃圾筒；鉴权与体型防护走 /panel/api 既有闸（CSRF 头＋readJsonBody）。
+  function handleTerminalSwitchLogIngest(res, body) {
+    const event = body && typeof body.event === "string" ? body.event : "";
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(event)) return sendJson(res, 400, { ok: false, error: "invalid_event" });
+    terminalSwitchLogLazy()(event, body && typeof body.detail === "object" ? body.detail : null);
+    return sendJson(res, 200, { ok: true });
+  }
+
   // 内切切换：把一条已开着的终端就地换成目标会话——宿主同记录内
   // terminate 旧进程树→spawn 目标会话→身份换绑，页签不新增。与复活路由的分工：
   // 复活用会话自己的身份重组装；内切用请求体给的目标会话身份（endpoint/id/file）
@@ -1620,10 +1638,27 @@ export function createPanelRouter({
   // 接「已决定内切」的请求，但杀进程前再做一道 switch-guard 复核（见下）：
   // 前端信号覆盖不了静默执行中的命令，不可逆动作的最后一道闸留在服务端。
   async function handleTerminalSessionSwitch(req, res, id, body) {
+    // P0 留痕：入口先记一拍（目标会话 id＋resume 目标身份），下方每个出口各记
+    // 一拍——修前这条准入链全程零日志，「该内切却新开页签」每次复发都不可归因。
+    // 写者自身保证不抛（terminal-switch-log.mjs），埋点不改变任何出口的形状。
+    const slog = terminalSwitchLogLazy();
+    const resumeReq = body?.resume ?? null;
+    slog("recv", {
+      id,
+      mode: resumeReq !== null ? "resume" : "fresh",
+      endpoint: typeof (resumeReq !== null ? resumeReq?.endpoint : body?.agentId) === "string" ? (resumeReq !== null ? resumeReq.endpoint : body.agentId) : "",
+      conversation: resumeReq !== null && typeof resumeReq?.id === "string" ? resumeReq.id : null,
+    });
     const token = terminalPullToken();
-    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    if (!token) {
+      slog("fail", { id, reason: "terminal_host_unavailable", stage: "token" });
+      return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    }
     const session = await fetchTerminalSessionFn(id, { token });
-    if (!session) return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
+    if (!session) {
+      slog("fail", { id, reason: "terminal_session_not_found" });
+      return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
+    }
     const resume = body?.resume ?? null;
     // 目标身份：resume 路径＝endpoint＋会话 id（两键缺一即拒）；全新路径＝agentId
     // 必在册。两条都要求 cwd（全新路径用面板「记住上次」，resume 路径用目标会话
@@ -1636,9 +1671,11 @@ export function createPanelRouter({
       endpoint = typeof resume?.endpoint === "string" ? resume.endpoint.trim() : "";
       conversationId = typeof resume?.id === "string" ? resume.id.trim() : "";
       if (!endpoint || !conversationId || endpoint.length > 64 || conversationId.length > 256) {
+        slog("fail", { id, reason: "resume-invalid", stage: "shape" });
         return sendJson(res, 400, { ok: false, code: "resume-invalid", error: "resume-invalid" });
       }
       if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
+        slog("fail", { id, reason: "resume-unsupported" });
         return sendJson(res, 400, { ok: false, code: "resume-unsupported", error: "resume-unsupported" });
       }
       if (typeof resume.file === "string" && resume.file.trim()) resumeFile = resume.file.trim();
@@ -1660,6 +1697,7 @@ export function createPanelRouter({
         if (warm && !knownHasTarget(warm)) {
           const refreshed = await snapshot.refresh();
           if (refreshed && !knownHasTarget(refreshed)) {
+            slog("fail", { id, reason: "resume-invalid", stage: "exists" });
             return sendJson(res, 404, { ok: false, code: "resume-invalid", error: "resume-invalid" });
           }
         }
@@ -1669,11 +1707,13 @@ export function createPanelRouter({
     } else {
       endpoint = typeof body?.agentId === "string" ? body.agentId.trim() : "";
       if (!endpoint || endpoint.length > 64 || !Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
+        slog("fail", { id, reason: "agent-invalid" });
         return sendJson(res, 400, { ok: false, code: "agent-invalid", error: "agent-invalid" });
       }
     }
     const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : "";
     if (!cwd) {
+      slog("fail", { id, reason: resume !== null ? "resume-invalid" : "invalid_cwd", stage: "cwd" });
       return sendJson(res, 400, { ok: false, code: resume !== null ? "resume-invalid" : "invalid_cwd", error: resume !== null ? "resume-invalid" : "invalid_cwd" });
     }
     let claudeBypassPermissions = false;
@@ -1706,14 +1746,15 @@ export function createPanelRouter({
       // ——前端 startsWith("resume-") 门据此落已批准续接句，error 字段即码本身、零
       // 文案）；其余组装错误维持原有响应形状。
       const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
+      slog("fail", { id, reason: code || "launch-error" });
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
     }
     // 杀前复核（switch-guard）：前端判定门的 working 只覆盖「LLM 请求在途＋输出
     // 活跃窗」，静默执行中的命令（无请求也无输出）两头都够不着，而本路由的落点
     // 是整棵进程树 terminate——不可逆动作前按需探测一次「PTY 树里有没有活着的
     // 命令子进程」。探测失败（null）同样拒：宁多开勿错杀。exited 不探测，树里已
-    // 没有活进程，restart 的树杀只剩残留登记的收尾。前端收到 switch_busy 静默转
-    // 新开（新开本就是点击历史会话的合法落点，无需提示）。
+    // 没有活进程，restart 的树杀只剩残留登记的收尾。前端收到 switch_busy 转保活：
+    // 旧终端留后台、目标终端挂进当前视口，页签数不变，无需提示。
     if (session.status === "running") {
       // opencode busy 旁证（2026-11-03 现场补的第三道信号）：opencode 的对话跑
       // 在它自家的后台服务进程里，在途请求既不进 relay（在途计数读 0）也不在
@@ -1727,6 +1768,7 @@ export function createPanelRouter({
           ? bound.conversationId
           : (session.resume && session.resume.endpoint === "opencode" && typeof session.resume.id === "string" && session.resume.id !== "" ? session.resume.id : null);
         if (busyConversationId && opencodeBusyFn(busyConversationId) === true) {
+          slog("deny", { id, reason: "opencode-busy", conversation: busyConversationId });
           return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
         }
       }
@@ -1801,6 +1843,9 @@ export function createPanelRouter({
         await recheckPromise;
       }
       if (first !== false && recheck !== false) {
+        // 留痕带上判据现值：anchor 有无决定探测形态，first/recheck 只可能是
+        // true（探到活命令）或 null（判不出，fail-safe 拒换）——false 走不到这里。
+        slog("deny", { id, reason: "guard-busy", anchor: anchorPid !== null, first, recheck });
         return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
       }
     }
@@ -1819,7 +1864,10 @@ export function createPanelRouter({
       agentId: launch.agentId,
       agentName: launch.agentName,
     }, { token });
-    if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    if (!restarted) {
+      slog("fail", { id, reason: "terminal_host_unavailable", stage: "restart" });
+      return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    }
     // 每次切换都开启新代：在飞的旧代扫描不得把上一段身份绑回来。全新内切
     // 须清旧对话绑定，否则复活会接回旧会话；历史续接把绑定改写到目标身份
     // ——绑定语义是「这条终端现在实际在跑的对话」，切换落地后它就是目标会
@@ -1856,6 +1904,7 @@ export function createPanelRouter({
     // 旧身份可言（复活路由传 session 是因它复活的正是会话自己的归属）。全新内切
     // 无目标身份可扫，不走这条——新对话存档由绑定捕获既有路径接管。
     if (resume !== null) scheduleBindingRefresh({ id: session.id, agentId: endpoint, cwd: launch.cwd }, switchStartedAt);
+    slog("ok", { id, mode: resume !== null ? "resume" : "fresh", ms: Date.now() - switchStartedAt });
     return sendJson(res, restarted.status || 200, restarted.body ?? {});
   }
 
@@ -3457,6 +3506,15 @@ export function createPanelRouter({
     return usageJournal;
   }
 
+  // 切会话留痕写者的惰性定位点（同 usageJournalLazy 的惰性纪律）：面板一开可能
+  // 就是几天，没有切换动作就不该凭空建出 logs 目录。
+  function terminalSwitchLogLazy() {
+    if (!terminalSwitchLogFn) {
+      terminalSwitchLogFn = createTerminalSwitchLog({ file: join(relayRoot, "logs", "terminal-switch.log") });
+    }
+    return terminalSwitchLogFn;
+  }
+
   // BYOK 导入服务惰性装配：storeRoot 用面板同一个数据根（store.json 所在），
   // 端点本地配置扫 homeDir 下的各端点目录；removeFn 绑定删除器，备份落数据根
   // backups/（与数据搬迁同一备份约定；面板是组合根，backupRoot 以这里为准，
@@ -3756,6 +3814,16 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/terminal/agent-sessions" && method === "POST") return handleTerminalAgentSessionCreate(req, res);
+    // 前端切会话留痕上报（terminal-switch.log）：与 /switch 服务端埋点同一写者。
+    if (path === "/panel/api/terminal/switch-log" && method === "POST") {
+      let switchLogBody;
+      try {
+        switchLogBody = await readJsonBody(req);
+      } catch (error) {
+        return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+      }
+      return handleTerminalSwitchLogIngest(res, switchLogBody);
+    }
     if (path.startsWith("/panel/api/terminal/sessions/")) {
       const suffix = path.slice("/panel/api/terminal/sessions/".length);
       const reviveMatch = suffix.match(/^([a-f0-9-]{8,64})\/revive$/i);

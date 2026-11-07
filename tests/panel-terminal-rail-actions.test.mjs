@@ -4111,9 +4111,15 @@ describe("视口化验收（页签＝视口）", () => {
     boundConversation: bound, status: "running",
   });
 
-  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE } = {}) {
+  // 桩钩（全部缺省＝既有行为不变）：agentsImpl/hostReadImpl/switchImpl/createImpl
+  // 让夹具按格控制判定门的四个外部输入（agents 负载 / 宿主单读 / /switch 应答 /
+  // 新建 POST），可 resolve 也可 reject（409 switch_busy、500 等）；blankCreateImpl
+  // 同理控制空白终端直连 POST（/api/terminal/sessions，「+」菜单与左栏「新建终端」
+  // 无 agent 分支共用）；inFlightCounter
+  // 在沙盒里声明真在飞计数（缺省不声明＝typeof 闸落「未抑制」，与既有用例同义）。
+  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, blankCreateImpl = null, inFlightCounter = false } = {}) {
     const log = { creates: [], switchBodies: [], closes: [], confirms: [], toasts: [], renders: 0, tabs: 0, empty: 0, rails: 0, streams: 0 };
-    const state = { store, agents, items, created: 0, confirm: true };
+    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl, blankCreateImpl };
     const createdTerminal = (body) => {
       state.created += 1;
       const id = `t-created-${state.created}`;
@@ -4135,6 +4141,7 @@ describe("视口化验收（页签＝视口）", () => {
       let terminalDefaultCwd = "";
       let terminalTabsRenderedHtml = "";
       let terminalSwitchInFlight = false;
+      ${inFlightCounter ? "let terminalCreateInFlight = 0;" : ""}
       let terminalRailSelectPending = null;
       let terminalRailSelectSeq = 0;
       const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
@@ -4164,13 +4171,23 @@ describe("视口化验收（页签＝视口）", () => {
       function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
       function api(method, path, body) {
         log.paths = (log.paths || []).concat(method + " " + path);
-        if (method === "GET" && path === "/api/agents") return Promise.resolve(state.agents);
+        if (method === "GET" && path === "/api/agents") {
+          return state.agentsImpl ? Promise.resolve().then(() => state.agentsImpl()) : Promise.resolve(state.agents);
+        }
         if (method === "POST" && path === "/api/terminal/agent-sessions") {
           log.creates.push({ body });
+          if (state.createImpl) return Promise.resolve().then(() => state.createImpl(body));
+          return Promise.resolve(state.createdTerminal(body));
+        }
+        // 空白终端直连 POST（「+」菜单与左栏「新建终端」无 agent 分支共用此路由）。
+        if (method === "POST" && path === "/api/terminal/sessions") {
+          log.blankCreates = (log.blankCreates || []).concat({ body });
+          if (state.blankCreateImpl) return Promise.resolve().then(() => state.blankCreateImpl(body));
           return Promise.resolve(state.createdTerminal(body));
         }
         if (method === "GET" && path.startsWith("/api/terminal/sessions/")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length));
+          if (state.hostReadImpl) return Promise.resolve().then(() => state.hostReadImpl(id));
           return terminalBackendSessions[id]
             ? Promise.resolve({ id, status: terminalBackendSessions[id].backendState?.status || "running" })
             : Promise.reject(Object.assign(new Error("HTTP 404"), { code: "terminal_session_not_found" }));
@@ -4178,6 +4195,9 @@ describe("视口化验收（页签＝视口）", () => {
         if (method === "POST" && path.endsWith("/switch")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length, path.length - "/switch".length));
           log.switchBodies.push({ id, body });
+          // 夹具可拒（409 switch_busy / 500 等）：判定门的失败分支此前从未被真视口
+          // 簿记覆盖过（本桩恒 resolve），409 转保活是页签守恒的重点格。
+          if (state.switchImpl) return Promise.resolve().then(() => state.switchImpl(id, body));
           // switch_resolve 记「落地」不记「发出」：记进返回 Promise 的 .then()，A1 的
           // log.order 断言才真钉住「await 回来后才 arm」。若记在发出时（此处同步 concat），
           // 回归把 arm 挪到 POST 发出之后、await 返回之前，顺序仍是 [switch_resolve, arm]，
@@ -4208,7 +4228,21 @@ describe("视口化验收（页签＝视口）", () => {
         }
       }
       function terminalCreateSize() { return { cols: 120, rows: 34 }; }
+      // 埋点捕获桩（P0）：生产里 terminalSwitchLog 是裸 fetch 上报，桩里只记账。
+      // 有了它 typeof 闸全部放行，埋点分支真跑；busy 保活分支的信号镜像同域给真
+      // 实现（只读复评，不改变行为）。
+      function terminalSwitchLog(event, detail) { log.switchEvents = (log.switchEvents || []).concat({ event, detail }); }
+      ${extractFn("terminalSwitchBusySignals")}
       ${extractFn("createAgentTerminal")}
+      // 空白终端两条直连 POST 通路（P1 同伞用例）：菜单态固定未选 agent、目录解析
+      // 与记住上次都让位给桩——钉的是计数伞，不是菜单交互。
+      function terminalCwdInitial() { return "C:/dev/alpha"; }
+      function rememberTerminalCwd() {}
+      function terminalRailAgentId() { return null; }
+      let terminalAddMenuSelection = null;
+      function closeTerminalAddMenu() {}
+      ${extractFn("terminalRailCreateTerminal")}
+      ${extractFn("confirmTerminalAddMenu")}
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
       function enterTerminalSwitchLoading() {
@@ -4255,6 +4289,17 @@ describe("视口化验收（页签＝视口）", () => {
         closeTab: (id) => terminalCloseViewportTab(id),
         railClose: (id) => terminalRailCloseSession(id),
         clear: () => clearTerminalLocalSessions(),
+        // 认领事务化与在飞抑制的观察/操作面（P1 测试）：attach 真函数直调、活跃视口
+        // 切换、宿主同步单拍、视口表活引用（摆永不合法的双挂夹具）、在飞计数读数。
+        attach: (viewportId, terminalId) => terminalViewportAttach(viewportId, terminalId),
+        activateViewport: (id) => terminalViewportActivate(id),
+        sync: () => terminalViewportSyncFromHost(),
+        rawViewports: () => terminalViewports,
+        inFlight: () => (typeof terminalCreateInFlight === "number" ? terminalCreateInFlight : null),
+        // 空白终端两条直连 POST 的驱动口（P1 同伞用例）：左栏「新建终端」无 agent
+        // 分支与页签条「+」菜单分支。
+        createBlank: () => terminalRailCreateTerminal(),
+        confirmAdd: () => confirmTerminalAddMenu(),
       };
     `)(state, log);
     // 沙盒内的 api 在调用时才读 state.*，这里补上外部发放的终端快照即可（new Function
@@ -4453,6 +4498,697 @@ describe("视口化验收（页签＝视口）", () => {
     assert.deepEqual(log.closes, [], "仍被另一个页签显示的终端不得结束");
     assert.ok(sandbox.sessions()["t-a"], "终端仍在");
     assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-2"], "只销毁这个页签");
+  });
+
+  // ── P3 页签守恒不变量矩阵（判定门全分支 × 真视口簿记）──────────────
+  // 重放 terminalRailSwitchOrCreateCore 的全部可达分支组合，每格断言同一不变量：
+  // 视口数不变、视口 id 序列不变；允许新建的终端只挂进既有视口（id 序列不变＝
+  // terminalViewportCreate 零调用，新视口必然带来新 id）。
+  // 判定门是顺序短路，原始叉积（working×2 × hostRead×3 × agents×3 × /switch×3
+  // × 归属×2 × 未使用槽×2＝216）按下述规则剪枝，被剪格逻辑上不可达或与前格同路：
+  //   · 归属命中在最前短路（dedupe-focus）——其后所有维度求值不到，只留 1 格；
+  //   · 未使用槽命中在补读前 return——hostRead/agents//switch 求值不到，留 1 格；
+  //   · 补读抛错（hostRead 或 agents 任一）→ reread-failed 保活——/switch 与
+  //     working 求值不到，各留 1 格；
+  //   · exited 压平 working（判据「exited 优先」）——exited×agents-working 与
+  //     exited×idle 同路，只留 200 一格钉「压平」本身，409/500 变体剪掉；
+  //   · working＝真只在 hostRead running＋agents working 时成立，且在 /switch 前
+  //     return——/switch 三态求值不到，留 1 格；
+  //   · 余下 running/exited × agents idle × /switch 200/409/500 六格全留——其中
+  //     409 两格是重点：旧桩恒 resolve，409 转保活从未被真视口簿记覆盖过。
+  describe("P3 页签守恒不变量矩阵", () => {
+    const SWITCH_BUSY = () => { const e = new Error("HTTP 409：switch_busy"); e.code = "switch_busy"; e.serverCode = "switch_busy"; throw e; };
+    const SWITCH_500 = () => { const e = new Error("HTTP 500"); e.code = "http_500"; throw e; };
+    // 未使用槽形态：agent 终端、无 resume/绑定、出生在窗内（A4 保护判据命中）。
+    const UNUSED_ITEM = () => ({ ...TERM_ITEM("t-old", { bound: null }), spawnedAt: Date.now() });
+
+    // 每格公共断言：页签守恒。beforeIds 在动作前取；新终端（若有）必须落在
+    // beforeIds 里的某个既有视口上。
+    const assertConserved = (sandbox, log, beforeIds, label) => {
+      const after = sandbox.viewports();
+      assert.deepEqual(after.map((row) => row.id), beforeIds, `${label}：视口 id 序列不变（数不变且无新视口）`);
+      if (log.creates.length > 0) {
+        const landed = after.find((row) => row.terminalId === "t-created-1");
+        assert.ok(landed, `${label}：新终端挂进了视口`);
+        assert.ok(beforeIds.includes(landed.id), `${label}：新终端挂进的是既有视口，不是新页签`);
+      }
+    };
+
+    const runCell = async ({ label, harnessOpts = {}, items, prepare = null, expect }) => {
+      const { sandbox, log } = viewportHarness({ items, ...harnessOpts });
+      sandbox.beat(items);
+      if (prepare) prepare(sandbox);
+      const beforeIds = sandbox.viewports().map((row) => row.id);
+      const createsBefore = log.creates.length;
+      const switchesBefore = log.switchBodies.length;
+      sandbox.switchTo(HISTORY);
+      await flush();
+      expect({ sandbox, log, creates: log.creates.length - createsBefore, switches: log.switchBodies.length - switchesBefore });
+      assertConserved(sandbox, log, beforeIds, label);
+      return { sandbox, log };
+    };
+
+    it("格 1 归属命中：目标会话已有活终端 → 去重聚焦，零 POST、零新建", async () => {
+      const items = [TERM_ITEM("t-old"), TERM_ITEM("t-dup", { resume: { endpoint: "kimi", id: "s-1" } })];
+      await runCell({
+        label: "归属命中", items,
+        expect: ({ sandbox, creates, switches }) => {
+          assert.equal(creates, 0, "不新建终端");
+          assert.equal(switches, 0, "不发 /switch");
+          assert.equal(sandbox.activeTerminal(), "t-dup", "聚焦到已在跑目标会话的终端");
+        },
+      });
+    });
+
+    it("格 2 未使用槽命中：刚建的 agent 终端不换绑，转保活（零 /switch）", async () => {
+      const items = [UNUSED_ITEM()];
+      await runCell({
+        label: "未使用槽", items,
+        expect: ({ creates, switches }) => {
+          assert.equal(creates, 1, "建目标终端挂当前视口");
+          assert.equal(switches, 0, "零 /switch（换绑会整树 terminate 掉还没说过话的会话）");
+        },
+      });
+    });
+
+    it("格 3 宿主单读抛错：判不出按在跑 → 保活（reread-failed）", async () => {
+      const items = [TERM_ITEM("t-old")];
+      const { log } = await runCell({
+        label: "hostRead 抛错", items,
+        harnessOpts: { hostReadImpl: async () => { throw new Error("boom"); } },
+        expect: ({ creates, switches }) => {
+          assert.equal(creates, 1, "建目标终端挂当前视口");
+          assert.equal(switches, 0, "不发 /switch");
+        },
+      });
+      assert.ok(log.switchEvents.some((row) => row.event === "keep-alive" && row.detail.reason === "reread-failed"),
+        "留痕：补读失败转保活");
+    });
+
+    it("格 4 agents 抛错：判不出按在跑 → 保活", async () => {
+      const items = [TERM_ITEM("t-old")];
+      await runCell({
+        label: "agents 抛错", items,
+        harnessOpts: { agentsImpl: async () => { throw new Error("boom"); } },
+        expect: ({ creates, switches }) => {
+          assert.equal(creates, 1, "建目标终端挂当前视口");
+          assert.equal(switches, 0, "不发 /switch");
+        },
+      });
+    });
+
+    it("格 5 exited＋idle → /switch 200：同记录换绑，零新建", async () => {
+      const items = [{ ...TERM_ITEM("t-old"), status: "exited" }];
+      await runCell({
+        label: "exited/200", items,
+        expect: ({ sandbox, creates, switches }) => {
+          assert.equal(creates, 0, "不新建终端");
+          assert.equal(switches, 1, "就地 /switch");
+          assert.equal(sandbox.viewports()[0].terminalId, "t-old", "同记录换内容：视口仍指原终端");
+        },
+      });
+    });
+
+    it("格 6 exited＋idle → /switch 409 switch_busy：转保活，页签不变（重点格）", async () => {
+      const items = [{ ...TERM_ITEM("t-old"), status: "exited" }];
+      const { sandbox, log } = await runCell({
+        label: "exited/409", items,
+        harnessOpts: { switchImpl: SWITCH_BUSY },
+        expect: ({ creates, switches }) => {
+          assert.equal(switches, 1, "先试 /switch");
+          assert.equal(creates, 1, "被拒后建目标终端挂当前视口，不是新开页签");
+        },
+      });
+      assert.equal(sandbox.viewports()[0].terminalId, "t-created-1", "目标终端挂进当前视口");
+      assert.deepEqual(sandbox.background(), ["t-old"], "旧终端进后台保活（被拒证明可能有活进程）");
+      assert.ok(log.switchEvents.some((row) => row.event === "keep-alive" && row.detail.reason === "switch-busy"),
+        "留痕：409 转保活");
+    });
+
+    it("格 7 exited＋idle → /switch 500：维持现状、零新建、不静默吞", async () => {
+      const items = [{ ...TERM_ITEM("t-old"), status: "exited" }];
+      const { sandbox, log } = await runCell({
+        label: "exited/500", items,
+        harnessOpts: { switchImpl: SWITCH_500 },
+        expect: ({ creates, switches }) => {
+          assert.equal(switches, 1, "发过 /switch");
+          assert.equal(creates, 0, "失败不新开任何终端");
+        },
+      });
+      assert.equal(sandbox.viewports()[0].terminalId, "t-old", "原终端原地不动");
+      assert.equal(log.toasts.length, 1, "失败给提示（不静默）");
+    });
+
+    it("格 8 exited＋agents working → /switch 200：exited 压平 working 位", async () => {
+      const items = [{ ...TERM_ITEM("t-old"), status: "exited" }];
+      await runCell({
+        label: "exited 压平", items,
+        harnessOpts: { agents: agentsWorking("inst-t-old") },
+        expect: ({ creates, switches }) => {
+          assert.equal(creates, 0, "已退出不被迟到的 working 信号救回：照旧就地换");
+          assert.equal(switches, 1, "走 /switch");
+        },
+      });
+    });
+
+    it("格 9 running＋agents working → 判忙保活：零 /switch", async () => {
+      const items = [TERM_ITEM("t-old")];
+      const { log } = await runCell({
+        label: "working 保活", items,
+        harnessOpts: { agents: agentsWorking("inst-t-old") },
+        expect: ({ creates, switches }) => {
+          assert.equal(creates, 1, "建目标终端挂当前视口");
+          assert.equal(switches, 0, "在跑绝不走 /switch（树杀会中断任务）");
+        },
+      });
+      const busy = log.switchEvents.find((row) => row.event === "keep-alive" && row.detail.reason === "busy");
+      assert.ok(busy, "留痕：判忙保活");
+      assert.ok(Array.isArray(busy.detail.signals) && busy.detail.signals.includes("working"), "命中信号清单含 working 位");
+    });
+
+    it("格 10 running＋idle → /switch 200：同记录换绑，零新建", async () => {
+      const items = [TERM_ITEM("t-old")];
+      await runCell({
+        label: "running/200", items,
+        expect: ({ creates, switches }) => {
+          assert.equal(creates, 0, "不新建终端");
+          assert.equal(switches, 1, "就地 /switch");
+        },
+      });
+    });
+
+    it("格 11 running＋idle → /switch 409 switch_busy：转保活，页签不变（重点格）", async () => {
+      const items = [TERM_ITEM("t-old")];
+      const { sandbox, log } = await runCell({
+        label: "running/409", items,
+        harnessOpts: { switchImpl: SWITCH_BUSY },
+        expect: ({ creates, switches }) => {
+          assert.equal(switches, 1, "先试 /switch");
+          assert.equal(creates, 1, "被拒后建目标终端挂当前视口");
+        },
+      });
+      assert.equal(sandbox.viewports()[0].terminalId, "t-created-1", "目标终端挂进当前视口");
+      assert.deepEqual(sandbox.background(), ["t-old"], "旧终端进后台保活");
+      assert.ok(log.switchEvents.some((row) => row.event === "keep-alive" && row.detail.reason === "switch-busy"),
+        "留痕：409 转保活");
+    });
+
+    it("格 12 running＋idle → /switch 500：维持现状、零新建、不静默吞", async () => {
+      const items = [TERM_ITEM("t-old")];
+      const { sandbox, log } = await runCell({
+        label: "running/500", items,
+        harnessOpts: { switchImpl: SWITCH_500 },
+        expect: ({ creates, switches }) => {
+          assert.equal(switches, 1, "发过 /switch");
+          assert.equal(creates, 0, "失败不新开任何终端");
+        },
+      });
+      assert.equal(sandbox.viewports()[0].terminalId, "t-old", "原终端原地不动");
+      assert.equal(log.toasts.length, 1, "失败给提示（不静默）");
+    });
+  });
+
+  // ── P3 真委托全链路：initTerminalRail click 委托 → 续接链 → 真视口簿记 ──
+  // 矩阵逐格验分支，这里验「连在一起」：真委托把一次非 live 历史行点击送进真
+  // terminalRailResumeHistoryRow → terminalRailResumeSession → terminalRailSwitchOrCreate
+  // → terminalRailSwitchOrCreateCore → 真视口簿记。钉两条守恒契约：
+  //   · terminalViewportCreate（新开页签的唯一落点）全程零调用（计数包装）；
+  //   · 整条链恰好一条 POST 落地（/switch 或保活新建，二选一）。
+  describe("P3 真委托全链路（点击非 live 历史行）", () => {
+    function delegationHarness({ items, agents = AGENT_IDLE, switchImpl = null } = {}) {
+      const log = { creates: [], switchBodies: [], viewportCreates: [], toasts: [], enters: 0, arms: 0 };
+      const state = { items, agents, switchImpl, created: 0 };
+      const listeners = {};
+      const btn = () => ({ onclick: null, addEventListener: () => {}, disabled: false });
+      const els = {
+        railTerminalDir: { addEventListener: (type, fn) => { listeners[type] = fn; } },
+        railTermNewBtn: btn(), railTermSearchBtn: btn(), railTermSearchInput: btn(),
+        railTermSearchClear: btn(), railTermViewOptionsBtn: btn(), railBackBtn: null,
+        v2Rail: { addEventListener: () => {} },
+      };
+      const sandbox = new Function("state", "els", "listeners", "log", `
+        let terminalBackendReady = true;
+        let terminalBackendSessions = {};
+        let activeTerminalPreviewId = null;
+        let terminalDefaultCwd = "";
+        let terminalSwitchInFlight = false;
+        let terminalSwitchInFlightSessionId = null;
+        let terminalCreateInFlight = 0;
+        let terminalRailSelectPending = null;
+        let terminalRailSelectSeq = 0;
+        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        const terminalDoneUnread = new Map();
+        const terminalPrevWorking = new Map();
+        const terminalTurnArmed = new Set();
+        const terminalHollowStreak = new Map();
+        const terminalPreviewSessions = {};
+        let terminalRailMotionArmed = false;
+        let terminalRailHoverEl = null;
+        let terminalRailHoverHead = null;
+        let railDragId = "";
+        let terminalRailFlipMode = "";
+        const terminalRailMenuEl = null;
+        const terminalRailViewMenuEl = null;
+        const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+        const terminalRailHistory = { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null };
+        const localStore = {};
+        const localStorage = {
+          getItem: (k) => (k in localStore ? localStore[k] : null),
+          setItem: (k, v) => { localStore[k] = String(v); },
+          removeItem: (k) => { delete localStore[k]; },
+        };
+        const window = { confirm: () => true };
+        const document = { addEventListener: () => {}, body: { classList: { contains: () => false } } };
+        function $(id) { return els[id] ?? null; }
+        function storedTerminalSessionId() { try { return localStorage.getItem("panel-terminal-session"); } catch { return null; } }
+        function rememberTerminalSessionId(id) {
+          if (typeof id === "string" && id.startsWith("preview-")) id = null;
+          try { if (id) localStorage.setItem("panel-terminal-session", id); else localStorage.removeItem("panel-terminal-session"); } catch {}
+        }
+        // 真视口簿记（terminalViewportCreate 除外：换计数包装钉零调用）
+        ${viewportPrelude(VIEWPORT_FNS.filter((name) => name !== "terminalViewportCreate"))}
+        ${extractFn("terminalViewportCreate").replace("function terminalViewportCreate(", "function terminalViewportCreateReal(")}
+        function terminalViewportCreate(terminalId) { log.viewportCreates.push(terminalId); return terminalViewportCreateReal(terminalId); }
+        function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+        function api(method, path, body) {
+          if (method === "GET" && path === "/api/agents") return Promise.resolve(state.agents);
+          if (method === "POST" && path === "/api/terminal/agent-sessions") {
+            log.creates.push({ body });
+            state.created += 1;
+            const id = "t-created-" + state.created;
+            return Promise.resolve({
+              id, label: "Kimi Code", shell: "powershell", cwd: (body && body.cwd) || "C:\\\\dev\\\\alpha",
+              agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-" + id, name: "Kimi Code", pid: 100, busy: false },
+              resume: body && body.resume ? body.resume : null, status: "running",
+            });
+          }
+          if (method === "GET" && path.startsWith("/api/terminal/sessions/")) {
+            const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length));
+            return terminalBackendSessions[id]
+              ? Promise.resolve({ id, status: terminalBackendSessions[id].backendState?.status || "running" })
+              : Promise.reject(Object.assign(new Error("HTTP 404"), { code: "terminal_session_not_found" }));
+          }
+          if (method === "POST" && path.endsWith("/switch")) {
+            const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length, path.length - "/switch".length));
+            log.switchBodies.push({ id, body });
+            if (state.switchImpl) return Promise.resolve().then(() => state.switchImpl(id, body));
+            const current = terminalBackendSessions[id];
+            return Promise.resolve({
+              id, label: "Kimi Code", shell: "powershell", cwd: (body && body.cwd) || (current && current.cwd) || "C:\\\\dev\\\\alpha",
+              agentId: "kimi", agentName: "Kimi Code", agent: current && current.agent,
+              resume: body && body.resume ? body.resume : null, status: "running",
+            });
+          }
+          return Promise.reject(new Error("unexpected " + method + " " + path));
+        }
+        // 与 viewportHarness 同口径的契约级富化桩。
+        function enrichTerminalSessions(payload) {
+          const endpoints = Array.isArray(payload) ? payload : [];
+          for (const session of Object.values(terminalBackendSessions)) {
+            const agent = session.agent || null;
+            if (!agent) continue;
+            const endpoint = endpoints.find((row) => row && row.id === agent.endpointId);
+            const instances = endpoint && Array.isArray(endpoint.instances) ? endpoint.instances : [];
+            const instance = instances.find((row) => row && row.id === agent.instanceId);
+            session.status = instance && Number(instance.activeRequests) > 0 ? "working" : "idle";
+          }
+        }
+        function terminalCreateSize() { return { cols: 120, rows: 34 }; }
+        function terminalSwitchLog(event, detail) { log.switchEvents = (log.switchEvents || []).concat({ event, detail }); }
+        ${extractFn("terminalSwitchBusySignals")}
+        function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
+        function panelError(err, fallback) { return fallback; }
+        function enterTerminalSwitchLoading() { log.enters += 1; }
+        function abortTerminalSwitchLoading() { return false; }
+        function armTerminalBootingOverlay() { log.arms += 1; }
+        function renderTerminalPreviewSession() {}
+        function renderTerminalPreviewTabs() {}
+        function renderTerminalEmptyState() {}
+        function renderTerminalRail() {}
+        function scheduleTerminalFit() {}
+        ${extractFn("terminalBackendSession")}
+        ${extractFn("pruneTerminalHollowStreak")}
+        ${extractFn("pruneTerminalDoneState")}
+        ${extractFn("rebuildTerminalBackendSessions")}
+        ${extractFn("createAgentTerminal")}
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailFindOpenSession")}
+        ${extractFn("terminalRailSwitchBusy")}
+        ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailArmSelect")}
+        ${extractFn("terminalRailEndSelect")}
+        ${extractFn("terminalRailSwitchOrCreateCore")}
+        ${extractFn("terminalRailSwitchOrCreate")}
+        ${extractFn("terminalRailActivateSession")}
+        ${extractFn("terminalRailResumeSession")}
+        ${extractFn("terminalRailResumeHistoryRow")}
+        // initTerminalRail 的周边桩（只挂委托，不验它们的行为）
+        function loadTerminalRailViewPrefs() {}
+        function loadTerminalRailCollapsedGroups() {}
+        function initTerminalRailScrollbarQuiet() {}
+        function closeTerminalRailGroupMenu() {}
+        function closeTerminalRailViewMenu() {}
+        function closeTerminalRailSearch() {}
+        function closeTerminalRailHoverCard() {}
+        function openTerminalRailSearch() {}
+        function openTerminalRailViewMenu() {}
+        function onTerminalRailSearchInput() {}
+        function scheduleTerminalRailHoverCard() {}
+        function terminalRailHeadKey() { return ""; }
+        function terminalRailCloseSession() {}
+        function terminalRailArchiveSession() {}
+        function toggleTerminalRailGroupMenu() {}
+        function terminalRailCreateTerminalInDir() {}
+        function terminalRailRemoveGroup() {}
+        function applyTerminalRailViewChoice() {}
+        function terminalRailUnarchiveSession() {}
+        function toggleTerminalRailGroup() {}
+        function toggleTerminalRailWatermark() {}
+        function terminalRailCreateTerminal() {}
+        function refreshTerminalRailHistory() {}
+        function terminalRailMoveInManualOrder() {}
+        function renderTerminalRailHistory() {}
+        function terminalRailIsArchived() { return false; }
+        ${extractFn("initTerminalRail")}
+        return {
+          beat: (items) => { rebuildTerminalBackendSessions(items); enrichTerminalSessions(state.agents.agents); },
+          setHistory: (rows) => { terminalRailHistory.sessions = rows; },
+          init: () => initTerminalRail(),
+          click: listeners,
+          viewports: () => terminalViewports.map((viewport) => ({ id: viewport.id, terminalId: viewport.terminalId })),
+          activeTerminal: () => activeTerminalPreviewId,
+          background: () => Array.from(terminalBackgroundIds),
+        };
+      `)(state, els, listeners, log);
+      return { sandbox, log, state };
+    }
+
+    // 一次非 live 历史行点击：target.closest 只命中 [data-rail-term-resume]，
+    // data-rail-term-live 为 null（非 live）→ 走去重/续接两分支。
+    const clickHistoryRow = (sandbox, id) => {
+      const rowEl = {
+        getAttribute: (name) => (name === "data-rail-term-resume" ? id : null),
+      };
+      sandbox.click.click({ target: { closest: (sel) => (sel === "[data-rail-term-resume]" ? rowEl : null) } });
+    };
+
+    it("空闲终端上点历史行：真委托进真判定门，就地 /switch，页签零新建", async () => {
+      const items = [TERM_ITEM("t-old")];
+      const { sandbox, log } = delegationHarness({ items });
+      sandbox.beat(items);
+      sandbox.setHistory([HISTORY]);
+      sandbox.init();
+      assert.equal(sandbox.viewports().length, 1, "前提：一个视口");
+      const beforeIds = sandbox.viewports().map((row) => row.id);
+      log.viewportCreates.length = 0; // 装帧期的合法补建（宿主无所属会话→建视口）不计入点击链
+      clickHistoryRow(sandbox, "s-1");
+      await flush();
+      assert.deepEqual(log.viewportCreates, [], "terminalViewportCreate 全程零调用（页签零新建）");
+      assert.equal(log.creates.length + log.switchBodies.length, 1, "整条链恰好一条 POST 落地");
+      assert.equal(log.switchBodies.length, 1, "空闲 → /switch 同记录换内容");
+      assert.deepEqual(log.switchBodies[0].body, { resume: { endpoint: "kimi", id: "s-1", file: HISTORY.file }, cwd: HISTORY.project },
+        "请求体由真续接链组装（resume 身份＋会话自己的 project）");
+      assert.deepEqual(sandbox.viewports().map((row) => row.id), beforeIds, "视口 id 序列不变");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-old", "同记录换绑，视口仍指原终端");
+    });
+
+    it("在跑终端上点历史行：真委托进真判定门，保活新建挂当前视口，页签零新建", async () => {
+      const items = [TERM_ITEM("t-old")];
+      const { sandbox, log } = delegationHarness({ items, agents: agentsWorking("inst-t-old") });
+      sandbox.beat(items);
+      sandbox.setHistory([HISTORY]);
+      sandbox.init();
+      const beforeIds = sandbox.viewports().map((row) => row.id);
+      log.viewportCreates.length = 0; // 装帧期的合法补建（宿主无所属会话→建视口）不计入点击链
+      clickHistoryRow(sandbox, "s-1");
+      await flush();
+      assert.deepEqual(log.viewportCreates, [], "terminalViewportCreate 全程零调用（页签零新建）");
+      assert.equal(log.creates.length + log.switchBodies.length, 1, "整条链恰好一条 POST 落地");
+      assert.equal(log.creates.length, 1, "在跑 → 保活新建目标终端");
+      assert.deepEqual(log.switchBodies, [], "在跑绝不发 /switch");
+      assert.deepEqual(sandbox.viewports().map((row) => row.id), beforeIds, "视口 id 序列不变");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-created-1", "目标终端挂进既有视口");
+      assert.deepEqual(sandbox.background(), ["t-old"], "旧终端进后台保活");
+    });
+
+    it("空闲判定后 /switch 被拒（409）：真委托链转保活，页签零新建", async () => {
+      // 409 只可能发生在空闲判定之后——这格用「补读 idle、宿主拒换」重演杀前复核
+      // 否决的现场：真委托链一路跑到 catch 转保活，落点仍是既有视口。
+      const SWITCH_BUSY = () => { const e = new Error("HTTP 409"); e.code = "switch_busy"; e.serverCode = "switch_busy"; throw e; };
+      const items = [TERM_ITEM("t-old")];
+      const { sandbox, log } = delegationHarness({ items, switchImpl: SWITCH_BUSY });
+      sandbox.beat(items);
+      sandbox.setHistory([HISTORY]);
+      sandbox.init();
+      const beforeIds = sandbox.viewports().map((row) => row.id);
+      log.viewportCreates.length = 0; // 装帧期的合法补建（宿主无所属会话→建视口）不计入点击链
+      clickHistoryRow(sandbox, "s-1");
+      await flush();
+      assert.deepEqual(log.viewportCreates, [], "terminalViewportCreate 全程零调用");
+      assert.equal(log.switchBodies.length, 1, "先发 /switch 被拒");
+      assert.equal(log.creates.length, 1, "被拒后保活新建，挂当前视口");
+      assert.deepEqual(sandbox.viewports().map((row) => row.id), beforeIds, "视口 id 序列不变");
+      assert.deepEqual(sandbox.background(), ["t-old"], "旧终端保活");
+    });
+  });
+
+  // ── P3 源码白名单：新开页签的落点只许有既有这几处 ──
+  // 「失败/兜底就新开一个页签」是页签自动变多的历史根因。这里把 panel.js 全文里
+  // 能新开视口的两个出口（terminalViewportCreate 调用点、placement:"new" 字面量）
+  // 逐一枚举钉死；再把判定门相关六个函数整段切出来，断言函数体内两个出口都不出现。
+  // 未来任何修复若新增一条「新开页签」退路，本组当场红。
+  describe("P3 页签出口源码白名单", () => {
+    it("terminalViewportCreate 全文只有定义＋四处既有调用点（逐一点名）", () => {
+      const hits = panelJs.split("\n")
+        .map((line, index) => ({ line: line.trim(), index: index + 1 }))
+        .filter((row) => row.line.includes("terminalViewportCreate("));
+      const counts = {};
+      for (const row of hits) counts[row.line] = (counts[row.line] || 0) + 1;
+      // 白名单（每项一句存在理由）：
+      //   · 定义本身；
+      //   · loadTerminalViewports：旧版单终端存档迁移成视口（刷新恢复路径）；
+      //   · placeTerminal placement==="new" 分支：「+」新建页签的落点执行；
+      //   · placeTerminal 无活跃视口兜底：有终端要落屏但没有视口可挂（viewport-fallback-create）；
+      //   · syncFromHost 自动补建：宿主出现无所属会话（他窗新建/宿主恢复）。
+      const expected = {
+        "function terminalViewportCreate(terminalId) {": 1,
+        "const viewport = terminalViewportCreate(legacy);": 1,
+        "viewport = terminalViewportCreate(terminalId);": 2,
+        "terminalViewportCreate(id);": 1,
+      };
+      assert.deepEqual(counts, expected,
+        "terminalViewportCreate 出现面与白名单逐字一致（新增调用点必须先过这道闸）");
+    });
+
+    it("placement: \"new\" 字面量全文唯一：页签条「+」新建菜单", () => {
+      const hits = panelJs.split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.includes('placement: "new"'));
+      assert.deepEqual(hits, ['createAgentTerminal({ agentId: terminalAddMenuSelection, cwd }, { placement: "new" });'],
+        "唯一的显式新开页签入口（判定门的 placement 解析是三元式，不是这个字面量）");
+    });
+
+    it("判定门六函数体内：不出现 terminalViewportCreate( 与 placement: \"new\"", () => {
+      for (const name of [
+        "terminalRailSwitchOrCreateCore",   // 判定门通用核
+        "terminalRailKeepAliveSwitch",      // 保活分支
+        "terminalRailResumeSession",        // 历史行续接入口
+        "terminalRailActivateSession",      // live 行聚焦入口
+        "terminalRailCreateTerminal",       // 栏底「新建会话」
+        "terminalRailCreateTerminalInDir",  // 组头 ⊕
+      ]) {
+        const body = extractFn(name);
+        assert.ok(!body.includes("terminalViewportCreate("), `${name} 不直接新开视口`);
+        assert.ok(!body.includes('placement: "new"'), `${name} 不走显式新开页签落点`);
+      }
+    });
+  });
+
+  // ── P1 在飞抑制：新建/保活 POST 在飞窗口内，轮询补建整步跳过 ──
+  // 根因场景：terminal-host 先 sessions.set 后回 201，1s 轮询拍在 POST 在飞窗口里
+  // 把新会话当「无所属」补建成重复页签。抑制＝计数 >0 时跳过补建，落定后下一拍
+  // 自然补建（宿主恢复/他窗新建只晚一拍）。
+  describe("P1 在飞抑制（terminalCreateInFlight）", () => {
+    it("在飞期间宿主快照已含新会话也不补建；落定后有所属不补建、无所属下一拍补建", async () => {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const { sandbox, log, state } = viewportHarness({
+        items: [TERM_ITEM("t-old")], inFlightCounter: true,
+        createImpl: (body) => gate.then(() => state.createdTerminal(body)),
+      });
+      sandbox.beat([TERM_ITEM("t-old")]);
+      sandbox.setAgents(agentsWorking("inst-t-old")); // 在跑 → 保活分支走 createAgentTerminal
+      sandbox.switchTo(HISTORY);
+      await flush(); // 补读两拍走完，POST 发出并被夹具压住
+      assert.equal(sandbox.inFlight(), 1, "POST 在飞计数 +1");
+      assert.equal(log.creates.length, 1, "保活 POST 已发出（在飞）");
+      // 在飞窗口：宿主已把新会话入表（先 sessions.set 后回 201），轮询拍打到这一拍
+      const eventsBefore = (log.switchEvents || []).length;
+      sandbox.beat([TERM_ITEM("t-old"), TERM_ITEM("t-created-1")]);
+      assert.equal(sandbox.viewports().length, 1, "在飞抑制：不把新会话补建成重复页签");
+      assert.ok(!(log.switchEvents || []).slice(eventsBefore).some((row) => row.event === "viewport-autocreate"),
+        "在飞窗口零补建留痕");
+      // 落定：保活挂上，新会话有所属；计数回落
+      release();
+      await flush();
+      assert.equal(sandbox.inFlight(), 0, "落定 −1");
+      assert.equal(sandbox.viewports().length, 1, "新终端挂进既有视口，页签数仍不变");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-created-1");
+      // 下一拍：抑制已解除，真无所属会话（他窗新建/宿主恢复）照补，只晚一拍
+      sandbox.beat([TERM_ITEM("t-old"), TERM_ITEM("t-created-1"), TERM_ITEM("t-else")]);
+      assert.equal(sandbox.viewports().length, 2, "落定后下一拍：无所属会话补建成视口");
+      assert.ok(log.switchEvents.some((row) => row.event === "viewport-autocreate" && row.detail.terminal === "t-else"),
+        "补建留痕落在解除抑制之后");
+    });
+
+    it("POST 失败：计数照样回落（finally −1），下一拍补建不受旧失败影响", async () => {
+      const { sandbox, log } = viewportHarness({
+        items: [TERM_ITEM("t-old")], inFlightCounter: true,
+        createImpl: async () => { const e = new Error("HTTP 500"); e.code = "http_500"; throw e; },
+      });
+      sandbox.beat([TERM_ITEM("t-old")]);
+      sandbox.setAgents(agentsWorking("inst-t-old"));
+      sandbox.switchTo(HISTORY);
+      await flush();
+      assert.equal(sandbox.inFlight(), 0, "失败落定：在飞计数回落");
+      assert.ok(log.switchEvents.some((row) => row.event === "create-fail"), "失败留痕 create-fail");
+      assert.equal(log.toasts.length, 1, "失败给提示");
+      sandbox.beat([TERM_ITEM("t-old"), TERM_ITEM("t-else")]);
+      assert.equal(sandbox.viewports().length, 2, "抑制随落定解除：无所属会话照补");
+    });
+
+    it("未声明计数的桩环境＝未抑制（typeof 闸语义，与既有用例一致）", () => {
+      const { sandbox } = viewportHarness({ items: [TERM_ITEM("t-old")] });
+      assert.equal(sandbox.inFlight(), null, "桩环境默认不带计数声明");
+      sandbox.beat([TERM_ITEM("t-old"), TERM_ITEM("t-else")]);
+      assert.equal(sandbox.viewports().length, 2, "未抑制：无所属会话当拍补建");
+    });
+
+    it("空白终端直连 POST 同伞：在飞不补建，落定（视口认领后）才放计数", async () => {
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const { sandbox, log, state } = viewportHarness({
+        items: [], inFlightCounter: true,
+        blankCreateImpl: () => gate.then(() => state.createdTerminal({})),
+      });
+      sandbox.beat([]);
+      // 左栏「新建终端」无 agent 分支：直连 /api/terminal/sessions（不经 createAgentTerminal）。
+      sandbox.createBlank();
+      await flush(); // POST 发出并被夹具压住
+      assert.equal(sandbox.inFlight(), 1, "空白 POST 在飞计数 +1");
+      assert.equal(log.blankCreates.length, 1, "空白 POST 已发出（在飞）");
+      // 在飞窗口：宿主已把新会话入表（先 sessions.set 后回 201），轮询拍打到这一拍
+      sandbox.beat([TERM_ITEM("t-created-1")]);
+      assert.equal(sandbox.viewports().length, 0, "在飞抑制：空白终端不被补建成页签");
+      assert.ok(!(log.switchEvents || []).some((row) => row.event === "viewport-autocreate"), "在飞窗口零补建留痕");
+      // 落定：无视口时 placeTerminal 兜底建一个认领（placement "viewport" 的 fallback）
+      release();
+      await flush();
+      assert.equal(sandbox.inFlight(), 0, "落定 −1");
+      assert.equal(sandbox.viewports().length, 1, "落定后由 placeTerminal 认领，不是轮询补建");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-created-1");
+      // 页签条「+」菜单空白分支同一伞（placement "new"）
+      let release2;
+      const gate2 = new Promise((resolve) => { release2 = resolve; });
+      state.blankCreateImpl = () => gate2.then(() => state.createdTerminal({}));
+      sandbox.confirmAdd();
+      await flush();
+      assert.equal(sandbox.inFlight(), 1, "「+」菜单空白 POST 同伞 +1");
+      sandbox.beat([TERM_ITEM("t-created-1"), TERM_ITEM("t-created-2")]);
+      assert.equal(sandbox.viewports().length, 1, "在飞窗口内仍不补建");
+      release2();
+      await flush();
+      assert.equal(sandbox.inFlight(), 0);
+      assert.equal(sandbox.viewports().length, 2, "「+」落点 placement 'new'：新建视口认领");
+      assert.equal(sandbox.viewports()[1].terminalId, "t-created-2");
+    });
+
+    it("源码钉：两条空白 POST 通路都在计数伞下，−1 排在视口认领之后", () => {
+      for (const name of ["confirmTerminalAddMenu", "terminalRailCreateTerminal"]) {
+        const src = extractFn(name);
+        assert.ok(src.includes('api("POST", "/api/terminal/sessions"'), `${name}：直连空白 POST 在册`);
+        assert.match(src, /terminalCreateInFlight \+= 1/, `${name}：POST 发起前 +1`);
+        const placeAt = src.indexOf("terminalViewportPlaceTerminal(created.id");
+        const releaseAt = src.indexOf("terminalCreateInFlight -= 1");
+        assert.ok(placeAt >= 0 && releaseAt > placeAt,
+          `${name}：计数释放排在视口认领之后（finally 的 −1 在 .then 的 placeTerminal 之后）`);
+      }
+    });
+  });
+
+  // ── P1 认领事务化：attach 挂上前摘除其余视口对同一终端的认领 ──
+  // 「同一终端被两个视口认领」永不合法：前台槽双挂＝同一终端两枚页签；
+  // background[] 双挂＝关页签判据数错入口。摘空且非活跃的视口销毁（复制页签自愈），
+  // 活跃视口摘空豁免。双挂态由 rawViewports 直接摆（生产里它来自在飞窗口补建事故，
+  // 正常路径构造不出来——这正是要钉的自愈）。
+  describe("P1 认领事务化（attach-absorb）", () => {
+    const THREE = () => [TERM_ITEM("t-a"), TERM_ITEM("t-b"), TERM_ITEM("t-c")];
+
+    it("前台槽双挂：摘除其余视口认领，摘空且非活跃的销毁，记 attach-absorb", () => {
+      const items = THREE();
+      const { sandbox, log } = viewportHarness({ items });
+      sandbox.beat(items);
+      assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-1", "viewport-2", "viewport-3"], "前提：三视口");
+      assert.equal(sandbox.activeViewport(), "viewport-1", "前提：viewport-1 活跃");
+      // 摆双挂：viewport-2 前台也认领 t-a（viewport-1 的正主）
+      sandbox.rawViewports().find((row) => row.id === "viewport-2").terminalId = "t-a";
+      sandbox.attach("viewport-3", "t-a");
+      const after = sandbox.viewports();
+      assert.deepEqual(after.map((row) => row.id), ["viewport-1", "viewport-3"], "摘空的 viewport-2 销毁（复制页签自愈）");
+      assert.equal(after[0].terminalId, null, "viewport-1 的重复认领被摘除（活跃视口落空不销毁）");
+      assert.equal(after[1].terminalId, "t-a", "t-a 挂进 viewport-3");
+      const absorb = log.switchEvents.find((row) => row.event === "attach-absorb");
+      assert.ok(absorb, "记 attach-absorb");
+      assert.equal(absorb.detail.terminal, "t-a");
+      assert.deepEqual(absorb.detail.from, ["viewport-1", "viewport-2"], "两个认领者都记");
+      assert.deepEqual(absorb.detail.closed, ["viewport-2"], "只有非活跃摘空者被销毁");
+    });
+
+    it("background[] 双挂：摘除后台记账，未摘空的视口不动", () => {
+      const items = THREE();
+      const { sandbox, log } = viewportHarness({ items });
+      sandbox.beat(items);
+      // 摆双挂：viewport-2 后台记账里也押着 t-a（前台仍是 t-b）
+      sandbox.rawViewports().find((row) => row.id === "viewport-2").background.push("t-a");
+      sandbox.attach("viewport-3", "t-a");
+      const after = sandbox.viewports();
+      assert.deepEqual(after.map((row) => row.id), ["viewport-1", "viewport-2", "viewport-3"], "viewport-2 未摘空（前台 t-b 还在）不销毁");
+      assert.deepEqual(sandbox.viewportBackgrounds("viewport-2"), [], "后台重复记账摘除");
+      assert.deepEqual(sandbox.viewportBackgrounds("viewport-3"), [], "attach 自身不产生后台记账（转后台是 placeTerminal/keepPrevious 的职责）");
+      const absorb = log.switchEvents.find((row) => row.event === "attach-absorb");
+      assert.ok(absorb, "记 attach-absorb");
+      assert.deepEqual(absorb.detail.from, ["viewport-1", "viewport-2"], "前台与后台两处的重复认领都摘除");
+      assert.deepEqual(absorb.detail.closed, [], "无人被销毁");
+    });
+
+    it("活跃视口被摘空豁免销毁：它是用户正看着的那枚页签", () => {
+      const items = THREE();
+      const { sandbox, log } = viewportHarness({ items });
+      sandbox.beat(items);
+      // 摆双挂：活跃视口 viewport-1 与 viewport-2 前台同为 t-b（viewport-1 的正主被顶掉）
+      sandbox.rawViewports().find((row) => row.id === "viewport-1").terminalId = "t-b";
+      sandbox.attach("viewport-3", "t-b");
+      const after = sandbox.viewports();
+      assert.deepEqual(after.map((row) => row.id), ["viewport-1", "viewport-3"], "viewport-2 销毁，活跃 viewport-1 摘空豁免");
+      assert.equal(after[0].terminalId, null, "活跃视口落空态，由渲染层承担");
+      const absorb = log.switchEvents.find((row) => row.event === "attach-absorb");
+      assert.ok(absorb);
+      assert.deepEqual(absorb.detail.from, ["viewport-1", "viewport-2"]);
+      assert.deepEqual(absorb.detail.closed, ["viewport-2"], "活跃视口不在销毁清单");
+    });
+
+    it("正常路径：无跨视口重复认领，attach 零摘除零日志", () => {
+      const items = THREE();
+      const { sandbox, log } = viewportHarness({ items });
+      sandbox.beat(items);
+      sandbox.attach("viewport-1", "t-a"); // 挂给自己原有的终端：其余视口没人认领它
+      sandbox.attach("viewport-3", "t-x"); // 全新终端：任何视口都不认领
+      assert.ok(!log.switchEvents || !log.switchEvents.some((row) => row.event === "attach-absorb"),
+        "无重复认领：零 attach-absorb 日志");
+      assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-1", "viewport-2", "viewport-3"],
+        "正常路径一个视口都不销毁");
+      assert.equal(sandbox.viewports()[2].terminalId, "t-x", "挂上动作本身照常");
+    });
   });
 });
 
