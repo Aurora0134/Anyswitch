@@ -22,7 +22,7 @@ export const SYNC_STATUS_FILENAME = "sync-status.json";
 
 // Where a sync was triggered from. Surfaced in the file for forensics only;
 // the panel renders the same copy regardless of source.
-export const SYNC_SOURCES = ["startup", "store-change", "settings", "manual"];
+export const SYNC_SOURCES = ["startup", "store-change", "settings", "manual", "token-rotation"];
 
 export function syncStatusPath(root) {
   return join(root, SYNC_STATUS_FILENAME);

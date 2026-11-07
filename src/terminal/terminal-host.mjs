@@ -12,7 +12,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
 import * as pty from "node-pty";
-import { loadOrGenerateToken } from "../launchers/pi-relay-token.mjs";
+import { loadOrGenerateToken, createRelayTokenValidator } from "../launchers/pi-relay-token.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
 import { probePidLiveness, getProcessCommandLineAsync } from "../relay/relay-process-manager.mjs";
@@ -687,6 +687,10 @@ export function createTerminalHost({
   const sessionStateDir = join(dataRoot, TERMINAL_SESSION_DIR);
   const sessions = new Map();
   const token = loadOrGenerateToken(dataRoot);
+  // Rotation-aware incoming auth: callers read the token file at use time and
+  // present the current generation, but after an in-flight rotation a strict
+  // compare against this boot-time copy would reject exactly them.
+  const tokenValidator = createRelayTokenValidator(dataRoot);
   let persistTimer = null;
   const coalesceWindowMs = Math.max(0, sseCoalesceWindowMs);
   // 终端当前亮暗与颜色（底色/前景/0-15 调色板）：996n 与 OSC 10 / 11 / 4 的即
@@ -1757,7 +1761,8 @@ export function createTerminalHost({
 
   function authorized(req) {
     const value = req.headers.authorization || "";
-    return value === `Bearer ${token}`;
+    const presented = value.startsWith("Bearer ") ? value.slice(7) : value;
+    return tokenValidator.isValid(presented);
   }
 
   // data 帧合帧器，每个 SSE 连接独立一份：多连接共享同一会话，各攒各的缓冲、

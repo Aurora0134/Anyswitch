@@ -11,6 +11,7 @@ import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics
 import { instanceIdFromSocket, bindLateSocketInstance, socketFallbackClientPid, SOCKET_OVERRIDE_AGENT_IDS, UNTRUSTED_INSTANCE_HEADER_AGENT_IDS } from "../agents/late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
 import { unpackChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "../channels/channel-model-slug.mjs";
+import { relayTokenAccepted } from "../launchers/pi-relay-token.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 // Single source of truth for the relay's loopback port. Every launcher
@@ -602,7 +603,7 @@ export function createOpenAIRelayServer(deps) {
     if (path === "/api/internal/agents" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      if (!token || token !== deps.token) {
+      if (!token || !relayTokenAccepted(deps, token)) {
         sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
         return;
       }
@@ -628,7 +629,7 @@ export function createOpenAIRelayServer(deps) {
     if (path === "/api/internal/agents-activity" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      if (!token || token !== deps.token) {
+      if (!token || !relayTokenAccepted(deps, token)) {
         sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
         return;
       }
@@ -709,7 +710,7 @@ export function createOpenAIRelayServer(deps) {
     if (path === "/api/internal/detected-processes" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      if (!token || token !== deps.token) {
+      if (!token || !relayTokenAccepted(deps, token)) {
         sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
         return;
       }
@@ -760,7 +761,7 @@ export function createOpenAIRelayServer(deps) {
     if (path === "/api/internal/model-stability" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      if (!token || token !== deps.token) {
+      if (!token || !relayTokenAccepted(deps, token)) {
         sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
         return;
       }
@@ -791,7 +792,7 @@ export function createOpenAIRelayServer(deps) {
     if (path === "/api/internal/route-chain-runtime" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      if (!token || token !== deps.token) {
+      if (!token || !relayTokenAccepted(deps, token)) {
         sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
         return;
       }
@@ -822,7 +823,7 @@ export function createOpenAIRelayServer(deps) {
     if (path === "/api/internal/logs" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
-      if (!token || token !== deps.token) {
+      if (!token || !relayTokenAccepted(deps, token)) {
         sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
         return;
       }
