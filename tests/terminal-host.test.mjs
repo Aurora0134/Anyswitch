@@ -667,14 +667,81 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
     const after = statSync(host.sessionStatePath(created.id));
     assert.equal(after.mtimeMs, before.mtimeMs, "同尺寸 resize 不重写这条会话的记录文件");
 
-    // 对照组：尺寸真变了，全路径照旧——重排发生、盘上尺寸更新。
+    // 对照组：尺寸真变了，全路径照旧——重排发生、盘上尺寸更新。2026-11-07 起
+    // 全路径响应对「静默会话的真变尺寸 resize」带回声戳（本测试从未喂过输出＝
+    // 恒静默，必带）；同尺寸短路的响应形状仍是不带戳的三字段，上面已钉。
     const changed = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
       method: "POST", headers: headers(host), body: JSON.stringify({ cols: 120, rows: 40 }),
     }).then((r) => r.json());
-    assert.deepEqual(changed, { ok: true, cols: 120, rows: 40 });
+    assert.equal(changed.ok, true);
+    assert.equal(changed.cols, 120);
+    assert.equal(changed.rows, 40);
+    assert.ok(Number.isFinite(changed.lastResizeAt), "静默会话的真变尺寸 resize 带回声戳");
     assert.deepEqual(pty.resizeCalls, [[120, 40]], "尺寸不同时 pty.resize 照常调用");
     const persisted = readSessionRecord(host, created.id);
     assert.equal(persisted.cols, 120, "实际变化的 resize 照常落盘");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// resize 回声戳（2026-11-07）：面板把终端挂进视口时会 fit 尺寸，宿主 resize 后 TUI
+// 适配新尺寸的重渲染也走 emit 顶热输出窗——面板杀前判据据此把「紧跟 resize 的输出」
+// 豁免出「在跑」证据。宿主只把「真变尺寸、且 resize 时已静默 ≥2s」的 resize 时刻
+// 随快照、落盘记录与响应带出（lastResizeAt）——静默门保流式：跨 resize 持续出字的
+// 会话没有戳，面板的输出窗照旧保它（顺序闸拦不住持续流式）。同尺寸 resize 走①的
+// 短路，没动 PTY 就没有回声、也不打戳。
+test("resize 回声戳：静默 ≥2s 才记 lastResizeAt（出字中不打戳），随快照、记录与响应带出", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-resizeecho-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "回声", cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+    const pty = calls[0].pty;
+    pty.dataListener?.("boot banner\r\n");
+    await sleep(10);
+
+    // 挂进视口的同尺寸 fit：走短路，不打戳。
+    const same = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+    assert.equal(same.lastResizeAt, undefined, "同尺寸 resize 的响应不带戳");
+    let snap = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.equal(snap.lastResizeAt, undefined, "同尺寸 resize 不产生回声戳（字段缺席）");
+
+    // PTY 正在出字（刚喂过 banner、静默 <2s）时真变尺寸：不打戳——流式保护，
+    // 面板的顺序闸拦不住持续流式，戳位就是防线。
+    const streaming = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 110, rows: 35 }),
+    }).then((r) => r.json());
+    assert.equal(streaming.cols, 110, "尺寸照常生效");
+    assert.equal(streaming.lastResizeAt, undefined, "出字中的 resize 响应不带戳（流式没有回声）");
+
+    // 静默 ≥2s 后真变尺寸（切到不同宽度的视口）：打戳，随后的 TUI 重渲染晚于它。
+    await sleep(2100);
+    const resizeAt = Date.now();
+    const changed = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 120, rows: 40 }),
+    }).then((r) => r.json());
+    pty.dataListener?.("redraw frame"); // TUI 适配新尺寸的重渲染
+    await sleep(10);
+    assert.ok(Number.isFinite(changed.lastResizeAt) && changed.lastResizeAt >= resizeAt,
+      "静默后的 resize 在响应里带戳（面板亚秒内切走也判得出回声）");
+    snap = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.ok(Number.isFinite(snap.lastResizeAt) && snap.lastResizeAt >= resizeAt,
+      "真变尺寸的静默 resize 记下时刻（回声判据的锚）");
+    assert.ok(snap.lastActiveAt >= snap.lastResizeAt, "重渲染输出晚于 resize（顺序闸可判）");
+
+    const record = readSessionRecord(host, created.id);
+    assert.ok(Number.isFinite(record.lastResizeAt), "落盘记录带上 lastResizeAt（跨宿主重启不丢锚点）");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });

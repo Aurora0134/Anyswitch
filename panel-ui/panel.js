@@ -5525,12 +5525,14 @@ async function api(method, path, body) {
   // 单测按函数体抽取，模块级量不随行，故各读写点用 typeof 闸护（同 renderTerminalRail
   // 的桩环境惯例）；闸护落空即视为桩环境，不记账。
   const terminalBackgroundSince = new Map();
-  // zcode 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧。
-  // 10min 是经验值、不是实测出的精确阈值：调小会撞上两类残余误杀面——停在权限确认框
-  // 等用户超过 10min 的会话，以及 MCP 宿主内不起子进程的长工具（进程树看不到、在途数
-  // 也是 0，现有信号区分不了）。另两条既定取舍：刷新恢复的后台集合无起点记账，本页
-  // 永不回收；面板隐藏／不在终端页时整拍跳过，拿陈旧计数做杀判据等于盲杀。
-  const TERMINAL_BACKGROUND_ZCODE_IDLE_MS = 10 * 60 * 1000;
+  // agent 后台终端多久算「空转」：10 分钟内无可见活动、无键入、计数为零＝资源空烧
+  //（2026-11-07 从 zcode 扩到全部 agent 会话：误判保留的僵尸不止 zcode 攒——dsh 这类
+  // 自绘终端同样宿主不自己退）。10min 是经验值、不是实测出的精确阈值：调小会撞上两类
+  // 残余误杀面——停在权限确认框等用户超过 10min 的会话，以及 MCP 宿主内不起子进程的
+  // 长工具（进程树看不到、在途数也是 0，现有信号区分不了）。另两条既定取舍：刷新恢复
+  // 的后台集合无起点记账，本页永不回收；面板隐藏／不在终端页时整拍跳过，拿陈旧计数做
+  // 杀判据等于盲杀。
+  const TERMINAL_BACKGROUND_IDLE_MS = 10 * 60 * 1000;
   // /close 被宿主拒关后的重试间隔：轮询 1s 一拍，持续失败不能变成每僵住一条终端
   // 就 1 req/s 空转。失败只留一条开发者日志（不是界面文案），退避满再试。
   const TERMINAL_BACKGROUND_RECYCLE_RETRY_MS = 30 * 1000;
@@ -5778,8 +5780,8 @@ async function api(method, path, body) {
   // 口径：exited 优先（迟到的活跃信号不能把已退出的进程重新判忙）；此后任一信号命中
   // 即按在跑处置，判不准也倒向在跑——宁可多留一个后台进程，不误杀用户正在做的事。
   // 显示层的转圈仍走回合闸（terminalSessionBusyFromSignals），不受这里影响。
-  // 已知代价：空闲仍持续重绘的 TUI 会被留在后台，需用户自己点 × 结束（用户裁决：
-  // 宁可多留、不可误杀）。
+  // 已知代价：空闲仍持续重绘的 TUI 会被留在后台（用户裁决：宁可多留、不可误杀）；
+  // 后台回收器（P-D）给 agent 会话兜一道 10 分钟静默收尸，手开 shell 仍只有用户点 ×。
   function terminalSessionRunning(session, now = Date.now()) {
     if (!session) return true; // 判不准：无会话记录＝不可杀
     const state = session.backendState ? session.backendState : null;
@@ -5792,7 +5794,23 @@ async function api(method, path, body) {
     if (terminalCommandRunning(session)) return true;
     // 最近确有非回显输出：输出窗自带孵化豁免与键入回显抑制，且不带回合闸——刷新页面
     // 丢掉内存里的闸、或请求从未归属到这条会话时，仍能保住正在出字的终端。
-    if (terminalBusyByOutput(session, undefined, now)) return true;
+    if (terminalBusyByOutput(session, undefined, now)) {
+      // resize 回声豁免（2026-11-07）：面板把终端挂进视口时会 fit 尺寸，宿主 resize
+      // 后 TUI 适配新尺寸的重渲染也走 emit、也顶热输出窗——切到老会话后几秒内切走
+      // 会被这里保成后台僵尸（实测：resize 让静默 28s 的 lastActiveAt 跳到 0.2s 新，
+      // 零输入零请求）。判据：最近一次输出紧跟在宿主 resize 之后＝回声，不当「在跑」。
+      // 两道闸保流式：宿主只对「resize 时已静默 ≥2s」的会话打戳（跨 resize 持续
+      // 出字的流式没有戳——顺序闸拦不住持续流式，戳位就是它的防线）；这里再要求
+      // 戳早于输出（输出停在 resize 前的不算回声）且落点距戳 2s 内（实测重渲染
+      // <0.2s 落地、再留一拍）。已知残余：静默暂停中被 resize、随后 2s 内恰好恢复
+      // 流式的会话，恢复输出的头 2s 仍会被误豁免——面板侧无法再细分，窄窗接受。
+      // 老宿主快照没有 lastResizeAt：缺位＝无回声可判，走原口径。
+      const resizedAt = state.lastResizeAt;
+      const echoOutput = Number.isFinite(resizedAt)
+        && resizedAt <= state.lastActiveAt
+        && state.lastActiveAt - resizedAt < 2000;
+      if (!echoOutput) return true;
+    }
     // 手开终端屏尾护栏（A1）：屏实例只在终端视图挂载后才有；没屏就交回上面四条信号，
     // 不把「判不了」当「判为不在跑」。
     if (typeof terminalXterm !== "undefined" && typeof activeTerminalPreviewId !== "undefined"
@@ -5816,12 +5834,9 @@ async function api(method, path, body) {
     if (terminalSessionRunning(session)) {
       // 引用记账：关页签时按它算「这条对话还有没有别的入口」。
       terminalViewportRefAdd(viewport, terminalId);
-      // 进后台起点记账（后台回收器逐拍扫这张表）。
+      // 进后台起点记账（后台回收器逐拍扫这张表；端点归属扫描拍按当拍会话数据现取）。
       if (typeof terminalBackgroundSince !== "undefined") {
-        terminalBackgroundSince.set(terminalId, {
-          at: Date.now(),
-          endpointId: (session.agent && session.agent.endpointId) || session.agentId || null,
-        });
+        terminalBackgroundSince.set(terminalId, { at: Date.now() });
       }
       return true;
     }
@@ -5847,14 +5862,9 @@ async function api(method, path, body) {
         if (previous && previous !== terminalId) {
           if (keepPrevious) {
             terminalViewportRefAdd(viewport, previous);
-            // 内切保活路径的进后台起点：端点归属当场取，取不到记 null，由扫描拍按
-            // 当时的会话归属复核（不能因为归档慢一拍就永久放弃回收）。
+            // 内切保活路径的进后台起点：回收判据扫描时按当拍会话归属现判。
             if (typeof terminalBackgroundSince !== "undefined") {
-              const kept = typeof terminalSessionFor === "function" ? terminalSessionFor(previous) : null;
-              terminalBackgroundSince.set(previous, {
-                at: Date.now(),
-                endpointId: (kept && kept.agent && kept.agent.endpointId) || (kept && kept.agentId) || null,
-              });
+              terminalBackgroundSince.set(previous, { at: Date.now() });
             }
           } else {
             terminalViewportRetire(viewport, previous);
@@ -5896,13 +5906,16 @@ async function api(method, path, body) {
     return true;
   }
 
-  // 后台回收器（P-D）：zcode 这类自绘终端进后台空转时宿主不会自己退（zcode-global
-  // 的在途数恒挂、输出窗恒热），攒成僵尸会话白烧资源。只对同时命中的终端直接发
-  // /close：① 在后台集合且有进后台起点；② 端点归属 zcode；③ 实例行在途数为零；
-  // ④ 进程树不忙；⑤ 最近可见活动已静默 10min；⑥ 最近无键入（或已过去 10min）；
-  // ⑦ 进后台已满 10min。
+  // 后台回收器（P-D）：agent 终端进后台后判据全静默即收尸。zcode 这类自绘终端空闲
+  // 也在写 PTY、宿主不会自己退（输出窗恒热），2026-11-07 起收面从 zcode 扩到全部
+  // agent 会话——切走误判保留的老会话（resize 回声修复前的主病灶）与 dsh/kimi 的
+  // 自绘空转同样攒僵尸白烧资源（实测 22 分钟无人收尸）。只对同时命中的终端直接发
+  // /close：① 在后台集合且有进后台起点；② 是 agent 会话（有端点归属——手开 shell
+  // 不收：用户可能在后台跑静默长命令，进程树与输出窗都看不见它）；③ 实例行在途数
+  // 为零；④ 进程树不忙；⑤ 最近可见活动已静默 10min；⑥ 最近无键入（或已过去
+  // 10min）；⑦ 进后台已满 10min。
   // 为什么不走 terminalCloseTerminal：它会对「在跑」的会话弹 window.confirm——回收
-  // 是后台自洁动作，弹窗即新增交互与文案（本轮硬约束零新增文案、零 toast）。失败
+  // 是后台自洁动作，弹窗即新增交互与文案（硬约束零新增文案、零 toast）。失败
   // 静默等下一拍（宿主拒关就留着，绝不重复提示）。
   // 判据用 lastVisibleAt 而不是 lastActiveAt：后者被自绘刷新（欢迎屏扫光）恒新，
   // 拿它做判据回收器永不触发；lastVisibleAt 缺位（老宿主快照）＝不知道有没有人在看，
@@ -5931,13 +5944,13 @@ async function api(method, path, body) {
       const since = typeof terminalBackgroundSince !== "undefined" ? terminalBackgroundSince.get(id) : null;
       // 无起点记账（刷新恢复的后台集合）＝不知道它何时进的后台，不回收。
       if (!since || !Number.isFinite(since.at)) continue;
-      // 记账里的端点只是快筛；null（内切保活时取不到）留给下面按会话归属复核。
-      if (since.endpointId && since.endpointId !== "zcode") continue;
-      if (now - since.at <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      if (now - since.at <= TERMINAL_BACKGROUND_IDLE_MS) continue;
       const session = terminalSessionFor(id);
       if (!session) continue;
+      // 只收 agent 会话（归属优先、agentId 兜底）：手开 shell 没有这一层归属，
+      // 用户可能在后台跑静默长命令——进程树与输出窗都看不见的它，唯一防线就是不收。
       const endpointId = (session.agent && session.agent.endpointId) || session.agentId || null;
-      if (endpointId !== "zcode") continue;
+      if (!endpointId) continue;
       // 计数只认实例行：聚合端点的 <endpoint>-global 是整机合计，不是这条终端的在途量。
       const instance = terminalInstanceRow(typeof terminalAgentsPayload !== "undefined" ? terminalAgentsPayload : null, session.agent);
       const count = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
@@ -5947,9 +5960,9 @@ async function api(method, path, body) {
       const visibleAt = Number.isFinite(session.lastVisibleAt)
         ? session.lastVisibleAt
         : (state && Number.isFinite(state.lastVisibleAt) ? state.lastVisibleAt : null);
-      if (!(Number.isFinite(visibleAt) && now - visibleAt > TERMINAL_BACKGROUND_ZCODE_IDLE_MS)) continue;
+      if (!(Number.isFinite(visibleAt) && now - visibleAt > TERMINAL_BACKGROUND_IDLE_MS)) continue;
       const inputAt = state ? state.lastInputAt : undefined;
-      if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt <= TERMINAL_BACKGROUND_ZCODE_IDLE_MS) continue;
+      if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt <= TERMINAL_BACKGROUND_IDLE_MS) continue;
       targets.push(id);
     }
     if (!targets.length) return;
@@ -7492,7 +7505,14 @@ async function api(method, path, body) {
     return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
-          session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
+          session.backendState = {
+            ...session.backendState,
+            cols: result.cols,
+            rows: result.rows,
+            // 回声戳随响应即达（不等 1s 轮询整表换血）：亚秒内切走也判得出回声。
+            // 只在宿主本次打了戳才带字段——流式形态的响应不带，这里不抹旧值。
+            ...(Number.isFinite(result.lastResizeAt) ? { lastResizeAt: result.lastResizeAt } : {}),
+          };
         }
         return result;
       })

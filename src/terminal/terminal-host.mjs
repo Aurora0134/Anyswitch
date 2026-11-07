@@ -527,6 +527,10 @@ function snapshot(session) {
     ...(session.deathUnobserved ? { deathUnobserved: true } : {}),
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
+    // resize 回声戳（2026-11-07）：真变尺寸的 resize 时刻。面板杀前判据拿它把「紧跟
+    // resize 的 TUI 重渲染输出」豁免出「在跑」证据。老宿主快照没有这个字段，缺席、
+    // 前端按缺位走原口径（契约字段名不可改）。
+    ...(session.lastResizeAt !== undefined ? { lastResizeAt: session.lastResizeAt } : {}),
     // 最近一次「可见文本」变化（毫秒 epoch）：纯颜色重绘不刷新它。老宿主快照没有
     // 这个字段，下发时缺席、前端按 undefined 处理（契约字段名不可改）。
     ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
@@ -831,6 +835,9 @@ export function createTerminalHost({
       pid: session.pid,
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt,
+      // 与 snapshot 同源（契约字段）：resize 回声判据的锚点。老记录没有这一项，
+      // 恢复时缺省为 undefined（面板按无回声走原口径）。
+      ...(session.lastResizeAt !== undefined ? { lastResizeAt: session.lastResizeAt } : {}),
       // 与 snapshot 同源（契约字段）：老记录没有这一项，恢复时缺省为 undefined。
       ...(session.lastVisibleAt !== undefined ? { lastVisibleAt: session.lastVisibleAt } : {}),
       spawnedAt: session.spawnedAt,
@@ -2077,6 +2084,15 @@ export function createTerminalHost({
         const sizeChanged = cols !== session.cols || rows !== session.rows;
         session.cols = cols;
         session.rows = rows;
+        // resize 回声戳（2026-11-07）：真变尺寸、且 resize 时 PTY 已静默 ≥2s 才记
+        // 时刻——「静默后的重渲染」才是回声；跨 resize 持续出字的（流式）不打戳，
+        // 面板的输出窗照旧保它（面板的顺序闸拦不住持续流式：输出永远晚于戳，戳位
+        // 就是它的防线）。静默门槛与面板回声窗同值 2s——两只是同一份契约，改要一起
+        // 改。同尺寸 resize 走上面的短路天然不记：没动 PTY 就没有回声。放在
+        // pty.resize 之前，保证重渲染输出的时刻晚于它（面板的顺序闸才判得出「回声」）。
+        const stampedResizeEcho = sizeChanged
+          && !(Number.isFinite(session.lastActiveAt) && Date.now() - session.lastActiveAt < 2000);
+        if (stampedResizeEcho) session.lastResizeAt = Date.now();
         try {
           if (!session.screen) session.screen = createScreenMirror({ cols, rows });
           else session.screen.resize(cols, rows);
@@ -2089,7 +2105,12 @@ export function createTerminalHost({
         // 自己那份记录里，所以只置这一条会话的脏标。
         if (sizeChanged) markSessionDirty(session);
         await persistSession(session);
-        return json(res, 200, { ok: true, cols, rows });
+        return json(res, 200, {
+          ok: true, cols, rows,
+          // 戳随响应即达（不等面板 1s 轮询整表换血）：亚秒内切走也判得出回声。
+          // 只在本次打了戳才带字段——流式形态的响应不带，面板侧不抹旧值。
+          ...(stampedResizeEcho ? { lastResizeAt: session.lastResizeAt } : {}),
+        });
       }
       if (action === "restart" && req.method === "POST") {
         // Optional env re-injection: a caller that holds fresh credentials
