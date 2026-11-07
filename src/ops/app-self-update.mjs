@@ -187,6 +187,8 @@ export async function runSelfUpdate({
   const autoApply = run.autoApply === true;
   const targetSha = track === "bleeding" ? String(run.targetSha ?? "") : null;
   const shortSha = targetSha ? targetSha.slice(0, 7) : null;
+  // 先行轨不打 tag，journal 里 targetTag 恒为 null；两次 fetch 的失败文案共用这一处目标标识。
+  const targetLabel = track === "bleeding" ? shortSha : targetTag;
   const repoUrl = run.repoUrl ?? APP_REPO_URL;
   const relayRoot = run.relayRoot ?? storePaths().root;
   const beforeVersion = run.beforeVersion ?? null;
@@ -250,7 +252,7 @@ export async function runSelfUpdate({
     const readyError = await ensureGitReady();
     if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
     const fetched = await fetchTarget();
-    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${track === "bleeding" ? shortSha : targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
+    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetLabel}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
     if (track === "bleeding") {
       // 先行轨的核验键是提交 SHA：FETCH_HEAD 与检查时的目标不一致（上游又前进
       // 了）即止步。版本号此刻才从 FETCH_HEAD 读出并回写 journal——应用阶段的
@@ -308,7 +310,7 @@ export async function runSelfUpdate({
     if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
     // 幂等补拉：已下载过的 tag 秒回；也兜住「下载后对象被 gc」的边角。
     const fetched = await fetchTarget();
-    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
+    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetLabel}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
     // 回滚点在应用开始时现取：HEAD 此刻仍是旧版（下载阶段不碰工作树）。首次引导
     // 没有 HEAD，回滚分支如实告知。
     const head = await runGit({ args: ["rev-parse", "HEAD"], cwd: appDir, spawnFn, env });

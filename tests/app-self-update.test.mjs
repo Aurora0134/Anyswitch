@@ -457,6 +457,24 @@ describe("runSelfUpdate · apply 阶段", () => {
       cleanup();
     }
   });
+
+  test("补拉失败：稳定轨失败文案仍带目标 tag", async () => {
+    const git = fakeSpawn(({ args }) => (args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(args)
+      ? { error: { code: 128 }, stderr: "fatal: could not read" }
+      : { stdout: "" }));
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载 v0\.7\.0失败/);
+      assert.equal(result.detail, "fatal: could not read");
+      assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false, "补拉失败不换装");
+      assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("runSelfUpdate · autoApply 顺延（一键流水线）", () => {
@@ -642,6 +660,43 @@ describe("runSelfUpdate · 先行轨（bleeding）", () => {
       assert.equal(result.outcome, "failed");
       assert.match(result.message, /更新目标无效/);
       assert.equal(git.calls.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("补拉失败：先行轨失败文案带提交短哈希，不出现 null", async () => {
+    // apply 段的幂等补拉是第二次 fetch；先行轨不打 tag，targetTag 恒为 null，
+    // 失败文案必须与下载段同口径取 shortSha。
+    const git = fakeSpawn(({ args }) => (args0("fetch", "--depth", "1", "--no-tags", "origin", "HEAD")(args)
+      ? { error: { code: 128 }, stderr: "fatal: could not read" }
+      : { stdout: "" }));
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ track: "bleeding", step: "apply", phase: "installing", targetSha: TARGET_SHA, targetVersion: "0.6.7", targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载 fedcba0失败/);
+      assert.doesNotMatch(result.message, /null/);
+      assert.equal(result.detail, "fatal: could not read");
+      assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false, "补拉失败不换装");
+      assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("补拉超时：先行轨文案同样带提交短哈希", async () => {
+    const git = fakeSpawn(({ args }) => (args0("fetch", "--depth", "1", "--no-tags", "origin", "HEAD")(args)
+      ? { error: { killed: true }, stderr: "timeout" }
+      : { stdout: "" }));
+    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ track: "bleeding", step: "apply", phase: "installing", targetSha: TARGET_SHA, targetVersion: "0.6.7", targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载 fedcba0用时过长被中止/);
+      assert.doesNotMatch(result.message, /null/);
     } finally {
       cleanup();
     }
