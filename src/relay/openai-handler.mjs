@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { relayTokenAccepted } from "../launchers/pi-relay-token.mjs";
 import { parseOpenAIPath, PARSE_REASON } from "./openai-path.mjs";
 import { providerRoutingShapes, findStaleTargets } from "../catalog/catalog-generation.mjs";
 import { extractPresentedToken } from "./handler.mjs";
@@ -111,19 +111,6 @@ export function buildResumeBody(originalBody, shadow) {
   return { ...original, messages };
 }
 
-function tokenMatches(presented, expected) {
-  if (typeof presented !== "string" || typeof expected !== "string") return false;
-  const a = Buffer.from(presented, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  try {
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
-  } finally {
-    a.fill(0);
-    b.fill(0);
-  }
-}
-
 const PARSE_STATUS = {
   [PARSE_REASON.NOT_OPENAI]: 404,
   [PARSE_REASON.NOT_A_STRING]: 400,
@@ -205,7 +192,6 @@ function hasUsableIdentity(call) {
 
 export function createOpenAIHandler(deps) {
   const {
-    token,
     loadStore,
     loadCredential,
     upstreamFetch,
@@ -240,7 +226,7 @@ export function createOpenAIHandler(deps) {
     if (presented === null) {
       return { ok: false, status: 401, body: openAIError("authentication_error", "missing Authorization header") };
     }
-    if (!tokenMatches(presented, token)) {
+    if (!relayTokenAccepted(deps, presented)) {
       return { ok: false, status: 401, body: openAIError("authentication_error", "invalid relay token") };
     }
     return { ok: true };

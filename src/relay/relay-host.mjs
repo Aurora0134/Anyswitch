@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { createProductionDeps } from "../launchers/launch.mjs";
 import { loadStore, storePaths } from "../store/store-io.mjs";
-import { loadOrGenerateToken } from "../launchers/pi-relay-token.mjs";
+import { loadOrGenerateToken, createRelayTokenValidator, checkAndRotateRelayToken, relayTokenAccepted } from "../launchers/pi-relay-token.mjs";
 import { writeZcodeConfig } from "../launchers/zcode-launcher.mjs";
 import { writeDshConfig } from "../launchers/dsh-launcher.mjs";
 import { createLogger, formatLogStamp } from "../shared/logger.mjs";
@@ -405,6 +405,7 @@ async function waitForTerminalHostReady({ token, fetchFn, hostPort, timeoutMs, i
 export function createTerminalHostRoutes({
   supervisor,
   token,
+  tokenValidator = null,
   settingsPath,
   root,
   logger = console,
@@ -421,6 +422,11 @@ export function createTerminalHostRoutes({
     supervisor.setManualStop(value);
   };
 
+  // Outbound calls to the terminal host must present the CURRENT generation:
+  // after an in-flight token rotation this process's boot-time `token` copy is
+  // stale, and a host restarted post-rotation would reject it.
+  const currentToken = () => (tokenValidator?.getCurrent ? tokenValidator.getCurrent() : token);
+
   const routes = {
     "GET /terminal-host/status": async (req, res) => {
       sendRouteJson(res, 200, { ok: true, host: supervisor.status() });
@@ -435,7 +441,7 @@ export function createTerminalHostRoutes({
       // Wait for the sessions endpoint to serve (the alreadyRunning path takes
       // the same probe — a live child can still be mid-bind after a respawn).
       const ready = await waitForTerminalHostReady({
-        token,
+        token: currentToken(),
         fetchFn,
         hostPort,
         timeoutMs: startReadyTimeoutMs,
@@ -464,7 +470,7 @@ export function createTerminalHostRoutes({
       let clearFailed = false;
       if (clearSessions) {
         try {
-          await requestClearAllSessions({ token, fetchFn, hostPort, timeoutMs: clearSessionsTimeoutMs });
+          await requestClearAllSessions({ token: currentToken(), fetchFn, hostPort, timeoutMs: clearSessionsTimeoutMs });
         } catch (error) {
           clearFailed = true;
           logger.warn?.(`terminal sessions clear-all failed (${error.message}); will delete the state file after the host is down`);
@@ -495,7 +501,12 @@ export function createTerminalHostRoutes({
       sendRouteJson(res, 403, { ok: false, error: "loopback_only" });
       return true;
     }
-    if (token && req.headers.authorization !== `Bearer ${token}`) {
+    // Rotation-aware guard: the panel bridges always read the token file at
+    // use time and present the current generation, but after an in-flight
+    // rotation this process's boot-time `token` copy is stale — a strict
+    // compare here would lock the panel out of its own terminal host.
+    const presented = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    if ((token || tokenValidator) && !relayTokenAccepted({ token, tokenValidator }, presented)) {
       sendRouteJson(res, 401, { ok: false, error: "unauthorized" });
       return true;
     }
@@ -511,6 +522,19 @@ export function createTerminalHostRoutes({
       }
     });
     return true;
+  };
+}
+
+// Daily check of the weekly rotation cadence. Unref'd timers: the relay's
+// HTTP listener owns the process lifetime; tests inject their own scheduler.
+function defaultTokenRotationSchedule(check) {
+  const first = setTimeout(check, 30_000);
+  const interval = setInterval(check, 24 * 3600_000);
+  first.unref?.();
+  interval.unref?.();
+  return () => {
+    clearTimeout(first);
+    clearInterval(interval);
   };
 }
 
@@ -550,9 +574,14 @@ function createResidentDeps(options = {}) {
   // 结果随探针下发，面板与 watchdog 才问得出「它还能不能服务」。见 service-health.mjs。
   const serviceHealth = options.serviceHealth ?? createServiceHealth();
   const token = loadOrGenerateToken(root);
+  // Rotation-aware gate for every inbound token check in this process: adopts
+  // rotated generations through its mtime cache, keeps recently used chained
+  // generations alive (see pi-relay-token.mjs).
+  const tokenValidator = options.tokenValidator ?? createRelayTokenValidator(root);
 
   return {
     token,
+    tokenValidator,
     loadStore: claudeDeps.loadStore,
     loadCredential: claudeDeps.loadCredential,
     buildUpstreamURLs: claudeDeps.buildUpstreamURLs,
@@ -734,6 +763,7 @@ export async function startResidentRelay(options = {}) {
   mountTerminalHostRoutes(server, createTerminalHostRoutes({
     supervisor: terminalSupervisor,
     token: deps.token,
+    tokenValidator: deps.tokenValidator,
     settingsPath,
     root,
     logger,
@@ -787,6 +817,37 @@ export async function startResidentRelay(options = {}) {
     },
   });
 
+  // Weekly automatic relay-token rotation, checked daily plus once shortly
+  // after boot (an install that was offline catches up immediately). The
+  // rotation is seamless by construction: the validator adopts the new
+  // generation through its mtime cache, sessions born earlier keep their
+  // generation alive through the chain, and the resync below propagates the
+  // new generation into every endpoint config.
+  const stopTokenRotation = (options.tokenRotationScheduleFn ?? defaultTokenRotationSchedule)(async () => {
+    let rotated = null;
+    try {
+      rotated = checkAndRotateRelayToken(root);
+    } catch (err) {
+      logger.error(`relay token rotation check failed: ${err.message}`);
+      return;
+    }
+    if (!rotated) return;
+    logger.info("relay token rotated automatically; resyncing agent configurations");
+    try {
+      const syncResult = await spawnAgentSync({ port, logger });
+      try {
+        writeSyncStatus(root, syncStatusFromResult(syncResult, "token-rotation"));
+      } catch (err) {
+        logger.warn?.(`sync status write failed: ${err.message}`);
+      }
+      if (!syncResult.ok) {
+        logger.error(`post-rotation agent config sync failed: ${syncResult.error ?? `runner exit ${syncResult.code}`}`);
+      }
+    } catch (err) {
+      logger.error(`post-rotation agent config sync failed: ${err.message}`);
+    }
+  });
+
   // Never phrase this as a panel URL: this line is bridged into the panel's
   // 实时输出 window, and 47821 serves no page — its /panel redirects to the
   // control plane. Only its /panel/api/* surface is live (session reports).
@@ -801,7 +862,11 @@ export async function startResidentRelay(options = {}) {
     // Final snapshot flush: the next relay (restart, login respawn) restores
     // the board's metric history from this file instead of starting at zero.
     try { deps.metricsCollector?.persistMetricsSnapshot?.(); } catch { /* shutdown must not fail on the sidecar */ }
+    // Flush the throttled usage map: a touch dropped at shutdown would
+    // shorten that generation's remaining grace window.
+    try { deps.tokenValidator?.flush?.(); } catch { /* advisory state, best-effort */ }
     storeWatcher.close();
+    stopTokenRotation?.();
     clearPid();
     try {
       await close();

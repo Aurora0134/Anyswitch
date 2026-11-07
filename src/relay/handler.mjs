@@ -22,7 +22,7 @@
 // in. There is still no default target, no cross-tier degradation and no
 // takeover for any other endpoint.
 
-import { timingSafeEqual } from "node:crypto";
+import { relayTokenAccepted } from "../launchers/pi-relay-token.mjs";
 import { unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
 import {
   CLAUDE_TIER_AGENT_ID,
@@ -111,22 +111,6 @@ function tierRowName(tier) {
   return tier.charAt(0).toUpperCase() + tier.slice(1);
 }
 
-// Constant-time token comparison. Length mismatch is reported without
-// short-circuiting on content. Both temporary copies are zeroed on every path so
-// no extra copy of the session token is left for the GC to reclaim lazily.
-export function tokenMatches(presented, expected) {
-  if (typeof presented !== "string" || typeof expected !== "string") return false;
-  const a = Buffer.from(presented, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  try {
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
-  } finally {
-    a.fill(0);
-    b.fill(0);
-  }
-}
-
 // Claude sends ANTHROPIC_AUTH_TOKEN in `Authorization` as the
 // bare value (no Bearer scheme). Accept an optional `Bearer ` prefix too, since
 // stripping it cannot weaken the comparison.
@@ -137,7 +121,10 @@ export function extractPresentedToken(headers) {
 }
 
 // deps:
-//   token          : string    - the relay's session token
+//   token          : string    - the relay's session token; constant-time
+//                    compare fallback when no tokenValidator is injected
+//   tokenValidator : object    - rotation-aware validator from
+//                    createRelayTokenValidator; takes precedence over token
 //   loadStore      : () => { ok, store?, errors? }
 //   loadCredential : (providerId, provider) => Promise<{ ok, value?, reason? }>
 //                    providerId is the already-validated id this request routed
@@ -152,7 +139,6 @@ export function extractPresentedToken(headers) {
 //                    absent → the mechanism is off
 export function createHandler(deps) {
   const {
-    token,
     loadStore,
     loadCredential,
     upstreamFetch,
@@ -219,7 +205,7 @@ export function createHandler(deps) {
     if (presented === null) {
       return { ok: false, status: 401, body: errorBody("authentication_error", "missing Authorization header") };
     }
-    if (!tokenMatches(presented, token)) {
+    if (!relayTokenAccepted(deps, presented)) {
       return { ok: false, status: 401, body: errorBody("authentication_error", "invalid relay token") };
     }
     return { ok: true };
