@@ -145,6 +145,36 @@ export function pruneBackups(dir, backupPrefix, keep = 5, { fs = realFs } = {}) 
   }
 }
 
+// Directory-shaped sibling of pruneBackups for callers whose backups are whole
+// timestamped DIRECTORIES (e.g. byok-remove's `byok-import-<yyyymmdd-HHmmss>/`).
+// `pattern` must be a RegExp anchored to the whole directory name (e.g.
+// /^byok-import-\d{8}-\d{6}$/): formatStamp's zero-padded stamp sorts
+// lexicographically in chronological order, and full-name anchoring is what
+// keeps a RECURSIVE delete off user-placed look-alike directories — the blast
+// radius of deleting a directory is larger than a single file's, so the match
+// is deliberately stricter than pruneBackups' string prefix. A missing dir is
+// a no-op; an undeletable directory is skipped rather than failing the flow
+// that just succeeded.
+export function pruneBackupDirs(dir, pattern, keep = 5, { fs = realFs } = {}) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return; // dir absent — nothing to prune
+  }
+  const backups = entries
+    .filter((entry) => entry.isDirectory() && pattern.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+  for (const name of backups.slice(0, Math.max(0, backups.length - keep))) {
+    try {
+      fs.rmSync(join(dir, name), { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup; an undeletable old backup must not fail the flow
+    }
+  }
+}
+
 const LOCK_RETRY_MS = 25;
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 2_000;

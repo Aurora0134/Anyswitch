@@ -1069,3 +1069,70 @@ test("通用: 未知端点 / 源文件缺失 / 非法条目各自 failed，互�
   assert.ok(result.failed[1].error.startsWith("entry-not-found"), result.failed[1].error);
   assert.ok(result.failed[2].error.startsWith("invalid-entry"), result.failed[2].error);
 });
+
+test("通用: 成功删除后备份目录按保留期收敛，正则外目录不碰", async () => {
+  const { dir, backupRoot } = setup();
+  const filePath = writeFixture(dir, "kimi/config.toml", kimiFixture());
+  const before = readFileSync(filePath, "utf8");
+
+  // 7 个历史 byok-import 备份目录（各含带内容文件）＋两个干扰目录。
+  for (let i = 1; i <= 7; i++) {
+    const old = join(backupRoot, `byok-import-2026010${i}-000000`);
+    mkdirSync(join(old, "kimi"), { recursive: true });
+    writeFileSync(join(old, "kimi", "config.toml"), `old-${i}\n`, "utf8");
+  }
+  mkdirSync(join(backupRoot, "pre-import-x"), { recursive: true });
+  writeFileSync(join(backupRoot, "pre-import-x", "store.json"), "{}", "utf8");
+  mkdirSync(join(backupRoot, "byok-import-notes"), { recursive: true });
+  writeFileSync(join(backupRoot, "byok-import-notes", "notes.txt"), "user", "utf8");
+
+  const result = await removeImportedEntries(
+    [entryOf("kimi", filePath, "foo", "https://foo.example/v1")],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.failed, []);
+  assert.deepEqual(result.removed, ["kimi::foo"]);
+  const byokDirs = readdirSync(backupRoot)
+    .filter((name) => /^byok-import-\d{8}-\d{6}$/.test(name))
+    .sort();
+  // 7 旧＋本次＝8，收敛到 keep=5：最旧三个被删，本次 stamp 字典序最新必留。
+  assert.deepEqual(byokDirs, [
+    "byok-import-20260104-000000",
+    "byok-import-20260105-000000",
+    "byok-import-20260106-000000",
+    "byok-import-20260107-000000",
+    STAMP_DIR,
+  ]);
+  assert.equal(
+    readFileSync(join(backupRoot, STAMP_DIR, "kimi", "config.toml"), "utf8"),
+    before,
+    "本次备份内容完整",
+  );
+  assert.equal(readFileSync(join(backupRoot, "pre-import-x", "store.json"), "utf8"), "{}");
+  assert.equal(readFileSync(join(backupRoot, "byok-import-notes", "notes.txt"), "utf8"), "user");
+});
+
+test("通用: 全失败调用不建备份目录，也不触碰既有备份", async () => {
+  const { dir, backupRoot } = setup();
+  const filePath = writeFixture(dir, "kimi/config.toml", kimiFixture());
+
+  for (let i = 1; i <= 3; i++) {
+    const old = join(backupRoot, `byok-import-2026010${i}-000000`);
+    mkdirSync(old, { recursive: true });
+    writeFileSync(join(old, "config.toml"), `old-${i}\n`, "utf8");
+  }
+  mkdirSync(join(backupRoot, "pre-import-x"), { recursive: true });
+  const before = readdirSync(backupRoot).sort();
+
+  const result = await removeImportedEntries(
+    [entryOf("kimi", filePath, "foo", "https://WRONG.example/v1")],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.removed, []);
+  assert.equal(result.failed.length, 1);
+  assert.ok(result.failed[0].error.startsWith("identity-mismatch"), result.failed[0].error);
+  assert.equal(result.backupDir, null);
+  assert.deepEqual(readdirSync(backupRoot).sort(), before, "无文件改动时不收敛用户历史备份");
+});
