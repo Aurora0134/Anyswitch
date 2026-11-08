@@ -11,6 +11,7 @@ import {
   casWriteFile,
   contentHash,
   pruneBackups,
+  pruneBackupDirs,
   withFileLock,
   withDirectoryLock,
   PreconditionFailedError,
@@ -283,6 +284,99 @@ test("pruneBackups defaults to keeping 5", () => {
   const remaining = readdirSync(dir).sort();
   assert.equal(remaining.length, 5);
   assert.equal(remaining[0], "config.backup.2026-01-04T00-00-00-000Z.toml");
+});
+
+// pruneBackupDirs: the directory-shaped sibling of pruneBackups (byok-import
+// backup directories). The pattern must be anchored to the whole name —
+// a recursive delete must never reach a user-placed look-alike directory.
+const BYOK_DIR_RE = /^byok-import-\d{8}-\d{6}$/;
+
+test("pruneBackupDirs keeps only the newest `keep` backup directories by name order", () => {
+  const dir = tempDir();
+  for (let i = 1; i <= 7; i++) {
+    const backupDir = join(dir, `byok-import-2026010${i}-000000`);
+    mkdirSync(join(backupDir, "kimi"), { recursive: true });
+    writeFileSync(join(backupDir, "kimi", "config.toml"), `v${i}\n`, "utf8");
+  }
+  pruneBackupDirs(dir, BYOK_DIR_RE, 5);
+  const remaining = readdirSync(dir).sort();
+  assert.deepEqual(remaining, [
+    "byok-import-20260103-000000",
+    "byok-import-20260104-000000",
+    "byok-import-20260105-000000",
+    "byok-import-20260106-000000",
+    "byok-import-20260107-000000",
+  ]);
+});
+
+test("pruneBackupDirs keeps everything when at or below the keep limit", () => {
+  const dir = tempDir();
+  for (let i = 1; i <= 5; i++) {
+    const backupDir = join(dir, `byok-import-2026010${i}-000000`);
+    mkdirSync(backupDir);
+    writeFileSync(join(backupDir, "config.toml"), `v${i}`, "utf8");
+  }
+  pruneBackupDirs(dir, BYOK_DIR_RE, 5);
+  assert.equal(readdirSync(dir).length, 5);
+
+  const emptyDir = tempDir();
+  pruneBackupDirs(emptyDir, BYOK_DIR_RE, 5);
+  assert.equal(readdirSync(emptyDir).length, 0);
+});
+
+test("pruneBackupDirs only touches directories whose whole name matches the anchored pattern", () => {
+  const dir = tempDir();
+  // User-placed look-alikes: same prefix but outside the stamped shape.
+  const kept = [
+    "byok-import-notes",
+    "byok-import-20260101-00000", // stamp one digit short
+    "byok-import-20260101-0000000", // stamp one digit long
+    "pre-import-x",
+  ];
+  for (const name of kept) {
+    mkdirSync(join(dir, name));
+    writeFileSync(join(dir, name, "user.txt"), "x", "utf8");
+  }
+  // A FILE named like a backup directory is not a directory — never touched.
+  writeFileSync(join(dir, "byok-import-20260101-000000"), "not a dir", "utf8");
+  for (const [name, body] of [
+    ["byok-import-20260102-000000", "old"],
+    ["byok-import-20260103-000000", "new"],
+  ]) {
+    mkdirSync(join(dir, name));
+    writeFileSync(join(dir, name, "config.toml"), body, "utf8");
+  }
+
+  pruneBackupDirs(dir, BYOK_DIR_RE, 1);
+
+  const remaining = readdirSync(dir).sort();
+  assert.deepEqual(remaining, [
+    "byok-import-20260101-00000",
+    "byok-import-20260101-000000",
+    "byok-import-20260101-0000000",
+    "byok-import-20260103-000000",
+    "byok-import-notes",
+    "pre-import-x",
+  ]);
+  assert.equal(readFileSync(join(dir, "byok-import-20260101-000000"), "utf8"), "not a dir");
+  assert.equal(readFileSync(join(dir, "byok-import-20260103-000000", "config.toml"), "utf8"), "new");
+});
+
+test("pruneBackupDirs is a no-op for a missing directory", () => {
+  const dir = join(tempDir(), "does-not-exist");
+  pruneBackupDirs(dir, BYOK_DIR_RE, 5);
+  assert.equal(existsSync(dir), false);
+});
+
+test("pruneBackupDirs defaults to keeping 5", () => {
+  const dir = tempDir();
+  for (let i = 1; i <= 8; i++) {
+    mkdirSync(join(dir, `byok-import-2026010${i}-000000`));
+  }
+  pruneBackupDirs(dir, BYOK_DIR_RE);
+  const remaining = readdirSync(dir).sort();
+  assert.equal(remaining.length, 5);
+  assert.equal(remaining[0], "byok-import-20260104-000000");
 });
 
 // --- withDirectoryLock: the ZCode-compatible directory lock -----------------

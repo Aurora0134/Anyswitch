@@ -43,7 +43,7 @@
 
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { atomicWriteFile } from "./atomic-write.mjs";
+import { atomicWriteFile, pruneBackupDirs } from "./atomic-write.mjs";
 import {
   readPersonalConfig,
   validatePersonalProviderConfig,
@@ -154,6 +154,12 @@ function formatStamp(date) {
   const p = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
 }
+
+// Backup-directory retention: only directories whose WHOLE name is
+// `byok-import-<formatStamp>` are prunable. The anchored full-name match keeps
+// the recursive delete off user-placed look-alike directories, and the
+// zero-padded stamp sorts lexicographically in chronological order.
+const BACKUP_DIR_NAME_RE = /^byok-import-\d{8}-\d{6}$/;
 
 function makeWriteContext(backupRoot, now) {
   const state = { stamp: null, dir: null, backups: new Map() };
@@ -982,5 +988,13 @@ export async function removeImportedEntries(entries, { backupRoot, now } = {}) {
       });
     }
   }
-  return { removed, failed, backupDir: ctx.backupDir() };
+  const backupDir = ctx.backupDir();
+  // Lazy-create discipline: an all-failed call (backupDir null) never wrote a
+  // byte, so it must not touch the user's backup history either. This call's
+  // stamp is the newest name in the set, so it always stays within the
+  // retention window.
+  if (backupDir !== null) {
+    pruneBackupDirs(backupRoot, BACKUP_DIR_NAME_RE);
+  }
+  return { removed, failed, backupDir };
 }
