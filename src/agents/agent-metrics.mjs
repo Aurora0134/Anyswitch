@@ -6286,7 +6286,10 @@ export function createAgentMetricsCollector(options = {}) {
     // 不是扫描计数——预取 runtime 会被扫描数到但不该上卡。
     const workbuddyRows = instanceRowsWithReserved("workbuddy", workbuddyDesktopPresent);
     const workbuddySurfaces = summarizeWorkbuddySurfaces(procCounts, wbActiveEnginePids);
-    if (workbuddyRows.length === 1 && instanceBuckets.workbuddy.size === 0) {
+    // 预留行是这条卡上唯一的行时，面徽章替它记上一票；引擎还在、行尚未铸出的
+    // 那一小段（注册表列着会话但会话文件还没刷新）面徽章已经按引擎计过票，
+    // 再补一票会读出「Desktop ×2、1 实例」，所以只在面徽章为空时补。
+    if (workbuddyRows.length === 1 && instanceBuckets.workbuddy.size === 0 && workbuddySurfaces.length === 0) {
       workbuddySurfaces.push({ surface: "desktop", label: workbuddySurfaceLabel("desktop"), count: 1 });
     }
     const workbuddyAgent = {

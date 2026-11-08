@@ -6267,6 +6267,23 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }]);
   });
 
+  it("引擎在、会话行还没铸出时可预留，面徽章只记一票", async () => {
+    // 注册表列着会话、但会话文件不新鲜：会话行起不来（见占位行的活跃闸），
+    // 引擎也不进活跃集（卡面真值是「会话行还活着的 runtime」）。此态卡片仍要
+    // 有一行（否则落回全局汇总），面徽章只由预留行记一票，不重复计。
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      workbuddySessionLookup: registryLookup({ 100: { sessionId: "6d2c" } }),
+      workbuddySessionActivity: async () => new Map(),
+      execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+    });
+    await collector.scanProcesses();
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 0, "行未铸出，引擎不进活跃集");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"], "行未铸出，只留预留行");
+    assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }], "一票，不重复");
+  });
+
   it("有真实会话行时不再给预留行", async () => {
     const collector = wbCollector({
       nowFn: () => 3000,
