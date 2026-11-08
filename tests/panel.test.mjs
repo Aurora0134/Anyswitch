@@ -6984,19 +6984,20 @@ describe("设置项「UI版本」", () => {
     return { echo, btns, writes, rootAttrs };
   }
 
-  it("回显按存档：缺省旧版高亮、存档 v2 新版高亮", () => {
-    assert.deepEqual(runUiVersionSeg(null, null).echo, ["true", "false"], "缺省旧版——升级上来的安装界面不变");
-    assert.deepEqual(runUiVersionSeg("v2", null).echo, ["false", "true"]);
+  it("回显按存档：缺省新版高亮、存档 classic 旧版高亮", () => {
+    assert.deepEqual(runUiVersionSeg(null, null).echo, ["false", "true"], "缺省新版——新装与从未选过的安装直接见新版");
+    assert.deepEqual(runUiVersionSeg("classic", null).echo, ["true", "false"], "显式选过旧版的保持旧版");
+    assert.deepEqual(runUiVersionSeg("v2", null).echo, ["false", "true"], "早期版本写下的 \"v2\" 存档仍按新版认");
   });
 
   it("点选写档并当帧改写 <html> 属性，高亮跟着移动", () => {
-    const on = runUiVersionSeg(null, "v2");
-    assert.deepEqual(on.writes, [["set", "panel-ui-version", "v2"]], "选新版写 \"v2\"");
+    const on = runUiVersionSeg("classic", "v2");
+    assert.deepEqual(on.writes, [["remove", "panel-ui-version"]], "选新版删存档、不落冗余值");
     assert.equal(on.rootAttrs["data-ui-version"], "v2", "选新版立刻挂上属性，看板当帧换列");
     assert.deepEqual(on.btns.map((b) => b.attrs["aria-checked"]), ["false", "true"], "高亮移到新版");
-    const off = runUiVersionSeg("v2", "classic");
-    assert.deepEqual(off.writes, [["remove", "panel-ui-version"]], "选回旧版删存档、不落冗余值");
-    assert.ok(!("data-ui-version" in off.rootAttrs), "选回旧版摘掉属性，回到 CSS 默认旧版");
+    const off = runUiVersionSeg(null, "classic");
+    assert.deepEqual(off.writes, [["set", "panel-ui-version", "classic"]], "选旧版写 \"classic\"");
+    assert.ok(!("data-ui-version" in off.rootAttrs), "选旧版摘掉属性，旧版是 CSS 无属性态");
     assert.deepEqual(off.btns.map((b) => b.attrs["aria-checked"]), ["true", "false"], "高亮移回旧版");
   });
 
@@ -7011,12 +7012,12 @@ describe("设置项「UI版本」", () => {
 
   it("绘制前落位：head 脚本读同一条存档，旧版不写属性", () => {
     const boot = panelHtml.slice(0, panelHtml.indexOf("</head>"));
-    assert.ok(boot.includes('localStorage.getItem("panel-ui-version") === "v2"'),
-      "head 预绘脚本读 panel-ui-version");
+    assert.ok(boot.includes('localStorage.getItem("panel-ui-version") !== "classic"'),
+      "head 预绘脚本读 panel-ui-version，缺省即新版");
     assert.ok(boot.includes('document.documentElement.setAttribute("data-ui-version", "v2")'),
-      "存档为 v2 时在绘制前挂上 data-ui-version，首帧不闪旧版");
+      "存档非 classic 时在绘制前挂上 data-ui-version，首帧不闪旧版");
     assert.ok(!boot.includes('setAttribute("data-ui-version", "classic")'),
-      "旧版是 CSS 默认态，不落冗余属性值");
+      "旧版是 CSS 无属性态，不落冗余属性值");
   });
 
   it("新版主导航进左栏：栏体默认整隐，新版定宽 fixed、右区统一让位", () => {

@@ -325,10 +325,11 @@ async function api(method, path, body) {
   }
 
   // 「UI版本」本机偏好：与开屏动画同一类存档（localStorage、绘制前由 head 脚本读、
-  // 不 POST、缺省旧版）。不同之处是它即时生效——设置页分段钮改写 <html> 的
-  // data-ui-version，看板 CSS 当帧换列；这里只管回显与写入。
+  // 不 POST、缺省新版——只有显式选过旧版（"classic"）才按旧版渲染）。不同之处是它
+  // 即时生效——设置页分段钮改写 <html> 的 data-ui-version，看板 CSS 当帧换列；
+  // 这里只管回显与写入。
   function newUiEnabled() {
-    try { return localStorage.getItem("panel-ui-version") === "v2"; } catch { return false; }
+    try { return localStorage.getItem("panel-ui-version") !== "classic"; } catch { return true; }
   }
 
   let startupViewReady = Promise.resolve();
@@ -5005,7 +5006,7 @@ async function api(method, path, body) {
     if (uiVersionSeg) {
       // 本机浏览器偏好，点选即时写存档、不 POST（同开屏动画）；不同处是即时生效——
       // 写存档的同时改写 <html> data-ui-version，看板 CSS 当帧换列，不必等刷新。
-      // 旧版是 CSS 默认态：选回旧版时摘属性、删存档，不留 "classic" 之类的冗余值。
+      // 新版是默认态：选新版删存档、不落冗余值；选旧版才写 "classic" 并摘属性。
       // 无 toast：选中枚高亮当帧移动本身就是反馈（同设置页子 tab）。
       const segBtns = Array.from(uiVersionSeg.querySelectorAll("[data-ui-version-choice]"));
       const reflectUiVersion = () => {
@@ -5018,8 +5019,8 @@ async function api(method, path, body) {
         b.onclick = () => {
           const next = b.dataset.uiVersionChoice === "v2";
           try {
-            if (next) localStorage.setItem("panel-ui-version", "v2");
-            else localStorage.removeItem("panel-ui-version");
+            if (next) localStorage.removeItem("panel-ui-version");
+            else localStorage.setItem("panel-ui-version", "classic");
           } catch {}
           if (next) document.documentElement.setAttribute("data-ui-version", "v2");
           else document.documentElement.removeAttribute("data-ui-version");

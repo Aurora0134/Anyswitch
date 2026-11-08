@@ -44,7 +44,7 @@ The panel lives at `http://127.0.0.1:47820/panel`, the relay at `127.0.0.1:47821
 
 <p align="center">
   <img src="docs/screenshots/s1-board.png" alt="Dashboard: service status, recent requests, per-agent instances with live output" width="48%">
-  <img src="docs/screenshots/s2-channels.png" alt="Channel management: channels, pools and the model list" width="48%">
+  <img src="docs/screenshots/s2-store.png" alt="Model management: channels, pools and the model list" width="48%">
   <img src="docs/screenshots/s3-stats.png" alt="Usage stats: today's overview, 90-day heatmap and token trends" width="48%">
   <img src="docs/screenshots/s4-skills.png" alt="Skills management: main repo and per-agent deployment" width="48%">
 </p>
@@ -62,7 +62,7 @@ Claude Code / Codex / other agents
    your OpenAI-compatible upstreams
 ```
 
-Screenshots live in [`docs/screenshots/`](docs/screenshots/) — open them after cloning to check the page shapes. They were taken from the panel of this exact code on one machine; channel names, usage numbers and the skills list are desensitized demo data.
+Screenshots live in [`docs/screenshots/`](docs/screenshots/) — open them after cloning to check the page shapes. They were taken from the panel of this exact code on one machine, on the default UI (the left-navigation layout); channel names, session titles, the skills and preset lists, and usage numbers are desensitized demo data.
 
 ---
 
@@ -70,7 +70,7 @@ Screenshots live in [`docs/screenshots/`](docs/screenshots/) — open them after
 
 Three prerequisites: Windows (credential sealing uses DPAPI, autostart uses Task Scheduler); Node.js (`>=22.15.0 <23 || >=23.8.0`, 24 LTS recommended — that is the API floor, not a claim that every version in range was tested); and a fresh install directory (never overwrite a running one with new source).
 
-Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node src/panel/panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere.
+Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node src/panel/panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere. Once installed, Settings → General also offers "Create desktop shortcut" — one click to put the panel entry on your desktop.
 
 Four steps to your first working request:
 
@@ -87,7 +87,7 @@ node --check src/panel/panel-host.mjs
 npm test
 ```
 
-`npm test` runs the repo's full suite (151 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
+`npm test` runs the repo's full suite (165 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
 
 ---
 
@@ -157,7 +157,7 @@ model name
 A node degrades after 2 consecutive failures and returns to the head of the chain after 5 minutes, driven by real requests. Deleting a channel or dissolving a pool prunes referencing chain entries in the same write — no dangling nodes. Every hop has a live lamp on the dashboard: which hop is serving, which is degraded, visible at a glance.
 
 <p align="center">
-  <img src="docs/screenshots/s5-route-chain.png" alt="Route chain editor: hop-by-hop failover chain and candidate tile wall" width="80%">
+  <img src="docs/screenshots/s5-route-chain.png" alt="A virtual model's route chain editor: hop-by-hop failover chain and candidate tile wall" width="80%">
 </p>
 
 ### Virtual models: one name, recognized by all ten agents
@@ -176,9 +176,13 @@ A channel carries its own last line of defense: `baseURL` plus multiple `fallbac
 
 Configuration and routing are the base; the readouts are what you use every day. Three places:
 
-- **Dashboard**: relay and terminal service status, live lamps for every chain hop, recent requests (including failures and 429s), per-agent instances. Multiple sessions of one client show as multiple instance rows, not merged into one blur.
+- **Dashboard**: relay and terminal service status, live lamps for every chain hop, recent requests (including failures and 429s), per-agent instances. Multiple sessions of one client show as multiple instance rows, not merged into one blur — ZCode instance rows go down to session granularity. The board has three layouts (All / Icon row / Running only) under Settings → Display.
 - **Usage stats**: today's overview (requests, tokens, cache hits, mean first-token latency, success rate), a 90-day heatmap, token trends, per-model usage and the request log.
 - **Sessions**: scans the ten clients' own session stores on demand, no separate index. Turn counting happens in the data layer — only what you actually said counts, never tool output posing as user input.
+
+<p align="center">
+  <img src="docs/screenshots/s9-sessions.png" alt="Sessions page: session lists and turn counting across the ten clients" width="80%">
+</p>
 
 Instance attribution is not guesswork: clients started via a launcher (or the virtual terminal) are attributed by the owning process of the connection; desktop GUI forms are recognized separately and never mistaken for another CLI. Attribution has a cold-cache window — right after relay start, before process scanning warms up, a launcher-shaped instance row can briefly appear twice; it collapses after 10 idle minutes.
 
@@ -215,18 +219,22 @@ The old approach poured the raw byte stream back into the terminal — refreshin
 - **Newlines**: `Ctrl+Enter` / `Shift+Enter`. Regular endpoints send LF; Codex alone sends `ESC CR` — it treats LF as submit, so it needs its own keybinding.
 - **Font size**: 10–24, default 13; `− / +`, `Ctrl+±`, `Ctrl+wheel` — three entry points, terminal page only.
 - **Tab bar**: collapses to give the terminal screen height; the transition is instant, container and canvas reflow in the same frame, no blank bars. Tabs can't be renamed; the server assigns labels from agent display names.
-- **Closing a tab**: closing a busy tab asks first; closing kills the whole process tree — node-pty's plain console close leaves children alive, so this is a tree kill.
+- **Closing a tab**: a tab is just an entry into a session. While other tabs onto the same conversation remain, closing one merely withdraws that entry — no confirmation, processes untouched; only when it is the last entry onto a still-running process does it ask first, and closing kills the whole process tree (node-pty's plain console close leaves children alive, so this is a tree kill).
 - **Theme**: terminal background, foreground, cursor and selection follow the panel's three skins and light/dark switch, re-rendering instantly.
 
-The terminal's backend is a separate process (port 47823) owned by the relay: it is relaunched automatically on crash — retry after 1s, at most 5 times per 10 minutes, then parked in "error" awaiting a manual start. The page header has two switches: **Continue from where you left off** (default on — restores page and history on next start, processes are not resurrected, restored sessions are honestly marked as exited) and **Bottom auto-alignment** (default off — when on, collapses the bottom blank band while browsing history upward).
+The terminal's backend is a separate process (port 47823) owned by the relay: it is relaunched automatically on crash — retry after 1s, at most 5 times per 10 minutes, then parked in "error" awaiting a manual start. The page header has two switches: **Continue from where you left off** (default on — restores page and history on next start; sessions killed by a service restart resurrect in place when you return to the terminal page, ones you exited normally stay honestly marked as exited and are not relaunched) and **Bottom auto-alignment** (default off — when on, collapses the bottom blank band while browsing history upward).
 
 ---
 
 ## Presets and skills: write once, effective in ten homes
 
-Prompt presets are instructions for *your* way of working, not a template library. Enabled presets are injected into the instruction files of all ten endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …), written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
+Prompt presets are instructions for *your* way of working, not a template library. Enabled presets are injected as a titled section (title + body) into the instruction files of all ten endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …) — the agent sees both the rule's subject and its content. Injection is written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
 
-Skills use a main-repo model: one local directory acts as the source, deploying into each agent's skills directory. Deployed skills appear in each endpoint's own listing; the main repo and deployment surface are managed on the same Skills page — and only installed agents are served: anything not installed stays off the dashboard, auto-route tiles and session filters.
+<p align="center">
+  <img src="docs/screenshots/s8-presets.png" alt="Preset management: titles, enable switches and injection share" width="80%">
+</p>
+
+Skills use a main-repo model: one local directory acts as the source, deploying into each agent's skills directory. Deployed skills appear in each endpoint's own listing; the main repo and deployment surface are managed on the same Skills page, where a SKILL.md body can be read and edited in place — and only installed agents are served: anything not installed stays off the dashboard, auto-route tiles and session filters.
 
 ---
 
@@ -256,9 +264,9 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
   The second command walks `src/` recursively (after the refactor no implementation sits at the repo root, so scanning the root finds nothing) and should print only `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`.
 
 - **The write path is concurrency-safe.** Panel writes to the store go through content-hash CAS with a file lock; the routing catalog carries a generation digest so a config changed mid-request is never served stale.
-- **Write endpoints trust only the local panel.** `POST /panel/api/*` passes Origin/Referer validation; the relay authenticates with a local token from the data root, as does the terminal host.
+- **Write endpoints trust only the local panel.** `POST /panel/api/*` passes Origin/Referer validation; the relay authenticates with a local token from the data root, as does the terminal host. The token rotates automatically every 7 days, and an idle previous generation retires after 24 hours — no handling required.
 
-Scale is not the selling point, but it is verifiable: 118 implementation `.mjs` files under `src/` and 151 test `.mjs` files under `tests/`, 269 in total; roughly 55,600 lines of implementation code and 106,100 lines of test code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 29,800 lines.
+Scale is not the selling point, but it is verifiable: 124 implementation `.mjs` files under `src/` and 165 test `.mjs` files under `tests/`, 289 in total; roughly 58,900 lines of implementation code and 116,800 lines of test code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 31,600 lines.
 
 ---
 
@@ -285,9 +293,9 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 - **The 0.7 line is now stable.** The stable line moved on from `v0.6.6` and now sits at `v0.7.2`: installations running a stable identity are offered `v0.7.2`, and installations that followed `v0.7.0-preview` already returned to the stable track at `v0.7.0`.
 - **The virtual terminal is still preview.** It needs its own `npm install` once; the default-off "bottom auto-alignment" and restore policy are still being polished on the preview line.
 - **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions. Restarting only the panel host does not kill terminals — the terminal host is owned by the relay.
-- **Refresh recovery has a scope.** It restores "still on the terminal page + which tab + whatever history the mirror can still replay"; it does not restore scroll position, does not replay everything since the session began, and does not resurrect sessions whose processes have exited.
+- **Refresh recovery has a scope.** It restores "still on the terminal page + which tab + whatever history the mirror can still replay"; it does not restore scroll position and does not replay everything since the session began. Sessions whose processes have exited split two ways: ones killed by a service restart resurrect in place when you return to the terminal page; ones you exited normally stay exited, keeping only their history.
 - **Terminal tabs can't be renamed, and a blank terminal's shell is fixed to PowerShell.** GUI desktop forms (Claude Desktop, Codex desktop, …) are not terminal candidates.
-- **The new UI is an opt-in toggle, not the default.** The default is still the classic layout; the screenshots show the default.
+- **The left-navigation UI is the default layout.** Browsers that never touched the UI toggle get the new UI; anyone who explicitly chose the classic layout keeps it. The switch lives under Settings → General → Display and takes effect instantly. The screenshots here show the default layout.
 - **One-step self-update and the "bleeding edge" channel haven't completed a real update round yet.** An update replaces the running panel — that step can only be walked by the first person who clicks it.
 - **Several attribution fixes live in the resident relay and need a relay restart to take effect**; the restart takes open terminal sessions with it — the page keeps the history and honestly marks the sessions as exited.
 - **Instance attribution has a cold-cache window.** Right after relay start, launcher-shaped instance rows can briefly double before process scanning warms up; they collapse after 10 idle minutes.
@@ -334,7 +342,7 @@ git log --no-merges --oneline v0.7.1..v0.7.2
 
 User data lives one level above `app` in `%LOCALAPPDATA%\Anyswitch\`: channels, credentials, settings, presets and usage records never follow the source directory.
 
-The preferred upgrade entry point is in the panel: **Settings → About → Check for updates**. Confirm once on "Update now" and download plus swap complete automatically; background pre-download ("auto-check and download updates") is off by default. To walk the same path manually, first schedule a quiet moment for open sessions, then check the install directory's working tree:
+The preferred upgrade entry point is in the panel: **Settings → About → Check for updates**. Confirm once on "Update now" and download plus swap complete automatically; background pre-download ("auto-check and download updates") is off by default. Checks and downloads go direct first; on a direct-connection transport failure they retry once through your configured proxy (environment variables or git `http.proxy`). To walk the same path manually, first schedule a quiet moment for open sessions, then check the install directory's working tree:
 
 ```bat
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
@@ -355,7 +363,7 @@ Do not copy new source over an old install, and do not upgrade with `git reset -
 
 ## Feedback and contributions
 
-- **Bugs**: include the Windows version, Node version, agent form, reproduction steps and the actual error; never attach API keys, credential files or full session contents.
+- **Bugs**: include the Windows version, Node version, the Anyswitch version (shown in the panel footer), agent form, reproduction steps and the actual error; never attach API keys, credential files or full session contents.
 - **Feature proposals**: first say where your workflow gets stuck, then the outcome you want; leave implementation approaches to the discussion.
 - **Code changes**: follow [`CONTRIBUTING.md`](CONTRIBUTING.md) — Node.js ESM, built-in `node:test`, specs and code updated in the same commit.
 

@@ -29,12 +29,13 @@ try {
 } catch (e) {}
 </script>
 <script>
-// 界面版本——绘制前恢复「UI版本」选择，避免刷新时先按旧版布局画一帧再换版。
-// 存档 localStorage「panel-ui-version」："v2"=新版（左侧导航栏布局）；缺失/其他值=
-// 旧版（旧版是 CSS 默认态，不写属性）。这是本机浏览器偏好，不过 /api/settings
-// （同主题/开屏动画）；设置→通用「显示」卡的分段钮写存档并即时改属性，这里只管首帧落位。
+// 界面版本——绘制前恢复「UI版本」选择，避免刷新时先按另一版布局画一帧再换版。
+// 存档 localStorage「panel-ui-version」："classic"=旧版；缺失/其他值=新版（左侧
+// 导航栏布局，默认即新版；旧版仍是 CSS 无属性态，JS 不跑时按旧版画）。这是本机
+// 浏览器偏好，不过 /api/settings（同主题/开屏动画）；设置→通用「显示」卡的分段钮
+// 写存档并即时改属性，这里只管首帧落位。
 try {
-  if (localStorage.getItem("panel-ui-version") === "v2") {
+  if (localStorage.getItem("panel-ui-version") !== "classic") {
     document.documentElement.setAttribute("data-ui-version", "v2");
   }
   // 左栏手动态——同一类本机偏好（localStorage「panel-rail-manual」：collapsed=
@@ -520,7 +521,7 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </header>
 
-<!-- 新版界面（设置→通用「显示」卡「UI版本」选新版）的左侧导航栏：栏顶品牌徽标，
+<!-- 新版界面（默认布局；设置→通用「显示」卡「UI版本」可切回旧版）的左侧导航栏：栏顶品牌徽标，
      七枚主 tab（含终端，图标在左、文字在右）竖排贴栏底，最底一行左亮暗钮、右设置钮。
      旧版整栏 display:none，头行布局原样。
      两级降级：≥1200px 全栏 216px；其余宽度收 72px 图标栏（文字标签整隐、title 作
@@ -2100,8 +2101,8 @@ if (window.panelStartupController) panelStartupPlay();
               <div class="modal-item-title">UI版本</div>
             </div>
             <div class="seg-switch" id="uiVersionSeg" role="radiogroup" aria-label="UI版本">
-              <button type="button" class="seg-switch-btn" data-ui-version-choice="classic" role="radio" aria-checked="true">旧版</button>
-              <button type="button" class="seg-switch-btn" data-ui-version-choice="v2" role="radio" aria-checked="false">新版</button>
+              <button type="button" class="seg-switch-btn" data-ui-version-choice="classic" role="radio" aria-checked="false">旧版</button>
+              <button type="button" class="seg-switch-btn" data-ui-version-choice="v2" role="radio" aria-checked="true">新版</button>
             </div>
           </div>
           <!-- 开屏动画：存档在 localStorage 的 panel-startup-animation（"1"/"0"，缺省视为开），
