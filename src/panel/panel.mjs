@@ -9,11 +9,14 @@
 //     them, and a relay-restart request handled BY the relay is self-kill.
 //
 // Authentication: NONE. Loopback binding is the network boundary (non-127
-// peers already 403). Writes (start/stop/restart, settings, autostart,
-// session report) additionally require Origin/Referer on the panel or relay
-// port plus header X-AnySwitch-Panel: 1, so a random page on this machine
-// cannot POST those routes. Credentials are never echoed. The relay Bearer
-// token still guards /v1/* and /openai/* and is not pasted into the browser.
+// peers already 403), and every request — read or write — must carry a
+// loopback Host header, so a browser DNS-rebinding page that reaches this
+// socket by its rebound name cannot read or write the surface. Writes
+// (start/stop/restart, settings, autostart, session report) additionally
+// require Origin/Referer on the panel or relay port plus header
+// X-AnySwitch-Panel: 1, so a random page on this machine cannot POST those
+// routes. Credentials are never echoed. The relay Bearer token still guards
+// /v1/* and /openai/* and is not pasted into the browser.
 
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -378,6 +381,23 @@ function loopbackHttpOrigin(origin) {
   } catch {
     return null;
   }
+}
+
+// AUTH-1 · DNS rebinding 读面门：重绑定页以自己的域名打到同一环回套接字，
+// Host 头是请求里唯一「浏览器自报它以为在跟谁说话」的输入。只认环回主机名；
+// 端口不校验——浏览器 Host 由 URL 生成，重绑定页必须以真实端口寻址，伪造端口
+// 对浏览器攻击者不可得，而同一 router 同时挂在 panel 端口、relay 端口与
+// 测试/DI 的临时端口上，钉死端口反而要穿线传参。畸形或缺头一律 fail closed。
+// （Node 的 URL 对 IPv6 字面量的 .hostname 保留方括号，故集合里的 [::1] 带框。）
+export function isTrustedPanelHostHeader(hostHeader) {
+  if (typeof hostHeader !== "string" || hostHeader === "") return false;
+  let url;
+  try {
+    url = new URL(`http://${hostHeader.toLowerCase()}`);
+  } catch {
+    return false;
+  }
+  return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
 }
 
 export function isTrustedPanelOrigin(origin, hostHeader) {
@@ -3637,15 +3657,27 @@ export function createPanelRouter({
     const path = url.pathname;
     const method = req.method;
 
+    // AUTH-1 · Host 门（封 DNS rebinding，读面写面一起盖）：环回绑定仍是网络
+    // 边界，但重绑定页以自己的域名寻址到同一套接字；Host 不信即整请求拒绝，
+    // 且拦在 POST 写门之前（原「环回 Origin＋敌意 Host 的 POST 放行」的写门
+    // 兜底漏洞随之闭合）。一处改动同时盖住 panel 端口与 relay 端口的 /panel 前缀。
+    if (!isTrustedPanelHostHeader(req?.headers?.host)) {
+      logger?.warn?.(`panel host gate: rejected ${method} ${path} (Host: ${req?.headers?.host})`);
+      return sendJson(res, 403, { ok: false, error: "host" });
+    }
+
     if (method === "POST" && path.startsWith("/panel/api/") && !isTrustedPanelMutation(req)) {
       return sendJson(res, 403, { ok: false, error: "csrf" });
     }
 
-    // The panel page is served to any loopback peer. No login box. Writes are
-    // gated above; GETs stay tokenless. Only the control plane serves it: two
-    // byte-identical pages on two ports would put every lifecycle button at the
-    // mercy of whichever process happens to answer, and on the relay port that
-    // process is the relay — which cannot restart itself without dying mid-request.
+    // The panel page is served to any loopback peer. No login box. Reads and
+    // writes alike must carry a loopback Host (gate above) — loopback binding
+    // plus a loopback Host header together close the browser DNS-rebinding
+    // read face. Writes are gated above; GETs stay tokenless. Only the control
+    // plane serves it: two byte-identical pages on two ports would put every
+    // lifecycle button at the mercy of whichever process happens to answer,
+    // and on the relay port that process is the relay — which cannot restart
+    // itself without dying mid-request.
     if (path === "/panel" && (method === "GET" || method === "HEAD")) {
       if (hostKind !== "panel-host") {
         res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
