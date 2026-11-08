@@ -2040,6 +2040,7 @@ describe("createAgentMetricsCollector", () => {
       await collector.scanProcesses();
       const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
       assert.deepEqual(zcode.instances, [], "CLI 是 node 跑 bin\\zcode.mjs，不算桌面端在场");
+      assert.deepEqual(zcode.surfaces, [], "没有桌面端就没有面徽章");
     });
 
     it("应用关闭后预留行随之消失", async () => {
@@ -2075,12 +2076,16 @@ describe("createAgentMetricsCollector", () => {
     });
 
     it("空态预留行连读两次指纹一致（面板按 JSON.stringify 判重渲染）", async () => {
+      let t = 3000;
       const collector = testCollector({
         execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
-        nowFn: () => 3000,
+        nowFn: () => t,
       });
       await collector.scanProcesses();
       const first = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      // 跨读间隔一秒（面板轮询节奏）：firstSeen 不许跟着时钟走，否则整卡指纹每拍
+      // 都变、卡片每秒重渲一次。
+      t += 1000;
       const second = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
       assert.equal(first.instances[0].firstSeen, second.instances[0].firstSeen, "首见时间跨读稳定");
       assert.equal(JSON.stringify(first), JSON.stringify(second), "整卡指纹稳定");
@@ -6265,6 +6270,21 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     assert.equal(card.processCount, 0, "GUI 主进程不是会话");
     assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"]);
     assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }]);
+  });
+
+  it("daemon/sidecar/辅助进程残留不算应用开着：不点亮也不预留", async () => {
+    // 主进程退出后家族成员可能短暂残留，它们没有窗口——为它们挂行就是幽灵卡。
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7006, 800, "--daemon-app-server-entry.js"),
+        row(7007, 7006, "--sidecar-entry.js"),
+        row(7008, 7006, "--type=utility"),
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.status, "stopped", "主进程不在，家族成员不点亮卡片");
+    assert.deepEqual(card.instances, [], "也不留预留行");
   });
 
   it("引擎在、会话行还没铸出时可预留，面徽章只记一票", async () => {

@@ -1110,6 +1110,10 @@ export function summarizeKimiSurfaces(procCounts) {
 const WORKBUDDY_IMAGE = "workbuddy.exe";
 // 内置 CLI 入口的路径段。`/` 与 `\` 两种分隔符都认（真机命令行两种都出现过）。
 const WORKBUDDY_RUNTIME_RE = /cli[\\/]bin[\\/]codebuddy/;
+// 同镜像的家族成员：Electron 辅助、后台 daemon、sidecar 与 CLI 入口。判「应用
+// 开着」时要把它们排除——主进程的形状就是这些标记一个都没有。它们可能在 GUI
+// 退出后短暂残留，当在场处理会挂出一张没有窗口的幽灵卡。
+const WORKBUDDY_FAMILY_MEMBER_RE = /--type=|--daemon-app-server-entry\.js|--sidecar-entry\.js|cli[\\/]bin[\\/]codebuddy/;
 
 // 本实例的 GUI 主进程：同镜像、读得到命令行、无 `--type=`、且不是 CLI 入口。
 // 它拥有会话进程，但本身不是会话（kimi 的主进程是会话属主，这里不是）。
@@ -5847,9 +5851,12 @@ export function createAgentMetricsCollector(options = {}) {
     // 谁在）：
     //   zcode：zcodePids 里有镜像为 zcode.exe 的行。CLI 是 node 跑 bin\zcode.mjs，
     //     镜像 node.exe，进不了这个集合；桌面主进程（ZCode.exe）在 = 应用开着。
-    //   workbuddy：家族集（workbuddyPids，含主进程 / --type= 辅助 / daemon /
-    //     sidecar / 待命预取 runtime）减去引擎集（workbuddyEnginePids，只有真会话
-    //     runtime）非空。纯 CLI 时两集相等，差集为空，不预留。
+    //   workbuddy：GUI 主进程在场。家族里的 --type= 辅助、daemon、sidecar 与待命
+    //     预取 runtime 都不算「应用开着」——它们可能在主进程退出后短暂残留，当
+    //     在场处理会挂出一张没有窗口的幽灵卡。主进程形状只能靠命令行分辨：工作台
+    //     镜像、且不是 WORKBUDDY_FAMILY_MEMBER_RE 里的任何一类。整轮命令行读不出
+    //     （tasklist 兜底）时没有分辨能力，按家族在场处理，否则这一轮会掉回旧
+    //     形态、下一轮再跳回来。
     const zcodeDesktopPresent = (() => {
       const pids = procCounts.zcodePids;
       const imageByPid = procCounts.imageByPid;
@@ -5859,10 +5866,19 @@ export function createAgentMetricsCollector(options = {}) {
     })();
     const workbuddyDesktopPresent = (() => {
       const pids = procCounts.workbuddyPids;
-      if (!(pids instanceof Set)) return false;
-      const engines = procCounts.workbuddyEnginePids instanceof Set ? procCounts.workbuddyEnginePids : null;
-      for (const pid of pids) if (engines === null || !engines.has(pid)) return true;
-      return false;
+      if (!(pids instanceof Set) || pids.size === 0) return false;
+      const cmdByPid = procCounts.cmdByPid;
+      const imageByPid = procCounts.imageByPid;
+      let sawReadable = false;
+      for (const pid of pids) {
+        const commandLine = cmdByPid instanceof Map ? (cmdByPid.get(pid) ?? null) : null;
+        if (isCommandLineUnreadable(commandLine)) continue;
+        sawReadable = true;
+        // node 形态的 CLI 也进家族集：读得出来就证明本轮有分辨能力，但它不是主进程。
+        if (imageByPid instanceof Map && imageByPid.get(pid) !== WORKBUDDY_IMAGE) continue;
+        if (!WORKBUDDY_FAMILY_MEMBER_RE.test(commandLine)) return true;
+      }
+      return !sawReadable;
     })();
     const RESERVED_INSTANCE_ID = { zcode: "zcode-reserved", workbuddy: "workbuddy-reserved" };
 
