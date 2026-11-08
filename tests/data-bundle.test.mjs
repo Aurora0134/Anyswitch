@@ -103,6 +103,25 @@ const listZip = async (zipPath) => {
   });
 };
 
+// 手工造一个导出包形状的 zip（真 bsdtar 合包，包格式本身是被测对象之一），
+// 给「恶意包」类用例用：包内容攻击者完全可控，合法导出路径造不出来的形态。
+async function buildZip(files) {
+  const staging = mkTestDir("anyswitch-bundle-handmade-");
+  for (const [name, body] of Object.entries(files)) {
+    const target = join(staging, name);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, body, "utf8");
+  }
+  const zip = join(mkTestDir("anyswitch-bundle-zip-"), "handmade.zip");
+  const { spawn } = await import("node:child_process");
+  await new Promise((res, rej) => {
+    const c = spawn("C:\\Windows\\System32\\tar.exe", ["--format=zip", "-cf", zip, "-C", staging, "."], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    c.on("error", rej);
+    c.on("close", (code) => (code === 0 ? res() : rej(new Error("pack failed"))));
+  });
+  return zip;
+}
+
 test("导出包内含全部人写的配置、skills 目录树与凭据", async () => {
   const m = fakeMachine();
   const result = await m.service().exportBundle({ targetDir: m.targetDir });
@@ -232,6 +251,41 @@ test("预览拒绝：非 zip、缺 manifest、格式版本不符、store 非法"
   const badStore = writeBadZip({ "manifest.json": JSON.stringify({ format: 1 }), "store.json": JSON.stringify({ version: 2, providers: { alpha: { displayName: "A" } } }) });
   await pack(badStore.staging, badStore.zip);
   assert.match((await service.previewBundle(badStore.zip)).error, /不合法|provider/);
+
+  // credentials.json 里的 credentialFile 同样不可信：逐条过 validateCredentialRef，
+  // 越界形态（../、..\、8.3 短名中间段、盘符形）任一命中即整包拒绝，最后一条
+  // 合法裸名救不了整单。
+  const hostileCreds = writeBadZip({
+    "manifest.json": JSON.stringify({ format: 1 }),
+    "store.json": JSON.stringify(validStore()),
+    "credentials.json": JSON.stringify({ entries: [
+      { providerId: "p0", credentialFile: "../escape.txt", plaintextBase64: "U0VDUkVUMA==" },
+      { providerId: "p1", credentialFile: "..\\escape2.txt", plaintextBase64: "U0VDUkVUMQ==" },
+      { providerId: "p2", credentialFile: "LONGVI~1/short83.txt", plaintextBase64: "U0VDUkVUMg==" },
+      { providerId: "p3", credentialFile: "C:drive.txt", plaintextBase64: "U0VDUkVUMw==" },
+      { providerId: "p9", credentialFile: "alpha.dpapi", plaintextBase64: "U0VDUkVUOQ==" },
+    ] }),
+  });
+  await pack(hostileCreds.staging, hostileCreds.zip);
+  const credReject = await service.previewBundle(hostileCreds.zip);
+  assert.equal(credReject.ok, false, "带越界 credentialFile 的包必须在预览整包拒绝");
+  assert.match(credReject.error, /包里的 credentials\.json 不合法：entries\[0\]\.credentialFile: /);
+  assert.match(credReject.error, /path separator/, "ref.reason 部分原样复用既有句式");
+  assert.equal(credReject.token, undefined, "预览被拒就不能签发票据");
+
+  // 逐条扫描：首条合法时，报错要指向真正出问题的那条（含索引与盘符形判词）。
+  const hostileCredsLate = writeBadZip({
+    "manifest.json": JSON.stringify({ format: 1 }),
+    "store.json": JSON.stringify(validStore()),
+    "credentials.json": JSON.stringify({ entries: [
+      { providerId: "p0", credentialFile: "alpha.dpapi", plaintextBase64: "U0VDUkVUMA==" },
+      { providerId: "p1", credentialFile: "C:drive.txt", plaintextBase64: "U0VDUkVUMQ==" },
+    ] }),
+  });
+  await pack(hostileCredsLate.staging, hostileCredsLate.zip);
+  const lateReject = await service.previewBundle(hostileCredsLate.zip);
+  assert.equal(lateReject.ok, false);
+  assert.match(lateReject.error, /entries\[1\]\.credentialFile: .*drive letter/);
 
   // store 版本不是 2 不另设用例：validateStore 先报 "version: must be 2"（归
   // store-schema.test.mjs 管），上面 badStore 已覆盖 inspectBundle 的"不合法"整包拒绝；
@@ -557,4 +611,131 @@ test("上次进程留下的过期暂存会在建服务时扫掉，正在用的�
     // 断言失败也不能把夹具留给下一次运行。
     for (const d of [staleDir, freshDir]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// ── D1/D2 导入面守门 ──────────────────────────────────────
+
+test("落定守门：预览后才落进暂存的毒 credentials.json，写盘前整包拒绝", async () => {
+  // 良性包不带 credentials.json（票据 credentialEntries 为 null），预览照常过；
+  // 毒密钥清单在预览后写进暂存——落定的读盘 fallback 与预览共用同一道
+  // inspectBundle 校验，越界条目在写盘前就被整包拒绝。
+  const zip = await buildZip({
+    "manifest.json": JSON.stringify({ format: 1 }),
+    "store.json": JSON.stringify(validStore()),
+  });
+  const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
+  const canary = join(dst.paths.appDir, "canary.txt");
+  writeFileSync(canary, "keep\n", "utf8");
+  const importer = dst.service();
+  await inStagingSandbox(async () => {
+    const before = importStagingDirs();
+    const preview = await importer.previewBundle(zip);
+    assert.equal(preview.ok, true, preview.error);
+    const staging = newStagingDir(before);
+    writeFileSync(join(staging, CREDENTIALS_NAME), JSON.stringify({
+      entries: [{ providerId: "alpha", credentialFile: "..\\app\\canary.txt", plaintextBase64: Buffer.from("EVIL").toString("base64") }],
+    }), "utf8");
+
+    const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
+    assert.equal(applied.ok, false, "毒密钥条目必须在写盘前被拒");
+    assert.match(applied.error, /包里的 credentials\.json 不合法：entries\[0\]\.credentialFile: /);
+    assert.equal(readFileSync(canary, "utf8"), "keep\n", "credentials 目录之外的路径一个字节都不能被写");
+    assert.equal(existsSync(join(dst.paths.credentialsDir, "alpha.dpapi")), false, "毒条目不落盘");
+    assert.equal(existsSync(join(dst.root, "backups")), false, "拒绝要发生在备份之前，不留备份残留");
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["beta"], "本机 store 未动");
+  });
+});
+
+test("预览拒绝：包外引用本机既有密钥的包（不带密钥、URL 指攻击域）", async () => {
+  const hostile = validStore();
+  hostile.providers.alpha.baseURL = "https://attacker.example/v1";
+  const zip = await buildZip({
+    "manifest.json": JSON.stringify({ format: 1 }),
+    "store.json": JSON.stringify(hostile),
+  });
+  // 本机已有同名密钥 alpha.dpapi：导入这份 store 等于把本机密钥的解密能力交给包
+  // 指定的地址，而包没带自己的密钥——外泄必要条件成立，必须整包拒绝。
+  const dst = fakeMachine();
+  const storeBefore = readFileSync(dst.paths.storeFile, "utf8");
+  const credsBefore = readdirSync(dst.paths.credentialsDir).sort();
+  const preview = await dst.service().previewBundle(zip);
+  assert.equal(preview.ok, false, "引用本机既有密钥而包不带密钥的包，预览必须整包拒绝");
+  assert.equal(preview.error, "导入包校验未通过");
+  assert.equal(preview.token, undefined, "预览被拒就不能签发票据，确认弹窗都不会出现");
+  assert.equal(readFileSync(dst.paths.storeFile, "utf8"), storeBefore, "本机 store.json 不变");
+  assert.deepEqual(readdirSync(dst.paths.credentialsDir).sort(), credsBefore, "本机密钥目录不变");
+});
+
+test("预览拒绝：fallbackURLs 变体（主 URL 原样、fallback 指攻击域）同拒", async () => {
+  const hostile = validStore();
+  hostile.providers.alpha.fallbackURLs = ["https://attacker.example/v1"];
+  const zip = await buildZip({
+    "manifest.json": JSON.stringify({ format: 1 }),
+    "store.json": JSON.stringify(hostile),
+  });
+  const dst = fakeMachine();
+  const preview = await dst.service().previewBundle(zip);
+  assert.equal(preview.ok, false, "判据与 URL 无关：fallback 指向攻击域同样封死");
+  assert.equal(preview.error, "导入包校验未通过");
+});
+
+test("落定拒绝：票据指向的 store 换成引用本机既有密钥后，写盘前整单拒绝", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+  // 目标机有 beta.dpapi、没有 alpha.dpapi：包自带 alpha 密钥，预览照常过。
+  const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
+  const storeBefore = readFileSync(dst.paths.storeFile, "utf8");
+  const betaBefore = readFileSync(join(dst.paths.credentialsDir, "beta.dpapi"));
+  const importer = dst.service();
+  await inStagingSandbox(async () => {
+    const before = importStagingDirs();
+    const preview = await importer.previewBundle(exp.path);
+    assert.equal(preview.ok, true, preview.error);
+    const staging = newStagingDir(before);
+    // 票据签发后把暂存里的 store 换成恶意版：渠道改引用本机既有的 beta.dpapi、
+    // URL 指攻击域——落定侧必须与预览同门。
+    const hostile = validStore();
+    hostile.providers.alpha.credentialFile = "beta.dpapi";
+    hostile.providers.alpha.baseURL = "https://attacker.example/v1";
+    writeFileSync(join(staging, "store.json"), JSON.stringify(hostile), "utf8");
+
+    const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
+    assert.equal(applied.ok, false, "落定侧必须拦下包外引用既有密钥");
+    assert.equal(applied.error, "导入包校验未通过");
+    assert.equal(readFileSync(dst.paths.storeFile, "utf8"), storeBefore, "本机 store 未动");
+    assert.deepEqual(readFileSync(join(dst.paths.credentialsDir, "beta.dpapi")), betaBefore, "本机密钥未动");
+    assert.equal(existsSync(join(dst.paths.credentialsDir, "alpha.dpapi")), false, "包自带密钥也不落");
+    assert.equal(existsSync(join(dst.root, "backups")), false, "数据未动、不留备份残留");
+  });
+});
+
+test("回归：包自带密钥导入本机同名密钥的机器，照常成功", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+  // 本机已存在同名 alpha.dpapi，但包把这份密钥带上了：判据只看「包外引用」，
+  // 合法的同机重导不受影响。
+  const dst = fakeMachine({ store: validStore(), skills: 0 });
+  const importer = dst.service();
+  const preview = await importer.previewBundle(exp.path);
+  assert.equal(preview.ok, true, preview.error);
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
+  assert.equal(applied.ok, true, applied.error);
+  assert.equal(applied.applied.credentials, 1, "包自带的密钥照常重新加密落盘");
+  assert.equal(readFileSync(join(dst.paths.credentialsDir, "alpha.dpapi"), "utf8").startsWith(FAKE_MARK), true);
+});
+
+test("回归：无凭据包导入没有同名密钥文件的机器，照常导入", async () => {
+  const zip = await buildZip({
+    "manifest.json": JSON.stringify({ format: 1 }),
+    "store.json": JSON.stringify(validStore("gamma")),
+  });
+  // 本机没有 gamma.dpapi：store 引用的密钥文件在包外不存在，不构成外泄条件。
+  const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
+  const importer = dst.service();
+  const preview = await importer.previewBundle(zip);
+  assert.equal(preview.ok, true, preview.error);
+  assert.equal(preview.counts.credentials, 0);
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
+  assert.equal(applied.ok, true, applied.error);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["gamma"]);
 });

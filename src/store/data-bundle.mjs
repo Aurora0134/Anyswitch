@@ -23,7 +23,8 @@ import { join, resolve } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { protect as defaultProtect, unprotect as defaultUnprotect } from "../ops/dpapi.mjs";
 import { loadSkillsConfig, saveSkillsConfig, skillsConfigPath } from "../agents/agent-skills.mjs";
-import { loadStore, storePaths, writeStore } from "./store-io.mjs";
+import { loadStore, resolveCredentialPath, storePaths, writeStore } from "./store-io.mjs";
+import { validateCredentialRef } from "./credential-ref.mjs";
 import { defaultSettingsPath, relayDataRoot } from "../relay/relay-settings.mjs";
 import { promptsPath } from "../agents/agent-prompts.mjs";
 import { validateStore } from "./store-schema.mjs";
@@ -312,6 +313,22 @@ export function createDataBundleService({
   }
 
   // ── 导入预览 ─────────────────────────────────────────────
+  // D2 判据：store 里引用了本机既有密钥文件、而包没把这份密钥带上的渠道。导入
+  // 会把本机密钥的解密能力连同渠道配置一起交给包指定的地址——外发 Key 的必要
+  // 条件是它来自本机既有 *.dpapi（包自带凭据外发的只是包作者的 Key），封死这
+  // 个必要条件即封死外泄，与攻击者把恶意地址放 baseURL 还是 fallbackURLs 无关。
+  function findExternalCredentialRefs(store, bundledCredentialFiles) {
+    const bundled = new Set(bundledCredentialFiles ?? []);
+    const hits = [];
+    for (const [providerId, provider] of Object.entries(store?.providers ?? {})) {
+      const credentialFile = provider?.credentialFile;
+      if (typeof credentialFile !== "string" || !credentialFile) continue;
+      if (bundled.has(credentialFile)) continue;
+      if (existsSync(join(paths.credentialsDir, credentialFile))) hits.push({ providerId, credentialFile });
+    }
+    return hits;
+  }
+
   async function previewBundle(zipPath) {
     if (!zipPath || !/\.zip$/i.test(zipPath)) return { ok: false, error: "只能选择 .zip 导出包" };
     if (!existsSync(zipPath) || !statSync(zipPath).isFile()) return { ok: false, error: "所选文件不存在" };
@@ -325,6 +342,10 @@ export function createDataBundleService({
       await runTar(tarPath, ["-xf", zipPath, "-C", staging], { spawnFn, timeoutMs });
       const checked = inspectBundle(staging);
       if (!checked.ok) { rmSafe(staging); return { ok: false, error: checked.error }; }
+      // D2 收口：包外引用既有密钥的包整包拒绝——恶意包连确认弹窗都不出现，
+      // 明文摘取也不发生。判据在 liftCredentialsOut 之前，凭据文件还在盘上。
+      const externalRefs = findExternalCredentialRefs(checked.store, checked.credentialEntries.map((entry) => entry?.credentialFile));
+      if (externalRefs.length) { rmSafe(staging); return { ok: false, error: "导入包校验未通过" }; }
       // 解包一落地，明文密钥就在 %TEMP% 里了。读进票据内存、把盘上这份立刻删掉：
       // 用户看完摘要放弃导入时，Temp 里剩下的只是渠道、预设这些不含密钥的部分。
       const credentialEntries = liftCredentialsOut(staging);
@@ -380,11 +401,24 @@ export function createDataBundleService({
         return { ok: false, error: "包里的 credentials.json 不是合法 JSON" };
       }
       if (!Array.isArray(credentials?.entries)) return { ok: false, error: "包里的 credentials.json 缺 entries 数组" };
+      // entries 里的 credentialFile 同样不可信：只过 Array.isArray 会把「解包后
+      // 逐条写盘」变成任意路径写。逐条过 validateCredentialRef（与 store 侧
+      // 同一标准），任一条不过即整包拒绝——预览与落定共用这道门。
+      for (let i = 0; i < credentials.entries.length; i += 1) {
+        const ref = validateCredentialRef(credentials.entries[i]?.credentialFile);
+        if (!ref.valid) {
+          return { ok: false, error: `包里的 credentials.json 不合法：entries[${i}].credentialFile: ${ref.reason}` };
+        }
+      }
     }
     const skillDirs = topLevelDirs(join(dir, SKILLS_DIR_NAME));
     const promptsText = readTextIfExists(join(dir, "prompts.json"));
     return {
       ok: true,
+      // 已解析的 store 与凭据条目给 D2 判据用（preview 在 liftCredentialsOut 之前
+      // 就要拿包内凭据集合）；只在本模块内部消费，不进对界面/面板的返回值。
+      store: parsedStore,
+      credentialEntries: credentials.entries,
       summary: {
         createdAt: manifest.createdAt ?? null,
         sourceComputer: manifest.source?.computerName ?? null,
@@ -423,6 +457,17 @@ export function createDataBundleService({
       if (!checked.ok) return { ok: false, error: checked.error };
       const store = JSON.parse(readFileSync(join(dir, "store.json"), "utf8"));
 
+      // 预览阶段已经把明文密钥从暂存里摘走、放进票据内存（见 liftCredentialsOut）；
+      // 只有票据由外部直接构造（测试替身）时才可能还得读盘。两边都没有，就当我
+      // 这个包不含密钥。
+      const entries = got.ticket.credentialEntries
+        ?? JSON.parse(readTextIfExists(join(dir, CREDENTIALS_NAME)) ?? '{"entries":[]}').entries
+        ?? [];
+      // D2 收口：与预览同一道门，盖住测试替身直接构造票据的路径。命中即整单
+      // 拒绝——备份与 writeStore 都还没发生，数据未动、不留备份残留。
+      const externalRefs = findExternalCredentialRefs(store, entries.map((entry) => entry?.credentialFile));
+      if (externalRefs.length) return { ok: false, error: "导入包校验未通过" };
+
       const backupId = stamp(now());
       const backupDir = join(backupRootFn(), `pre-import-${backupId}`);
       const saved = [];
@@ -460,19 +505,18 @@ export function createDataBundleService({
       const promptsText = readTextIfExists(join(dir, "prompts.json"));
       if (promptsText !== null) { atomicWriteFile(promptsJsonPath, promptsText); applied.prompts = true; }
 
-      // 预览阶段已经把明文密钥从暂存里摘走、放进票据内存（见 liftCredentialsOut）；
-      // 只有票据由外部直接构造（测试替身）时才可能还得读盘。两边都没有，就当我
-      // 这个包不含密钥。
-      const entries = got.ticket.credentialEntries
-        ?? JSON.parse(readTextIfExists(join(dir, CREDENTIALS_NAME)) ?? '{"entries":[]}').entries
-        ?? [];
       if (entries.length) {
         mkdirSync(paths.credentialsDir, { recursive: true });
         for (const entry of entries) {
           const plaintext = Buffer.from(String(entry.plaintextBase64 ?? ""), "base64");
           try {
+            // 写入前终检：预览已过 validateCredentialRef（见 inspectBundle），这里
+            // 与 store 条目的「writeStore 前必过 validateStore」结构等价——测试替
+            // 身票据带越界条目时单条跳过、计入 credentialFailures，不掀翻整单。
+            const resolved = resolveCredentialPath(entry.credentialFile, paths);
+            if (!resolved.ok) { applied.credentialFailures.push(entry.providerId); continue; }
             const ciphertext = await protect(plaintext, entry.providerId);
-            atomicWriteFile(join(paths.credentialsDir, entry.credentialFile), ciphertext);
+            atomicWriteFile(resolved.path, ciphertext);
             applied.credentials += 1;
           } catch {
             applied.credentialFailures.push(entry.providerId);
