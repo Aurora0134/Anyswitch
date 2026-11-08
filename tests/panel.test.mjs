@@ -10106,6 +10106,25 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
     assert.equal(seen.resets, 2, "自动重连后的 snapshot 同样先清屏");
   });
 
+  it("契约：一次 SSE = 1 snapshot + 1 data replay，重连不重放全量缓冲", () => {
+    // panel.js:8609 那段旧注释写「后端把全量缓冲以 data 帧从头回放到当前」，
+    // 是 §六 之前旧实现的措辞；照着它改代码会把「丢掉某帧再等下一帧」当成可行
+    // 收尾。现役真值是单帧自足整屏回放，这里把契约钉成断言防资产再腐坏。
+    const stream = terminalHostJs.match(/function stream\(session, res\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(stream, "terminal-host.mjs 的 stream() 在册");
+    assert.equal((stream.match(/event: snapshot/g) || []).length, 1, "每条连接只发一个 snapshot");
+    const emitReplay = stream.match(/const emitReplay = \(\) => \{[\s\S]*?\n    \};/)?.[0];
+    assert.ok(emitReplay, "emitReplay 在册");
+    assert.equal((emitReplay.match(/res\.write\(`event: data/g) || []).length, 1, "每连接只发一帧 data 回放");
+    assert.ok(emitReplay.includes("session.screen.toReplay()"), "回放取自宿主渲染镜像的 toReplay()");
+    assert.equal((stream.match(/emitReplay\(\)/g) || []).length, 2,
+      "两条路径（有积压 drain 完 / 无积压直接）各一个调用点，任一连接只走其中一条");
+    assert.ok(stream.includes("if (done) emitReplay();"), "分轮 drain 只在排空后调用一次，不重发回放");
+    const absorb = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(absorb && !absorb.includes("把全量缓冲以 data 帧从头回放到当前"),
+      "前端注释已订正，不再把单帧回放写成全量缓冲重放");
+  });
+
   it("接线：snapshot 帧走 reset 入口，data 帧与 onerror 不 reset", () => {
     const body = panelJs.match(/async function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(body, "connectTerminalStream found in panel.js");
@@ -10148,9 +10167,11 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
-    const state = { posts: [], eventSources: [], terms: [], sessions: {}, timers: new Map(), timerSeq: 0 };
+    const state = { posts: [], eventSources: [], terms: [], sessions: {}, timers: new Map(), timerSeq: 0, rebuilds: [] };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
+      // 整屏重建的接线桩：只记账不真重连（本组只验「半块丢弃 + 请求重建」这一段）。
+      const requestTerminalFrameRebuild = (session, term) => { state.rebuilds.push({ id: session?.id, term }); };
       ${terminalBurstConsts}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
@@ -10203,7 +10224,9 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       const terminalReviveInflight = new Map();
       const terminalDoneUnread = new Map();
       const api = () => Promise.resolve({});
-      function fitTerminalXterm() {}
+      // null＝真身「fit 已落定、尺寸已对齐、没发 POST」；undefined 是早退闸门，
+      // 会让 connectTerminalStream 挂起建流（见 panel-terminal-geometry 的 N10）。
+      function fitTerminalXterm() { return null; }
       function requestAnimationFrame(cb) { cb(); }
       function cancelAnimationFrame() {}
       function terminalImeAnchorReady() { return false; }
@@ -10245,6 +10268,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
         source: () => terminalEventSource,
         runTimers: () => { for (const [id, t] of [...state.timers]) { state.timers.delete(id); t.fn(); } },
         pendingTimers: () => state.timers.size,
+        rebuilds: () => state.rebuilds,
       };
     `)(state);
     return { sandbox, state };
@@ -10299,7 +10323,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
     assert.deepEqual(term.writes, ["正文", `${OPEN}全屏${CLOSE}`], "拼回后识别为块并整块写入");
   });
 
-  it("闭合标记迟到时按上限兜底冲刷，画面不被永久锁死", () => {
+  it("闭合标记迟到时按上限兜底丢弃半块：腰斩的整屏帧一个字节都不落屏", () => {
     const { sandbox } = syncSandbox();
     sandbox.connect(session("sess-a"));
     const term = sandbox.xterm();
@@ -10307,7 +10331,13 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
     src.emit("data", `${OPEN}\u001b[2J半屏`);
     assert.deepEqual(term.writes, [], "块内挂起");
     sandbox.runTimers();
-    assert.deepEqual(term.writes, [`${OPEN}\u001b[2J半屏`], "超时兜底冲刷，已到的字节不丢");
+    assert.deepEqual(term.writes, [], "超时兜底丢弃半块（写出去就是缺 CUU 上移回退的阶梯）");
+    assert.equal(sandbox.rebuilds().length, 1, "同一连接不补发整屏回放：请求重建整条画面流重新拿一屏");
+    // 作废后迟到的后半块与闭合标记也不当正文写进这块屏，否则半帧仍会落地。
+    src.emit("data", `剩余半屏${CLOSE}`);
+    assert.deepEqual(term.writes, [], "迟到的后半块与闭合标记一并丢弃");
+    src.emit("data", "新一帧正文");
+    assert.deepEqual(term.writes, ["新一帧正文"], "闭合标记之后的正文回到正常帧序");
   });
 
   it("snapshot 作废挂起块：上一段画面的半帧不得写进重连后的新屏", () => {
@@ -10588,7 +10618,9 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
         if (state.apiImpl) return state.apiImpl(method, url, body);
         return Promise.resolve({});
       };
-      function fitTerminalXterm() {}
+      // null＝真身「fit 已落定、尺寸已对齐、没发 POST」；undefined 是早退闸门，
+      // 会让 connectTerminalStream 挂起建流（见 panel-terminal-geometry 的 N10）。
+      function fitTerminalXterm() { return null; }
       function requestAnimationFrame(cb) { cb(); }
       function cancelAnimationFrame() {}
       function terminalImeAnchorReady() { return false; }

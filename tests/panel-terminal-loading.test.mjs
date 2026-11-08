@@ -414,6 +414,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
       pending: () => terminalReplayFramePending,
       epoch: () => terminalReplayEpoch,
       contentEpoch: () => terminalContentEpoch,
+      deferred: () => terminalStreamDeferred,
       unavailableRenders: () => terminalUnavailableRenders,
       setSwitchInFlight: (v, sessionId = null) => { terminalSwitchInFlight = v; terminalSwitchInFlightSessionId = sessionId; },
       setBooting: (v) => { terminalBooting = v; },
@@ -453,7 +454,9 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     clock.setTimeout, clock.clearTimeout, clock.requestAnimationFrame, clock.cancelAnimationFrame,
     { get hidden() { return ctx.docHidden; } },
     () => openTerm(),
-    fitImpl ?? (() => { log.push("fit"); }),
+    // 默认桩返回 null＝真身「fit 已落定、尺寸已对齐、没发 POST」的稳态。
+    // 返回 undefined 在真身里只表示被视图/尺寸/组字闸拦下（建流该挂起，见 T10）。
+    fitImpl ?? (() => { log.push("fit"); return null; }),
     (id, data) => { inputPosts.push(`${id}:${data}`); },
     () => Promise.resolve(null),
     () => { log.push("flush_burst"); },
@@ -764,6 +767,16 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     const beforeEpoch = 1;
     api.setTerm(blankTerm);
     assert.equal(api.ready({ contentEpochAtPark: beforeEpoch }), false, "新实例空屏 → 仍未就绪");
+
+    // 跨实例判据交替（2026-11-08）：epoch 是全局单调计数，密集重建流时中间那只
+    // 实例出过字也会把它推高。只比数值会让旧垫片在**当前实例还没画任何东西**时被
+    // 提前揭幕，露出空屏或上一屏残帧；判据必须认「当前实例自己出过字」。
+    const otherFilled = { ...filledTerm };
+    api.setTerm(otherFilled);
+    assert.equal(api.ready({ contentEpochAtPark: 0 }), true, "前置：中间实例出过字，epoch 已推高");
+    api.setTerm(blankTerm);
+    assert.equal(api.ready({ contentEpochAtPark: 1 }), false,
+      "epoch 已被中间实例推高，但当前实例没出字 → 不揭幕");
   });
 
   it("真跑：换绑期上限放宽到 6s，普通切页签仍是 2s", async () => {
@@ -1278,6 +1291,18 @@ describe("T10 建连：fit 的 resize POST 落定后再开流", () => {
     // 绿，钉不住「不因这条等待多付一个来回」，故同步即断言。
     assert.equal(w.sources.length, 1, "无 POST 可等：调用当拍直开，一个微任务都不多付");
     await connectPromise;
+  });
+
+  it("fit 被几何闸拦下（返回 undefined）：不开流，拆净半截实例并挂起等补挂", async () => {
+    // N10：真身 fitTerminalXterm 三道早退（视图隐藏 / 宿主不可测 / 组字期）都返回
+    // undefined。旧实现照常 new EventSource，首帧整屏回放按 xterm 出厂 80×24 折行，
+    // 而加大列宽不会重排已折行内容——错一次就永久错。现在挂起，几何可信那一拍由
+    // fit → remountDeferredTerminalStream 补挂，重新收一帧正确尺寸的自绘整屏。
+    const w = makeTerminalWorld({ fitImpl: () => undefined });
+    await w.world.connectTerminalStream(terminalSession("S"));
+    assert.equal(w.sources.length, 0, "几何不可信这一拍不开 SSE");
+    assert.equal(w.world.instance(), null, "半成品 xterm 当场收掉，不留悬空实例");
+    assert.equal(w.world.deferred(), true, "挂起等 fit 在几何可信那一拍补挂");
   });
 });
 

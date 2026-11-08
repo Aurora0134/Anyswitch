@@ -270,8 +270,10 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     // 冷却期不再重连，但这一帧仍然是错宽回放：不画。排一次延后对齐，等窗过去再对齐。
     es2.emit("data", "冷却期的回放");
     assert.deepEqual(world.state.writes, [], "冷却窗内的错宽回放同样不落屏");
+    // 基线作废后连后续帧一并丢到下一次 snapshot：live 帧是零 2J / 零 CUP 的纯相对
+    // 重绘，没有自足起点，照画只会把旧行叠成多份输入框（2026-11-08 修法 4）。
     es2.emit("data", "冷却期的增量");
-    assert.deepEqual(world.state.writes, ["冷却期的增量"], "只丢回放首帧，其后的增量照画");
+    assert.deepEqual(world.state.writes, [], "基线作废期间其后的增量一并丢弃");
 
     const postsBefore = world.state.posts.length;
     const sourcesBefore = world.state.sources.length;
@@ -363,7 +365,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.deepEqual(world.state.warnings, [], "上限那一拍是正常重对齐，还不告警");
 
     // 第三次错配：超限刹车。不 POST、不重连，只告警一次，且这一份错宽回放不画——
-    // 屏上保留的是上一帧已经画好的（正确）画面，不是空白，也不是错列宽的残行。
+    // 整屏回放作废即清屏，宁可短暂空白也不留一屏错列宽的残行（错信息比慢更糟）。
     world.clock.advance(world.cooldown() + 1);
     term = world.term();
     term.cols = 129;
@@ -377,9 +379,9 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.warnings.length, 1, "告警一次");
     assert.match(world.state.warnings[0][0], /geometry realign abandoned/);
     assert.deepEqual(world.state.writes, [], "超限后的错宽回放不落屏");
-    // 只丢首帧：其后的增量是应用自己的正常输出，照画。
+    // 不再「只丢首帧」：基线没了之后每一帧增量都缺自足起点，一并丢到下一次 snapshot。
     es.emit("data", "超限后的增量");
-    assert.deepEqual(world.state.writes, ["超限后的增量"], "回放之后的增量照画");
+    assert.deepEqual(world.state.writes, [], "作废期间的增量同样不落屏，堵住叠画");
 
     es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
     assert.equal(world.state.warnings.length, 1, "接续的错配不再重复告警");
@@ -438,7 +440,7 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     assert.equal(world.state.sources.length, 1, "隐藏期也不新建流");
   });
 
-  it("POST 永不落定：兜底超时放开数据闸，回放照常落屏且不拆流", async () => {
+  it("POST 永不落定：兜底超时放开数据闸，其后增量照常落屏且不拆流", async () => {
     const world = makeGeometryWorld();
     const session = sessionOf("S1");
     const { es, term } = await prime(world, session);
@@ -456,8 +458,12 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
 
     world.clock.advance(1);
     assert.equal(world.pending(), false, "越过兜底时限后放开数据闸");
-    es.emit("data", "兜底后的回放");
-    assert.deepEqual(world.state.writes, ["兜底后的回放"], "错宽回放照常落屏：有画面胜过空白");
+    // 放开的是「重对齐在飞」这道帧闸，不是把错宽回放补画回去——那份整屏回放
+    // 在闸关着的时候已经被丢弃了（M5：错宽帧一个字节都不进屏）。兜底之后落屏的
+    // 是应用自己新产生的增量帧。旧断言把它写成「错宽回放照常落屏／有画面胜过空白」，
+    // 与现役取向相反，2026-11-08 一并订正。
+    es.emit("data", "兜底后的增量");
+    assert.deepEqual(world.state.writes, ["兜底后的增量"], "闸放开后其后的增量照常落屏");
     assert.equal(world.stream(), es, "流没有被拆掉");
     assert.equal(world.term(), term, "实例也还在（可见时拆流没有补救通路）");
     assert.equal(world.state.sources.length, 1, "不新建流");
@@ -519,5 +525,32 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     world.remount();
     assert.equal(world.deferred(), false, "量准后补挂");
     assert.equal(world.state.sources.length, 2, "补挂建了新流");
+  });
+
+  it("基线作废后连后续帧一并丢到下一次 snapshot，整屏回放重建基线", async () => {
+    // 钉住图一/图二的叠画通路：宿主对每条连接只发一帧自足整屏回放，丢掉它之后
+    // 后续 live 帧是零 2J / 零 CUP 的纯相对重绘，没有自足起点；旧语义「只丢首帧、
+    // 其余照画」会把旧行留成残行、新帧再叠上去，输入框于是被复制成多份。
+    const world = makeGeometryWorld();
+    const session = sessionOf("S1");
+    await prime(world, session);
+    world.setStreak(world.maxAttempts() + 1); // 直接进「放弃对齐」那一支：流继续、不重连
+    const term = world.term();
+    term.cols = 129;
+    const es = world.state.sources[0];
+    world.state.writes.length = 0;
+
+    es.emit("snapshot", { pid: 1, cols: 120, rows: 34 });
+    es.emit("data", "错宽整屏回放");
+    assert.deepEqual(world.state.writes, [], "作废旧基线并清屏，回放一字不进屏");
+    es.emit("data", "纯相对增量-1");
+    es.emit("data", "纯相对增量-2");
+    assert.deepEqual(world.state.writes, [], "作废期间的后续帧一并丢弃，不留叠画通路");
+
+    // 下一次 snapshot（新连接 / 自动重连）是唯一能重建基线的信号。
+    term.cols = 120;
+    es.emit("snapshot", { pid: 2, cols: 120, rows: 34 });
+    es.emit("data", "自足整屏回放");
+    assert.deepEqual(world.state.writes, ["自足整屏回放"], "新 snapshot 后整屏回放重新落屏");
   });
 });

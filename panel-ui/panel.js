@@ -6260,6 +6260,16 @@ async function api(method, path, body) {
   // 回放突发合并（见 queueTerminalChunk）：进行中的突发 { term, chunks, bytes,
   // quietTimer, capTimer }，空闲为 null。
   let terminalWriteBurst = null;
+  // 画面基线事务：一次建流只发一帧自足整屏回放（自带 2J + 逐行绝对定位），
+  // 其后全是纯相对增量帧（零 2J / 零 CUP，2K 只擦当前行）。任何「基线不确定」
+  // 都必须整条流重建、重新拿一屏——留着旧帧继续画只会把新帧叠成多份输入框
+  // 或逐行累积的阶梯。代次每次建流自增：await 醒来的旧请求见代次已变即退场。
+  let terminalFrameRebuildSeq = 0;
+  let terminalFrameRebuildAt = 0;
+  let terminalFrameRebuildTimer = null;
+  // 连续重建次数：一次干净整屏回放落地即归零；连续三次仍拿不到基线就停手，
+  // 防几何永久对不上时每 1.2s 重连一次的风暴。
+  let terminalFrameRebuildStreak = 0;
   // 建连后「宿主的自足整屏重绘」那一帧还没到：它由 stream() 单帧发出，不需要
   // 合并，直接写；收到即清。
   let terminalReplayFramePending = false;
@@ -7121,6 +7131,9 @@ async function api(method, path, body) {
   // 时触发当前监听器，把旧会话的 DA/CPR 自动应答 POST 进新会话的 PTY。逐连接
   // 重建 xterm 后，旧积压只能打进监听器表已随之清空的旧实例，彻底落空。
   function closeTerminalStream() {
+    // 拆流即作废旧连接代次：在 await 里睡着的建流请求、EventSource 自动重连送来的
+    // 迟到帧、以及合帧写者闭包醒来时，见代次已变就整组退场。typeof 闸护单测桩环境。
+    if (typeof terminalFrameRebuildSeq === "number") terminalFrameRebuildSeq += 1;
     terminalEventSource?.close();
     terminalEventSource = null;
     terminalInputDisposable?.dispose();
@@ -7176,6 +7189,40 @@ async function api(method, path, body) {
     // 更要在销毁前撤掉。
     discardTerminalBurst();
     terminalReplayFramePending = false;
+    // 待办的整屏重建随流销毁：流都没了，再重连只会凭空多出一条连接。
+    try {
+      if (terminalFrameRebuildTimer !== null) clearTimeout(terminalFrameRebuildTimer);
+      terminalFrameRebuildTimer = null;
+    } catch { /* 桩环境没有这套设施：没有待办可清 */ }
+  }
+
+  // 画面基线丢了（整屏回放被作废 / 同步块被腰斩 / 浏览器自动重连）：宿主对每条
+  // 连接只发一帧自足整屏回放，同一连接内不补发，所以「丢掉某帧再等下一帧」拿不回
+  // 那一屏。唯一正确的收尾是拆净旧流、重开一条流，重新收一帧带 2J 的整屏重绘。
+  // 多次请求合并成一次；1.2s 节流挡住 400ms 兜底与几何重对齐叠出来的重连风暴。
+  // 整段用 typeof 闸：切函数体真跑的单测沙箱不声明这套设施，读到「没有」就跳过。
+  function requestTerminalFrameRebuild(session, term) {
+    if (typeof terminalFrameRebuildSeq !== "number") return;
+    if (typeof terminalFrameRebuildAt !== "number") return;
+    if (typeof terminalFrameRebuildTimer === "undefined") return;
+    if (!session?.backend || terminalFrameRebuildTimer !== null) return;
+    const now = Date.now();
+    if (now - terminalFrameRebuildAt < 1200) return;
+    // 连续重建封顶：几何永久对不上时不再无限重连，停在干净空屏上等比错画面好。
+    if (typeof terminalFrameRebuildStreak === "number" && terminalFrameRebuildStreak >= 3) return;
+    terminalFrameRebuildAt = now;
+    if (typeof terminalFrameRebuildStreak === "number") terminalFrameRebuildStreak += 1;
+    terminalFrameRebuildTimer = setTimeout(() => {
+      terminalFrameRebuildTimer = null;
+      if (term !== terminalXterm || !terminalEventSource) return;
+      if (typeof document !== "undefined" && document.hidden) return;
+      if ($("terminalView")?.hidden) return;
+      // 重建是「整条画面流换新」：上一实例停的旧帧垫片与占位都服务旧画面，留着
+      // 只会叠在新屏上。撤净再开流，揭幕由新实例自己重新等。
+      if (typeof dropTerminalStaleScreen === "function") dropTerminalStaleScreen();
+      if (typeof dropTerminalBootingOverlay === "function") dropTerminalBootingOverlay();
+      connectTerminalStream(session, { revive: false });
+    }, 0);
   }
 
   // 整页清场入口（关停清场 / 零会话）：关闭终端流与实例。
@@ -7417,6 +7464,10 @@ async function api(method, path, body) {
     // 到落位那一刻，用户看到的新帧直接就在原阅读位。兜底计时器仍限总时长。
     if (stale.restorePending) return false;
     noteTerminalContent(terminalXterm);
+    // 只认「当前这只实例自己出过字」。terminalContentEpoch 是全局单调计数，密集
+    // 重建流时中间那只实例出过字也会把它推高；只比数值会让旧垫片在当前实例还没
+    // 画任何东西时被提前揭幕（跨实例判据交替），露出一块空屏或上一屏的残帧。
+    if (terminalContentTerm !== terminalXterm || !terminalContentSeen) return false;
     return terminalContentEpoch !== stale.contentEpochAtPark;
   }
 
@@ -8572,12 +8623,12 @@ async function api(method, path, body) {
     };
   }
 
-  // 终端流是一次性回放重放流：后端（terminal-host.mjs stream()）对每次建立
-  // 的连接——包括 SSE 断线后浏览器自动发起的重连——都先发一个 snapshot 帧、
-  // 再把全量缓冲以 data 帧从头回放到当前。所以处理 snapshot 之前必须把屏幕
-  // 清空，否则重连后旧内容与新回放的缓冲叠加成双份。稳态连接只在建连时收一
-  // 次 snapshot、心跳是注释帧，不会因此误清屏。reset-on-snapshot 也是浏览器
-  // 侧唯一可靠的重连信号（onerror 之后浏览器自动重连，前端没有钩子）。
+  // 一次 SSE 连接 = 1 个 snapshot 帧 + 1 帧自足整屏回放，之后全是 TUI 自己发的
+  // live 增量帧（terminal-host.mjs stream()：emitReplay 每条连接只调一次，pump 只
+  // 分轮 drain 镜像，不重发回放）。snapshot 前清屏不是「防重连把全量缓冲重放成双份」
+  // ——那条是 §六 之前旧实现的措辞——而是 M5 的整屏重绘基线：这份回放自带 2J 与
+  // 逐行 CUP/2K，只有从干净空屏开始才画得准；浏览器自动重连同样会重发这一对帧，
+  // reset-on-snapshot 正是前端唯一可靠的「新基线到了」信号（onerror 无钩子）。
   function absorbTerminalSnapshot(term, session, state) {
     // 几何闸：宿主按镜像自己的列宽发整屏绝对定位回放（每行 CUP+2K+内容），客户端这一拍
     // 若停在出厂 80×24 或旧尺寸，回放就会按错宽度折行。TUI 只「定位光标 + 写字符」、
@@ -8614,7 +8665,7 @@ async function api(method, path, body) {
       // 不是「不用担心」的信号。改成拆流挂起：终端页可见时 RO / window resize / 组字
       // 释放都会再走一次 fit，那时量准了由 fit 把流接回来（见 remountDeferredTerminalStream），
       // 屏幕空白只持续到那一拍。
-      dropTerminalReplayFrame();
+      dropTerminalReplayFrame(term);
       session.backendState = state;
       session.shell.pid = state.pid || "—";
       deferTerminalStream(session);
@@ -8647,9 +8698,9 @@ async function api(method, path, body) {
         return;
       }
       // 刹车拦下的错配帧：同样是错宽回放，一个字节都不画（M5 收紧的第二、三处退让）。
-      // 屏上留在上一个 geometryRealign 里 reset 之后的空白，或者（超限那一路）上一帧
-      // 已经画好的正确画面——绝不留一屏错列宽的残行。
-      dropTerminalReplayFrame();
+      // 作废回放即清屏，屏上是一块干净空态——绝不留一屏错列宽的残行，也不让后续
+      // 纯相对增量帧在旧行上继续叠画。
+      dropTerminalReplayFrame(term);
       session.backendState = state;
       session.shell.pid = state.pid || "—";
       if (terminalGeometryRealignStreak >= TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS) {
@@ -8661,6 +8712,10 @@ async function api(method, path, body) {
             host: [hostCols, hostRows], client: [clientCols, clientRows],
           });
         }
+        // 这一支既不 POST 也不重对齐，是唯一没有「下一次 snapshot」通路的作废场景。
+        // 请求一次有界重建（节流与连续上限都在 requestTerminalFrameRebuild 内），
+        // 几何只是暂时对不上时能拿回一屏；拿不回就停在干净空屏，不画错画面。
+        if (typeof requestTerminalFrameRebuild === "function") requestTerminalFrameRebuild(session, term);
         return;
       }
       // 冷却窗内：账还热着，等窗过去再对齐（此前这一帧按原逻辑照常落屏，等于拖窗口
@@ -8672,6 +8727,8 @@ async function api(method, path, body) {
     // 落屏反而画成双份，直接丢弃。
     discardTerminalBurst();
     term.reset();
+    // 拿到一份可画的整屏基线：连续重建账清零（typeof 闸护单测桩环境）。
+    if (typeof terminalFrameRebuildStreak === "number") terminalFrameRebuildStreak = 0;
     // reset() 后的回放是整段重写：闩到写入静默，期间的滚动与逐块写入都不参与
     // 跟随判定（见 installTerminalFollowBottomGuard）。护栏未装上（无宿主/无
     // viewport）时不置闩，避免闩住后无人清理。
@@ -8690,18 +8747,28 @@ async function api(method, path, body) {
   // ---- 几何闸的收尾件（G2b，见 absorbTerminalSnapshot 的取向注释）----
   //
   // 三个动作的分工要分清，混用会退回到「永久错位」或「永久空白」：
-  //   · dropTerminalReplayFrame：这一份整屏回放作废，但**流继续**。只丢首帧。
+  //   · dropTerminalReplayFrame：这一份整屏回放作废、清屏，并把其后所有 data 帧
+  //     一并丢到下一次 snapshot（新连接/重连自带的整屏回放）重建基线为止。
   //   · deferTerminalStream：这一拍判不了几何，连流一起拆掉挂起，等 fit 补挂。
   //   · scheduleTerminalGeometryRealign：几何能判、只是冷却窗还热，等到点再对齐。
 
-  // 丢掉「紧接着这一帧 snapshot 到达的首帧回放」。不 reset：屏上已有的画面是这处
-  // 收尾的关键——错配时若把屏擦了又画不进新内容，用户看到的是空白；保留上一帧至
-  // 少还有内容。terminalReplayFramePending 一并清零，否则 data 处理器会把首帧当成
-  // 「自足整屏重绘」直写，正好绕过合并器也绕过丢弃标记。
-  function dropTerminalReplayFrame() {
+  // 作废「紧接着这一帧 snapshot 到达的首帧回放」，并让这一屏回到干净空态。
+  //
+  // 旧语义是「只丢首帧、不 reset、流继续、其后的增量照画」——这正是叠画的直接
+  // 通路：宿主对每条连接只发一帧自足整屏回放（帧首 2J + 逐行 CUP/2K），丢掉它
+  // 之后屏上留着旧帧；而后续 live 帧是纯相对重绘（零 2J、零 CUP，2K 只擦当前行），
+  // 没有自足基线，旧行原地留成残行、新帧再叠上去——输入框于是被复制成多份。
+  // 真 xterm 台架实证：回放被丢 + 不 reset + 纯相对增量帧 = 2 份输入框 / 4 条横贯边框。
+  //
+  // 现在：清屏 + 把丢弃标记改成「持续丢弃，直到下一次 snapshot 重建基线」。宿主在同一
+  // 连接内不补发回放帧，所以「丢掉一帧再等下一帧」永远等不来那一屏；下一次 snapshot
+  // 由几何闸自己的重连、同步块兜底／断线重连的整屏重建送来（见 requestTerminalFrameRebuild）。
+  // 取向与 M5 一致：错信息比慢更糟，宁可短暂空白。
+  function dropTerminalReplayFrame(term) {
     terminalGeometryReplayDrop = true;
     terminalReplayFramePending = false;
     discardTerminalBurst();
+    try { term?.reset?.(); } catch { /* 实例已换人 */ }
   }
 
   // 几何判不了（容器不可测 / 组字期）时拆流挂起。挡下只是「这一拍量不准」，不是
@@ -8807,6 +8874,15 @@ async function api(method, path, body) {
     // 终端页后活着的那条流，不能被隐藏期的重渲染路径（fetch 完成、轮询）关掉。
     if ($("terminalView")?.hidden) return;
     closeTerminalStream();
+    // 建流事务闸：每次连接领一个代次。下面两处 await（复活、resize POST 落定）醒来时，
+    // 若期间已被更新的连接顶替，代次就对不上——旧请求整组退场，不再另开一条 EventSource，
+    // 也不把旧连接的同步块/盖层状态带进新屏。桩沙箱不声明这个计数时 connectionSeq 为
+    // null，判据恒真，行为与单连接的取样环境一致。
+    const connectionSeq = typeof terminalFrameRebuildSeq === "number"
+      ? (terminalFrameRebuildSeq += 1)
+      : null;
+    const connectionAlive = () => connectionSeq === null
+      || (typeof terminalFrameRebuildSeq === "number" && terminalFrameRebuildSeq === connectionSeq);
     // 新连接自带按当前几何算的回放：上一条连接遗留的「重对齐在飞」标记不能带进来，
     // 否则首帧会被当成错配期的迟到帧丢掉（见 absorbTerminalSnapshot 的几何闸）。
     terminalGeometryRealignPending = false;
@@ -8825,6 +8901,14 @@ async function api(method, path, body) {
     // null＝尺寸已对齐没发 POST，零等待）：宿主按收到的尺寸重排镜像，回放按镜像
     // 当前尺寸算，不等就会两边尺寸一旧一新、回放整体错位。
     const resizeInFlight = fitTerminalXterm();
+    if (resizeInFlight === undefined) {
+      // fit 被视图隐藏 / 宿主不可测 / 组字期三道闸拦下：这一拍 xterm 还停在出厂
+      // 80×24（或旧值），首帧整屏回放会按错列宽折行，而 xterm 加大列宽不重排已
+      // 折行内容——错一次就永久错。不开流：拆净这半截实例并挂起，几何可信那一拍
+      // 由 fit → remountDeferredTerminalStream 补挂，重新收一帧按正确尺寸自绘的整屏。
+      deferTerminalStream(session);
+      return;
+    }
     term.reset();
     // 回放闩：reset() 把 ydisp/ybase 归零，回放逐块写入也会改写视口——两者都
     // 不是用户滚动，闩住到写入静默后再锚定（见 installTerminalFollowBottomGuard）。
@@ -8861,8 +8945,8 @@ async function api(method, path, body) {
       dropTerminalStaleScreen();
       await reviveTerminalSession(session);
       // await 期间入口那道闸已经过期：可能已转后台/页被藏起，也可能已被新的连接顶替
-      // （closeTerminalStream 换掉了实例）。这两种情况下都不该再开流。
-      if (term !== terminalXterm) return;
+      // （closeTerminalStream 作废了代次、换掉了实例）。这两种情况下都不该再开流。
+      if (!connectionAlive() || term !== terminalXterm) return;
       if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
     }
     // 同步输出合帧（`\e[?2026h` … `\e[?2026l`）：Kimi 等 TUI 用这对标记声明「这一整屏
@@ -8871,7 +8955,11 @@ async function api(method, path, body) {
     // 视口于是按重绘节奏在头尾之间来回跳（实测 8 次/秒）。这里在标记之间攒住字节、
     // 闭合时一次写入：一次 write 只解析一遍、只渲染一次，中间态永远不落到屏上。
     // 不带标记的输出（增量刷新的 agent）零延迟直通，行为不变。标记被劈在两帧之间时
-    // 扣住尾部前缀，下一帧拼回再判；标记迟迟不闭合按上限兜底冲刷，不把画面锁死。
+    // 扣住尾部前缀，下一帧拼回再判。
+    // 兜底取向（2026-11-08）：块迟迟不闭合时**不写半块**，作废整块并重建整条画面流。
+    // 半块里可能正缺 `CSI nA` 那一段上移回退（kimi 的整屏重绘以 ?2026h + CUU 开头），
+    // 写进去就是图三那种逐行累积的阶梯；而这类 TUI 是纯相对重绘，之后再来的帧没有
+    // 自足起点，旧行永远擦不掉。宿主同一连接不补发整屏回放，唯一收尾是重开一条流。
     const TERMINAL_SYNC_OPEN = "\u001b[?2026h";
     const TERMINAL_SYNC_CLOSE = "\u001b[?2026l";
     const TERMINAL_SYNC_HOLD_MAX_MS = 400;
@@ -8880,20 +8968,36 @@ async function api(method, path, body) {
     let syncBlock = "";
     let syncCarry = "";
     let syncTimer = null;
-    const flushSyncBlock = () => {
+    // 作废之后：迟到的后半块与闭合标记一并丢，不能当正文写进新基线。
+    let syncAbandoned = false;
+    const clearSyncTimer = () => {
       if (syncTimer !== null) {
         clearTimeout(syncTimer);
         syncTimer = null;
       }
+    };
+    // 只有**闭合的**整块才落屏。
+    const flushSyncBlock = () => {
+      clearSyncTimer();
       if (!syncHolding) return;
       const block = syncBlock;
       syncHolding = false;
       syncBlock = "";
       if (block) term.write(block);
     };
+    // 兜底/字节超限：半块一个字节都不写，主动重开流拿一屏自足整屏回放。
+    const discardSyncBlock = () => {
+      clearSyncTimer();
+      if (!syncHolding && !syncAbandoned) return;
+      syncHolding = false;
+      syncBlock = "";
+      syncCarry = "";
+      syncAbandoned = true;
+      if (typeof requestTerminalFrameRebuild === "function") requestTerminalFrameRebuild(session, term);
+    };
     const armSyncTimer = () => {
       if (syncTimer !== null) return;
-      syncTimer = setTimeout(() => { syncTimer = null; flushSyncBlock(); }, TERMINAL_SYNC_HOLD_MAX_MS);
+      syncTimer = setTimeout(() => { syncTimer = null; discardSyncBlock(); }, TERMINAL_SYNC_HOLD_MAX_MS);
     };
     // 尾部是标记前缀的长度：只有真正劈开的标记才扣住，其余字节照常当拍落屏。
     const syncMarkerPrefixLength = (text, marker) => {
@@ -8903,8 +9007,24 @@ async function api(method, path, body) {
       return 0;
     };
     const writeStreamChunk = (chunkText) => {
+      // 代次已变：这条合帧写者属于旧连接，迟到字节不许落进新屏。
+      if (!connectionAlive()) return;
       let text = syncCarry + chunkText;
       syncCarry = "";
+      if (syncAbandoned) {
+        // 作废块的后半段与闭合标记一并丢；标记之后若还有正文，继续按正常帧序处理。
+        // 闭合标记同样可能被劈在两帧之间，尾部前缀要扣住等下一帧拼回。
+        const closeAt = text.indexOf(TERMINAL_SYNC_CLOSE);
+        if (closeAt < 0) {
+          const keep = syncMarkerPrefixLength(text, TERMINAL_SYNC_CLOSE);
+          syncCarry = keep > 0 ? text.slice(text.length - keep) : "";
+          return;
+        }
+        syncAbandoned = false;
+        syncCarry = "";
+        text = text.slice(closeAt + TERMINAL_SYNC_CLOSE.length);
+        if (!text) return;
+      }
       while (text) {
         if (syncHolding) {
           const closeAt = text.indexOf(TERMINAL_SYNC_CLOSE);
@@ -8912,7 +9032,7 @@ async function api(method, path, body) {
             const keep = syncMarkerPrefixLength(text, TERMINAL_SYNC_CLOSE);
             syncBlock += keep > 0 ? text.slice(0, text.length - keep) : text;
             syncCarry = keep > 0 ? text.slice(text.length - keep) : "";
-            if (syncBlock.length > TERMINAL_SYNC_HOLD_MAX_BYTES) flushSyncBlock();
+            if (syncBlock.length > TERMINAL_SYNC_HOLD_MAX_BYTES) discardSyncBlock();
             return;
           }
           syncBlock += text.slice(0, closeAt + TERMINAL_SYNC_CLOSE.length);
@@ -8938,13 +9058,11 @@ async function api(method, path, body) {
     };
     // 流关闭 / 重连 snapshot 时未闭合的块一律作废：它属于上一段画面，不能写进新屏。
     terminalStreamSyncCancel = () => {
-      if (syncTimer !== null) {
-        clearTimeout(syncTimer);
-        syncTimer = null;
-      }
+      clearSyncTimer();
       syncHolding = false;
       syncBlock = "";
       syncCarry = "";
+      syncAbandoned = false;
     };
     // burst 冲刷与小帧都经这里进合帧层（见 queueTerminalChunk 层次注释）：
     // 本连接存续期间有效，closeTerminalStream 摘除。
@@ -8954,13 +9072,17 @@ async function api(method, path, body) {
       try { await resizeInFlight; } catch { /* 已有失败处置，照常建流 */ }
       // 同上：等 POST 落定的这段时间里可能已切走、转入后台或被新的连接顶替。检查排在
       // 这个 await 之后（而不是入口），才管得住这一拍的转折。
-      if (term !== terminalXterm) return;
+      if (!connectionAlive() || term !== terminalXterm) return;
       if (document.hidden || $("terminalView")?.hidden) { closeTerminalStream(); return; }
     }
     terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     terminalEventSource.addEventListener("snapshot", (event) => {
       // 已被拆掉/顶替的旧连接：不消费任何闩与计数，也不拿旧几何去触发重对齐。
-      if (term !== terminalXterm) return;
+      // 代次判据排在清标记之前，否则迟到帧会把当前流的持续丢弃标记抹掉。
+      if (!connectionAlive() || term !== terminalXterm) return;
+      // snapshot 是「新基线到了」的唯一信号：上一屏作废后的持续丢弃到此为止，
+      // 让紧随其后的那一帧自足整屏回放能重新落屏（见 dropTerminalReplayFrame）。
+      if (typeof terminalGeometryReplayDrop !== "undefined") terminalGeometryReplayDrop = false;
       terminalStreamSyncCancel?.();
       // 流侧时戳（闲剪静默判据，见 maybeTerminalIdleTrim）。typeof 闸护单测桩环境
       // （同 terminalReplayEpoch）。
@@ -8970,12 +9092,15 @@ async function api(method, path, body) {
       } catch {}
     });
     terminalEventSource.addEventListener("data", (event) => {
+      // 旧代次的迟到帧不参与任何当前流的判据（作废标记、回放闩、揭幕计数）。
+      if (!connectionAlive()) return;
       // 重对齐在飞时到达的回放属于旧几何，写进去就是一屏错宽度；新流会重发一份。
       if (terminalGeometryRealignPending) return;
-      // 错配 snapshot 的作废回放：只丢这一帧。其后的增量是应用自己的正常输出，
-      // 与这份回放无关，照画（见 dropTerminalReplayFrame）。
+      // 基线已作废：连其后的帧一并丢到下一次 snapshot。宿主对这条连接只发一帧整屏
+      // 回放，而后续 live 帧是纯相对重绘（零 2J / 零 CUP，2K 只擦当前行），没有自足
+      // 起点——照画只会把旧行叠成多份输入框或逐行累积的阶梯。旧语义「只丢首帧」正是
+      // 这条叠画通路，见 dropTerminalReplayFrame 的台架实证。
       if (terminalGeometryReplayDrop) {
-        terminalGeometryReplayDrop = false;
         terminalReplayFramePending = false;
         return;
       }
@@ -9007,7 +9132,7 @@ async function api(method, path, body) {
     });
     terminalEventSource.addEventListener("exit", () => {
       // 迟到的旧流：已被拆掉/顶替的连接不消费退出帧（同 data 处理器的第一道闸）。
-      if (term !== terminalXterm) return;
+      if (!connectionAlive() || term !== terminalXterm) return;
       // 消费退出帧（2026-11-05 F4）：在此之前面板对进程退出只有一个 1s 轮询，而它对
       // 「屏上什么都没有」没有任何呈现动作（见 applyTerminalHostState 的 exited 口径：
       // 页签保留不动、停在最后一帧）——最后一帧恰好是空白时，那块空白就永久留在屏上。
@@ -9022,6 +9147,11 @@ async function api(method, path, body) {
       terminalReplayFramePending = false;
     });
     terminalEventSource.onerror = () => {
+      // 浏览器自动重连没有前端钩子，旧流残帧与自动重连的整屏回放会在同一块屏上
+      // 叠加。收口成一次显式整屏重建（合并/节流在 requestTerminalFrameRebuild 内）：
+      // 先拆净旧连接，再重开一条流拿一屏干净回放。旧代次的错连直接退场。
+      if (!connectionAlive() || term !== terminalXterm) return;
+      if (typeof requestTerminalFrameRebuild === "function") requestTerminalFrameRebuild(session, term);
     };
   }
 

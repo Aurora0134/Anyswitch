@@ -1333,3 +1333,59 @@ describe("渲染快照（跨宿主重启的恢复原料）", () => {
     assert.equal(b.toReplay(), fresh.toReplay(), "兜底态与真出厂态回放一致（整屏区不发区域序列）");
   });
 });
+
+// ---- 真 xterm 判画面：本次两种错画面的成因钉（2026-11-08）----
+// 台架证的是因果关系，不是「事发那天确实丢了哪一帧」：现场只留下静态截图，没有
+// 运行态帧序记录。但它足以判定修法取向——半帧/旧基线一律不许落屏，只能整屏重放。
+async function paintFrames(cols, rows, frames) {
+  const t = new Terminal({ cols, rows, convertEol: true, allowProposedApi: true, scrollback: 5000 });
+  t.loadAddon(new Unicode11Addon());
+  t.unicode.activeVersion = "11";
+  for (const f of frames) await new Promise((resolve) => t.write(f, resolve));
+  return { term: t, lines: xtermViewport(t) };
+}
+
+test("判画面：丢掉 CUU 上移回退的帧逐行累积成阶梯，完整帧只留一行", async () => {
+  const cols = 30;
+  const rows = 8;
+  let acc = "";
+  const intact = ["\u001b[0m\u001b[2J\u001b[H"];
+  const truncated = ["\u001b[0m\u001b[2J\u001b[H"];
+  for (let n = 1; n <= 4; n += 1) {
+    acc += "1";
+    // kimi 这类纯相对重绘：上移回组件顶部 → \r + 2K 擦行 → 写新内容。
+    intact.push(`\u001b[1A\r\u001b[2K> ${acc}`);
+    // 半块被腰斩成孤立的 "A" 时等价于整段 CUU 丢失：每帧都从当前行往下另起一行。
+    truncated.push(`\r\u001b[2K> ${acc}\r\n`);
+  }
+  const good = (await paintFrames(cols, rows, intact)).lines.map((l) => l.trim()).filter(Boolean);
+  const bad = (await paintFrames(cols, rows, truncated)).lines.map((l) => l.trim()).filter(Boolean);
+  assert.deepEqual(good, [`> ${acc}`], "完整帧（CUU 在）原地重写一行，视口不累积");
+  assert.deepEqual(bad, ["> 1", "> 11", "> 111", "> 1111"],
+    "腰斩掉上移回退的帧逐行累积成图三那种阶梯——所以 ?2026 兜底必须丢弃半块，不能冲刷");
+});
+
+test("判画面：整屏回放被作废且不清屏，后续相对重绘把输入框复制成多份", async () => {
+  const cols = 32;
+  const rows = 12;
+  const top = "╭" + "─".repeat(cols - 2) + "╮";
+  const bottom = "╰" + "─".repeat(cols - 2) + "╯";
+  const boxLine = (text) => `│ ${text.padEnd(cols - 4)}│`;
+  const fullFrame = (text) => `\u001b[0m\u001b[2J\u001b[H${top}\r\n${boxLine(text)}\r\n${bottom}\r\n`;
+  // 旧语义：回放作废、不 reset、屏上留着上一屏，live 帧从当前光标继续相对重绘。
+  const liveFrame = (text) => `\r\u001b[2K${top}\r\n${boxLine(text)}\r\n${bottom}\r\n`;
+  const boxes = (lines) => lines.filter((l) => l.startsWith("╭")).length;
+
+  const clean = (await paintFrames(cols, rows, [fullFrame("> ")])).lines;
+  assert.equal(boxes(clean), 1, "前置：干净整屏回放只有一份输入框");
+
+  const stacked = (await paintFrames(cols, rows,
+    [fullFrame("> "), liveFrame("> 1"), liveFrame("> 11")])).lines;
+  assert.ok(boxes(stacked) >= 2,
+    "回放被丢 + 不 reset + 纯相对增量帧 = 输入框复制成多份（图一/图二形态）");
+
+  const rebuilt = (await paintFrames(cols, rows,
+    [fullFrame("> "), liveFrame("> 1"), liveFrame("> 11"), fullFrame("> 111")])).lines;
+  assert.equal(boxes(rebuilt), 1,
+    "清屏 + 重放一帧自足整屏回放后恢复单份——丢弃回放必须 reset 并重建整条画面流");
+});
