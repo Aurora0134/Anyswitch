@@ -31,7 +31,7 @@
 
   function $(id) { return document.getElementById(id); }
   function escapeHtml(s) {
-    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick }（单钮）或
@@ -15521,7 +15521,7 @@ async function api(method, path, body) {
       .replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (m, label, url) => {
         // href 只放行 http/https；javascript: 等其他协议降级为纯文本
         if (!/^https?:\/\//i.test(url)) return label;
-        // escapeHtml 不转引号，进入 href 属性前另防引号逃逸
+        // 上游 escapeHtml 已把引号转实体；此处再按 URL 语义兜一层百分号编码
         const safeUrl = url.replace(/"/g, "%22").replace(/'/g, "%27");
         return `<a href="${safeUrl}" target="_blank" rel="noopener">${label}</a>`;
       })
@@ -22055,8 +22055,7 @@ async function api(method, path, body) {
   function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
 
   /* HTML 转义（五字符含引号）：会话内容进 DOM/attribute 前必须过这道。
-     与 escapeHtml 并存——escapeHtml 不转引号，会话数据的 id/路径/标题要进
-     data-id/title 等属性，需引号转义，故保留原型 esc。 */
+     escapeHtml 已补齐引号转义、与本函数同口径；esc 保留为既有调用点的兼容别名。 */
   function esc(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
