@@ -1112,6 +1112,23 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
     // 颜色只走 token，5 套主题与亮暗才不用各写一遍
     assert.doesNotMatch(panelCss, /\.sd-(row|file|gap|no|tx)[^{]*\{[^}]*(#[0-9a-f]{3,8}|rgba?\()/i);
   });
+
+  it("sepia 题感宽字距只给短标签：整句分组标题回落正文口径，不把句读拉开", () => {
+    // 用户报：sepia 下「本地独有（仓库中没有同名 skill）」字间距异常变宽。根因是皮肤把
+    // 10px 小标签的 0.12em 宽字距挂在 .skills-group-title 整类上，整句标题也吃满——
+    // 12.5px 下每个字多 1.5px，19 字标题比自然宽度多出 28.5px。短标签保留题感，
+    // 整句式标题（折叠组 + 分叉冲突）按正文口径 0.02em。
+    const rawCss = read("panel.css");
+    assert.match(rawCss, /:root\[data-style="sepia"\] \.skills-group-title \{\n  font-size: 10px;\n  letter-spacing: 0\.12em;\n\}/,
+      "短分区标签仍保留 0.12em 题感宽字距");
+    assert.match(rawCss, /:root\[data-style="sepia"\] \.skills-group-title\.skills-anomaly-fold,\n:root\[data-style="sepia"\] \.skills-group-title\.skills-group-title-sentence \{\n  letter-spacing: 0\.02em;\n\}/,
+      "整句式分组标题必须把字距回落到正文口径 0.02em");
+    assert.match(rawCss, /:root\[data-style="sepia"\] \.skills-group-title\.skills-anomaly-fold \{\n  font-size: 12\.5px;\n\}/,
+      "折叠组标题字号仍为 12.5px，不被上面的 10px 带走");
+    assert.match(extractFn("renderSkillsAnomalies", ""),
+      /class="skills-group-title skills-group-title-sentence"[^>]*>分叉冲突（与仓库同名但内容不同）</,
+      "分叉冲突标题同为整句，必须带 sentence 修饰类才吃到上面的回落");
+  });
 });
 
 // ── 空目录设为主仓库：确认后放行 ──

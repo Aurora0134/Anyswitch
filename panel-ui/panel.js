@@ -15741,7 +15741,7 @@ async function api(method, path, body) {
     }
     if (diverged.length) {
       sections.push(
-        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>分叉冲突（与仓库同名但内容不同）</div>` +
+        `<div class="skills-group-title skills-group-title-sentence"${sections.length ? "" : firstStyle}>分叉冲突（与仓库同名但内容不同）</div>` +
         diverged.map(({ ep, entry }) => rowHtml(ep, entry,
           '<span class="badge badge-danger">分叉冲突</span>',
           `<button class="btn btn-mini" data-diff="${key(ep, entry)}">查看差异</button>` +
