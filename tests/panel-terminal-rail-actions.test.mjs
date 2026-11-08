@@ -207,14 +207,17 @@ function rowHtmlSandbox(prefs) {
 // 2026-11-01 追加 live 闸：会话有终端开着时归档＝二次确认＋归档即杀（走行内 × 同一
 // 条 terminalCloseTerminal 链路）。沙盒默认无 live 会话（window 置 undefined，生产
 // 浏览器里 confirm 恒在）；live 三分支由 openSessions 注入、window 桩收 confirm。
-const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [] }, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, openSessions = null, windowImpl } = {}) => {
-  const log = { posts: [], toasts: [], renders: 0, removed: [], flipModes: [], viewChoice: null, confirms: [], closes: [], railRenders: 0, tabRenders: 0 };
-  const fn = new Function("session", "log", "apiImpl", "prefs", "viewPrefs", "openSessions", "windowImpl", `
+// 2026-11-08 追加 refill 面：归档当前正看的会话（activeTerminalId 注入
+// activeTerminalPreviewId）→ 同工作区原位补新（terminalRailSwitchOrCreateCore 桩收参）。
+const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [] }, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, openSessions = null, windowImpl, activeTerminalId = null } = {}) => {
+  const log = { posts: [], toasts: [], renders: 0, removed: [], flipModes: [], viewChoice: null, confirms: [], closes: [], railRenders: 0, tabRenders: 0, refills: [], switchLogs: [] };
+  const fn = new Function("session", "log", "apiImpl", "prefs", "viewPrefs", "openSessions", "windowImpl", "activeTerminalId", `
     let terminalRailPrefs = prefs;
     let terminalRailHistory = { endpoint: "kimi", sessions: [session], fetchedAt: 1, error: null };
     let terminalRailFlipMode = "instant";
     const terminalRailMotionArmed = false;
     const terminalRailViewPrefs = viewPrefs;
+    let activeTerminalPreviewId = activeTerminalId;
     const window = windowImpl;
     function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
     function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
@@ -230,6 +233,8 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
       return openSessions.find((row) => row && row.resume && row.resume.endpoint === endpoint && row.resume.id === id) || null;
     }
     function terminalCloseTerminal(id) { log.closes.push(id); return true; }
+    function terminalRailSwitchOrCreateCore(args) { log.refills.push(args); }
+    function terminalSwitchLog(event, detail) { log.switchLogs.push({ event, detail }); }
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailMotionEnabled")}
     ${extractFn("terminalRailSnapshotMotion")}
@@ -242,7 +247,7 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
       unarchive: (endpoint, id) => terminalRailUnarchiveSession(endpoint, id),
       prefs: () => terminalRailPrefs,
     };
-  `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs, openSessions, windowImpl);
+  `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs, openSessions, windowImpl, activeTerminalId);
   return { fn, log };
 };
 
@@ -481,6 +486,48 @@ describe("S1 会话归档（finding 1a）", () => {
         assert.equal(log0.confirms.length, 0, "平静会话单击即归档（既有口径不动）");
         assert.deepEqual(log.closes, [], "没有可关的终端");
         assert.deepEqual(fn.prefs().archived, [{ endpoint: "kimi", id: "s-1" }], "归档照常");
+      });
+
+      // 2026-11-08 用户裁决：归档当前正看的会话不回落别的页签、不落空态，
+      // 同工作区原位补一条新会话（挂进本页签，页签守恒）。
+      describe("归档当前会话原位补新（archive-refill）", () => {
+        const REFILL_SESSION = { id: "s-live", endpoint: "kimi", title: "在跑的会话", project: "C:\\dev\\alpha" };
+        const REFILL_OPEN = { id: "t-9", resume: { endpoint: "kimi", id: "s-live" } };
+        const OK_CONFIRM = { confirm: () => true };
+
+        it("归档正看的会话：关终端后以同 agent＋同工作区发起补新，留痕一拍", () => {
+          const { fn, log } = runArchive(REFILL_SESSION, { openSessions: [REFILL_OPEN], windowImpl: OK_CONFIRM, activeTerminalId: "t-9" });
+          fn.archive();
+          assert.deepEqual(log.closes, ["t-9"], "归档即杀先走（既有链路不动）");
+          assert.deepEqual(log.refills, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }],
+            "补新＝同 endpoint＋左栏分组键 project（用户认知的当前工作区）");
+          assert.equal(log.switchLogs.length, 1, "留痕恰好一拍");
+          assert.ok(log.switchLogs[0].event === "archive-refill" && log.switchLogs[0].detail.cwd === "C:\\dev\\alpha",
+            "「这条页签怎么自己新建了会话」可归因");
+        });
+
+        it("project 缺失回落终端 cwd；两者皆空不补（维持既有回落）", () => {
+          const { fn, log } = runArchive(
+            { id: "s-live", endpoint: "kimi", title: "t", project: "" },
+            { openSessions: [{ id: "t-9", resume: { endpoint: "kimi", id: "s-live" }, cwd: "C:\\dev\\beta" }], windowImpl: OK_CONFIRM, activeTerminalId: "t-9" },
+          );
+          fn.archive();
+          assert.deepEqual(log.refills, [{ agentId: "kimi", cwd: "C:\\dev\\beta" }], "cwd 回落 live.cwd");
+          const bare = runArchive(
+            { id: "s-live", endpoint: "kimi", title: "t" },
+            { openSessions: [{ id: "t-9", resume: { endpoint: "kimi", id: "s-live" } }], windowImpl: OK_CONFIRM, activeTerminalId: "t-9" },
+          );
+          bare.fn.archive();
+          assert.deepEqual(bare.log.refills, [], "无工作区信息不补——不猜目录");
+        });
+
+        it("归档后台会话（终端开着但不是当前显示）不补新，归档照常", () => {
+          const { fn, log } = runArchive(REFILL_SESSION, { openSessions: [REFILL_OPEN], windowImpl: OK_CONFIRM, activeTerminalId: "t-other" });
+          fn.archive();
+          assert.deepEqual(log.closes, ["t-9"], "归档即杀照走");
+          assert.deepEqual(log.refills, [], "不打扰用户正看着的画面");
+          assert.deepEqual(log.switchLogs, [], "不补新就不留痕");
+        });
       });
     });
   });
