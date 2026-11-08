@@ -207,6 +207,12 @@ export function buildDshProviderEntry(providerId, provider, port, token, knowled
       id: modelId,
       name: m.displayName ?? modelId,
       contextWindow: m.contextWindow ?? fallbackContextWindow(modelId),
+      // DSH refuses an image-bearing request before it leaves the client
+      // unless the model declares "image"; an undeclared model inherits a
+      // text-only default. The relay decides capability per model (strip
+      // before send, retry stripped on an upstream refusal), so every managed
+      // model declares both here instead of gating at the client.
+      input: ["text", "image"],
     };
     if (m.maxOutputTokens !== undefined) {
       entry.maxTokens = m.maxOutputTokens;

@@ -289,6 +289,7 @@ test("writeDshConfig writes every existing profile and clears them after the las
     // authenticate; an apiKeyEnv reference would resolve to nothing there.
     assert.equal(channel.apiKeyEnv, undefined);
     assert.equal(channel.headers.Authorization, "Bearer tok");
+    assert.deepEqual(channel.models.map((model) => model.input), [["text", "image"]]);
     assert.deepEqual(readSidecar(dir), { providers: ["poke-api"] });
 
     const emptied = await writeDshConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, "settings.yaml"));
