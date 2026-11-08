@@ -384,7 +384,12 @@
   font-size: 10px;
   letter-spacing: 0.12em;
 }
-/* 可折叠分组标题保持 12.5px（双类提升特异性压过上面的 10px），宽字距风格保留 */
+/* 可折叠分组标题保持 12.5px（双类提升特异性压过上面的 10px）；题感宽字距只留给
+   短标签——整句式标题按正文口径 0.02em，否则每个字多吃 1.2–1.5px，长句读着散 */
+:root[data-style="sepia"] .skills-group-title.skills-anomaly-fold,
+:root[data-style="sepia"] .skills-group-title.skills-group-title-sentence {
+  letter-spacing: 0.02em;
+}
 :root[data-style="sepia"] .skills-group-title.skills-anomaly-fold {
   font-size: 12.5px;
 }
