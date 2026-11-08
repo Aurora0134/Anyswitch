@@ -9,6 +9,7 @@ import {
   getYamlModule,
   dshYamlSchema,
 } from "../src/launchers/dsh-merge-config.mjs";
+import { AUTO_CHANNEL_KEY } from "../src/launchers/merge-common.mjs";
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
@@ -60,6 +61,24 @@ test("buildDshProviderEntry creates valid dsh profile", () => {
   assert.equal(entry._deepseek.models[0].name, "DeepSeek V3");
   assert.equal(entry._deepseek.models[0].contextWindow, 64000);
   assert.equal(entry._deepseek.models[0].maxTokens, 8000);
+  assert.deepEqual(entry._deepseek.models[0].input, ["text", "image"]);
+});
+
+test("buildDshProviderEntry declares image input for every managed model", () => {
+  const provider = {
+    models: {
+      "vision-route": { contextWindow: 16000 },
+      "text-only-route": { contextWindow: 8000 },
+      "embedding-bge": { contextWindow: 1000 },
+    },
+  };
+  const entry = buildDshProviderEntry(AUTO_CHANNEL_KEY, provider, 47821, TOKEN);
+  assert.ok(entry.Anyswitch, "the pseudo channel uses its display-name key");
+  assert.deepEqual(entry.Anyswitch.models.map((model) => model.input), [
+    ["text", "image"],
+    ["text", "image"],
+    ["text", "image"],
+  ]);
 });
 
 test("buildDshProviderEntry omits the credential header when no token is available", () => {
