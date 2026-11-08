@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPanelRouter } from "../src/panel/panel.mjs";
+import { buildTurns } from "../src/agents/session-scan.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 // Sessions tab routes: the router is exercised with a mock session-scan
@@ -65,9 +66,12 @@ function mockSessionScan({ scanResult, scanError, messagesResult, deleteResult }
       if (scanError) throw scanError;
       return scanResult ?? { sessions: [], endpointErrors: [] };
     },
-    loadMessages: async (endpoint, file) => {
+    // messages 服务面：正文＋目录在服务侧（worker 线程）序列化成一整串，路由
+    // 原样直写不再 re-stringify。参数记录进 calls.loadMessages，形状与修前一致。
+    loadMessagesResponse: async (endpoint, file) => {
       calls.loadMessages.push([endpoint, file]);
-      return messagesResult ?? { session: { endpoint, file }, messages: [] };
+      const messages = messagesResult ?? { session: { endpoint, file }, messages: [] };
+      return JSON.stringify({ ok: true, messages, turns: buildTurns(messages) });
     },
     deleteSessions: async (items) => {
       calls.deleteSessions.push(items);
@@ -330,9 +334,9 @@ parentPort.on("message", (message) => {
     assert.equal(json().error, "boom");
   });
 
-  it("GET /panel/api/sessions/messages passes endpoint+path through to loadMessages", async () => {
-    // loadMessages returns a bare message array; the router wraps it as
-    // { ok, messages } for the frontend contract.
+  it("GET /panel/api/sessions/messages passes endpoint+path through to loadMessagesResponse", async () => {
+    // loadMessagesResponse returns the serialized { ok, messages, turns }
+    // body string (worker-thread product); the router writes it verbatim.
     const messages = [
       { role: "user", content: "hi", ts: 1 },
       { role: "assistant", content: "hello", ts: 2 },

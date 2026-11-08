@@ -2097,6 +2097,147 @@ test("scan offload: 冷却窗内不反复重建 worker（评审 F8 的另一半�
   }
 });
 
+// --- 扫描离线程 · messages 通道（会话消息读取搬进 worker） ---------------------
+// 路由修前的产物是进程内 sessionLoadMessages + buildTurns + JSON.stringify；
+// 搬进 worker 后必须逐字节一致，worker 不可用时退回进程内组合，应用层错误
+// （未知端点/根外路径）经 {ok:false, error} 通道回传不丢信息。worker 里的
+// scanner 用 workerData.roots（全套临时根），绝不碰真存档。
+
+// 进程内组合（＝panel 默认兜底的产物形状，也是路由修前的响应串）。
+async function inProcessMessagesBody(scanner, endpoint, file) {
+  const messages = await scanner.loadMessages(endpoint, file);
+  return JSON.stringify({ ok: true, messages, turns: buildTurns(messages) });
+}
+
+// 全套临时根 + 指定端点覆盖：漏一个端点 worker 就会去扫真 home。
+function offloadRoots(overrides) {
+  const roots = {};
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok", "workbuddy"]) {
+    roots[id] = [makeTmp()];
+  }
+  return Object.assign(roots, overrides);
+}
+
+test("scan offload: messages 往返字节与进程内调用逐字节一致", async () => {
+  const claudeRoot = makeTmp();
+  const file = writeClaudeSession(claudeRoot, "C--work-m", "sess-m.jsonl", [
+    claudeLine({ sessionId: "sess-m", message: { role: "user", content: "第一问" } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "答一" }, timestamp: "2026-09-01T10:01:00.000Z" }),
+    claudeLine({ sessionId: "sess-m", message: { role: "user", content: "第二问" }, timestamp: "2026-09-01T10:02:00.000Z" }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const expected = await inProcessMessagesBody(scanner, "claude", file);
+  const offload = createSessionScanOffload({
+    workerData: { roots: offloadRoots({ claude: [claudeRoot] }) },
+    fallback: {
+      scanAll: () => scanner.scanAll(),
+      scanAgent: (id) => scanner.scanEndpoint(id),
+      loadMessagesResponse: (endpoint, f) => inProcessMessagesBody(scanner, endpoint, f),
+    },
+  });
+  try {
+    const body = await offload.loadMessagesResponse("claude", file);
+    assert.equal(body, expected, "kind=messages 的 worker 往返串与进程内组合逐字节一致");
+    assert.equal(offload.stats().failures, 0, "字节一致必须是 worker 真跑出来的，不是降级兜底碰巧等价");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: messages 请求 worker 起不来时退回进程内，结果等价", async () => {
+  const claudeRoot = makeTmp();
+  const file = writeClaudeSession(claudeRoot, "C--work-dm", "sess-dm.jsonl", [
+    claudeLine({ sessionId: "sess-dm", message: { role: "user", content: "问" } }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const expected = await inProcessMessagesBody(scanner, "claude", file);
+  const offload = createSessionScanOffload({
+    // 不存在的 worker 模块 → 构造即失败，走降级路径（与扫描降级同语义）。
+    workerFile: join(makeTmp(), "no-such-worker.mjs"),
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => scanner.scanAll(),
+      scanAgent: (id) => scanner.scanEndpoint(id),
+      loadMessagesResponse: (endpoint, f) => inProcessMessagesBody(scanner, endpoint, f),
+    },
+  });
+  try {
+    const body = await offload.loadMessagesResponse("claude", file);
+    assert.equal(body, expected, "降级后 messages 响应串与 worker 路径等价");
+    assert.equal(offload.stats().failures, 1, "降级只记一次故障");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: messages 未知端点拒绝，错误经通道回传", async () => {
+  const claudeRoot = makeTmp();
+  const file = writeClaudeSession(claudeRoot, "C--work-ue", "sess-ue.jsonl", [
+    claudeLine({ sessionId: "sess-ue" }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const offload = createSessionScanOffload({
+    workerData: { roots: offloadRoots({ claude: [claudeRoot] }) },
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => scanner.scanAll(),
+      scanAgent: (id) => scanner.scanEndpoint(id),
+      loadMessagesResponse: (endpoint, f) => inProcessMessagesBody(scanner, endpoint, f),
+    },
+  });
+  try {
+    // worker 侧 adapterFor 抛「unknown endpoint」→ {ok:false, error} 回传：错误信息
+    // 原样到达调用方（修前进程内同款 500）。业务层错误不许把 worker 打进降级
+    // 冷却窗——常态 4xx（列表 60s TTL 内点开陈旧行）会把列表扫描一起拖下水。
+    await assert.rejects(() => offload.loadMessagesResponse("nope", file), /unknown endpoint: nope/);
+    assert.equal(offload.stats().failures, 0, "业务错误（未知端点）不 retire");
+    assert.equal(offload.stats().degraded, false, "worker 无恙，不进降级窗");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: messages 业务错误不降级——worker 无恙，后续 scanAll 仍走 worker", async () => {
+  // 陈旧行点开（源文件已被删/移走）是常态业务错误：只该这一单失败，扫描 worker
+  // 不许被打进 retire＋5 分钟冷却窗——否则窗内列表扫描退进程内同步 fs（最坏 8s
+  // 级停摆），PERF-P1-2 要消灭的卡顿换了个触发面复现。
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-be", "sess-be.jsonl", [
+    claudeLine({ sessionId: "sess-be", message: { role: "user", content: "问" } }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  let fallbackScanAllCalls = 0;
+  let fallbackMessagesCalls = 0;
+  const offload = createSessionScanOffload({
+    workerData: { roots: offloadRoots({ claude: [claudeRoot] }) },
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => { fallbackScanAllCalls += 1; return scanner.scanAll(); },
+      scanAgent: (id) => scanner.scanEndpoint(id),
+      loadMessagesResponse: (endpoint, f) => {
+        fallbackMessagesCalls += 1;
+        return inProcessMessagesBody(scanner, endpoint, f);
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      () => offload.loadMessagesResponse("claude", join(claudeRoot, "C--work-be", "gone.jsonl")),
+      /该会话的源文件已不在磁盘上/,
+    );
+    assert.equal(offload.stats().failures, 0, "业务错误不许 retire（不打进冷却窗）");
+    assert.equal(offload.stats().degraded, false, "worker 无恙，不在降级窗");
+    assert.equal(fallbackMessagesCalls, 0, "业务错误不退进程内重读（同款错误只会再抛一遍）");
+    // 降级不外溢：随后的列表扫描仍由 worker 服务，兜底零调用。
+    const scan = await offload.scanAll();
+    assert.equal(scan.sessions.length, 1, "scanAll 结果正常");
+    assert.equal(fallbackScanAllCalls, 0, "scanAll 仍走 worker，没退进程内");
+    assert.equal(offload.stats().failures, 0, "两次请求全程零降级");
+  } finally {
+    offload.close();
+  }
+});
+
 test("loadMessages rejects files outside the endpoint roots", async () => {
   const root = makeTmp();
   const outside = makeTmp();

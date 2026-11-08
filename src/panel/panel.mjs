@@ -220,6 +220,17 @@ function sendJson(res, status, body, extraHeaders = null) {
   res.end(text);
 }
 
+// sendJson 的已序列化版：正文在服务侧（扫描 worker 线程）就是现成 JSON 文本，
+// 主线程直写、不再 re-stringify——大载荷的序列化已经挪离面板事件循环。
+function sendJsonText(res, status, text, extraHeaders = null) {
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(text),
+    ...(extraHeaders ?? {}),
+  });
+  res.end(text);
+}
+
 // One in-flight probe round (registry + liveness, parallel) shared by every
 // waiter; consecutive rounds wait for the previous one to finish so refreshes
 // never pile up. Each round's resolved value becomes the new snapshot.
@@ -1077,8 +1088,10 @@ export function createPanelRouter({
   // built statsService). Injectable so tests can capture appendSession
   // without touching the real usage dir; `null` lazily creates one.
   usageJournal = null,
-  // Sessions tab service (session-scan.mjs): scanAll() / loadMessages() /
-  // deleteSessions() over the nine agents' on-disk session stores.
+  // Sessions tab service (session-scan.mjs): scanAll() /
+  // loadMessagesResponse() / deleteSessions() over the nine agents' on-disk
+  // session stores. loadMessagesResponse returns the serialized
+  // { ok, messages, turns } body string (worker-thread product).
   // Injectable for tests; `null` lazily binds the real module's exports on
   // the first sessions request.
   sessionScanService = null,
@@ -1133,6 +1146,12 @@ export function createPanelRouter({
     fallback: sessionScanFallback ?? {
       scanAll: () => sessionScanner.scanAll(),
       scanAgent: (agentId) => sessionScanner.scanEndpoint(agentId),
+      // worker 起不来/超时/崩溃时退回本进程一拍（＝修前行为，与扫描降级同语义）：
+      // 同款 loadMessages + buildTurns + JSON.stringify 组合，产物逐字节一致。
+      loadMessagesResponse: async (endpoint, file) => {
+        const messages = await sessionLoadMessages(endpoint, file);
+        return JSON.stringify({ ok: true, messages, turns: sessionBuildTurns(messages) });
+      },
     },
   });
   // 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家，不是 scanAll
@@ -1156,14 +1175,14 @@ export function createPanelRouter({
     }
     return sessionListSnapshot;
   }
-  // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描走扫描承载（worker
-  // 线程），九个 adapter 的同步 fs 不跑在面板进程的事件循环上。列表路由与启动预热
-  // 共用这一定位点。
+  // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描与消息读取都走扫描
+  // 承载（worker 线程），九个 adapter 的同步 fs 与消息序列化不跑在面板进程的事件
+  // 循环上。列表路由与启动预热共用这一定位点。
   function ensureSessionScanService() {
     if (!sessionScanService) {
       sessionScanService = {
         scanAll: () => scanHost.scanAll(),
-        loadMessages: sessionLoadMessages,
+        loadMessagesResponse: (endpoint, file) => scanHost.loadMessagesResponse(endpoint, file),
         deleteSessions: sessionDeleteSessions,
       };
     }
@@ -4371,11 +4390,11 @@ export function createPanelRouter({
           return sendJson(res, 400, { ok: false, error: "endpoint and path query params are required" });
         }
         try {
-          const messages = await svc.loadMessages(endpoint, file);
-          // The directory (「对话目录」) rides along with the transcript: session-scan
-          // owns what counts as a round a human typed, so the panel draws turns
-          // instead of re-judging nine transcript formats in the browser.
-          return sendJson(res, 200, { ok: true, messages, turns: sessionBuildTurns(messages) });
+          // 正文＋目录（「对话目录」的 turns 由 session-scan 判定）在服务侧序列化成
+          // 一整串：读盘、parse 与 JSON.stringify 都跑在扫描 worker 线程里，百 MB
+          // 级会话的打开不再按住面板进程的事件循环；路由只把现成串直写出去。
+          const body = await svc.loadMessagesResponse(endpoint, file);
+          return sendJsonText(res, 200, body);
         } catch (err) {
           return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
         }

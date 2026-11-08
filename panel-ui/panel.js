@@ -22501,7 +22501,7 @@ async function api(method, path, body) {
 
   function currentSession() { return sessState.sessions.find((s) => s.id === sessState.selectedId) || null; }
 
-  async function renderSessDetail() {
+  async function renderSessDetail(reuse) {
     const s = currentSession();
     const empty = $("sessDetailEmpty"), body = $("sessDetailBody"), skel = $("sessDetailSkel");
     if (!s) {
@@ -22534,17 +22534,25 @@ async function api(method, path, body) {
     $("sessCopyCmdBtn").disabled = !cmd;
     $("sessResumeBtn").disabled = !cmd;
 
-    // 消息流：点选后拉取详情
-    await loadSessMessages(s);
+    // 消息流：点选后拉取详情（reuse=true 时搜索词联动只走本地重渲，不发新请求）
+    await loadSessMessages(s, reuse);
     renderSessToc(s);
   }
 
-  /* 拉取并渲染消息流（角色着色、超长折叠、搜索高亮、hover 复制） */
-  async function loadSessMessages(s) {
+  /* 拉取并渲染消息流（角色着色、超长折叠、搜索高亮、hover 复制）。
+     reuse：搜索词变化只影响高亮，不必重拉正文——数据已缓存时本地重渲
+     （渲染现取 sessState.search 当高亮词），点选/刷新/删除路径不传，
+     切回会话照旧拿最新数据。 */
+  async function loadSessMessages(s, reuse) {
+    if (reuse && s.msgsLoaded) { renderSessMessages(s); return; }
+    // 同会话请求在飞时跳过：不堆积重复的大载荷读取任务；在飞的那次完成时
+    // 渲染现取搜索词，边搜边等首拉的会话不会被旧词卡住。
+    if (s.msgsLoading) return;
     const flow = $("sessMsgFlow");
     flow.innerHTML = `<div style="padding:8px 0;"><div class="sessions-skel" style="height:64px;margin-bottom:14px;"></div><div class="sessions-skel" style="height:64px;width:80%;margin-left:auto;"></div></div>`;
     let messages = [];
     let turns = [];
+    s.msgsLoading = true;
     try {
       const res = await api("GET", "/api/sessions/messages?endpoint=" + encodeURIComponent(s.endpoint) + "&path=" + encodeURIComponent(s.file));
       messages = Array.isArray(res.messages) ? res.messages : [];
@@ -22552,16 +22560,19 @@ async function api(method, path, body) {
       // 的角色写法各不相同，前端按 role==="user" 现算会把工具输出当作用户轮。
       turns = Array.isArray(res.turns) ? res.turns : [];
     } catch (err) {
-      // 会话可能已被删/移动：回退空消息流并提示
+      // 会话可能已被删/移动：回退空消息流并提示。不置 msgsLoaded——下次照常重试。
       s.messages = [];
       s.turns = [];
       flow.innerHTML = `<div class="sessions-list-empty">${esc(panelError(err, "消息加载失败"))}</div>`;
       return;
+    } finally {
+      s.msgsLoading = false;
     }
     // 竞态：拉取期间用户已改选其它会话 → 丢弃
     if (sessState.selectedId !== s.id) return;
     s.messages = messages; // 缓存到会话对象，TOC/复制/折叠共用
     s.turns = turns;
+    s.msgsLoaded = true; // 成功才置位：失败/竞态丢弃都不缓存，重选即重拉
     renderSessMessages(s);
   }
 
@@ -22824,7 +22835,7 @@ async function api(method, path, body) {
     $("sessSearchInput").value = ""; sessState.search = ""; sessState.page = 1;
     $("sessSearchClear").hidden = true; $("sessKbdHint").hidden = false;
     renderSessList();
-    if (sessState.selectedId) renderSessDetail();
+    if (sessState.selectedId) renderSessDetail(true); // 清词同搜索：本地重渲
   }
 
   /* 进入/离开视图：首拉 list + 60s 相对时间刷新定时器（照 statsTimer 模式） */
@@ -22912,7 +22923,7 @@ async function api(method, path, body) {
       $("sessSearchClear").hidden = !sessState.search;
       $("sessKbdHint").hidden = !!sessState.search;
       renderSessList();
-      if (sessState.selectedId) renderSessDetail(); // 搜索词联动消息高亮
+      if (sessState.selectedId) renderSessDetail(true); // 搜索词只影响高亮：本地重渲，不发新请求
     });
     searchInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { clearSessSearch(); searchInput.blur(); }

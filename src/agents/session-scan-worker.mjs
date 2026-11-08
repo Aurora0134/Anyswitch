@@ -13,7 +13,10 @@
 //
 // 降级：worker 起不来 / 崩了 / 单次超时，就退回本进程内扫（面板仍能出列表，
 // 只是那一拍会卡），并记一条 warn——不每拍重试、不无限重连。这保证了「worker
-// 在某些打包/受限环境下不可用」不会变成「会话列表没了」。
+// 在某些打包/受限环境下不可用」不会变成「会话列表没了」。降级只认基础设施
+// 故障：messages 的业务层失败（appLevel，见 run()）是常态 4xx，只让那一单
+// 失败，不许把 worker 打进冷却窗——否则陈旧行点开一次，列表扫描跟着退
+// 进程内停摆 5 分钟。
 //
 // 降级不是终点（reviveCooldownMs，默认 5 分钟）：冷却窗过后允许重建一次
 // worker。一次抖动（机器休眠唤醒、磁盘卡顿撞上 120s 上限、worker 偶发崩溃）
@@ -27,7 +30,7 @@
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 
-import { createSessionScanner } from "./session-scan.mjs";
+import { createSessionScanner, buildTurns } from "./session-scan.mjs";
 
 const WORKER_FILE = fileURLToPath(import.meta.url);
 // 单次扫描上限：参考机最坏实测 8s（2927 条会话），给到 120s 只用于兜住「worker
@@ -97,7 +100,14 @@ export function createSessionScanOffload({
       clearTimeout(entry.timer);
       if (pending.size === 0) created.unref?.();
       if (message.ok) entry.resolve(message.result);
-      else entry.reject(new Error(message.error ?? "session_scan_failed"));
+      else {
+        const error = new Error(message.error ?? "session_scan_failed");
+        // appLevel：worker 自己回传的业务层失败（messages 的未知端点/根外路径/
+        // 源文件已不在盘）。worker 能回话就说明它无恙——这类失败只属于这一单请求，
+        // 主线程据此不把它当基础设施故障降级。
+        if (message.appLevel) error.appLevel = true;
+        entry.reject(error);
+      }
     });
     created.on("error", (error) => retire(error));
     // 非 0 退出＝扫描线程异常结束；0 是正常终止（terminate() 之后也会走到这里）。
@@ -110,7 +120,7 @@ export function createSessionScanOffload({
     return created;
   }
 
-  function request(kind, agentId) {
+  function request(kind, payload) {
     return new Promise((resolve, reject) => {
       let target;
       try {
@@ -127,7 +137,7 @@ export function createSessionScanOffload({
       pending.set(id, { resolve, reject, timer });
       target.ref?.();
       try {
-        target.postMessage({ id, kind, agentId });
+        target.postMessage({ id, kind, ...payload });
       } catch (error) {
         pending.delete(id);
         clearTimeout(timer);
@@ -136,13 +146,17 @@ export function createSessionScanOffload({
     });
   }
 
-  async function run(kind, agentId, fallbackFn) {
+  async function run(kind, payload, fallbackFn) {
     // 冷却窗内一律本进程扫——不在这段时间里反复重建线程（起不来的环境每拍
     // 重建一次只会拖慢每一拍）。
     if (Date.now() < degradedUntil) return fallbackFn();
     try {
-      return await request(kind, agentId);
+      return await request(kind, payload);
     } catch (error) {
+      // 业务层失败（appLevel）只是这一单的 4xx 级结果：worker 无恙，不 retire、
+      // 不退进程内（退了也是同款错误再抛一遍），错误原样交给调用方＝修前的
+      // 进程内行为。基础设施级失败才走降级。
+      if (error?.appLevel) throw error;
       retire(error);
       return fallbackFn();
     }
@@ -150,9 +164,16 @@ export function createSessionScanOffload({
 
   return {
     // 九家全量扫描（会话管理 tab 的列表）。
-    scanAll: () => run("all", undefined, () => fallback.scanAll()),
+    scanAll: () => run("all", {}, () => fallback.scanAll()),
     // 单端点扫描（终端会话 ↔ 对话存档绑定、复活兜底）。
-    scanAgent: (agentId) => run("agent", agentId, () => fallback.scanAgent(agentId)),
+    scanAgent: (agentId) => run("agent", { agentId }, () => fallback.scanAgent(agentId)),
+    // 会话消息读取（会话管理右栏）：adapter 的同步 fs 读取＋parse＋JSON 序列化
+    // 全在 worker 里跑——大载荷（百 MB 级 transcript）不许按住面板进程的事件循环。
+    // 返回值就是路由修前的响应串（{ ok, messages, turns } 的 JSON 文本），逐字节
+    // 一致（session-scan.test.mjs 有对照钉）；超时/ref 生命周期与扫描同款，降级
+    // 只认基础设施故障——业务错误（appLevel）原样抛给调用方，worker 无恙。
+    loadMessagesResponse: (endpoint, file) =>
+      run("messages", { endpoint, file }, () => fallback.loadMessagesResponse(endpoint, file)),
     // 诊断面（测试与现场排查用）：worker 起过几次、降级了几次、当前是否在冷却窗。
     stats() {
       return { workerStarts, failures, degraded: Date.now() < degradedUntil, degradedUntil };
@@ -167,15 +188,35 @@ export function createSessionScanOffload({
   };
 }
 
-// ---- worker 侧：原样跑 session-scan.mjs，不重写任何扫描逻辑 ----
+// ---- worker 侧：原样跑 session-scan.mjs，不重写任何扫描/读取逻辑 ----
 if (!isMainThread) {
   // workerData.roots 只在测试里给（临时目录根，绝不碰真 home）；生产不传，
   // createSessionScanner 走默认 home 根。
   const scanner = createSessionScanner(workerData?.roots ? { roots: workerData.roots } : {});
   parentPort.on("message", async (message) => {
-    const { id, kind, agentId } = message ?? {};
+    const { id, kind, agentId, endpoint, file } = message ?? {};
     try {
-      const result = kind === "agent" ? await scanner.scanEndpoint(agentId) : await scanner.scanAll();
+      let result;
+      if (kind === "messages") {
+        // 消息读取同款搬家：adapter 体内先 assertUnderRoots（路径 confinement
+        // 不放松），再读盘/parse；buildTurns 与序列化都在本线程完成，主线程
+        // 只收现成的响应串。产物与进程内组合逐字节一致（键序 ok/messages/turns）。
+        // 读取抛错是业务层失败（未知端点/根外路径/源文件已不在盘——常态 4xx，
+        // 前端 catch 的「会话可能已被删/移动」就是这条）：appLevel 标记回传，
+        // 主线程只让这一单失败，不把 worker 打进降级冷却窗。
+        let messages;
+        try {
+          messages = await scanner.loadMessages(endpoint, file);
+        } catch (error) {
+          parentPort.postMessage({ id, ok: false, error: error?.message ?? String(error), appLevel: true });
+          return;
+        }
+        result = JSON.stringify({ ok: true, messages, turns: buildTurns(messages) });
+      } else if (kind === "agent") {
+        result = await scanner.scanEndpoint(agentId);
+      } else {
+        result = await scanner.scanAll();
+      }
       parentPort.postMessage({ id, ok: true, result });
     } catch (error) {
       parentPort.postMessage({ id, ok: false, error: error?.message ?? String(error) });
