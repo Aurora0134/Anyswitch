@@ -13158,6 +13158,17 @@ async function api(method, path, body) {
       // 用户取消行内 × 自带的确认（working 终端）时关闭返回 false——归档一并放弃，
       // 动作视作整体取消。
       if (!terminalCloseTerminal(live.id)) return;
+      // 归档的是当前正看着的会话（2026-11-08 用户裁决）：关掉后不回落别的页签、
+      // 不落空态，同工作区原位补一条新会话。cwd 取左栏分组键 project（用户认知的
+      // 「当前工作区」），缺失回落终端 cwd，两者皆空不补（维持既有回落）。close 已把
+      // 本地会话记录摘掉，core 落「无活跃终端」分支：新会话挂进本页签（页签守恒）；
+      // 失败与轮询竞态由既有机制兜底（在飞伞、placeTerminal 兜底新建、失败 toast）。
+      // 后台页签的会话归档不补——不打扰用户正看着的画面，页签消失维持现状。
+      if (live.id === activeTerminalPreviewId && (session.project || live.cwd)) {
+        const cwd = session.project || live.cwd;
+        if (typeof terminalSwitchLog === "function") terminalSwitchLog("archive-refill", { endpoint: session.endpoint, conversation: session.id, terminal: live.id, cwd });
+        terminalRailSwitchOrCreateCore({ agentId: session.endpoint, cwd });
+      }
       renderTerminalPreviewTabs();
       if (typeof renderTerminalRail === "function") renderTerminalRail();
     }
