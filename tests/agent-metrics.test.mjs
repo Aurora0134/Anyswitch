@@ -1956,6 +1956,140 @@ describe("createAgentMetricsCollector", () => {
       });
       assert.deepEqual(await collector.getZcodeSessionsForTerminalJoin(), [], "扫描失败绝不弄坏读取面");
     });
+
+    // ---- 预留会话行：桌面端开着但还没有任何会话行时，卡里出且只出一条零账行。
+    // 行在出口合成（桶里始终只有真实行），所以真实行出现的那一拍结构上不存在
+    // 「两行并存」的中间态；行也不进实例桶、不进累计账。
+    it("桌面端空态（无任何请求）给一条预留会话行", async () => {
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
+        nowFn: () => 3000,
+      });
+      await collector.scanProcesses();
+      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.equal(zcode.instances.length, 1, "空态只有预留行一条");
+      const row = zcode.instances[0];
+      assert.equal(row.id, "zcode-reserved");
+      assert.equal(row.status, "idle", "没有请求，行待命");
+      assert.equal(row.surface, "Desktop");
+      assert.equal(row.requests, 0);
+      assert.equal(row.activeRequests, 0);
+      assert.equal(row.lastSeen, null, "刻意不写 lastSeen，避开前端 2 分钟陈旧判定");
+      assert.equal(typeof row.firstSeen, "number", "首见时间是数字");
+      assert.equal(row.activeDurationMs, 0);
+      assert.equal(row.activeDurationFormatted, "0秒");
+      assert.deepEqual(row.tokens, { prompt: 0, completion: 0, cached: 0 }, "零账");
+      assert.equal(zcode.status, "running", "桌面端在场，卡片必须点亮");
+      assert.deepEqual(zcode.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }]);
+    });
+
+    it("首个真实会话行出现后只留真实行，预留行让位", async () => {
+      let t = 3000;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
+        nowFn: () => t,
+      });
+      await collector.scanProcesses();
+      const empty = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual(empty.instances.map((i) => i.id), ["zcode-reserved"], "前置：空态先给预留行");
+
+      t = 3200;
+      const r = collector.startRequest({
+        agentId: "zcode", instanceId: "zcode-sess-sess_a", surfacePid: 5001,
+        model: "m1", stream: true, path: "openai",
+      });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+
+      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-sess-sess_a"], "只剩真实行");
+      assert.ok(!zcode.instances.some((i) => i.id === "zcode-reserved"), "不得两行并存");
+    });
+
+    it("5min 空闲档收走真实行后预留行顶回，累计账不蒸发", async () => {
+      let t = 3000;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
+        nowFn: () => t,
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({
+        agentId: "zcode", instanceId: "zcode-sess-sess_exp", surfacePid: 5001,
+        model: "m1", stream: true, path: "openai",
+      });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual((await read()).instances.map((i) => i.id), ["zcode-sess-sess_exp"], "刚发完请求行在");
+
+      t += 4 * 60 * 1000;
+      await collector.scanProcesses();
+      assert.deepEqual((await read()).instances.map((i) => i.id), ["zcode-sess-sess_exp"], "空闲档内不收行");
+
+      t += 2 * 60 * 1000;
+      await collector.scanProcesses();
+      const zcode = await read();
+      assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-reserved"], "收行后桌面端仍在，预留行顶回");
+      assert.equal(zcode.retiredMetrics.requests, 1, "行的累计并入退役账");
+      assert.equal(zcode.metrics.totalRequests, 1, "累计不随行蒸发");
+    });
+
+    it("纯 CLI 形态不预留会话行", async () => {
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, CLI_SCAN),
+        nowFn: () => 3000,
+      });
+      await collector.scanProcesses();
+      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual(zcode.instances, [], "CLI 是 node 跑 bin\\zcode.mjs，不算桌面端在场");
+      assert.deepEqual(zcode.surfaces, [], "没有桌面端就没有面徽章");
+    });
+
+    it("应用关闭后预留行随之消失", async () => {
+      let t = 3000;
+      let scan = ZC_DESKTOP_SCAN;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, scan),
+        nowFn: () => t,
+      });
+      await collector.scanProcesses();
+      assert.deepEqual((await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances.map((i) => i.id),
+        ["zcode-reserved"], "前置：桌面端开着，有预留行");
+
+      scan = wmicZc(zcExplorerRow);
+      t += 3000;
+      collector.scanProcesses();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual((await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances,
+        [], "扫描里没有 zcode，预留行不留");
+    });
+
+    it("降级扫描轮（tasklist 兜底、无命令行列）仍按镜像名预留", async () => {
+      const collector = testCollector({
+        execFn: (cmd, opts, cb) => (cmd.includes("tasklist")
+          ? cb(null, '"ZCode.exe","20588","Console","1","50,000 K"\r\n')
+          : cb(null, "")),
+        nowFn: () => 3000,
+      });
+      const procs = await collector.scanProcesses();
+      assert.equal(procs.zcode, 1, "兜底轮按镜像名认桌面主进程");
+      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.deepEqual(zcode.instances.map((i) => i.id), ["zcode-reserved"], "降级轮照样预留");
+    });
+
+    it("空态预留行连读两次指纹一致（面板按 JSON.stringify 判重渲染）", async () => {
+      let t = 3000;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
+        nowFn: () => t,
+      });
+      await collector.scanProcesses();
+      const first = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      // 跨读间隔一秒（面板轮询节奏）：firstSeen 不许跟着时钟走，否则整卡指纹每拍
+      // 都变、卡片每秒重渲一次。
+      t += 1000;
+      const second = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+      assert.equal(first.instances[0].firstSeen, second.instances[0].firstSeen, "首见时间跨读稳定");
+      assert.equal(JSON.stringify(first), JSON.stringify(second), "整卡指纹稳定");
+    });
   });
 
   describe("zcode 子会话归母 / 面正源 / 端点账同源", () => {
@@ -5908,7 +6042,8 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     });
     const card = wb(await collector.getAgentsStatus());
     assert.equal(card.processCount, 0, "辅助/daemon/sidecar 一个都不算会话");
-    assert.deepEqual(card.instances, [], "没有会话进程就不起实例行");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"],
+      "没有会话进程就不起真实行，只剩主进程在场合成的预留行");
   });
 
   it("does not inflate the count when the command line is unreadable", async () => {
@@ -6119,8 +6254,67 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       });
       const card = wb(await collector.getAgentsStatus());
       assert.equal(card.processCount, 0, `${label}：待命进程不是会话`);
-      assert.deepEqual(card.instances, [], `${label}：不起实例行`);
+      assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"],
+        `${label}：待命进程不起真实行，只剩主进程在场的预留行`);
     }
+  });
+
+  it("主进程-only：卡仍 running，给一条预留会话行", async () => {
+    // 主进程不算会话（processCount 0），但应用开着，卡片必须点亮并给一条零账行。
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(row(7001, 800))),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.status, "running", "家族里有人，卡片必须点亮");
+    assert.equal(card.processCount, 0, "GUI 主进程不是会话");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"]);
+    assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }]);
+  });
+
+  it("daemon/sidecar/辅助进程残留不算应用开着：不点亮也不预留", async () => {
+    // 主进程退出后家族成员可能短暂残留，它们没有窗口——为它们挂行就是幽灵卡。
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7006, 800, "--daemon-app-server-entry.js"),
+        row(7007, 7006, "--sidecar-entry.js"),
+        row(7008, 7006, "--type=utility"),
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.status, "stopped", "主进程不在，家族成员不点亮卡片");
+    assert.deepEqual(card.instances, [], "也不留预留行");
+  });
+
+  it("引擎在、会话行还没铸出时可预留，面徽章只记一票", async () => {
+    // 注册表列着会话、但会话文件不新鲜：会话行起不来（见占位行的活跃闸），
+    // 引擎也不进活跃集（卡面真值是「会话行还活着的 runtime」）。此态卡片仍要
+    // 有一行（否则落回全局汇总），面徽章只由预留行记一票，不重复计。
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      workbuddySessionLookup: registryLookup({ 100: { sessionId: "6d2c" } }),
+      workbuddySessionActivity: async () => new Map(),
+      execFn: (cmd, opts, cb) => cb(null, wmic(row(60, 800), agentRow(100, 60))),
+    });
+    await collector.scanProcesses();
+    const card = wb(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 0, "行未铸出，引擎不进活跃集");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"], "行未铸出，只留预留行");
+    assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }], "一票，不重复");
+  });
+
+  it("有真实会话行时不再给预留行", async () => {
+    const collector = wbCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        row(7001, 800),
+        agentRow(7008, 7001),
+      )),
+    });
+    const card = wb(await collector.getAgentsStatus());
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-7008"], "只有真实行");
+    assert.ok(!card.instances.some((i) => i.id === "workbuddy-reserved"), "不得两行并存");
   });
 
   // ---- 会话粒度行（A 方案 2026-11-01）：行身份锚注册表 sessionId，不锚 pid。
@@ -6264,8 +6458,9 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
 
       t += 5 * 1000;
       await collector.scanProcesses();
-      assert.equal(wb(await collector.getAgentsStatus()).instances.length, 0,
-        "缺席第 2 轮：行收走（数秒级，不再等 30 分钟待命 TTL）");
+      const reaped = wb(await collector.getAgentsStatus());
+      assert.deepEqual(reaped.instances.map((i) => i.id), ["workbuddy-reserved"],
+        "缺席第 2 轮：会话行收走（数秒级，不再等 30 分钟待命 TTL），只剩预留行");
     });
 
     it("keeps the endpoint account while the session row survives, zeroes it once the row is reaped", async () => {
@@ -6306,7 +6501,8 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       t += 5 * 1000;
       await collector.scanProcesses();
       const after = wb(await collector.getAgentsStatus());
-      assert.equal(after.instances.length, 0, "缺席第 2 轮：会话行收走");
+      assert.deepEqual(after.instances.map((i) => i.id), ["workbuddy-reserved"],
+        "缺席第 2 轮：会话行收走，只剩预留行");
       const settled = wb(await collector.getAgentsStatus());
       assert.equal(settled.metrics.totalRequests, 0, "行走后下一拍端点账清零");
     });
@@ -6327,7 +6523,8 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       });
       await collector.scanProcesses();
       const card = wb(await collector.getAgentsStatus());
-      assert.deepEqual(card.instances, [], "扫描没见过的 pid 不起占位行（注册表残影不算）");
+      assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"],
+        "扫描没见过的 pid 不起真实占位行（注册表残影不算），只剩主进程在场的预留行");
       assert.equal(card.processCount, 0);
     });
 
@@ -6781,7 +6978,8 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     });
     const card = wb(await collector.getAgentsStatus());
     assert.equal(card.processCount, 0, "只设 CODEBUDDY_CONFIG_DIR 也要读到注册表，待命进程不计数");
-    assert.deepEqual(card.instances, [], "不起实例行");
+    assert.deepEqual(card.instances.map((i) => i.id), ["workbuddy-reserved"],
+      "待命进程不起真实行，只剩主进程在场的预留行");
   });
 
   it("options.env 优先于 process.env：注入的根决定读哪棵注册表", async () => {

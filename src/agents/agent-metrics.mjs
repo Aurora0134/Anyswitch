@@ -1110,6 +1110,10 @@ export function summarizeKimiSurfaces(procCounts) {
 const WORKBUDDY_IMAGE = "workbuddy.exe";
 // 内置 CLI 入口的路径段。`/` 与 `\` 两种分隔符都认（真机命令行两种都出现过）。
 const WORKBUDDY_RUNTIME_RE = /cli[\\/]bin[\\/]codebuddy/;
+// 同镜像的家族成员：Electron 辅助、后台 daemon、sidecar 与 CLI 入口。判「应用
+// 开着」时要把它们排除——主进程的形状就是这些标记一个都没有。它们可能在 GUI
+// 退出后短暂残留，当在场处理会挂出一张没有窗口的幽灵卡。
+const WORKBUDDY_FAMILY_MEMBER_RE = /--type=|--daemon-app-server-entry\.js|--sidecar-entry\.js|cli[\\/]bin[\\/]codebuddy/;
 
 // 本实例的 GUI 主进程：同镜像、读得到命令行、无 `--type=`、且不是 CLI 入口。
 // 它拥有会话进程，但本身不是会话（kimi 的主进程是会话属主，这里不是）。
@@ -2675,8 +2679,11 @@ function sparkHistoryForState(state) {
   };
 }
 
-function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = RECENT_SAMPLE_WINDOW, nowFn = Date.now, instances = null, surfaces = null, retiredMetrics = null }) {
-  const isRunning = processCount > 0 || state.activeRequests > 0;
+function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = RECENT_SAMPLE_WINDOW, nowFn = Date.now, instances = null, surfaces = null, retiredMetrics = null, appAlive = false }) {
+  // appAlive 表达「端点家族在场」，只影响卡片是否 running：它不改 processCount，
+  // 也不改会话口径。workbuddy 主进程在场但无 agent 运行时时 processCount 为 0，
+  // 而卡片必须仍然展开——判 running 的依据是家族里有没有人，不是会话数。
+  const isRunning = processCount > 0 || state.activeRequests > 0 || appAlive;
 
   // Display duration = settled busy intervals + the still-running tail, so the
   // number grows smoothly while a request is in flight and never exceeds
@@ -3859,6 +3866,11 @@ export function createAgentMetricsCollector(options = {}) {
   // the desktop app points its gateway straight at the resident relay, so it
   // has no session reporter and the socket reverse lookup is its only identity.
   const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map(), workbuddy: new Map(), zcode: new Map() };
+
+  // 预留会话行的起账时刻，按桶记忆。它只服务一件事：同一条预留行在轮询之间
+  // 指纹稳定（面板按 JSON.stringify(agent) 判重渲染，每拍都换 firstSeen 会让
+  // 卡片每秒整卡重渲）。真实行接手、或桌面端离场时清空，下次空态重新起账。
+  const reservedRowFirstSeen = { zcode: null, workbuddy: null };
 
   // Consecutive trusted scan rounds in which a session row's endpoint family was
   // absent, keyed "<bucket>:<instId>". A session row names a conversation, not
@@ -5835,6 +5847,85 @@ export function createAgentMetricsCollector(options = {}) {
         });
     }
 
+    // 桌面端在场判定（两种端点各一条判据，都不看 procCounts 的计数，只看家族里
+    // 谁在）：
+    //   zcode：zcodePids 里有镜像为 zcode.exe 的行。CLI 是 node 跑 bin\zcode.mjs，
+    //     镜像 node.exe，进不了这个集合；桌面主进程（ZCode.exe）在 = 应用开着。
+    //   workbuddy：GUI 主进程在场。家族里的 --type= 辅助、daemon、sidecar 与待命
+    //     预取 runtime 都不算「应用开着」——它们可能在主进程退出后短暂残留，当
+    //     在场处理会挂出一张没有窗口的幽灵卡。主进程形状只能靠命令行分辨：工作台
+    //     镜像、且不是 WORKBUDDY_FAMILY_MEMBER_RE 里的任何一类。整轮命令行读不出
+    //     （tasklist 兜底）时没有分辨能力，按家族在场处理，否则这一轮会掉回旧
+    //     形态、下一轮再跳回来。
+    const zcodeDesktopPresent = (() => {
+      const pids = procCounts.zcodePids;
+      const imageByPid = procCounts.imageByPid;
+      if (!(pids instanceof Set) || !(imageByPid instanceof Map)) return false;
+      for (const pid of pids) if (imageByPid.get(pid) === "zcode.exe") return true;
+      return false;
+    })();
+    const workbuddyDesktopPresent = (() => {
+      const pids = procCounts.workbuddyPids;
+      if (!(pids instanceof Set) || pids.size === 0) return false;
+      const cmdByPid = procCounts.cmdByPid;
+      const imageByPid = procCounts.imageByPid;
+      let sawReadable = false;
+      for (const pid of pids) {
+        const commandLine = cmdByPid instanceof Map ? (cmdByPid.get(pid) ?? null) : null;
+        if (isCommandLineUnreadable(commandLine)) continue;
+        sawReadable = true;
+        // node 形态的 CLI 也进家族集：读得出来就证明本轮有分辨能力，但它不是主进程。
+        if (imageByPid instanceof Map && imageByPid.get(pid) !== WORKBUDDY_IMAGE) continue;
+        if (!WORKBUDDY_FAMILY_MEMBER_RE.test(commandLine)) return true;
+      }
+      return !sawReadable;
+    })();
+    const RESERVED_INSTANCE_ID = { zcode: "zcode-reserved", workbuddy: "workbuddy-reserved" };
+
+    // 预留行：与真实行同构的零账行（四宫格 —、0 请求、待命、面 Desktop），用它顶替
+    // 「全局汇总」伪实例行。状态对象每拍现造一份零态，不共享：它不承接任何流量。
+    function reservedInstanceRow(bucket) {
+      if (reservedRowFirstSeen[bucket] === null) reservedRowFirstSeen[bucket] = now;
+      const built = buildAggregateAgentStatus({
+        id: RESERVED_INSTANCE_ID[bucket],
+        name: RESERVED_INSTANCE_ID[bucket],
+        state: createAggregateState(sparkWindowPoints),
+        processCount: 0,
+        tpsWindow: recentSampleWindow,
+        nowFn,
+      });
+      const s = built.sessions[0];
+      return {
+        ...s,
+        sparkHistory: built.metrics.sparkHistory,
+        id: RESERVED_INSTANCE_ID[bucket],
+        // 行标题不上屏（面板按序号显示「会话 #N」），与其它行同形留给未来消费面。
+        title: null,
+        surface: "Desktop",
+        status: "idle",
+        firstSeen: reservedRowFirstSeen[bucket],
+        // 不写 lastSeen：预留行没跑过请求，写成起账时刻会让前端在 2 分钟后把它标成
+        // 陈旧行（速率三格置 —、胶囊行换成「X 前」）。
+        lastSeen: null,
+      };
+    }
+
+    // 实例行读出口。空桶 + 桌面端在场 → 一条预留行；否则原样返回实例桶的快照。
+    // 预留行只在出口合成，桶里始终只有真实行，所以首个真实行出现的那一拍，快照里
+    // 就只剩真实行，结构上不存在「两行并存再删一行」的中间态。
+    function instanceRowsWithReserved(bucket, desktopPresent) {
+      const rows = instanceSnapshots(bucket);
+      if (rows.length > 0) {
+        reservedRowFirstSeen[bucket] = null;
+        return rows;
+      }
+      if (!desktopPresent) {
+        reservedRowFirstSeen[bucket] = null;
+        return rows;
+      }
+      return [reservedInstanceRow(bucket)];
+    }
+
     // 端点卡读数由「活会话行 + 退役账」派生：zcodeState 只当在途累加器，重启
     // 续账判决会把它整体归零，而实例行保留历史——这正是 0 vs 1493 的断裂来源。
     // 每轮读取现算一份展示态，四宫格/简要栏/折线/静态汇总/模型徽标/
@@ -5902,6 +5993,7 @@ export function createAgentMetricsCollector(options = {}) {
     // 1. ZCode Agent Status（汇总卡 + 实例桶；实例按会话一行 zcode-sess-<会话
     // id>，身份正源是 x-session-id 请求头——桌面端 utility 进程跨会话共享连接
     // 池，pid 到不了会话。进程家族只决定卡片运行状态与会话行的生灭）
+    const zcodeRows = instanceRowsWithReserved("zcode", zcodeDesktopPresent);
     const zcodeAgent = buildAggregateAgentStatus({
       id: "zcode",
       name: "ZCode",
@@ -5909,10 +6001,14 @@ export function createAgentMetricsCollector(options = {}) {
       processCount: procCounts.zcode || 0,
       tpsWindow: recentSampleWindow,
       nowFn,
-      instances: instanceSnapshots("zcode"),
-      surfaces: summarizeZcodeSurfaces([...instanceBuckets.zcode.keys()].map((instId) => ({
-        surface: zcodeSurfaceForRow(instId, instanceBuckets.zcode.get(instId)),
-      }))),
+      appAlive: zcodeDesktopPresent,
+      instances: zcodeRows,
+      surfaces: summarizeZcodeSurfaces([
+        ...[...instanceBuckets.zcode.keys()].map((instId) => ({
+          surface: zcodeSurfaceForRow(instId, instanceBuckets.zcode.get(instId)),
+        })),
+        ...(zcodeRows.length === 1 && instanceBuckets.zcode.size === 0 ? [{ surface: "desktop" }] : []),
+      ]),
       retiredMetrics: { ...zcodeRetiredLedger },
     });
 
@@ -6204,6 +6300,14 @@ export function createAgentMetricsCollector(options = {}) {
     // CLI 共用同一个 agentId，请求面同像，只有进程扫描能在第一条请求之前分辨。
     // processCount 与面徽章走活跃引擎集（wbActiveEnginePids，与行同一真值），
     // 不是扫描计数——预取 runtime 会被扫描数到但不该上卡。
+    const workbuddyRows = instanceRowsWithReserved("workbuddy", workbuddyDesktopPresent);
+    const workbuddySurfaces = summarizeWorkbuddySurfaces(procCounts, wbActiveEnginePids);
+    // 预留行是这条卡上唯一的行时，面徽章替它记上一票；引擎还在、行尚未铸出的
+    // 那一小段（注册表列着会话但会话文件还没刷新）面徽章已经按引擎计过票，
+    // 再补一票会读出「Desktop ×2、1 实例」，所以只在面徽章为空时补。
+    if (workbuddyRows.length === 1 && instanceBuckets.workbuddy.size === 0 && workbuddySurfaces.length === 0) {
+      workbuddySurfaces.push({ surface: "desktop", label: workbuddySurfaceLabel("desktop"), count: 1 });
+    }
     const workbuddyAgent = {
       ...buildAggregateAgentStatus({
         id: "workbuddy",
@@ -6212,9 +6316,10 @@ export function createAgentMetricsCollector(options = {}) {
         processCount: wbActiveEnginePids !== null ? wbActiveEnginePids.size : (procCounts.workbuddy || 0),
         tpsWindow: recentSampleWindow,
         nowFn,
-        instances: instanceSnapshots("workbuddy"),
+        appAlive: workbuddyDesktopPresent,
+        instances: workbuddyRows,
       }),
-      surfaces: summarizeWorkbuddySurfaces(procCounts, wbActiveEnginePids),
+      surfaces: workbuddySurfaces,
     };
 
     return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent, grokAgent, workbuddyAgent];
