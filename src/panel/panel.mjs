@@ -386,8 +386,8 @@ function loopbackHttpOrigin(origin) {
 // AUTH-1 · DNS rebinding 读面门：重绑定页以自己的域名打到同一环回套接字，
 // Host 头是请求里唯一「浏览器自报它以为在跟谁说话」的输入。只认环回主机名；
 // 端口不校验——浏览器 Host 由 URL 生成，重绑定页必须以真实端口寻址，伪造端口
-// 对浏览器攻击者不可得，而同一 router 同时挂在 47820、47821 与测试/DI 的临时
-// 端口上，钉死端口反而要穿线传参。畸形或缺头一律 fail closed。
+// 对浏览器攻击者不可得，而同一 router 同时挂在 panel 端口、relay 端口与
+// 测试/DI 的临时端口上，钉死端口反而要穿线传参。畸形或缺头一律 fail closed。
 // （Node 的 URL 对 IPv6 字面量的 .hostname 保留方括号，故集合里的 [::1] 带框。）
 export function isTrustedPanelHostHeader(hostHeader) {
   if (typeof hostHeader !== "string" || hostHeader === "") return false;
@@ -3660,7 +3660,7 @@ export function createPanelRouter({
     // AUTH-1 · Host 门（封 DNS rebinding，读面写面一起盖）：环回绑定仍是网络
     // 边界，但重绑定页以自己的域名寻址到同一套接字；Host 不信即整请求拒绝，
     // 且拦在 POST 写门之前（原「环回 Origin＋敌意 Host 的 POST 放行」的写门
-    // 兜底漏洞随之闭合）。一处改动同时盖住 47820 与 47821 的 /panel 前缀。
+    // 兜底漏洞随之闭合）。一处改动同时盖住 panel 端口与 relay 端口的 /panel 前缀。
     if (!isTrustedPanelHostHeader(req?.headers?.host)) {
       logger?.warn?.(`panel host gate: rejected ${method} ${path} (Host: ${req?.headers?.host})`);
       return sendJson(res, 403, { ok: false, error: "host" });
