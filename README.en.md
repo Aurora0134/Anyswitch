@@ -19,7 +19,7 @@
 
 <br>
 
-The first agent is easy — five minutes, fill in a baseURL and a key. By the tenth, you are copying the same dozens of lines into a tenth config file; ten plaintext keys, each sitting in a directory that agent's process can read. A dead channel means manual switching; finding out who sent that 250 tok/s burst and through which channel means cross-checking ten windows and their logs.
+The first agent is easy — five minutes, fill in a baseURL and a key. By the tenth, you are copying the same dozens of lines into a tenth config file; ten plaintext keys, each sitting in a directory that agent's process can read. A dead channel means manual switching; finding out who sent that request, how fast it came back and which channel it took means cross-checking ten windows and their logs.
 
 The entire reason this tool exists is to make "configure once", "one sealed key", and "see at a glance who is running and which route they take" true at the same time.
 
@@ -87,7 +87,7 @@ node --check src/panel/panel-host.mjs
 npm test
 ```
 
-`npm test` runs the repo's full suite (165 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
+`npm test` runs the repo's full suite (167 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
 
 ---
 
@@ -204,12 +204,6 @@ Every terminal session has a real shell PID on the host side. Attribution rule: 
 
 So the side panel shows the same data as that instance — in-flight requests, first-token latency (green < 5s / yellow 5–15s / red > 15s), generation speed, cache hit rate, elapsed time, the last 10 requests. When the agent exits, the terminal stays and the metrics area disappears; start another agent in the same terminal and it re-attributes to the new instance.
 
-Codex is the exception: its desktop sessions share one engine process, so PIDs don't line up with instance rows; it bridges by "working directory + recent activity" from its own session records, and only binds when the instance row actually exists.
-
-### Refresh doesn't lose the scene: history replays from the render mirror
-
-The old approach poured the raw byte stream back into the terminal — refreshing a long session made the screen messier. Replay now uses the host-side render mirror: clear the screen, redraw line by line at absolute positions, push scrolled-out history into scrollback; a full-screen TUI sitting on the alternate screen switches to it before drawing. After a refresh you stay on the terminal page, on the same tab — both states persist locally; reconnects likewise clear-then-replay, never stacking old and new content.
-
 ![Virtual terminal: tabs, session rail, terminal output and bottom bar](docs/screenshots/s6-terminal.png)
 
 ### The details you touch every day
@@ -228,7 +222,7 @@ The terminal's backend is a separate process (port 47823) owned by the relay: it
 
 ## Presets and skills: write once, effective in ten homes
 
-Prompt presets are instructions for *your* way of working, not a template library. Enabled presets are injected as a titled section (title + body) into the instruction files of all ten endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …) — the agent sees both the rule's subject and its content. Injection is written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
+Prompt presets are instructions for *your* way of working. Enabled presets are injected as a titled section (title + body) into the instruction files of all ten endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …) — the agent sees both the rule's subject and its content. Injection is written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
 
 <p align="center">
   <img src="docs/screenshots/s8-presets.png" alt="Preset management: titles, enable switches and injection share" width="80%">
@@ -238,7 +232,7 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
 
 ---
 
-## Mechanics: a source of truth, not just a forwarder
+## Mechanics
 
 ```text
 %LOCALAPPDATA%\Anyswitch\
@@ -261,12 +255,10 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
   node -e "const fs=require('fs'),path=require('path');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):e.name.endsWith('.mjs')?[path.join(d,e.name)]:[]);for(const f of walk('src'))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f.split(path.sep).join('/')+': '+l.trim())"
   ```
 
-  The second command walks `src/` recursively (after the refactor no implementation sits at the repo root, so scanning the root finds nothing) and should print only `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`.
+  The second command walks `src/` recursively (after the refactor no implementation sits at the repo root) and should print only `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`.
 
 - **The write path is concurrency-safe.** Panel writes to the store go through content-hash CAS with a file lock; the routing catalog carries a generation digest so a config changed mid-request is never served stale.
 - **Write endpoints trust only the local panel.** `POST /panel/api/*` passes Origin/Referer validation; the relay authenticates with a local token from the data root, as does the terminal host. The token rotates automatically every 7 days, and an idle previous generation retires after 24 hours — no handling required.
-
-Scale is not the selling point, but it is verifiable: 124 implementation `.mjs` files under `src/` and 165 test `.mjs` files under `tests/`, 289 in total; roughly 58,900 lines of implementation code and 116,800 lines of test code; the panel frontend trio `panel.js` / `panel.html` / `panel.css` together about 31,600 lines.
 
 ---
 
@@ -280,7 +272,7 @@ Scale is not the selling point, but it is verifiable: 124 implementation `.mjs` 
 | Observability | terminal side panel + dashboard + stats page, one shared instance dataset | none | each client has its own; nothing aligns |
 | Failover | pools, route chains, fallback URLs, virtual models | manual provider switching | manual config edits |
 
-Two fair notes: CC Switch is mature with a broad management surface — its provider preset library and bidirectional sync are real strengths; and the system terminal is always the fastest, least picky option. What Anyswitch adds is putting configuration, runtime and observation into one local control plane — the price is running a local relay and panel yourself.
+Two fair notes: CC Switch is mature with a broad management surface — its provider preset library and bidirectional sync are real strengths; and the system terminal is always the fastest, least picky option. What Anyswitch adds is putting configuration, runtime and data monitoring into one local control plane, and it starts any compatible CLI agent right inside the app, with live monitoring and an experience close to a GUI agent switching sessions — developers no longer have to watch several native terminals or a VS Code window at the same time.
 
 The comparison is based on read-only research of CC Switch's public repo and docs, checked 2026-10-18.
 
@@ -289,20 +281,12 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 ## Boundaries to accept first
 
 - **Windows only; no macOS or Linux.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows.
-- **No installer.** 0.7.2 ships as source; first installs and machine moves are git clone + `npm install`. After that, the panel's About page can self-update.
-- **The 0.7 line is now stable.** The stable line moved on from `v0.6.6` and now sits at `v0.7.2`: installations running a stable identity are offered `v0.7.2`, and installations that followed `v0.7.0-preview` already returned to the stable track at `v0.7.0`.
-- **The virtual terminal is still preview.** It needs its own `npm install` once; the default-off "bottom auto-alignment" and restore policy are still being polished on the preview line.
-- **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions. Restarting only the panel host does not kill terminals — the terminal host is owned by the relay.
-- **Refresh recovery has a scope.** It restores "still on the terminal page + which tab + whatever history the mirror can still replay"; it does not restore scroll position and does not replay everything since the session began. Sessions whose processes have exited split two ways: ones killed by a service restart resurrect in place when you return to the terminal page; ones you exited normally stay exited, keeping only their history.
-- **Terminal tabs can't be renamed, and a blank terminal's shell is fixed to PowerShell.** GUI desktop forms (Claude Desktop, Codex desktop, …) are not terminal candidates.
+- **No installer.** 0.7.2 ships as source. After that, the panel's About page can self-update.
+- **The virtual terminal is still preview.** It needs its own `npm install` once; the UI framework that imitates a GUI agent is still being polished.
+- **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions.
 - **The left-navigation UI is the default layout.** Browsers that never touched the UI toggle get the new UI; anyone who explicitly chose the classic layout keeps it. The switch lives under Settings → General → Display and takes effect instantly. The screenshots here show the default layout.
-- **One-step self-update and the "bleeding edge" channel haven't completed a real update round yet.** An update replaces the running panel — that step can only be walked by the first person who clicks it.
-- **Several attribution fixes live in the resident relay and need a relay restart to take effect**; the restart takes open terminal sessions with it — the page keeps the history and honestly marks the sessions as exited.
-- **Instance attribution has a cold-cache window.** Right after relay start, launcher-shaped instance rows can briefly double before process scanning warms up; they collapse after 10 idle minutes.
+- **The "bleeding edge" update channel is not stable yet.** If you are not a developer, or not someone who really wants to follow the project's latest progress, you are better off leaving the bleeding-edge mode off.
 - **In-panel launching for the ten CLIs, virtual models in all ten client pickers, and the About page's real install button** are verified down to code and tests, but not walked through on every client for you.
-- **No official models, no bundled channels.** Every upstream comes from a provider you enter; ports 47820 / 47821 / 47822 / 47823 are fixed in code and not configurable in the panel.
-
-This is the first stable release on the 0.7 line, not a 1.0 product: every line above is real. None of it stops someone whose channels are scattered across ten config files from using it — all of it decides whether it belongs on a production pipeline.
 
 ---
 
@@ -386,3 +370,5 @@ Do not copy new source over an old install, and do not upgrade with `git reset -
 *Ten agents share them.*
 
 </div>
+
+Ciallo～(∠・ω< )⌒☆
