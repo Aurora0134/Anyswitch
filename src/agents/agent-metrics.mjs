@@ -5797,8 +5797,9 @@ export function createAgentMetricsCollector(options = {}) {
     // Per-instance snapshots for one endpoint. Reuses the aggregate card's
     // 全局汇总 session shape field-for-field; ordering is deterministic
     // (firstSeen, then id) so the panel API output is stable.
-    function instanceSnapshots(bucket) {
-      return [...instanceBuckets[bucket].entries()]
+    function instanceSnapshots(bucket, sourceMap = null) {
+      const map = sourceMap || instanceBuckets[bucket];
+      return [...map.entries()]
         .sort((a, b) => a[1].firstSeen - b[1].firstSeen || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
         .map(([instId, entry]) => {
           const built = buildAggregateAgentStatus({
@@ -5845,6 +5846,69 @@ export function createAgentMetricsCollector(options = {}) {
             lastSeen: entry.state.lastRequestAt ?? entry.firstSeen,
           };
         });
+    }
+
+    // 桌面宿主冷缓存窗口：请求侧只同步读 2500ms 缓存，宿主换代后的首笔请求
+    // 折不到面级稳定行，落成 `<bucket>-<宿主pid>` 原始行；读侧用新快照补起的
+    // 稳定行又先于请求存在，在途闸拦住重折叠并账，桶里同帧出现两行同指一个
+    // 宿主、都贴 Desktop。出口只吐稳定行：把临时行的累计量/样本按
+    // absorbAggregateState 口径并进一份展示态克隆，再让 instanceSnapshots 从
+    // 同一份 state 派生 sparkHistory（不另造展示侧 spark 拼接）。桶内账、
+    // 行身份与代际锚一概不动，请求收尾后仍由既有重折叠并账收敛。
+    function foldDesktopHostRows(bucket, stableId, hostPids) {
+      const bucketMap = instanceBuckets[bucket];
+      const stable = bucketMap.get(stableId);
+      if (!stable || !(hostPids instanceof Set) || hostPids.size === 0) {
+        return { rows: instanceSnapshots(bucket), folded: 0 };
+      }
+      const pidTail = new RegExp("^" + bucket + "-(\\d+)$");
+      const dupIds = [...bucketMap.keys()].filter((id) => {
+        const m = pidTail.exec(String(id));
+        return m !== null && hostPids.has(Number(m[1]));
+      });
+      if (dupIds.length === 0) return { rows: instanceSnapshots(bucket), folded: 0 };
+
+      const displayMap = new Map(bucketMap);
+      const merged = {
+        ...stable.state,
+        recentSamples: [...stable.state.recentSamples],
+        ttftHistory: [...stable.state.ttftHistory],
+        activeModels: new Map(stable.state.activeModels),
+        activeTargets: new Map(stable.state.activeTargets),
+        activeFaults: new Map(stable.state.activeFaults),
+      };
+      const keep = Math.max(recentSampleWindow, stable.state.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS);
+      for (const id of dupIds) {
+        const entry = bucketMap.get(id);
+        if (!entry) continue;
+        absorbAggregateState(merged, entry.state, keep);
+        // absorb 只累加累计量与样本环，不碰在途；在途的临时行就是这一帧的
+        // 生成中状态，展示上要随稳定行一起呈现。
+        if (entry.state.activeRequests > 0) {
+          merged.activeRequests += entry.state.activeRequests;
+          if (merged.activeWallStart === null) merged.activeWallStart = entry.state.activeWallStart;
+          if (merged.currentModel === null) merged.currentModel = entry.state.currentModel;
+          if (merged.currentProvider === null) merged.currentProvider = entry.state.currentProvider;
+          for (const [key, count] of entry.state.activeModels) {
+            merged.activeModels.set(key, (merged.activeModels.get(key) ?? 0) + count);
+          }
+          for (const [key, target] of entry.state.activeTargets) {
+            if (!merged.activeTargets.has(key)) merged.activeTargets.set(key, target);
+          }
+        }
+        displayMap.delete(id);
+      }
+      displayMap.set(stableId, { ...stable, state: merged });
+      return { rows: instanceSnapshots(bucket, displayMap), folded: dupIds.length };
+    }
+
+    // 折掉宿主行后，按引擎集算出的面副行不该比实际行数多报一票。
+    function reconcileDesktopSurfaces(surfaces, rows, label, folded) {
+      if (folded === 0 || !Array.isArray(surfaces)) return surfaces;
+      const desktopRows = rows.filter((row) => row.surface === label).length;
+      return surfaces
+        .map((entry) => (entry.label === label ? { ...entry, count: Math.min(entry.count, desktopRows) } : entry))
+        .filter((entry) => entry.count > 0);
     }
 
     // 桌面端在场判定（两种端点各一条判据，都不看 procCounts 的计数，只看家族里
@@ -6204,6 +6268,7 @@ export function createAgentMetricsCollector(options = {}) {
     // 3. DSH Agent Status（汇总卡 + 实例桶；一行 = 一个 DSH 进程，profile 决定
     // 它是 web 还是 TUI 还是用户自建的面。会话粒度不在这里——见 instanceBuckets
     // 上方注释，请求面拿不到 DSH 的会话 id）
+    const dshFolded = foldDesktopHostRows("dsh", DSH_DESKTOP_INSTANCE_ID, procCounts.dshDesktopHostPids);
     const dshAgent = {
       ...buildAggregateAgentStatus({
         id: "dsh",
@@ -6212,11 +6277,14 @@ export function createAgentMetricsCollector(options = {}) {
         processCount: procCounts.dsh || 0,
         tpsWindow: recentSampleWindow,
         nowFn,
-        instances: instanceSnapshots("dsh"),
+        instances: dshFolded.rows,
       }),
       // 卡内分面汇总（"Web ×1 · TUI ×2"）：只有进程扫描能在第一条请求之前
       // 分辨面，请求面上 web 与 TUI 同像（同一条 x-agent-id: dsh）。
-      surfaces: summarizeDshSurfaces(procCounts),
+      surfaces: reconcileDesktopSurfaces(
+        summarizeDshSurfaces(procCounts), dshFolded.rows,
+        dshSurfaceLabel(DSH_DESKTOP_PROFILE), dshFolded.folded,
+      ),
     };
 
     // 4. Pi Agent Status
@@ -6234,6 +6302,7 @@ export function createAgentMetricsCollector(options = {}) {
     // 卡内分面汇总（"Desktop ×1 · TUI ×1"）：与 DSH 同一形状、不同来源——kimi 的
     // 面读自镜像名与它自己的 server 登记表（口径见 summarizeKimiSurfaces 上方），
     // 请求面上三个面共用同一条 kimi 归属、本期不承担分面。
+    const kimiFolded = foldDesktopHostRows("kimi", KIMI_DESKTOP_INSTANCE_ID, procCounts.kimiDesktopPids);
     const kimiAgent = {
       ...buildAggregateAgentStatus({
         id: "kimi",
@@ -6242,9 +6311,12 @@ export function createAgentMetricsCollector(options = {}) {
         processCount: procCounts.kimi || 0,
         tpsWindow: recentSampleWindow,
         nowFn,
-        instances: instanceSnapshots("kimi"),
+        instances: kimiFolded.rows,
       }),
-      surfaces: summarizeKimiSurfaces(procCounts),
+      surfaces: reconcileDesktopSurfaces(
+        summarizeKimiSurfaces(procCounts), kimiFolded.rows,
+        kimiSurfaceLabel("desktop"), kimiFolded.folded,
+      ),
     };
 
     // Qoder Agent Status（汇总卡 + 实例桶；qodercli.exe 每终端一进程，kimi/grok

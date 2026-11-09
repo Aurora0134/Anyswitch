@@ -43,6 +43,10 @@ const sparkValues = new Function(
   "sparkWindowPoints", "pruneSparkBuffer",
   `return (${extractSrc(/function sparkValues\(buf, authoritativeHistory\) \{[\s\S]*?\n  \}/, "sparkValues")});`,
 )(sparkWindowPoints, pruneSparkBuffer);
+// 权威历史按窗口逐线落暂存：空数组表示「本帧还没有样本」，不是「历史清空」。
+const seedInstanceSparkHistory = new Function(
+  `return (${extractSrc(/function seedInstanceSparkHistory\(buf, hist\) \{[\s\S]*?\n  \}/, "seedInstanceSparkHistory")});`,
+)();
 const formatDurationSeconds = new Function(
   `return (${extractSrc(/function formatDurationSeconds\(ms\) \{[\s\S]*?\n  \}/, "formatDurationSeconds")});`,
 )();
@@ -61,7 +65,7 @@ function fakeElement() {
 }
 
 function makeEnv() {
-  const calls = { update: [], push: [], redraw: [], redrawEp: [] };
+  const calls = { update: [], push: [], redraw: [], redrawEp: [], ensure: [], renderBoard: [] };
   const created = [];
   const env = {
     calls,
@@ -70,6 +74,9 @@ function makeEnv() {
     endpointStaleFlags: {},
     redrawInstanceSparklines: (prefix) => { calls.redraw.push(prefix); },
     redrawEndpointSparklines: (prefix) => { calls.redrawEp.push(prefix); },
+    ensureFoldInstanceRows: (prefix) => { calls.ensure.push(prefix); return false; },
+    boardInstanceFor: () => null,
+    seedInstanceSparkHistory,
     isDetailOpen: () => false,
     pushInstanceSpark: (prefix, iid, vals) => {
       const key = prefix + ":" + iid;
@@ -99,10 +106,12 @@ function makeRenderInstanceRows(env) {
   return new Function(
     "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
     "formatDurationSeconds", "escapeHtml", "formatTokens", "isInstanceStale", "formatRelativeAge", "document",
+    "seedInstanceSparkHistory",
     `return (${m[0]});`,
   )(
     env.isDetailOpen, env.pushInstanceSpark, env.updateSparkline, env.sparkValues, env.instanceSparkBuffers,
     env.formatDurationSeconds, env.escapeHtml, env.formatTokens, env.isInstanceStale, env.formatRelativeAge, env.document,
+    env.seedInstanceSparkHistory,
   );
 }
 
@@ -116,8 +125,11 @@ function makeApplyDetailFold(env, open) {
     closest: () => ({ querySelectorAll: () => [gridEl] }),
   };
   const foldDoc = { querySelectorAll: () => [btn] };
-  const fn = new Function("isDetailOpen", "document", "redrawInstanceSparklines", `return (${m[0]});`)(
-    () => open, foldDoc, env.redrawInstanceSparklines,
+  const fn = new Function(
+    "isDetailOpen", "document", "redrawInstanceSparklines", "ensureFoldInstanceRows",
+    `return (${m[0]});`,
+  )(
+    () => open, foldDoc, env.redrawInstanceSparklines, env.ensureFoldInstanceRows,
   );
   return { fn, btn, gridEl };
 }
@@ -185,11 +197,17 @@ describe("panel.js 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
     const gridEls = ["a1", "a2"].map((iid) => ({ dataset: { instanceId: iid }, closest: () => card }));
     gridEls.push({ dataset: { instanceId: "x" }, closest: () => ({ querySelector: () => null }) }); // 无本栏折叠钮的卡必须跳过
     const foldDoc = { querySelectorAll: (sel) => (sel.startsWith(".instance-telemetry-grid") ? gridEls : []) };
-    const fn = new Function("document", "instanceSparkBuffers", "sparkValues", "updateSparkline", `return (${m[0]});`)(
+    const fn = new Function(
+      "document", "instanceSparkBuffers", "sparkValues", "updateSparkline",
+      "seedInstanceSparkHistory", "boardInstanceFor",
+      `return (${m[0]});`,
+    )(
       foldDoc,
       buffers,
       sparkValues,
       (id, dataPoints, minVal, maxVal) => calls.push({ id, dataPoints, minVal, maxVal }),
+      seedInstanceSparkHistory,
+      () => null,
     );
     fn("kimi");
     assert.deepEqual(calls.map((c) => c.id), [
@@ -293,21 +311,25 @@ describe("panel.js 端点级旧机制（只剩 qoder）收起不绘制、展开�
 });
 
 describe("panel.js 陈旧实例行（lastSeen 超阈值）速率类隐藏", () => {
-  // 数小时前的 last-N 窗口均值不再冒充实时数据：速率类三格置 —、折线停绘、
-  // 简要胶囊行换成相对时间；工时等累计量不受影响。
+  // 数小时前的 last-N 窗口均值不再冒充实时数据：速率类三格置 —、
+  // 简要胶囊行换成相对时间；工时等累计量不受影响。已发生过的历史曲线
+  // 不因行闲置而抹掉——陈旧只作用于速率数值，不作用于折线。
   const STALE_INSTANCE = {
     id: "inst-old", title: "kimi old", status: "idle",
     tps: 12.3, lastTtftMs: 420, cacheHitRate: 88.5,
+    sparkHistory: { tps: [10, 11, 12], cache: [70, 75, 80], ttft: [0.3, 0.4, 0.5] },
     tokens: { prompt: 100, completion: 50, cached: 20 }, requests: 3,
     activeDurationMs: 65000, lastSeen: Date.now() - 3 * 3600 * 1000,
   };
 
-  it("展开态渲染陈旧行：零折线绘制 + data-stale=1 + 速率类置 — + 胶囊行标注相对时间", () => {
+  it("展开态渲染陈旧行：折线按权威历史照常绘制 + data-stale=1 + 速率类置 — + 胶囊行标注相对时间", () => {
     const env = makeEnv();
     env.isDetailOpen = () => true;
     const render = makeRenderInstanceRows(env);
     render({ prefix: "kimi", listEl: fakeElement(), instances: [STALE_INSTANCE] });
-    assert.equal(env.calls.update.length, 0, "陈旧行不绘历史折线");
+    assert.equal(env.calls.update.length, 3, "陈旧行仍绘三条历史折线");
+    const tps = env.calls.update.find((c) => c.id === "kimiInstSparkTps-inst-old");
+    assert.deepEqual(tps.dataPoints, [10, 11, 12], "折线用权威历史，不用本地 1 点");
     const grid = env.created.find((el) => el.className === "instance-telemetry-grid");
     const row = env.created.find((el) => el.className === "session-row");
     assert.equal(grid.dataset.stale, "1", "grid carries data-stale flag");
@@ -350,6 +372,102 @@ describe("panel.js 陈旧实例行（lastSeen 超阈值）速率类隐藏", () =
     assert.equal(env.calls.update.length, 3, "active 行照常绘制三条折线");
     const grid = env.created.find((el) => el.className === "instance-telemetry-grid");
     assert.equal(grid.dataset.stale, "0", "active never marked stale regardless of lastSeen");
+  });
+});
+
+describe("panel.js 冷启动展开：权威历史不因未渲染 / 空历史 / 陈旧而丢", () => {
+  const HISTORY = { tps: [10, 11, 12], cache: [70, 75, 80], ttft: [0.3, 0.4, 0.5] };
+  const LIVE = { id: "inst-1", status: "active", sparkHistory: HISTORY };
+
+  function makeEnsure(agents, rowsExistRef) {
+    const m = panelJs.match(/function ensureFoldInstanceRows\(prefix\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "ensureFoldInstanceRows found in panel.js");
+    const rendered = [];
+    const fn = new Function(
+      "foldRowsState", "cardHasInstanceRows", "BOARD_AGENT_ID", "BOARD_RENDERERS", "lastBoardAgents",
+      `return (${m[0]});`,
+    )(
+      { inFlight: false }, () => rowsExistRef.value, { zc: "zcode", cc: "claude" },
+      { dsh: (a) => rendered.push(a) }, agents,
+    );
+    return { fn, rendered };
+  }
+
+  function makeRedraw(buffers, boardInst, gridEls) {
+    const m = panelJs.match(/function redrawInstanceSparklines\(prefix\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "redrawInstanceSparklines found in panel.js");
+    const foldBtn = {};
+    const card = { querySelector: (sel) => (sel.includes("agent-detail-fold") ? foldBtn : null) };
+    const grids = gridEls.map((extra) => ({ ...extra, closest: () => card }));
+    const foldDoc = { querySelectorAll: (sel) => (sel.startsWith(".instance-telemetry-grid") ? grids : []) };
+    const calls = [];
+    const fn = new Function(
+      "document", "instanceSparkBuffers", "sparkValues", "updateSparkline",
+      "seedInstanceSparkHistory", "boardInstanceFor",
+      `return (${m[0]});`,
+    )(
+      foldDoc, buffers, sparkValues,
+      (id, dataPoints, minVal, maxVal) => calls.push({ id, dataPoints, minVal, maxVal }),
+      seedInstanceSparkHistory, boardInst,
+    );
+    return { fn, calls };
+  }
+
+  it("展开早于首渲：补绘前先按最近一帧补建实例行，补绘链不再空转", () => {
+    const env = makeEnv();
+    const fold = makeApplyDetailFold(env, true);
+    fold.fn("kimi");
+    assert.deepEqual(env.calls.ensure, ["kimi"], "展开时先补建实例行 DOM/buffer");
+    assert.deepEqual(env.calls.redraw, ["kimi"], "补建后照常补绘");
+  });
+
+  it("ensureFoldInstanceRows：无行且有数据时走整卡渲染器；行已在时不重渲", () => {
+    const ref = { value: false };
+    const { fn, rendered } = makeEnsure([{ id: "dsh", status: "running", instances: [LIVE] }], ref);
+    assert.equal(fn("dsh"), false, "已按最近一帧补行，无需再拉一帧");
+    assert.deepEqual(rendered[0].instances, [LIVE], "补行走整卡渲染器，与轮询同一渲染路径");
+    ref.value = true;
+    assert.equal(fn("dsh"), false, "行已存在时无需补拉");
+    assert.equal(rendered.length, 1, "行已存在时不重渲");
+  });
+
+  it("ensureFoldInstanceRows：最近一帧还没有该端点时不造行、要求补拉一帧", () => {
+    const ref = { value: false };
+    const { fn, rendered } = makeEnsure([], ref);
+    assert.equal(fn("dsh"), true, "数据未到，调用方需补拉一帧");
+    assert.equal(rendered.length, 0, "不得凭空造实例行");
+  });
+
+  it("空 sparkHistory 不覆盖已暂存的权威历史（零账行不打回 1 点虚线）", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    const base = { ...KIMI_INSTANCE, sparkHistory: HISTORY };
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [base] });
+    env.calls.update.length = 0;
+    render({
+      prefix: "kimi", listEl: fakeElement(),
+      instances: [{ ...base, sparkHistory: { tps: [], cache: [], ttft: [] } }],
+    });
+    const tps = env.calls.update.find((c) => c.id === "kimiInstSparkTps-inst-1");
+    assert.deepEqual(tps.dataPoints, [10, 11, 12], "空权威历史不得抹掉上一帧整线");
+  });
+
+  it("补绘时 buffer 未建立：从最近一帧的 instances[].sparkHistory 播种再画，陈旧行也画", () => {
+    const buffers = {};
+    const { fn, calls } = makeRedraw(
+      buffers,
+      (prefix, iid) => (iid === "inst-1" ? LIVE : null),
+      [{ dataset: { instanceId: "inst-1", stale: "1" } }],
+    );
+    fn("kimi");
+    assert.equal(calls.length, 3, "陈旧行不再被补绘链跳过");
+    assert.deepEqual(
+      calls.find((c) => c.id === "kimiInstSparkTps-inst-1").dataPoints,
+      [10, 11, 12],
+      "buffer 缺键时按最近一帧的权威历史整线恢复",
+    );
+    assert.ok(buffers["kimi:inst-1"].sparkHistory, "缺 buffer 时建键并播种");
   });
 });
 
