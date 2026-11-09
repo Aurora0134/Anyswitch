@@ -10315,16 +10315,24 @@ async function api(method, path, body) {
     // 计数 >0 期间自动补建整步跳过（见 terminalViewportSyncFromHost）。落定
     // （含失败）在 finally 里 −1。typeof 闸护单测桩环境（见计数声明处注释）。
     if (typeof terminalCreateInFlight === "number") terminalCreateInFlight += 1;
+    // 新建会话（不带 resume）在 POST 之前武装占位：判定门可能已提前武装，此时
+    // armCreate 复用同一令牌，不重置 TTL。续接创建由历史行的乐观选中接管，不武装，
+    // 避免两行同亮。typeof 闸护单测桩环境。
+    const createToken = !resume && typeof terminalRailArmCreate === "function"
+      ? terminalRailArmCreate({ endpoint: agentId, cwd }) : null;
     return api("POST", "/api/terminal/agent-sessions", body)
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
         // 挂进视口＝决定页签数：进当前视口时旧终端在这里按「在跑不杀、空闲才杀」处置。
         terminalViewportPlaceTerminal(created.id, placement, { keepPrevious });
+        // 真 id 落地即认领：同一同步栈内撤占位，由真实「新会话」行接任高亮。
+        if (createToken !== null && typeof terminalRailDisarmCreate === "function") terminalRailDisarmCreate(createToken);
         // 新建成功即武装「正在加载」占位（先于渲染：sync 按武装认领会话）。
         armTerminalBootingOverlay(created.id);
         renderTerminalPreviewSession();
       })
       .catch((error) => {
+        if (createToken !== null && typeof terminalRailDisarmCreate === "function") terminalRailDisarmCreate(createToken);
         if (typeof terminalSwitchLog === "function") terminalSwitchLog("create-fail", { agentId, conversation: resume && resume.id ? resume.id : null, code: (error && (error.serverCode || error.code)) || null });
         // 内切保活分支在这里失败：切换态还盖着，撤层并把被拆掉的旧流接回来，不留一屏
         // 加载态。POST 落地那条出口由 armTerminalBootingOverlay 交接切换层，不走这里。
@@ -11594,6 +11602,15 @@ async function api(method, path, body) {
   // 取值 10~15s 档：远大于一次正常切换（1~2s），远小于用户对「亮点着却什么
   // 都没发生」的忍耐。
   const TERMINAL_RAIL_SELECT_TTL_MS = 12 * 1000;
+  // 新建会话乐观态：点「新建会话」到创建请求落地之间，新终端还没进会话表，左栏连
+  // 「新会话」行都推导不出来，高亮只能停在老会话行上。这枚状态让目标行当拍先在
+  // 对应工作区组顶出现并点亮，真 id 落地后按令牌认领、由真实行接任。与上面两形态
+  // 的 selectPending 分开记账：一个认已存在的行，一个认尚未存在的新终端，混用会让
+  // 「一屏至多一条」的判据互相压制。同样必须进渲染消费的状态而非 DOM-only 类名。
+  let terminalRailCreatePending = null; // { endpoint, cwd, token, placeholderId, timer }
+  let terminalRailCreateSeq = 0;
+  // 与切换加载层同档：宿主卡死、创建请求永不落地时假行不能常驻。
+  const TERMINAL_RAIL_CREATE_TTL_MS = 30 * 1000;
   let terminalRailFetchInFlight = false;
   // 历史会话快照的复用窗口。服务端把这份列表缓存成短 TTL 快照（panel.mjs
   // createSessionsListSnapshot，同为 30s），过期先交旧值、后台补一拍——也就是说
@@ -11916,6 +11933,19 @@ async function api(method, path, body) {
         if (taken) continue;
       }
       out.push({ id: session.id, cwd: session.cwd, createdAt: born });
+    }
+    // 创建在飞的占位行（typeof 闸护单测桩环境）：创建请求没回来时新终端不在会话表，
+    // 没有这条就没有任何「新会话」行可亮，高亮只能等新会话加载完毕才跟上来。
+    // 目录为空时不凭空造组，维持既有「无处安放就不放行」的口径。
+    const createPending = typeof terminalRailCreatePending !== "undefined" ? terminalRailCreatePending : null;
+    if (createPending && createPending.endpoint === agentId && createPending.cwd) {
+      // unshift：同组若已有真兜底行，这次点击的目标行仍固定排在组顶。
+      out.unshift({
+        id: createPending.placeholderId,
+        cwd: createPending.cwd,
+        createdAt: Date.now(),
+        optimistic: true,
+      });
     }
     return out;
   }
@@ -12326,9 +12356,12 @@ async function api(method, path, body) {
     // 旧活跃行立刻失亮（pending 优先于 live 派生，一屏至多一条选中）；无 pending
     // 维持原 live 派生。读模块状态位而非 DOM-only 切类名：1s 轮询全树重铺会冲掉
     // 类名（见 terminalRailSelectPending 处注释）。
-    if (terminalRailSelectPending
+    // 新建会话在飞：目标行还没进会话表，屏上由占位行独占选中（见
+    // terminalRailPendingRowHtml 的 optimistic 分支），历史行同拍一律失亮。
+    const createPending = typeof terminalRailCreatePending !== "undefined" ? terminalRailCreatePending : null;
+    if (!createPending && (terminalRailSelectPending
       ? session.id === terminalRailSelectPending.id && session.endpoint === terminalRailSelectPending.endpoint
-      : live && live.id === activeId) cls.push("is-active");
+      : live && live.id === activeId)) cls.push("is-active");
     // 行首常驻槽（dsh sessionRow 同构）：所有会话行（历史/pending/搜索结果）都渲染
     // 16×20 前导槽——槽内容取 terminalRailStateSlotHtml（与页签指示位同一判定）：
     // working 行填转圈（14×14 SVG，读屏文本「进行中」）、非聚焦的 done（跑完未读）
@@ -12364,12 +12397,24 @@ async function api(method, path, body) {
   // 「新会话」兜底行：组顶 live 行，无时间、无归档钮（还没有会话身份可
   // 归档），点击走聚焦、hover 出关闭叉。
   function terminalRailPendingRowHtml(entry, activeId) {
+    const createPending = typeof terminalRailCreatePending !== "undefined" ? terminalRailCreatePending : null;
+    // 创建在飞的占位行：没有实体终端可聚焦／关闭，只作这一拍的选中落点。标签与
+    // 真实兜底行逐字相同，落地后由真行接任；不可点标记让点击委托直接收手。
+    if (entry && entry.optimistic) {
+      const active = !!createPending && createPending.placeholderId === entry.id;
+      return `
+      <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" data-rail-term-create-pending="1" title="新会话">
+        <span class="rail-term-slot"></span>
+        <span class="rail-term-row-title">新会话</span>
+      </button>`;
+    }
     const session = terminalRailSessionMap()[entry.id];
     const working = !!session && session.status === "working";
     // 同 terminalRailRowHtml 的选中判据：pending 存在时按终端 id 认行——
     // 这枚 pending 就是这条终端的全新内切时，兜底行是这次点击的目标行，当拍亮；
     // 其余情况不亮（pending 命中的历史行才是被选中的那条，一屏至多一条）。
-    const active = terminalRailPendingFreshActive(entry, activeId);
+    // 新建会话在飞时由占位行独占选中，真兜底行不跟着亮。
+    const active = createPending ? false : terminalRailPendingFreshActive(entry, activeId);
     return `
       <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
         <span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER : ""}</span>
@@ -12455,8 +12500,12 @@ async function api(method, path, body) {
     // 拉回来（组表为空），那时就认下「已自动展开」会让这次展开永远不发生。
     // 同上：活跃终端只读后端真值，未就绪时不拿预览种子的 cwd 去展开组。
     const activeSession = terminalRailActiveSession();
-    const activeGroup = activeSession ? terminalRailGroupForDir(groups, activeSession.cwd) : "";
-    const autoKey = `${agentId}\u0000${activeSession ? activeSession.id : ""}`;
+    const createPending = typeof terminalRailCreatePending !== "undefined" ? terminalRailCreatePending : null;
+    // 创建在飞时按占位行的目标目录展开／滚入：活跃终端此刻还是老会话，按它算会把
+    // 刚点亮的目标行留在收起的组里。令牌进 autoKey，认领后真活跃终端接管再落一次。
+    const createGroup = createPending ? terminalRailGroupForDir(groups, createPending.cwd) : "";
+    const activeGroup = createGroup || (activeSession ? terminalRailGroupForDir(groups, activeSession.cwd) : "");
+    const autoKey = `${agentId}\u0000${activeSession ? activeSession.id : ""}${createPending ? `\u0000${createPending.token}` : ""}`;
     let scrollKey = "";
     if (activeGroup && autoKey !== terminalRailAutoExpandedFor) {
       terminalRailAutoExpandedFor = autoKey;
@@ -12908,6 +12957,8 @@ async function api(method, path, body) {
   function terminalRailBeginSelect(session) {
     if (!session || (!session.id && !session.terminalId)) return;
     if (terminalRailSwitchBusy()) return;
+    // 一次点击只留一枚乐观态：点历史行时撤掉新建占位，避免两行同亮或互相压制。
+    if (typeof terminalRailDisarmCreate === "function") terminalRailDisarmCreate(null);
     terminalRailArmSelect(session);
   }
 
@@ -12975,6 +13026,49 @@ async function api(method, path, body) {
     renderTerminalRail();
   }
 
+  // 新建会话乐观态：确认这次点击要切走、但创建请求还没落地的一整段先点亮。
+  // 左栏选中派生自 activeTerminalPreviewId，而它只在创建请求落地、挂进视口之后
+  // 才换；没有这枚状态，高亮就得等新会话加载完毕才跟上来。
+  function terminalRailArmCreate({ endpoint, cwd }) {
+    // 一趟创建只领一次令牌：判定门已提前武装时，创建函数再来一遍不能重置 TTL 与
+    // 身份键（否则同一次点击会出两枚占位、落地清不干净）。目标换了（用户又点了
+    // 另一处新建）则重新武装，旧请求落地时按旧令牌撤销不了新点击。
+    if (terminalRailCreatePending
+      && terminalRailCreatePending.endpoint === (endpoint || "")
+      && terminalRailCreatePending.cwd === (cwd || "")) return terminalRailCreatePending.token;
+    if (terminalRailCreatePending && terminalRailCreatePending.timer !== null) clearTimeout(terminalRailCreatePending.timer);
+    terminalRailCreateSeq += 1;
+    const token = terminalRailCreateSeq;
+    const timer = setTimeout(() => {
+      if (terminalRailCreatePending && terminalRailCreatePending.token === token) {
+        terminalRailCreatePending = null;
+        if (typeof renderTerminalRail === "function") renderTerminalRail();
+      }
+    }, TERMINAL_RAIL_CREATE_TTL_MS);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    terminalRailCreatePending = {
+      endpoint: endpoint || "",
+      cwd: cwd || "",
+      token,
+      placeholderId: `rail-create:${token}`,
+      timer,
+    };
+    if (typeof renderTerminalRail === "function") renderTerminalRail();
+    return token;
+  }
+
+  // 认领／回滚：令牌不匹配 no-op（迟到的旧请求清不掉新点击）；null＝无条件作废。
+  // 落地出口排在挂进视口之后、重渲之前，占位与真行在同一同步栈交接，中间不闪。
+  function terminalRailDisarmCreate(token) {
+    const pending = terminalRailCreatePending;
+    const unconditional = token === null || token === undefined;
+    if (!unconditional && (!pending || pending.token !== token)) return;
+    if (pending && pending.timer !== null) clearTimeout(pending.timer);
+    terminalRailCreatePending = null;
+    if (unconditional) terminalRailCreateSeq += 1;
+    if (typeof renderTerminalRail === "function") renderTerminalRail();
+  }
+
   // 左栏点一条「已开着终端」的会话行（live 行 / 兜底行）：把视口切到它显示的终端。
   // 页签数不变、进程不重启——已在某个视口里的只激活那个视口；后台保活的不在视口里，
   // 就挂进当前视口显示，被换下来的旧终端按「在跑不杀、空闲才杀」处置。
@@ -12985,6 +13079,8 @@ async function api(method, path, body) {
     // 改主意清点：无条件作废旧选中令牌再置活跃——activate 是 live 行快
     // 路径，置活跃即由 live 派生接管高亮；旧 pending 继续压着会把别的行说成选中。
     terminalRailEndSelect(null);
+    // 创建在飞期间用户点了别的会话行：撤掉占位高亮，别让新点击看上去没生效。
+    if (typeof terminalRailDisarmCreate === "function") terminalRailDisarmCreate(null);
     if (!id || !terminalSessionFor(id) || id === activeTerminalPreviewId) return;
     const viewport = terminalViewportForTerminal(id);
     if (viewport) {
@@ -13174,11 +13270,15 @@ async function api(method, path, body) {
       // placement 解析落点：有视口挂进它（页签不变），无视口才新开一个视口
       // （页签 +1，设计内）。记一拍——「页签自己变多」的归因要能分清这条与事故。
       if (typeof terminalSwitchLog === "function") terminalSwitchLog("create", { agentId, conversation: resume && resume.id ? resume.id : null, placement: activeViewport ? "viewport" : "new", reason: "no-active-terminal" });
+      if (!resume && typeof terminalRailArmCreate === "function") terminalRailArmCreate({ endpoint: agentId, cwd });
       if (typeof enterTerminalSwitchLoading === "function") enterTerminalSwitchLoading();
       return createAgentTerminal({ agentId, cwd, resume }, { placement: activeViewport ? "viewport" : "new" });
     }
     terminalSwitchInFlight = true;
     terminalSwitchInFlightSessionId = active.id;
+    // 全新会话在补读两拍、进程探测与创建请求整段先点亮：新终端还没进会话表，
+    // 不武装的话左栏会一直亮着老会话行，直到新会话加载完毕才跟上。
+    if (!resume && typeof terminalRailArmCreate === "function") terminalRailArmCreate({ endpoint: agentId, cwd });
     // 点击当拍擦屏并挂加载态：补读两拍、/switch 或 agent-sessions 的 spawn 都还在后面，
     // 这一整段屏上不再留上一条会话的画面。typeof 闸护单测桩环境。
     if (typeof enterTerminalSwitchLoading === "function") enterTerminalSwitchLoading();
@@ -13229,6 +13329,8 @@ async function api(method, path, body) {
       // 出现才挪过去（实测小半秒）。确定要内切（过了 working 门）后、POST 之前点亮：
       // 兜底行当拍出现在目标目录组顶。working/无从内切落点都是别的页签，不许亮本页
       // 签——武装点必须在这两个 return 之后。
+      // 同记录内切不新建终端：撤掉占位，交给既有「真实兜底行」的当拍点亮。
+      if (typeof terminalRailDisarmCreate === "function") terminalRailDisarmCreate(null);
       if (!resume) terminalRailArmSelect({ endpoint: agentId, terminalId: active.id, cwd });
       // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本视口的记录（终端 id
       // 不变，视口/页签都不变）。切换期进行态（A6）不排在这一拍：在飞的 6~12s 里屏上还是
@@ -13298,6 +13400,7 @@ async function api(method, path, body) {
       // 继续说它选中就是说谎。不放 finally 清：working 转新开等落点经 finally
       // 会让高亮弹回旧行。
       terminalRailEndSelect(null);
+      if (!resume && typeof terminalRailDisarmCreate === "function") terminalRailDisarmCreate(null);
       if (typeof code === "string" && code.startsWith("resume-")) {
         if (typeof terminalSwitchLog === "function") terminalSwitchLog("switch-fail", { terminal: active.id, code });
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
@@ -13722,6 +13825,9 @@ async function api(method, path, body) {
     dir.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
+      // 创建在飞的「新会话」占位行：没有实体终端，点它不聚焦、不续接、不关闭。
+      const createPlaceholder = target.closest("[data-rail-term-create-pending]");
+      if (createPlaceholder) return;
       const close = target.closest("[data-rail-term-close]");
       if (close) {
         terminalRailCloseSession(close.getAttribute("data-rail-term-close"));
