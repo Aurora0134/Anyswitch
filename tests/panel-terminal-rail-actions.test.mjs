@@ -71,14 +71,14 @@ const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // ── 渲染沙盒：renderTerminalRailHistory 及其全部依赖（照既有测试的同款桩） ──
-function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedAt = {}, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, apiImpl = async () => ({ ok: true }) } = {}) {
+function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedAt = {}, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, apiImpl = async () => ({ ok: true }), createPending = null } = {}) {
   const list = { html: "", writes: 0 };
   Object.defineProperty(list, "innerHTML", {
     get: () => list.html,
     set: (v) => { list.writes += 1; list.html = v; },
   });
   const state = { collapsed: new Set(collapsed), scrolled: [], posts: [], saved: 0 };
-  const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedAt", "viewPrefs", "apiImpl", `
+  const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedAt", "viewPrefs", "apiImpl", "createPending", `
     let terminalRailRendered = { history: null };
     let terminalRailAutoExpandedFor = "";
     let terminalRailScrolledFor = "";
@@ -150,6 +150,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const terminalDoneUnread = new Map();
     let terminalRailSelectPending = null;
     let terminalRailSelectSeq = 0;
+    let terminalRailCreatePending = createPending;
     let terminalSwitchInFlight = false;
     const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
     function renderTerminalRail() { renderTerminalRailHistory(terminalRailAgentId()); }
@@ -172,8 +173,9 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
       begin: (session) => terminalRailBeginSelect(session),
       endSelect: (token) => terminalRailEndSelect(token),
       pending: () => terminalRailSelectPending,
+      setCreate: (value) => { terminalRailCreatePending = value; },
     };
-  `)(list, state, history, activeSession, prefs, removedAt, viewPrefs, apiImpl);
+  `)(list, state, history, activeSession, prefs, removedAt, viewPrefs, apiImpl, createPending);
   return { fn, list, state };
 }
 
@@ -1552,6 +1554,62 @@ describe("两段合并：live 内联 / 新会话兜底 / 无 agent 空树", () =
     sandbox.fn.render("kimi");
     assert.ok(!baseRow("s-2").includes("is-active"), "收尾后历史行不再占选中");
     assert.ok(baseRow("t-9").includes("is-active"), "活跃兜底行复位");
+  });
+
+  it("新建会话在飞：整树把占位「新会话」行落在目标组顶并独占选中，认领后交回真实行", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [{ id: "s-old", endpoint: "kimi", project: "C:\\dev\\alpha", title: "老会话", lastActive: 200 }],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: {
+        id: "t-old", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle",
+        boundConversation: { endpoint: "kimi", id: "s-old" }, backendState: { createdAt: 500 },
+      },
+      collapsed: ["c:\\dev\\alpha"],
+      createPending: { endpoint: "kimi", cwd: "C:\\dev\\alpha", token: 7, placeholderId: "rail-create:7", timer: null },
+    });
+    sandbox.fn.render("kimi");
+    const html = sandbox.list.html;
+    const at = html.indexOf('data-rail-term-session="rail-create:7"');
+    assert.ok(at >= 0, "创建请求没回来，整树已经渲染出占位「新会话」行");
+    const row = html.slice(html.lastIndexOf("<button", at), html.indexOf("</button>", at));
+    assert.ok(row.includes("is-active"), "占位行当拍点亮");
+    assert.equal((html.match(/is-active/g) || []).length, 1, "整树一屏至多一条选中");
+    assert.ok(at < html.indexOf('data-rail-term-resume="s-old"'), "占位行固定在目标组组顶");
+    assert.ok(!sandbox.fn.collapsed.has("c:\\dev\\alpha"), "收起的目标工作区自动展开，别把新行藏在组里");
+    assert.ok(sandbox.fn.scrolled.length, "目标工作区滚入视野");
+
+    // 真 id 落地那一拍：撤占位，高亮由真实会话行接任。
+    sandbox.fn.setCreate(null);
+    sandbox.fn.render("kimi");
+    assert.ok(!sandbox.list.html.includes("rail-create:7"), "认领后占位行退场");
+    const after = sandbox.list.html;
+    const oldAt = after.indexOf('data-rail-term-resume="s-old"');
+    const oldRow = after.slice(after.lastIndexOf("<button", oldAt), after.indexOf("</button>", oldAt));
+    assert.ok(oldRow.includes("is-active"), "没有新会话可接任时高亮如实回到老会话行");
+  });
+
+  it("新建会话在飞：单列表平铺模式同样当拍出现占位行", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [{ id: "s-old", endpoint: "kimi", project: "C:\\dev\\alpha", title: "老会话", lastActive: 200 }],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: {
+        id: "t-old", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle",
+        boundConversation: { endpoint: "kimi", id: "s-old" }, backendState: { createdAt: 500 },
+      },
+      viewPrefs: { groupBy: "flat", orderBy: "updated", archivedFilter: "default", sessionOrder: {} },
+      createPending: { endpoint: "kimi", cwd: "C:\\dev\\alpha", token: 7, placeholderId: "rail-create:7", timer: null },
+    });
+    sandbox.fn.render("kimi");
+    assert.ok(sandbox.list.html.includes('data-rail-term-session="rail-create:7"'), "平铺伪组照样挂占位行");
+    assert.equal((sandbox.list.html.match(/is-active/g) || []).length, 1, "平铺模式仍是一屏至多一条选中");
   });
 
   it("兜底行的目录没有历史会话时，为它新建组（组头三件齐全）", () => {
