@@ -5208,6 +5208,41 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.equal(dsh.instances[0].tokens.prompt, 30);
   });
 
+  it("folds a cold-cache desktop host row into the stable row at the display exit", async () => {
+    // 稳定占位行先在桶里，宿主换代后首笔在途请求因冷缓存落在原始 pid 行上：
+    // 二者同指一个桌面宿主，出口只能吐一行；在途计数与面汇总一起对齐，
+    // 请求收尾后由既有重折叠并账，账目不丢。
+    let t = 3000;
+    let hostPid = 4910;
+    const execFn = (cmd, opts, cb) => cb(null, wmic(desktopHostRow(hostPid)));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    const before = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(before.instances.map((i) => i.id), ["dsh-desktop"], "占位稳定行先在桶里");
+
+    hostPid = 4950;
+    t += 3000;
+    const r = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    // 请求侧此时读到的仍是旧宿主缓存，落成原始 dsh-<pid> 行；读侧要等扫描
+    // 缓存真正看到新宿主才能重折叠。scanProcesses 是「陈旧即回、后台刷新」语义，
+    // 轮询到新宿主落地再读，不赌后台线程的落地时机。
+    for (let tries = 0; tries < 10; tries += 1) {
+      const procs = await collector.scanProcesses();
+      if (procs.dshDesktopHostPids.has(4950)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    // 刻意不 recordEnd：在途闸拦住重折叠并账，双行帧才成立。
+    const mid = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(mid.instances.map((i) => i.id), ["dsh-desktop"], "冷缓存 pid 行与稳定行同指宿主，出口只吐一行");
+    assert.equal(mid.instances[0].activeRequests, 1, "在途请求随稳定行呈现");
+    assert.deepEqual(mid.surfaces, [{ profile: "desktop", label: "Desktop", count: 1 }], "面汇总与出口行数一致");
+
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 30, completion_tokens: 12 } });
+    const after = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(after.instances.map((i) => i.id), ["dsh-desktop"], "收敛后仍只有稳定行");
+    assert.equal(after.instances[0].requests, 1, "并账计数不丢");
+    assert.equal(after.instances[0].tokens.prompt, 30, "样本随账归位");
+  });
+
   it("asks the resident probe for the whole process table, not a name-filtered one", async () => {
     // 行的第一道门是探针的查询范围：2026-10-28 起查询不带镜像名白名单，因为
     // 「锚 pid 之下有没有活命令」要的全表——白名单一滤，agent 跑的命令子进程
@@ -5731,6 +5766,36 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "the cold pid row folds onto the stable row");
     assert.equal(card.instances[0].requests, 1);
     assert.equal(card.instances[0].tokens.prompt, 30);
+  });
+
+  it("folds a cold-cache desktop main-process row into the stable row at the display exit", async () => {
+    // 与 dsh 同形：桌面主进程换代 + 首笔在途请求撞上冷缓存，桶里稳定行与
+    // 原始 pid 行同指一个宿主。出口只吐 kimi-desktop，计数与在途状态随行。
+    let t = 3000;
+    let appPid = 6401;
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => cb(null, wmic(desktopRow(appPid))),
+      kimiRegistryLookup: registry([]),
+    });
+    assert.deepEqual(rowsOf(kimi(await collector.getAgentsStatus())), [["kimi-desktop", "Desktop"]]);
+
+    appPid = 6431;
+    t += 3000;
+    const r = collector.startRequest({ agentId: "kimi", instanceId: `kimi-${appPid}`, model: "m1", stream: true, path: "openai" });
+    for (let tries = 0; tries < 10; tries += 1) {
+      const procs = await collector.scanProcesses();
+      if (procs.kimiDesktopPids.has(6431)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const mid = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(mid), [["kimi-desktop", "Desktop"]], "同指一个主进程，出口只吐一行");
+    assert.equal(mid.instances[0].activeRequests, 1, "在途请求随稳定行呈现");
+
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 30, completion_tokens: 12 } });
+    const after = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(after), [["kimi-desktop", "Desktop"]], "收敛后仍只有稳定行");
+    assert.equal(after.instances[0].requests, 1, "并账计数不丢");
   });
 
   it("accepts a plain-tasklist desktop row by image name (no command line on that probe)", async () => {

@@ -12,6 +12,8 @@
   // 浏览器脚本无法 import，此镜像由 relay-port-consistency.test.mjs 互钉）。
   const RELAY_PORT = 47821;
   let agentsInFlight = false;
+  // 在飞刷新共用的完成信号：展开补行要等这一帧落地，而不是被守卫吞掉。
+  let agentsRefreshPromise = null;
   let es = null;
 
   // 折线图按请求节点时序保留，不按墙钟 TTL 过期。
@@ -249,6 +251,23 @@ async function api(method, path, body) {
     }
     pruneSparkBuffer(buf);
     return buf.map(p => p.v).slice(-limit);
+  }
+
+  // 权威历史按窗口逐线落暂存。空数组是「本帧还没有样本」，不是「历史清空」：
+  // 冷缓存窗口里的零账行会下发三条空数组，直接整对象覆盖会把上一帧已恢复的
+  // 整线打回本地 buffer 的 1 点空态虚线。只有拿到非空窗口的线才更新，其余
+  // 保留上一帧口径；没有权威历史时由 sparkValues 回退本地 buffer。
+  function seedInstanceSparkHistory(buf, hist) {
+    if (!buf || !hist) return;
+    const next = { ...(buf.sparkHistory || {}) };
+    let changed = false;
+    for (const key of ["tps", "cache", "ttft"]) {
+      if (Array.isArray(hist[key]) && hist[key].length > 0) {
+        next[key] = hist[key];
+        changed = true;
+      }
+    }
+    if (changed) buf.sparkHistory = next;
   }
 
   function pushMetricPoint(bufferKey, val, authoritativeHistory) {
@@ -900,6 +919,25 @@ async function api(method, path, body) {
   let routeRuntimeVer = 0;
   let lastBoardChainsRef = null;
 
+  // 端点 id ↔ 卡内折叠前缀：zc/cc 是历史简称，其余端点同 id。
+  const BOARD_AGENT_ID = { zc: "zcode", cc: "claude" };
+  // 看板各端点的整卡渲染器：boardActivityApplyFrame 命中后按 id 调对应渲染器重渲，
+  // 展开补行也走同一张表。渲染器是函数声明（已提升），所以这张表放在轮询链之前，
+  // 首刷同步折叠态时就能用，不会踩 const 的暂时性死区。覆盖全部十个端点；
+  // 表外端点的帧照样改数据，只是不即时重渲（等下一拍轮询）。
+  const BOARD_RENDERERS = {
+    zcode: (a) => renderZcode(a),
+    claude: (a) => renderClaude(a),
+    dsh: (a) => renderDsh(a),
+    pi: (a) => renderPi(a),
+    kimi: (a) => renderKimi(a),
+    qoder: (a) => renderQoder(a),
+    opencode: (a) => renderOpencode(a),
+    codex: (a) => renderCodex(a),
+    grok: (a) => renderGrok(a),
+    workbuddy: (a) => renderWorkbuddy(a),
+  };
+
   function syncRouteChainsVer() {
     const chains = (storeState && Array.isArray(storeState.routingChains))
       ? storeState.routingChains : routeChainsCache;
@@ -998,9 +1036,13 @@ async function api(method, path, body) {
     if (boardLiveSettled) boardLiveSettled();
   }
 
+  // 在飞请求返回同一个 promise：展开补行时若 1s 轮询正好在飞，等它落地即可，
+  // 不会被守卫吞成「什么都没做」。
   async function refreshAgents() {
-    if (agentsInFlight) return;
+    if (agentsInFlight) return agentsRefreshPromise;
     agentsInFlight = true;
+    let release;
+    agentsRefreshPromise = new Promise((resolve) => { release = resolve; });
     try {
       const res = await api("GET", "/api/agents");
       const boardWasPending = !boardLive;
@@ -1050,7 +1092,10 @@ async function api(method, path, body) {
         }
       }
     } catch {}
-    finally { agentsInFlight = false; }
+    finally {
+      agentsInFlight = false;
+      release();
+    }
   }
 
   // 收起态简要信息栏：与多实例端点实例行同构——名称行（标题 + 状态徽标 + 请求数徽标）+
@@ -1162,6 +1207,30 @@ async function api(method, path, body) {
     return open;
   }
 
+  // 展开时实例行可能还没建 DOM：端点卡此前从未渲染过（此前 stopped、或首帧
+  // 数据未到）时 #<prefix>InstancesList 仍是空 div，补绘链的 querySelectorAll
+  // 空集会整轮空转，展开后看到一张没有折线容器的卡。补行走整卡渲染器，与
+  // 1s 轮询同一路径，建行 + 播种 + 绘制一拍完成；内部桶/指纹不动。
+  // 数据帧还没到时不凭空造行，由调用方补拉一帧后再应用折叠态。
+  const foldRowsState = { inFlight: false };
+  function cardHasInstanceRows(prefix) {
+    const btn = document.querySelector('.agent-detail-fold[data-prefix="' + prefix + '"]');
+    const card = btn && btn.closest ? btn.closest(".panel-card") : null;
+    if (!card) return false;
+    return card.querySelectorAll(".instance-telemetry-grid[data-instance-id]").length > 0;
+  }
+  function ensureFoldInstanceRows(prefix) {
+    if (foldRowsState.inFlight || cardHasInstanceRows(prefix)) return false;
+    const id = BOARD_AGENT_ID[prefix] || prefix;
+    const render = BOARD_RENDERERS[id];
+    if (!render) return false;
+    const agent = lastBoardAgents.find((a) => a && a.id === id);
+    if (!agent || agent.status !== "running" || !Array.isArray(agent.instances) || agent.instances.length === 0) return true;
+    foldRowsState.inFlight = true;
+    try { render(agent); } finally { foldRowsState.inFlight = false; }
+    return false;
+  }
+
   // 把折叠态应用到 DOM：同步该 prefix 所有折叠钮的 aria-expanded/文案，
   // 并切换钮所在卡片内实例四宫格与 .detail-open-only（如「全局汇总」行）的 hidden。
   // renderInstanceRows 渲染后与折叠钮点击时都会走这里，不等下轮轮询。
@@ -1177,6 +1246,8 @@ async function api(method, path, body) {
       // 不等下一轮 1s 轮询（renderInstanceRows 渲染后调用时 open 已正确，重复补绘被
       // updateSparkline 的路径级 diff 吸收为零 DOM 写）。
       if (open) {
+        // 卡从未渲染过时先补行：补建排在整表重建之后，补绘才能找到容器。
+        ensureFoldInstanceRows(prefix);
         // zc 与其余会话级端点同构：展开只补绘各行自己的实例折线，端点级
         // 四宫格已整块摘除，不再触发端点级补绘。
         redrawInstanceSparklines(prefix);
@@ -1277,6 +1348,13 @@ async function api(method, path, body) {
     const prefix = btn.getAttribute("data-prefix");
     toggleDetailFold(prefix);
     applyDetailFold(prefix);
+    // 最近一帧还没有这个端点的实例数据：补拉一帧，行建好后再按当前折叠态补绘。
+    // refreshAgents 复用在飞 promise，不会被 1s 轮询的守卫吞掉。
+    if (isDetailOpen(prefix) && !cardHasInstanceRows(prefix)) {
+      refreshAgents().then(() => {
+        if (isDetailOpen(prefix)) applyDetailFold(prefix);
+      });
+    }
   });
   // 首刷同步静态折叠钮的初始文案/折叠态（暂无 data-prefix 钮时为空转）
   document.querySelectorAll(".agent-detail-fold[data-prefix]").forEach((btn) => applyDetailFold(btn.getAttribute("data-prefix")));
@@ -1429,12 +1507,14 @@ async function api(method, path, body) {
       const buf = instanceSparkBuffers[prefix + ":" + iid];
       // 权威历史暂存：折叠期间无 inst 可用，展开补绘（redrawInstanceSparklines）
       // 要用与本次渲染同源的 sparkHistory，否则 ttft 曲线口径回退到本地去重 buffer。
-      if (inst.sparkHistory) buf.sparkHistory = inst.sparkHistory;
-      // 折叠门控：收起态跳过绘制，展开瞬间经 applyDetailFold 补绘；陈旧行不绘历史折线。
+      // 空数组不覆盖已恢复的整线（冷缓存零账行会下发三条空数组）。
+      seedInstanceSparkHistory(buf, inst.sparkHistory);
+      // 折叠门控：收起态跳过绘制，展开瞬间经 applyDetailFold 补绘。陈旧只压暗
+      // 速率数值、不改既成事实的历史曲线，所以折线绘制不再受 stale 影响。
       // 三条线统一接权威历史：tps/cache 与 ttft 同样消费 sparkHistory，刷新或丢
       // buffer 后的首轮即由服务端历史整线恢复。只让一条线接历史，其余两条会在刷新后
       // 从零攒点，表现为折线节点丢失。
-      if (open && !stale) {
+      if (open) {
         updateSparkline(sparkTpsId, sparkValues(buf.tps, buf.sparkHistory?.tps));
         updateSparkline(sparkCacheId, sparkValues(buf.cache, buf.sparkHistory?.cache), 0, 100);
         updateSparkline(sparkTtftId, sparkValues(buf.ttft, buf.sparkHistory?.ttft));
@@ -1446,11 +1526,20 @@ async function api(method, path, body) {
     }
   }
 
-  // 展开瞬间补绘：按当前 DOM 行序把已攒 buffer 画回本栏实例折线（不串其他栏），
+  // 展开瞬间补绘：按当前 DOM 行序把权威历史画回本栏实例折线（不串其他栏），
   // 供 applyDetailFold（data-prefix 栏）与旧 id 接线栏的 setFold（zcode/qoder）
   // 展开时调用——否则折叠期间攒的数据要等下一轮 1s 轮询才上屏。
   // 行→实例配对与 renderInstanceRows 同构（.instance-telemetry-grid[data-instance-id]），
   // ttft 取 buffer 暂存的权威历史、cache 锁 0-100 量程，与渲染时口径一致。
+  // 权威源取最近一帧 /api/agents 的 instances[].sparkHistory：buffer 缺键时按它
+  // 播种，不依赖「这张卡此前渲染过」。陈旧只压暗速率数值，历史曲线照常补绘。
+  function boardInstanceFor(prefix, iid) {
+    const id = BOARD_AGENT_ID[prefix] || prefix;
+    const agent = lastBoardAgents.find((a) => a && a.id === id);
+    if (!agent || !Array.isArray(agent.instances)) return null;
+    return agent.instances.find((inst) => String(inst && inst.id) === String(iid)) || null;
+  }
+
   function redrawInstanceSparklines(prefix) {
     document.querySelectorAll('.instance-telemetry-grid[data-instance-id]').forEach((grid) => {
       const card = grid.closest(".panel-card");
@@ -1458,10 +1547,11 @@ async function api(method, path, body) {
       // 本栏的折叠钮：新机制按 data-prefix 找，旧机制按 <prefix>DetailFoldBtn 找。
       if (!card.querySelector('.agent-detail-fold[data-prefix="' + prefix + '"]')
         && !card.querySelector("#" + prefix + "DetailFoldBtn")) return;
-      if (grid.dataset.stale === "1") return; // 陈旧行不补绘历史折线
       const iid = grid.dataset.instanceId;
-      const buf = instanceSparkBuffers[prefix + ":" + iid];
-      if (!buf) return;
+      const key = prefix + ":" + iid;
+      const buf = instanceSparkBuffers[key] || (instanceSparkBuffers[key] = { tps: [], cache: [], ttft: [] });
+      const live = boardInstanceFor(prefix, iid);
+      seedInstanceSparkHistory(buf, live && live.sparkHistory);
       const domId = iid.replace(/[^A-Za-z0-9_-]/g, "_");
       // 与渲染路径同口径：三条线都接 buffer 暂存的权威历史（见 renderInstanceRows 内注释）
       updateSparkline(prefix + "InstSparkTps-" + domId, sparkValues(buf.tps, buf.sparkHistory?.tps));
@@ -7044,21 +7134,6 @@ async function api(method, path, body) {
     }
     return hit;
   }
-
-  // 看板各端点的整卡渲染器：boardActivityApplyFrame 命中后按 id 调对应渲染器重渲。
-  // 覆盖全部十个端点；表外端点的帧照样改数据，只是不即时重渲（等下一拍轮询）。
-  const BOARD_RENDERERS = {
-    zcode: (a) => renderZcode(a),
-    claude: (a) => renderClaude(a),
-    dsh: (a) => renderDsh(a),
-    pi: (a) => renderPi(a),
-    kimi: (a) => renderKimi(a),
-    qoder: (a) => renderQoder(a),
-    opencode: (a) => renderOpencode(a),
-    codex: (a) => renderCodex(a),
-    grok: (a) => renderGrok(a),
-    workbuddy: (a) => renderWorkbuddy(a),
-  };
 
   // 空壳防抖计数表的会话关闭清零：只清「两张会话表都不认」的 id——轮询重建是整表
   // 换血，别处关掉的会话从此不再出现在后端表；预览表同查是为了保住尚未就绪期的

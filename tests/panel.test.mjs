@@ -4667,12 +4667,18 @@ describe("panel.html 实例四宫格陈旧语义（lastSeen 超阈值速率类�
       "tags line swaps rate bubbles for a bare relative-age bubble");
   });
 
-  it("陈旧行折线停绘：渲染期 if (open && !stale) 门控 + 展开补绘跳过 data-stale 行", () => {
-    assert.ok(/if \(open && !stale\) \{[\s\S]*?updateSparkline\(sparkTpsId/.test(panelJs),
-      "render-time sparkline draw gated on !stale");
-    assert.ok(/grid\.dataset\.stale = stale \? "1" : "0";/.test(panelJs), "grid carries data-stale flag");
-    assert.ok(/if \(grid\.dataset\.stale === "1"\) return;/.test(panelJs),
-      "redrawInstanceSparklines skips stale grids");
+  it("陈旧只压暗速率数值：历史折线在渲染期和展开补绘都照常绘制", () => {
+    // 陈旧是「速率数值不该冒充实时数据」，不是「既成事实的历史曲线该抹掉」。
+    assert.ok(/if \(open\) \{[\s\S]*?updateSparkline\(sparkTpsId/.test(panelJs),
+      "render-time sparkline draw is gated on fold state only");
+    assert.ok(!/if \(open && !stale\)/.test(panelJs), "陈旧不再整线停绘");
+    assert.ok(/grid\.dataset\.stale = stale \? "1" : "0";/.test(panelJs), "grid still carries data-stale flag");
+    assert.ok(!/if \(grid\.dataset\.stale === "1"\) return;/.test(panelJs),
+      "redrawInstanceSparklines no longer skips stale grids");
+    assert.ok(/function seedInstanceSparkHistory\(buf, hist\)/.test(panelJs),
+      "空权威历史不再覆盖已恢复的整线");
+    assert.ok(/function boardInstanceFor\(prefix, iid\)/.test(panelJs),
+      "补绘的权威源取最近一帧的 instances[].sparkHistory");
   });
 
   it("相对时间标注随时间刷新：renderIfChanged 指纹混入陈旧分钟桶", () => {
