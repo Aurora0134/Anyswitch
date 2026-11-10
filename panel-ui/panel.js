@@ -4534,13 +4534,12 @@ async function api(method, path, body) {
     // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
     // 去掉，元素级 hidden（路由链卡/错误横幅等）是真实显隐态，保留。快照随进主题子页
     // 抓一次即冻结——预览看样式不看数据；主题/亮暗切换经全局 token 即时作用于镜像。
-    function captureSettingsMirror() {
-      const viewport = $("settingsMirrorViewport");
-      const sizer = $("settingsMirrorSizer");
-      const scaleEl = $("settingsMirrorScale");
+    // 「自定义主题」窗口的窗内预览复用同一构造（captureMirrorInto），token 改注预览
+    // 容器作用域。
+    function captureMirrorInto(viewport, sizer, scaleEl) {
       const board = document.querySelector(".telemetry-view");
       const main = document.querySelector("main.layout-container");
-      if (!viewport || !sizer || !scaleEl || !board || !main) return;
+      if (!viewport || !sizer || !scaleEl || !board || !main) return false;
       const stripIds = (root) => {
         root.removeAttribute("id");
         for (const el of root.querySelectorAll("[id]")) el.removeAttribute("id");
@@ -4601,13 +4600,17 @@ async function api(method, path, body) {
       const mainCs = getComputedStyle(main);
       const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
       const availW = viewport.clientWidth;
-      if (!naturalW || !availW) return;
+      if (!naturalW || !availW) return false;
       scaleEl.style.width = naturalW + "px";
       const s = availW / naturalW;
       const naturalH = scaleEl.offsetHeight;
       scaleEl.style.transform = `scale(${s})`;
       sizer.style.width = naturalW * s + "px";
       sizer.style.height = naturalH * s + "px";
+      return true;
+    }
+    function captureSettingsMirror() {
+      captureMirrorInto($("settingsMirrorViewport"), $("settingsMirrorSizer"), $("settingsMirrorScale"));
     }
     // 恢复路径下进「主题」的那次快照可能拍在首刷数据落地之前（空壳看板）：挂一次性补拍，
     // 等 refreshAgents 把真实内容渲染完再拍。正常路径拍到的已是真实内容，补拍值相同、
@@ -11183,12 +11186,15 @@ async function api(method, path, body) {
   // ═══════════════════════════════════════════════
   // 「自定义」壁纸主题
   // ═══════════════════════════════════════════════
-  // 动态第四主题（data-style="wallpaper"）：背景图全局垫底，取色引擎
-  // （wallpaper-theme.js，浏览器挂 window.WallpaperTheme）按图生成亮暗双套
-  // token，差量注入 <html> 内联样式；切走时全量清掉注入属性，静态皮肤的 CSS
-  // 规则自然恢复。存储分工：图片 blob 在 IndexedDB；滑杆值与 token 缓存（供
-  // head 恢复脚本首帧注入）在 localStorage。移除背景图＝自动切回 Default，
-  // 滑杆值保留，下次选用自定义并上传时恢复。
+  // 动态第四主题（data-style="wallpaper"）。全局生效侧：背景图垫底，取色引擎
+  // （wallpaper-theme.js，浏览器挂 window.WallpaperTheme）按图生成亮暗双套 token，
+  // 差量注入 <html> 内联样式；切走时全量清掉注入属性，静态皮肤的 CSS 规则自然恢复。
+  // 配置走主题列表「自定义...」入口的配置窗口：上传/三滑杆只写窗口暂存并作用于
+  // 窗内预览（与主题页右栏同构的看板镜像，token 注预览容器而非 <html>）；「确认」
+  // 才落盘并全局生效，取消/遮罩/✕ 丢弃暂存。窗内「移除背景图」只清暂存，确认时
+  // 才真删已存图，全局正生效自定义时确认删除同时切回 Default。
+  // 存储分工：图片 blob 在 IndexedDB；滑杆值与 token 缓存（供 head 恢复脚本首帧
+  // 注入）在 localStorage。
   const WALLPAPER_STYLE = "wallpaper";
   const WALLPAPER_FX_KEY = "panel-wallpaper-fx";
   const WALLPAPER_TOKENS_KEY = "panel-wallpaper-tokens";
@@ -11198,6 +11204,12 @@ async function api(method, path, body) {
   const WALLPAPER_FX_LIMITS = { blur: [0, 30], dim: [0, 70], surface: [40, 100] };
   // 「阅读区不透明度」滑杆的引擎挂钩面：surfaceAlpha 一次覆盖六个表面 token
   const WALLPAPER_SURFACE_KEYS = ["--bg", "--bg-page", "--surface", "--surface-sunken", "--surface-hover", "--surface-glass"];
+  // 三滑杆的窗口元素映射：开窗回显与 input 监听共用
+  const WALLPAPER_FX_INPUTS = [
+    { key: "blur", input: "wallpaperFxBlur", val: "wallpaperFxBlurVal", suffix: "px" },
+    { key: "dim", input: "wallpaperFxDim", val: "wallpaperFxDimVal", suffix: "%" },
+    { key: "surface", input: "wallpaperFxSurface", val: "wallpaperFxSurfaceVal", suffix: "%" },
+  ];
 
   let wallpaperController = null;
 
@@ -11241,16 +11253,25 @@ async function api(method, path, body) {
   }
 
   // 壁纸主题控制器：状态与副作用全在闭包里，依赖（DOM 根、存档、引擎、解码、
-  // 存储）注入，测试按既有 createXController 形态抽取本函数进沙箱驱动。
-  function createWallpaperThemeController({ doc, root, storage, engine, decode, store, preferDark = () => false, notify = () => {}, onAfterChange = () => {}, onFallbackStyle = () => {} }) {
+  // 存储）注入，测试按既有 createXController 形态抽取本函数进沙箱驱动。两侧状态
+  // 分离：已生效侧（pixels/blobUrl/hasImage/themeCache/fx + 全局注入键集）只在确认
+  // 与启动恢复时改写；窗口暂存侧 staged 关窗即弃，确认前不碰已生效侧与存储。
+  function createWallpaperThemeController({ doc, root, storage, engine, decode, store, preferDark = () => false, notify = () => {}, onAfterChange = () => {}, onApplyStyle = () => {}, onFallbackStyle = () => {}, isStyleActive = () => false, captureMirror = () => false }) {
     const get = (id) => doc.getElementById(id);
     const imageLayer = get("wallpaperBackdropImage");
     const dimLayer = get("wallpaperBackdropDim");
-    let pixels = null;       // 解码后的降采样像素：滑杆实时重算免二次解码
+    const previewBox = get("wallpaperPreview");
+    const previewImage = get("wallpaperPreviewImage");
+    const previewDim = get("wallpaperPreviewDim");
+    // —— 已生效侧 ——
+    let pixels = null;       // 解码后的降采样像素：surface 重取色免二次解码
     let blobUrl = null;
     let hasImage = false;
     let themeCache = null;     // { light: {token}, dark: {token} }
     const injectedKeys = new Set();
+    // —— 窗口暂存侧：null = 窗口关闭 ——
+    // { file, pixels, blobUrl, blobOwned, hasImage, hadSavedImage, removed, fx, themeCache, injectedKeys, mirrorCaptured }
+    let staged = null;
 
     const clampFx = (key, value) => {
       const [lo, hi] = WALLPAPER_FX_LIMITS[key];
@@ -11258,6 +11279,7 @@ async function api(method, path, body) {
       if (!Number.isFinite(n)) return WALLPAPER_FX_DEFAULTS[key];
       return Math.min(hi, Math.max(lo, Math.round(n)));
     };
+    // 已存滑杆值：确认时写、开窗时读作暂存初值
     const fx = { ...WALLPAPER_FX_DEFAULTS };
     try {
       const saved = JSON.parse(storage.getItem(WALLPAPER_FX_KEY) || "null");
@@ -11275,16 +11297,20 @@ async function api(method, path, body) {
       return preferDark() ? "dark" : "light";
     }
 
-    function injectTokens(tokens) {
+    // token 注入目标参数化：全局注 <html>，窗口预览注预览容器；keySet 记账供差量清除
+    function injectTokens(target, tokens, keySet) {
       for (const [key, value] of Object.entries(tokens)) {
-        root.style.setProperty(key, value);
-        injectedKeys.add(key);
+        target.style.setProperty(key, value);
+        keySet.add(key);
       }
+    }
+    function clearInjected(target, keySet) {
+      for (const key of keySet) target.style.removeProperty(key);
+      keySet.clear();
     }
     // 切走「自定义」：清掉全部注入属性并删掉首帧缓存，静态皮肤规则恢复生效
     function clearTokens() {
-      for (const key of injectedKeys) root.style.removeProperty(key);
-      injectedKeys.clear();
+      clearInjected(root, injectedKeys);
       try { storage.removeItem(WALLPAPER_TOKENS_KEY); } catch {}
     }
     function persistCache() {
@@ -11306,29 +11332,24 @@ async function api(method, path, body) {
 
     function applyTokens() {
       if (!themeCache) return;
-      injectTokens(themeCache[currentMode()] || themeCache.light);
+      injectTokens(root, themeCache[currentMode()] || themeCache.light, injectedKeys);
     }
     function applyFx() {
       if (imageLayer) imageLayer.style.filter = fx.blur > 0 ? `blur(${fx.blur}px)` : "";
       if (dimLayer) dimLayer.style.background = `rgba(0, 0, 0, ${fx.dim / 100})`;
     }
-    // 按当前滑杆重取色：surfaceAlpha 同时覆盖亮暗两套的表面透明度
+    function surfaceOverrides(values) {
+      const overrides = {};
+      for (const key of WALLPAPER_SURFACE_KEYS) overrides[key] = values.surface / 100;
+      return overrides;
+    }
+    // 按已生效滑杆重取色：surfaceAlpha 同时覆盖亮暗两套的表面透明度
     function rebuildTheme() {
       if (!engine || !pixels) return;
-      const overrides = {};
-      for (const key of WALLPAPER_SURFACE_KEYS) overrides[key] = fx.surface / 100;
+      const overrides = surfaceOverrides(fx);
       themeCache = engine.extractTheme(pixels, { surfaceAlpha: { light: overrides, dark: overrides } });
       persistCache();
       applyTokens();
-    }
-
-    function syncButtons() {
-      const uploadBtn = get("wallpaperUploadBtn");
-      const changeBtn = get("wallpaperChangeBtn");
-      const removeBtn = get("wallpaperRemoveBtn");
-      if (uploadBtn) uploadBtn.hidden = hasImage;
-      if (changeBtn) changeBtn.hidden = !hasImage;
-      if (removeBtn) removeBtn.hidden = !hasImage;
     }
 
     function presentImage(blob) {
@@ -11344,7 +11365,6 @@ async function api(method, path, body) {
       presentImage(blob);
       applyFx();
       rebuildTheme();
-      syncButtons();
     }
 
     async function restore() {
@@ -11355,12 +11375,242 @@ async function api(method, path, body) {
       } catch { /* 存储读失败：壁纸主题停在无图态，不挡面板启动 */ }
     }
 
+    // —— 窗口暂存侧：token/垫底层只作用于窗内预览 ——
+
+    function applyStagedTokens() {
+      if (!staged || !staged.themeCache || !previewBox) return;
+      injectTokens(previewBox, staged.themeCache[currentMode()] || staged.themeCache.light, staged.injectedKeys);
+    }
+    function applyStagedFx() {
+      if (!staged) return;
+      if (previewImage) previewImage.style.filter = staged.fx.blur > 0 ? `blur(${staged.fx.blur}px)` : "";
+      if (previewDim) previewDim.style.background = `rgba(0, 0, 0, ${staged.fx.dim / 100})`;
+    }
+    // 「阅读区不透明度」暂存值变化：按暂存像素重取色，只注入预览容器
+    function rebuildStagedTheme() {
+      if (!staged || !engine || !staged.pixels) return;
+      const overrides = surfaceOverrides(staged.fx);
+      staged.themeCache = engine.extractTheme(staged.pixels, { surfaceAlpha: { light: overrides, dark: overrides } });
+      applyStagedTokens();
+    }
+
+    // 预览渲染：空态/有图态切换 + 垫底与 token；镜像只在首次有图时拍一次
+    // （克隆体经作用域 token 跟随后续调参，无需重拍）
+    function renderPreview() {
+      if (!staged || !previewBox) return;
+      previewBox.classList.toggle("has-image", staged.hasImage);
+      if (!staged.hasImage) return;
+      if (previewImage && staged.blobUrl) previewImage.style.backgroundImage = `url("${staged.blobUrl}")`;
+      applyStagedFx();
+      applyStagedTokens();
+      if (!staged.mirrorCaptured) staged.mirrorCaptured = !!captureMirror();
+    }
+
+    function syncModalButtons() {
+      const uploadBtn = get("wallpaperUploadBtn");
+      const removeBtn = get("wallpaperRemoveBtn");
+      const confirmBtn = get("wallpaperConfirmBtn");
+      if (uploadBtn) uploadBtn.textContent = staged && staged.hasImage ? "重新上传" : "上传背景图";
+      if (removeBtn) removeBtn.hidden = !staged || !staged.hasImage;
+      // 确认闸门：无暂存图且无待确认删除（从未有过已存图）时无可提交内容
+      if (confirmBtn) confirmBtn.disabled = !staged || (!staged.hasImage && !(staged.removed && staged.hadSavedImage));
+    }
+
+    function syncFxInputs() {
+      if (!staged) return;
+      for (const item of WALLPAPER_FX_INPUTS) {
+        const input = get(item.input);
+        const val = get(item.val);
+        if (input) input.value = String(staged.fx[item.key]);
+        if (val) val.textContent = `${staged.fx[item.key]}${item.suffix}`;
+      }
+    }
+
+    function revokeStagedBlob() {
+      if (staged && staged.blobOwned && staged.blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) {
+        URL.revokeObjectURL(staged.blobUrl);
+      }
+      if (staged) {
+        staged.blobUrl = null;
+        staged.blobOwned = false;
+      }
+    }
+
+    // 开窗：暂存初值 = 已存图（IndexedDB）+ 已存滑杆值。已生效侧已有同图解码产物
+    // 时直接借用（blobUrl 所有权不动）；窗口开着期间的任何改动都不碰已生效侧与存储。
+    async function openModal() {
+      const modal = get("wallpaperModal");
+      if (!modal || staged) return;
+      staged = {
+        file: null, pixels: null, blobUrl: null, blobOwned: false,
+        hasImage: false, hadSavedImage: false, removed: false,
+        fx: { ...fx }, themeCache: null, injectedKeys: new Set(), mirrorCaptured: false,
+      };
+      modal.classList.add("show");
+      if (store) {
+        try {
+          const blob = await store.load();
+          if (!staged) return; // 载入期间已被关闭
+          if (blob) {
+            staged.hadSavedImage = true;
+            if (hasImage && pixels && blobUrl) {
+              staged.pixels = pixels;
+              staged.blobUrl = blobUrl;
+              staged.themeCache = themeCache;
+              staged.hasImage = true;
+            } else {
+              staged.pixels = await decode(blob);
+              if (!staged) return;
+              staged.blobUrl = URL.createObjectURL(blob);
+              staged.blobOwned = true;
+              staged.hasImage = true;
+              rebuildStagedTheme();
+            }
+          }
+        } catch { /* 已存图读失败按无图态开窗，确认时上传新图自然覆盖 */ }
+      }
+      renderPreview();
+      syncModalButtons();
+      syncFxInputs();
+    }
+
+    // 关窗：丢弃暂存（借用已生效侧的 blobUrl 不回收），窗内注入与垫底层全清
+    function closeModal() {
+      const modal = get("wallpaperModal");
+      if (modal) modal.classList.remove("show");
+      if (!staged) return;
+      revokeStagedBlob();
+      if (previewBox) {
+        clearInjected(previewBox, staged.injectedKeys);
+        previewBox.classList.remove("has-image");
+      }
+      if (previewImage) {
+        previewImage.style.backgroundImage = "";
+        previewImage.style.filter = "";
+      }
+      if (previewDim) previewDim.style.background = "";
+      staged = null;
+    }
+
+    // 窗内上传：只换暂存，不写存储、不 toast 成功（预览出现即反馈）
+    async function pickFile(file) {
+      if (!file || !staged) return;
+      if (!WALLPAPER_MIME_TYPES.includes(file.type)) {
+        notify("仅支持 PNG、JPEG、WebP、GIF 格式的图片", true);
+        return;
+      }
+      if (file.size > WALLPAPER_MAX_BYTES) {
+        notify("图片超过 20MB，未上传", true);
+        return;
+      }
+      try {
+        const nextPixels = await decode(file);
+        if (!staged) return; // 解码期间关窗：结果直接作废
+        revokeStagedBlob();
+        staged.file = file;
+        staged.pixels = nextPixels;
+        staged.blobUrl = URL.createObjectURL(file);
+        staged.blobOwned = true;
+        staged.hasImage = true;
+        staged.removed = false;
+        rebuildStagedTheme();
+        renderPreview();
+        syncModalButtons();
+      } catch {
+        notify("背景图读取失败，请换一张图片", true);
+      }
+    }
+
+    // 窗内移除只清暂存：预览回空态，确认时才真删已存图
+    function removeStaged() {
+      if (!staged || !staged.hasImage) return;
+      revokeStagedBlob();
+      staged.file = null;
+      staged.pixels = null;
+      staged.hasImage = false;
+      staged.themeCache = null;
+      if (previewBox) clearInjected(previewBox, staged.injectedKeys);
+      staged.removed = true;
+      renderPreview();
+      syncModalButtons();
+    }
+
+    // 确认：有暂存图 → 落盘并全局生效自定义；无图且有待确认删除 → 真删已存图，
+    // 全局正生效自定义时切回 Default
+    async function confirmModal() {
+      if (!staged) return;
+      if (staged.hasImage) {
+        if (staged.file && store) {
+          try {
+            await store.save(staged.file);
+          } catch {
+            notify("背景图读取失败，请换一张图片", true);
+            return;
+          }
+        }
+        // 暂存晋升为已生效：自有的旧 blobUrl 让位（借用已生效侧时同一引用，不能回收）
+        if (staged.blobOwned) {
+          if (blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) URL.revokeObjectURL(blobUrl);
+          blobUrl = staged.blobUrl;
+        }
+        pixels = staged.pixels;
+        hasImage = true;
+        for (const key of Object.keys(fx)) fx[key] = staged.fx[key];
+        saveFx();
+        themeCache = staged.themeCache;
+        persistCache();
+        if (imageLayer && blobUrl) imageLayer.style.backgroundImage = `url("${blobUrl}")`;
+        root.setAttribute("data-wallpaper", "active");
+        applyFx();
+        applyTokens();
+        // 关窗但不走丢弃路径：暂存资产已移交已生效侧
+        const modal = get("wallpaperModal");
+        if (modal) modal.classList.remove("show");
+        if (previewBox) {
+          clearInjected(previewBox, staged.injectedKeys);
+          previewBox.classList.remove("has-image");
+        }
+        if (previewImage) {
+          previewImage.style.backgroundImage = "";
+          previewImage.style.filter = "";
+        }
+        if (previewDim) previewDim.style.background = "";
+        staged = null;
+        // 走标准换肤路径：落 data-style/存档/列表选中态，syncStyle(true) 幂等续接
+        onApplyStyle();
+        notify("自定义主题已应用");
+        onAfterChange();
+        return;
+      }
+      if (staged.removed && staged.hadSavedImage) {
+        if (store) {
+          try { await store.clear(); } catch {}
+        }
+        hasImage = false;
+        pixels = null;
+        themeCache = null;
+        if (blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) URL.revokeObjectURL(blobUrl);
+        blobUrl = null;
+        if (imageLayer) imageLayer.style.backgroundImage = "";
+        root.removeAttribute("data-wallpaper");
+        clearTokens();
+        const wasActive = isStyleActive();
+        closeModal();
+        if (wasActive) {
+          onFallbackStyle();
+          notify("背景图已移除，主题已切回 Default");
+        } else {
+          notify("背景图已移除");
+        }
+        onAfterChange();
+      }
+    }
+
     return {
       fx,
-      syncButtons,
-      // 主题切换接线：选中「自定义」恢复 token 与垫底，切走清空注入。
-      // 有缓存无像素（刷新后首帧已由缓存注入）也要继续 restore：像素是
-      // 「阅读区不透明度」滑杆重取色的料，不恢复则调参失敏。
+      // 主题切换接线：「自定义」生效（确认路径与启动恢复共用）时恢复 token 与垫底，
+      // 切走清空注入。有缓存无像素（刷新后首帧已由缓存注入）也要继续 restore：像素
+      // 是窗口内「阅读区不透明度」重取色的料，不恢复则开窗调参失敏。
       async syncStyle(active) {
         if (!active) {
           clearTokens();
@@ -11375,62 +11625,41 @@ async function api(method, path, body) {
         if (!pixels) await restore();
         onAfterChange();
       },
-      // 亮暗切换（含跟随系统时系统侧变化）：壁纸 token 双套跟随
+      // 亮暗切换（含跟随系统时系统侧变化）：已生效 token 双套跟随；窗口开着时
+      // 窗内预览的暂存 token 同步换套
       syncMode() {
-        if (!themeCache) return;
-        applyTokens();
-        onAfterChange();
-      },
-      // 三滑杆实时调参：模糊/压暗直改垫底层，阅读区不透明度重取色
-      setFx(key, value) {
-        fx[key] = clampFx(key, value);
-        saveFx();
-        applyFx();
-        if (key === "surface") rebuildTheme();
-        onAfterChange();
-      },
-      async pickFile(file) {
-        if (!file) return;
-        if (!WALLPAPER_MIME_TYPES.includes(file.type)) {
-          notify("仅支持 PNG、JPEG、WebP、GIF 格式的图片", true);
-          return;
-        }
-        if (file.size > WALLPAPER_MAX_BYTES) {
-          notify("图片超过 20MB，未上传", true);
-          return;
-        }
-        const replacing = hasImage;
-        try {
-          if (store) await store.save(file);
-          await applyBlob(file);
+        if (themeCache) {
+          applyTokens();
           onAfterChange();
-          notify(replacing ? "背景图已更换" : "背景图已上传");
-        } catch {
-          notify("背景图读取失败，请换一张图片", true);
         }
+        if (staged && staged.themeCache) applyStagedTokens();
       },
-      // 移除背景图＝自动切回 Default；滑杆值不清，下次上传时沿用
-      async removeImage() {
-        if (store) { try { await store.clear(); } catch {} }
-        hasImage = false;
-        pixels = null;
-        themeCache = null;
-        if (blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) URL.revokeObjectURL(blobUrl);
-        blobUrl = null;
-        if (imageLayer) imageLayer.style.backgroundImage = "";
-        root.removeAttribute("data-wallpaper");
-        clearTokens();
-        syncButtons();
-        notify("已移除背景图，主题已切回 Default");
-        onFallbackStyle();
+      openModal,
+      closeModal,
+      confirmModal,
+      pickFile,
+      removeStaged,
+      isOpen: () => !!staged,
+      // 窗口开着时预览宽变化（窗口缩放）：镜像按新宽度重拍
+      recaptureMirror() {
+        if (staged && staged.hasImage) staged.mirrorCaptured = !!captureMirror();
+      },
+      // 三滑杆实时调参（只写暂存）：模糊/压暗直改窗内垫底层，阅读区不透明度重取色
+      setStagedFx(key, value) {
+        if (!staged) return;
+        staged.fx[key] = clampFx(key, value);
+        applyStagedFx();
+        if (key === "surface") rebuildStagedTheme();
       },
     };
   }
 
-  // 主题页「自定义」从属区接线：上传/更换/移除与三滑杆
+  // 「自定义主题」窗口接线：入口只开窗不换肤（initStylePicker 的 wallpaper 分支）；
+  // 窗内上传/移除/三滑杆全部走暂存，确认/取消由窗口按钮与遮罩/✕ 收口
   function initWallpaper() {
     const fileInput = $("wallpaperFileInput");
-    if (!fileInput) return;
+    const modal = $("wallpaperModal");
+    if (!fileInput || !modal) return;
     wallpaperController = createWallpaperThemeController({
       doc: document,
       root: document.documentElement,
@@ -11441,36 +11670,47 @@ async function api(method, path, body) {
       preferDark: () => window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
       notify: toast,
       onAfterChange: () => applyTerminalXtermTheme(),
+      onApplyStyle: () => setPanelStyle(WALLPAPER_STYLE),
       onFallbackStyle: () => setPanelStyle("saas"),
+      isStyleActive: () => currentPanelStyle() === WALLPAPER_STYLE,
+      captureMirror: () => captureMirrorInto($("wallpaperPreviewViewport"), $("wallpaperPreviewSizer"), $("wallpaperPreviewScale")),
     });
-    const fxInputs = [
-      { key: "blur", input: $("wallpaperFxBlur"), val: $("wallpaperFxBlurVal"), suffix: "px" },
-      { key: "dim", input: $("wallpaperFxDim"), val: $("wallpaperFxDimVal"), suffix: "%" },
-      { key: "surface", input: $("wallpaperFxSurface"), val: $("wallpaperFxSurfaceVal"), suffix: "%" },
-    ];
-    for (const item of fxInputs) {
-      if (!item.input) continue;
-      item.input.value = String(wallpaperController.fx[item.key]);
-      if (item.val) item.val.textContent = `${wallpaperController.fx[item.key]}${item.suffix}`;
-      item.input.addEventListener("input", () => {
-        const v = Number(item.input.value);
-        if (item.val) item.val.textContent = `${v}${item.suffix}`;
-        wallpaperController.setFx(item.key, v);
+    for (const item of WALLPAPER_FX_INPUTS) {
+      const input = $(item.input);
+      const val = $(item.val);
+      if (!input) continue;
+      input.addEventListener("input", () => {
+        const v = Number(input.value);
+        if (val) val.textContent = `${v}${item.suffix}`;
+        wallpaperController.setStagedFx(item.key, v);
       });
     }
     const uploadBtn = $("wallpaperUploadBtn");
-    const changeBtn = $("wallpaperChangeBtn");
     const removeBtn = $("wallpaperRemoveBtn");
+    const confirmBtn = $("wallpaperConfirmBtn");
+    const cancelBtn = $("wallpaperCancelBtn");
+    const closeBtn = $("wallpaperModalCloseBtn");
     if (uploadBtn) uploadBtn.onclick = () => fileInput.click();
-    if (changeBtn) changeBtn.onclick = () => fileInput.click();
-    if (removeBtn) removeBtn.onclick = () => wallpaperController.removeImage();
+    if (removeBtn) removeBtn.onclick = () => wallpaperController.removeStaged();
+    if (confirmBtn) confirmBtn.onclick = () => wallpaperController.confirmModal();
+    if (cancelBtn) cancelBtn.onclick = () => wallpaperController.closeModal();
+    if (closeBtn) closeBtn.onclick = () => wallpaperController.closeModal();
+    modal.onclick = (e) => {
+      if (e.target === modal) wallpaperController.closeModal();
+    };
     fileInput.addEventListener("change", () => {
       const file = fileInput.files && fileInput.files[0];
       // 清空值：同一张图再选一次也要触发 change
       fileInput.value = "";
       wallpaperController.pickFile(file);
     });
-    wallpaperController.syncButtons();
+    // 窗口开着时窗口尺寸变化：镜像按新预览宽重拍（与主题页镜像同一防抖口径）
+    let wallpaperMirrorResizeTimer = 0;
+    window.addEventListener("resize", () => {
+      if (!wallpaperController || !wallpaperController.isOpen()) return;
+      clearTimeout(wallpaperMirrorResizeTimer);
+      wallpaperMirrorResizeTimer = setTimeout(() => wallpaperController.recaptureMirror(), 200);
+    });
     // 启动恢复：当前就是「自定义」且有图时，重读 IndexedDB 并续上 token
     wallpaperController.syncStyle(currentPanelStyle() === WALLPAPER_STYLE);
   }
@@ -11527,8 +11767,9 @@ async function api(method, path, body) {
 
   // 面板主题清单：与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份，改动需两侧
   // 同步（panel.test.mjs 有同值断言）。前三项 saas/aurora/sepia 是 style-lab 静态
-  // 皮肤（CSS 片段）；第四项 wallpaper（「自定义」）是动态主题——token 由取色引擎
-  // 按背景图生成、运行时注入 <html> 内联样式，没有静态皮肤段。
+  // 皮肤（CSS 片段）；第四项 wallpaper（列表文案「自定义...」）是动态主题——token
+  // 由取色引擎按背景图生成、运行时注入 <html> 内联样式，没有静态皮肤段；列表项是
+  // 配置窗口入口，确认才落 data-style。
   // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
   // 等历史主题均已退役，CSS 片段已随退役删除；历史 localStorage 存档的退役样式
   // 由 <head> 恢复脚本兜底回落默认主题（saas）。
@@ -11552,13 +11793,18 @@ async function api(method, path, body) {
     applyTerminalXtermTheme();
   }
 
-  // 面板主题（设置视图「主题」子 tab 左栏列表，点选即全局生效）
+  // 面板主题（设置视图「主题」子 tab 左栏列表）。前三项点选即全局生效；
+  // 「自定义...」是配置窗口入口：点开窗口、确认才生效，不在这里切换主题
   function initStylePicker() {
     const picker = $("stylePicker");
     if (!picker) return;
     picker.addEventListener("click", (e) => {
       const b = e.target.closest(".settings-theme-item");
       if (!b || !STYLES.includes(b.dataset.style)) return;
+      if (b.dataset.style === WALLPAPER_STYLE) {
+        if (wallpaperController) wallpaperController.openModal();
+        return;
+      }
       setPanelStyle(b.dataset.style);
     });
     // 初始选中态回显：与 setPanelStyle 里的同步同一口径

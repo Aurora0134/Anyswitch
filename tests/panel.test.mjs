@@ -3997,16 +3997,18 @@ describe("panel.html 设置全页视图", () => {
       "svg[hidden] 显式兜底规则在册（罩 4 处按钮 8 颗 SVG）");
   });
 
-  it("「主题」子 tab：左栏四项点选即生效，右栏预览为真实看板镜像", () => {
+  it("「主题」子 tab：左栏前三项点选即生效，「自定义...」开配置窗口；右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
     const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)" role="radio" aria-checked="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
     assert.deepEqual(items.map((m) => [m[1], m[3], m[2]]), [
       ["saas", "Default", "true"], ["aurora", "Aurora", "false"], ["sepia", "Sepia", "false"],
-      ["wallpaper", "自定义", "false"],
+      ["wallpaper", "自定义...", "false"],
     ], "四项主题与样式值一一对应，Default 按钮静态 aria-checked=\"true\"");
     assert.ok(panelJs.includes('picker.querySelectorAll(".settings-theme-item")'),
       "initStylePicker 同步选中态到新列表项");
+    assert.ok(/b\.dataset\.style === WALLPAPER_STYLE[\s\S]{0,200}?openModal\(\)/.test(panelJs),
+      "「自定义...」分支开配置窗口而非切换主题");
     assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
     const preview = panelHtml.slice(
       panelHtml.indexOf('id="settingsThemePreview"'),
@@ -4018,8 +4020,8 @@ describe("panel.html 设置全页视图", () => {
       assert.ok(preview.includes(`id="${id}"`), `预览含镜像层 #${id}`);
     }
     assert.ok(!preview.includes("panel-card"), "预览不再内置独立样张");
-    const capture = panelJs.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/);
-    assert.ok(capture, "captureSettingsMirror found in panel.js");
+    const capture = panelJs.match(/function captureMirrorInto\(viewport, sizer, scaleEl\) \{([\s\S]*?)\n    \}/);
+    assert.ok(capture, "captureMirrorInto found in panel.js");
     assert.ok(capture[1].includes('document.querySelector(".telemetry-view")'), "镜像源为真实看板视图");
     assert.ok(capture[1].includes("cloneNode(true)"), "镜像为看板 DOM 克隆");
     assert.ok(capture[1].includes('removeAttribute("id")'), "克隆剥 id 防重复命中");
@@ -4035,8 +4037,8 @@ describe("panel.html 设置全页视图", () => {
     // 剥了 id 的克隆体移进镜像容器后不再命中那条规则，照样克隆就是给 v2 用户画出一条
     // 界面上根本不存在的旧版胶囊导航。新版改克隆一份迷你左栏（皮肤 token 全局生效，
     // 自动着色）；旧版行为原样保留。
-    const capture = panelJs.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/);
-    assert.ok(capture, "captureSettingsMirror found in panel.js");
+    const capture = panelJs.match(/function captureMirrorInto\(viewport, sizer, scaleEl\) \{([\s\S]*?)\n    \}/);
+    assert.ok(capture, "captureMirrorInto found in panel.js");
     const body = capture[1];
     assert.ok(body.includes("newUiEnabled()"), "镜像按本机 UI 版本分路（复用 newUiEnabled，与分段钮同一状态源）");
     assert.ok(body.includes('document.querySelector(".rail")'), "新版克隆左栏进镜像");
