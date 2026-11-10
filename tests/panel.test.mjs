@@ -4088,6 +4088,14 @@ describe("panel.html 设置全页视图", () => {
       "预览回调交给控制器时直接引用顶层这一份");
   });
 
+  it("「自定义主题」窗口的「高级选项」静态初值隐藏：无图空态不露出，展开钮文案原样", () => {
+    const details = panelHtml.match(/<details[^>]*id="wallpaperAdvanced"[^>]*>/);
+    assert.ok(details, "高级选项展开钮在册");
+    assert.ok(/\shidden(?:="")?>$/.test(details[0]),
+      "静态初值带 hidden——首帧与刷新恢复的无图空态都不露出这三根滑杆");
+    assert.ok(panelHtml.includes("<summary>高级选项</summary>"), "展开钮文案原样，零文案改动");
+  });
+
   it("主题存档恢复：内联脚本四项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
     assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];'),
       "PANEL_STYLES 恰为 saas/aurora/sepia 三静态皮肤 + wallpaper 动态项");

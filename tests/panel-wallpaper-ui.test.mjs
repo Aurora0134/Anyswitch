@@ -264,11 +264,14 @@ function makeDoc() {
   const els = new Map();
   for (const id of ["wallpaperBackdropImage", "wallpaperBackdropDim",
     "wallpaperModal", "wallpaperPreview", "wallpaperPreviewImage", "wallpaperPreviewDim",
+    "wallpaperAdvanced",
     "wallpaperUploadBtn", "wallpaperRemoveBtn", "wallpaperConfirmBtn",
     "wallpaperFxBlur", "wallpaperFxBlurVal", "wallpaperFxDim", "wallpaperFxDimVal",
     "wallpaperFxSurface", "wallpaperFxSurfaceVal"]) {
     els.set(id, makeEl(id));
   }
+  // HTML 的静态初值（hidden）不在这里预置：桩从「未隐藏」起，收放全由 renderPreview
+  // 驱动，空态露没露才是被钉的那件事；静态初值另由 panel.test.mjs 断言。
   return { getElementById: (id) => els.get(id) ?? null, els };
 }
 
@@ -532,6 +535,37 @@ describe("壁纸控制器：移除的确认闸门", () => {
     await h.controller.pickFile(PNG_1KB);
     h.controller.removeStaged();
     assert.equal(h.doc.els.get("wallpaperConfirmBtn").disabled, true, "无图且无已存图时确认禁用");
+  });
+});
+
+describe("壁纸控制器：「高级选项」只随暂存图态露出", () => {
+  const advanced = (h) => h.doc.els.get("wallpaperAdvanced");
+
+  it("开窗无图空态：「高级选项」随预览一起收起", async () => {
+    const h = harness();
+    await h.controller.openModal();
+    assert.equal(advanced(h).hidden, true, "无暂存图时三根滑杆不露出");
+    assert.equal(h.doc.els.get("wallpaperPreview")._classes.has("has-image"), false, "预览同为空态");
+  });
+
+  it("上传后：「高级选项」随有图态展开", async () => {
+    const h = harness();
+    await h.controller.openModal();
+    await h.controller.pickFile(PNG_1KB);
+    assert.equal(advanced(h).hidden, false, "有暂存图即展开可调");
+  });
+
+  it("已存图开窗后窗内移除：「高级选项」回到收起，确认前已生效侧不受影响", async () => {
+    const store = makeStore();
+    store.state.blob = PNG_1KB;
+    const h = harness({ store, styleActive: true });
+    await h.controller.syncStyle(true);
+    await h.controller.openModal();
+    assert.equal(advanced(h).hidden, false, "已存图开窗即有图态，高级选项可用");
+    h.controller.removeStaged();
+    assert.equal(advanced(h).hidden, true, "窗内移除后回到空态收起");
+    assert.equal(store.state.clears, 0, "移除只清暂存，确认前不清库");
+    assert.equal(h.rootEl._attrs.get("data-wallpaper"), "active", "确认前全局垫底原样");
   });
 });
 

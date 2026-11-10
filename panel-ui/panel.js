@@ -11408,6 +11408,7 @@ async function api(method, path, body) {
     const previewBox = get("wallpaperPreview");
     const previewImage = get("wallpaperPreviewImage");
     const previewDim = get("wallpaperPreviewDim");
+    const advancedBox = get("wallpaperAdvanced");
     // —— 已生效侧 ——
     let pixels = null;       // 解码后的降采样像素：surface 重取色免二次解码
     let blobUrl = null;
@@ -11544,6 +11545,9 @@ async function api(method, path, body) {
     function renderPreview() {
       if (!staged || !previewBox) return;
       previewBox.classList.toggle("has-image", staged.hasImage);
+      // 「高级选项」调的三根滑杆只对有图态有意义：与预览同帧随暂存图有无收起，
+      // 空态与窗内移除后都不露出（HTML 静态初值同为 hidden，首帧不闪）。
+      if (advancedBox) advancedBox.hidden = !staged.hasImage;
       if (!staged.hasImage) return;
       if (previewImage && staged.blobUrl) previewImage.style.backgroundImage = `url("${staged.blobUrl}")`;
       applyStagedFx();
