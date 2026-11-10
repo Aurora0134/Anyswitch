@@ -137,8 +137,11 @@ function instanceIdForRequest(req, agentId, deps) {
     // workflow actor / subagent / 侧聊一律铸在母会话行上：会话库的 parent_id
     // 是确定性的正源，collector 把它折成同步映射（15s 会话缓存），这里只做
     // 一次查表。journal、实例桶、端点账、面徽标、终端归属随之全部同源。
-    // 映射未就绪（冷缓存 / 老 relay 注入）时原样回落，绝不丢请求。
+    // 映射未就绪（冷缓存 / 老 relay 注入）时原样回落，绝不丢请求。命中会话头
+    // 就驱动 relay 自持刷新派生表：面板没开着时映射也必须保持热，否则整批
+    // 后台子会话会在冷窗口里铸成独立实例。刷新是异步且节流的，不进等待链。
     if (sessionId !== null) {
+      deps.metricsCollector?.noteZcodeSessionRequest?.();
       return deps.metricsCollector?.resolveZcodeParentRowId?.(sessionId) ?? sessionId;
     }
   }

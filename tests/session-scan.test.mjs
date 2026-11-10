@@ -1718,7 +1718,7 @@ test("zcode: desktop-driven sessions are tagged originator=desktop, CLI sessions
   assert.equal(byId.get("sess_db1").originator, null, "CLI 会话无 inputIntent，不排除");
 });
 
-test("zcode: parent_id / surface 随 meta 透出（子会话归母与面判据的正源）", async () => {
+test("zcode: parent_id 透出；子会话不挂面，普通会话仍按输入通道二值确证", async () => {
   const root = makeTmp();
   mkdirSync(join(root, "cli", "db"), { recursive: true });
   const dbPath = makeSessionDb(join(root, "cli", "db"));
@@ -1727,6 +1727,8 @@ test("zcode: parent_id / surface 随 meta 透出（子会话归母与面判据�
   db.exec("ALTER TABLE session ADD COLUMN parent_id text");
   db.prepare("INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, ?)")
     .run("sess_dwf-dwfrun-1-actor_1_1", "C:\\work\\dbproj", "workflow actor", 1788000300000, 1788000309000, "sess_db1");
+  db.prepare("INSERT INTO session (id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?)")
+    .run("sess_cli", "C:\\work\\dbproj", "命令行会话", 1788000400000, 1788000409000);
   db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
     "msg_gui2", "sess_db1", 1788000301000, 1788000301000,
     JSON.stringify({ role: "user", metadata: { inputIntent: { clientId: "client-01j00000000000000000000" } } }),
@@ -1738,7 +1740,9 @@ test("zcode: parent_id / surface 随 meta 透出（子会话归母与面判据�
   assert.equal(byId.get("sess_dwf-dwfrun-1-actor_1_1").parentId, "sess_db1", "子会话带出母会话原始 id");
   assert.equal(byId.get("sess_db1").parentId, undefined, "母会话不挂 parentId");
   assert.equal(byId.get("sess_db1").surface, "desktop", "桌面输入通道判 desktop");
-  assert.equal(byId.get("sess_dwf-dwfrun-1-actor_1_1").surface, "cli", "无桌面输入通道判 cli");
+  assert.equal(byId.get("sess_cli").surface, "cli", "普通会话无桌面输入通道仍判 cli");
+  assert.equal(byId.get("sess_dwf-dwfrun-1-actor_1_1").surface, undefined,
+    "子会话不挂 surface：后台执行单元没有界面，不贴徽标也不计分面票");
 });
 
 test("opencode: scans its own db and builds a verified resume command", async () => {

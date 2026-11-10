@@ -2182,7 +2182,10 @@ function pruneStaleAggregateFaults(state, nowFn, ttlMs) {
   }
 }
 
-function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId, onTransition = null) {
+// resolveJournalInstanceId：写账那一刻再过一次实例身份映射（只对常驻 collector
+// 提供）。请求开始时父子映射可能还没就绪，而请求结束时通常已经就绪——账本与
+// 看板必须同源，否则冷窗口的请求会永久留下一把查不到母行的子会话键。
+function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId, onTransition = null, resolveJournalInstanceId = null) {
   const startTime = nowFn();
   // 后台请求（codex 引擎/GUI 自发流量——记忆整理、guardian、预热、线程标题/
   // 摘要生成等，由 openai-server 的分类器打上 meta.background）与全部展示面
@@ -2611,7 +2614,10 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
             stream: meta.stream === true,
             path: typeof meta.path === "string" ? meta.path : null,
             // 有则写：未注入实例的客户端不产生这个键，保持旧行形状不变。
-            ...(journalInstanceId !== null ? { instanceId: journalInstanceId } : {}),
+            // 冷窗口里落在子行上的账，写账时若映射已就绪就记到母行。
+            ...(journalInstanceId !== null
+              ? { instanceId: resolveJournalInstanceId?.(journalInstanceId) ?? journalInstanceId }
+              : {}),
           });
         } catch (error) {
           console.warn(`[agent-metrics] usage journal append failed: ${error.message}`);
@@ -3527,14 +3533,19 @@ export function createAgentMetricsCollector(options = {}) {
   };
   const SESSION_LOOKUP_TTL_MS = 15000;
   const sessionInfoCache = new Map(); // agentId -> { at, byId }
+  // 同一端点的并发刷新合并成一轮：面板读取、终端归属、relay 自持节拍可能同时
+  // 请求同一份会话表，重复的全表扫描既浪费又会让两张派生表被旧结果覆盖。
+  const sessionInfoPending = new Map(); // agentId -> Promise
 
-  // zcode 会话库派生出的两张同步表，请求热路径只读它们、绝不新起扫描：
+  // zcode 会话库派生出的三张同步表，请求热路径只读它们、绝不新起扫描：
   //   parentRowById: 子会话行 id → 母会话行 id（workflow actor / subagent /
   //     侧聊的 session.parent_id 正源；截断后同键多父＝判不准，整键丢弃）
   //   surfaceByRowId: 行 id → desktop / cli（会话扫描 inputIntent 的判据）
-  // 两份都随 loadSessionInfo("zcode") 的 15s 缓存刷新，面板轮询保持热。
+  //   childRowIds: 已知子会话行 id（后台执行单元没有界面，不贴徽标/不计票）
+  // 三份都随 loadSessionInfo("zcode") 的刷新重建，由 relay 自持节拍保持热。
   let zcodeParentRowById = new Map();
   let zcodeSurfaceByRowId = new Map();
+  let zcodeChildRowIds = new Set();
 
   function resolveZcodeParentRowId(rowId) {
     if (typeof rowId !== "string") return rowId;
@@ -3542,7 +3553,43 @@ export function createAgentMetricsCollector(options = {}) {
   }
 
   function zcodeSurfaceForRow(rowId, entry) {
+    // 子会话行既不认扫描面，也不认旧快照里随行落盘的面：它没有界面。
+    if (zcodeChildRowIds.has(rowId)) return null;
     return zcodeSurfaceByRowId.get(rowId) ?? entry?.zcodeSurface ?? null;
+  }
+
+  // zcode 派生表由 relay 自持：面板不轮询时也要保持热，否则 workflow actor /
+  // subagent 的请求会在冷窗口里铸成独立实例。15s 节拍由「近期有 zcode 会话
+  // 请求」驱动，60s 无流量即停；扫描走 loadSessionInfo 的缓存与在途合并，
+  // fire-and-forget，绝不进请求等待链。setInterval 注入口只为测试可控。
+  const ZCODE_REFRESH_IDLE_MS = 60_000;
+  let lastZcodeSessionRequestAt = 0;
+  let zcodeRefreshTimer = null;
+  const setRefreshTimer = options.setIntervalFn ?? ((fn, ms) => {
+    const handle = setInterval(fn, ms);
+    handle.unref?.();
+    return handle;
+  });
+  const clearRefreshTimer = options.clearIntervalFn ?? clearInterval;
+
+  function ensureZcodeRefreshTimer() {
+    if (zcodeRefreshTimer !== null) return;
+    zcodeRefreshTimer = setRefreshTimer(() => {
+      if (nowFn() - lastZcodeSessionRequestAt > ZCODE_REFRESH_IDLE_MS) {
+        clearRefreshTimer(zcodeRefreshTimer);
+        zcodeRefreshTimer = null;
+        return;
+      }
+      void loadSessionInfo("zcode").catch(() => {});
+    }, SESSION_LOOKUP_TTL_MS);
+  }
+
+  // 请求入口（会话头命中）与 relay 启动预热共用一个入口；后者避免「等第一笔
+  // 请求才建映射」留下冷窗口。两者都只打标并触发一轮异步刷新。
+  function noteZcodeSessionRequest() {
+    lastZcodeSessionRequestAt = nowFn();
+    ensureZcodeRefreshTimer();
+    void loadSessionInfo("zcode").catch(() => {});
   }
 
   // 冷缓存或旧快照里已经落在子行上的账，父子映射一到位就并回母行：目标行不存在
@@ -3577,10 +3624,22 @@ export function createAgentMetricsCollector(options = {}) {
     const now = nowFn();
     const cached = sessionInfoCache.get(agentId);
     if (cached !== undefined && now - cached.at < SESSION_LOOKUP_TTL_MS) return cached.byId;
+    const pending = sessionInfoPending.get(agentId);
+    if (pending !== undefined) return pending;
+    const task = readSessionInfo(agentId, now);
+    sessionInfoPending.set(agentId, task);
+    try {
+      return await task;
+    } finally {
+      sessionInfoPending.delete(agentId);
+    }
+  }
+
+  async function readSessionInfo(agentId, now) {
     const injected = sessionLookups[agentId] ?? null;
     let sessions = [];
-    // WB 通道多记一位「这轮扫描到底成没成」：空表（全部会话已关）与读不出
-    // 是两回事——生死判死只信前者。其余 agent 维持原契约（失败落空表）。
+    // 「读不出」与「会话真的全关了」是两回事：WB 通道据此做生死判死，
+    // zcode 通道据此决定要不要用空结果抹掉已建好的父子/面派生表。
     let scanOk = true;
     try {
       if (agentId === "workbuddy") {
@@ -3596,33 +3655,44 @@ export function createAgentMetricsCollector(options = {}) {
           sessions = metas;
         }
       } else {
-        sessions = injected !== null
+        const metas = injected !== null
           ? await injected()
           : await (await import("./session-scan.mjs")).defaultScanner.adapters.get(agentId).scan();
+        if (metas === null) scanOk = false;
+        else sessions = metas;
       }
     } catch {
       sessions = []; // a scan failure must never break the status read
-      if (agentId === "workbuddy") scanOk = false;
+      scanOk = false;
     }
     const byId = new Map();
     for (const meta of Array.isArray(sessions) ? sessions : []) {
       if (meta && typeof meta.id === "string") byId.set(meta.id, meta);
     }
     sessionInfoCache.set(agentId, { at: now, byId, ok: scanOk });
-    if (agentId === "zcode") {
+    // 一次 sqlite 读失败不能把已建好的映射清空：那会立刻开一个「子会话铸成
+    // 独立实例」的窗口，直到下一轮成功扫描才合上。失败轮保留上一版三张表。
+    if (agentId === "zcode" && scanOk) {
       const parents = new Map();
       const ambiguous = new Set();
       const surfaces = new Map();
+      const childRows = new Set();
       for (const meta of byId.values()) {
         const rowId = zcodeRowIdFromScanId(meta.id);
         if (rowId === null) continue;
+        const isChild = typeof meta.parentId === "string" && meta.parentId !== "";
+        if (isChild) childRows.add(rowId);
         // 面：会话扫描的 surface 是正源；旧形状（只有 originator）只认
         // desktop 确证，originator 为 null 不当 CLI 判据（判不出就不贴）。
         const surface = meta.surface === "desktop" || meta.surface === "cli"
           ? meta.surface
           : (typeof meta.originator === "string" && meta.originator.toLowerCase().includes("desktop") ? "desktop" : null);
-        if (surface === "desktop" || (surface === "cli" && !surfaces.has(rowId))) surfaces.set(rowId, surface);
-        if (typeof meta.parentId !== "string" || meta.parentId === "" || ambiguous.has(rowId)) continue;
+        // 子会话没有界面。parent_id 优先于面字段：旧版扫描会把「无用户输入
+        // 消息」确证成 cli，这里一律不落面、不贴徽标、不计卡头分面票。
+        if (!isChild && (surface === "desktop" || (surface === "cli" && !surfaces.has(rowId)))) {
+          surfaces.set(rowId, surface);
+        }
+        if (!isChild || ambiguous.has(rowId)) continue;
         const parentRowId = zcodeRowIdFromScanId(meta.parentId);
         if (parentRowId === null || parentRowId === rowId) continue;
         const previous = parents.get(rowId);
@@ -3636,6 +3706,7 @@ export function createAgentMetricsCollector(options = {}) {
       }
       zcodeParentRowById = parents;
       zcodeSurfaceByRowId = surfaces;
+      zcodeChildRowIds = childRows;
       foldZcodeChildRows();
     }
     return byId;
@@ -4455,7 +4526,7 @@ export function createAgentMetricsCollector(options = {}) {
       ? { ...meta, instanceId: normalized.id }
       : meta;
     const primary = trackAggregateRequest(targetState, effMeta, nowFn, recentSampleWindow, stability, journal, bucketAgentId,
-      (count) => publishActivity(bucketAgentId, null, count));
+      (count) => publishActivity(bucketAgentId, null, count), resolveZcodeParentRowId);
     // A request start already moved totalRequests/activeRequests: mark the
     // snapshot dirty so a restart mid-turn still carries the start forward.
     markMetricsDirty();
@@ -4494,13 +4565,19 @@ export function createAgentMetricsCollector(options = {}) {
       }
       if (norm.label !== null) entry.label = norm.label;
       if (bucketAgentId === "zcode") {
-        // 会话扫描的 surface 是正源（inputIntent 判据，与 netstat 快照是否命中
-        // 无关）；每个请求重判，换界面不钉死。扫不到才用请求 socket 属主谱系
-        // 兜底。两源都判不出就不贴面，下个请求再试；字段随行落盘，重启恢复的
-        // 行也能立刻补回。
-        const fromScan = zcodeSurfaceByRowId.get(instanceId) ?? null;
-        const surface = fromScan ?? zcodeSurfaceFromOwnerPid(meta.surfacePid, cachedProcessCounts);
-        if (surface !== null) entry.zcodeSurface = surface;
+        if (zcodeChildRowIds.has(instanceId)) {
+          // 后台子会话没有界面：清掉旧快照里可能被命令行兜底贴上的面，也不让
+          // socket 谱系从后门判回 cli。映射就绪后这行会并回母行，徽标归母行。
+          delete entry.zcodeSurface;
+        } else {
+          // 会话扫描的 surface 是正源（inputIntent 判据，与 netstat 快照是否命中
+          // 无关）；每个请求重判，换界面不钉死。扫不到才用请求 socket 属主谱系
+          // 兜底。两源都判不出就不贴面，下个请求再试；字段随行落盘，重启恢复的
+          // 行也能立刻补回。
+          const fromScan = zcodeSurfaceByRowId.get(instanceId) ?? null;
+          const surface = fromScan ?? zcodeSurfaceFromOwnerPid(meta.surfacePid, cachedProcessCounts);
+          if (surface !== null) entry.zcodeSurface = surface;
+        }
       }
       if (bucketAgentId === "workbuddy") {
         // 行活跃三选一之三的锚：记下扛过本行流量的引擎 pid。长工具调用期间会话
@@ -5702,12 +5779,12 @@ export function createAgentMetricsCollector(options = {}) {
       }
     }
 
-    // zcode 的父子映射与面判据由会话库扫描派生：有会话行时才过一次 15s 缓存，
-    // 让冷缓存期间落在子行上的账尽快并回母行、恢复的行尽早补上面徽标——不依赖
-    // 终端右栏是否打开（那条路才调 getZcodeSessionsForTerminalJoin）。fire-and-
-    // forget：绝不把一次 sqlite 全表扫描挂进看板 1s 轮询的 await 链，无会话行
-    // 的端点/测试也不会凭空付这次扫描。
-    if (instanceBuckets.zcode.size > 0) void loadSessionInfo("zcode");
+    // 兜底补刷：派生表已由 relay 自持节拍按 zcode 流量维持（见
+    // noteZcodeSessionRequest），面板读取时若正有会话行再顺带过一次 15s 缓存；
+    // 在途合并保证与节拍、终端归属三方并发时只扫一轮。fire-and-forget：绝不把
+    // 一次 sqlite 全表扫描挂进看板 1s 轮询的 await 链。冷缓存落在子行上的账由
+    // 每轮开头的 foldZcodeChildRows 补并，不依赖这次刷新恰好命中。
+    if (instanceBuckets.zcode.size > 0) void loadSessionInfo("zcode").catch(() => {});
 
     // Session-granular rows get user-readable titles from the endpoint's own
     // session scan (codex rollouts / opencode's db). Worth the walk only when
@@ -6429,6 +6506,8 @@ export function createAgentMetricsCollector(options = {}) {
     getWorkbuddySessionsForTerminalJoin,
     // zcode 子会话流量铸行时并回母行：同步读 15s 会话缓存派生表，不新起扫描。
     resolveZcodeParentRowId,
+    // 会话头命中时打标并触发一轮异步刷新；relay 启动时调一次做预热。
+    noteZcodeSessionRequest,
     getZcodeLiveRowIds,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of
@@ -6439,6 +6518,10 @@ export function createAgentMetricsCollector(options = {}) {
     // 撤掉本 collector 对模块级 WB 注册表反查的接管（测试同进程建多个 collector
     // 会互相覆盖；谁最后创建谁生效，销毁时恢复前一个，防泄漏）。
     dispose: () => {
+      if (zcodeRefreshTimer !== null) {
+        clearRefreshTimer(zcodeRefreshTimer);
+        zcodeRefreshTimer = null;
+      }
       workbuddySessionRowIdForPid = saveWbSessionRowIdForPid;
     },
   };

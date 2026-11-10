@@ -2166,6 +2166,114 @@ describe("createAgentMetricsCollector", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    // 普通会话与子会话共用同一副 CLI 进程谱系：前者照旧贴 TUI，后者不许贴。
+    // 旧版扫描会把「无用户输入消息」的子会话确证成 cli，socket 兜底也会把它
+    // 从后门判回 cli，两处都必须被 parent_id 压住。
+    const CLI_METAS = [
+      { id: "sess_93b5c395-8a19-4401-bb4c-ddbb096750a1", project: "C:\\work\\alpha", surface: "cli" },
+      { id: "sess_dwf-dwfrun-26c196b7-ea7f-4f1c-8a19-1df0699906a0-actor_1_1", project: "C:\\work\\alpha", surface: "cli", parentId: "sess_93b5c395-8a19-4401-bb4c-ddbb096750a1" },
+    ];
+    const fakeTimers = () => ({
+      setIntervalFn: () => ({ unref() {} }),
+      clearIntervalFn: () => {},
+    });
+
+    it("子会话行不贴 TUI，卡头也不计 TUI 票；普通 CLI 会话照旧", async () => {
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, CLI_SCAN),
+        nowFn: () => 10000,
+        zcodeSessionLookup: async () => CLI_METAS,
+        ...fakeTimers(),
+      });
+      await collector.scanProcesses();
+      await collector.getZcodeSessionsForTerminalJoin();
+      const mother = collector.startRequest({ agentId: "zcode", instanceId: MOTHER, model: "m1", stream: true, path: "openai", surfacePid: 6001 });
+      mother.recordEnd({ status: 200, usage: { prompt_tokens: 1 } });
+      // 子行保持在途，绕过 fold，才能单独验它的徽标。
+      collector.startRequest({ agentId: "zcode", instanceId: CHILD, model: "m1", stream: true, path: "openai", surfacePid: 6001 });
+      const card = await zcodeOf(collector);
+      const byId = new Map(card.instances.map((row) => [row.id, row]));
+      assert.equal(byId.get(MOTHER).surface, "TUI", "普通命令行会话仍贴 TUI");
+      assert.equal(byId.get(CHILD).surface, undefined, "后台子会话没有界面，不贴徽标（行不带面字段）");
+      assert.deepEqual(card.surfaces, [{ surface: "cli", label: "TUI", count: 1 }],
+        "卡头分面只数普通会话那一行");
+      collector.dispose();
+    });
+
+    it("面板不轮询时，relay 自持节拍仍把父子映射刷新到最新", async () => {
+      let t = 10000;
+      let metasNow = [];
+      let tick = null;
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => t,
+        zcodeSessionLookup: async () => metasNow,
+        setIntervalFn: (fn) => { tick = fn; return { unref() {} }; },
+        clearIntervalFn: () => { tick = null; },
+      });
+      collector.noteZcodeSessionRequest(); // 启动预热：此时会话库里还没有子会话
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(collector.resolveZcodeParentRowId(CHILD), CHILD);
+      metasNow = metas;                    // workflow 起跑，actor 会话写进会话库
+      t += 16_000;                        // 越过 15s 会话缓存
+      tick();                             // 仅自持节拍，全程不调面板/终端归属
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(collector.resolveZcodeParentRowId(CHILD), MOTHER,
+        "面板没开着也能把子会话并回母行，不留冷窗口");
+      collector.dispose();
+    });
+
+    it("会话库读失败保留上一版映射，不抹掉归母与子会话无面判据", async () => {
+      let t = 10000;
+      let fail = false;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, CLI_SCAN),
+        nowFn: () => t,
+        zcodeSessionLookup: async () => {
+          if (fail) throw new Error("db locked");
+          return CLI_METAS;
+        },
+        ...fakeTimers(),
+      });
+      await collector.scanProcesses();
+      await collector.getZcodeSessionsForTerminalJoin();
+      assert.equal(collector.resolveZcodeParentRowId(CHILD), MOTHER);
+      t += 16_000;
+      fail = true;
+      collector.noteZcodeSessionRequest();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(collector.resolveZcodeParentRowId(CHILD), MOTHER,
+        "读不出 ≠ 会话全关：已建好的父子映射继续生效");
+      collector.startRequest({ agentId: "zcode", instanceId: CHILD, model: "m1", stream: true, path: "openai", surfacePid: 6001 });
+      const card = await zcodeOf(collector);
+      assert.equal(card.instances.find((row) => row.id === CHILD).surface, undefined,
+        "子会话无面判据也一并保留，不会因一次读失败贴回 TUI");
+      collector.dispose();
+    });
+
+    it("冷窗口请求写账时按最新父子映射记到母行", async () => {
+      let t = 10000;
+      let metasNow = [];
+      const lines = [];
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, CLI_SCAN),
+        nowFn: () => t,
+        journal: { appendRequest: (row) => lines.push(row) },
+        zcodeSessionLookup: async () => metasNow,
+        ...fakeTimers(),
+      });
+      await collector.scanProcesses();
+      const req = collector.startRequest({ agentId: "zcode", instanceId: CHILD, model: "m1", stream: true, path: "openai" });
+      metasNow = metas;                    // 请求在途期间映射就绪
+      t += 16_000;
+      await collector.getZcodeSessionsForTerminalJoin();
+      req.recordEnd({ status: 200, usage: { prompt_tokens: 7 } });
+      assert.equal(lines.length, 1, "一个请求一行账");
+      assert.equal(lines[0].instanceId, MOTHER,
+        "账本与看板同源，不留查不到母行的子会话键");
+      collector.dispose();
+    });
   });
 
   it("routes Codex traffic by x-agent-id and counts the codex.exe engine family", async () => {
