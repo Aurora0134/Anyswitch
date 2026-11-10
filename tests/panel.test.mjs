@@ -2505,6 +2505,36 @@ describe("panel router logo asset", () => {
   });
 });
 
+describe("panel router wallpaper theme asset", () => {
+  // 壁纸主题取色引擎以经典脚本由 panel.html 引入，路由缺位会 404 使整个壁纸主题失效。
+  // 文件随仓库分发恒在，不做环境跳过；响应必须与 panel-ui 实物逐字节对上。
+  it("GET /panel/assets/wallpaper-theme.js serves the bundled script, including query params", async () => {
+    const expected = readFileSync(new URL("../panel-ui/wallpaper-theme.js", import.meta.url), "utf8");
+    const router = routerWith();
+    for (const path of ["/panel/assets/wallpaper-theme.js", "/panel/assets/wallpaper-theme.js?startup=1&v=2"]) {
+      const { req, res } = fakeReqRes(path, "GET", null, { host: "127.0.0.1:47820" });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
+      assert.equal(res.headers["cache-control"], "no-cache");
+      assert.ok(res.headers.etag, "响应带 ETag（size-mtimeMs 派生）");
+      assert.equal(res.headers.location, undefined);
+      assert.equal(res.body, expected);
+      assert.ok(res.body.includes("WallpaperTheme"), "经典脚本导出全局 WallpaperTheme");
+    }
+  });
+
+  it("HEAD /panel/assets/wallpaper-theme.js returns headers without redirect", async () => {
+    const router = routerWith();
+    const { req, res } = fakeReqRes("/panel/assets/wallpaper-theme.js", "HEAD", null, { host: "127.0.0.1:47820" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
+    assert.equal(res.headers["cache-control"], "no-cache");
+    assert.equal(res.headers.location, undefined);
+  });
+});
+
 describe("panel router xterm assets", () => {
   // 五枚 xterm 资产实物钉：静态路由必须与 node_modules 打包实物逐字节对上。环境装了
   // 依赖（装机/开发机）就必须真 200；包在而路径或文件名再漂移时 readFileSync 抛错转红，
