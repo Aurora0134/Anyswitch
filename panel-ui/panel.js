@@ -4318,6 +4318,88 @@ async function api(method, path, body) {
     };
   }
 
+  // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（导航 + telemetry-view），剥 id
+  // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
+  // 去掉，元素级 hidden（路由链卡/错误横幅等）是真实显隐态，保留。快照随进主题子页
+  // 抓一次即冻结——预览看样式不看数据；主题/亮暗切换经全局 token 即时作用于镜像。
+  // 「自定义主题」窗口的窗内预览复用同一构造（captureMirrorInto），token 改注预览
+  // 容器作用域。两个调用方（设置页的 captureSettingsMirror 与 initWallpaper 的预览
+  // 回调）一个在设置视图闭包内、一个在 IIFE 顶层，故声明只能放顶层：嵌回任一闭包，
+  // 另一侧就会 ReferenceError（窗内上传会被 catch 吞成「背景图读取失败」）。
+  function captureMirrorInto(viewport, sizer, scaleEl) {
+    const board = document.querySelector(".telemetry-view");
+    const main = document.querySelector("main.layout-container");
+    if (!viewport || !sizer || !scaleEl || !board || !main) return false;
+    const stripIds = (root) => {
+      root.removeAttribute("id");
+      for (const el of root.querySelectorAll("[id]")) el.removeAttribute("id");
+    };
+    scaleEl.textContent = "";
+    // 导航区按 UI 版本取真实形态：旧版是头行胶囊 tab 条；新版主导航在左栏，头行那条
+    // 已被 :root[data-ui-version="v2"] #mainHeadInner .view-tabs 隐去——剥了 id 的克隆体
+    // 不再命中那条规则，照样克隆就是给新版用户画出一条界面上不存在的旧版导航，改为
+    // 克隆一份迷你栏（fixed 通高形态由 :root[v2] .settings-mirror-scale .rail 剥成静态）。
+    const v2 = newUiEnabled();
+    let mirrorRailW = 0;
+    if (v2) {
+      const rail = document.querySelector(".rail");
+      if (rail) {
+        const railClone = rail.cloneNode(true);
+        stripIds(railClone);
+        scaleEl.appendChild(railClone);
+        // 栏宽按克隆实渲取值（宽档 216、窄栏随媒体查询收 72），栏与内容区间的
+        // 24px 间隔由镜像 CSS 的 gap 呈现，自然宽一并补回。
+        mirrorRailW = railClone.offsetWidth;
+      }
+      // 头行一并进镜像：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
+      // 只克隆栏+看板时预览的板内顶栏整条缺失。只克隆 #mainHeadInner（设置头行与
+      // 主头行同在 header.site-head 内，整克隆会把设置头行也带进来），外套新建的
+      // header.site-head 壳——皮肤玻璃底/底边线与 v2 的 48px 高都锚在 .site-head
+      // 祖先链上。剥 id 后 v2 收编头行的 id 锚规则（隐品牌组/旧 tab 条/头行按钮、
+      // 右对齐、栏让位）全部脱钩，由镜像作用域规则顶班（panel.css v2 集中段）；
+      // 剥 hidden——设置态真身主头行带 hidden 属性（switchView 互斥切换），不剥
+      // 克隆体整行不可见。
+      const mainHead = document.querySelector("#mainHeadInner");
+      if (mainHead) {
+        const headClone = mainHead.cloneNode(true);
+        stripIds(headClone);
+        headClone.removeAttribute("hidden");
+        const headWrap = document.createElement("header");
+        headWrap.className = "site-head";
+        headWrap.appendChild(headClone);
+        scaleEl.appendChild(headWrap);
+      }
+    } else {
+      const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
+      if (tabs) {
+        const tabsClone = tabs.cloneNode(true);
+        stripIds(tabsClone);
+        const tabsWrap = document.createElement("div");
+        tabsWrap.className = "settings-mirror-tabs";
+        tabsWrap.appendChild(tabsClone);
+        scaleEl.appendChild(tabsWrap);
+      }
+    }
+    const boardClone = board.cloneNode(true);
+    boardClone.removeAttribute("hidden");
+    stripIds(boardClone);
+    scaleEl.appendChild(boardClone);
+    // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
+    // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
+    // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开（预览随内容全高）。
+    const mainCs = getComputedStyle(main);
+    const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
+    const availW = viewport.clientWidth;
+    if (!naturalW || !availW) return false;
+    scaleEl.style.width = naturalW + "px";
+    const s = availW / naturalW;
+    const naturalH = scaleEl.offsetHeight;
+    scaleEl.style.transform = `scale(${s})`;
+    sizer.style.width = naturalW * s + "px";
+    sizer.style.height = naturalH * s + "px";
+    return true;
+  }
+
   // 设置全页视图与各项开关
   function initSettingsView() {
     const keepAliveToggle = $("keepAliveToggle");
@@ -4530,85 +4612,7 @@ async function api(method, path, body) {
       if (which === "advanced") { dataBundle.enter(); return backupLocation.enter(); }
       if (which === "about") return about.enter();
     }
-    // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（导航 + telemetry-view），剥 id
-    // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
-    // 去掉，元素级 hidden（路由链卡/错误横幅等）是真实显隐态，保留。快照随进主题子页
-    // 抓一次即冻结——预览看样式不看数据；主题/亮暗切换经全局 token 即时作用于镜像。
-    // 「自定义主题」窗口的窗内预览复用同一构造（captureMirrorInto），token 改注预览
-    // 容器作用域。
-    function captureMirrorInto(viewport, sizer, scaleEl) {
-      const board = document.querySelector(".telemetry-view");
-      const main = document.querySelector("main.layout-container");
-      if (!viewport || !sizer || !scaleEl || !board || !main) return false;
-      const stripIds = (root) => {
-        root.removeAttribute("id");
-        for (const el of root.querySelectorAll("[id]")) el.removeAttribute("id");
-      };
-      scaleEl.textContent = "";
-      // 导航区按 UI 版本取真实形态：旧版是头行胶囊 tab 条；新版主导航在左栏，头行那条
-      // 已被 :root[data-ui-version="v2"] #mainHeadInner .view-tabs 隐去——剥了 id 的克隆体
-      // 不再命中那条规则，照样克隆就是给新版用户画出一条界面上不存在的旧版导航，改为
-      // 克隆一份迷你栏（fixed 通高形态由 :root[v2] .settings-mirror-scale .rail 剥成静态）。
-      const v2 = newUiEnabled();
-      let mirrorRailW = 0;
-      if (v2) {
-        const rail = document.querySelector(".rail");
-        if (rail) {
-          const railClone = rail.cloneNode(true);
-          stripIds(railClone);
-          scaleEl.appendChild(railClone);
-          // 栏宽按克隆实渲取值（宽档 216、窄栏随媒体查询收 72），栏与内容区间的
-          // 24px 间隔由镜像 CSS 的 gap 呈现，自然宽一并补回。
-          mirrorRailW = railClone.offsetWidth;
-        }
-        // 头行一并进镜像：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
-        // 只克隆栏+看板时预览的板内顶栏整条缺失。只克隆 #mainHeadInner（设置头行与
-        // 主头行同在 header.site-head 内，整克隆会把设置头行也带进来），外套新建的
-        // header.site-head 壳——皮肤玻璃底/底边线与 v2 的 48px 高都锚在 .site-head
-        // 祖先链上。剥 id 后 v2 收编头行的 id 锚规则（隐品牌组/旧 tab 条/头行按钮、
-        // 右对齐、栏让位）全部脱钩，由镜像作用域规则顶班（panel.css v2 集中段）；
-        // 剥 hidden——设置态真身主头行带 hidden 属性（switchView 互斥切换），不剥
-        // 克隆体整行不可见。
-        const mainHead = document.querySelector("#mainHeadInner");
-        if (mainHead) {
-          const headClone = mainHead.cloneNode(true);
-          stripIds(headClone);
-          headClone.removeAttribute("hidden");
-          const headWrap = document.createElement("header");
-          headWrap.className = "site-head";
-          headWrap.appendChild(headClone);
-          scaleEl.appendChild(headWrap);
-        }
-      } else {
-        const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
-        if (tabs) {
-          const tabsClone = tabs.cloneNode(true);
-          stripIds(tabsClone);
-          const tabsWrap = document.createElement("div");
-          tabsWrap.className = "settings-mirror-tabs";
-          tabsWrap.appendChild(tabsClone);
-          scaleEl.appendChild(tabsWrap);
-        }
-      }
-      const boardClone = board.cloneNode(true);
-      boardClone.removeAttribute("hidden");
-      stripIds(boardClone);
-      scaleEl.appendChild(boardClone);
-      // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
-      // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
-      // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开（预览随内容全高）。
-      const mainCs = getComputedStyle(main);
-      const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
-      const availW = viewport.clientWidth;
-      if (!naturalW || !availW) return false;
-      scaleEl.style.width = naturalW + "px";
-      const s = availW / naturalW;
-      const naturalH = scaleEl.offsetHeight;
-      scaleEl.style.transform = `scale(${s})`;
-      sizer.style.width = naturalW * s + "px";
-      sizer.style.height = naturalH * s + "px";
-      return true;
-    }
+
     function captureSettingsMirror() {
       captureMirrorInto($("settingsMirrorViewport"), $("settingsMirrorSizer"), $("settingsMirrorScale"));
     }
@@ -11404,6 +11408,7 @@ async function api(method, path, body) {
     const previewBox = get("wallpaperPreview");
     const previewImage = get("wallpaperPreviewImage");
     const previewDim = get("wallpaperPreviewDim");
+    const advancedBox = get("wallpaperAdvanced");
     // —— 已生效侧 ——
     let pixels = null;       // 解码后的降采样像素：surface 重取色免二次解码
     let blobUrl = null;
@@ -11540,6 +11545,9 @@ async function api(method, path, body) {
     function renderPreview() {
       if (!staged || !previewBox) return;
       previewBox.classList.toggle("has-image", staged.hasImage);
+      // 「高级选项」调的三根滑杆只对有图态有意义：与预览同帧随暂存图有无收起，
+      // 空态与窗内移除后都不露出（HTML 静态初值同为 hidden，首帧不闪）。
+      if (advancedBox) advancedBox.hidden = !staged.hasImage;
       if (!staged.hasImage) return;
       if (previewImage && staged.blobUrl) previewImage.style.backgroundImage = `url("${staged.blobUrl}")`;
       applyStagedFx();
