@@ -10355,6 +10355,24 @@ async function api(method, path, body) {
         // 内切保活分支在这里失败：切换态还盖着，撤层并把被拆掉的旧流接回来，不留一屏
         // 加载态。POST 落地那条出口由 armTerminalBootingOverlay 交接切换层，不走这里。
         if (typeof abortTerminalSwitchLoading === "function") abortTerminalSwitchLoading();
+        // 「等落点」空 id 页签的孤儿收尾（archive-refill 失败路径）：新会话没建成，
+        // 页签没有落点可接。名下已无后台保活登记的孤儿页签销掉（零页签落空态，与
+        // 关页签同观感）；仍有后台登记的保留——左栏行可点回、⊕ 可再补，与 attach
+        // 吸空页签同口径。typeof 闸护测试桩环境（本函数被多沙盒抽取）。
+        if (placement === "viewport" && typeof terminalViewportActive === "function") {
+          const orphanViewport = terminalViewportActive();
+          if (orphanViewport && !orphanViewport.terminalId
+            && !(Array.isArray(orphanViewport.background) && orphanViewport.background.length > 0)) {
+            if (typeof terminalSwitchLog === "function") terminalSwitchLog("refill-orphan-drop", { viewport: orphanViewport.id });
+            if (typeof terminalViewportDestroy === "function") terminalViewportDestroy(orphanViewport.id);
+            if (typeof renderTerminalPreviewTabs === "function") renderTerminalPreviewTabs();
+            if (typeof terminalViewports !== "undefined" && terminalViewports.length === 0) {
+              if (typeof closeAllTerminalStreams === "function") closeAllTerminalStreams();
+              if (typeof renderTerminalEmptyState === "function") renderTerminalEmptyState();
+              if (typeof renderTerminalRail === "function") renderTerminalRail();
+            }
+          }
+        }
         // 失败清点：续接新建失败即撤乐观高亮——点亮的那行没换成，继续说它
         // 选中就是说谎。不带 resume 的新建（⊕/新建终端）不碰 pending：没有哪一次
         // 点击预测过它，别误伤别人在飞的选中。
@@ -14034,11 +14052,19 @@ async function api(method, path, body) {
       if (!terminalCloseTerminal(live.id)) return;
       // 归档的是当前正看着的会话（2026-11-08 用户裁决）：关掉后不回落别的页签、
       // 不落空态，同工作区原位补一条新会话。cwd 取左栏分组键 project（用户认知的
-      // 「当前工作区」），缺失回落终端 cwd，两者皆空不补（维持既有回落）。close 已把
-      // 本地会话记录摘掉，core 落「无活跃终端」分支：新会话挂进本页签（页签守恒）；
-      // 失败与轮询竞态由既有机制兜底（在飞伞、placeTerminal 兜底新建、失败 toast）。
+      // 「当前工作区」），缺失回落终端 cwd，两者皆空不补（维持既有回落）。close 只摘
+      // 本地会话记录，页签上还挂着死 id：1s 同步会把死 id 页签连同名下后台保活登记
+      // 一起摘除，在飞伞拦得住补建拦不住摘除——页签守恒在该窗口失效，名下后台会话
+      // 随后被自动补建逐条变成新页签（2026-11-10 kimi 归档页签 1→5 实锤）。补新发
+      // 起前先把页签置成「等落点」空 id 态（同步规则明确保留该态）：页签与后台登记
+      // 都活到新会话落座；创建失败由 createAgentTerminal 的 catch 清孤儿页签。
       // 后台页签的会话归档不补——不打扰用户正看着的画面，页签消失维持现状。
       if (live.id === activeTerminalPreviewId && (session.project || live.cwd)) {
+        const refillViewport = terminalViewportActive();
+        if (refillViewport && refillViewport.terminalId === live.id) {
+          refillViewport.terminalId = "";
+          saveTerminalViewports();
+        }
         const cwd = session.project || live.cwd;
         if (typeof terminalSwitchLog === "function") terminalSwitchLog("archive-refill", { endpoint: session.endpoint, conversation: session.id, terminal: live.id, cwd });
         terminalRailSwitchOrCreateCore({ agentId: session.endpoint, cwd });

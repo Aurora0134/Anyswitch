@@ -221,6 +221,12 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
     const terminalRailViewPrefs = viewPrefs;
     let activeTerminalPreviewId = activeTerminalId;
     const window = windowImpl;
+    // 视口桩（2026-11-10 页签 1→5 修复）：补新分支会读活跃页签并把死 id 摘成
+    // 「等落点」空态——桩提供两件真函数的形状，状态留给外部断言。
+    let terminalViewports = [{ id: "vp-1", terminalId: activeTerminalId || null, background: [] }];
+    let terminalViewportActiveId = activeTerminalId ? "vp-1" : null;
+    function terminalViewportActive() { return terminalViewports.find((row) => row.id === terminalViewportActiveId) || null; }
+    function saveTerminalViewports() { log.viewportSaves = (log.viewportSaves || 0) + 1; }
     function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
     function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
     function panelError(err, fallback) { return fallback; }
@@ -248,6 +254,7 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
       archive: () => terminalRailArchiveSession(session.id),
       unarchive: (endpoint, id) => terminalRailUnarchiveSession(endpoint, id),
       prefs: () => terminalRailPrefs,
+      viewports: () => terminalViewports,
     };
   `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs, openSessions, windowImpl, activeTerminalId);
   return { fn, log };
@@ -506,6 +513,15 @@ describe("S1 会话归档（finding 1a）", () => {
           assert.equal(log.switchLogs.length, 1, "留痕恰好一拍");
           assert.ok(log.switchLogs[0].event === "archive-refill" && log.switchLogs[0].detail.cwd === "C:\\dev\\alpha",
             "「这条页签怎么自己新建了会话」可归因");
+        });
+
+        it("补新发起前页签先摘死 id 进「等落点」态（2026-11-10 页签 1→5 根因：同步只摘挂死 id 的页签、撤其后台登记）", () => {
+          const { fn, log } = runArchive(REFILL_SESSION, { openSessions: [REFILL_OPEN], windowImpl: OK_CONFIRM, activeTerminalId: "t-9" });
+          fn.archive();
+          assert.deepEqual(fn.viewports(), [{ id: "vp-1", terminalId: "", background: [] }],
+            "死 id 不留在页签上——空 id 等落点态被同步规则保留，页签与后台登记活到新会话落座");
+          assert.equal(log.viewportSaves, 1, "摘 id 即落盘");
+          assert.deepEqual(log.refills, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }], "补新照常发起");
         });
 
         it("project 缺失回落终端 cwd；两者皆空不补（维持既有回落）", () => {
@@ -4222,9 +4238,9 @@ describe("视口化验收（页签＝视口）", () => {
   // 同理控制空白终端直连 POST（/api/terminal/sessions，「+」菜单与左栏「新建终端」
   // 无 agent 分支共用）；inFlightCounter
   // 在沙盒里声明真在飞计数（缺省不声明＝typeof 闸落「未抑制」，与既有用例同义）。
-  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, blankCreateImpl = null, inFlightCounter = false } = {}) {
+  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, blankCreateImpl = null, inFlightCounter = false, railHistory = null } = {}) {
     const log = { creates: [], switchBodies: [], closes: [], confirms: [], toasts: [], renders: 0, tabs: 0, empty: 0, rails: 0, streams: 0 };
-    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl, blankCreateImpl };
+    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl, blankCreateImpl, railHistory };
     const createdTerminal = (body) => {
       state.created += 1;
       const id = `t-created-${state.created}`;
@@ -4249,6 +4265,13 @@ describe("视口化验收（页签＝视口）", () => {
       ${inFlightCounter ? "let terminalCreateInFlight = 0;" : ""}
       let terminalRailSelectPending = null;
       let terminalRailSelectSeq = 0;
+      // 归档真跑状态（2026-11-10 页签 1→5 修复）：terminalRailArchiveSession 的
+      // 读写面与 runArchive 同一组，缺省空史（不归档的用例碰不到）。
+      let terminalRailHistory = state.railHistory;
+      let terminalRailPrefs = { archived: [], removedGroups: [] };
+      let terminalRailFlipMode = "instant";
+      const terminalRailMotionArmed = false;
+      let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
       const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
       const terminalDoneUnread = new Map();
       const terminalPrevWorking = new Map();
@@ -4317,6 +4340,10 @@ describe("视口化验收（页签＝视口）", () => {
           log.closes.push(id);
           return Promise.resolve({ ok: true });
         }
+        if (method === "POST" && path === "/api/terminal/rail/archive") {
+          log.railArchives = (log.railArchives || []).concat(body);
+          return Promise.resolve({ ok: true });
+        }
         return Promise.reject(new Error("unexpected " + method + " " + path));
       }
       // 契约级富化桩：按 agents 负载里同 instanceId 的 activeRequests 置 working（真口径
@@ -4350,6 +4377,8 @@ describe("视口化验收（页签＝视口）", () => {
       ${extractFn("confirmTerminalAddMenu")}
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
+      function renderTerminalRailHistory() { log.railHistoryRenders = (log.railHistoryRenders || 0) + 1; }
+      function applyTerminalRailViewChoice() {}
       function enterTerminalSwitchLoading() {
         log.switchLoading = (log.switchLoading || []).concat("enter");
         log.order = (log.order || []).concat("switch_enter");
@@ -4375,6 +4404,12 @@ describe("视口化验收（页签＝视口）", () => {
       ${extractFn("terminalRailSwitchOrCreate")}
       ${extractFn("terminalRailActivateSession")}
       ${extractFn("terminalRailCloseSession")}
+      ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailMotionEnabled")}
+      ${extractFn("terminalRailSnapshotMotion")}
+      ${extractFn("terminalRailMountExitGhosts")}
+      ${extractFn("terminalRailRerenderExitFlip")}
+      ${extractFn("terminalRailArchiveSession")}
       return {
         beat: (items) => { rebuildTerminalBackendSessions(items); enrichTerminalSessions(state.agents.agents); },
         setAgents: (payload) => { state.agents = payload; },
@@ -4405,6 +4440,8 @@ describe("视口化验收（页签＝视口）", () => {
         // 分支与页签条「+」菜单分支。
         createBlank: () => terminalRailCreateTerminal(),
         confirmAdd: () => confirmTerminalAddMenu(),
+        // 归档真跑驱动口（2026-11-10 页签 1→5 修复）：归档即杀＋原位补新全链。
+        archive: (id) => terminalRailArchiveSession(id),
       };
     `)(state, log);
     // 沙盒内的 api 在调用时才读 state.*，这里补上外部发放的终端快照即可（new Function
@@ -5293,6 +5330,103 @@ describe("视口化验收（页签＝视口）", () => {
       assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-1", "viewport-2", "viewport-3"],
         "正常路径一个视口都不销毁");
       assert.equal(sandbox.viewports()[2].terminalId, "t-x", "挂上动作本身照常");
+    });
+  });
+
+  // 2026-11-10 事故复刻（kimi 归档页签 1→5，terminal-switch.log 实锤 archive-refill →
+  // viewport-fallback-create → viewport-autocreate ×4）：归档正看会话的补新与 1s 同步
+  // 竞态——死 id 页签被同步摘除时连名下后台保活登记一并撤销，自动补建随后把 4 条
+  // 后台会话逐条补成新页签。修复＝补新发起前置「等落点」空 id 态（同步规则保留该
+  // 态），创建失败由 createAgentTerminal 的 catch 清孤儿页签。全链真跑，不摆态。
+  describe("归档补新×同步竞态（2026-11-10 页签 1→5）", () => {
+    const ARCH = { endpoint: "kimi", id: "s-arch", title: "归档目标", project: "C:\\dev\\arch", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-arch.jsonl" };
+    const RAIL = { endpoint: "kimi", sessions: [ARCH], fetchedAt: 1, error: null };
+    const HIST = (id) => ({ endpoint: "kimi", id, title: "会话 " + id, project: "C:\\dev\\" + id, file: "C:\\Users\\fixture\\.kimi\\sessions\\" + id + ".jsonl" });
+    // busy 内切产生的终端形态（createImpl 返回值，与 createdTerminal 同构）。
+    const TC = (n, resume) => ({
+      id: "tc-" + n, label: "Kimi Code", shell: "powershell", cwd: "C:\\dev\\alpha",
+      agentId: "kimi", agentName: "Kimi Code", agent: AGENT("inst-tc-" + n),
+      resume: resume || null, boundConversation: { endpoint: "kimi", id: "c-tc-" + n }, status: "running",
+    });
+    // 事故前置态：1 页签显示归档目标会话的终端（末轮内切目标＝s-arch）、名下压 4 条
+    // 运行中后台保活。逐轮走真 busy 内切（判定门判忙 → 保活内切 → 新终端挂同页签、
+    // 旧终端进后台）。refillCreate 只接补新那次 POST（无 resume），构造轮照常落地。
+    const seedRefillViewport = async (refillCreate) => {
+      let seq = 0;
+      const harness = viewportHarness({
+        railHistory: RAIL,
+        inFlightCounter: true,
+        createImpl: (body) => {
+          if (body && body.resume) { seq += 1; return Promise.resolve(TC(seq, body.resume)); }
+          return refillCreate(body);
+        },
+      });
+      const { sandbox } = harness;
+      sandbox.beat([TERM_ITEM("t-b1")]);
+      for (const row of [HIST("s-2"), HIST("s-3"), HIST("s-4"), ARCH]) {
+        sandbox.setAgents(agentsWorking(seq === 0 ? "inst-t-b1" : "inst-tc-" + seq));
+        sandbox.switchTo(row);
+        await flush();
+      }
+      return harness;
+    };
+
+    it("竞态拍：死终端离宿主、补新在飞——页签守恒，后台登记不动", async () => {
+      let resolveRefill;
+      const refillCreate = () => new Promise((resolve) => { resolveRefill = resolve; });
+      const { sandbox, log } = await seedRefillViewport(refillCreate);
+      assert.equal(sandbox.viewports().length, 1, "前提：单页签");
+      assert.equal(sandbox.background().length, 4, "前提：名下压 4 条运行中后台保活");
+      assert.equal(sandbox.activeTerminal(), "tc-4", "前提：正看归档目标会话的终端");
+      // 种子构造的首次 beat 本就有一条合法 autocreate（页签出生方式），之后不得再有。
+      const autocreatesSeeded = (log.switchEvents || []).filter((row) => row.event === "viewport-autocreate").length;
+      sandbox.archive("s-arch");
+      await flush();
+      assert.deepEqual(log.closes, ["tc-4"], "归档即杀先落地");
+      // 竞态拍＝事故时序：/close 已落地（宿主表里死终端消失）、补新 POST 还在飞。
+      // 修复前这一拍摘掉死 id 页签并撤销名下 4 条后台登记，伞放行后 4 条被逐条
+      // 补成新页签（1→5）；修复后页签进等落点态，同步整步不动它。
+      sandbox.beat([TERM_ITEM("t-b1"), TERM_ITEM("tc-1"), TERM_ITEM("tc-2"), TERM_ITEM("tc-3")]);
+      assert.equal(sandbox.viewports().length, 1, "页签不被摘（等落点态被同步保留）");
+      assert.equal(sandbox.viewports()[0].terminalId, "", "空 id 等落点");
+      assert.equal(sandbox.background().length, 4, "后台保活登记原封不动");
+      resolveRefill(TC(5, null));
+      await flush();
+      assert.equal(sandbox.viewports().length, 1, "新会话挂进本页签（不走兜底新建）");
+      assert.equal(sandbox.viewports()[0].terminalId, "tc-5", "落座即挂本页签");
+      assert.equal(sandbox.background().length, 4, "4 条后台会话保持后台");
+      assert.equal(sandbox.activeTerminal(), "tc-5", "显示指针换到新会话");
+      assert.ok(!(log.switchEvents || []).some((row) => row.event === "viewport-fallback-create"), "无兜底新建");
+      assert.equal((log.switchEvents || []).filter((row) => row.event === "viewport-autocreate").length, autocreatesSeeded,
+        "无新增自动补建（页签爆炸的源头）");
+    });
+
+    it("补新创建失败（名下无后台保活）：孤儿页签销掉，零页签落空态", async () => {
+      const solo = TERM_ITEM("t-solo", { resume: { endpoint: "kimi", id: "s-arch" } });
+      const { sandbox, log } = viewportHarness({
+        items: [solo],
+        railHistory: RAIL,
+        createImpl: () => Promise.reject(Object.assign(new Error("HTTP 500"), { serverCode: "internal" })),
+      });
+      sandbox.beat([solo]);
+      sandbox.archive("s-arch");
+      await flush();
+      assert.equal(sandbox.viewports().length, 0, "孤儿页签已销（没有落点也没有后台可守）");
+      assert.equal(log.empty, 1, "零页签落空态渲染（与关最后一个页签同观感）");
+      assert.ok(log.toasts.some((row) => row.msg === "无法启动这个终端"), "失败 toast 照出");
+      assert.ok((log.switchEvents || []).some((row) => row.event === "refill-orphan-drop"), "孤儿收尾留痕一拍");
+    });
+
+    it("补新创建失败（名下压后台保活）：孤儿页签保留，后台登记不动", async () => {
+      const refillCreate = () => Promise.reject(Object.assign(new Error("HTTP 500"), { serverCode: "internal" }));
+      const { sandbox, log } = await seedRefillViewport(refillCreate);
+      sandbox.archive("s-arch");
+      await flush();
+      assert.equal(sandbox.viewports().length, 1, "孤儿页签保留（左栏行可点回、⊕ 可再补）");
+      assert.equal(sandbox.viewports()[0].terminalId, "", "仍等落点");
+      assert.equal(sandbox.background().length, 4, "后台登记不动");
+      assert.equal(log.empty, 0, "不落空态");
+      assert.ok(log.toasts.some((row) => row.msg === "无法启动这个终端"), "失败 toast 照出");
     });
   });
 });
