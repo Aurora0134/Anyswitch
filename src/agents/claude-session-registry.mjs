@@ -1,7 +1,7 @@
 // Claude Code 会话注册表读侧：pid → 会话 id 的权威映射。
 //
-// CC 2.1 的交互会话在 ~/.claude/sessions/ 下登记 <pid>.json（真机取证：
-// {pid, sessionId, cwd, startedAt, procStart, kind:"interactive", ...}，另有
+// CC 2.1 的交互会话在 ~/.claude/sessions/ 下登记 <pid>.json
+// （{pid, sessionId, cwd, startedAt, procStart, kind:"interactive", ...}，另有
 // 同前缀的 <pid>.<hash>.key 对等认证文件）。同一条对话被第二个进程
 // resume/continue 附着时，两个进程各发各的请求——逐 PID 成行会把一条对话
 // 拆成两张卡（2026-11-01 夜间报障：单会话两张 TUI 卡、各带活跃数据）。本模块

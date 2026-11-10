@@ -72,7 +72,7 @@ const BUDGET_QUANTUM = 256;
 // 版本由 terminal-screen.test.mjs 的全码点对账用例钉住——客户端那份表一变，那里就红）。
 // 为什么必须同源：镜像只在「后台切回 / F5」时上屏一次，宽度少算一列，应用用
 // 「相对移动 + 空格覆盖」擦行时就少擦一格，行尾留下擦不掉的旧字符——即用户看到的
-// 悬空碎片（2026-10-26 取证：dsh 的 ⚓ 客户端占 2 列、旧手写表按 1 列算）。
+// 悬空碎片（dsh 的 ⚓ 客户端占 2 列、旧手写表按 1 列算）。
 const ZERO_WIDTH_RANGES = [
   [0x0, 0x1f], [0x7f, 0x9f], [0x300, 0x36f], [0x483, 0x489], [0x591, 0x5bd],
   [0x5bf, 0x5bf], [0x5c1, 0x5c2], [0x5c4, 0x5c5], [0x5c7, 0x5c7], [0x600, 0x605],
@@ -930,7 +930,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 冒号子参数（ITU T.416 风格）单独成族：4:x 是下划线样式、58:x 是下划线颜色。
   // 其余冒号族（含 38:/48: 的冒号形态）一律安全忽略——不入列，也不许被拆成数字码：
   // 旧实现把冒号当垃圾丢掉再把数字拼起来（\e[4:3m → 43），回放里凭空多出一条黄底
-  // （2026-10-18 取证，opencode 2.0.32 的 4:3 序列触发）。
+  // （opencode 2.0.32 的 4:3 序列触发）。
   function applySgrColon(token) {
     const parts = token.split(":");
     const family = Number(parts[0]);
@@ -981,7 +981,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       if (p === 38 || p === 48 || p === 58) {
         // 38;5;n / 38;2;r;g;b — carry the whole colour run as one attribute token.
         // 58（下划线色）走同一套：子参数散着入列会让回放序列被客户端当成独立指令
-        // （58;2;171;178;194;40;90;30 的尾巴 = 黑底 + 黑字，2026-10-18 取证）。
+        // （58;2;171;178;194;40;90;30 的尾巴 = 黑底 + 黑字，2026-10-18）。
         const kind = sub(i + 1);
         let next = null;
         if (kind === 5) { next = `${p};5;${sub(i + 2)}`; i += 2; }
@@ -990,7 +990,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
           // 颜色是赋值不是叠加：push 前摘掉同槽旧 token（扩展或基础形态都算）。
           // 残留叠加会把回放序列化撑成一条超长 SGR，超过 xterm 的 32 参数上限后
           // 被截，末尾 38;2 缺 RGB 按零补齐解析成纯黑——dsh 状态栏一帧连设 7 色、
-          // 切回后「近白灰字变纯黑」即此形态（2026-10-17 取证）。
+          // 切回后「近白灰字变纯黑」即此形态（2026-10-17）。
           setSgr(p === 38
             ? sgr.filter((c) => { const n = Number(c); return !String(c).startsWith("38;") && !(n >= 30 && n <= 37) && !(n >= 90 && n <= 97); })
             : p === 48
@@ -1164,7 +1164,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // ("?<params><intermediates><final>"); keep the digits for dispatch.
   // 返回 INCOMPLETE 表示「输入在这里用完了、序列还没结束」：调用方要把 start 之后
   // 的尾巴留到下一块。旧实现一律返回 input.length 当作已消费，等于把 ESC 头连同
-  // 参数一起丢掉、把参数当普通文字画进屏幕——实测真实 resume 抓包的 22 个块边界里
+  // 参数一起丢掉、把参数当普通文字画进屏幕——真实 resume 流的 22 个块边界里
   // 有 3 个正好劈在序列中间，屏幕上就多出一行 "session[79Gwiah" 之类的乱码。
   function consumeEscape(input, start) {
     const len = input.length;
@@ -1454,7 +1454,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   // 渲染快照（跨宿主重启的恢复原料）。落盘原料从「128KB 字节尾」换成「渲染结果」：
   // 字节尾的头是任意块边界，全屏 TUI 的帧靠相对移动＋原地覆盖定位，头一裁锚点就没了，
-  // 恢复画面必然是中间态（2026-10-29 取证：dsh 尾巴 130,703 字节里换行 0 个、擦除 0 个，
+  // 恢复画面必然是中间态（dsh 尾巴 130,703 字节里换行 0 个、擦除 0 个，
   // 重建出的画面顶部截断、滚动区 0 行、残影成片）。渲染结果是自足真值：恢复＝直接重建
   // 镜像，与在线回放共用同一条正确性来源。行格式复用 serializeRow 的 SGR 标注串
   // （历史行的 _text 缓存直接复用），重建走模块级 deserializeSnapshotRow。

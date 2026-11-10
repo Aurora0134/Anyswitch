@@ -246,7 +246,7 @@ describe("attributeTerminalSessions", () => {
 
     it("binds the latest-active row when the sole TUI works outside the shell cwd", () => {
       // opencode 2.1.x 的 TUI 可以显示任意项目里的会话（项目切换 / 恢复上次
-      // 项目），会话目录不必等于终端启动目录——真机取证 2026-10-27：终端启动
+      // 项目），会话目录不必等于终端启动目录——2026-10-27：终端启动
       // 目录 C:\Users\me\Desktop\work，TUI 正在干活的项目却是另一个 worktree。
       // 机器上只有这一个 opencode 交互进程时，全部会话行都归它所有，「最近活跃」
       // 就是它正在显示的那一个。

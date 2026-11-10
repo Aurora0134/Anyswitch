@@ -1762,7 +1762,7 @@ function createGrokAdapter(roots) {
 
 // ---------------------------------------------------------------------------
 // workbuddy — ~/.workbuddy/projects/<cwd-slug>/<sessionId>.jsonl（2026-10-31
-// 实测）。cwd-slug 是项目
+// 确认）。cwd-slug 是项目
 // 路径小写、`\`→`-`（`C:\Users\me\proj` → `c-users-me-proj`）；同名目录
 // <sessionId>/ 只放 subagents/ 与 tool-results/，是会话的旁挂数据，不是会话
 // 本身，因此扫描只认 <project>/<sessionId>.jsonl 这一层。
@@ -1775,8 +1775,8 @@ function createGrokAdapter(roots) {
 // 同名目录，绝不碰任何全局索引/数据库（grok 先例）。
 // ---------------------------------------------------------------------------
 
-// 事件里的一轮对话：role 可能在顶层也可能在 message 内，content 同理（实测
-// 用户块元素 type 为 input_text；助手块形态未实测，交给 extractText 兼容）。
+// 事件里的一轮对话：role 可能在顶层也可能在 message 内，content 同理（用户块
+// 元素 type 为 input_text；助手块形态未确认，交给 extractText 兼容）。
 // 非 message 事件（reasoning / function_call* / credit-usage / ai-title …）
 // 一律返回 null——它们是引擎记账，不是人打的字或最终回答。
 function workbuddyMessage(value) {
@@ -1790,7 +1790,7 @@ function workbuddyMessage(value) {
 }
 
 // 中段 ai-title 的定向扫描。头 60 / 尾 60 行都没命中的大文件里，标题事件就可能
-// 停在中间（真机 1343 行会话的 ai-title 落在第 119 行），只读两个窗口永远看不
+// 停在中间（1343 行会话的 ai-title 落在第 119 行），只读两个窗口永远看不
 // 见。这里按 16KB 块流式再走一遍整份文件，但不做整文件解析：只有含字面量
 // "ai-title" 的行才 JSON.parse，其余行连解析都不做；命中的最后一次即最新标题
 // （标题生成与改名都是追加的独立事件）。解码同样经 StringDecoder，跨块多字节
@@ -1914,7 +1914,7 @@ function createWorkbuddyAdapter(roots) {
         }
       }
     }
-    // 头窗与尾窗都没命中：标题事件也可能停在长会话的中段（真机 1343 行、ai-title
+    // 头窗与尾窗都没命中：标题事件也可能停在长会话的中段（1343 行、ai-title
     // 在第 119 行），这时补一次定向流式扫描——只看含 "ai-title" 的行，取最后一次。
     if (aiTitle === null) aiTitle = readLastAiTitle(path);
 

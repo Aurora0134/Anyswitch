@@ -145,9 +145,9 @@ function latestActiveSessionRowId(feed, instanceRow) {
 
 // Whether this terminal session runs every interactive opencode TUI on the
 // machine. opencode 2.1.x decoupled a TUI's session directory from its launch
-// directory (project switching / restoring the last project — live forensics
-// 2026-10-27: the terminal's launch directory and the live session's project
-// differed), so the cwd bridge misses exactly the
+// directory (project switching / restoring the last project — the terminal's
+// launch directory and the live session's project differ), so the cwd bridge
+// misses exactly the
 // sessions a user is working in and the right rail falls empty. When a single
 // TUI exists it owns every session row of the endpoint — the most recently
 // active one is the session it is displaying. With a second TUI running the

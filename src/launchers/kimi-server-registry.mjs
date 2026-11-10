@@ -3,8 +3,8 @@
 // 背景：Kimi Code 的每一个「带 server 的界面」启动时都会在自己家目录的
 // server/instances/ 下登记一条 <server_id>.json（字段 server_id / pid / host /
 // port / started_at / heartbeat_at / host_version，多实例共用同一份家目录、各取
-// 下一个空闲端口）。写入方一共四条，全部经过客户端里唯一的那个 register 调用点
-// （2026-09-23 读自实装的 @moonshot-ai/kimi-code 安装包）：`kimi web`、
+// 下一个空闲端口）。写入方一共四条，全部经过客户端里唯一的那个 register 调用点：
+// `kimi web`、
 // `kimi rc`（远程控制面板）、在 TUI 里把当前会话交给浏览器（TUI 退出后同一个
 // 进程就地变成 server），以及内嵌同一份 server 代码的官方桌面端。纯交互式 TUI
 // 不起 server、不留记录。于是这条注册表是 anyswitch 现有所有端点里第一份
@@ -25,11 +25,11 @@ import { join } from "node:path";
 import { readdir, readFile } from "node:fs/promises";
 
 // 心跳时效：一条登记的 heartbeat_at 距 now 超过这个窗口就当旧档丢弃。取值依据
-// 是客户端自己的节律——它每 15 秒重写一次这条登记（安装包内 createInstanceRegistry
+// 是客户端自己的节律——它每 15 秒重写一次这条登记（客户端 createInstanceRegistry
 // 的默认心跳间隔，与有没有活动无关，进程活着就写），90 秒相当于连漏 6 拍才判旧：
 // 够容忍一次唤醒或一次慢盘，又远小于一个进程号被新起的 kimi 复用、冒充成另一张面
 // 的时间窗。不能指望客户端替我们清档：它的清理只发生在「下一次有人登记」时，判据
-// 是进程号死活而非心跳时间，而且桌面端退出时根本不删自己那条（真机 2026-09-23
+// 是进程号死活而非心跳时间，而且桌面端退出时根本不删自己那条（2026-09-23
 // 12:55 那次退出后，登记文件原样留在盘上）。旧档被丢掉时那张面退化成终端档，
 // 而不是多出一个界面。
 export const KIMI_REGISTRY_HEARTBEAT_MAX_AGE_MS = 90 * 1000;

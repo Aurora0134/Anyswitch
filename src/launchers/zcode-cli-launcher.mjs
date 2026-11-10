@@ -2,8 +2,7 @@
 // through the Anyswitch relay against an Anyswitch-owned provider config slot,
 // so the CLI never reads or writes the desktop client's ~/.zcode data.
 //
-// The isolation mechanism (verified against the CLI source,
-// apps/zcode-cli packages/cli/src/provider-runtime-env.ts):
+// The isolation mechanism:
 //   - ZCODE_PERSONAL_PROVIDER_CONFIG_FILE points the CLI at the slot file
 //     <LOCALAPPDATA>\Anyswitch\zcode-cli\provider_config.json instead of the
 //     desktop's ~/.zcode/v2/provider_config.json;
@@ -110,7 +109,7 @@ export async function startOpenAIRelay(options = {}) {
 }
 
 // ZCODE_BUILTIN_PROVIDER_CONFIG_FILE 的取值：优先发行树内随包的 builtin 配置
-// （dist 实测布局：bin\zcode.mjs 的兄弟 agent\provider\zcode-builtin.json），
+// （bin\zcode.mjs 的兄弟 agent\provider\zcode-builtin.json），
 // 推导不到再回落到源码树 config/provider/zcode-builtin.json（与 CLI 自己的
 // resolveBundledZCodeBuiltinProviderConfig 同一相对层级）。两者都没有则报错
 // 不启动——这比让 CLI 把 builtin 缓存静默物化进 ~/.zcode/v2/runtime 好。

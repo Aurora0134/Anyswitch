@@ -18,8 +18,7 @@
 //     (same treatment as codex) → hotReload false. Anyswitch never touches
 //     ~/.grok/AGENTS.md — hence a dedicated file under rules/.
 //   - workbuddy: Electron desktop shell + bundled CodeBuddy Code CLI. No
-//     WorkBuddy code path reads ~/.workbuddy/AGENTS.md (verified against the
-//     installed app.asar and CLI bundle); the user-level injection surface is
+//     WorkBuddy code path reads ~/.workbuddy/AGENTS.md; the user-level injection surface is
 //     the rules dir `<config dir>/rules` (default `~/.workbuddy/rules`), whose
 //     *.md files load as user rules when no `paths` frontmatter is present
 //     (alwaysApply defaults true, single-file cap 40k chars). Read once at

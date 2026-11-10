@@ -127,7 +127,7 @@ describe("requestModelIsTextOnly", () => {
     // 声明纯文本：预判子开关关着也照判（声明是事实，不是猜测）。
     assert.equal(requestModelIsTextOnly({ inputModalities: ["text"] }, "whatever", false), true);
     assert.equal(requestModelIsTextOnly({ inputModalities: ["text"] }, "whatever", true), true);
-    // 声明支持图片：名单命中也被声明推翻（ccswitch resolve 语义）。
+    // 声明支持图片：名单命中也被声明推翻（声明优先语义）。
     assert.equal(requestModelIsTextOnly({ inputModalities: ["text", "image"] }, "glm-5.3", true), false);
   });
 
@@ -163,11 +163,11 @@ describe("looksLikeTextOnlyRejection", () => {
       headers: { "content-type": "application/json" },
     });
 
-  it("matches the ccswitch wording samples (real gateway phrasings)", async () => {
+  it("matches real gateway refusal phrasings", async () => {
     // 常见明确措辞。
     assert.equal(looksLikeTextOnlyRejection(400, "This model does not support image input"), true);
     assert.equal(looksLikeTextOnlyRejection(400, "this model does not support image input"), true);
-    // 火山方舟（issue #5025）：全程不出现 image，且英文缺三单 s。
+    // 火山方舟：全程不出现 image，且英文缺三单 s。
     assert.equal(looksLikeTextOnlyRejection(400, "Model only support text input Request id: 021783"), true);
     assert.equal(looksLikeTextOnlyRejection(400, "Model only supports text input"), true);
     // 反序列化报错把 image_url 当未知变体。

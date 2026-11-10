@@ -25,7 +25,7 @@
 // it. The pointer is managed state but lives outside the managed block —
 // top-level keys must precede every table, so it can never sit between the
 // markers. A pointer naming any other file is the user's own catalog and is
-// left untouched (codex++ semantics); an empty model set writes neither file
+// left untouched; an empty model set writes neither file
 // nor pointer, because codex hard-fails config load on an empty catalog.
 //
 // The model set is NOT part of config.toml's text, so the config result and
@@ -172,7 +172,7 @@ export function collectCodexCatalogModels(providers) {
 //   - support_verbosity / supports_image_detail_original: request knobs only
 //     OpenAI's own backend honors
 // multi_agent_version is forced to "v2" even though the template entry leaves
-// it null — without it codex disables the subagent tools (codex++ #2161).
+// it null — without it codex disables the subagent tools.
 export function buildCodexModelCatalog(models, template, catalog = null) {
   const entries = [];
   let index = 0;

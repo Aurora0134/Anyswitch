@@ -488,15 +488,15 @@ export function zcodeRowIdFromScanId(rawId) {
 // WorkBuddy 会话行（id "workbuddy-sess-<产品会话 id>"）。身份正源是产品自己的
 // 进程注册表（~/.workbuddy/sessions/<pid>.json 的 sessionId）：runtime 是池化的
 // （一个会话在一次运行里可换多个 pid），pid 锚不住行，注册表才是把「同一会话
-// 的新 pid」连回「旧行」的钥匙。CLI 发请求会带 X-Conversation-ID 头（bundle
-// 实证：内部头无条件注入，CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即该
+// 的新 pid」连回「旧行」的钥匙。CLI 发请求会带 X-Conversation-ID 头（内部头
+// 无条件注入，CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即该
 // 会话 id——请求侧与扫描侧两个入口都收敛到同一行 id。
 export const WORKBUDDY_SESSION_ROW_PREFIX = "workbuddy-sess-";
 
 // WB 会话行活跃窗：会话文件（~/.workbuddy/projects/<slug>/<sessionId>.jsonl）最近
 // 一次写入距今多久内算「会话在跑」。跑回合时每事件一行持续追加，回合一停文件
 // 即静默——这是「会话真的在跑」的外部真值（注册表与进程存活都分不出预取/待释放
-// 的过渡态 runtime，2026-11-01 实测「活跃会话数+1」幽灵卡）。2 分钟档：覆盖事件
+// 的过渡态 runtime，2026-11-01 出过「活跃会话数+1」幽灵卡）。2 分钟档：覆盖事件
 // 间隔（含普通工具往返）；长工具的深度静默期由「扛过流量的引擎 pid 还活着」那条
 // 保行（见行生命周期处的活跃三选一）。
 const WORKBUDDY_SESSION_ACTIVE_FILE_MS = 2 * 60 * 1000;
@@ -515,7 +515,7 @@ const SESSION_ROW_PREFIXES = Object.freeze({
   zcode: ZCODE_SESSION_ID_PREFIX,
   // WorkBuddy 的行身份是产品自己的会话注册表（~/.workbuddy/sessions/<pid>.json
   // 的 sessionId），不是 pid：CLI 内核是池化 runtime，同一会话在一次运行里可以
-  // 换任意多个 pid（回合间回收、预热池领养，真机 2026-11-01：同会话 20 分钟走
+  // 换任意多个 pid（回合间回收、预热池领养，2026-11-01：同会话 20 分钟走
   // 过 3 个 pid），pid 行会把每次换代都当成「死一个实例、生一个零账实例」——
   // 面板上就是幽灵卡。注册表由内核自己写，sessionId 跨 pid 稳定，是唯一能当
   // 行身份的锚。
@@ -615,7 +615,7 @@ const AGENT_IMAGE_BUCKETS = [
   ["qoder.exe", "qoder"],
   // Qoder CLI 的官方形态是 Bun 单文件 qodercli.exe（resolveQoderCliExecutable，
   // 终端一键启动用的就是它）：不收进认领表的话 CLI 进程永远不进 detected feed，
-  // 虚拟终端的 Qoder 会话归属不到端点（2026-10-15 取证）。它自带的
+  // 虚拟终端的 Qoder 会话归属不到端点。它自带的
   // `--internal-sites-mcp` 内部子进程同镜像名，计数在 qoder 桶分支里滤掉。
   ["qodercli.exe", "qoder"],
   ["codex.exe", "codex"],
@@ -641,7 +641,7 @@ const AGENT_IMAGE_BUCKETS = [
   // 不到它（桌面端在进程面全盲）。
   ["kimi code.exe", "kimi"],
   // WorkBuddy 桌面端同样是 Electron 包，且一个实例起九个同镜像进程（主进程 /
-  // --type= 辅助 / daemon / sidecar / agent 运行时，真机 2026-10-31 取证）。
+  // --type= 辅助 / daemon / sidecar / agent 运行时）。
   // 镜像名只负责把整族收进桶；谁是会话由 workbuddy 桶分支的命令行谓词裁决。
   ["workbuddy.exe", "workbuddy"],
   // The official DSH desktop app is Electron too, but its image name must not
@@ -932,7 +932,7 @@ export function kimiSurfaceLabel(surface) {
 
 // Kimi 家目录（resolveKimiCodeHome：KIMI_CODE_HOME 优先，否则 ~/.kimi-code）
 // 之下的 node 行一律不是会话。桌面端把托管的插件/MCP 帮手进程放在这棵树下
-// 孵化（真机 2026-10-22：桌面主进程 → `cmd /c bin\kimi-cu-mcp.cmd` →
+// 孵化（2026-10-22：桌面主进程 → `cmd /c bin\kimi-cu-mcp.cmd` →
 // `node %USERPROFILE%\.kimi-code\plugins\managed\kimi-cu-win\bin\launch.mjs`，
 // computer-use 插件）：那条命令行里的 `.kimi-code\` 恰好包含 node 谓词的
 // 裸安装 token `kimi-code\`，`dist\main.mjs` + `kimi` 的回退分支同样会被
@@ -1108,7 +1108,7 @@ export function summarizeKimiSurfaces(procCounts) {
 //   判不出（父指针缺席、链走出去、链上是家族内的非主进程）→ 不贴面，不回落
 //   成产品名。
 const WORKBUDDY_IMAGE = "workbuddy.exe";
-// 内置 CLI 入口的路径段。`/` 与 `\` 两种分隔符都认（真机命令行两种都出现过）。
+// 内置 CLI 入口的路径段。`/` 与 `\` 两种分隔符都认（命令行两种都出现过）。
 const WORKBUDDY_RUNTIME_RE = /cli[\\/]bin[\\/]codebuddy/;
 // 同镜像的家族成员：Electron 辅助、后台 daemon、sidecar 与 CLI 入口。判「应用
 // 开着」时要把它们排除——主进程的形状就是这些标记一个都没有。它们可能在 GUI
@@ -1331,7 +1331,7 @@ function readWorkbuddySessionRecord(pid, configRoot) {
 }
 
 // 注册表说这个进程是不是预热池里的空闲备用：`kind` 明说 prewarm，或没有会话 id
-// （空串 / 缺席 / 非字符串）都算没在服务。真机那条 `--prewarm` 行注册表是
+// （空串 / 缺席 / 非字符串）都算没在服务。在跑的 `--prewarm` 行注册表是
 // kind:"interactive" 且有 sessionId——它正在服务，照常计数。
 export function workbuddySessionIsIdlePrewarm(record) {
   if (record === null || typeof record !== "object") return false;
@@ -1429,12 +1429,12 @@ function createEmptyProcessScan() {
   return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), claudeSessionByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, unclaimedNodeRows: 0, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
 }
 
-// Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
-// 取证 1.37937.1.0），镜像落在 C:\Program Files\WindowsApps\Claude_<版本>_…\
+// Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，
+// 1.37937.1.0 一带），镜像落在 C:\Program Files\WindowsApps\Claude_<版本>_…\
 // 下——同一形态约 5 个进程，逐 PID 成行会把一个桌面端拆成一排幽灵分身。
 // 桌面托管引擎按 <根>\claude-code\<semver>\…\claude.exe 落位，semver 与 exe
-// 之间至多垫一层目录：旧布局零层（真机取证 Claude-3p\claude-code\2.1.246\
-// claude.exe），Desktop ≥2.37337 起垫一层构建哈希目录（真机取证 2.1.295\
+// 之间至多垫一层目录：旧布局零层（Claude-3p\claude-code\2.1.246\
+// claude.exe），Desktop ≥2.37337 起垫一层构建哈希目录（2.1.295\
 // d2e29494ec83\claude.exe，连盘上残留的旧版目录也被重组为该形态），更深的
 // 嵌套不在白名单形状内。根只认
 // %LOCALAPPDATA%\Claude-3p、%LOCALAPPDATA%\Claude、%USERPROFILE%\.claude
@@ -1459,9 +1459,9 @@ export function claudeDesktopForm(commandLine) {
 
 // 环境检测（environment-service）对本地版本无清单可读的原生 CLI
 // （PROBE_VERSION_CLIENTS：qoder-cli、grok）探版本的方式是 spawn `<exe>
-// --version`——进程秒退（qodercli 实测 0.32s）。扫描若照常认领会把它当活
+// --version`——进程秒退（qodercli 0.32s）。扫描若照常认领会把它当活
 // 客户端：占位实例行起行、processCount 1，看板卡翻「运行中/待命」一个扫描
-// 窗口再回落（2026-10-24 取证：重启后页面重载触发首次检测，恰好撞上扫描
+// 窗口再回落（2026-10-24：重启后页面重载触发首次检测，恰好撞上扫描
 // 节奏，看板闪悬空 qoder 卡数秒）。只豁免无歧义形状——探针是唯一「参数
 // 只有 --version、后面再无别的」的调用；真实会话不可能裸 --version 常驻
 //（它打印即退），漏判不会掩盖会话，误判方向只会多算不漏算。
@@ -1476,7 +1476,7 @@ function isVersionProbeRow(commandLine) {
 }
 
 // 命令行读不出的行。这不只发生在 tasklist 降级轮：进程正被系统收尾时，可信轮
-// （带命令行的 CIM 行 dump）也会把 CommandLine 报成空。2026-10-26 实测：
+// （带命令行的 CIM 行 dump）也会把 CommandLine 报成空。2026-10-26：
 // qodercli 探针 0.32s 的生命里最后一段正是这个状态——对探针进程高频采样 20 次，
 // 12 次看到「先读到 --version、随后读空」，且空值只在收尾阶段出现。只看形状的
 // isVersionProbeRow 认不出这种行，它于是落进「认不出即计数」的兜底，把一次环境
@@ -1657,7 +1657,7 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
       }
     } else if (bucket === "opencode") {
       // The interactive opencode.exe spawns a same-image child running
-      // `opencode.exe serve --service`. Live forensics 2026-10-16 (netstat +
+      // `opencode.exe serve --service`. 2026-10-16 (netstat +
       // journal + agents payload) settled the division of labor: the serve
       // child is the process that holds the relay keep-alive connection and
       // issues ALL LLM traffic, while the interactive process owns the
@@ -1772,7 +1772,7 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
         if (pid) result.grokPids.add(pid);
       }
     } else if (bucket === "workbuddy") {
-      // 同名九进程（真机 2026-10-31 取证）：主进程是 GUI 宿主，
+      // 同名九进程：主进程是 GUI 宿主，
       // --type= 四个辅助、daemon、sidecar 都只是家族成员；只有 agent 运行时
       // （命令行含 cli\bin\codebuddy、且无 --type=）算会话。镜像名只决定进桶，
       // 计数必须过命令行谓词——否则一个客户端报九次。裸 --version 是环境检测
@@ -1796,7 +1796,7 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
     } else if (bucket === "pi") {
       // pi 原生形态：镜像名即会话进程，accept-by-name 直接计数（无命令列的
       // tasklist 降级轮同此，与其余端点的残差一致）。原生二进制的辅助子进程
-      // 形状无本机取证，先不设过滤——宁可多算不漏算，等真形态落地再收。
+      // 形状未确认，先不设过滤——宁可多算不漏算，等真形态落地再收。
       // 双计防护的数据面：原生启动器若拉起 node 跑包路径（「pi.exe 父＋node
       // 子」谱系），node 子行会同时命中 isPiNode——pid 先记入 nativePiPids，
       // 循环后的裁决把这类 node 行压掉，一个会话只算一次。
@@ -1887,7 +1887,7 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
           result.kimiSurfaceByPid.set(pid, "tui");
         }
       }
-      // WorkBuddy 终端形态（真机 2026-10-31）：launcher 用 process.execPath 再 spawn
+      // WorkBuddy 终端形态（2026-10-31）：launcher 用 process.execPath 再 spawn
       // `node <install>\resources\app.asar.unpacked\cli\bin\codebuddy`，镜像名是
       // node.exe——只认 WorkBuddy.exe 的判据对这条形态全盲（终端里起的会话一张行
       // 都没有）。入口路径与桌面运行时的谓词同一个（WORKBUDDY_RUNTIME_RE）；launcher
@@ -4768,7 +4768,7 @@ export function createAgentMetricsCollector(options = {}) {
 
   // Claude 桌面形态收敛：MSIX 桌面壳（单形态约 5 个进程）与桌面托管引擎
   // 同属一个桌面形态，逐 PID 成行会把一个桌面端拆成一排幽灵分身（Claude
-  // 3p 桌面端验证现场实测约 5 行）。扫描按镜像路径分型（claudeDesktopPids），
+  // 3p 桌面端现场约 5 行）。扫描按镜像路径分型（claudeDesktopPids），
   // 本轮读取时把分型命中的会话折成一条合成行 claude-desktop：计数类求和，
   // 速率/错误/模型/spark 类取 lastSeen 最新的有值成员，startedAt 取最早、
   // lastSeen 取最晚，形态标注 surface: "desktop" 供面板贴 Desktop 徽标。
@@ -5533,7 +5533,7 @@ export function createAgentMetricsCollector(options = {}) {
               } else {
                 // 缺席分支的流量锚钉：子代理会话行（进程内子会话）注册表永远
                 // 缺席，请求间隙按缺席收行＝行下场、下一笔请求再起新行、计数
-                // 清零的抖动（真机：同一行 65→3 请求）。扛过本行流量的引擎 pid
+                // 清零的抖动（同一行 65→3 请求）。扛过本行流量的引擎 pid
                 // 还活着＝这条运行还有活进程在服务，行不下场；进程退场（或从未
                 // 解析出锚）照旧缺席轮次确认收口。空闲 TTL 不受此钉影响——子代
                 // 理结束后行至多再留一个 5 分钟空闲档，不是永挂。

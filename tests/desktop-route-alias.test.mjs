@@ -8,21 +8,20 @@ import {
   resolveDesktopAlias,
 } from "../src/panel/desktop-route-alias.mjs";
 
-// 桌面拾取器的品牌黑名单钉样（golden pin），字面逐字取自 Claude Desktop
-// 2.9939.2 app.asar（.vite/build/index.chunk-6aZ703Pj.js，拾取器两道闸共用
-// 同一条）。这个测试不读 asar，探不到官方换表——它锁的是模块常量：任何人
-// 改 DESKTOP_PICKER_BLOCKLIST 都必须同步更新这份手抄副本，改的时候按上面
-// 出处对照官方 asar 重核；官方真换表而模块没人动时，这里不会红（那种漂移
+// 桌面拾取器的品牌黑名单钉样（golden pin）：Claude Desktop 2.9939.2 的拾取器
+// 两道闸共用同一条。这个测试探不到官方换表——它锁的是模块常量：任何人
+// 改 DESKTOP_PICKER_BLOCKLIST 都必须同步更新这份钉样副本，改的时候对照
+// 新版桌面的拾取器行为重核；官方真换表而模块没人动时，这里不会红（那种漂移
 // 靠升级 Claude Desktop 时对别名层的人工重核兜底）。
-const ASAR_BLOCKLIST_SOURCE =
+const DESKTOP_BLOCKLIST_PIN =
   "ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\\bling\\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code|\\bunic\\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\\.nova|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\\d|\\bk2\\.|\\bm2\\.|jamba|arctic|solar|mercury|zamba|kat-coder|\\bds-|dpsk";
 
 test("品牌黑名单钉样：模块正则锁死为钉样字面，且无 i 标志（过滤前先转小写）", () => {
   assert.equal(DESKTOP_PICKER_BLOCKLIST.flags, "", "模块按小写输入测试，正则本身不带 i 标志");
   assert.equal(
     DESKTOP_PICKER_BLOCKLIST.source,
-    ASAR_BLOCKLIST_SOURCE,
-    "黑名单字面被改动：按本文件头出处对照官方 asar 重核后，再同步这份钉样",
+    DESKTOP_BLOCKLIST_PIN,
+    "黑名单字面被改动：对照新版桌面的拾取器行为重核后，再同步这份钉样",
   );
 });
 

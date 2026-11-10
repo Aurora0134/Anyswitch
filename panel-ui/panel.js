@@ -38,7 +38,7 @@
 
   // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick }（单钮）或
   // opts.actions = [{ label, onClick }, …]（多钮）在文案后追加可点小字——点中即
-  // 瞬时收起 toast 再执行 onClick。动效（dsh 同款）：入场 -6px 滑入＋淡入
+  // 瞬时收起 toast 再执行 onClick。动效：入场 -6px 滑入＋淡入
   // 160ms（CSS 基座过渡）；驻留期满先转 1s 淡出（is-leaving）再落暗；动作点击
   // 瞬时消失（is-gone 压掉过渡）。
   function toast(msg, isErr, opts) {
@@ -6383,12 +6383,12 @@ async function api(method, path, body) {
   // 改塌缩触发时机，上面两条锁存规则（用户钉住 / 系统收拢标记）原样。
   const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
   const terminalHollowStreak = new Map();
-  // done（跑完未读）标记：dsh completed/completionUnread 的前端同构。后台会话
+  // done（跑完未读）标记。后台会话
   // working→idle 翻转且非当前聚焦 → 置位（见 noteTerminalWorkingStatus）；清除＝
   // 聚焦该终端（每拍聚焦即清）/点它的会话栏行/向它发键入/会话退出或关闭。
   // 上一拍状态表 terminalPrevWorking 用来识别真实观测到的翻转：初拍（刷新后
   // 首见、无上一拍）不置——不拿「刷新前它在跑」的想象补标。两张表都是内存态、
-  // 不持久化：面板刷新即清（与 dsh 同口径——completed 本就是事件派生非持久）。
+  // 不持久化：面板刷新即清（completed 本就是事件派生非持久）。
   const terminalDoneUnread = new Map();
   const terminalPrevWorking = new Map();
   // 回合闸（terminalSessionBusyFromSignals 的状态位）：输出活跃窗只在本轮对话回合
@@ -6838,8 +6838,8 @@ async function api(method, path, body) {
   // agent 执行工具命令的整段时间请求数是零，只看请求会把在跑的命令判成空闲
   // （页签/会话栏误显空闲＋内切判定门误放行的同源根因）。窗取 5s：跑命令的进度
   // 输出会持续刷新它，等输入静默几秒后回落空闲。窗与时刻可注入（vm 沙盒测试）。
-  // 输出窗的输入面有两处污染，各用一只豁免窗收窄（dsh 的 running 是「回合在跑」
-  // 布尔位、信号在 agent 进程内部拿不到，这里是在它缺席下的替代信号）：
+  // 输出窗的输入面有两处污染，各用一只豁免窗收窄（「回合在跑」的信号在 agent 进程
+  // 内部拿不到，这里是替代信号）：
   //  · 孵化窗 15s——新 shell 的 banner 与续接重放（宿主把盘上尾巴回放给终端）
   //    实测 6–12s，出生 15s 内的输出活跃一律不当「在跑」（出生≠活跃），窗值取
   //    实测上界再留一拍余量；出生点锚 spawnedAt（进程生日，内切/复活跟着走），
@@ -6847,7 +6847,7 @@ async function api(method, path, body) {
   //  · 键入抑制窗 2s——PTY 对键入的回显会走 emit 顶进输出窗，把「用户在打字」
   //    误归因成「agent 在跑」；距最近一次键入 2s 内的输出活跃不判忙（回显随
   //    键入即时出现，静默 2s 后的输出才是程序自己的）。
-  // 已知残留（替代信号的精度天花板，dsh 靠回合信号无此面）：空闲仍持续重绘的
+  // 已知残留（替代信号的精度天花板）：空闲仍持续重绘的
   // TUI（htop 之类）在回合内会被输出启发误判忙；完全静默的长命令显示层回落空闲
   // 由服务端 /switch 的杀前进程树探测（switch-guard）兜底——既有，显示层不追求
   // 完美。另注：本函数只回答「输出窗内出过字节」，已归属 agent 会话还须过回合闸
@@ -6992,7 +6992,7 @@ async function api(method, path, body) {
   // done（跑完未读）标记的翻转观测器——两个 working 写点（SSE apply 经上面的
   // terminalActivityApplyToSession／1s 轮询 enrichTerminalSessions）算出 status 后
   // 都先过这里再落定：非聚焦会话真实观测到 working→idle 翻转 → 置 doneUnread
-  // （dsh completed：后台回合跑完且未被查看）；working 再起（idle→working）同拍
+  // （后台回合跑完且未被查看）；working 再起（idle→working）同拍
   // 清旧标——跑起来了就不再是「已完成」，下次翻完成再重新置；聚焦即清（每拍
   // 聚焦即清，不等事件：看着＝已读）；会话退出（backendState.status exited，
   // 含输入路径写回的 exited）不置标且清既有标。上一拍状态按会话 id 记模块级
@@ -7907,8 +7907,8 @@ async function api(method, path, body) {
   // 钳制派发的 scroll 事件不带任何标记，xterm 拿它当「用户滚动」写进 ydisp；此后
   // ydisp≠ybase，新输出不再带动视口，画面卡死在接近顶端的位置不自行恢复。
   // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态下、最近没有用户
-  // 语义对齐 Claude Desktop（实证规格，
-  // 2026-10-20 用户拍板）：空区出现时不自动折回——视口原地不动，空白带留在屏上；用户
+  // 语义（2026-10-20
+  // 用户拍板）：空区出现时不自动折回——视口原地不动，空白带留在屏上；用户
   // 上滚翻看历史时「地板」随滚动逐拍收紧（trim 只缩不扩），空区被吃掉而视口不跳；滚回
   // 地板即恢复跟随，落点恰好是修剪后的内容底。用户主动离底的各条通路都先记意图——滚轮/
   // 拖滚动条/触摸/选择拖动，以及键盘翻页（xterm 把 Shift+PageUp/PageDown 译为
@@ -7954,7 +7954,7 @@ async function api(method, path, body) {
     root.addEventListener("keydown", (event) => {
       if (event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")) noteIntent();
     }, { capture: true, passive: true });
-    // 地板（CD 的 hold/trim 在缓冲层的等价物）：跟随态的停泊行，恒夹在 [内容底, 真尾]。
+    // 地板：跟随态的停泊行，恒夹在 [内容底, 真尾]。
     // 初始=真尾（空白带完全可见）。trim 见下方 scroll 监听；内容增长时地板随内容底
     // 同幅平移（屏上可视空白恒定，/ 菜单类向下延伸的绘制始终可见）；收缩不动地板。
     let floor = term.buffer.active.baseY;
@@ -7966,7 +7966,7 @@ async function api(method, path, body) {
       if (lastEffBottom !== null && eff > lastEffBottom) floor += eff - lastEffBottom;
       lastEffBottom = eff;
       if (floor > buffer.baseY) floor = buffer.baseY;
-      if (floor < eff) floor = eff; // 内容长过地板=地板被顶起（CD 的 settle 语义）
+      if (floor < eff) floor = eff; // 内容长过地板=地板被顶起（settle 语义）
     };
     // 底部基准：开关关=缓冲真尾（与历史行为逐位一致）；开关开=地板。
     const bottomBase = () => (terminalBottomAlignEnabled() ? floor : term.buffer.active.baseY);
@@ -8012,7 +8012,7 @@ async function api(method, path, body) {
     // 写入也不是用户滚动——闩住期间护栏零动作。回放每来一块重置静默定时器，
     // 静默一拍后清闩并锚一次；没有回放数据时同一定时器兜底清闩，不会永久闩住。
     // 清闩只恢复「进入回放前本来就在跟随」的会话：用户在读历史时回放结束绝不
-    // 拽底（CD：处理白区时视窗自己不动）。
+    // 拽底（处理白区时视窗自己不动）。
     let armedFollow = true;
     terminalReplayRestoreArm = () => {
       if (replayTimer === null) {
@@ -9317,7 +9317,7 @@ async function api(method, path, body) {
       const rawBrandId = session.agent?.endpointId || session.agentId || "";
       const brandId = /^[\w-]+$/.test(rawBrandId) ? rawBrandId : "";
       const tabIcon = brandId ? `<span class="terminal-tab-brand" data-terminal-brand="${brandId}">${shellBadge}</span>` : shellBadge;
-      // 页签指示位（dsh 四态机的行内子集）：槽内容与会话栏行首槽同一判定
+      // 页签指示位：槽内容与会话栏行首槽同一判定
       // （terminalRailStateSlotHtml——working 转圈／非聚焦的 done 绿点／空，勿写
       // 两份口径）；idle 不画任何图标（灰点退役）。指示位是常驻定宽槽（沿用会话
       // 栏行首槽原则），转圈出现/消失不推挤页签文字；title 只在工作态挂「进行中」
@@ -11385,17 +11385,17 @@ async function api(method, path, body) {
   // prefers-reduced-motion 一律不挂开关——拖窗口不是用户在「看收展手法」，不该跟着滑。
   const RAIL_ANIM_ATTR = "data-rail-anim";
   const RAIL_ANIM_MS = 220;
-  // ── 收展交叉淡化（dsh SidebarRoot「Collapse is a slide plus crossfade」）──
+  // ── 收展交叉淡化 ──
   // 收起向不是一键落终态：先挂 data-rail-collapsing 让宽内容定宽原地淡出（150ms；
   // CSS 镜像段同时把栏宽与让位照终态值滑收），到点才落 data-rail="collapsed"——
   // display:none 的段头/树此刻才隐，硬切被淡出掩掉；随后 data-rail-railin 让收起态
-  // 图标行从右侧 49px 滑入进场，掩掉落态一瞬的布局换装（dsh rail-in 同款）。展开向
-  // 无落态延迟，data-rail-widein 整体淡入（dsh wide-in 同款）。三个都是手动收展
+  // 图标行从右侧 49px 滑入进场，掩掉落态一瞬的布局换装。展开向
+  // 无落态延迟，data-rail-widein 整体淡入。三个都是手动收展
   // 那一次的瞬态开关；自动档跨档不经 toggleRailManual，reduced-motion 在两侧都不挂。
   const RAIL_COLLAPSING_ATTR = "data-rail-collapsing";
   const RAIL_WIDEIN_ATTR = "data-rail-widein";
   const RAIL_RAILIN_ATTR = "data-rail-railin";
-  const RAIL_SETTLE_MS = 150; // dsh COLLAPSE_SETTLE_MS：宽内容淡出时长＝落态延迟
+  const RAIL_SETTLE_MS = 150; // 宽内容淡出时长＝落态延迟
   const RAIL_RAILIN_MS = 200; // rail-in 动画 150ms＋到点摘除余量
   let railAnimTimer = null;
   let railSettleTimer = null;
@@ -11422,7 +11422,7 @@ async function api(method, path, body) {
     return !window.matchMedia("(min-width: 1200px)").matches;
   }
   // 展开态不挂重复提示：各 tab 的 title 与可见标签逐字相同，鼠标扫过一排等于把同一句
-  // 话念七遍。ccswitch 是靠自家 tooltip 组件做「文字可见即不提示」，原生 title 没法条件
+  // 话念七遍。原生 title 没法条件
   // 抑制，这里按有效栏态摘挂——收起态标签不渲染，title 是唯一的名字来源，必须留。
   // 只动运行期属性，HTML 里写死的初值不删（v1 整栏不出，摘挂对它不可见）。
   function syncRailTabTitles(collapsed) {
@@ -11452,7 +11452,7 @@ async function api(method, path, body) {
     syncRailTabTitles(collapsed);
   }
   // 手动态的出口：窗口拖回宽档即解除，栏回到「跟随窗口宽度」。手动态原本永久压制自动档
-  // 且没有回退口（ccswitch 同款毛病），而拖窗口多半只是用户换个地方看东西，不该替他
+  // 且没有回退口，而拖窗口多半只是用户换个地方看东西，不该替他
   // 把栏态钉死。解除属自动态变化，不挂滑动开关；重同步由调用方收尾。
   function releaseRailManual() {
     const root = document.documentElement;
@@ -11551,7 +11551,7 @@ async function api(method, path, body) {
   // 属性：一条会话行有开着终端替它续接（resume 两键映射）即是 live，带状态
   // 点/选中态/关闭叉。全新终端在会话文件落盘前按 cwd 在组顶插「新会话」兜底行
   // （渲染时从后端真值表现推导，不另记状态）。原左上角 agent 身份行已拆。
-  // 观感按 dsh 左栏实测：行 hover/选中、行内动作
+  // 观感纪律：行 hover/选中、行内动作
   // 按钮一律 0ms 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位
   // 移有运动。
   const TERMINAL_RAIL_WATERMARK = 5;
@@ -11565,17 +11565,17 @@ async function api(method, path, body) {
   let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
   // 视图状态：归档清单 + 已移除分组目录清单。进终端视图时从面板后端拉一次
   // （GET /api/terminal/rail/prefs），之后的动作本地先生效、POST 落盘。落在面板侧，
-  // 与 terminal-host 就绪与否无关——降级/未就绪时归档照样可用（dsh 同口径：归档
-  // 是 workspace domain 的持久化集合，不是宿主能力）。
+  // 与 terminal-host 就绪与否无关——降级/未就绪时归档照样可用（归档
+  // 是持久化集合，不是宿主能力）。
   let terminalRailPrefs = { archived: [], removedGroups: [] };
   // 移除时刻：目录归一化键 → 移除时的毫秒时间戳，落 localStorage。后端清单
   // 只存目录拼写，没有时间轴；而「移除持久＋新会话自愈」必须知道移除发生在哪一刻，
   // 才能判「这条会话是移除之后新来的」。纯视图状态（与视图偏好同层），不进面板后端。
   const TERMINAL_RAIL_REMOVED_AT_KEY = "panel-terminal-rail-removed-at";
   let terminalRailRemovedAt = {};
-  // 视图偏好：分组方式 / 排序方式 / 归档筛选三组，落 localStorage（dsh
-  // 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）。手序按 agent 键存
-  // （手动排序的唯一来源）。默认值即 dsh 出厂默认。
+  // 视图偏好：分组方式 / 排序方式 / 归档筛选三组，落 localStorage
+  // （纯视图偏好，不进面板后端）。手序按 agent 键存
+  // （手动排序的唯一来源）。
   const TERMINAL_RAIL_VIEW_KEY = "panel-terminal-rail-view";
   let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
   // 组折叠态（与视图偏好同层）：归一化目录键的数组。纯视图状态，不进面板后端
@@ -11624,7 +11624,7 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_HISTORY_RETRY_MS = 5 * 1000;
   // 补拉只排一次：进页、换身份、轮询都经同一个门，重复排队没有意义。
   let terminalRailFetchQueued = false;
-  // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
+  // FLIP 门控：首次指针/键盘输入前不播（armed 门）；
   // flipMode 一帧用完即复位，组展开/收起与归档/撤销会置 "flip"。
   let terminalRailMotionArmed = false;
   let terminalRailFlipMode = "instant";
@@ -11642,8 +11642,7 @@ async function api(method, path, body) {
   let terminalRailLastDiffAgent = null;
   let terminalRailLastDiffSearch = false;
 
-  // 组头两枚图标与开合箭头：数据逐字符照抄 dsh（m14 附录，净室提取自 dsh-desktop
-  // 0.2.1-rc.2 bundle，chevron 以附录勘误后的 C5.95242 为准）。闭合态是 1px 描边空心
+  // 组头两枚图标与开合箭头（chevron 以 C5.95242 为准）。闭合态是 1px 描边空心
   // 轮廓＋一条中线（两条 path 都不填）；展开态是三层实心（背板 16% 透明＋盒体＋
   // 前舌）——两者构造方式不同，不是同一轮廓的改线，别把闭合态也填实。
   const TERMINAL_RAIL_ICON_CHEVRON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M5.5 4.5C5.5 4.40714 5.52586 4.31612 5.57467 4.23713C5.62349 4.15815 5.69334 4.09431 5.77639 4.05279C5.85945 4.01126 5.95242 3.99368 6.0449 4.00202C6.13738 4.01036 6.22572 4.04429 6.3 4.1L10.967 7.6C11.0291 7.64657 11.0795 7.70697 11.1142 7.77639C11.1489 7.84582 11.167 7.92238 11.167 8C11.167 8.07762 11.1489 8.15418 11.1142 8.22361C11.0795 8.29303 11.0291 8.35343 10.967 8.4L6.3 11.9C6.22572 11.9557 6.13738 11.9896 6.0449 11.998C5.95242 12.0063 5.85945 11.9887 5.77639 11.9472C5.69334 11.9057 5.62349 11.8419 5.57467 11.7629C5.52586 11.6839 5.5 11.5929 5.5 11.5V4.5Z" fill="currentColor"></path></svg>';
@@ -11659,15 +11658,15 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底
   const TERMINAL_RAIL_ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-  // 运行中转圈（dsh 实测规格逐项照抄）：行首 16×20 前导槽内的 14×14 SVG——
+  // 运行中转圈：行首 16×20 前导槽内的 14×14 SVG——
   // 轨道圆 r=9.5 静态（opacity .25），弧线圆同描边 dasharray 12 150 呼吸（1.5s
   // ease-in-out：0% 12 150/offset 0 → 50% 24 150/offset -6 → 100% 12 150/offset 0），
   // 外层 g 匀速转 360°（1.5s linear）——两动画同周期成稳定加载环。currentColor 吃
   // 三级文字色（不造新色值）；prefers-reduced-motion 下降级静态（CSS 侧两动画全
   // none）。槽内挂读屏文本「进行中」（本规格批准的唯一新增 aria 文本）。
   const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle class="rail-term-spinner-track" cx="12" cy="12" r="9.5" opacity=".25"></circle><g class="rail-term-spinner-rot"><circle class="rail-term-spinner-arc" cx="12" cy="12" r="9.5" stroke-dasharray="12 150"></circle></g></svg><span class="rail-term-spinner-sr">进行中</span></span>';
-  // done（跑完未读）绿点（dsh 状态点规格）：10×10 槽、:after inset 20%（视觉 6px
-  // 圆）、色走既有 --ok（dsh success 档）。挂在 16×20 常驻槽内居中（.rail-term-done
+  // done（跑完未读）绿点：10×10 槽、:after inset 20%（视觉 6px
+  // 圆）、色走既有 --ok。挂在 16×20 常驻槽内居中（.rail-term-done
   // 自身不另起布局）；tooltip「已完成」（本笔唯一新增文案）随 markup 走，会话栏行
   // 与页签指示位同一份。
   const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成"></span>';
@@ -11707,7 +11706,7 @@ async function api(method, path, body) {
     return /^[\w-]+$/.test(raw) ? raw : "";
   }
 
-  // 栏内局部时间格式（dsh 式无前缀）：刚刚 / N分钟 / N小时 / 昨天 / N天 /
+  // 栏内局部时间格式（无前缀）：刚刚 / N分钟 / N小时 / 昨天 / N天 /
   // M月D日（跨年 YYYY年M月D日）。**栏内局部实现**——会话页共用的 sessRelTime 带
   // 「前」缀且被别的视图用着，不动它。
   function terminalRailRelTime(ts) {
@@ -11763,7 +11762,7 @@ async function api(method, path, body) {
     return out;
   }
 
-  // 水位线（dsh 实测口径）：每组先露 5 条，点一次 +5，剩余不足一档即一次全展开；
+  // 水位线：每组先露 5 条，点一次 +5，剩余不足一档即一次全展开；
   // 全展开后再点是「收起」（回基线）。水位只活在内存，不持久化。
   function terminalRailWatermarkView(total, watermark) {
     const limit = Math.max(TERMINAL_RAIL_WATERMARK, Number(watermark) || 0);
@@ -11833,9 +11832,9 @@ async function api(method, path, body) {
     return healed;
   }
 
-  // 分组移除（dsh §2.4）：只从视图里摘掉目录身份——被移除目录的会话落
-  // 「未分组」，会话记录与磁盘文件夹都不动。全局生效（不分 agent，dsh 工作区清单
-  // 同为全局）。归一化比较口径同 store（terminalRailSameDir）：前端拿 project 路径、
+  // 分组移除：只从视图里摘掉目录身份——被移除目录的会话落
+  // 「未分组」，会话记录与磁盘文件夹都不动。全局生效（不分 agent）。
+  // 归一化比较口径同 store（terminalRailSameDir）：前端拿 project 路径、
   // 后端存用户点选时的原始拼写，必须是同一把尺。未分组组没有目录身份，天然不被
   // 移除（循环里 key 为空的组直接跳过）。
   function terminalRailRegroupRemoved(groups) {
@@ -11854,7 +11853,7 @@ async function api(method, path, body) {
     const ungrouped = groups.find((row) => row.key === "");
     if (ungrouped) {
       // 迁进来的行按最近活跃重排（恢复分组时同样按最近活跃归组，不记原索引——
-      // dsh 的 sessionIds 槽位在我们这儿没有对应物，派生分组本就该按活跃序）
+      // 派生分组本就该按活跃序）
       ungrouped.rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
       ungrouped.latest = ungrouped.rows.length ? ungrouped.rows[0].lastActive || 0 : 0;
     }
@@ -11874,7 +11873,7 @@ async function api(method, path, body) {
     return !!key && terminalRailPrefs.archived.some((row) => terminalRailArchivedKey(row) === key);
   }
 
-  // 归档＝视图过滤（dsh §1.4）：底层列表一个字节都不动，过滤放在分组之前——
+  // 归档＝视图过滤：底层列表一个字节都不动，过滤放在分组之前——
   // 组内序、水位线、「展开其余 N」计数自然都按过滤后的行算（实测口径：
   // 归档即计数减一，取消即加一）。筛选三态：default 隐藏 / show 内联灰显 /
   // only 只留归档（无归档的组整组丢弃，见渲染层的组过滤）。
@@ -11888,7 +11887,7 @@ async function api(method, path, body) {
   // ── 全新终端兜底行 ──
   // 新建终端后会话文件可能还没生成（agent 未发消息、列表里没有这条历史）——此时在
   // 它 cwd 所属组的组顶插一条 live 行，标签「新会话」、无时间；会话文件出现后自然
-  // 被真行接替（dsh 的「新会话」行正是这个形态）。**渲染时从后端真值表现推导**，
+  // 被真行接替。**渲染时从后端真值表现推导**，
   // 不另记 pending 状态：终端关了（不在会话表里）行即消失，同目录出现建终端之后
   // 活跃的会话即算被接替。判据＝该终端带 agent、无 resume 记录（续接创建的真行
   // 已在列表里，不需要兜底）、绑定库身份（boundConversation）也没在列表里（全新会话
@@ -11950,12 +11949,11 @@ async function api(method, path, body) {
     return out;
   }
 
-  // ── 段头搜索（照搬实测规格，裁剪后） ──
+  // ── 段头搜索 ──
   // 行内展开不是浮层：点搜索钮＝展开＋自动聚焦；已展开再点不退出（非 toggle，只
   // 重新聚焦）。退出手势：Esc／清空钮／点开结果行＝清空＋收起；点搜索区外**仅当
   // 查询为空**才收起（有查询只失焦）。退出后列表滚动回顶、分组展开态保留。
-  // 范围＝会话标题＋目录短名的大小写不敏感子串——dsh 出厂配置把 Host 内容搜索整个
-  // 关了（实测重大发现），侧栏实际就只有这个口径；照搬的就是它，不做全文。
+  // 范围＝会话标题＋目录短名的大小写不敏感子串，不做全文。
   // 防抖 250ms（窗口内出「正在搜索会话历史…」骨架位）。不挂任何键盘加速入口
   // （显式不做清单既有口径）。
   const TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250;
@@ -12053,10 +12051,10 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 视图选项（照搬实测规格全集） ──
+  // ── 视图选项 ──
   // 三组互斥单选：分组方式（按工作区/按工作区树/单列表）、排序方式（最近更新/
   // 手动排序）、筛选会话（隐藏已归档/全部会话/仅显示已归档）。偏好落 localStorage
-  // 一个键（dsh 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）；
+  // 一个键（纯视图偏好，不进面板后端）；
   // 手序按 agent 键存（手动排序的唯一来源＝会话行拖拽；组行不拖——我们的组是目录
   // 派生、无清单可持久化）。菜单右对齐锚定、dense 30px、✓ 居项最右、点选即关。
   const TERMINAL_RAIL_VIEW_GROUPS = [
@@ -12160,7 +12158,7 @@ async function api(method, path, body) {
 
   // 按工作区树：组按目录祖先关系嵌套（owningParentFolder：逐级找最近
   // 已注册祖先）。给每组打 depth；祖先组自动展开（切进树模式时一次性解除折叠，
-  // 之后尊重用户手动收起——与 dsh 的 expandedGroups 含全部 ancestorKeys 同效果）。
+  // 之后尊重用户手动收起）。
   function terminalRailNestGroups(groups) {
     const keys = groups.map((group) => group.key).filter(Boolean);
     for (const group of groups) {
@@ -12212,8 +12210,8 @@ async function api(method, path, body) {
     return groups;
   }
 
-  // 切入手动排序：把当前派生序（渲染序）快照进该 agent 的手序（dsh setOrderBy 的
-  // initialOrders 同语义——切换瞬间视觉序不变）。
+  // 切入手动排序：把当前派生序（渲染序）快照进该 agent 的手序
+  // （切换瞬间视觉序不变）。
   function terminalRailSnapshotManualOrder() {
     const agentId = terminalRailAgentId();
     if (!agentId) return;
@@ -12225,7 +12223,7 @@ async function api(method, path, body) {
     saveTerminalRailViewPrefs();
   }
 
-  // 拖拽落点：把 fromId 移到 toId 之前（dsh workspaces.insertBefore 同语义）。
+  // 拖拽落点：把 fromId 移到 toId 之前。
   // 先快照（从 updated 拖进来时）再改写，切回 updated 会清空该 agent 手序。
   function terminalRailMoveInManualOrder(agentId, fromId, toId) {
     if (!agentId || !fromId || fromId === toId) return;
@@ -12283,8 +12281,8 @@ async function api(method, path, body) {
         menu.append(el);
       }
     }
-    // portal 到 body 下 position:fixed（栏体 overflow:hidden 会裁栏内浮层，
-    // dsh 的 portal:true 同款）；右对齐锚定＝菜单右缘贴钮右缘（align:end）。
+    // portal 到 body 下 position:fixed（栏体 overflow:hidden 会裁栏内浮层）；
+    // 右对齐锚定＝菜单右缘贴钮右缘（align:end）。
     document.body.append(menu);
     const btnRect = btn.getBoundingClientRect();
     const width = menu.offsetWidth || 200;
@@ -12311,7 +12309,7 @@ async function api(method, path, body) {
     }
     terminalRailViewPrefs[field] = value;
     saveTerminalRailViewPrefs();
-    terminalRailFlipMode = "instant"; // 视图切换是 resetKey：瞬时跳变（dsh 同口径）
+    terminalRailFlipMode = "instant"; // 视图切换是 resetKey：瞬时跳变
     renderTerminalRailHistory(terminalRailAgentId());
     closeTerminalRailViewMenu();
   }
@@ -12362,11 +12360,10 @@ async function api(method, path, body) {
     if (!createPending && (terminalRailSelectPending
       ? session.id === terminalRailSelectPending.id && session.endpoint === terminalRailSelectPending.endpoint
       : live && live.id === activeId)) cls.push("is-active");
-    // 行首常驻槽（dsh sessionRow 同构）：所有会话行（历史/pending/搜索结果）都渲染
+    // 行首常驻槽：所有会话行（历史/pending/搜索结果）都渲染
     // 16×20 前导槽——槽内容取 terminalRailStateSlotHtml（与页签指示位同一判定）：
     // working 行填转圈（14×14 SVG，读屏文本「进行中」）、非聚焦的 done（跑完未读）
-    // live 行填绿点（title「已完成」，dsh completed）、其余一律留空（dsh 四态机
-    // pendingInteraction＞running＞completed＞idle，行内只画最高优先级一态、idle 不画
+    // live 行填绿点（title「已完成」）、其余一律留空（行内只画最高优先级一态、idle 不画
     // 任何图标；exited 无专门呈现，随空槽自然成立，行点击续接/复活语义不变）。槽宽
     // 恒定，图标出现/消失/互换都不动标题文字起点；行 8+16+8 与组头 8+16+8 同式，
     // 标题与组头文字严格同 x。
@@ -12447,7 +12444,7 @@ async function api(method, path, body) {
     // 先归档过滤（visible）再分组，最后把被移除目录的会话改组进「未分组」——
     // 顺序即语义：过滤 → 目录身份 → 移除摘牌。
     let groups = terminalRailRegroupRemoved(terminalRailGroupSessions(sessions));
-    // 「仅显示已归档」：无归档会话的组整组丢弃（dsh groupByWorkspace 同口径）
+    // 「仅显示已归档」：无归档会话的组整组丢弃
     if (terminalRailViewPrefs.archivedFilter === "only") {
       groups = groups.filter((group) => group.key === "" || group.rows.length > 0);
     }
@@ -12528,7 +12525,7 @@ async function api(method, path, body) {
       // 组头三件：非 hover 是文件夹图标（开/关两枚），hover 同槽位
       // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
       // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
-      // 没有目录身份，这些都不给（dsh 同口径）。组头本身仍是整行可点的折叠开关。
+      // 没有目录身份，这些都不给。组头本身仍是整行可点的折叠开关。
       // 树模式缩进 8+depth×12px；单列表模式不渲组头。
       const current = group.key !== "" && group.key === activeGroup;
       const indent = group.depth ? ` style="padding-inline-start: ${8 + group.depth * 12}px"` : "";
@@ -12554,7 +12551,7 @@ async function api(method, path, body) {
       }
       if (!collapsed) {
         // 兜底行固定组顶（不看 lastActive）；水位线只数真实历史行（单列表模式不设
-        // 水位——dsh 平铺同样一次露全）
+        // 水位，一次露全）
         for (const entry of group.pending || []) parts.push(terminalRailPendingRowHtml(entry, activeTerminalPreviewId));
         if (group.flat) {
           for (const row of group.rows) {
@@ -12562,7 +12559,7 @@ async function api(method, path, body) {
           }
         } else {
           const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
-          // 水位线联动（dsh requiredWatermark 同构）：运行中＋当前会话两档
+          // 水位线联动：运行中＋当前会话两档
           // 强制入可见段——永远不被藏进「展开其余 N 个会话」。我们只有 running＋
           // current 两个信号（无 pendingInteraction/completed，范围声明）。flat
           // 模式不设水位（整组平铺全露），走不到这条分支。
@@ -12608,7 +12605,7 @@ async function api(method, path, body) {
       }
     }
     // 旧位置只在真要播 FLIP 时才量：1s 归属轮询每拍都走本函数，无条件逐元素
-    // getBoundingClientRect 等于每秒一次强制布局（dsh 也只量参与动画的元素）。
+    // getBoundingClientRect 等于每秒一次强制布局（只量参与动画的元素）。
     const before = terminalRailFlipMode === "flip" ? terminalRailMotionTops(list) : null;
     if (html !== terminalRailRendered.history) {
       terminalRailRendered.history = html;
@@ -12690,7 +12687,7 @@ async function api(method, path, body) {
     }
   }
 
-  // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新元素 100ms ease-out）。
+  // 简版 FLIP：位移 200ms ease-out、新元素 100ms ease-out。
   // 组展开/收起与归档/撤销置 flip；兜底行增删（2026-10-25）同样置 flip。
   // 量测集＝TERMINAL_RAIL_MOTION_SELECTOR（行＋组头＋水位线钮，2026-10-26 扩全）：
   // 同一段位移里所有元素同缓动，不再出现组头瞬跳压在行上。
@@ -12718,7 +12715,7 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 退场动效（归档/撤销；2026-10-25 起兜底行增删同路，dsh AnimatedRows
+  // ── 退场动效（归档/撤销；2026-10-25 起兜底行增删同路，走
   // FLIP 路径）── 归档/撤销不再是 resetKey 瞬时消失：动作前给在册元素拍快照（克隆＋
   // 视口位），重渲后离开布局的元素以幽灵克隆补进滚动层 100ms 淡出——下方元素上移/
   // 落回 200ms、回填/归位元素淡入 100ms 由上面的 FLIP（flip 门）承担。量测集自
@@ -13167,7 +13164,7 @@ async function api(method, path, body) {
       terminalRailActivateSession(open.id);
       return;
     }
-    // 归档会话点不开（dsh notifyArchivedNotOpenable 同口径）：恢复链是
+    // 归档会话点不开：恢复链是
     // 行内取消归档钮 + toast 撤销，续接要先取消归档。live 终端已开着的走上面聚焦，
     // 到这儿的就是没开着终端的归档行。
     if (terminalRailIsArchived(session)) {
@@ -13202,7 +13199,7 @@ async function api(method, path, body) {
   //   · 旧终端在跑（exited 优先）→ 旧终端留后台保活、不杀；目标终端挂进当前视口；
   //   · 旧终端空闲/已退出 → 既有 POST /switch（同记录 terminate+spawn，页签不增）；
   //   · switch_busy 与补读失败 = 判不出/判定为在跑（A12）→ 同样走保活分支，不开新页签。
-  // 在飞闸（规格「偏离声明」）：dsh 是 last-wins 因换视图免费；我们要杀起进程、
+  // 在飞闸（规格「偏离声明」）：我们要杀起进程、
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
@@ -13441,7 +13438,7 @@ async function api(method, path, body) {
     return null;
   }
 
-  // 归档（dsh §1.4）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
+  // 归档：持久化标记 + 视图过滤，磁盘会话文件一概不动；
   // 平静会话单击即归档，无确认。本地先生效再落盘——POST 是本机回环，等它往返再
   // 动列表会出现「点了没反应」的半个节拍；落盘失败回退本地态并提示，不假装成功
   // （刷新回来还在，比假成功更难理解）。归档与续接无关：不可续接的会话照样可归档。
@@ -13449,7 +13446,7 @@ async function api(method, path, body) {
   // 保活都算），归档先弹二次确认，确认后「归档即杀」——走行内 × 同一条
   // terminalCloseTerminal 链路（working 会再叠它自己的运行中确认），关掉才归档。
   // 否则归档行从默认筛选消失、终端却在别处活着，终端一关会话即从视野彻底消失、
-  // 点击续接又被归档拦截。动效走 AnimatedRows 同款：行克隆淡出、
+  // 点击续接又被归档拦截。动效：行克隆淡出、
   // 下方行上移、隐藏池回填行淡入（terminalRailRerenderExitFlip）。恢复入口三件：
   // toast「撤销」＋行内取消归档钮＋段头「视图选项」筛选（三入口齐备）。
   function terminalRailArchiveSession(id) {
@@ -13485,8 +13482,8 @@ async function api(method, path, body) {
     terminalRailRerenderExitFlip();
     api("POST", "/api/terminal/rail/archive", entry)
       .then(() => {
-        // 6s 撤销窗（dsh holdMs 同值）：tone 走成功（不传 isErr），撤销＝取消归档；
-        // 当前筛选＝隐藏已归档时追加筛选引导钮（dsh ArchiveToastEntry 的条件性第二
+        // 6s 撤销窗：tone 走成功（不传 isErr），撤销＝取消归档；
+        // 当前筛选＝隐藏已归档时追加筛选引导钮（条件性第二
         // 动作），点了切到「仅显示已归档」看归档去向。
         toast("会话已归档。", false, {
           durationMs: 6000,
@@ -13506,7 +13503,7 @@ async function api(method, path, body) {
   }
 
   // 取消归档：从清单移除即回到原分组原位置——底层列表从没被改动，组内按最近活跃
-  // 的排序天然还原（dsh 的 sessionIds 槽位保留是同一种思路）。无 toast（
+  // 的排序天然还原。无 toast（
   // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。动效＝
   // 归档的镜像：行淡入回槽、下方行落回、水位线让位的回填行克隆淡出。
   function terminalRailUnarchiveSession(endpoint, id) {
@@ -13531,7 +13528,7 @@ async function api(method, path, body) {
     renderTerminalRailHistory(terminalRailAgentId());
   }
 
-  // ⊕ 新建（dsh B1 的 onCreate）：先展开该组（若收起），再以该组目录为 cwd 给当前
+  // ⊕ 新建：先展开该组（若收起），再以该组目录为 cwd 给当前
   // agent 建终端。历史会话段只在有 agent 聚焦时才有内容——组头天然带着 agentId
   // （terminalRailAgentId），不写无 agent 分支：没有 agent 时列表为空、组头不存在，
   // ⊕ 根本不会露面。就绪闸与页签栏加号同拍。与「新建会话」同门（2026-10-25 用户
@@ -13547,11 +13544,11 @@ async function api(method, path, body) {
     return terminalRailSwitchOrCreateCore({ agentId: terminalRailAgentId(), cwd: key });
   }
 
-  // ── 组头 hover 卡（dsh B4） ──
-  // 800ms 延迟（dsh 同值）；三行＝目录短名／完整路径／「N 个会话」；整卡可点，
+  // ── 组头 hover 卡 ──
+  // 800ms 延迟；三行＝目录短名／完整路径／「N 个会话」；整卡可点，
   // 点击复制完整路径并短暂显示「已复制」（复用既有 sessCopyText 复制反馈手法）。
-  // 挂 body 下 position:fixed（dsh 同款 portal——栏体 overflow-x:hidden 会切掉贴
-  // 右缘展开的卡）。⋯ 菜单打开期间抑制（dsh 的 disabled: menuOpen 同口径）。
+  // 挂 body 下 position:fixed（portal——栏体 overflow-x:hidden 会切掉贴
+  // 右缘展开的卡）。⋯ 菜单打开期间抑制（disabled: menuOpen）。
   const TERMINAL_RAIL_HOVER_DELAY_MS = 800;
   let terminalRailHoverTimer = null;
   let terminalRailHoverEl = null;
@@ -13565,7 +13562,7 @@ async function api(method, path, body) {
   }
 
   // 组键从 toggle 钮上读（不拼选择器：组键是 Windows 路径）。空键 = 未分组，
-  // 不出卡（dsh 同口径：未分组组没有 hover 卡）。
+  // 不出卡（未分组组没有 hover 卡）。
   function terminalRailHeadKey(head) {
     if (!head || typeof head.querySelector !== "function") return "";
     const toggle = head.querySelector("[data-rail-term-group]");
@@ -13646,7 +13643,7 @@ async function api(method, path, body) {
     const head = terminalRailGroupHeadEl(key);
     if (!head) { closeTerminalRailGroupMenu(); return; }
     closeTerminalRailGroupMenu();
-    closeTerminalRailHoverCard(); // 菜单后开：悬停卡让位（dsh 的 menuOpen 抑制同口径）
+    closeTerminalRailHoverCard(); // 菜单后开：悬停卡让位
     terminalRailMenuKey = key;
     const menu = document.createElement("div");
     menu.className = "rail-term-menu";
@@ -13657,7 +13654,7 @@ async function api(method, path, body) {
     item.textContent = "移除分组";
     menu.append(item);
     // portal 到 body 下 position:fixed——栏体 overflow:hidden 会裁掉栏内
-    // 浮层（dsh 的 portal:true 同款）。坐标直接按视口 rect 算，不再换算到栏体。
+    // 浮层。坐标直接按视口 rect 算，不再换算到栏体。
     document.body.append(menu);
     const headRect = head.getBoundingClientRect();
     const width = menu.offsetWidth || 120;
@@ -13673,7 +13670,7 @@ async function api(method, path, body) {
     else openTerminalRailGroupMenu(key);
   }
 
-  // 分组移除（dsh §2）：红色确认弹窗（复用共用确认件），只从清单移除，
+  // 分组移除：红色确认弹窗（复用共用确认件），只从清单移除，
   // 磁盘文件夹与会话记录不动，会话落「未分组」。
   function terminalRailRemoveGroup(key) {
     // 先收场组头菜单再开弹窗：菜单 z-index 1200 高于弹窗 overlay 300，
@@ -13720,12 +13717,12 @@ async function api(method, path, body) {
     const next = terminalRailNextWatermark(group.rows.length, terminalRailWatermarks.get(key));
     if (next === TERMINAL_RAIL_WATERMARK) terminalRailWatermarks.delete(key);
     else terminalRailWatermarks.set(key, next);
-    terminalRailFlipMode = "instant"; // 水位线增减是 resetKey：瞬时跳变（dsh 实测）
+    terminalRailFlipMode = "instant"; // 水位线增减是 resetKey：瞬时跳变
     renderTerminalRailHistory(terminalRailAgentId());
   }
 
   // 进终端视图：历史会话**不再**在这里抛掉重取。视图内的其他渲染都不触发扫盘；
-  // 水位线随列表卸载即重置（dsh 实测同口径：水位不持久化，分组树卸载即丢），组折叠态
+  // 水位线随列表卸载即重置（水位不持久化，分组树卸载即丢），组折叠态
   // 落 localStorage、跨视图进出与页面重载保持（用户手动收起的组不该每次进来都弹开）。
   // 视图状态（归档/已移除分组）同样在这里拉一次——落盘在面板侧，与 terminal-host
   // 就绪与否无关。
@@ -13777,7 +13774,7 @@ async function api(method, path, body) {
       });
   }
 
-  // 滚动条指针感知的自动隐退（dsh §3.5）：指针在列内 thumb 可见，离开 2s 后隐退
+  // 滚动条指针感知的自动隐退：指针在列内 thumb 可见，离开 2s 后隐退
   // ——变量替换瞬时消失，无淡出（写了 transition 就错）。挂栏体（#v2Rail）而不是
   // 滚动层：整列都算「在列内」，指针挪到底栏那排钮时 thumb 照旧可见。初态即隐退：
   // 进终端视图时指针多半不在列内，不先隐就会常亮一条thumb。
@@ -13811,7 +13808,7 @@ async function api(method, path, body) {
     loadTerminalRailViewPrefs(); // 视图偏好先进状态再首渲（localStorage 读回）
     loadTerminalRailCollapsedGroups(); // 组折叠态同层读回：首帧就是存档形态，不先全展开再跳
     initTerminalRailScrollbarQuiet();
-    // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，走捕获相）：
+    // 首次真实指针/键盘交互才武装 FLIP（armed 门，走捕获相）：
     // 合成点击（element.click()）不派发 pointerdown——进页首帧、自动化测量都瞬时
     // 落位。监听挂整个会话栏而非仅历史列表：新建按钮也在列内，它的首次点击同样
     // 会让兜底行出现，不能等到下一次操作才有动画。
@@ -13932,7 +13929,7 @@ async function api(method, path, body) {
       });
     }
     // 会话行拖拽（手序的唯一来源）：draggable 只在非归档行上；同列表内
-    // 移动（dsh 只允许同父级兄弟，我们的组/平铺都是一个父）。落点＝目标行之前。
+    // 移动（只允许同父级兄弟，组/平铺都是一个父）。落点＝目标行之前。
     let railDragId = "";
     dir.addEventListener("dragstart", (event) => {
       const row = event.target && typeof event.target.closest === "function"
@@ -14446,7 +14443,7 @@ async function api(method, path, body) {
     });
   }
 
-  // 看板变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）：容器整体淡入
+  // 看板变体入场：容器整体淡入
   // 上浮 10px 立即开始；可见 .panel-card 按视觉顺序逐张阶梯——首卡（服务状态）用 scale
   // 变奏、延迟 100ms，其余淡入+上浮、延迟 150ms+i×40ms。隐藏卡（如无链时的路由链卡）
   // 跳过不占延迟位；播完即清，1s 轮询只更新卡片内容不重建节点，不会打断动画。
@@ -20931,7 +20928,7 @@ async function api(method, path, body) {
     };
   }
 
-  // dash 生长期间保留用户自定义虚线图案（recharts 3 Ve 直译）：图案按已画弧长 u 交错
+    // dash 生长期间保留用户自定义虚线图案：图案按已画弧长 u 交错
   // 铺开——整周期重复 floor(u/周期) 次，边界处截断到余数，尾部用超长 gap 兜住未画部分。
   // pattern 为原始 dash 串解析出的数组（如 "5,3" → [5,3]），奇数长度补 0 对齐 dash/gap 交替。
   function statsDashPattern(u, D, pattern) {
@@ -20953,7 +20950,7 @@ async function api(method, path, body) {
     return [...grow, ...partial, ...suffix].map((v) => `${v}px`).join(", ");
   }
 
-  // morph 参数对齐 ZCode 趋势图（recharts 3 Line 默认）：1500ms + 'ease'
+  // morph 参数（recharts 3 Line 默认）：1500ms + 'ease'
   const STATS_MORPH_MS = 1500;
   const STATS_MORPH_EASE = statsCubicBezier(0.25, 0.1, 0.25, 1);
 

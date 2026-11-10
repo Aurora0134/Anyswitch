@@ -1306,7 +1306,7 @@ describe("createAgentMetricsCollector", () => {
   // 2026-10-15 修复面：qoder CLI（qodercli.exe，终端一键启动的执行体）此前
   // 不在认领桶也不在探测 WHERE——CLI 进程对检测面全盲，虚拟终端的 Qoder
   // 会话永远归属不上；实例身份面（socket 兜底白名单 + instanceBuckets）
-  // 同批收编。live 取证形状：cmd 壳 19560 → 主 CLI 10284 → MCP 内部子进程 7332。
+  // 同批收编。典型形状：cmd 壳 19560 → 主 CLI 10284 → MCP 内部子进程 7332。
   describe("qoder CLI (qodercli.exe) process + instance surfaces", () => {
     const PS_QODER_CLI_SCAN = [
       String.raw`10284,19560,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe`,
@@ -5479,7 +5479,7 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
 });
 
 describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
-  // 行形态与真机一致：WMIC 形状 <Node>,<CommandLine>,<Name>,<ProcessId>。
+  // 行形态与真实 WMIC 输出一致：形状 <Node>,<CommandLine>,<Name>,<ProcessId>。
   const KIMI_PKG = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@moonshot-ai\\kimi-code";
   const DESKTOP_IMG = "C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi Code\\Kimi Code.exe";
   const nodeRow = (pid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${pid}`;
@@ -6047,7 +6047,7 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
 });
 
 describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
-  // 行形态与真机一致：WMIC 形状 <Node>,<CommandLine>,<Name>,<ParentProcessId>,<ProcessId>。
+  // 行形态与真实 WMIC 输出一致：形状 <Node>,<CommandLine>,<Name>,<ParentProcessId>,<ProcessId>。
   const INSTALL = "C:\\Users\\tester\\AppData\\Local\\Programs\\WorkBuddy";
   const IMG = `${INSTALL}\\WorkBuddy.exe`;
   const RUNTIME = `${INSTALL}\\resources\\app.asar.unpacked\\cli\\bin\\codebuddy`;
@@ -6068,7 +6068,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   const registryLookup = (sessions) => (pid) => sessions[pid] ?? null;
 
   it("counts exactly the two agent runtimes in the nine-process sample", async () => {
-    // 一个桌面实例的真机形状：主进程 + 四个 --type= 辅助 + daemon + sidecar
+    // 一个桌面实例的真实形状：主进程 + 四个 --type= 辅助 + daemon + sidecar
     // + 两个 agent 运行时。只有最后两个算会话；其余同镜像进程只进家族集。
     const collector = wbCollector({
       nowFn: () => 3000,
@@ -6243,7 +6243,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" "${RUNTIME}"${args ? ` ${args}` : ""},node.exe,${ppid},${pid}`;
 
   it("counts the terminal form: node.exe running cli\\bin\\codebuddy", async () => {
-    // 真机行样本：node.exe "…\cli\bin\codebuddy" --resume <id>，父是本机终端宿主。
+    // 真实行样本：node.exe "…\cli\bin\codebuddy" --resume <id>，父是终端宿主。
     const collector = wbCollector({
       nowFn: () => 3000,
       execFn: (cmd, opts, cb) => cb(null, wmic(
@@ -6383,7 +6383,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
   });
 
   // ---- 会话粒度行（A 方案 2026-11-01）：行身份锚注册表 sessionId，不锚 pid。
-  // runtime 池按回合回收换 pid（真机：同会话 20 分钟换 3 个 pid），pid 行把每次
+  // runtime 池按回合回收换 pid（同会话 20 分钟换 3 个 pid），pid 行把每次
   // 换代都演成「死一个实例、生一个零账实例」——幽灵卡。注册表反查让同一会话
   // 的新 pid 连回旧行，账续着。
   describe("WorkBuddy 会话粒度行", () => {
@@ -6716,7 +6716,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
 
     it("keeps a registry-absent subagent row between requests while its engine pid lives", async () => {
       // 子代理行注册表永远缺席：缺席轮次照收＝请求间隙行下场、下一笔请求再起
-      // 新行、计数清零（真机：同一行 65→3 请求）。扛过流量的引擎 pid 还活着时
+      // 新行、计数清零（同一行 65→3 请求）。扛过流量的引擎 pid 还活着时
       // 行钉住不下场；引擎退场后照旧 2 轮确认收走。
       let t = 3000;
       let withEngine = true;
@@ -6766,7 +6766,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       // 子代理整段跑：主会话自己的流量停、会话文件静默、注册表还开着——行
       // 活跃只剩「扛过本行流量的引擎 pid 活着」一臂。头通道身份解析不出 pid，
       // relay 捎带的 workbuddyClientPid 把锚补上：主行不下场、processCount 不
-      // 归零、分面副行不空（真机：主行被收走、卡上进程数 0、surfaces 空）。
+      // 归零、分面副行不空（主行被收走、卡上进程数 0、surfaces 空）。
       let t = 3000;
       const registry = { 100: { kind: "interactive", sessionId: "6d2c", cwd: "C:\\proj\\bridge" } };
       const collector = wbCollector({
@@ -7010,7 +7010,7 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
     });
     assert.equal(wb(await noRegistry.getAgentsStatus()).processCount, 1, "读不出注册表 → 照旧计数");
 
-    // 真机那条 --prewarm 行注册表是 kind:"interactive" 且有 sessionId：正在服务。
+    // 在跑的 --prewarm 行注册表是 kind:"interactive" 且有 sessionId：正在服务。
     const serving = wbCollector({
       nowFn: () => 3000,
       workbuddySessionLookup: registryLookup({ 7801: { kind: "interactive", sessionId: "0199c1a2-3b4d" } }),
@@ -7353,15 +7353,15 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
   const ENGINE_3P = "C:\\Users\\u\\AppData\\Local\\Claude-3p\\claude-code\\2.1.246\\claude.exe";
 
   it("classifies desktop shell/engine image paths and rejects CLI or unknown shapes", () => {
-    // MSIX 桌面壳（真机包路径形状 1.37937.1.0），主进程与 --type= 助手同一形态
+    // MSIX 桌面壳（包路径形状 1.37937.1.0），主进程与 --type= 助手同一形态
     assert.equal(claudeDesktopForm(SHELL), "desktop");
     assert.equal(claudeDesktopForm(`${SHELL} --type=renderer`), "desktop");
     assert.equal(claudeDesktopForm(`"${SHELL}"`), "desktop");
-    // 桌面托管引擎的三个根（3p 真机旧布局取证 claude-code\2.1.246\claude.exe）
+    // 桌面托管引擎的三个根（3p 旧布局 claude-code\2.1.246\claude.exe）
     assert.equal(claudeDesktopForm(ENGINE_3P), "desktop");
     assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude\\claude-code\\2.1.246\\claude.exe"), "desktop");
     assert.equal(claudeDesktopForm("C:\\Users\\u\\.claude\\claude-code\\2.1.246\\claude.exe"), "desktop");
-    // 新布局（Desktop 2.37337.1.0 / 引擎 2.1.295 真机取证）：semver 与 exe 之间
+    // 新布局（Desktop 2.37337.1.0 / 引擎 2.1.295）：semver 与 exe 之间
     // 垫一层构建哈希目录（claude-code\2.1.295\d2e29494ec83\claude.exe），三个根同
     // 规则；真实引擎命令行拖着一大串 --flag 尾巴，照样命中
     assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude-3p\\claude-code\\2.1.295\\d2e29494ec83\\claude.exe"), "desktop");
@@ -9045,7 +9045,7 @@ describe("node 桶失配行兜底与第三道护栏", () => {
 // 判生死（本轮全量 pid），分型与归属沿用上一轮可信扫描的答案；可信轮从未见过的
 // 新进程仍然不猜形态（「宁可漏折，不可误折」不动）。
 describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例行", () => {
-  // 真机取证：一个 Claude Desktop 的 claude.exe 全家福 = MSIX 桌面壳 + 其
+  // 一个 Claude Desktop 的 claude.exe 全家福 = MSIX 桌面壳 + 其
   // Electron 子进程（--type=）+ 桌面托管引擎（<根>\claude-code\<semver>\）。
   const SHELL = "C:\\Program Files\\WindowsApps\\Claude_2.9939.2.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe";
   const ENGINE = "C:\\Users\\tester\\AppData\\Local\\Claude-3p\\claude-code\\2.1.246\\claude.exe";

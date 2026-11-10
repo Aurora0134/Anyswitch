@@ -25,7 +25,7 @@ export function defaultClaudeExecutable(base = process.env) {
 
 // 桌面托管引擎扫描：<根>\claude-code\ 的子目录以 semver 命名的才是引擎版本目录，
 // 版本目录里 claude.exe 直连（旧布局）或垫一层目录（构建哈希）两种落位都认，跨根
-// 取版本三元组最新的那份。非 semver 的条目与更深的嵌套不在已取证形状内，不认。
+// 取版本三元组最新的那份。非 semver 的条目与更深的嵌套不在已知形状内，不认。
 function newestClaudeEngineExecutable(base, io) {
   const local = base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local");
   const roots = [
@@ -76,9 +76,9 @@ function newestClaudeEngineExecutable(base, io) {
 // 更新按钮装的就是那个包（与 kimi 的「npm shim 优先」同一优先序）；npm 位落空时
 // 扫桌面托管引擎：已知形状是 <根>\claude-code\<semver>\[至多一层]\claude.exe，根
 // 只认 %LOCALAPPDATA%\Claude-3p、%LOCALAPPDATA%\Claude 与 %USERPROFILE%\.claude
-// 三个，与 agent-metrics 的 claudeDesktopForm 白名单同源（同一份真机取证：旧布局
+// 三个，与 agent-metrics 的 claudeDesktopForm 白名单同源（旧布局
 // 零层，Desktop ≥2.37337 起在 semver 与 exe 之间垫一层构建哈希）。npm 位存在但不
-// 是 PE 也落引擎扫描——本机 npm claude.exe 曾是 500B 占位脚本，Windows 拒绝执行
+// 是 PE 也落引擎扫描——npm 的 claude.exe 可能是 500B 占位脚本，Windows 拒绝执行
 // 文本桩，与 opencode 的 bin 桩同病（故同样过 isPortableExecutable）。都落空时仍
 // 返回 npm 位：未安装的报法与历史口径一致，存在性由调用方判。
 export function resolveClaudeExecutable(
@@ -189,7 +189,7 @@ function opencodePackageDirs(npmRoot, modulesRoot, io) {
 }
 
 // 上游按平台与 CPU 档位各发一个可选依赖包，本机该用哪一个由它的清单说了算。
-// 优先序照抄上游 postinstall 在有 AVX2 时的选择：本机 CPU 档非 baseline 优先，
+// 优先序与上游 postinstall 在有 AVX2 时的选择一致：本机 CPU 档非 baseline 优先，
 // 其次同档 baseline，最后其他档；darwin/linux 的条目一律不看。
 function opencodeVariantNames(manifest, hostArch) {
   const names = Object.keys(manifest?.optionalDependencies ?? {})
@@ -203,7 +203,7 @@ function opencodeDeclaredBinary(manifest) {
   return typeof target === "string" && target ? basename(target) : "opencode.exe";
 }
 
-// 包自己的 bin 在 postinstall 被 npm 的脚本白名单拦下时是一个文本桩（实测 2.0.28 即
+// 包自己的 bin 在 postinstall 被 npm 的脚本白名单拦下时是一个文本桩（2.0.28 即
 // 如此），Windows 拒绝执行它，历史表现为「与你运行的 Windows 版本不兼容」。只认 PE。
 function isPortableExecutable(path, io) {
   let fd;

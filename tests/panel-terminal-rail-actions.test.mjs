@@ -352,12 +352,12 @@ describe("S1 会话归档（finding 1a）", () => {
       await flush();
       assert.equal(log.toasts.length, 1, "成功后一句 toast");
       assert.equal(log.toasts[0].msg, "会话已归档。", "文案逐字");
-      assert.equal(log.toasts[0].opts.durationMs, 6000, "驻留 6s（dsh 同值）");
+      assert.equal(log.toasts[0].opts.durationMs, 6000, "驻留 6s");
       assert.equal(log.toasts[0].opts.actions[0].label, "撤销", "动作钮文案逐字");
       assert.ok(!log.toasts[0].isErr, "不是错误提示（tone 走成功）");
     });
 
-    it("「撤销」＝取消归档：出清单、POST 取消、无 toast（dsh 同口径）", async () => {
+    it("「撤销」＝取消归档：出清单、POST 取消、无 toast", async () => {
       const { fn, log } = runArchive(SESSION);
       fn.archive();
       await flush();
@@ -559,11 +559,11 @@ describe("S1 会话归档（finding 1a）", () => {
       const archive = panelCss.match(/\.rail-term-row-archive \{([^}]*)\}/);
       assert.ok(archive, "归档钮样式在册");
       assert.ok(archive[1].includes("display: none"), "静息不占位");
-      assert.ok(!/transition/.test(archive[1]), "无过渡（0ms 硬切，dsh 同口径）");
+      assert.ok(!/transition/.test(archive[1]), "无过渡（0ms 硬切）");
       assert.ok(panelCss.includes(".rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }"),
         "hover 出归档钮（只限历史行）");
       assert.ok(panelCss.includes(".rail-term-row-history:hover .rail-term-row-time { display: none; }"),
-        "hover 时时间让位动作钮（dsh 同款取舍，见既有注释）");
+        "hover 时时间让位动作钮（见既有注释）");
       assert.ok(!panelCss.includes(".rail-term-row-open:hover .rail-term-row-archive"),
         "「打开的终端」行没有归档钮");
     });
@@ -933,7 +933,7 @@ describe("S2 分组移除（finding 1b）", () => {
   });
 });
 
-describe("组头三件（dsh 工作区行按钮）", () => {
+describe("组头三件（工作区行按钮）", () => {
   describe("⊕ 在此目录新建终端（vm 真跑）", () => {
     const runCreate = ({ collapsed = [], agentId = "kimi", ready = true, apiImpl, sessions = {}, activeId = null, agentsImpl, hostReadImpl, switchImpl } = {}) => {
       const log = { posts: [], gets: [], switchBodies: [], renders: 0, collapsed: new Set(collapsed) };
@@ -1051,13 +1051,13 @@ describe("组头三件（dsh 工作区行按钮）", () => {
   describe("hover 卡（源码 + CSS）", () => {
     it("800ms 延迟、三行内容、整卡复制路径 + 「已复制」", () => {
       const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
-      assert.ok(src.includes("TERMINAL_RAIL_HOVER_DELAY_MS = 800"), "延迟 800ms（dsh 同值）");
+      assert.ok(src.includes("TERMINAL_RAIL_HOVER_DELAY_MS = 800"), "延迟 800ms");
       assert.ok(src.includes("个会话"), "第三行「N 个会话」");
       assert.ok(src.includes('sessCopyText(key, "已复制")'), "整卡点击复制完整路径，反馈「已复制」（复用既有手法）");
       assert.ok(src.includes("pointerover") && src.includes("pointerout"), "指针进出驱动显隐");
     });
 
-    it("⋯ 菜单打开期间抑制 hover 卡（dsh 的 disabled: menuOpen 同口径）", () => {
+    it("⋯ 菜单打开期间抑制 hover 卡（disabled: menuOpen）", () => {
       const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(/if \(!head \|\| !key \|\| terminalRailMenuKey\) return/.test(src),
         "菜单开着不排卡");
@@ -1075,10 +1075,10 @@ describe("组头三件（dsh 工作区行按钮）", () => {
     });
   });
 
-  describe("图标同槽互换（CSS 钉死，照 dsh 尺寸与色档）", () => {
+  describe("图标同槽互换（CSS 钉死）", () => {
     it("非 hover 文件夹、hover 箭头同槽互换；槽 16×20，箭头 14×14、文件夹 16×16", () => {
       const slot = cssRule(".rail-term-group-slot {");
-      assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "槽位 16×20（dsh 实测槽）");
+      assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "槽位 16×20");
       assert.ok(slot.includes("justify-content: center"), "两枚图标同槽居中（不产生宽度跳动）");
       assert.ok(panelCss.includes(".rail-term-group-head .rail-term-group-arrow { display: none; }"),
         "组头内箭头默认隐（非 hover 看文件夹）");
@@ -1087,7 +1087,7 @@ describe("组头三件（dsh 工作区行按钮）", () => {
       assert.ok(panelCss.includes(".rail-term-group-head:hover .rail-term-group-icon { display: none; }"),
         "hover 收文件夹（同槽位互换）");
       const arrow = cssRule(".rail-term-group-arrow {");
-      assert.ok(arrow.includes("transition: transform .15s ease-in-out"), "箭头 .15s ease-in-out（dsh 实测缓动）");
+      assert.ok(arrow.includes("transition: transform .15s ease-in-out"), "箭头 .15s ease-in-out");
       assert.ok(arrow.includes("color: var(--text-4)"), "箭头吃 caption 级色（--text-4）");
       const icon = cssRule(".rail-term-group-icon {");
       assert.ok(icon.includes("color: var(--text-3)"), "文件夹静息吃三级文字色");
@@ -1105,7 +1105,7 @@ describe("组头三件（dsh 工作区行按钮）", () => {
       assert.ok(rm[1].includes("transition: none"), "过渡关掉（不做位移动画）");
     });
 
-    it("SVG 数据与 dsh 一致（结构与关键特征）：闭合态两条描边、展开态三层实心、chevron 以 C5.95242 为准", () => {
+    it("SVG 数据钉样（结构与关键特征）：闭合态两条描边、展开态三层实心、chevron 以 C5.95242 为准", () => {
       const iconOf = (name) => {
         const m = panelJs.match(new RegExp(`const ${name} = '([^']*)';`));
         assert.ok(m, `${name} 在册`);
@@ -1146,7 +1146,7 @@ describe("组头三件（dsh 工作区行按钮）", () => {
   });
 
   describe("S3 豁免与菜单容器", () => {
-    it("「未分组」组：无 ⊕、无 ⋯、无 hover 卡（dsh 同口径）", () => {
+    it("「未分组」组：无 ⊕、无 ⋯、无 hover 卡", () => {
       const render = extractFn("renderTerminalRailHistory");
       const actionsAt = render.indexOf("const headActions");
       assert.ok(actionsAt > 0, "动作钮渲染可取样");
@@ -1177,7 +1177,7 @@ describe("S4 底栏钉住", () => {
       // 顶区：新建终端钮在最上，且不在滚动层里
       assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf('id="railTermSectionHead"'),
         "新建终端（顶区）在段头之前");
-      // 段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none）
+      // 段头是滚动层外的定高块（flex:none）
       assert.ok(body.indexOf('id="railTermSectionHead"') < body.indexOf('class="rail-term-scroll"'),
         "段头在滚动层之前（不随树滚）");
       // 中段：唯一滚动层里只有一棵工作区树（两段合并）
@@ -1198,12 +1198,12 @@ describe("S4 底栏钉住", () => {
   describe("滚动条指针感知隐退（JS 钉死）", () => {
     it("指针在列内可见、离开 2s 隐退：变量替换瞬时消失，无淡出", () => {
       const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
-      assert.ok(src.includes("TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000"), "滞留 2s（dsh 同值）");
+      assert.ok(src.includes("TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000"), "滞留 2s");
       assert.ok(src.includes("pointerenter"), "进列即显");
       assert.ok(src.includes("pointerleave"), "出列即排隐退");
       assert.ok(src.includes("setTerminalRailQuiet(true)"), "初态隐退（thumb 随指针进列才出现）");
       assert.ok(src.includes('toggleAttribute("data-quiet"'), "隐退=属性开关（CSS 变量替换）");
-      // 隐退不允许带过渡：变量替换必须瞬时（dsh 同口径）。剥掉注释再查——注释里
+      // 隐退不允许带过渡：变量替换必须瞬时。剥掉注释再查——注释里
       // 出现「transition」二字是在立规矩，不是违规。
       const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
       const ruleBody = (sel) => {
@@ -1899,7 +1899,7 @@ describe("选中态跟随聚焦", () => {
 });
 
 describe("文案与时间格式", () => {
-  it("栏内局部时间格式：dsh 式无前缀（不动会话页共用的 sessRelTime）", () => {
+  it("栏内局部时间格式：无前缀（不动会话页共用的 sessRelTime）", () => {
     // 冻结时钟沙盒：实现内部自取 Date.now()/new Date()，旧写法直接喂真实时刻——
     // 昨天/跨年分支随运行日期漂移、月/年边界还有毫秒级竞态（普查 finding）。固定
     // 「现在」后全分支确定性断言，年内/跨年两种日期形制都钉死（旧写法每天只能测到其一）。
@@ -1980,7 +1980,7 @@ describe("组文件夹图标含当前会话时变主题色", () => {
     const betaHead = sandbox.list.html.slice(sandbox.list.html.indexOf('data-rail-term-group="C:\\dev\\beta"'));
     assert.ok(alphaHead.slice(0, 600).includes("rail-term-group-icon is-current"), "聚焦终端所在组：图标带 is-current");
     assert.ok(!betaHead.slice(0, 600).includes("is-current"), "别的组不带");
-    // 用户修正：dsh 的蓝是它的品牌色，我们取主题 accent（sepia 出橙等）
+    // 用户修正：品牌蓝不写死，我们取主题 accent（sepia 出橙等）
     const rule = panelCss.match(/\.rail-term-group-icon\.is-current \{([^}]*)\}/);
     assert.ok(rule, "is-current 样式在册");
     assert.ok(rule[1].includes("var(--accent)"), "取 --accent 主题变量（亮暗/sepia 各自生效）");
@@ -2002,7 +2002,7 @@ describe("live 行悬停动作与归档钮并存", () => {
   });
 });
 
-describe("段头搜索（照搬实测规格，裁剪后）", () => {
+describe("段头搜索", () => {
   describe("HTML 与 CSS", () => {
     it("段头三钮位：搜索槽（钮＋输入框＋清空钮）在册，刷新在位，文案逐字", () => {
       const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/)[0];
@@ -2014,7 +2014,7 @@ describe("段头搜索（照搬实测规格，裁剪后）", () => {
       assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字");
       // D4：段头只剩搜索＋视图选项两钮（刷新钮已砍，用户拍板）
       assert.ok(!head.includes('id="railTermHistoryRefresh"'), "刷新钮不在册");
-      // 位序：标题 → 搜索 → 视图选项（dsh 两钮排布）
+      // 位序：标题 → 搜索 → 视图选项
       assert.ok(head.indexOf('id="railTermSectionTitle"') < head.indexOf('id="railTermSearchBtn"')
         && head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermViewOptionsBtn"'), "位序：标题 → 搜索 → 视图选项");
       // 搜索钮无标签（批准清单里没有它的词）——同 ⋯ 钮形制
@@ -2049,7 +2049,7 @@ describe("段头搜索（照搬实测规格，裁剪后）", () => {
       return fn(query, sessions);
     };
 
-    it("范围＝会话标题＋目录短名，大小写不敏感子串（dsh 出厂口径，无全文）", () => {
+    it("范围＝会话标题＋目录短名，大小写不敏感子串（无全文）", () => {
       assert.deepEqual(run("重构").map((s) => s.id), ["s-1"], "标题命中");
       // alpha：s-2 标题含 Alpha，s-1 目录短名就是 alpha——两条都命中，按最近活跃倒序
       assert.deepEqual(run("alpha").map((s) => s.id), ["s-2", "s-1"], "标题/目录短名双路命中且大小写不敏感");
@@ -2124,7 +2124,7 @@ describe("段头搜索（照搬实测规格，裁剪后）", () => {
   });
 });
 
-// ── 视图选项（照搬实测规格全集） ──
+// ── 视图选项 ──
 // 探针：从 panel.js 栏体段按函数名切源码进 vm 桩环境（照本文件既有惯例）。
 import { readFileSync as readForT7b } from "node:fs";
 import { join as joinForT7b } from "node:path";
@@ -2144,7 +2144,7 @@ describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
       assert.ok(/id="railTermViewOptionsBtn"[^>]*title="视图选项"[^>]*aria-label="视图选项"/.test(dir), "title/aria 逐字");
       const head = dir.slice(dir.indexOf('id="railTermSectionHead"'), dir.indexOf('class="rail-term-scroll"'));
       assert.ok(head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermViewOptionsBtn"'),
-        "位序：搜索 → 视图选项（D4 起段头只此两钮，dsh 两钮排布）");
+        "位序：搜索 → 视图选项（D4 起段头只此两钮）");
     });
 
     it("组头 ⋯ 钮补录 aria「分组操作」（用户已知情未异议）", () => {
@@ -2254,7 +2254,7 @@ describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
         return { move: terminalRailMoveInManualOrder, prefs: () => terminalRailViewPrefs };
       `)({ groupBy: "workspace", orderBy: "manual", archivedFilter: "default", sessionOrder: { kimi: ["a", "b", "c", "d"] } });
       box.move("kimi", "a", "c");
-      assert.deepEqual(box.prefs().sessionOrder.kimi, ["b", "a", "c", "d"], "a 移到 c 之前（dsh insertBefore 同语义）");
+      assert.deepEqual(box.prefs().sessionOrder.kimi, ["b", "a", "c", "d"], "a 移到 c 之前");
     });
 
     it("行 draggable＝非归档；组行不拖（组是目录派生、无清单可持久化）", () => {
@@ -2339,7 +2339,7 @@ describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
   describe("持久化与菜单交互（源码钉死）", () => {
     const src = () => panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
 
-    it("视图偏好一个 localStorage 键存全部（dsh 的 view store 同层）", () => {
+    it("视图偏好一个 localStorage 键存全部", () => {
       assert.ok(src().includes('TERMINAL_RAIL_VIEW_KEY = "panel-terminal-rail-view"'), "键名在册");
       assert.ok(src().includes("localStorage.getItem(TERMINAL_RAIL_VIEW_KEY)"), "进入时读回");
       assert.ok(src().includes("localStorage.setItem(TERMINAL_RAIL_VIEW_KEY,"), "点选即写");
@@ -2512,7 +2512,7 @@ describe("新会话按钮的首次交互动画", () => {
   });
 });
 
-describe("复审必修 2：段头行观感照抄实测值", () => {
+describe("复审必修 2：段头行观感钉死", () => {
   const decls = (selector) => {
     const at = panelCss.indexOf(selector);
     assert.ok(at >= 0, `规则 ${selector} 在册`);
@@ -2545,7 +2545,7 @@ describe("复审必修 2：段头行观感照抄实测值", () => {
     const title = decls(".rail-term-section-title {");
     assert.ok(/font-size:\s*14px/.test(title), "标题 14px");
     assert.ok(/line-height:\s*20px/.test(title), "行高 20px");
-    assert.ok(/font-weight:\s*400/.test(title), "字重 400（dsh 同：不加粗）");
+    assert.ok(/font-weight:\s*400/.test(title), "字重 400（不加粗）");
     assert.ok(/color:\s*var\(--text-3\)/.test(title), "tertiary 色（语义 token）");
     assert.ok(/max-width:\s*45%/.test(title), "max-width 45%");
   });
@@ -2556,10 +2556,10 @@ describe("复审必修 2：段头行观感照抄实测值", () => {
       assert.ok(/width:\s*28px/.test(rule) && /height:\s*28px/.test(rule), `${sel} 28×28`);
     }
     const menu = decls(".rail-term-view-menu {");
-    assert.ok(/min-width:\s*200px/.test(menu), "视图选项菜单 min-width 200px（dsh 实测值）");
+    assert.ok(/min-width:\s*200px/.test(menu), "视图选项菜单 min-width 200px");
   });
 
-  it("搜索槽展开态高度 28→30px（dsh 口径，height 不进过渡列表＝瞬时）", () => {
+  it("搜索槽展开态高度 28→30px（height 不进过渡列表＝瞬时）", () => {
     const collapsed = decls(".rail-term-search {");
     assert.ok(/height:\s*28px/.test(collapsed), "收起态 28px");
     const expanded = decls(".rail-term-section-head.is-searching .rail-term-search {");
@@ -3657,7 +3657,7 @@ describe("全新内切乐观选中（补口：组头 ⊕ / 新建会话无历史
 });
 
 
-// ── 归档/撤销动效（FLIP）＋toast 动效与去向引导钮（dsh 对齐） ──
+// ── 归档/撤销动效（FLIP）＋toast 动效与去向引导钮 ──
 // 用户拍板方案：归档不再瞬时消失——被归档行克隆进覆盖层 100ms 淡出、下方行 200ms
 // 上移、隐藏池回填行 100ms 淡入；撤销是镜像；toast 入场 -6px/160ms、驻留 6s 后
 // 1s 淡出、动作点击瞬时收场；引导钮只在「隐藏已归档」筛选下出现（文案逐字批准）。

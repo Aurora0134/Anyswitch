@@ -27,7 +27,7 @@ export const DSH_TUI_PACKAGE = "@deepseek-harness-tui/dsh-tui";
 //   2. minimumReleaseAgeExclude：pnpm ≥11 默认拒绝 24h 内发布的版本，而发版
 //      当天对齐到的正是那个版本；
 //   3. ignoredOptionalDependencies：sharp 的平台原生包会按 lockfile 全平台下载
-//      （上游维护组实测约 90MB），只留当前平台的那几包。
+//      （全平台约 90MB），只留当前平台的那几包。
 // 三条都按上游同一套纪律写：best-effort、幂等、不覆盖用户已有决定、失败不抛。
 const PROFILE_ALLOW_BUILDS = Object.freeze({
   "@google/genai": false,
@@ -36,7 +36,7 @@ const PROFILE_ALLOW_BUILDS = Object.freeze({
   protobufjs: false,
 });
 
-// sharp 的平台矩阵（上游 0.35.3 的实测表）。只列「别的平台」，当前平台的包
+// sharp 0.35.3 的平台矩阵。只列「别的平台」，当前平台的包
 // 永远不忽略——漏一个后缀只是少省一点下载量，错杀当前平台会让 sharp 起不来。
 const SHARP_WRAPPER_SUFFIXES = Object.freeze([
   "darwin-arm64", "darwin-x64", "freebsd-wasm32", "linux-arm", "linux-arm64",
@@ -191,7 +191,7 @@ export function dshTuiSessionRunning({ base = process.env, io = { readFileSync }
 // 有自己的版本线，不参与对齐判定。
 const DSH_PEER_PREFIX = "@deepseek-ai/dsh";
 
-// dsh 系 peer 区间的实测形状只有两种：精确版（0.1.7-rc.2）与 caret（^0.1.5-alpha.2），
+// dsh 系 peer 区间的形状只有两种：精确版（0.1.7-rc.2）与 caret（^0.1.5-alpha.2），
 // 用 || 连成长名单（上游逐版本枚举）。忠实实现这两种 + npm 的预发行规则：带预发行
 // 尾巴的版本只被「同 [major,minor,patch] 且自身带预发行的档位」接住。认不出的形状
 // 一律判不满足——选不出可证适配的新版就不动，绝不把说不准的包写进用户 profile。

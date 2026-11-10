@@ -69,9 +69,9 @@ export function managedConnectionId(providerId) {
 }
 
 // Effort levels Qoder's worker runtime accepts in `capabilities.thinking`
-// before it rejects the WHOLE provider entry. Measured against the real
-// validator shipped with the running app (0.2.3, `iec` + `Ctr`): only these
-// five pass, and anything else — `light`, `minimal`, `off`, a gateway-specific
+// before it rejects the WHOLE provider entry. The running app's validator
+// (0.2.3, `iec` + `Ctr`): only these five pass, and anything else — `light`,
+// `minimal`, `off`, a gateway-specific
 // spelling — raises an issue on the model, which `qAc` then answers by dropping
 // the provider entirely. So the library's levels must be intersected with this
 // set, never written through.
@@ -80,13 +80,11 @@ const QODER_EFFORT_LEVELS = Object.freeze(["low", "medium", "high", "xhigh", "ma
 // Build one model entry in Qoder's `providers[].models[]` shape.
 //
 // `capabilities.thinking` must be an OBJECT carrying a `modes` array — not a
-// boolean. Verified by running the app's own validator (0.2.3 worker `qAc`):
+// boolean. Per the app's own validator (0.2.3 worker `qAc`):
 // a bare boolean fails `iec`'s shape check, the model accumulates an issue, and
 // because `qAc` only returns a provider when `issues.length === 0`, the entire
 // provider silently disappears from Qoder's model list. That is what emptied
 // the endpoint — every managed connection was dropped, not merely downgraded.
-// (A boolean happens to be what the stale copy of the binary under
-// `Programs\Qoder\resources\` expects; that install is not the one running.)
 //
 // The levels are also handed to Qoder rather than left to request-time
 // injection alone, so the endpoint's own picker offers exactly what the
@@ -112,8 +110,8 @@ function buildModelEntry(modelId, model, catalog = null, provider = null, channe
   const modelLabel = model.displayName ?? modelId;
   return {
     model: modelId,
-    // 渠道名拼进模型显示名：Qoder 选择器每行只渲染 display_name（0.2.5 运行
-    // 时实证 providerDisplayName 不进展示字段，行末 modelID 又是
+    // 渠道名拼进模型显示名：Qoder 选择器每行只渲染 display_name（0.2.5：
+    // providerDisplayName 不进展示字段，行末 modelID 又是
     // qoder-custom-anyswitch-<哈希> 这种 opaque 形式），跨渠道同名模型不拼
     // 渠道名就是两行无法区分的条目；且运行时存在按 display_name 首匹配解析
     // 的路径，名称唯一化同时消除该路径的歧义。

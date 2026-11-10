@@ -2,7 +2,7 @@
 // that retired the ~/.config/opencode/plugins/apicred plugin (2026-09-15).
 //
 // OpenCode MERGES opencode.json + opencode.jsonc from the same directory
-// (verified against the real 1.18.30 binary: providers from both files are
+// (1.18.30: providers from both files are
 // listed side by side), so the managed block lives in the plain-JSON
 // opencode.json — a wholesale-managed file — and the user's hand-written
 // opencode.jsonc (permissions, theme, plugin lines) is never touched.

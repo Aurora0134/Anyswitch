@@ -261,7 +261,7 @@ function openStorePage({ spec, spawn }) {
 // execFile 口径（-NoProfile -Command，不经 shell），JS 侧只解析 stdout。
 const PS_MSIX_INSTALLED = String.raw`$p = Get-AppxPackage -Name $env:ANYS_MSIX_PACKAGE -ErrorAction SilentlyContinue | Select-Object -First 1; if ($p) { [string]$p.Version }`;
 
-// 元数据响应的版本字段经官方客户端代码取证为 currentRelease（version 兜底）；
+// 元数据响应的版本字段是 currentRelease（version 兜底）；
 // 直链字段名没有留存样本，按形态认：第一个以 .msix 结尾的 https 字符串即安装包地址。
 const PS_MSIX_METADATA = String.raw`$ProgressPreference = 'SilentlyContinue'
 try {
