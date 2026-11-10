@@ -35,7 +35,9 @@ const VIEWPORT_FNS = [
   "terminalViewportDestroy", "terminalViewportActivate", "terminalSessionRunning",
   "terminalViewportRetire", "terminalViewportPlaceTerminal", "terminalCloseTerminal",
   "terminalCloseTerminalNow", "terminalViewportRefs", "terminalViewportRefAdd",
-  "terminalViewportRefDrop", "terminalSessionIdentity", "terminalSessionSupportedElsewhere",
+  "terminalViewportRefDrop",
+  "terminalSessionAgentId", "terminalViewportCarriesAgent", "terminalViewportFamilyHost",
+  "terminalViewportAdvanceOrDispose", "terminalViewportDisposeTab",
   "terminalTerminalShownElsewhere",
   "terminalCloseViewportTab", "terminalViewportSyncFromHost",
   "loadTerminalViewports", "saveTerminalViewports", "terminalRailKeepAliveSwitch",
@@ -4272,13 +4274,16 @@ describe("视口化验收（页签＝视口）", () => {
     endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
     file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
   };
-  const AGENT = (instanceId) => ({ endpointId: "kimi", instanceId, name: "Kimi Code", pid: 100, busy: false });
+  const AGENT = (instanceId, endpointId = "kimi") => ({
+    endpointId, instanceId, name: endpointId === "kimi" ? "Kimi Code" : "Claude Code", pid: 100, busy: false,
+  });
   // bound 默认给一个合成对话身份：这些用例的终端都是「已经在用的会话」（在跑 / 后台 /
-  // 可回），未使用槽的形态由 A4 保护专项用例显式传 bound: null 建模。
-  const TERM_ITEM = (id, { instance = "inst-" + id, resume = null, bound = { endpoint: "kimi", id: "c-" + id } } = {}) => ({
+  // 可回），未使用槽的形态由 A4 保护专项用例显式传 bound: null 建模。agent 缺省 kimi，
+  // 家族语义用例传 claude 建第二家（同 agent 判据按会话归属的 endpointId）。
+  const TERM_ITEM = (id, { instance = "inst-" + id, resume = null, bound, agent = "kimi" } = {}) => ({
     id, label: "终端 " + id, shell: "powershell", cwd: "C:\\dev\\alpha",
-    agentId: "kimi", agentName: "Kimi Code", agent: AGENT(instance), resume,
-    boundConversation: bound, status: "running",
+    agentId: agent, agentName: agent === "kimi" ? "Kimi Code" : "Claude Code", agent: AGENT(instance, agent), resume,
+    boundConversation: bound === undefined ? { endpoint: agent, id: "c-" + id } : bound, status: "running",
   });
 
   // 桩钩（全部缺省＝既有行为不变）：agentsImpl/hostReadImpl/switchImpl/createImpl
@@ -4286,10 +4291,13 @@ describe("视口化验收（页签＝视口）", () => {
   // 新建 POST），可 resolve 也可 reject（409 switch_busy、500 等）；blankCreateImpl
   // 同理控制空白终端直连 POST（/api/terminal/sessions，「+」菜单与左栏「新建终端」
   // 无 agent 分支共用）；inFlightCounter
-  // 在沙盒里声明真在飞计数（缺省不声明＝typeof 闸落「未抑制」，与既有用例同义）。
-  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, blankCreateImpl = null, inFlightCounter = false, railHistory = null } = {}) {
+  // 在沙盒里声明真在飞计数（缺省不声明＝typeof 闸落「未抑制」，与既有用例同义）；
+  // closePending 在沙盒里声明真 close 墓碑（缺省不声明＝typeof 闸落「无墓碑」，与
+  // 既有用例同义）；closeImpl 控制 /close 应答（可 reject 出 404/500，走 closeNow 的
+  // 墓碑清账与 404 视同成功分支）。
+  function viewportHarness({ store = {}, items = [], agents = AGENT_IDLE, agentsImpl = null, hostReadImpl = null, switchImpl = null, createImpl = null, blankCreateImpl = null, inFlightCounter = false, railHistory = null, closePending = false, closeImpl = null } = {}) {
     const log = { creates: [], switchBodies: [], closes: [], confirms: [], toasts: [], renders: 0, tabs: 0, empty: 0, rails: 0, streams: 0 };
-    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl, blankCreateImpl, railHistory };
+    const state = { store, agents, items, created: 0, confirm: true, agentsImpl, hostReadImpl, switchImpl, createImpl, blankCreateImpl, railHistory, closeImpl };
     const createdTerminal = (body) => {
       state.created += 1;
       const id = `t-created-${state.created}`;
@@ -4312,6 +4320,7 @@ describe("视口化验收（页签＝视口）", () => {
       let terminalTabsRenderedHtml = "";
       let terminalSwitchInFlight = false;
       ${inFlightCounter ? "let terminalCreateInFlight = 0;" : ""}
+      ${closePending ? "const terminalClosePending = new Set();" : ""}
       let terminalRailSelectPending = null;
       let terminalRailSelectSeq = 0;
       // 归档真跑状态（2026-11-10 页签 1→5 修复）：terminalRailArchiveSession 的
@@ -4387,6 +4396,7 @@ describe("视口化验收（页签＝视口）", () => {
         if (method === "POST" && path.endsWith("/close")) {
           const id = decodeURIComponent(path.slice("/api/terminal/sessions/".length, path.length - "/close".length));
           log.closes.push(id);
+          if (state.closeImpl) return Promise.resolve().then(() => state.closeImpl(id));
           return Promise.resolve({ ok: true });
         }
         if (method === "POST" && path === "/api/terminal/rail/archive") {
@@ -4491,6 +4501,8 @@ describe("视口化验收（页签＝视口）", () => {
         confirmAdd: () => confirmTerminalAddMenu(),
         // 归档真跑驱动口（2026-11-10 页签 1→5 修复）：归档即杀＋原位补新全链。
         archive: (id) => terminalRailArchiveSession(id),
+        // close 墓碑观察口（2026-11-10 关页签家族语义修复）：沙盒声明墓碑时读当前集合。
+        closePending: () => (typeof terminalClosePending !== "undefined" ? Array.from(terminalClosePending) : null),
       };
     `)(state, log);
     // 沙盒内的 api 在调用时才读 state.*，这里补上外部发放的终端快照即可（new Function
@@ -4634,27 +4646,32 @@ describe("视口化验收（页签＝视口）", () => {
     assert.equal(log.streams, 1, "终端流一并收掉");
   });
 
-  // ── 页签只是入口：关页签要不要问，取决于这条对话还有没有别的活页签 ──
-  it("A12 同对话两个页签：关一个零确认、只结束它自己的终端，另一个照常跑", async () => {
-    const shared = { endpoint: "kimi", id: "c-shared" };
-    const items = [TERM_ITEM("t-a", { bound: shared }), TERM_ITEM("t-b", { bound: shared })];
+  // ── 页签只是视口：关页签动不动会话、要不要问，看这条会话的 agent 还有没有别的页签 ──
+  it("A12 同 agent 还有一枚页签：关一个只摘页签，名下会话托养过去零确认", async () => {
+    const items = [
+      TERM_ITEM("t-a", { bound: { endpoint: "kimi", id: "c-one" } }),
+      TERM_ITEM("t-b", { bound: { endpoint: "kimi", id: "c-two" } }),
+    ];
     const { sandbox, log } = viewportHarness({ items });
     sandbox.beat(items);
     assert.equal(sandbox.viewports().length, 2, "两条宿主会话各一个页签");
     sandbox.setAgents(agentsWorking("inst-t-a"));
     sandbox.enrich();
     const viewportA = sandbox.viewports().find((row) => row.terminalId === "t-a");
+    const viewportB = sandbox.viewports().find((row) => row.terminalId === "t-b");
     sandbox.closeTab(viewportA.id);
-    assert.deepEqual(log.confirms, [], "同一条对话还有另一个活页签：不问");
-    assert.deepEqual(log.closes, ["t-a"], "只结束这个入口自己的终端（对话由另一个页签承载）");
-    assert.deepEqual(sandbox.viewports().map((row) => row.terminalId), ["t-b"], "另一个页签原样");
-    assert.ok(sandbox.sessions()["t-b"], "它的终端仍在宿主会话表");
+    assert.deepEqual(log.confirms, [], "同 agent 还有别的页签承载：不动会话，不问");
+    assert.deepEqual(log.closes, [], "一条都不关（页签只是视口）");
+    assert.deepEqual(sandbox.viewports().map((row) => row.terminalId), ["t-b"], "只摘掉这一枚页签");
+    assert.deepEqual(sandbox.viewportBackgrounds(viewportB.id), ["t-a"], "被摘页签的会话托养到同 agent 页签名下继续隐藏保活");
+    assert.ok(sandbox.sessions()["t-a"] && sandbox.sessions()["t-b"], "两条会话都还活着（左栏照常各一行）");
+    assert.deepEqual(sandbox.background(), ["t-a"], "后台引用镜像同步（不会被补建成新页签）");
   });
 
-  it("A13 同 agent 不同对话：仍按自己那条是否最后入口判，取消则一个不动", async () => {
+  it("A13 本页签是该 agent 的最后一枚入口：在跑先问一次，取消则一个不动", async () => {
     const items = [
       TERM_ITEM("t-a", { bound: { endpoint: "kimi", id: "c-one" } }),
-      TERM_ITEM("t-b", { bound: { endpoint: "kimi", id: "c-two" } }),
+      TERM_ITEM("t-b", { bound: { endpoint: "claude", id: "c-two" }, agent: "claude" }),
     ];
     const { sandbox, log, state } = viewportHarness({ items });
     sandbox.beat(items);
@@ -4664,7 +4681,7 @@ describe("视口化验收（页签＝视口）", () => {
     state.confirm = false;
     sandbox.closeTab(viewportA.id);
     assert.deepEqual(log.confirms, ["当前终端仍在运行，关闭后将中断任务。确定继续吗？"],
-      "两条不同对话互不支持：最后入口在跑，复用既有文案问一次");
+      "kimi 只剩这一枚页签（旁边是 claude 的）：最后入口在跑，复用既有文案问一次");
     assert.deepEqual(log.closes, [], "取消＝一条都不关");
     assert.equal(sandbox.viewports().length, 2, "页签一个不动");
     assert.ok(sandbox.sessions()["t-a"], "终端仍在");
@@ -5478,6 +5495,122 @@ describe("视口化验收（页签＝视口）", () => {
       assert.ok(log.toasts.some((row) => row.msg === "无法启动这个终端"), "失败 toast 照出");
     });
   });
+
+  // ── 2026-11-10 关页签家族语义 × close 在飞墓碑 × 视口交接（三案合一回归）──
+  // 家族语义（用户裁决原话）：摘页签的时候还有同 agent 页签就只摘页签不动会话（页签
+  // 只是视口）；若为最后一个同名页签即摘的时候删掉下属所有会话，确保不出现不受控的
+  // 后台会话（无合法前端入口的后台形态不允许存在）。墓碑：/close 树杀窗口内轮询 GET
+  // 带回处理中旧快照，autocreate 把刚关的会话补成新页签＝「关了又回」——盖住这个窗口。
+  // 交接：当屏会话结束（左栏 ×／宿主摘除）时视口交给名下下一位活成员，入口不折损。
+  describe("关页签家族语义×close 墓碑×视口交接（2026-11-10）", () => {
+    const CLAUDE_ITEM = (id) => TERM_ITEM(id, { agent: "claude" });
+    const layoutStore = (viewports, active) => ({
+      "panel-terminal-viewports": JSON.stringify({ active, viewports, background: [] }),
+    });
+
+    it("最后一个同名页签：名下会话全删；墓碑盖住树杀窗（不复活），宿主删干净即清碑", async () => {
+      const items = [TERM_ITEM("t-1")];
+      const { sandbox, log } = viewportHarness({ items, closePending: true });
+      sandbox.beat(items);
+      assert.equal(sandbox.viewports().length, 1, "一页签");
+      sandbox.closeTab(sandbox.viewports()[0].id);
+      assert.deepEqual(log.closes, ["t-1"], "最后入口：结束名下会话");
+      assert.deepEqual(sandbox.closePending(), ["t-1"], "POST 在飞墓碑立起");
+      // 树杀窗内：宿主表还带着它（处理中的旧快照），旧口径这里会 autocreate 复活成新页签
+      sandbox.beat(items);
+      assert.equal(sandbox.viewports().length, 0, "墓碑盖住 autocreate：不复活（「关了又回」的源头）");
+      assert.deepEqual(sandbox.closePending(), ["t-1"], "宿主还在表里：碑继续盖着");
+      sandbox.beat([]);
+      assert.deepEqual(sandbox.closePending(), [], "真相到达即清碑");
+      assert.equal(sandbox.viewports().length, 0, "终态零页签");
+    });
+
+    it("404 视同成功：清碑不弹假错（复活的页签上再点一次 ×，第二笔正是它）", async () => {
+      const items = [TERM_ITEM("t-1")];
+      const { sandbox, log } = viewportHarness({
+        items, closePending: true,
+        closeImpl: () => Promise.reject(new Error("HTTP 404：terminal_session_not_found")),
+      });
+      sandbox.beat(items);
+      sandbox.closeTab(sandbox.viewports()[0].id);
+      await flush();
+      assert.deepEqual(sandbox.closePending(), [], "404＝宿主已无此会话（前一笔已完成或外部已删）：碑即清");
+      assert.deepEqual(log.toasts, [], "不再弹「无法关闭这个终端」假错");
+    });
+
+    it("/close 真失败（500）：碑清＋既有 toast 照出；下一拍把还活着的会话补回入口", async () => {
+      const items = [TERM_ITEM("t-1")];
+      const { sandbox, log } = viewportHarness({
+        items, closePending: true,
+        closeImpl: () => Promise.reject(new Error("HTTP 500：internal")),
+      });
+      sandbox.beat(items);
+      sandbox.closeTab(sandbox.viewports()[0].id);
+      await flush();
+      assert.deepEqual(sandbox.closePending(), [], "失败即清碑");
+      assert.deepEqual(log.toasts.map((row) => row.msg), ["无法关闭这个终端"], "既有文案照出");
+      sandbox.beat(items);
+      assert.equal(sandbox.viewports().length, 1, "关不掉的会话恢复入口（不留无主后台形态）");
+    });
+
+    it("家族托养：同 agent 他页签在，关一枚只摘页签；关掉最后一枚才名下全删", async () => {
+      const items = [TERM_ITEM("t-a"), TERM_ITEM("t-b"), CLAUDE_ITEM("t-c")];
+      const { sandbox, log } = viewportHarness({ items });
+      sandbox.beat(items);
+      assert.equal(sandbox.viewports().length, 3, "三枚页签");
+      const viewportA = sandbox.viewports().find((row) => row.terminalId === "t-a");
+      const viewportB = sandbox.viewports().find((row) => row.terminalId === "t-b");
+      sandbox.closeTab(viewportA.id);
+      assert.deepEqual(log.closes, [], "kimi 还有 t-b 那枚页签：一条都不关（页签只是视口）");
+      assert.deepEqual(sandbox.viewportBackgrounds(viewportB.id), ["t-a"], "t-a 托养进同 agent 页签名下继续隐藏保活");
+      assert.equal(sandbox.viewports().length, 2, "只摘一枚（claude 的照常）");
+      assert.ok(sandbox.sessions()["t-a"], "会话还在宿主表（左栏照常一行）");
+      sandbox.closeTab(viewportB.id);
+      assert.deepEqual(log.closes, ["t-b", "t-a"], "最后一个同名页签：名下会话（当屏＋托养的）全删");
+      assert.deepEqual(sandbox.background(), [], "后台引用清零（不受控后台形态不存在）");
+      assert.equal(sandbox.viewports().length, 1, "只剩 claude 的页签");
+      assert.ok(!sandbox.sessions()["t-a"] && !sandbox.sessions()["t-b"], "kimi 会话本地记录已摘");
+      const family = (log.switchEvents || []).filter((row) => row.event === "tab-close-family");
+      assert.equal(family.length, 2, "留痕两拍");
+      assert.deepEqual([family[0].detail.parked, family[0].detail.closed], [["t-a"], []], "第一拍：托养 1、关 0");
+      assert.deepEqual([family[1].detail.parked, family[1].detail.closed], [[], ["t-b", "t-a"]], "第二拍：托养 0、关 2");
+    });
+
+    it("视口交接（sync 摘除）：当屏会话离开宿主 → 名下最近换下的一位接上当屏，页签数不变", async () => {
+      const store = layoutStore([{ id: "viewport-1", terminalId: "t-1", background: ["t-2", "t-3"] }], "viewport-1");
+      const items = [TERM_ITEM("t-1"), TERM_ITEM("t-2"), TERM_ITEM("t-3")];
+      const { sandbox, log } = viewportHarness({ store, items });
+      sandbox.beat(items);
+      assert.equal(sandbox.viewports().length, 1, "存档布局还原：一页签");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-1");
+      const rendersBefore = log.renders;
+      sandbox.beat([TERM_ITEM("t-2"), TERM_ITEM("t-3")]);
+      assert.equal(sandbox.viewports().length, 1, "入口不折损：页签数不变（旧口径这里是摘视口＋后台成员各自爆成一枚新页签）");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-3", "LIFO：最近换下来的 t-3 接上当屏");
+      assert.deepEqual(sandbox.viewportBackgrounds("viewport-1"), ["t-2"], "t-2 保持后台");
+      assert.equal(sandbox.activeTerminal(), "t-3", "显示指针换到接班的会话");
+      assert.equal(log.renders - rendersBefore, 2,
+        "交接渲染一拍＋尾拍指针变更补渲一拍（生产里第二刀被同会话流短路收成零成本）");
+      assert.ok((log.switchEvents || []).some((row) => row.event === "viewport-advance"), "交接留痕一拍");
+    });
+
+    it("左栏 × 当屏会话：直杀这一条＋视口交接；树杀窗内不复活、宿主删干净即清碑", async () => {
+      const store = layoutStore([{ id: "viewport-1", terminalId: "t-1", background: ["t-2"] }], "viewport-1");
+      const items = [TERM_ITEM("t-1"), TERM_ITEM("t-2")];
+      const { sandbox, log } = viewportHarness({ store, items, closePending: true });
+      sandbox.beat(items);
+      sandbox.railClose("t-1");
+      assert.deepEqual(log.closes, ["t-1"], "会话级关闭：直发它自己的 /close");
+      assert.equal(sandbox.viewports().length, 1, "视口守恒：入口不折损");
+      assert.equal(sandbox.viewports()[0].terminalId, "t-2", "名下活成员接上当屏");
+      assert.deepEqual(sandbox.closePending(), ["t-1"], "墓碑立起");
+      sandbox.beat(items);
+      assert.equal(sandbox.viewports().length, 1, "交接后的页签不受牵连；t-1 不复活成新页签");
+      assert.deepEqual(sandbox.viewportBackgrounds("viewport-1"), [], "t-2 已当屏（不在后台集合）");
+      sandbox.beat([TERM_ITEM("t-2")]);
+      assert.deepEqual(sandbox.closePending(), [], "宿主删干净即清碑");
+    });
+  });
 });
 
 // ── 补验：宿主绑定库身份（boundConversation）──────────────────────
@@ -6088,6 +6221,67 @@ describe("2026-11-07 resize 回声回归（切到→重渲染→快切走被误�
     // 显示层口径不许动：回声只影响杀前判据，转圈仍走 terminalSessionBusyFromSignals。
     assert.ok(!extractFn("terminalBusyByOutput").includes("lastResizeAt"),
       "terminalBusyByOutput 本体不读 resize 戳（显示层口径零改动）");
+  });
+});
+
+// ── 同会话流健在时整组跳过重建（2026-11-10 关页签抽搐面：方案三）──
+// 关非活跃页签、左栏重渲等入口都会无差别走到 renderTerminalPreviewSession，把没变的
+// 活跃会话整拆整建（xterm＋SSE 各重来一遍）——抽搐的主要视觉放大器。绑定中的会话与
+// 流都健在时，park／建流／挂占位／fit 整组跳过。closeTerminalStream 同步清
+// terminalBoundSessionId，条件自洽：流被拆过就必然不满足，重建照旧。
+describe("同会话流短路（关非活跃页签不再整拆重建）", () => {
+  const screenSandbox = () => {
+    const log = { connects: [], clears: 0 };
+    const sandbox = new Function("log", `
+      let terminalBackendReady = true;
+      let activeTerminalPreviewId = "t1";
+      let terminalBoundSessionId = null;
+      let terminalEventSource = null;
+      const currentView = "board";
+      const document = { querySelector: () => null, hidden: false };
+      function $(id) { return null; }
+      function terminalSessionFor(id) { return id === "t1" || id === "t2" ? { id, backend: true } : null; }
+      function clearTerminalEmptyState() { log.clears += 1; }
+      function renderTerminalSessionData() {}
+      function renderTerminalPreviewTabs() {}
+      function connectTerminalStream(session) { log.connects.push(session.id); }
+      ${extractFn("renderTerminalPreviewSession")}
+      return {
+        render: (opts) => renderTerminalPreviewSession(opts),
+        bind: (id) => { terminalBoundSessionId = id; },
+        stream: (on) => { terminalEventSource = on ? {} : null; },
+        show: (id) => { activeTerminalPreviewId = id; },
+      };
+    `)(log);
+    return { sandbox, log };
+  };
+
+  it("绑定中的会话且流健在：零重建（同步路径与 deferScreen 路径都不碰流）", () => {
+    const { sandbox, log } = screenSandbox();
+    sandbox.render({});
+    assert.deepEqual(log.connects, ["t1"], "首渲无流：建流一次（前提自证）");
+    log.connects.length = 0;
+    // 生产里建流的同步段即固化 terminalBoundSessionId——沙盒手工置位同一状态
+    sandbox.bind("t1");
+    sandbox.stream(true);
+    sandbox.render({});
+    assert.deepEqual(log.connects, [], "同会话流健在：park/建流/fit 整组跳过");
+    sandbox.render({ deferScreen: true });
+    assert.deepEqual(log.connects, [], "deferScreen 路径同样短路（帧队列里也没有重建）");
+  });
+
+  it("换了会话或流已拆：照旧重建", () => {
+    const { sandbox, log } = screenSandbox();
+    sandbox.bind("t1");
+    sandbox.stream(true);
+    sandbox.show("t2");
+    sandbox.render({});
+    assert.deepEqual(log.connects, ["t2"], "切到别的会话：重建（短路不误伤切换）");
+    log.connects.length = 0;
+    sandbox.show("t1");
+    sandbox.stream(false); // 生产里 closeTerminalStream 会同时清绑定——这里只拆流也必须重建
+    sandbox.render({});
+    assert.deepEqual(log.connects, ["t1"], "流不在了：重建照旧");
   });
 });
 
