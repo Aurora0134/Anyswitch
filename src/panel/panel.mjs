@@ -92,6 +92,7 @@ const APP_INFO = Object.freeze({
 const REPO_PANEL_HTML = join(APP_DIR, "panel-ui", "panel.html");
 const REPO_PANEL_CSS = join(APP_DIR, "panel-ui", "panel.css");
 const REPO_PANEL_JS = join(APP_DIR, "panel-ui", "panel.js");
+const REPO_PANEL_WALLPAPER_THEME_JS = join(APP_DIR, "panel-ui", "wallpaper-theme.js");
 const REPO_PANEL_LOGO = join(APP_DIR, "docs", "assets", "logo.png");
 const REPO_XTERM_JS = join(APP_DIR, "node_modules", "@xterm", "xterm", "lib", "xterm.js");
 const REPO_XTERM_CSS = join(APP_DIR, "node_modules", "@xterm", "xterm", "css", "xterm.css");
@@ -3723,6 +3724,14 @@ export function createPanelRouter({
         return res.end();
       }
       return servePanelFile(res, req, REPO_PANEL_JS, "text/javascript; charset=utf-8");
+    }
+
+    if (path === "/panel/assets/wallpaper-theme.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_PANEL_WALLPAPER_THEME_JS, "text/javascript; charset=utf-8");
     }
     if (path === "/panel/assets/xterm.js" && (method === "GET" || method === "HEAD")) {
       if (hostKind !== "panel-host") {
