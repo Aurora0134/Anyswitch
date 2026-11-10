@@ -1,7 +1,7 @@
 // 「自定义」壁纸主题 UI 接线回归测试。
 // 静态面：panel.html 的清单/垫底 DOM/配置窗口骨架与文案锚点、panel.css 的垫底/
 // 终端半透明/窗口预览规则、panel.js 的接线点（setPanelStyle→syncStyle、亮暗→
-// syncMode、「自定义...」开窗分支、xterm allowTransparency、rgba 上报剥 alpha）。
+// syncMode、「自定义...」开窗分支、xterm 透明开关门控、rgba 上报剥 alpha）。
 // 行为面：抽取 createWallpaperThemeController 进 vm 沙箱，桩化 DOM 根/存档/解码/
 // 存储，驱动「窗口暂存 → 确认落盘 / 取消丢弃」全模型：上传校验、暂存隔离、
 // 亮暗跟随、三滑杆、移除的确认闸门。
@@ -116,7 +116,7 @@ describe("壁纸主题静态接线", () => {
     assert.ok(!panelCss.includes("#wallpaperControls"), "旧从属区 CSS 门控已清");
   });
 
-  it("panel.js 接线：清单四项、「自定义...」开窗分支、主题/亮暗切换进控制器、xterm 允许透明", () => {
+  it("panel.js 接线：清单四项、「自定义...」开窗分支、主题/亮暗切换进控制器、xterm 透明开关按底色门控", () => {
     assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia", "wallpaper"];'), "STYLES 四项");
     assert.ok(/b\.dataset\.style === WALLPAPER_STYLE[\s\S]{0,200}?openModal\(\)/.test(panelJs),
       "「自定义...」点开配置窗口");
@@ -128,7 +128,77 @@ describe("壁纸主题静态接线", () => {
       "确认走标准换肤路径");
     assert.ok(panelJs.includes("onFallbackStyle: () => setPanelStyle(\"saas\")"),
       "确认删除已存图时切回 Default");
-    assert.ok(panelJs.includes("allowTransparency: true,"), "xterm 允许透明底色");
+    assert.ok(panelJs.includes("allowTransparency: terminalBackgroundHasAlpha(),"),
+      "构造首帧按底色是否带 alpha 决定开关");
+    assert.ok(panelJs.includes("terminalXterm.options.allowTransparency = terminalBackgroundHasAlpha();"),
+      "换肤/亮暗/系统偏好变化时同步开关");
+  });
+});
+
+// ═══════════════════════════════════════════════
+// 终端透明栅格化门控（vm 沙箱）
+// ═══════════════════════════════════════════════
+
+describe("终端透明栅格化只在壁纸底色带 alpha 时开启", () => {
+  function sandbox(initialBg) {
+    const state = { bg: initialBg };
+    const log = [];
+    const options = new Proxy({}, {
+      set(target, key, value) { log.push([key, value]); target[key] = value; return true; },
+    });
+    const context = {
+      document: { documentElement: {} },
+      getComputedStyle: () => ({ getPropertyValue: (n) => (n === "--terminal-bg" ? state.bg : "") }),
+      terminalXterm: { options },
+      terminalXtermTheme: () => ({ background: state.bg }),
+      reportTerminalThemeToBackend: () => {},
+    };
+    const api = vm.runInNewContext(
+      `(() => { ${extractPanelFn("terminalBackgroundHasAlpha")}
+        ${extractPanelFn("applyTerminalXtermTheme")}
+        return { apply: applyTerminalXtermTheme, hasAlpha: terminalBackgroundHasAlpha }; })()`,
+      context,
+    );
+    return { api, state, log };
+  }
+
+  it("三静态皮肤亮暗六档都是六位 hex，透明开关恒关", () => {
+    for (const bg of ["#f8fafc", "#0b1220", "#eef7fb", "#050e1a", "#faf6ec", "#120d08"]) {
+      const { api, log } = sandbox(bg);
+      assert.equal(api.hasAlpha(), false, `${bg} 不带 alpha`);
+      api.apply();
+      assert.deepEqual(log[0], ["allowTransparency", false], `${bg} 开关落定`);
+      assert.equal(log[1][0], "theme", "theme 赋值在开关之后");
+    }
+  });
+
+  it("壁纸主题亮/暗/跟随系统三态带 alpha，开关打开", () => {
+    for (const bg of ["rgba(248, 250, 252, 0.78)", "rgba(11, 18, 32, 0.72)"]) {
+      const { api, log } = sandbox(bg);
+      assert.equal(api.hasAlpha(), true, `${bg} 带 alpha`);
+      api.apply();
+      assert.deepEqual(log[0], ["allowTransparency", true]);
+    }
+  });
+
+  it("alpha=1 的 rgba 与八位 hex 的 ff 通道按不透明处理", () => {
+    assert.equal(sandbox("rgba(248, 250, 252, 1)").api.hasAlpha(), false);
+    assert.equal(sandbox("#f8fafcff").api.hasAlpha(), false);
+    assert.equal(sandbox("#f8fafcc8").api.hasAlpha(), true);
+  });
+
+  it("同一实例换肤：开关随底色在开/关之间翻转，且每次都先于 theme 落定", () => {
+    const { api, state, log } = sandbox("#f8fafc");
+    api.apply();
+    state.bg = "rgba(248, 250, 252, 0.78)";
+    api.apply();
+    state.bg = "#faf6ec";
+    api.apply();
+    assert.deepEqual(log.filter(([k]) => k === "allowTransparency").map(([, v]) => v),
+      [false, true, false], "Default → 自定义 → Sepia 依次关/开/关");
+    assert.deepEqual(log.map(([k]) => k),
+      ["allowTransparency", "theme", "allowTransparency", "theme", "allowTransparency", "theme"],
+      "每次都先设开关再设 theme（theme 赋值触发图集重建）");
   });
 });
 

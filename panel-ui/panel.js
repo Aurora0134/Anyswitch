@@ -7847,6 +7847,18 @@ async function api(method, path, body) {
   };
   const TERMINAL_ANSI_KEYS = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
     "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
+  // 静态皮肤的 --terminal-bg 是六位 hex：开透明路径会跳过 clearColor 与背景色
+  // 描边，亮态浅底上笔画变细、dim 字发白。只有壁纸主题带 alpha 的底色才需要开。
+  function terminalBackgroundHasAlpha() {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue("--terminal-bg").trim().toLowerCase();
+    const rgba = /^rgba?\(([^)]+)\)$/.exec(raw);
+    if (rgba) {
+      const parts = rgba[1].split(",").map((v) => v.trim());
+      return parts.length === 4 && Number(parts[3]) < 1;
+    }
+    const hex8 = /^#([0-9a-f]{8})$/.exec(raw);
+    return hex8 ? hex8[1].slice(6) !== "ff" : false;
+  }
   function terminalXtermTheme() {
     const cs = getComputedStyle(document.documentElement);
     const pick = (name, fallback) => {
@@ -7907,7 +7919,12 @@ async function api(method, path, body) {
   }
   // 主题/皮肤/系统亮暗变化后重刷在跑的 xterm；不在跑（未建流）则等下次创建时自然取新值
   function applyTerminalXtermTheme() {
-    if (terminalXterm) terminalXterm.options.theme = terminalXtermTheme();
+    if (terminalXterm) {
+      // theme 赋值会触发 xterm 重建字形图集，allowTransparency 必须先落定：xterm
+      // 的 option 变更清单不含此项，单改它不会换栅格化路径。
+      terminalXterm.options.allowTransparency = terminalBackgroundHasAlpha();
+      terminalXterm.options.theme = terminalXtermTheme();
+    }
     reportTerminalThemeToBackend();
   }
 
@@ -8379,9 +8396,8 @@ async function api(method, path, body) {
     if ($("terminalView")?.hidden) return terminalXterm;
     const term = new window.Terminal({
       allowProposedApi: true,
-      // 壁纸主题的 --terminal-bg 带 alpha：不开 allowTransparency 时 xterm 会把
-      // 底色按不透明处理，终端屏透不出垫底图；不透明底色下此开关无视觉差异
-      allowTransparency: true,
+      // 首帧与 applyTerminalXtermTheme 同口径：底色带 alpha 才走透明栅格化
+      allowTransparency: terminalBackgroundHasAlpha(),
       convertEol: true,
       cursorBlink: true,
       // 输入不再把视口写回真尾：跟随态的合法停靠位是内容底（见
