@@ -4022,7 +4022,7 @@ describe("panel.html 设置全页视图", () => {
       assert.ok(preview.includes(`id="${id}"`), `预览含镜像层 #${id}`);
     }
     assert.ok(!preview.includes("panel-card"), "预览不再内置独立样张");
-    const capture = panelJs.match(/function captureMirrorInto\(viewport, sizer, scaleEl\) \{([\s\S]*?)\n    \}/);
+    const capture = panelJs.match(/function captureMirrorInto\(viewport, sizer, scaleEl\) \{([\s\S]*?)\n  \}/);
     assert.ok(capture, "captureMirrorInto found in panel.js");
     assert.ok(capture[1].includes('document.querySelector(".telemetry-view")'), "镜像源为真实看板视图");
     assert.ok(capture[1].includes("cloneNode(true)"), "镜像为看板 DOM 克隆");
@@ -4039,7 +4039,7 @@ describe("panel.html 设置全页视图", () => {
     // 剥了 id 的克隆体移进镜像容器后不再命中那条规则，照样克隆就是给 v2 用户画出一条
     // 界面上根本不存在的旧版胶囊导航。新版改克隆一份迷你左栏（皮肤 token 全局生效，
     // 自动着色）；旧版行为原样保留。
-    const capture = panelJs.match(/function captureMirrorInto\(viewport, sizer, scaleEl\) \{([\s\S]*?)\n    \}/);
+    const capture = panelJs.match(/function captureMirrorInto\(viewport, sizer, scaleEl\) \{([\s\S]*?)\n  \}/);
     assert.ok(capture, "captureMirrorInto found in panel.js");
     const body = capture[1];
     assert.ok(body.includes("newUiEnabled()"), "镜像按本机 UI 版本分路（复用 newUiEnabled，与分段钮同一状态源）");
@@ -4065,6 +4065,27 @@ describe("panel.html 设置全页视图", () => {
       "镜像头行克隆顶班 v2 id 锚收编规则：品牌组与旧 tab 条在克隆体里整隐");
     assert.ok(/:root\[data-ui-version="v2"\]\[data-style\] \.settings-mirror-scale \.head-inner \{\s*max-width: none; padding-left: 0; justify-content: flex-end;/.test(panelCss),
       "镜像头行剥栏让位（padding-left 0）、保持右对齐，与看板内容左缘对齐");
+  });
+
+  it("captureMirrorInto 与 initWallpaper 同处 IIFE 顶层：窗内预览回调与设置页快照共用同一份实现", () => {
+    // 作用域回归：initWallpaper 在 IIFE 顶层把 captureMirror 回调交给壁纸控制器，而这份
+    // 实现一度留在 initSettingsView 闭包内，真实面板一上传就在 renderPreview 抛
+    // ReferenceError，被 pickFile 的 catch 吞成「背景图读取失败，请换一张图片」，其后的
+    // syncModalButtons 不执行（确认钮恒禁用、上传钮不翻「重新上传」、移除钮不出现）。
+    // 单测当时全绿，是因为行为面直接注入 mock captureMirror，真实接线从未被测。
+    const topLevel = (name) => new RegExp(`^ {2}function ${name}\\(`, "m").test(panelJs);
+    assert.ok(topLevel("captureMirrorInto"), "captureMirrorInto 声明在 IIFE 顶层（2 空格缩进）");
+    assert.ok(topLevel("initWallpaper"), "initWallpaper 同在 IIFE 顶层");
+    assert.ok(!/^ {4}function captureMirrorInto\(/m.test(panelJs),
+      "不再嵌在设置视图闭包内（4 空格缩进＝IIFE 顶层够不到）");
+    const settingsView = panelJs.match(/function initSettingsView\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? "";
+    assert.ok(settingsView.length > 1000, "initSettingsView 取到函数体");
+    assert.ok(!settingsView.includes("function captureMirrorInto"),
+      "设置视图闭包里不再持有声明，两处调用共用顶层这一份");
+    const initWallpaper = panelJs.match(/function initWallpaper\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? "";
+    assert.ok(initWallpaper.length > 100, "initWallpaper 取到函数体");
+    assert.ok(/captureMirror: \(\) => captureMirrorInto\(/.test(initWallpaper),
+      "预览回调交给控制器时直接引用顶层这一份");
   });
 
   it("主题存档恢复：内联脚本四项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
