@@ -1,6 +1,6 @@
 # 面板美术风格重构 · 风格片段契约（常驻主题机制）
 
-目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 3 套可切换面板主题片段（`saas` 默认 / `aurora` / `sepia`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上。
+目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 3 套可切换面板主题片段（`saas` 默认 / `aurora` / `sepia`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上；另有动态第四主题「自定义」（`wallpaper`），不进本机制，见下文专节。
 **布局、DOM 结构、文案、既有注释一律不动**；只换皮肤。
 
 主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
@@ -13,12 +13,27 @@
 
 ## 切换机制（集成方实现，片段作者只需了解）
 
-- `<html>` 上新增 `data-style` 属性：`saas`（默认）/ `aurora` / `sepia` = 三套风格。
+- `<html>` 上新增 `data-style` 属性：`saas`（默认）/ `aurora` / `sepia` = 三套风格，
+  另有动态第四项 `wallpaper`（见下节，不走静态片段机制）。
   已退役的 `blueprint` / `neon` / `industrial` / `editorial` / `anthropic` 片段随退役删除；
   存档缺失、空串、上述退役值或任何未知值，首帧一律解析为 `saas` 并覆写存档。
 - 亮暗仍由既有 `data-theme="light|dark"` + `prefers-color-scheme` 决定，与 `data-style` 正交，
   亮暗由右上角按钮独立控制。
 - 设置弹窗「面板主题」栏切换，即时生效，localStorage `panel-style` 记忆在本机。
+
+## 动态主题「自定义」（wallpaper，不走静态片段机制）
+
+`wallpaper` 没有 `style-lab/wallpaper.css` 源文件，panel.css 里也没有它的横幅块：
+它的整套 token 由取色引擎（`../wallpaper-theme.js`，OKLCH 聚类取种子色）按用户
+上传的背景图生成，亮暗双套预生成，panel.js 以 `documentElement.style.setProperty`
+差量注入并按 `data-theme` 取用；切走「自定义」时全量清掉注入属性，静态皮肤的
+CSS 规则自然恢复生效。
+
+清单对账因此分两层：panel.html 的 PANEL_STYLES 与 panel.js 的 STYLES 是四项
+（三静态 + `wallpaper`），style-lab-sync.test.mjs 的横幅块/源文件校验只覆盖三静态，
+并反向断言动态项没有 `style-lab/` 源文件。壁纸垫底结构、终端屏半透明与主题页
+从属控件的样式写在 panel.css 基座段（非横幅块），由 `:root[data-style="wallpaper"]`
+门控。
 
 ## 片段文件必须包含的三段（顺序、选择器形式严格照此）
 
