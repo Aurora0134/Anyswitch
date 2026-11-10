@@ -11396,7 +11396,7 @@ async function api(method, path, body) {
           return;
         }
         if (file.size > WALLPAPER_MAX_BYTES) {
-          notify("图片超过 20MB，请换一张更小的", true);
+          notify("图片超过 20MB，未上传", true);
           return;
         }
         const replacing = hasImage;
