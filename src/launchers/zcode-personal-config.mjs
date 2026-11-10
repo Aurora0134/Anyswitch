@@ -1,6 +1,6 @@
 // ZCode's own model list — the file it actually renders — is
-// ~/.zcode/v2/provider_config.json. Reading ZCode's shipped runtime shows why
-// writing config.json alone stopped being enough: the import from config.json
+// ~/.zcode/v2/provider_config.json. Writing config.json alone stopped
+// being enough: the import from config.json
 // runs only while provider_config.json does not exist, after which the client
 // polls and rewrites its own file and never looks at the injected one again.
 // So every channel, model and deletion Anyswitch pushes into config.json after

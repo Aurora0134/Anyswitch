@@ -527,7 +527,7 @@ describe("pi provider id mapping", () => {
   });
 });
 describe("static on-disk auth values (direct-launch decoupling)", () => {
-  // 结论（2026-10，证据为本机安装 @earendil-works/pi-coding-agent 1.0.4）：
+  // 结论（2026-10，@earendil-works/pi-coding-agent 1.0.4）：
   // pi 对 apiKey 与 header 值做 ${VAR} 模板展开、缺变量即抛错
   // （dist/core/resolve-config-value.js resolveConfigValueOrThrow /
   // resolveHeadersOrThrow），且模板语法没有 ${VAR:-default} 默认值形式——

@@ -339,7 +339,7 @@ describe("handleModels auto catalog entry", () => {
   });
 
   it("the alias survives Claude Code's gateway discovery filter and collides with no wire id", async () => {
-    // The filter below is the exact predicate extracted from claude.exe 2.1.x:
+    // The filter below is the exact predicate Claude Code 2.1.x applies:
     // catalog entries whose id fails it never reach the /model picker. Pin the
     // contract so a future rename can't silently re-hide auto.
     assert.ok(/(claude|anthropic)/i.test(AUTO_MODEL_ANTHROPIC_ID));

@@ -69,8 +69,8 @@ export function buildZcodeProviderEntry(providerId, provider, port, token, catal
     if (efforts) {
       // ZCode renders `variants` verbatim as its thinking-depth picker, so the
       // list itself is the vocabulary; `defaultVariant` is what a session that
-      // never touched the picker sends. Key names come from the shipped
-      // app.asar schema, not from an observed request — if a ZCode update
+      // never touched the picker sends. Key names come from ZCode's shipped
+      // schema, not from an observed request — if a ZCode update
       // renames them this block silently stops rendering a picker.
       entry.reasoning = {
         enabled: true,

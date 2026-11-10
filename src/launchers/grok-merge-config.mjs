@@ -72,9 +72,8 @@ const MANAGED_ID_PREFIX = "anyswitch-";
 // managed entry.
 export const AUTO_MODEL_KEY = `${MANAGED_ID_PREFIX}${AUTO_CHANNEL_KEY}`;
 // Picker copy for the reasoning_efforts sub-tables: low→xhigh mirror the
-// wording of grok's built-in model catalog (extracted from the binary's
-// bundled definitions); none/minimal/max extend the same style because the
-// built-ins never ship those levels.
+// wording of grok's built-in model catalog; none/minimal/max extend the same
+// style because the built-ins never ship those levels.
 const EFFORT_PRESENTATION = {
   none: { label: "No Reasoning", description: "Disable reasoning for the fastest responses" },
   minimal: { label: "Minimal Effort", description: "Lightest reasoning for simple tasks" },

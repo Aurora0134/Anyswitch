@@ -2,8 +2,8 @@
 // Pure functions only. No IO, no network, no DPAPI.
 //
 // The official 3p deployment's model picker only lists route ids that look
-// like Anthropic models. The test (verbatim from the Claude Desktop 2.9939.2
-// app.asar, applied to BOTH discovery results and a static inferenceModels
+// like Anthropic models. The test (Claude Desktop 2.9939.2, applied to BOTH
+// discovery results and a static inferenceModels
 // list, with no config switch to disable it): the id must not mention a
 // competitor brand (the blocklist below) and must either be a bare tier name
 // or contain a Claude-family word. The refusal text names the contract for

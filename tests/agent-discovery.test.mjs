@@ -72,7 +72,7 @@ test("claude 解析优先 npm 全局包：npm 位在且是真执行体时，引�
 });
 
 test("claude npm 位落空时认桌面托管引擎：三根都扫，跨根取版本最新的一份", () => {
-  // 引擎形状照 agent-metrics 的 claudeDesktopForm 白名单真机取证写：semver 与 exe
+  // 引擎形状照 agent-metrics 的 claudeDesktopForm 白名单写：semver 与 exe
   // 之间旧布局零层、Desktop ≥2.37337 起垫一层构建哈希；非 semver 条目不认。
   const dir = mkTestDir("claude-engine-");
   try {

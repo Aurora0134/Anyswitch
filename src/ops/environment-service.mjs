@@ -119,7 +119,7 @@ export const CLIENT_ENTRY_FORMS = Object.freeze({
   qoder: Object.freeze(["CLI", "Desktop"]),
   claude: Object.freeze(["CLI", "Desktop"]),
   // 官方桌面端上线后 DSH 与 kimi 同形：一个端点 id、一份家目录之上有终端与
-  // 桌面两个界面。官方 Desktop 捆绑 Web（desktop-runtime.json 实证三件同包），
+  // 桌面两个界面。官方 Desktop 捆绑 Web（desktop-runtime.json：三件同包），
   // Web 是附带入口，不单列——终端形态本身由本体 harness 与界面插件 dsh-tui
   // 两个组件构成，但那是同一种形态的两个部分，不是两个入口。
   dsh: Object.freeze(["CLI", "Desktop"]),

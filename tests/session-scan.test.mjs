@@ -1336,7 +1336,7 @@ test("workbuddy: 大文件里只在头窗的 ai-title 也认（尾窗 16KB 之�
   assert.equal(row.lastActive, 1788000100000, "lastActive 仍取最后一条事件");
 });
 
-// 真机会话的裁剪版（2026-10-31 本机复现）：1343 行、ai-title（"优化应用启动动画
+// 真实会话的裁剪版（2026-10-31 复现）：1343 行、ai-title（"优化应用启动动画
 // 效果"）落在第 119 行，既不在头 60 行也不在尾 60 行；首条 user 消息是客户端注入
 // 的 `<system-reminder data-role="user-context">` 整块，不是人打的字。样本内容
 // （路径、标题文案）按原样脱敏后复制进临时目录，不读真实 ~/.workbuddy。
@@ -1349,7 +1349,7 @@ function realWorkbuddySessionEvents({ aiTitleAt = 119, withAiTitle = true } = {}
   const id = "9c1d2e3f-4a5b-4c6d-8e7f-001122334455";
   const head = [
     { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
-    // 客户端注入块：真机上它就是首条 user 消息，标题曾退化成这段机器文本。
+    // 客户端注入块：实际它就是首条 user 消息，标题曾退化成这段机器文本。
     workbuddyMessageEvent("user", REAL_WORKBUDDY_REMINDER, 1788000000500),
     workbuddyMessageEvent("user", REAL_WORKBUDDY_PROMPT, 1788000001000),
   ];
@@ -1369,7 +1369,7 @@ function realWorkbuddySessionEvents({ aiTitleAt = 119, withAiTitle = true } = {}
   return { id, events };
 }
 
-test("workbuddy: 中段 ai-title 也能读到，注入块不当标题/摘要（真机裁剪样本）", async () => {
+test("workbuddy: 中段 ai-title 也能读到，注入块不当标题/摘要（真实会话裁剪样本）", async () => {
   const root = makeTmp();
   const { id, events } = realWorkbuddySessionEvents();
   const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, events);
@@ -1723,7 +1723,7 @@ test("zcode: parent_id / surface 随 meta 透出（子会话归母与面判据�
   mkdirSync(join(root, "cli", "db"), { recursive: true });
   const dbPath = makeSessionDb(join(root, "cli", "db"));
   const db = new DatabaseSync(dbPath);
-  // 真机库带 parent_id；夹具默认表没有，用 ALTER 补上——同时验证探列分支。
+  // 真实库带 parent_id；夹具默认表没有，用 ALTER 补上——同时验证探列分支。
   db.exec("ALTER TABLE session ADD COLUMN parent_id text");
   db.prepare("INSERT INTO session (id, directory, title, time_created, time_updated, parent_id) VALUES (?, ?, ?, ?, ?, ?)")
     .run("sess_dwf-dwfrun-1-actor_1_1", "C:\\work\\dbproj", "workflow actor", 1788000300000, 1788000309000, "sess_db1");

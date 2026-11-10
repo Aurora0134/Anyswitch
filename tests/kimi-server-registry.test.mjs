@@ -9,7 +9,7 @@ import {
   readKimiServerInstances,
 } from "../src/launchers/kimi-server-registry.mjs";
 
-// 本机 2026-09-23 桌面端真实跑过一轮后留下的那条登记，逐字段照抄。
+// 桌面端真实跑过一轮后的登记形态，逐字段钉样。
 const REAL_ROW = '{"server_id":"01M3628YJKJ9Q8HXYAXA98HV8D","pid":21460,"host":"127.0.0.1","port":7457,"started_at":1790131337810,"heartbeat_at":1790131653029,"host_version":"2.0.1"}';
 
 test("home resolution follows the client's own order: env first, then ~/.kimi-code", () => {
@@ -134,9 +134,9 @@ test("a recycled pid keeps the fresher of two registrations", async () => {
 });
 
 test("the window tracks the client's own heartbeat cadence: a beating row counts, a row left by an app that exited three minutes ago does not", async () => {
-  // 15 秒是客户端安装包里的默认心跳间隔（createInstanceRegistry），每拍重写一次
+  // 15 秒是客户端的默认心跳间隔（createInstanceRegistry），每拍重写一次
   // 自己的登记，与有没有活动无关。所以一个还活着的 server 的 heartbeat_at 永远
-  // 只有一拍老；反过来，退出时不删档的那条路（真机桌面端 2026-09-23 12:55 那次）
+  // 只有一拍老；反过来，退出时不删档的那条路（桌面端 2026-09-23 12:55 那次）
   // 留下的残档会立刻停止前进。窗口取几拍 = 90 秒：余量给唤醒与慢盘，上限压住
   // 「进程号被新起的 kimi 复用、残档替它冒充另一张面」。这两个界把常量的取值
   // 理由钉在客户端节律上，而不是任一个数字。

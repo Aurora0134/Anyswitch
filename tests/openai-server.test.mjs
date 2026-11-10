@@ -2481,7 +2481,7 @@ describe("channel-qualified model slugs (<channel>~<model>)", () => {
   it("workbuddy: the identity prefix survives the packed-slug rewrite", async () => {
     const captured = {};
     await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
-      // 刻意不带 user-agent（客户端真机就是这样）：归属只能来自 URL 前缀。
+      // 刻意不带 user-agent（客户端实际就是这样）：归属只能来自 URL 前缀。
       const res = await postChatTo(port, "workbuddy~poke-api", "nim~deepseek-chat");
       assert.equal(res.status, 200);
       await res.text();

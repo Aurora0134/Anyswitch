@@ -178,7 +178,7 @@ function codexSessionInstanceId(body) {
 // 常驻的 `serve --service` 子进程代发，而那个服务是全局单例：它从「第一个拉起
 // 它的启动器」继承环境变量，之后无论用户在哪个终端里开会话，标签都是那一个。
 // 进程粒度对它因此不成立（一条 TUI 一个进程号，但请求根本不经它的连接）。
-// 会话头是可靠的：2.1.1 实测每个 chat 请求都带 x-opencode-session，值即会话
+// 会话头是可靠的：2.1.1 里每个 chat 请求都带 x-opencode-session，值即会话
 // id（另有两个同值旁路头，取第一个可用的）。
 const OPENCODE_SESSION_PREFIX = "opencode-sess-";
 const OPENCODE_SESSION_HEADERS = ["x-opencode-session", "x-opencode-session-id", "x-session-affinity"];
@@ -191,10 +191,10 @@ function opencodeSessionInstanceId(headers) {
 }
 
 // WorkBuddy 会话粒度的实例身份正源。CLI 内核把 X-Conversation-ID 无条件带在每个
-// 模型请求上（bundle 实证：prepare_http 头注入链无自定义模型豁免，设
+// 模型请求上（prepare_http 头注入链无自定义模型豁免，设
 // CODEBUDDY_SKIP_INTERNAL_HEADERS 才剥离），值即产品会话 id——与
 // ~/.workbuddy/sessions/<pid>.json 的 sessionId 同源。pid 粒度对它不成立：runtime
-// 是池化的，同一会话在一次运行里可换多个 pid（真机 2026-11-01：同会话 20 分钟
+// 是池化的，同一会话在一次运行里可换多个 pid（2026-11-01：同会话 20 分钟
 // 换 3 个 pid），进程扫描侧的会话行归一（agent-metrics 的
 // WORKBUDDY_SESSION_ROW_PREFIX）与这条请求通道共用同一行 id 形状。
 const WORKBUDDY_SESSION_PREFIX = "workbuddy-sess-";
@@ -418,7 +418,7 @@ function openaiAgentIdFrom(headers, agentHint = null) {
 
 // 只有 grok 的 ChatCompletionChunk 结构体把 id/created/model 当必填，缺一个
 // 就整轮中止且 is_retryable=false（会话在 /new 之前都是死的）。其他客户端
-// （实测 kimi/opencode/pi/codex/claude/dsh）要么自己解析时逐字段容错读取，
+// （kimi/opencode/pi/codex/claude/dsh）要么自己解析时逐字段容错读取，
 // 要么走 responses/anthropic 通道由中继重排，都不受影响——所以信封修复
 // 只对 grok 开，别家字节级原样透传。返回 null 表示不开。
 function chunkEnvelopeRepairFor(agentId, model) {

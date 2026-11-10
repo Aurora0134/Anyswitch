@@ -3,12 +3,11 @@
 //
 // codex speaks only the Responses API; every upstream in the store speaks
 // chat/completions, so this module is the entire data plane between them.
-// The rules are distilled from codex++ protocol_proxy.rs, narrowed to the
-// subset the relay's openai-compatible upstreams need. The load-bearing
+// The load-bearing
 // invariants (breaking any one disconnects or hard-fails the codex stream):
 //
-//   1. item id prefixes: msg_ / rs_ / fc_ / ctc_ (a {resp}_msg suffix shape is
-//      the pre-#1431 codex++ bug — codex rejects ids without the prefix);
+//   1. item id prefixes: msg_ / rs_ / fc_ / ctc_ (codex rejects ids without
+//      the prefix);
 //   2. usage always carries output_tokens_details.reasoning_tokens (missing
 //      details key -> fill 0, missing usage -> synthesize the zero structure);
 //   3. orphan tool pairing degrades to text instead of forwarding shapes
@@ -24,7 +23,7 @@ const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
 
 // Chat Completions fields a Responses request is allowed to carry straight
-// through (same set as codex++).
+// through.
 const EXTRA_CHAT_PASSTHROUGH_FIELDS = [
   "frequency_penalty",
   "logit_bias",
@@ -70,8 +69,8 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
-// JSON.stringify, deliberately NOT canonical: object keys keep insertion order
-// (codex++'s canonical_json_string sorts them). Good enough here because every
+// JSON.stringify, deliberately NOT canonical: object keys keep insertion
+// order. Good enough here because every
 // call site only needs a re-parseable text form — tool-output text and
 // function.arguments — and none compares serialized bytes or key positions.
 function canonicalJsonString(value) {
@@ -326,9 +325,8 @@ function imagePartToChat(part) {
 }
 
 // Chat upstreams accept only string content on tool messages, so multi-part
-// tool output flattens to text; image blocks degrade to a placeholder (codex++
-// relocates them into a trailing user message — not worth the machinery for
-// tools that essentially never return images).
+// tool output flattens to text; image blocks degrade to a placeholder (not
+// worth the machinery for tools that essentially never return images).
 function toolOutputContent(output) {
   if (!Array.isArray(output)) return responseOutputText(output);
   const hasImages = output.some((part) => part?.type === "input_image" || part?.type === "image_url");

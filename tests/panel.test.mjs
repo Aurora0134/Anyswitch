@@ -3803,7 +3803,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelCss.includes(".route-chain-card"), "旧小链卡样式已删");
   });
 
-  it("抗截断开关同构 ccswitch skill 管理：品牌色淡底方钮 + 总开关关时收起图标", () => {
+  it("抗截断开关：品牌色淡底方钮 + 总开关关时收起图标", () => {
     // ── DOM：控件只剩图标组 + 总开关（计数徽标已移除）──
     const controls = panelHtml.slice(
       panelHtml.indexOf('class="keepalive-controls"'),
@@ -7711,7 +7711,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     // 栏 fixed 定位、内容让位靠 padding，栏宽不参与内容重排，无需合成盖板；
     // clip-path 只能减不能加（收起时边线被裁走）。开关只挂 <html> 临时属性。
     assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-rail-anim] .rail { transition: width 200ms cubic-bezier(0.2, 0, 0, 1); }'),
-      "栏宽滑动规则在册（基座常驻无媒体门槛——栏任何窗口宽度都作数；时长与缓动照 ccswitch v4）");
+      "栏宽滑动规则在册（基座常驻无媒体门槛——栏任何窗口宽度都作数）");
     // 内容让位必须与栏同缓动：栏 fixed/z-index 40/底色不透明，让位当帧到位而栏还在滑，
     // 收起向栏压在已让开的文字上、展开向栏裁掉未缩小的行右端（终端 120ms 防抖才重排）
     assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-rail-anim] main.layout-container { transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1), max-width 200ms cubic-bezier(0.2, 0, 0, 1); }'),
@@ -7775,8 +7775,8 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
       "快捷键无宽度门槛——栏任何窗口宽度常驻，Ctrl+\\ 全档在管");
   });
 
-  it("收展交叉淡化：收起向定宽淡出＋落态延迟＋rail-in 进场，展开向整体淡入（dsh 规格）", () => {
-    // ── JS：三个瞬态属性与 150ms 落态延迟（dsh SidebarRoot「slide＋crossfade」）──
+  it("收展交叉淡化：收起向定宽淡出＋落态延迟＋rail-in 进场，展开向整体淡入", () => {
+    // ── JS：三个瞬态属性与 150ms 落态延迟 ──
     for (const pin of ['const RAIL_COLLAPSING_ATTR = "data-rail-collapsing";',
       'const RAIL_WIDEIN_ATTR = "data-rail-widein";',
       'const RAIL_RAILIN_ATTR = "data-rail-railin";',
@@ -7805,7 +7805,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     // ── CSS：淡出／进场／宽度让位镜像／reduced-motion 压零 ──
     assert.ok(panelCss.includes("@keyframes rail-wide-in { from { opacity: 0; } }"), "展开淡入关键帧在册");
     assert.ok(panelCss.includes("@keyframes rail-rail-in { from { opacity: 0; transform: translateX(49px); } }"),
-      "rail-in 从右侧 49px 滑入（dsh 同值）");
+      "rail-in 从右侧 49px 滑入");
     const fadeRule = panelCss.match(/\[data-rail-collapsing\] \.rail > :is\(\.rail-brand, \.rail-tabs, \.rail-dir, \.rail-terminal-dir, \.rail-foot\) \{([^}]*)\}/);
     assert.ok(fadeRule, "淡出规则在册（五个直接子块）");
     assert.ok(fadeRule[1].includes("min-width: 192px;") && fadeRule[1].includes("opacity: 0;")
@@ -7817,7 +7817,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
       && panelCss.includes(':root[data-ui-version="v2"][data-rail-collapsing] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }'),
       "让位镜像同窗口起算（晚一个窗口会在栏与内容间露底）");
     assert.ok(panelCss.includes('[data-rail-railin] .rail > .rail-foot {\n    animation: rail-wide-in 150ms'),
-      "栏底行只淡入不位移（dsh footArea 同款）");
+      "栏底行只淡入不位移");
     assert.ok(/@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*:root\[data-ui-version="v2"\]\[data-rail-collapsing\][\s\S]{0,600}?transition: none; animation: none;/.test(panelCss),
       "reduced-motion 压零段在册（淡化全关、直接落位）");
   });
@@ -8494,7 +8494,7 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
     assert.ok(toastRule, "基座 .toast 规则存在");
     assert.ok(toastRule[0].includes("top: 68px"), "固定在 56px 顶栏下方 12px");
     assert.ok(!toastRule[0].includes("bottom:"), "底部定位已移除");
-    assert.ok(toastRule[0].includes("translateY(-6px)"), "入场自上方滑下（对齐 dsh 批准规格 -6px/160ms）");
+    assert.ok(toastRule[0].includes("translateY(-6px)"), "入场自上方滑下（-6px/160ms）");
   });
 
   it("终态远离通报：置「等切回」标记、停淡出计时、弹带链接的 8s toast", () => {
@@ -11248,7 +11248,7 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     assert.equal(fn(makeTerm(30, blankTail.slice(0, 13), 0)), 0, "短缓冲（3J 后无回滚可补）钳到 0=真尾");
   });
 
-  // 地板（Claude Desktop hold/trim 的缓冲层等价）：跟随态停泊行 ∈ [内容底, 真尾]。
+  // 地板：跟随态停泊行 ∈ [内容底, 真尾]。
   // 初始=真尾（空白带完全可见、零自动折回）；用户上滚经过的最低点把地板收到那里
   // （trim 只缩不扩）；内容增长地板同幅平移（屏上空白恒定）；收缩不动地板。
   it("有效底部·上滚吃掉空白带：收缩零动作，上滚逐拍收紧地板，滚回地板即恢复跟随", () => {
@@ -11262,7 +11262,7 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     write();
     state.now += state.settleMs + 10;
     state.flushTimers();
-    assert.deepEqual(state.scrollToLineCalls, [], "收缩后不自动折回（CD 语义：空区留给用户上滚吃掉）");
+    assert.deepEqual(state.scrollToLineCalls, [], "收缩后不自动折回（空区留给用户上滚吃掉）");
     assert.equal(buffer.viewportY, 500, "视口原地不动");
     root.fire("wheel", { deltaY: -120 });
     buffer.viewportY = 490; // 用户上滚第一拍：地板收到 490

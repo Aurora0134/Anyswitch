@@ -12,7 +12,7 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // (settings.json openai-compatible connections) cannot carry custom request
 // headers, so the CLI's keep-alive connection is its only instance identity —
 // without the fallback the virtual terminal's Qoder sessions never bind an
-// instance row (2026-10-15 forensics; the terminal one-click launch ships no
+// instance row (the terminal one-click launch ships no
 // tag either, so the synthesized qoder-<pid> is the row the process scan and
 // the terminal join both key on). This set mirrors agent-metrics' instanceBuckets
 // minus zcode, whose rows are session-granular (header-minted, see above).

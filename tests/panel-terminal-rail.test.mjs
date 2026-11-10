@@ -152,7 +152,7 @@ describe("终端视图左栏换血", () => {
       assert.ok(closeRule[1].includes("display: inline-flex"), "动作按钮 display 硬切（无淡入无位移）");
       const arrow = cssRule(".rail-term-group-arrow {");
       assert.ok(arrow.includes("transition: transform .15s ease-in-out"),
-        "组箭头是栏内唯一一条 CSS 过渡：.15s ease-in-out（照 dsh 实测缓动）");
+        "组箭头是栏内唯一一条 CSS 过渡：.15s ease-in-out");
       assert.ok(panelCss.includes(".rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }"),
         "展开态箭头旋转 90°");
       const rm = panelCss.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-group-arrow \{ transition: none; \}/);
@@ -163,12 +163,12 @@ describe("终端视图左栏换血", () => {
       // 真机缺陷：栏体是列 flex，定高块默认 flex:0 1 auto 会参与收缩，而它们的行有
       // min-height、容器没有 → 行溢出容器画到下一段头上。布局几何在桩框架里量不出来
       // （要真渲染才有 rect），所以这里钉住让几何成立的结构契约；几何本身由无头
-      // Chrome harness 验。段头是滚动层外的定高块（dsh：sectionHeader 在
-      // regionArea 里 flex:none，滚的只有里面的列表）。
+      // Chrome harness 验。段头是滚动层外的定高块（flex:none，
+      // 滚的只有里面的列表）。
       const dir = cssRule("#railTerminalDir {");
       // 只比对声明（注释里也会出现「min-height:0」这类说明文字）
       const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
-      // 栏体必须 min-height:0 + overflow:hidden（dsh regionArea 同口径）。
+      // 栏体必须 min-height:0 + overflow:hidden。
       // 早先选 auto 是为躲 e160790，但它把整棵树的 min-content 全高传给 aside 的
       // flex 布局——收缩链断在栏体，aside 自己滚、底栏被滚走、滚动层从不接管
       // （真机实测：rail scrollHeight 1468 > clientHeight 566，滚动层 1254==1254）。
@@ -190,14 +190,14 @@ describe("终端视图左栏换血", () => {
         "中段滚动层是唯一吃剩余空间的那层（空间不够时它先缩）");
       assert.ok(scroll.includes("overflow-y: auto"), "滚动发生在中段滚动层，溢出由它裁切、不越段");
       assert.ok(scroll.includes("scrollbar-gutter: stable"), "预留滚动条槽位：有无滚动条布局不跳");
-      assert.ok(scroll.includes("padding-bottom: 16px"), "列表底部留白 16px（dsh 同值）");
+      assert.ok(scroll.includes("padding-bottom: 16px"), "列表底部留白 16px");
       // 树容器不得靠 overflow:hidden 掩盖问题（那会把行切掉，不是修）
       assert.ok(!/\.rail-term-history[^{]*\{[^}]*overflow/.test(panelCss), "树容器不靠 overflow 裁切");
     });
 
     it("栏内浮层 portal 到 body（栏体 overflow:hidden 不裁它们）", () => {
       // 组头 ⋯ 菜单与视图选项菜单原先挂在栏内 absolute——栏体加 overflow:hidden 后
-      // 会把贴边展开的菜单裁掉，故一并 portal 到 body（dsh 的 portal:true 同款），
+      // 会把贴边展开的菜单裁掉，故一并 portal 到 body，
       // 坐标改按视口 rect 算、层级抬到与 hover 卡/右键菜单同档。
       const menu = cssRule(".rail-term-menu {");
       assert.ok(menu.includes("position: fixed"), "菜单挂 body 下 fixed（不再吃栏内 absolute）");
@@ -212,15 +212,15 @@ describe("终端视图左栏换血", () => {
     });
 
     it("钉底三层：顶区/中段滚动层/底栏各司其职，不用 sticky/fixed", () => {
-      // dsh 的钉底不是 sticky/fixed，是 flex:1+min-height:0 的唯一
+      // 钉底不靠 sticky/fixed，是 flex:1+min-height:0 的唯一
       // 可伸缩层 + flex:none 的兄弟节点。栏体与设置态共用骨架，底栏一颗钮两态共用。
-      // （hover 卡是挂 body 的 portal 浮层，dsh 同款 position:fixed，不属钉底机制，
+      // （hover 卡是挂 body 的 portal 浮层，position:fixed，不属钉底机制，
       // 钉底三件——滚动层/底栏/遮罩——的规则里不许出现 sticky/fixed。）
       assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏（亮暗/返回）不参与伸缩");
       const pinRules = [".rail-term-scroll {", ".rail-foot {", ".rail-term-fade {"]
         .map((sel) => cssRule(sel)).join("");
       assert.ok(!/position:\s*(sticky|fixed)/.test(pinRules), "钉底三件不碰 sticky/fixed（钉底靠 flex）");
-      // 滚动条指针感知隐退（dsh §3.5）：变量替换、无淡出
+      // 滚动条指针感知隐退：变量替换、无淡出
       assert.ok(panelCss.includes("#railTerminalDir[data-quiet] { --rail-term-scrollbar-thumb: transparent; }"),
         "离开 2s 后 thumb 变量替换成透明（瞬时消失，无过渡）");
       const thumb = panelCss.match(/\.rail-term-scroll::-webkit-scrollbar-thumb \{([^}]*)\}/);
@@ -259,7 +259,7 @@ describe("终端视图左栏换血", () => {
       assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
       assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section-head, \.rail-term-scroll, \.rail-term-fade\) \{ display: none; \}/.test(panelCss),
-        "折叠态只留新建图标钮：段头/树/渐隐整段不出（dsh 折叠同款取舍）");
+        "折叠态只留新建图标钮：段头/树/渐隐整段不出");
       assert.ok(/:root\[data-ui-version="v2"\]:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "窄栏（<1200 自动档）新建按钮收成图标钮");
       assert.ok(/:root\[data-ui-version="v2"\]\[data-rail="collapsed"\] \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
@@ -433,7 +433,7 @@ describe("终端视图左栏换血", () => {
       const session = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 };
       const live = { id: "t-1", status: "working" };
       const html = fn(session, live, "t-1");
-      // working 行的行首槽位挂转圈（dsh 实测口径），不再用 7×7 状态点。
+      // working 行的行首槽位挂转圈，不再用 7×7 状态点。
       assert.ok(html.includes("SPINNER-STUB"), "working 行行首槽位挂转圈");
       assert.ok(!html.includes("terminal-tab-state"), "working 行不挂 7×7 状态点（转圈即运行中视觉）");
       assert.ok(html.includes("is-active"), "聚焦终端对应的行是选中态（T2）");
@@ -448,7 +448,7 @@ describe("终端视图左栏换血", () => {
       assert.ok(!plain.includes("data-rail-term-close"), "非 live 行无关闭叉");
       assert.ok(plain.includes('data-rail-term-archive="s-1"'), "非 live 行 hover 出归档钮（T5）");
       assert.ok(!plain.includes("is-active"), "非 live 行不占选中态");
-      // 选中只属于聚焦终端那条 live 行；idle 的 live 行留空槽（dsh 四态机：idle
+      // 选中只属于聚焦终端那条 live 行；idle 的 live 行留空槽（idle
       // 不画任何图标，灰点退役）
       const other = fn(session, { id: "t-2", status: "idle" }, "t-1");
       assert.ok(other.includes('<span class="rail-term-slot"></span>'), "idle 的 live 行是空常驻槽（不画图标）");
@@ -458,7 +458,7 @@ describe("终端视图左栏换血", () => {
       assert.ok(!other.includes("is-active"), "同一时刻至多一条选中（T2）");
     });
 
-    it("转圈 markup 逐项（源码钉死，dsh 实测规格照抄）", () => {
+    it("转圈 markup 逐项（源码钉死）", () => {
       const spinner = panelJs.match(/const TERMINAL_RAIL_SPINNER = '([\s\S]*?)';/)?.[1];
       assert.ok(spinner, "转圈常量在册");
       assert.ok(spinner.includes('width="14" height="14" viewBox="0 0 24 24"'), "SVG 14×14、viewBox 0 0 24 24");
@@ -471,7 +471,7 @@ describe("终端视图左栏换血", () => {
       assert.ok(spinner.includes('class="rail-term-spinner-sr"'), "读屏文本走 visuallyHidden 形制");
     });
 
-    it("行首常驻槽：三种状态同起点，组头文字与会话标题同 x（dsh sessionRow 同构）", () => {
+    it("行首常驻槽：三种状态同起点，组头文字与会话标题同 x", () => {
       const fn = new Function("session", "live", "activeId", `
         const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
         const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
@@ -505,12 +505,12 @@ describe("终端视图左栏换血", () => {
         assert.ok(titleAt > slotAt, `${name} 行槽在标题之前（空槽也占位）`);
       }
       assert.ok(states.working.indexOf("SPINNER-STUB") > states.working.indexOf('<span class="rail-term-slot">'), "转圈填进常驻槽");
-      assert.ok(states.idle.includes('<span class="rail-term-slot"></span>'), "idle 行常驻槽留空（dsh 四态机 idle 不画图标）");
+      assert.ok(states.idle.includes('<span class="rail-term-slot"></span>'), "idle 行常驻槽留空（idle 不画图标）");
       assert.ok(!states.idle.includes("terminal-tab-state"), "idle 行不再渲染状态点");
       // 不变式①③：几何同式对齐——行 8+16+8 == 组头 8+16+8（32px），行 gap 与组头
       // gap 都是 8、两个槽都是 16 宽，标题与组头文字严格同 x，三种行互相对齐。
       const slot = cssRule(".rail-term-slot {");
-      assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "行首槽 16×20（dsh 实测槽）");
+      assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "行首槽 16×20");
       assert.ok(slot.includes("flex: none"), "槽不参与伸缩");
       assert.ok(slot.includes("justify-content: center"), "槽内图标居中（状态互换不产生位移）");
       const row = cssRule(".rail-term-row {");
@@ -1649,7 +1649,7 @@ describe("终端视图左栏换血", () => {
       assert.equal(animated.length, 2, "位置变的两行 + 新出现的一行各一条动画");
       const glide = animated.find((a) => a.key === "s2");
       assert.equal(glide.opts.duration, 200, "行移动 200ms");
-      assert.equal(glide.opts.easing, "ease-out", "行移动用 ease-out（与 dsh 实测一致，不是设计 token）");
+      assert.equal(glide.opts.easing, "ease-out", "行移动用 ease-out（不是设计 token）");
       assert.ok(glide.frames[0].transform.startsWith("translateY("), "FLIP 位移从旧位置滑到新位置");
       assert.equal(glide.frames[1].transform, "none", "落位到自然位置");
       const fade = animated.find((a) => a.key === "s3");
@@ -1701,7 +1701,7 @@ describe("终端视图左栏换血", () => {
 
     it("resetKey（水位线 / 刷新 / 换 agent）直接落位；首次输入前与 reduced-motion 不动", () => {
       const before = new Map([["resume:s1", 0], ["resume:s2", 0]]);
-      assert.deepEqual(runFlip({ mode: "instant", before }), [], "水位线增减与刷新是瞬时跳变（dsh 实测）");
+      assert.deepEqual(runFlip({ mode: "instant", before }), [], "水位线增减与刷新是瞬时跳变");
       assert.deepEqual(runFlip({ armed: false, before }), [], "首次输入前不做动画（真实首挂由 armed 门拦下）");
       assert.deepEqual(runFlip({ reduced: true, before }), [], "prefers-reduced-motion 全关");
       // 空集 before（换写前栏里一行都没量到）不再整体跳过（2026-10-25 兜底行动效
@@ -2068,10 +2068,10 @@ describe("组折叠持久化（localStorage）", () => {
   });
 });
 
-describe("运行中转圈与水位线联动（dsh 实测规格）", () => {
+describe("运行中转圈与水位线联动", () => {
   it("转圈 CSS 逐项：16×20 槽、轨道/弧线 currentColor、两动画同周期、reduced-motion 降级", () => {
     const slot = cssRule(".rail-term-spinner {");
-    assert.ok(/width:\s*16px/.test(slot) && /height:\s*20px/.test(slot), "行首槽位 16×20（dsh 实测）");
+    assert.ok(/width:\s*16px/.test(slot) && /height:\s*20px/.test(slot), "行首槽位 16×20");
     assert.ok(/color:\s*var\(--text-3\)/.test(slot), "槽位取三级文字色 token（currentColor 链）");
     const track = cssRule(".rail-term-spinner-track {");
     assert.ok(/fill:\s*none/.test(track) && /stroke:\s*currentColor/.test(track) && /stroke-width:\s*2/.test(track) && /opacity:\s*\.25/.test(track),
@@ -2090,7 +2090,7 @@ describe("运行中转圈与水位线联动（dsh 实测规格）", () => {
     assert.ok(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-spinner-arc, \.rail-term-spinner-rot \{ animation: none; \}/.test(panelCss),
       "reduced-motion 两动画全 none（静态轨道＋固定弧）");
     assert.ok(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.rail-term-spinner-arc \{ stroke-dasharray: 18 150; stroke-dashoffset: -3; \}/.test(panelCss),
-      "reduced-motion 静态弧对齐 dsh：dasharray 18 150、offset -3（不是动画 0% 的短弧）");
+      "reduced-motion 静态弧：dasharray 18 150、offset -3（不是动画 0% 的短弧）");
     const sr = cssRule(".rail-term-spinner-sr {");
     assert.ok(/width:\s*1px/.test(sr) && /height:\s*1px/.test(sr) && /clip:/.test(sr), "读屏文本 visuallyHidden 形制");
   });
@@ -2262,7 +2262,7 @@ describe("运行中转圈与水位线联动（dsh 实测规格）", () => {
   });
 });
 
-describe("done（跑完未读）标记与绿点（dsh completed/completionUnread 同构）", () => {
+describe("done（跑完未读）标记与绿点", () => {
   const mkObserver = () => new Function(`
     const terminalDoneUnread = new Map();
     const terminalPrevWorking = new Map();
@@ -2276,7 +2276,7 @@ describe("done（跑完未读）标记与绿点（dsh completed/completionUnread
     h.note({ id: "t-bg", backendState: { status: "running" } }, "working");
     assert.ok(!h.marked("t-bg"), "跑着不置");
     h.note({ id: "t-bg", backendState: { status: "running" } }, "idle");
-    assert.ok(h.marked("t-bg"), "后台翻完成即置（dsh completed）");
+    assert.ok(h.marked("t-bg"), "后台翻完成即置");
     const fresh = mkObserver();
     fresh.note({ id: "t-bg", backendState: { status: "running" } }, "idle");
     assert.ok(!fresh.marked("t-bg"), "初拍（刷新后首见直接 idle）不置——不拿想象补标");
@@ -2341,11 +2341,11 @@ describe("done（跑完未读）标记与绿点（dsh completed/completionUnread
     assert.ok(extractFn("terminalRailPendingRowHtml").includes('working ? TERMINAL_RAIL_SPINNER : ""'), "pending 行维持 working 转圈/留空两态（方案定死不涉及 done）");
   });
 
-  it("绿点规格与四路清除接线（源码钉）：dsh 状态点规格＋清除在位", () => {
+  it("绿点规格与四路清除接线（源码钉）：规格＋清除在位", () => {
     const doneRule = cssRule(".rail-term-done {");
-    assert.ok(doneRule.includes("width: 10px") && doneRule.includes("height: 10px"), "10×10 槽（dsh 状态点规格）");
+    assert.ok(doneRule.includes("width: 10px") && doneRule.includes("height: 10px"), "10×10 槽");
     const afterRule = panelCss.slice(panelCss.indexOf(".rail-term-done::after")).slice(0, 220);
-    assert.ok(afterRule.includes("inset: 20%") && afterRule.includes("var(--ok)") && afterRule.includes("border-radius: 50%"), "视觉 6px 圆、--ok（dsh success 档）、:after 承载");
+    assert.ok(afterRule.includes("inset: 20%") && afterRule.includes("var(--ok)") && afterRule.includes("border-radius: 50%"), "视觉 6px 圆、--ok、:after 承载");
     assert.ok(extractFn("terminalRailActivateSession").includes("terminalDoneUnread.delete(id)"), "点行即读：activate 即时清标");
     const sendAt = panelJs.indexOf("function sendTerminalInput");
     const sendBlock = panelJs.slice(sendAt, sendAt + 700);

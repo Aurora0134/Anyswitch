@@ -13,8 +13,8 @@
 // panel surface — and is deliberately module-level so both relay handlers
 // (anthropic / openai) share one process-wide count.
 
-// The approved wire placeholder, byte-identical to ccswitch's marker. It
-// enters the conversation content, so the value is a user-facing contract.
+// The approved wire placeholder. It enters the conversation content, so the
+// value is a user-facing contract.
 export const UNSUPPORTED_IMAGE_MARKER = "[Unsupported Image]";
 
 function isImagePart(part) {

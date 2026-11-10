@@ -11,17 +11,16 @@
 //      never a silently dropped image. Gated by the 纯文本预判 sub-switch;
 //   3. an upstream 4xx whose wording says the model only takes text — the
 //      报错兜底 retry path, gated by the 图片降级 master switch. The wording
-//      library is ported from ccswitch's media_sanitizer (issue #5025 real
-//      samples), lower-cased and plural-tolerant.
+//      library covers real refusal samples, lower-cased and plural-tolerant.
 //
-// The starting registry is ccswitch's CONFIRMED_TAILS trimmed to the model
-// families this install actually routes (see the per-entry notes).
+// The starting registry is trimmed to the model families this install
+// actually routes (see the per-entry notes).
 
 // Registry trimmed to model families an operator store plausibly routes:
 // deepseek (v4-* gateway aliases), glm (5.2/5.3 base tiers, incl. the
 // "[云]GLM-5.3"-style channel-labelled ids), mimo (v2.5-pro), minimax
-// (m2.7 family via the -free gateway variant). ccswitch families such an
-// install never routes (kat/ling/longcat/ark-code/qwen3-coder/step-3.5/us.deepseek)
+// (m2.7 family via the -free gateway variant). Families an install like
+// this never routes (kat/ling/longcat/ark-code/qwen3-coder/step-3.5/us.deepseek)
 // are dropped; unconfirmed variants (glm-5.3-flash, glm-5.3-flashx,
 // kimi-k3, qwen3.8-*, mimo-v2.6-*, MiniMax-M2.7-free, deepseek-v4-*) stay out
 // on the fail-open rule — deepseek-v4-flash/v4-pro deliberately so: the
@@ -86,8 +85,7 @@ export function modelDeclaresTextOnly(model) {
  *
  * `registryEnabled` is the 纯文本预判 sub-switch — it gates ONLY the registry
  * tier. A store declaration answers regardless of both switches (a declared
- * image-capable model wins over a registry hit, exactly like ccswitch's
- * resolve_image_input_capability).
+ * image-capable model wins over a registry hit).
  */
 export function requestModelIsTextOnly(model, modelId, registryEnabled) {
   const row = model ?? null;
@@ -109,7 +107,7 @@ const REJECTION_STATUSES = new Set([400, 415, 422]);
 
 // Self-evident phrasings: these assert "only text is accepted" by themselves,
 // with no need to mention image/media at all — 火山方舟 answers
-// "Model only support text input" without the word image (issue #5025).
+// "Model only support text input" without the word image.
 // Gateway English often drops the third-person s, so both spellings are
 // listed; substring matching makes plural variants ("texts") fall in too.
 const TEXT_ONLY_SELF_EVIDENT = ["only support text", "only supports text"];

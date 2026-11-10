@@ -108,8 +108,7 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
         : null;
       if (efforts) {
         // 「这个模型会思考」在两处界面上由两个不同的键说给 kimi 听，只写一个就会
-        // 出现「终端能选档、桌面端与网页端写着不支持思考强度」。2026-09-23 读自实装
-        // 的 @moonshot-ai/kimi-code 与 Kimi Code.exe 内嵌核心：
+        // 出现「终端能选档、桌面端与网页端写着不支持思考强度」。两处界面的口径：
         // - 终端：认 `reasoning === true || support_efforts.length > 0`，并把
         //   support_efforts 原样渲染成档位表；
         // - 桌面端/网页端的模型目录（agent-core-v2 的 catalog 面）：只看

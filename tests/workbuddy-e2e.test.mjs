@@ -73,7 +73,7 @@ function dispatchChat(server, path, body) {
   const req = Readable.from([Buffer.from(JSON.stringify(body), "utf8")]);
   req.method = "POST";
   req.url = path;
-  // 刻意不带 user-agent：WorkBuddy 的真机请求会 delete 它，身份只能来自 URL 段。
+  // 刻意不带 user-agent：WorkBuddy 的真实请求会 delete 它，身份只能来自 URL 段。
   req.headers = { authorization: TOKEN, "content-type": "application/json" };
   req.socket = { remoteAddress: "127.0.0.1", localPort: 0, remotePort: 0 };
 
