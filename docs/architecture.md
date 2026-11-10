@@ -7,7 +7,7 @@ Anyswitch 是一套把多家 OpenAI 兼容上游（以及经由协议转换的 A
 - **凭据不出本机**：上游 API Key 用 Windows DPAPI 按提供方熵封存，relay 仅在请求时即时解密，**从不落盘明文**。解密结果是否在本进程内保留由设置项「缓存上游密钥」决定（`credentialCacheEnabled`，默认开）：关闭时用后即焚、每个请求重新解密；开启时按**凭据密文哈希**复用已解出的值，密文一变（轮换密钥／改 `credentialFile`／换 store）立即失效，开关关掉的当下即清空内存中的明文。默认开是因为那一跳要起一个外部进程（本机实测约 0.4s）且最脆——2026-10-05 那次连续 70 分钟的请求全败就落在它上面；而 relay 以用户自身身份运行在回环地址上，能读本进程内存的程序同样能读凭据密文并以同一身份解开。
 - **store 即唯一真相源**：一份 v2 `store.json` 描述全部 provider/模型/路由元数据，relay 路由纯靠它，管理面（panel）写、relay 与各端点配置写手读。
 - **无感多地址退避 + 协议透传**：主地址失败自动按序重试备用地址（180s 生成预算、5xx 透传）；Anthropic 客户端经 relay 无缝对接 OpenAI 兼容上游。
-- **解耦独立常驻**：常驻 relay 宿主与独立常驻 Web 控制面板分离，relay 停止/崩溃时面板仍可用；支持免管理员权限开机自启（计划任务 AnyswitchRelay/AnyswitchWatchdog）。
+- **解耦独立常驻**：常驻 relay 宿主与独立常驻 Web 控制面板分离，relay 停止/崩溃时面板仍可用；支持免管理员权限开机自启（计划任务 AnyswitchRelay/AnyswitchPanel/AnyswitchWatchdog，开关同时覆盖 relay 与 panel 宿主）。
 
 B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，负责鉴权、路由、协议转换、多 BaseURL 退避、流式转发，并由各客户端启动器把端点 + 一次性会话 token 注入子进程。
 
@@ -120,7 +120,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `src/agents/agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode/grok/workbuddy）。
 - `src/relay/relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。运行日志总开关（`loggingEnabled`，默认开）与实时输出的最低显示级别（`logLevel`，默认 info＝显示全部，只管面板显示出口、不窄化落盘与缓冲）也归这里：`createLoggingEnabledGate` / `createLogLevelGate` 每次调用现读 settings.json，relay-host 与 panel-host 各自持一份，因此设置当场生效、不需要重启任何常驻进程。上游密钥缓存开关（`credentialCacheEnabled`，默认开）同归这里，由 `createCredentialCacheEnabledGate` 每请求现读：密钥解密要起一个外部进程（本机实测约 0.4s），缓存掉的是这一跳，而它正是 2026-10-05 那次连续 70 分钟请求全败的落点；关掉开关的**当下**就清空已留存的明文——这个开关的方向是「别再留着」，留到下次请求才清等于关不掉。**闸门不按 mtime 缓存**——mtime 证明不了文件没动：本机实测 300 对连续保存里 33 对共享同一个 `mtimeMs`，`birthtimeMs`/`ctimeMs` 跟着一起撞，按 mtime 缓存会把旧值一直端到下下次「运气好」的写入，而那次写入可能永远不来（关掉记录后文件继续长、换了级别面板照旧筛，正是这两个闸门存在的理由）。现读的代价实测 160µs/次（真文件 1096 字节，仅 `statSync` 是 35µs），触发频率是每行日志与每条转发帧，平均远低于每秒一次。文件读不到时保持上次已知值，损坏时按默认（开 / 显示全部）回落——两个方向都不会让一次读失败把记录静默关掉、或把日志行静默藏掉。
 - `src/agents/instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
-- `src/ops/autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
+- `src/ops/autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchPanel/AnyswitchWatchdog，免管理员权限；面板开关同时注册 relay 与 panel 宿主两个任务，启动对账会把早于 panel 覆盖期的存量安装补上 panel 任务）。
 - `src/ops/git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 关于页的版本来源边界

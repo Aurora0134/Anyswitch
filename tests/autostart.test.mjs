@@ -6,16 +6,22 @@ import { join } from "node:path";
 import {
   buildTaskXml,
   disableAutostart,
+  disablePanelAutostart,
   disableWatchdogAutostart,
   enableAutostart,
+  enablePanelAutostart,
   enableWatchdogAutostart,
   getAutostartCommand,
   isAutostartEnabled,
+  isPanelAutostartEnabled,
   isWatchdogAutostartEnabled,
   reconcileAutostart,
   taskAction,
   xmlEscape,
 } from "../src/ops/autostart.mjs";
+
+const PANEL_SCRIPT = join("..", "panel", "panel-host.mjs");
+const WATCHDOG_SCRIPT = join("..", "agents", "agent-watchdog.mjs");
 
 // Fake powershell child: records the invocation, then replays stdout/stderr
 // and closes (or errors) asynchronously like the real spawn handle.
@@ -135,20 +141,23 @@ describe("buildTaskXml", () => {
 });
 
 describe("enableAutostart", () => {
-  it("registers the AnyswitchRelay task with the XML over stdin", async () => {
+  it("registers the relay and panel tasks with the XML over stdin", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "REGISTERED\r\n" });
     const result = await enableAutostart({ spawnFn });
 
     assert.deepEqual(result, { ok: true, stdout: "REGISTERED\r\n" });
-    assert.equal(calls.length, 1);
-    const call = calls[0];
-    assert.equal(call.cmd, "powershell.exe");
-    assert.deepEqual(call.args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
-    assert.ok(psCommandOf(call).includes("Register-ScheduledTask -TaskName 'AnyswitchRelay'"));
+    assert.equal(calls.length, 2);
+    const relay = calls[0];
+    assert.equal(relay.cmd, "powershell.exe");
+    assert.deepEqual(relay.args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
+    assert.ok(psCommandOf(relay).includes("Register-ScheduledTask -TaskName 'AnyswitchRelay'"));
     // The task XML must travel over stdin, never the command line.
-    assert.ok(call.stdin.includes("<Task"));
-    assert.ok(call.stdin.includes("relay-host.mjs"));
-    assert.ok(!psCommandOf(call).includes("<Task"));
+    assert.ok(relay.stdin.includes("<Task"));
+    assert.ok(relay.stdin.includes("relay-host.mjs"));
+    assert.ok(!psCommandOf(relay).includes("<Task"));
+    const panel = calls[1];
+    assert.ok(psCommandOf(panel).includes("Register-ScheduledTask -TaskName 'AnyswitchPanel'"));
+    assert.ok(panel.stdin.includes("panel-host.mjs"));
   });
 
   it("reports failure with the PowerShell stderr", async () => {
@@ -156,6 +165,18 @@ describe("enableAutostart", () => {
     const result = await enableAutostart({ spawnFn });
     assert.equal(result.ok, false);
     assert.ok(result.error.includes("拒绝访问"));
+  });
+
+  it("reports failure when the panel task registration fails after the relay's", async () => {
+    const { spawnFn, calls } = fakePSSeries([
+      { stdout: "REGISTERED\r\n" },
+      { code: 1, stderr: "Register-ScheduledTask : 拒绝访问\r\n" },
+    ]);
+    const result = await enableAutostart({ spawnFn });
+    assert.equal(result.ok, false);
+    assert.ok(result.error.includes("panel task:"));
+    assert.ok(result.error.includes("拒绝访问"));
+    assert.equal(calls.length, 2);
   });
 
   it("reports failure when powershell cannot be spawned", async () => {
@@ -167,7 +188,7 @@ describe("enableAutostart", () => {
 });
 
 describe("disableAutostart", () => {
-  it("unregisters the AnyswitchRelay task and sends no stdin", async () => {
+  it("unregisters the relay and panel tasks and sends no stdin", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
     const result = await disableAutostart({ spawnFn });
 
@@ -176,14 +197,15 @@ describe("disableAutostart", () => {
     assert.ok(command.includes("Unregister-ScheduledTask -TaskName 'AnyswitchRelay'"));
     assert.ok(command.includes("-Confirm:$false"));
     assert.equal(calls[0].stdin, "");
+    assert.ok(psCommandOf(calls[1]).includes("Unregister-ScheduledTask -TaskName 'AnyswitchPanel'"));
   });
 
   it("also unregisters the pre-rename legacy task", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
     await disableAutostart({ spawnFn });
 
-    assert.equal(calls.length, 2);
-    assert.ok(psCommandOf(calls[1]).includes("Unregister-ScheduledTask -TaskName 'ApiCredRelay'"));
+    assert.equal(calls.length, 3);
+    assert.ok(psCommandOf(calls[2]).includes("Unregister-ScheduledTask -TaskName 'ApiCredRelay'"));
   });
 });
 
@@ -225,8 +247,13 @@ describe("taskAction", () => {
     for (const path of taskAction().arguments.match(/"([^"]+)"/g).map((quoted) => quoted.slice(1, -1))) {
       assert.ok(existsSync(path), `task action path must exist: ${path}`);
     }
-    const watchdog = taskAction(join("..", "agents", "agent-watchdog.mjs"));
+    const watchdog = taskAction(WATCHDOG_SCRIPT);
     assert.match(watchdog.arguments, /agent-watchdog\.mjs"$/);
+    const panel = taskAction(PANEL_SCRIPT);
+    assert.match(panel.arguments, /panel-host\.mjs"$/);
+    for (const path of panel.arguments.match(/"([^"]+)"/g).map((quoted) => quoted.slice(1, -1))) {
+      assert.ok(existsSync(path), `panel task action path must exist: ${path}`);
+    }
   });
 });
 
@@ -237,7 +264,7 @@ describe("reconcileAutostart", () => {
       arguments: '"C:\\Anyswitch\\app\\silent-start.vbs" "C:\\Anyswitch\\app\\relay-host.mjs"',
     };
     const { spawnFn, calls } = fakePSSeries([
-      { stdout: probeOutput({ AnyswitchRelay: stale }) },
+      { stdout: probeOutput({ AnyswitchRelay: stale, AnyswitchPanel: taskAction(PANEL_SCRIPT) }) },
       { stdout: "REGISTERED\r\n" },
     ]);
 
@@ -256,13 +283,43 @@ describe("reconcileAutostart", () => {
 
   it("leaves a correct registration alone — one probe, no writes", async () => {
     const { spawnFn, calls } = fakePSSeries([
-      { stdout: probeOutput({ AnyswitchRelay: taskAction(), AnyswitchWatchdog: taskAction(join("..", "agents", "agent-watchdog.mjs")) }) },
+      { stdout: probeOutput({ AnyswitchRelay: taskAction(), AnyswitchWatchdog: taskAction(WATCHDOG_SCRIPT), AnyswitchPanel: taskAction(PANEL_SCRIPT) }) },
     ]);
 
     const result = await reconcileAutostart({ spawnFn });
 
-    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "ok"]);
+    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "ok", "ok"]);
     assert.equal(calls.length, 1);
+  });
+
+  it("backfills the panel task on installs from before panel coverage", async () => {
+    // Relay task present and healthy, panel task absent: the user turned
+    // autostart on when the toggle only covered the relay. Absence here is
+    // not the user's own 关闭, so reconcile creates the panel task.
+    const { spawnFn, calls } = fakePSSeries([
+      { stdout: probeOutput({ AnyswitchRelay: taskAction() }) },
+      { stdout: "REGISTERED\r\n" },
+    ]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "absent", "backfilled"]);
+    assert.equal(calls.length, 2);
+    assert.ok(psCommandOf(calls[1]).includes("Register-ScheduledTask -TaskName 'AnyswitchPanel'"));
+    assert.ok(calls[1].stdin.includes("panel-host.mjs"));
+  });
+
+  it("backfills the panel task when only the legacy relay task survives", async () => {
+    const { spawnFn, calls } = fakePSSeries([
+      { stdout: probeOutput({ ApiCredRelay: taskAction() }) },
+      { stdout: "REGISTERED\r\n" },
+    ]);
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.deepEqual(result.tasks.map((task) => task.state), ["legacy", "absent", "backfilled"]);
+    assert.equal(calls.length, 2);
+    assert.ok(psCommandOf(calls[1]).includes("Register-ScheduledTask -TaskName 'AnyswitchPanel'"));
   });
 
   it("ignores a path that differs only by case", async () => {
@@ -271,7 +328,8 @@ describe("reconcileAutostart", () => {
     // normalised — those count as a stale registration and get healed.
     const action = taskAction();
     const shouty = { command: action.command.toUpperCase(), arguments: action.arguments.toUpperCase() };
-    const { spawnFn, calls } = fakePSSeries([{ stdout: probeOutput({ AnyswitchRelay: shouty }) }]);
+    const panel = taskAction(PANEL_SCRIPT);
+    const { spawnFn, calls } = fakePSSeries([{ stdout: probeOutput({ AnyswitchRelay: shouty, AnyswitchPanel: panel }) }]);
 
     const result = await reconcileAutostart({ spawnFn });
 
@@ -284,7 +342,9 @@ describe("reconcileAutostart", () => {
 
     const result = await reconcileAutostart({ spawnFn });
 
-    assert.deepEqual(result.tasks.map((task) => task.state), ["absent", "absent"]);
+    // Relay absent too — autostart is OFF, so the absent panel task is left
+    // alone instead of backfilled.
+    assert.deepEqual(result.tasks.map((task) => task.state), ["absent", "absent", "absent"]);
     assert.equal(calls.length, 1);
   });
 
@@ -301,6 +361,10 @@ describe("reconcileAutostart", () => {
     const relay = result.tasks.find((task) => task.task === "AnyswitchRelay");
     assert.equal(relay.state, "heal-failed");
     assert.ok(relay.error.includes("拒绝访问"));
+    // Relay present (however stale) still proves the toggle was ON, so the
+    // panel backfill is attempted — and fails the same way.
+    const panel = result.tasks.find((task) => task.task === "AnyswitchPanel");
+    assert.equal(panel.state, "heal-failed");
   });
 
   it("stays out of the way when the probe itself fails", async () => {
@@ -335,5 +399,31 @@ describe("watchdog autostart variants", () => {
     const { spawnFn, calls } = fakePS({ stdout: "" });
     assert.equal(await isWatchdogAutostartEnabled({ spawnFn }), false);
     assert.ok(psCommandOf(calls[0]).includes("$names = @('AnyswitchWatchdog')"));
+  });
+});
+
+describe("panel autostart variants", () => {
+  it("registers the AnyswitchPanel task pointing at panel-host.mjs", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "REGISTERED\r\n" });
+    const result = await enablePanelAutostart({ spawnFn });
+
+    assert.equal(result.ok, true);
+    assert.ok(psCommandOf(calls[0]).includes("Register-ScheduledTask -TaskName 'AnyswitchPanel'"));
+    assert.ok(calls[0].stdin.includes("panel-host.mjs"));
+    // The task starts the host, not the launcher — no browser window at logon.
+    assert.ok(!calls[0].stdin.includes("panel-launcher.mjs"));
+  });
+
+  it("unregisters the AnyswitchPanel task", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
+    const result = await disablePanelAutostart({ spawnFn });
+    assert.equal(result.ok, true);
+    assert.ok(psCommandOf(calls[0]).includes("Unregister-ScheduledTask -TaskName 'AnyswitchPanel'"));
+  });
+
+  it("probes the AnyswitchPanel task name", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "" });
+    assert.equal(await isPanelAutostartEnabled({ spawnFn }), false);
+    assert.ok(psCommandOf(calls[0]).includes("$names = @('AnyswitchPanel')"));
   });
 });
