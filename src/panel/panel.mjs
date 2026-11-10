@@ -1196,13 +1196,15 @@ export function createPanelRouter({
     }
     return sessionListSnapshot;
   }
-  // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描与消息读取都走扫描
-  // 承载（worker 线程），九个 adapter 的同步 fs 与消息序列化不跑在面板进程的事件
-  // 循环上。列表路由与启动预热共用这一定位点。
+  // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描、单端点扫描与消息
+  // 读取都走扫描承载（worker 线程），九个 adapter 的同步 fs 与消息序列化不跑在
+  // 面板进程的事件循环上。列表路由与启动预热共用这一定位点。scanAgent 供会话栏
+  // 追赶的单端点强制扫描用（与绑定捕获同一条扫描通路，含注入与降级纪律）。
   function ensureSessionScanService() {
     if (!sessionScanService) {
       sessionScanService = {
         scanAll: () => scanHost.scanAll(),
+        scanAgent: (agentId) => scanAgentConversations(agentId),
         loadMessagesResponse: (endpoint, file) => scanHost.loadMessagesResponse(endpoint, file),
         deleteSessions: sessionDeleteSessions,
       };
@@ -4415,6 +4417,20 @@ export function createPanelRouter({
         // 没有旧值可交）。扫描本身在 worker 线程里跑，不占本进程事件循环。
         // ?refresh=1 是 TTL 的逃生口：会话管理 tab 的刷新按钮用它，等真扫描落地
         // 再回新值——否则按钮在窗口内就是「返回旧数据 + toast 已刷新」的假动作。
+        // ?endpoint=<agent> 是会话栏追赶的专用形：只扫该 agent 一家的存档（worker
+        // 线程，与绑定捕获同一条通路），响应只带 { sessions }（该家的行），绝不
+        // 碰全量快照——追赶本来就是要等真扫描的强制语义，且全量十家对只显示一个
+        // agent 的左栏纯属陪跑（全盘 2.7–9.8s vs 单家 ~1s）。未知 agent 按空表处理
+        // （scanEndpoint 的纪律：名单外降级空表，不抛错）。
+        const endpointParam = url.searchParams.get("endpoint");
+        if (endpointParam) {
+          try {
+            const sessions = await svc.scanAgent(endpointParam);
+            return sendJson(res, 200, { sessions });
+          } catch (err) {
+            return sendJson(res, 500, { ok: false, error: err.message });
+          }
+        }
         try {
           const snapshot = sessionsListSnapshotFor(svc);
           const forced = url.searchParams.get("refresh") === "1";

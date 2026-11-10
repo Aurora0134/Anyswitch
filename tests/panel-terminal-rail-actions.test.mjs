@@ -138,6 +138,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailSameDir")}
     ${extractFn("terminalRailGroupForDir")}
     ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailClaimedRowKeys")}
     ${extractFn("terminalRailIsArchived")}
     ${extractFn("terminalRailVisibleSessions")}
     ${extractFn("terminalRailSelfHealRemovedGroups")}
@@ -191,6 +192,7 @@ function rowHtmlSandbox(prefs) {
     function esc(v) { return String(v); }
     function escapeHtml(v) { return String(v || ""); }
     ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailClaimedRowKeys")}
     ${extractFn("terminalRailIsArchived")}
     const TERMINAL_RAIL_SPINNER = "";
     const TERMINAL_RAIL_DONE_DOT = "";
@@ -1772,6 +1774,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       ${extractFn("terminalRailSameDir")}
       ${extractFn("terminalRailGroupForDir")}
       ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailClaimedRowKeys")}
       ${extractFn("terminalRailIsArchived")}
       ${extractFn("terminalRailVisibleSessions")}
       ${extractFn("terminalRailSelfHealRemovedGroups")}
@@ -3399,6 +3402,8 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
     ${extractFn("terminalRailAgentId")}
     ${extractFn("terminalRailActiveSession")}
     ${extractFn("terminalRailSessionMap")}
+    ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailClaimedRowKeys")}
     ${extractFn("terminalRailPendingNewTerminals")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
@@ -4049,6 +4054,9 @@ describe("归档/撤销动效（FLIP）＋toast 引导钮", () => {
 // 病灶：历史列表只在进终端页时拉（全盘扫 2.7–9.8s，禁挂轮询），「在终端页里新建
 // 会话」这条路径不刷新它——真行不回来，组顶的「新会话」兜底行就一直压着它，用户
 // 看到的就是「真正的新会话被压到一个（或多个）假『新会话』之下」。
+// 2026-11-10 重写点火判据：追赶不再读兜底行（它是被推导的渲染态，会被同目录
+// 兄弟会话的「已被接替」误判一并顶掉），改按「在跑终端＋键入武装窗＋会话行不能
+// 阳性归到屏上」判定；收敛从「连续 5 发无进展」改为键入新鲜度窗（60s 静默即停）。
 describe("终端页内新建会话：历史列表追赶", () => {
   // 真跑 refreshTerminalRailHistory 的取数路径。
   const refreshSandbox = ({ endpoint = "dsh", rows = [], fail = false }) => {
@@ -4073,10 +4081,10 @@ describe("终端页内新建会话：历史列表追赶", () => {
     return { fn, seen, state };
   };
 
-  it("force 走 ?refresh=1（与会话管理页刷新钮同一条逃生口：等真扫描落地再回新值）", async () => {
+  it("force 走 ?refresh=1&endpoint（单端点强制扫描；旧面板不认 endpoint 参数时按全盘强制扫降级）", async () => {
     const { fn, seen } = refreshSandbox({ rows: [{ endpoint: "dsh", id: "c-1", project: "C:\\dev\\alpha" }] });
     await fn.run({ endpoint: "dsh", force: true });
-    assert.deepEqual(seen.filter((s) => s.method).map((s) => s.path), ["/api/sessions/list?refresh=1"]);
+    assert.deepEqual(seen.filter((s) => s.method).map((s) => s.path), ["/api/sessions/list?refresh=1&endpoint=dsh"]);
     assert.equal(fn.history().sessions.length, 1, "真扫描的新值落进历史表（兜底行的接替判据读它）");
   });
 
@@ -4087,25 +4095,24 @@ describe("终端页内新建会话：历史列表追赶", () => {
   });
 
   // 真跑 maybeCatchUpTerminalRailHistory + terminalRailPendingNewTerminals（含
-  // 它内部的「已被接替」判据）——触发条件不是猜的，是兜底行推导的同一份真值。
-  const catchUpSandbox = ({ sessions, history, catchUpAt = 0, inFlight = false, ready = true, misses = 0, seen = -1 }) => {
+  // 它内部的「已被接替」判据与阳性占用排除集）。
+  const catchUpSandbox = ({ sessions, history, catchUpAt = 0, inFlight = false, ready = true }) => {
     const calls = [];
-    const fn = new Function("sessions", "history", "catchUpAt0", "inFlight", "ready", "misses0", "seen0", "calls", `
+    const fn = new Function("sessions", "history", "catchUpAt0", "inFlight", "ready", "calls", `
       const terminalBackendReady = ready;
       const terminalBackendSessions = sessions;
       let activeTerminalPreviewId = "t-a";
       let terminalRailFetchInFlight = inFlight;
       let terminalRailCatchUpAt = catchUpAt0;
-      let terminalRailCatchUpSeen = seen0;
-      let terminalRailCatchUpMisses = misses0;
       const TERMINAL_RAIL_CATCHUP_MIN_MS = 20000;
-      const TERMINAL_RAIL_CATCHUP_MAX_MISSES = 5;
+      const TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS = 60000;
       const terminalRailSelectPending = null;
       const terminalRailHistory = history;
-      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
       function refreshTerminalRailHistory(opts) { calls.push(opts); return Promise.resolve(); }
       ${extractFn("terminalRailNormDir")}
       ${extractFn("terminalRailSameDir")}
+      ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailClaimedRowKeys")}
       ${extractFn("terminalRailSessionMap")}
       ${extractFn("terminalRailActiveSession")}
       ${extractFn("terminalRailAgentId")}
@@ -4115,11 +4122,9 @@ describe("终端页内新建会话：历史列表追赶", () => {
       return {
         run: () => maybeCatchUpTerminalRailHistory(),
         catchUpAt: () => terminalRailCatchUpAt,
-        misses: () => terminalRailCatchUpMisses,
-        seen: () => terminalRailCatchUpSeen,
         pending: () => terminalRailPendingNewTerminals(),
       };
-    `)(sessions, history, catchUpAt, inFlight, ready, misses, seen, calls);
+    `)(sessions, history, catchUpAt, inFlight, ready, calls);
     return { fn, calls };
   };
 
@@ -4130,70 +4135,114 @@ describe("终端页内新建会话：历史列表追赶", () => {
     resume: null, status: "idle", label: "dsh",
     backendState: { status: "running", createdAt: 1000, spawnedAt: 1000, lastActiveAt: 2500, lastInputAt: 0, ...over },
   });
+  const SIBLING = (over = {}) => ({
+    id: "t-b", cwd: "C:\\dev\\alpha", agentId: "dsh", agent: { endpointId: "dsh" }, agentName: "dsh",
+    resume: null, status: "idle", label: "dsh",
+    backendState: { status: "running", createdAt: 1000, spawnedAt: 1000, lastActiveAt: 2500, lastInputAt: 0, ...over },
+  });
 
-  it("兜底行正为一条已键入的新会话显示 → 补一发强制对齐", () => {
+  it("在跑终端已键入（武装窗内）且无阳性归属 → 补一发强制对齐", () => {
     const { fn, calls } = catchUpSandbox({
-      sessions: { "t-a": TERM({ lastInputAt: 2000 }) },
+      sessions: { "t-a": TERM({ lastInputAt: Date.now() - 1000 }) },
       history: HIST([]),
     });
     assert.equal(fn.pending().length, 1, "前提：兜底行在场（列表里没有它的真行）");
     fn.run();
-    assert.deepEqual(calls, [{ endpoint: "dsh", force: true }], "按当前 agent 强制补拉（?refresh=1）");
+    assert.deepEqual(calls, [{ endpoint: "dsh", force: true }], "按当前 agent 强制补拉（单端点强制扫描）");
     assert.ok(fn.catchUpAt() > 0, "记下补拉时刻（供最小间隔闸读）");
   });
 
-  it("没键入过的新会话不补：存档还没开始写，补也是白扫一盘", () => {
+  it("没键入过的终端不补：存档还没开始写，补也是白扫一盘", () => {
     const { fn, calls } = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: 0 }) }, history: HIST([]) });
     assert.equal(fn.pending().length, 1, "兜底行照样在场（它确实是条新会话）");
     fn.run();
     assert.deepEqual(calls, [], "不补");
   });
 
-  it("真行已经回来（同目录有更晚活跃的会话）就不补：没有可疑兜底行", () => {
+  it("键入已过武装窗（60s）不补：收敛跟用户动作走，静默期不扫盘", () => {
     const { fn, calls } = catchUpSandbox({
-      sessions: { "t-a": TERM({ lastInputAt: 2000 }) },
-      history: HIST([ROW("c-1", 5000)]),
+      sessions: { "t-a": TERM({ lastInputAt: Date.now() - 120000 }) },
+      history: HIST([]),
     });
-    assert.deepEqual(fn.pending(), [], "前提：兜底行已被接替退场");
     fn.run();
-    assert.deepEqual(calls, [], "不补");
+    assert.deepEqual(calls, [], "最后一次键入超过 60s：静音（替代旧的 5 发无进展收敛）");
   });
 
-  it("最小间隔闸：刚补过一发，20s 内不重复扫（全盘扫 2.7–9.8s，不能连排）", () => {
+  it("已退出的终端不点火：追赶只认在跑会话", () => {
     const { fn, calls } = catchUpSandbox({
-      sessions: { "t-a": TERM({ lastInputAt: 2000 }) }, history: HIST([]), catchUpAt: Date.now(),
+      sessions: { "t-a": TERM({ lastInputAt: Date.now() - 1000, status: "exited" }) },
+      history: HIST([]),
+    });
+    fn.run();
+    assert.deepEqual(calls, [], "exited 终端的行要么已在屏上、要么归复活链管，追赶不管");
+  });
+
+  it("绑定身份已在屏（阳性归属）不补：行确实在了", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), boundConversation: { endpoint: "dsh", id: "c-1" } } },
+      history: HIST([ROW("c-1", 5000)]),
+    });
+    fn.run();
+    assert.deepEqual(calls, [], "boundConversation 命中屏上行：这台终端的行已经在屏上");
+  });
+
+  it("续接身份已在屏（阳性归属）不补", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), resume: { endpoint: "dsh", id: "c-9" } } },
+      history: HIST([ROW("c-9", 5000)]),
+    });
+    fn.run();
+    assert.deepEqual(calls, [], "resume 命中屏上行：续接创建的真行本就应在列表里");
+  });
+
+  it("兄弟会话并发把兜底行顶掉时，追赶照样点火（回归钉：修前驱动随兜底行一起消失）", () => {
+    // 2026-11-10 kimi 现场形态：同目录另一条会话活跃晚于本终端出生，兜底行被
+    // 「已被接替」时间判据顶掉（修前判据＝兜底行在场才点火，驱动随行消失，真行
+    // 只能等用户重新进终端页）。追赶判据与兜底行解耦后，无阳性归属照样补拉。
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": TERM({ lastInputAt: Date.now() - 1000 }) },
+      history: HIST([ROW("c-1", Date.now())]),
+    });
+    assert.deepEqual(fn.pending(), [], "前提：兜底行已被同目录无主活跃行顶掉（时间判据保留旧口径）");
+    fn.run();
+    assert.deepEqual(calls, [{ endpoint: "dsh", force: true }], "驱动不读兜底行：行可能还没上屏就补拉");
+  });
+
+  it("兄弟终端阳性占用的行不顶兜底行：占位留在组顶（回归钉：修前兄弟的活跃行把新会话占位一并顶掉）", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: {
+        "t-a": TERM({ lastInputAt: Date.now() - 1000 }),
+        "t-b": { ...SIBLING(), boundConversation: { endpoint: "dsh", id: "c-1" } },
+      },
+      history: HIST([ROW("c-1", Date.now())]),
+    });
+    const pending = fn.pending();
+    assert.ok(pending.some((entry) => entry.id === "t-a"), "t-a 的兜底行在场（c-1 归 t-b，不顶它）");
+    assert.ok(!pending.some((entry) => entry.id === "t-b"), "t-b 的行在屏上（绑定命中），无需兜底行");
+    fn.run();
+    assert.deepEqual(calls, [{ endpoint: "dsh", force: true }], "t-a 无阳性归属：驱动照常点火（它的行可能还没上屏）");
+  });
+
+  it("最小间隔闸：刚补过一发，20s 内不重复扫（扫盘不能连排）", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": TERM({ lastInputAt: Date.now() - 1000 }) }, history: HIST([]), catchUpAt: Date.now(),
     });
     fn.run();
     assert.deepEqual(calls, [], "窗口内不重复");
   });
 
   it("列表已在飞 / 宿主未就绪都不补", () => {
-    const flying = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: 2000 }) }, history: HIST([]), inFlight: true });
+    const flying = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: Date.now() - 1000 }) }, history: HIST([]), inFlight: true });
     flying.fn.run();
     assert.deepEqual(flying.calls, [], "在飞不排队（等那一拍落地自然重渲）");
-    const cold = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: 2000 }) }, history: HIST([]), ready: false });
+    const cold = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: Date.now() - 1000 }) }, history: HIST([]), ready: false });
     cold.fn.run();
     assert.deepEqual(cold.calls, [], "宿主未就绪不补");
   });
 
-  it("无进展收敛：兜底行集合连着几发不变就停手（不把全盘扫挂成轮询）", () => {
-    // 5 发都没让兜底行集合变小（agent 不落存档的怪形态）→ 收敛。
-    const stalled = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: 2000 }) }, history: HIST([]), seen: 1, misses: 4 });
-    stalled.fn.run();
-    assert.deepEqual(stalled.calls, [{ endpoint: "dsh", force: true }], "差一发到上限：还补最后一发");
-    assert.equal(stalled.fn.misses(), 5, "记为一次无进展");
-    stalled.fn.run();
-    assert.deepEqual(stalled.calls, [{ endpoint: "dsh", force: true }], "到上限即停手");
-    // 集合一变（真行回来／又新建会话）＝有进展，清零重来。
-    const progress = catchUpSandbox({ sessions: { "t-a": TERM({ lastInputAt: 2000 }) }, history: HIST([]), seen: 2, misses: 4 });
-    progress.fn.run();
-    assert.deepEqual(progress.calls, [{ endpoint: "dsh", force: true }], "集合变过：照补");
-    assert.equal(progress.fn.misses(), 0, "有进展即清零");
-  });
-
   it("追赶挂在 1s 归属轮询收尾（数据路径，不是渲染路径）", () => {
     assert.ok(extractFn("pollTerminalSessions").includes("maybeCatchUpTerminalRailHistory()"),
-      "轮询每拍问一次「有没有可疑兜底行要补」");
+      "轮询每拍问一次「有没有终端的会话行还没上屏」");
   });
 });
 
@@ -5467,6 +5516,8 @@ describe("绑定库身份（boundConversation）", () => {
     ${extractFn("terminalRailSessionMap")}
     ${extractFn("terminalRailActiveSession")}
     ${extractFn("terminalRailAgentId")}
+    ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailClaimedRowKeys")}
     ${extractFn("terminalRailPendingFreshArmed")}
     ${extractFn("terminalRailPendingNewTerminals")}
     return () => terminalRailPendingNewTerminals();

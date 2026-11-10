@@ -57,14 +57,20 @@ function sessionsRouter(sessionScanService, extra = {}) {
   });
 }
 
-function mockSessionScan({ scanResult, scanError, messagesResult, deleteResult } = {}) {
-  const calls = { scanAll: 0, loadMessages: [], deleteSessions: [] };
+function mockSessionScan({ scanResult, scanError, messagesResult, deleteResult, scanAgentResult, scanAgentError } = {}) {
+  const calls = { scanAll: 0, scanAgent: [], loadMessages: [], deleteSessions: [] };
   return {
     calls,
     scanAll: async () => {
       calls.scanAll += 1;
       if (scanError) throw scanError;
       return scanResult ?? { sessions: [], endpointErrors: [] };
+    },
+    // 会话栏追赶的单端点扫描面：列表路由 ?endpoint= 参数只经这里。
+    scanAgent: async (agentId) => {
+      calls.scanAgent.push(agentId);
+      if (scanAgentError) throw scanAgentError;
+      return scanAgentResult ?? [];
     },
     // messages 服务面：正文＋目录在服务侧（worker 线程）序列化成一整串，路由
     // 原样直写不再 re-stringify。参数记录进 calls.loadMessages，形状与修前一致。
@@ -182,6 +188,51 @@ parentPort.on("message", (message) => {
     await router.handle(after.req, after.res);
     assert.equal(after.json().sessions[0].id, "r2");
     assert.equal(calls.scanAll, 2, "刷新重置了 TTL，普通 GET 不该再扫");
+  });
+
+  // 会话栏追赶的专用形（?endpoint=<agent>）：只扫该 agent 一家（worker 线程、与
+  // 绑定捕获同一条通路），响应只带该家的行，绝不碰全量快照——全量十家对只显示
+  // 一个 agent 的左栏纯属陪跑（全盘 2.7–9.8s vs 单家 ~1s）。
+  it("?endpoint=<agent> 走单端点扫描：只回该家的行，不碰全量快照", async () => {
+    const svc = mockSessionScan({
+      scanResult: { sessions: [{ endpoint: "claude", id: "full-1", file: "C:/s/full.jsonl" }], endpointErrors: [] },
+      scanAgentResult: [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1" }],
+    });
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 3_600_000 });
+    // 先把全量快照建起来（这一拍扫全量）。
+    const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(warm.req, warm.res);
+    assert.equal(svc.calls.scanAll, 1);
+    const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
+    await router.handle(hit.req, hit.res);
+    assert.equal(hit.res.statusCode, 200);
+    assert.deepEqual(hit.json().sessions, [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1" }]);
+    assert.deepEqual(svc.calls.scanAgent, ["kimi"], "只扫 kimi 一家");
+    assert.equal(svc.calls.scanAll, 1, "全量一次没多扫");
+    // 单端点结果不回写全量快照：随后的普通 GET 仍拿全量值。
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(after.json().sessions[0].id, "full-1");
+    assert.equal(svc.calls.scanAll, 1);
+  });
+
+  it("?endpoint= 单端点扫描失败回 500（前端保旧行不空栏）", async () => {
+    const svc = mockSessionScan({ scanAgentError: new Error("scan boom") });
+    const router = sessionsRouter(svc);
+    const failed = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=dsh", "GET");
+    await router.handle(failed.req, failed.res);
+    assert.equal(failed.res.statusCode, 500);
+    assert.equal(failed.json().ok, false);
+  });
+
+  it("?endpoint= 未知 agent 按空表处理（名单外降级不抛错），参数原样透传给扫描层", async () => {
+    const svc = mockSessionScan({ scanAgentResult: [] });
+    const router = sessionsRouter(svc);
+    const empty = fakeReqRes("/panel/api/sessions/list?endpoint=nobody", "GET");
+    await router.handle(empty.req, empty.res);
+    assert.equal(empty.res.statusCode, 200);
+    assert.deepEqual(empty.json().sessions, []);
+    assert.deepEqual(svc.calls.scanAgent, ["nobody"]);
   });
 
   it("TTL 过期先返回上次结果、刷新在后台（请求不等刷新）", async () => {
