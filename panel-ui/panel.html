@@ -13,8 +13,9 @@
 // 等历史主题已退役不可选：缺失、空值或任何非法存档一律回落默认主题（saas）并改写存档，
 // 避免残留已删样式
 // 这份清单与 panel.js 的 STYLES 是同一份，改动需两侧同步（panel.test.mjs 有同值断言）。
-// 前三项 saas/aurora/sepia 是 style-lab 静态皮肤；第四项 wallpaper（「自定义」）是
-// 动态主题：token 由取色引擎按背景图生成、运行时注入 <html> 内联样式，没有静态皮肤段。
+// 前三项 saas/aurora/sepia 是 style-lab 静态皮肤；第四项 wallpaper（列表文案
+// 「自定义...」）是动态主题：token 由取色引擎按背景图生成、运行时注入 <html> 内联
+// 样式，没有静态皮肤段。
 var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];
 var panelStyleRaw = null;
 try {
@@ -2420,7 +2421,8 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「主题」：左栏列表点选即全局生效（setStyle），右栏看板镜像实时预览 -->
+    <!-- 「主题」：左栏前三项点选即全局生效（setStyle），「自定义...」点开配置窗口
+         （上传/调参在窗口内暂存预览，确认才全局生效）；右栏看板镜像实时预览 -->
     <div class="settings-panel" id="settingsPanelTheme" hidden role="tabpanel" aria-labelledby="settingsTabTheme">
       <p class="settings-theme-desc">点选主题即时生效并记住选择。</p>
       <div class="settings-theme-grid">
@@ -2428,7 +2430,7 @@ if (window.panelStartupController) panelStartupPlay();
           <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="true">Default</button>
           <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">Aurora</button>
           <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">Sepia</button>
-          <button type="button" class="settings-theme-item" data-style="wallpaper" role="radio" aria-checked="false">自定义</button>
+          <button type="button" class="settings-theme-item" data-style="wallpaper" role="radio" aria-checked="false">自定义...</button>
         </div>
         <!-- 预览 = 真实看板镜像：进主题子页时克隆看板页当前 DOM（剥 id、inert、CSS
              缩放），换主题/切亮暗经全局 token 即时反映；看板改版预览自动跟随 -->
@@ -2437,44 +2439,6 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="settings-mirror-sizer" id="settingsMirrorSizer">
               <div class="settings-mirror-scale" id="settingsMirrorScale"></div>
             </div>
-          </div>
-        </div>
-      </div>
-      <!-- 「自定义」的从属控件：仅该主题选中时展开（CSS 按 data-style 门控），
-           换走自动收起。上传即时生效，三滑杆实时调参，值记本机。 -->
-      <div class="wallpaper-controls" id="wallpaperControls">
-        <div class="wallpaper-upload-row">
-          <button type="button" class="btn btn-mini" id="wallpaperUploadBtn">上传背景图</button>
-          <button type="button" class="btn btn-mini" id="wallpaperChangeBtn" hidden>更换背景图</button>
-          <button type="button" class="btn btn-mini" id="wallpaperRemoveBtn" hidden>移除背景图</button>
-          <input type="file" id="wallpaperFileInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
-        </div>
-        <p class="wallpaper-hint">背景图支持 PNG、JPEG、WebP、GIF，不超过 20MB</p>
-        <div class="wallpaper-fx">
-          <div class="wallpaper-fx-title">背景效果</div>
-          <div class="wallpaper-fx-item">
-            <label class="wallpaper-fx-row" for="wallpaperFxBlur">
-              <span class="wallpaper-fx-name">模糊</span>
-              <input type="range" id="wallpaperFxBlur" min="0" max="30" step="1" value="0">
-              <span class="wallpaper-fx-val" id="wallpaperFxBlurVal">0px</span>
-            </label>
-            <p class="wallpaper-fx-desc">背景图的模糊程度。</p>
-          </div>
-          <div class="wallpaper-fx-item">
-            <label class="wallpaper-fx-row" for="wallpaperFxDim">
-              <span class="wallpaper-fx-name">压暗</span>
-              <input type="range" id="wallpaperFxDim" min="0" max="70" step="1" value="10">
-              <span class="wallpaper-fx-val" id="wallpaperFxDimVal">10%</span>
-            </label>
-            <p class="wallpaper-fx-desc">背景图上叠加的暗色强度。</p>
-          </div>
-          <div class="wallpaper-fx-item">
-            <label class="wallpaper-fx-row" for="wallpaperFxSurface">
-              <span class="wallpaper-fx-name">阅读区不透明度</span>
-              <input type="range" id="wallpaperFxSurface" min="40" max="100" step="1" value="80">
-              <span class="wallpaper-fx-val" id="wallpaperFxSurfaceVal">80%</span>
-            </label>
-            <p class="wallpaper-fx-desc">卡片与正文底色的不透明程度，数值越低背景图透出越多。</p>
           </div>
         </div>
       </div>
@@ -2980,6 +2944,71 @@ if (window.panelStartupController) panelStartupPlay();
     <div class="modal-foot">
       <button class="btn" id="routeChainCancelBtn">取消</button>
       <button class="btn btn-primary" id="routeChainConfirmBtn">保存路由链</button>
+    </div>
+  </div>
+</div>
+
+<!-- 「自定义主题」窗口：主题列表「自定义...」入口点开。上传/三滑杆只写暂存并作用于
+     窗内预览，确认才落盘并全局生效；取消/遮罩/✕ 丢弃暂存（panel.js 壁纸段）。
+     预览区与主题页右栏同构（settings-mirror 三层克隆缩放），背景图与压暗层垫在镜像下。 -->
+<div class="modal-overlay" id="wallpaperModal">
+  <div class="modal-card wallpaper-modal-card" role="dialog" aria-modal="true" aria-labelledby="wallpaperModalTitle">
+    <div class="modal-head">
+      <h3 id="wallpaperModalTitle">自定义主题</h3>
+      <button class="modal-close-btn" id="wallpaperModalCloseBtn" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body wallpaper-modal-body">
+      <p class="wallpaper-modal-desc">以上传的背景图取色生成主题，确认前不影响当前面板。支持 PNG、JPEG、WebP、GIF，不超过 20MB。</p>
+      <div class="wallpaper-modal-toolbar">
+        <button type="button" class="btn btn-mini" id="wallpaperUploadBtn">上传背景图</button>
+        <button type="button" class="btn btn-mini" id="wallpaperRemoveBtn" hidden>移除背景图</button>
+        <input type="file" id="wallpaperFileInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+      </div>
+      <div class="wallpaper-preview" id="wallpaperPreview">
+        <div class="wallpaper-preview-backdrop" aria-hidden="true">
+          <div class="wallpaper-preview-image" id="wallpaperPreviewImage"></div>
+          <div class="wallpaper-preview-dim" id="wallpaperPreviewDim"></div>
+        </div>
+        <div class="wallpaper-preview-empty" id="wallpaperPreviewEmpty">上传背景图后在此预览效果</div>
+        <div class="settings-mirror-viewport wallpaper-preview-viewport" id="wallpaperPreviewViewport" inert>
+          <div class="settings-mirror-sizer" id="wallpaperPreviewSizer">
+            <div class="settings-mirror-scale" id="wallpaperPreviewScale"></div>
+          </div>
+        </div>
+      </div>
+      <details class="about-details wallpaper-advanced" id="wallpaperAdvanced">
+        <summary>高级选项</summary>
+        <div class="wallpaper-fx">
+          <div class="wallpaper-fx-item">
+            <label class="wallpaper-fx-row" for="wallpaperFxBlur">
+              <span class="wallpaper-fx-name">模糊</span>
+              <input type="range" id="wallpaperFxBlur" min="0" max="30" step="1" value="0">
+              <span class="wallpaper-fx-val" id="wallpaperFxBlurVal">0px</span>
+            </label>
+            <p class="wallpaper-fx-desc">背景图的模糊程度。</p>
+          </div>
+          <div class="wallpaper-fx-item">
+            <label class="wallpaper-fx-row" for="wallpaperFxDim">
+              <span class="wallpaper-fx-name">压暗</span>
+              <input type="range" id="wallpaperFxDim" min="0" max="70" step="1" value="10">
+              <span class="wallpaper-fx-val" id="wallpaperFxDimVal">10%</span>
+            </label>
+            <p class="wallpaper-fx-desc">背景图上叠加的暗色强度。</p>
+          </div>
+          <div class="wallpaper-fx-item">
+            <label class="wallpaper-fx-row" for="wallpaperFxSurface">
+              <span class="wallpaper-fx-name">阅读区不透明度</span>
+              <input type="range" id="wallpaperFxSurface" min="40" max="100" step="1" value="80">
+              <span class="wallpaper-fx-val" id="wallpaperFxSurfaceVal">80%</span>
+            </label>
+            <p class="wallpaper-fx-desc">卡片与正文底色的不透明程度，数值越低背景图透出越多。</p>
+          </div>
+        </div>
+      </details>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="wallpaperCancelBtn">取消</button>
+      <button class="btn btn-primary" id="wallpaperConfirmBtn">确认</button>
     </div>
   </div>
 </div>

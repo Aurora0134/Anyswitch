@@ -2064,8 +2064,8 @@
 
   /* ═══ 「自定义」壁纸主题 ═══
      动态主题：整套皮肤 token 由取色引擎按背景图生成，JS 差量注入 <html> 内联
-     样式，这里没有 token 段（也不进 style-lab 静态片段机制）；本段只含垫底结构、
-     终端屏半透明与主题页从属控件这几条结构性规则。 */
+     样式，这里没有 token 段（也不进 style-lab 静态片段机制）；本段只含全局垫底结构、
+     终端屏半透明与「自定义主题」窗口（上传/预览/高级选项）这几条结构性规则。 */
   .wallpaper-backdrop {
     display: none; position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none;
   }
@@ -2089,12 +2089,33 @@
       --terminal-bg: rgba(11, 18, 32, 0.72);
     }
   }
-  /* 主题页「自定义」从属控件：未选中该主题时整组收起 */
-  :root:not([data-style="wallpaper"]) #wallpaperControls { display: none; }
-  .wallpaper-controls { margin-top: 14px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
-  .wallpaper-upload-row { display: flex; gap: 8px; align-items: center; }
-  .wallpaper-hint { margin: 0; font-size: 11.5px; color: var(--text-3); }
-  .wallpaper-fx-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  /* 「自定义主题」窗口（主题列表「自定义...」点开）：上传/调参在窗口内暂存，预览
+     与主题页右栏同构（settings-mirror 三层），背景图与压暗层垫在镜像下；容器上的
+     .has-image 切空态/有图态，皮肤 token 由 JS 注入 #wallpaperPreview 作用域。 */
+  .wallpaper-modal-card { max-width: min(960px, 94vw); height: min(84vh, 920px); display: flex; flex-direction: column; }
+  .wallpaper-modal-body { flex: 1; min-height: 0; overflow-y: auto; }
+  .wallpaper-modal-desc { margin: 0 0 10px; font-size: 12px; color: var(--text-3); }
+  .wallpaper-modal-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .wallpaper-preview {
+    position: relative; overflow: hidden; min-height: 280px;
+    border: 1px solid var(--border); border-radius: var(--radius-lg, 12px);
+    pointer-events: none; user-select: none;
+  }
+  .wallpaper-preview-backdrop { display: none; position: absolute; inset: 0; }
+  .wallpaper-preview.has-image .wallpaper-preview-backdrop { display: block; }
+  /* 图片层外扩 40px：模糊滤镜会把边缘透出底色，外扩把虚边推出预览区 */
+  .wallpaper-preview-image { position: absolute; inset: -40px; background-size: cover; background-position: center; background-repeat: no-repeat; }
+  .wallpaper-preview-dim { position: absolute; inset: 0; }
+  .wallpaper-preview-empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: var(--text-3);
+  }
+  .wallpaper-preview.has-image .wallpaper-preview-empty { display: none; }
+  .wallpaper-preview-viewport { display: none; position: relative; background: transparent; }
+  .wallpaper-preview.has-image .wallpaper-preview-viewport { display: block; }
+  /* 高级选项展开钮复用关于页 about-details 构造，左侧缩进是该页版式专属，这里抹掉 */
+  .wallpaper-advanced { margin: 12px 0 0; }
+  .wallpaper-fx { margin-top: 10px; max-width: 460px; }
   .wallpaper-fx-item + .wallpaper-fx-item { margin-top: 6px; }
   .wallpaper-fx-row { display: grid; grid-template-columns: 96px 1fr 44px; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
   .wallpaper-fx-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-3); }
