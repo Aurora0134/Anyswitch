@@ -355,6 +355,9 @@ async function api(method, path, body) {
   async function init() {
     initTheme();
     initStylePicker();
+    // typeof 守卫理由同 initTerminalPreview：panel-startup 测试把 init() 抽进桩
+    // 环境真跑，桩里只有固定名单上的函数。
+    if (typeof initWallpaper === "function") initWallpaper();
     initBrandVersion();
     initSettingsView();
     if (typeof initTerminalPreview === "function") initTerminalPreview();
@@ -7867,10 +7870,19 @@ async function api(method, path, body) {
   function terminalCssHex(name, fallback) {
     const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim().toLowerCase();
     const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(raw);
-    if (!hex) return fallback;
-    const value = hex[1];
-    if (value.length === 6) return `#${value}`;
-    return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`;
+    if (hex) {
+      const value = hex[1];
+      if (value.length === 6) return `#${value}`;
+      return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`;
+    }
+    // 壁纸主题的终端底色带 alpha（rgba(...)）：上报契约只收六位 hex，剥掉透明
+    // 通道报 RGB 部分——宿主按此回答 agent 的颜色询问，不可解析的值会被当没上报
+    const rgb = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/.exec(raw);
+    if (rgb) {
+      const channel = (i) => Math.min(255, Number(rgb[i])).toString(16).padStart(2, "0");
+      return `#${channel(1)}${channel(2)}${channel(3)}`;
+    }
+    return fallback;
   }
   function terminalBackgroundHex(dark) {
     return terminalCssHex("--terminal-bg", dark ? "#0b1220" : "#f8fafc");
@@ -8364,6 +8376,9 @@ async function api(method, path, body) {
     if ($("terminalView")?.hidden) return terminalXterm;
     const term = new window.Terminal({
       allowProposedApi: true,
+      // 壁纸主题的 --terminal-bg 带 alpha：不开 allowTransparency 时 xterm 会把
+      // 底色按不透明处理，终端屏透不出垫底图；不透明底色下此开关无视觉差异
+      allowTransparency: true,
       convertEol: true,
       cursorBlink: true,
       // 输入不再把视口写回真尾：跟随态的合法停靠位是内容底（见
@@ -11165,6 +11180,301 @@ async function api(method, path, body) {
     }
   }
 
+  // ═══════════════════════════════════════════════
+  // 「自定义」壁纸主题
+  // ═══════════════════════════════════════════════
+  // 动态第四主题（data-style="wallpaper"）：背景图全局垫底，取色引擎
+  // （wallpaper-theme.js，浏览器挂 window.WallpaperTheme）按图生成亮暗双套
+  // token，差量注入 <html> 内联样式；切走时全量清掉注入属性，静态皮肤的 CSS
+  // 规则自然恢复。存储分工：图片 blob 在 IndexedDB；滑杆值与 token 缓存（供
+  // head 恢复脚本首帧注入）在 localStorage。移除背景图＝自动切回 Default，
+  // 滑杆值保留，下次选用自定义并上传时恢复。
+  const WALLPAPER_STYLE = "wallpaper";
+  const WALLPAPER_FX_KEY = "panel-wallpaper-fx";
+  const WALLPAPER_TOKENS_KEY = "panel-wallpaper-tokens";
+  const WALLPAPER_MAX_BYTES = 20 * 1024 * 1024;
+  const WALLPAPER_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+  const WALLPAPER_FX_DEFAULTS = { blur: 0, dim: 10, surface: 80 };
+  const WALLPAPER_FX_LIMITS = { blur: [0, 30], dim: [0, 70], surface: [40, 100] };
+  // 「阅读区不透明度」滑杆的引擎挂钩面：surfaceAlpha 一次覆盖六个表面 token
+  const WALLPAPER_SURFACE_KEYS = ["--bg", "--bg-page", "--surface", "--surface-sunken", "--surface-hover", "--surface-glass"];
+
+  let wallpaperController = null;
+
+  // 图片解码在本层（引擎只收 RGBA 像素，不碰 DOM/Canvas）：最长边降到 512 再
+  // 取色，采样步长 8 下聚类结果不变、解码内存可控；动图取首帧。
+  async function decodeWallpaperPixels(blob) {
+    const bitmap = await createImageBitmap(blob);
+    const scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    bitmap.close();
+    const frame = ctx.getImageData(0, 0, width, height);
+    return { data: frame.data, width, height };
+  }
+
+  // IndexedDB 纯前端存储：库 anyswitch-wallpaper / 表 images，固定键 "current"，
+  // 换图覆盖、移除删除。不可用时返回 null，控制器按无持久化降级（本次会话仍生效）。
+  function openWallpaperImageStore() {
+    if (!window.indexedDB) return null;
+    const ready = new Promise((resolve, reject) => {
+      const req = window.indexedDB.open("anyswitch-wallpaper", 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore("images"); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const run = (mode, op) => ready.then((db) => new Promise((resolve, reject) => {
+      const req = op(db.transaction("images", mode).objectStore("images"));
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }));
+    return {
+      load: () => run("readonly", (s) => s.get("current")),
+      save: (blob) => run("readwrite", (s) => s.put(blob, "current")),
+      clear: () => run("readwrite", (s) => s.delete("current")),
+    };
+  }
+
+  // 壁纸主题控制器：状态与副作用全在闭包里，依赖（DOM 根、存档、引擎、解码、
+  // 存储）注入，测试按既有 createXController 形态抽取本函数进沙箱驱动。
+  function createWallpaperThemeController({ doc, root, storage, engine, decode, store, preferDark = () => false, notify = () => {}, onAfterChange = () => {}, onFallbackStyle = () => {} }) {
+    const get = (id) => doc.getElementById(id);
+    const imageLayer = get("wallpaperBackdropImage");
+    const dimLayer = get("wallpaperBackdropDim");
+    let pixels = null;       // 解码后的降采样像素：滑杆实时重算免二次解码
+    let blobUrl = null;
+    let hasImage = false;
+    let themeCache = null;     // { light: {token}, dark: {token} }
+    const injectedKeys = new Set();
+
+    const clampFx = (key, value) => {
+      const [lo, hi] = WALLPAPER_FX_LIMITS[key];
+      const n = Number(value);
+      if (!Number.isFinite(n)) return WALLPAPER_FX_DEFAULTS[key];
+      return Math.min(hi, Math.max(lo, Math.round(n)));
+    };
+    const fx = { ...WALLPAPER_FX_DEFAULTS };
+    try {
+      const saved = JSON.parse(storage.getItem(WALLPAPER_FX_KEY) || "null");
+      if (saved && typeof saved === "object") {
+        for (const key of Object.keys(WALLPAPER_FX_DEFAULTS)) {
+          if (saved[key] !== undefined) fx[key] = clampFx(key, saved[key]);
+        }
+      }
+    } catch {}
+    const saveFx = () => { try { storage.setItem(WALLPAPER_FX_KEY, JSON.stringify(fx)); } catch {} };
+
+    function currentMode() {
+      const t = root.getAttribute("data-theme");
+      if (t === "light" || t === "dark") return t;
+      return preferDark() ? "dark" : "light";
+    }
+
+    function injectTokens(tokens) {
+      for (const [key, value] of Object.entries(tokens)) {
+        root.style.setProperty(key, value);
+        injectedKeys.add(key);
+      }
+    }
+    // 切走「自定义」：清掉全部注入属性并删掉首帧缓存，静态皮肤规则恢复生效
+    function clearTokens() {
+      for (const key of injectedKeys) root.style.removeProperty(key);
+      injectedKeys.clear();
+      try { storage.removeItem(WALLPAPER_TOKENS_KEY); } catch {}
+    }
+    function persistCache() {
+      if (!themeCache) return;
+      try { storage.setItem(WALLPAPER_TOKENS_KEY, JSON.stringify(themeCache)); } catch {}
+    }
+    // 首帧可能已被 head 恢复脚本注入过：接管缓存键集，亮暗切换/调参按同一键集续写
+    function adoptCache() {
+      if (themeCache) return;
+      try {
+        const cached = JSON.parse(storage.getItem(WALLPAPER_TOKENS_KEY) || "null");
+        if (cached && cached.light && cached.dark) {
+          themeCache = cached;
+          for (const key of Object.keys(cached.light)) injectedKeys.add(key);
+          for (const key of Object.keys(cached.dark)) injectedKeys.add(key);
+        }
+      } catch {}
+    }
+
+    function applyTokens() {
+      if (!themeCache) return;
+      injectTokens(themeCache[currentMode()] || themeCache.light);
+    }
+    function applyFx() {
+      if (imageLayer) imageLayer.style.filter = fx.blur > 0 ? `blur(${fx.blur}px)` : "";
+      if (dimLayer) dimLayer.style.background = `rgba(0, 0, 0, ${fx.dim / 100})`;
+    }
+    // 按当前滑杆重取色：surfaceAlpha 同时覆盖亮暗两套的表面透明度
+    function rebuildTheme() {
+      if (!engine || !pixels) return;
+      const overrides = {};
+      for (const key of WALLPAPER_SURFACE_KEYS) overrides[key] = fx.surface / 100;
+      themeCache = engine.extractTheme(pixels, { surfaceAlpha: { light: overrides, dark: overrides } });
+      persistCache();
+      applyTokens();
+    }
+
+    function syncButtons() {
+      const uploadBtn = get("wallpaperUploadBtn");
+      const changeBtn = get("wallpaperChangeBtn");
+      const removeBtn = get("wallpaperRemoveBtn");
+      if (uploadBtn) uploadBtn.hidden = hasImage;
+      if (changeBtn) changeBtn.hidden = !hasImage;
+      if (removeBtn) removeBtn.hidden = !hasImage;
+    }
+
+    function presentImage(blob) {
+      if (blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) URL.revokeObjectURL(blobUrl);
+      blobUrl = URL.createObjectURL(blob);
+      if (imageLayer) imageLayer.style.backgroundImage = `url("${blobUrl}")`;
+      root.setAttribute("data-wallpaper", "active");
+    }
+
+    async function applyBlob(blob) {
+      pixels = await decode(blob);
+      hasImage = true;
+      presentImage(blob);
+      applyFx();
+      rebuildTheme();
+      syncButtons();
+    }
+
+    async function restore() {
+      if (!store) return;
+      try {
+        const blob = await store.load();
+        if (blob) await applyBlob(blob);
+      } catch { /* 存储读失败：壁纸主题停在无图态，不挡面板启动 */ }
+    }
+
+    return {
+      fx,
+      syncButtons,
+      // 主题切换接线：选中「自定义」恢复 token 与垫底，切走清空注入。
+      // 有缓存无像素（刷新后首帧已由缓存注入）也要继续 restore：像素是
+      // 「阅读区不透明度」滑杆重取色的料，不恢复则调参失敏。
+      async syncStyle(active) {
+        if (!active) {
+          clearTokens();
+          return;
+        }
+        adoptCache();
+        if (themeCache) {
+          applyTokens();
+          persistCache();
+        }
+        applyFx();
+        if (!pixels) await restore();
+        onAfterChange();
+      },
+      // 亮暗切换（含跟随系统时系统侧变化）：壁纸 token 双套跟随
+      syncMode() {
+        if (!themeCache) return;
+        applyTokens();
+        onAfterChange();
+      },
+      // 三滑杆实时调参：模糊/压暗直改垫底层，阅读区不透明度重取色
+      setFx(key, value) {
+        fx[key] = clampFx(key, value);
+        saveFx();
+        applyFx();
+        if (key === "surface") rebuildTheme();
+        onAfterChange();
+      },
+      async pickFile(file) {
+        if (!file) return;
+        if (!WALLPAPER_MIME_TYPES.includes(file.type)) {
+          notify("仅支持 PNG、JPEG、WebP、GIF 格式的图片", true);
+          return;
+        }
+        if (file.size > WALLPAPER_MAX_BYTES) {
+          notify("图片超过 20MB，未上传", true);
+          return;
+        }
+        const replacing = hasImage;
+        try {
+          if (store) await store.save(file);
+          await applyBlob(file);
+          onAfterChange();
+          notify(replacing ? "背景图已更换" : "背景图已上传");
+        } catch {
+          notify("背景图读取失败，请换一张图片", true);
+        }
+      },
+      // 移除背景图＝自动切回 Default；滑杆值不清，下次上传时沿用
+      async removeImage() {
+        if (store) { try { await store.clear(); } catch {} }
+        hasImage = false;
+        pixels = null;
+        themeCache = null;
+        if (blobUrl && typeof URL !== "undefined" && URL.revokeObjectURL) URL.revokeObjectURL(blobUrl);
+        blobUrl = null;
+        if (imageLayer) imageLayer.style.backgroundImage = "";
+        root.removeAttribute("data-wallpaper");
+        clearTokens();
+        syncButtons();
+        notify("已移除背景图，主题已切回 Default");
+        onFallbackStyle();
+      },
+    };
+  }
+
+  // 主题页「自定义」从属区接线：上传/更换/移除与三滑杆
+  function initWallpaper() {
+    const fileInput = $("wallpaperFileInput");
+    if (!fileInput) return;
+    wallpaperController = createWallpaperThemeController({
+      doc: document,
+      root: document.documentElement,
+      storage: localStorage,
+      engine: window.WallpaperTheme || null,
+      decode: decodeWallpaperPixels,
+      store: openWallpaperImageStore(),
+      preferDark: () => window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
+      notify: toast,
+      onAfterChange: () => applyTerminalXtermTheme(),
+      onFallbackStyle: () => setPanelStyle("saas"),
+    });
+    const fxInputs = [
+      { key: "blur", input: $("wallpaperFxBlur"), val: $("wallpaperFxBlurVal"), suffix: "px" },
+      { key: "dim", input: $("wallpaperFxDim"), val: $("wallpaperFxDimVal"), suffix: "%" },
+      { key: "surface", input: $("wallpaperFxSurface"), val: $("wallpaperFxSurfaceVal"), suffix: "%" },
+    ];
+    for (const item of fxInputs) {
+      if (!item.input) continue;
+      item.input.value = String(wallpaperController.fx[item.key]);
+      if (item.val) item.val.textContent = `${wallpaperController.fx[item.key]}${item.suffix}`;
+      item.input.addEventListener("input", () => {
+        const v = Number(item.input.value);
+        if (item.val) item.val.textContent = `${v}${item.suffix}`;
+        wallpaperController.setFx(item.key, v);
+      });
+    }
+    const uploadBtn = $("wallpaperUploadBtn");
+    const changeBtn = $("wallpaperChangeBtn");
+    const removeBtn = $("wallpaperRemoveBtn");
+    if (uploadBtn) uploadBtn.onclick = () => fileInput.click();
+    if (changeBtn) changeBtn.onclick = () => fileInput.click();
+    if (removeBtn) removeBtn.onclick = () => wallpaperController.removeImage();
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      // 清空值：同一张图再选一次也要触发 change
+      fileInput.value = "";
+      wallpaperController.pickFile(file);
+    });
+    wallpaperController.syncButtons();
+    // 启动恢复：当前就是「自定义」且有图时，重读 IndexedDB 并续上 token
+    wallpaperController.syncStyle(currentPanelStyle() === WALLPAPER_STYLE);
+  }
+
   // 主题切换
   function initTheme() {
     // 主头行、设置头行、终端页、新版左栏各有一颗亮暗钮：同一状态源
@@ -11199,12 +11509,14 @@ async function api(method, path, body) {
       else document.documentElement.removeAttribute("data-theme");
       try { localStorage.setItem("panel-theme", mode); } catch {}
       syncBtns();
+      if (wallpaperController) wallpaperController.syncMode();
       applyTerminalXtermTheme();
     }
     // 系统亮暗变化（用户未显式选定主题时）：同步图标，并重刷终端屏配色
     if (window.matchMedia) {
       window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
         syncBtns();
+        if (wallpaperController) wallpaperController.syncMode();
         applyTerminalXtermTheme();
       });
     }
@@ -11213,37 +11525,47 @@ async function api(method, path, body) {
     for (const t of toggles) t.btn.onclick = () => setTheme(currentTheme() === "dark" ? "light" : "dark");
   }
 
+  // 面板主题清单：与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份，改动需两侧
+  // 同步（panel.test.mjs 有同值断言）。前三项 saas/aurora/sepia 是 style-lab 静态
+  // 皮肤（CSS 片段）；第四项 wallpaper（「自定义」）是动态主题——token 由取色引擎
+  // 按背景图生成、运行时注入 <html> 内联样式，没有静态皮肤段。
+  // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
+  // 等历史主题均已退役，CSS 片段已随退役删除；历史 localStorage 存档的退役样式
+  // 由 <head> 恢复脚本兜底回落默认主题（saas）。
+  const STYLES = ["saas", "aurora", "sepia", "wallpaper"];
+  function currentPanelStyle() {
+    const s = document.documentElement.getAttribute("data-style") || "";
+    return STYLES.includes(s) ? s : "saas";
+  }
+  // 换皮肤：落属性、记存档、同步列表选中态，再让壁纸控制器进/出「自定义」、
+  // 重刷终端屏配色（--terminal-bg 随皮肤变，壁纸主题下还带 alpha）
+  function setPanelStyle(s) {
+    document.documentElement.setAttribute("data-style", s);
+    try { localStorage.setItem("panel-style", s); } catch {}
+    const picker = $("stylePicker");
+    if (picker) {
+      for (const b of picker.querySelectorAll(".settings-theme-item")) {
+        b.setAttribute("aria-checked", b.dataset.style === s ? "true" : "false");
+      }
+    }
+    if (wallpaperController) wallpaperController.syncStyle(s === WALLPAPER_STYLE);
+    applyTerminalXtermTheme();
+  }
+
   // 面板主题（设置视图「主题」子 tab 左栏列表，点选即全局生效）
   function initStylePicker() {
     const picker = $("stylePicker");
     if (!picker) return;
-    // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
-    // 等历史主题均已退役，CSS 片段已随退役删除；历史 localStorage 存档的退役样式
-    // 由 <head> 恢复脚本兜底回落默认主题（saas）。
-    // 与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份清单，改动需两侧同步（panel.test.mjs 有同值断言）
-    const STYLES = ["saas", "aurora", "sepia"];
-    function currentStyle() {
-      const s = document.documentElement.getAttribute("data-style") || "";
-      return STYLES.includes(s) ? s : "saas";
-    }
-    function syncBtns() {
-      const cur = currentStyle();
-      for (const b of picker.querySelectorAll(".settings-theme-item")) {
-        b.setAttribute("aria-checked", b.dataset.style === cur ? "true" : "false");
-      }
-    }
-    function setStyle(s) {
-      document.documentElement.setAttribute("data-style", s);
-      try { localStorage.setItem("panel-style", s); } catch {}
-      syncBtns();
-      applyTerminalXtermTheme();
-    }
     picker.addEventListener("click", (e) => {
       const b = e.target.closest(".settings-theme-item");
       if (!b || !STYLES.includes(b.dataset.style)) return;
-      setStyle(b.dataset.style);
+      setPanelStyle(b.dataset.style);
     });
-    syncBtns();
+    // 初始选中态回显：与 setPanelStyle 里的同步同一口径
+    const cur = currentPanelStyle();
+    for (const b of picker.querySelectorAll(".settings-theme-item")) {
+      b.setAttribute("aria-checked", b.dataset.style === cur ? "true" : "false");
+    }
   }
 
   // ═══════════════════════════════════════════════

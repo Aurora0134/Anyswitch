@@ -12,8 +12,10 @@
 // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
 // 等历史主题已退役不可选：缺失、空值或任何非法存档一律回落默认主题（saas）并改写存档，
 // 避免残留已删样式
-// 这份清单与 panel.js 的 STYLES 是同一份，改动需两侧同步（panel.test.mjs 有同值断言）
-var PANEL_STYLES = ["saas", "aurora", "sepia"];
+// 这份清单与 panel.js 的 STYLES 是同一份，改动需两侧同步（panel.test.mjs 有同值断言）。
+// 前三项 saas/aurora/sepia 是 style-lab 静态皮肤；第四项 wallpaper（「自定义」）是
+// 动态主题：token 由取色引擎按背景图生成、运行时注入 <html> 内联样式，没有静态皮肤段。
+var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];
 var panelStyleRaw = null;
 try {
   panelStyleRaw = localStorage.getItem("panel-style");
@@ -27,6 +29,26 @@ try {
   var panelTheme = localStorage.getItem("panel-theme");
   if (panelTheme === "light" || panelTheme === "dark") document.documentElement.setAttribute("data-theme", panelTheme);
 } catch (e) {}
+// 「自定义」主题的 token 是运行时注入 <html> 内联样式的（见 panel.js 壁纸段）：
+// 绘制前把上次生成的整套 token 从本机缓存读回，避免刷新时先以基座色画一帧再跳变。
+// 缓存只在壁纸主题下写入，切走主题时由 panel.js 全量清掉并删除这份缓存。
+if (panelStyle === "wallpaper") {
+  try {
+    var panelWallpaperCache = JSON.parse(localStorage.getItem("panel-wallpaper-tokens") || "null");
+    if (panelWallpaperCache && typeof panelWallpaperCache === "object") {
+      var panelWallpaperMode = document.documentElement.getAttribute("data-theme");
+      if (panelWallpaperMode !== "light" && panelWallpaperMode !== "dark") {
+        panelWallpaperMode = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      var panelWallpaperTokens = panelWallpaperCache[panelWallpaperMode];
+      if (panelWallpaperTokens && typeof panelWallpaperTokens === "object") {
+        for (var panelWallpaperKey in panelWallpaperTokens) {
+          document.documentElement.style.setProperty(panelWallpaperKey, panelWallpaperTokens[panelWallpaperKey]);
+        }
+      }
+    }
+  } catch (e) {}
+}
 </script>
 <script>
 // 界面版本——绘制前恢复「UI版本」选择，避免刷新时先按另一版布局画一帧再换版。
@@ -259,6 +281,13 @@ try {
 </script>
 </head>
 <body>
+<!-- 壁纸垫底（「自定义」主题）：fixed 铺底、不响应交互、不随滚动；仅壁纸主题
+     选中且有图时显示（CSS 按 data-style + data-wallpaper 门控）。图片层外扩
+     40px 消除模糊滤镜的边缘透明带，上盖一层压暗。 -->
+<div class="wallpaper-backdrop" aria-hidden="true">
+  <div class="wallpaper-backdrop-image" id="wallpaperBackdropImage"></div>
+  <div class="wallpaper-backdrop-dim" id="wallpaperBackdropDim"></div>
+</div>
 <div id="panelStartup" role="status" aria-label="正在打开 Anyswitch">
   <div class="startup-mark">
     <svg id="startupSvg" viewBox="0 0 512 512" aria-hidden="true">
@@ -2399,6 +2428,7 @@ if (window.panelStartupController) panelStartupPlay();
           <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="true">Default</button>
           <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">Aurora</button>
           <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">Sepia</button>
+          <button type="button" class="settings-theme-item" data-style="wallpaper" role="radio" aria-checked="false">自定义</button>
         </div>
         <!-- 预览 = 真实看板镜像：进主题子页时克隆看板页当前 DOM（剥 id、inert、CSS
              缩放），换主题/切亮暗经全局 token 即时反映；看板改版预览自动跟随 -->
@@ -2407,6 +2437,44 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="settings-mirror-sizer" id="settingsMirrorSizer">
               <div class="settings-mirror-scale" id="settingsMirrorScale"></div>
             </div>
+          </div>
+        </div>
+      </div>
+      <!-- 「自定义」的从属控件：仅该主题选中时展开（CSS 按 data-style 门控），
+           换走自动收起。上传即时生效，三滑杆实时调参，值记本机。 -->
+      <div class="wallpaper-controls" id="wallpaperControls">
+        <div class="wallpaper-upload-row">
+          <button type="button" class="btn btn-mini" id="wallpaperUploadBtn">上传背景图</button>
+          <button type="button" class="btn btn-mini" id="wallpaperChangeBtn" hidden>更换背景图</button>
+          <button type="button" class="btn btn-mini" id="wallpaperRemoveBtn" hidden>移除背景图</button>
+          <input type="file" id="wallpaperFileInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        </div>
+        <p class="wallpaper-hint">背景图支持 PNG、JPEG、WebP、GIF，不超过 20MB</p>
+        <div class="wallpaper-fx">
+          <div class="wallpaper-fx-title">背景效果</div>
+          <div class="wallpaper-fx-item">
+            <label class="wallpaper-fx-row" for="wallpaperFxBlur">
+              <span class="wallpaper-fx-name">模糊</span>
+              <input type="range" id="wallpaperFxBlur" min="0" max="30" step="1" value="0">
+              <span class="wallpaper-fx-val" id="wallpaperFxBlurVal">0px</span>
+            </label>
+            <p class="wallpaper-fx-desc">背景图的模糊程度。</p>
+          </div>
+          <div class="wallpaper-fx-item">
+            <label class="wallpaper-fx-row" for="wallpaperFxDim">
+              <span class="wallpaper-fx-name">压暗</span>
+              <input type="range" id="wallpaperFxDim" min="0" max="70" step="1" value="10">
+              <span class="wallpaper-fx-val" id="wallpaperFxDimVal">10%</span>
+            </label>
+            <p class="wallpaper-fx-desc">背景图上叠加的暗色强度。</p>
+          </div>
+          <div class="wallpaper-fx-item">
+            <label class="wallpaper-fx-row" for="wallpaperFxSurface">
+              <span class="wallpaper-fx-name">阅读区不透明度</span>
+              <input type="range" id="wallpaperFxSurface" min="40" max="100" step="1" value="80">
+              <span class="wallpaper-fx-val" id="wallpaperFxSurfaceVal">80%</span>
+            </label>
+            <p class="wallpaper-fx-desc">卡片与正文底色的不透明程度，数值越低背景图透出越多。</p>
           </div>
         </div>
       </div>
@@ -2978,6 +3046,7 @@ if (window.panelStartupController) panelStartupPlay();
 <script src="/panel/assets/xterm-fit.js" defer></script>
 <script src="/panel/assets/xterm-unicode11.js" defer></script>
 <script src="/panel/assets/xterm-webgl.js" defer></script>
+<script src="/panel/assets/wallpaper-theme.js" defer></script>
 <script src="/panel/assets/panel.js" defer></script>
 </body>
 </html>

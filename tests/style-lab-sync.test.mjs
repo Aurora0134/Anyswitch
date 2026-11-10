@@ -1,8 +1,10 @@
 // style-lab 主题同步校验：panel.css 内嵌块（/* ===== style-lab: SLUG ===== */ 横幅）
 // 必须与 panel-ui/style-lab/SLUG.css 源文件逐字一致（归一化 CRLF/LF 行尾后比对）。
-// 在册风格清单三处对账：panel.html 的 PANEL_STYLES、panel.js 的 STYLES 与本文件的
-// SLUGS 必须完全一致；panel.css 横幅块集合也必须恰为在册清单——已退役主题的横幅块
-// 残留、在册主题缺块、同名横幅重复都会红（退役片段的 CSS 与源文件随退役一并删除）。
+// 在册主题清单＝静态三皮肤（saas/aurora/sepia，走本文件的横幅块与源文件校验）＋
+// 动态第四项 wallpaper（「自定义」：token 由取色引擎按背景图运行时注入，无静态
+// 片段，不进本文件的块校验）。panel.html 的 PANEL_STYLES 与 panel.js 的 STYLES
+// 必须是「三静态 + wallpaper」四项；panel.css 横幅块集合仍恰为三静态——已退役
+// 主题的横幅块残留、在册静态皮肤缺块、同名横幅重复都会红。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -11,22 +13,30 @@ import { dirname, join } from "node:path";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const SLUGS = ["saas", "aurora", "sepia"];
+// 动态主题：不进 style-lab 静态片段机制，但占用主题清单第四项
+const DYNAMIC_STYLES = ["wallpaper"];
 
-test("在册风格清单三处一致：panel.html PANEL_STYLES = panel.js STYLES = 本测试 SLUGS", () => {
+test("在册主题清单两处一致：panel.html PANEL_STYLES = panel.js STYLES = 三静态皮肤 + 动态第四项", () => {
   const html = readFileSync(join(root, "../panel-ui", "panel.html"), "utf8");
   const js = readFileSync(join(root, "../panel-ui", "panel.js"), "utf8");
   const htmlList = html.match(/var PANEL_STYLES = (\[[^\]]*\]);/);
   assert.ok(htmlList, "panel.html 找不到 var PANEL_STYLES = [...] ——清单手写处变更后请同步本测试的解析");
   const jsList = js.match(/const STYLES = (\[[^\]]*\]);/);
   assert.ok(jsList, "panel.js 找不到 const STYLES = [...] ——清单手写处变更后请同步本测试的解析");
+  const expected = [...SLUGS, ...DYNAMIC_STYLES];
   const htmlStyles = JSON.parse(htmlList[1]);
   const jsStyles = JSON.parse(jsList[1]);
-  assert.deepEqual(htmlStyles, SLUGS,
-    `panel.html 的 PANEL_STYLES ${JSON.stringify(htmlStyles)} 与本测试 SLUGS ${JSON.stringify(SLUGS)} 不一致：` +
-    "在册清单变更须同步 SLUGS 与 style-lab/ 源文件");
-  assert.deepEqual(jsStyles, SLUGS,
-    `panel.js 的 STYLES ${JSON.stringify(jsStyles)} 与本测试 SLUGS ${JSON.stringify(SLUGS)} 不一致：` +
+  assert.deepEqual(htmlStyles, expected,
+    `panel.html 的 PANEL_STYLES ${JSON.stringify(htmlStyles)} 与在册清单 ${JSON.stringify(expected)} 不一致：` +
+    "静态皮肤变更须同步 SLUGS 与 style-lab/ 源文件；动态项变更须同步 DYNAMIC_STYLES");
+  assert.deepEqual(jsStyles, expected,
+    `panel.js 的 STYLES ${JSON.stringify(jsStyles)} 与在册清单 ${JSON.stringify(expected)} 不一致：` +
     "清单各手写副本必须同步");
+  // 动态主题不得有 style-lab 源文件：它的 token 是运行时注入的，静态片段没有意义
+  for (const slug of DYNAMIC_STYLES) {
+    assert.ok(!existsSync(join(root, "../panel-ui", "style-lab", `${slug}.css`)),
+      `动态主题 ${slug} 不应存在 style-lab/${slug}.css 源文件`);
+  }
 });
 
 function extractBlocks() {
