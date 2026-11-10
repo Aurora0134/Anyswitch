@@ -29,7 +29,9 @@ const VIEWPORT_FNS = [
   "terminalViewportDestroy", "terminalViewportActivate", "terminalSessionRunning",
   "terminalViewportRetire", "terminalViewportPlaceTerminal", "terminalCloseTerminal",
   "terminalCloseTerminalNow", "terminalViewportRefs", "terminalViewportRefAdd",
-  "terminalViewportRefDrop", "terminalSessionIdentity", "terminalSessionSupportedElsewhere",
+  "terminalViewportRefDrop",
+  "terminalSessionAgentId", "terminalViewportCarriesAgent", "terminalViewportFamilyHost",
+  "terminalViewportAdvanceOrDispose", "terminalViewportDisposeTab",
   "terminalTerminalShownElsewhere",
   "terminalRailKeepAliveSwitch", "loadTerminalViewports", "saveTerminalViewports",
 ];
@@ -849,6 +851,8 @@ describe("终端视图左栏换血", () => {
         const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         function renderTerminalPreviewTabs() { log.tabsRenders = (log.tabsRenders || 0) + 1; }
+        function renderTerminalEmptyState() { log.emptyRenders = (log.emptyRenders || 0) + 1; }
+        function closeAllTerminalStreams() { log.streams = (log.streams || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
         ${extractFn("terminalRailArmSelect")}
@@ -945,7 +949,7 @@ describe("终端视图左栏换血", () => {
       assert.equal(sandbox.pending(), null, "匹配即清");
     });
 
-    it("关闭叉走页签同一条处理：按 data-terminal-terminal 找到对应页签里那颗 ×，不复制第二份关闭逻辑", () => {
+    it("左栏 × 与页签 × 分工：行内 × 直杀这一条会话（自己的 /close），视口交给下一位，不经页签关闭叉", () => {
       const clicked = [];
       const makeTab = (viewportId, terminalId, closeEl) => ({
         getAttribute: (name) => (name === "data-terminal-tab" ? viewportId
@@ -956,13 +960,14 @@ describe("终端视图左栏换血", () => {
       const target = { click: () => clicked.push("t2") };
       const tabs = { querySelectorAll: () => [makeTab("viewport-1", "t1", other), makeTab("viewport-2", "t2", target)] };
       const { sandbox, log } = runRail({
-        sessions: { t1: {}, t2: {} }, tabs,
+        sessions: { t1: { id: "t1", backend: true }, t2: { id: "t2", backend: true } }, tabs,
         viewports: [{ id: "viewport-1", terminalId: "t1" }, { id: "viewport-2", terminalId: "t2" }],
       });
       sandbox.close("t2");
-      assert.deepEqual(clicked, ["t2"], "只点目标页签的关闭叉（运行中确认/POST/空态计数全由那一处承担）");
-      assert.equal(log.renders, 0, "关闭逻辑不在本函数里重写——不自己删会话、不自己重渲");
-      assert.deepEqual(log.posts, [], "也不直接发 /close");
+      assert.deepEqual(clicked, [], "不借道页签关闭叉——那是家族语义（摘入口），行内 × 是会话级语义（杀这一条）");
+      assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/sessions/t2/close" }],
+        "直发自己的 /close（运行中确认在 terminalCloseTerminal 里，本桩无 window 即免确认）");
+      assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-1"], "t2 视口无活成员即销毁；别家的不动");
     });
 
     it("后台保活的终端（不在任何视口）：行内 × 就地结束它，不碰任何页签", () => {
@@ -980,27 +985,16 @@ describe("终端视图左栏换血", () => {
       assert.deepEqual(sandbox.background(), [], "退出后台保活集合");
     });
 
-    it("页签条缺席或找不到对应页签：静默返回，不炸", () => {
+    it("页签条缺席：行内 × 照常关当屏会话并把视口交给名下活成员（不再依赖 DOM 找页签）", () => {
       const absent = runRail({
-        sessions: { t1: {} }, tabs: null,
-        viewports: [{ id: "viewport-1", terminalId: "t1" }],
+        sessions: { t1: { id: "t1", backend: true }, t2: { id: "t2", backend: true } }, tabs: null,
+        viewports: [{ id: "viewport-1", terminalId: "t1", background: ["t2"] }],
       });
       absent.sandbox.close("t1");
-      assert.equal(absent.log.renders, 0, "页签条不存在时不动手");
-
-      const clicked = [];
-      const tabs = { querySelectorAll: () => [{
-        getAttribute: (name) => (name === "data-terminal-terminal" ? "t1" : "viewport-1"),
-        querySelector: () => ({ click: () => clicked.push("t1") }),
-      }] };
-      // t9 必须有自己的视口：无视口会在进页签扫描前就走「就地结束」早退分支
-      // （terminalViewportForTerminal 先判），循环根本不跑，断言就成了恒真。
-      const missing = runRail({
-        sessions: { t1: {}, t2: {}, t9: {} }, tabs,
-        viewports: [{ id: "viewport-1", terminalId: "t1" }, { id: "viewport-9", terminalId: "t9" }],
-      });
-      missing.sandbox.close("t9");
-      assert.deepEqual(clicked, [], "id 对不上时什么都不点");
+      assert.deepEqual(absent.log.posts, [{ method: "POST", path: "/api/terminal/sessions/t1/close" }], "直杀 t1");
+      assert.equal(absent.sandbox.viewports().length, 1, "视口守恒：入口不折损");
+      assert.equal(absent.sandbox.viewports()[0].terminalId, "t2", "名下活成员 t2 接上当屏");
+      assert.deepEqual(absent.sandbox.background(), [], "t2 从后台引用转正（不再挂后台集合）");
     });
   });
 

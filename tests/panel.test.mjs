@@ -103,7 +103,9 @@ const VIEWPORT_FNS = [
   "terminalViewportActivate", "terminalSessionRunning", "terminalViewportRetire",
   "terminalViewportPlaceTerminal", "terminalCloseTerminal", "terminalCloseViewportTab",
   "terminalCloseTerminalNow", "terminalViewportRefs", "terminalViewportRefAdd",
-  "terminalViewportRefDrop", "terminalSessionIdentity", "terminalSessionSupportedElsewhere",
+  "terminalViewportRefDrop",
+  "terminalSessionAgentId", "terminalViewportCarriesAgent", "terminalViewportFamilyHost",
+  "terminalViewportAdvanceOrDispose", "terminalViewportDisposeTab",
   "terminalTerminalShownElsewhere",
   "terminalViewportSyncFromHost",
 ];
@@ -4272,6 +4274,13 @@ describe("panel.html 设置全页视图", () => {
       const terminalPreviewSessions = {};
       ${viewportPrelude()}
       ${bodies}
+      // 视口交接/销毁链（sync 经 advanceOrDispose 走到 disposeTab）的渲染收尾桩：
+      // 这两个沙盒只断言视口表与指针，渲染计数无观测面。
+      function renderTerminalPreviewSession() {}
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalEmptyState() {}
+      function renderTerminalRail() {}
+      function closeAllTerminalStreams() {}
       rebuildTerminalBackendSessions(items);
       return {
         active: activeTerminalPreviewId,
@@ -9777,7 +9786,10 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(tabsWire.includes("terminalCloseViewportTab(viewportId)"), "关闭分支委托给视口关闭语义");
     assert.ok(tabsWire.includes("terminalViewportActivate(viewportId)"), "点击分支＝激活视口（不走 /switch）");
     const closeTab = panelFnSrc("terminalCloseViewportTab");
-    const zeroBranch = closeTab.match(/if \(terminalViewports\.length === 0\) \{[\s\S]*?\n    \}/)?.[0];
+    assert.ok(closeTab.includes("terminalViewportDisposeTab(viewport)"), "关页签收尾委托给共用的销毁收尾（相邻回退＋空态）");
+    // 零视口分支搬进 terminalViewportDisposeTab（关页签 / 左栏 × / 宿主摘除三条路共用）：
+    // 取样跟着搬，别在两处各写一份。
+    const zeroBranch = panelFnSrc("terminalViewportDisposeTab").match(/if \(terminalViewports\.length === 0\) \{[\s\S]*?\n    \}/)?.[0];
     assert.ok(zeroBranch, "零视口分支可取样");
     assert.ok(panelJs.includes("terminalViewports.length === 0"), "最后一个页签照常可关（判据看视口数）");
     assert.ok(!panelJs.includes("remaining.length === 0"), "旧「剩余会话数」判据退役（会话多≠页签多）");
@@ -13600,11 +13612,17 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       const terminalPreviewSessions = {};
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
-        setItem: (k, v) => { store[k] = v; },
+        setItem: (k, v) => { store[k] = String(v); },
         removeItem: (k) => { delete store[k]; },
       };
       ${viewportPrelude()}
       ${bodies}
+      // 视口交接/销毁链（sync 经 advanceOrDispose 走到 disposeTab）的渲染收尾桩。
+      function renderTerminalPreviewSession() {}
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalEmptyState() {}
+      function renderTerminalRail() {}
+      function closeAllTerminalStreams() {}
       return {
         beat: (items) => rebuildTerminalBackendSessions(items),
         streak: (id) => terminalHollowStreak.get(id) || 0,
