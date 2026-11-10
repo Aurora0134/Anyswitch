@@ -2063,6 +2063,44 @@
   :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; grid-row: 1 / span 2; }
   :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { grid-column: 2; min-width: 0; }
 
+  /* ═══ 「自定义」壁纸主题 ═══
+     动态主题：整套皮肤 token 由取色引擎按背景图生成，JS 差量注入 <html> 内联
+     样式，这里没有 token 段（也不进 style-lab 静态片段机制）；本段只含垫底结构、
+     终端屏半透明与主题页从属控件这几条结构性规则。 */
+  .wallpaper-backdrop {
+    display: none; position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none;
+  }
+  /* 有图（data-wallpaper="active"）且当前选中「自定义」时才铺底，切走自动消失 */
+  :root[data-style="wallpaper"][data-wallpaper="active"] .wallpaper-backdrop { display: block; }
+  /* 图片层外扩 40px：模糊滤镜会把边缘透出底色，外扩把虚边推出视口 */
+  .wallpaper-backdrop-image { position: absolute; inset: -40px; background-size: cover; background-position: center; background-repeat: no-repeat; }
+  .wallpaper-backdrop-dim { position: absolute; inset: 0; }
+  /* 垫底在负 z 层：body 底色会提升为画布色盖在壁纸上方，壁纸主题下必须透明 */
+  :root[data-style="wallpaper"] body { background: transparent; }
+  /* 终端屏半透明：壁纸主题下 --terminal-bg 带 alpha，屏下透出垫底图。xterm 主题
+     与亮暗上报链同取此 token（上报侧剥 alpha 转六位 hex，宿主契约只收 hex）。 */
+  :root[data-style="wallpaper"] {
+    --terminal-bg: rgba(248, 250, 252, 0.78);
+  }
+  :root[data-style="wallpaper"][data-theme="dark"] {
+    --terminal-bg: rgba(11, 18, 32, 0.72);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-style="wallpaper"]:not([data-theme="light"]):not([data-theme="dark"]) {
+      --terminal-bg: rgba(11, 18, 32, 0.72);
+    }
+  }
+  /* 主题页「自定义」从属控件：未选中该主题时整组收起 */
+  :root:not([data-style="wallpaper"]) #wallpaperControls { display: none; }
+  .wallpaper-controls { margin-top: 14px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
+  .wallpaper-upload-row { display: flex; gap: 8px; align-items: center; }
+  .wallpaper-hint { margin: 0; font-size: 11.5px; color: var(--text-3); }
+  .wallpaper-fx-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  .wallpaper-fx-item + .wallpaper-fx-item { margin-top: 6px; }
+  .wallpaper-fx-row { display: grid; grid-template-columns: 96px 1fr 44px; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .wallpaper-fx-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-3); }
+  .wallpaper-fx-desc { margin: 2px 0 0; font-size: 11.5px; color: var(--text-3); }
+
   /* 虚拟终端页：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
      右侧状态面板使用普通面板 token，与看板遥测同源。 */
   body.terminal-mode { overflow: hidden; }
