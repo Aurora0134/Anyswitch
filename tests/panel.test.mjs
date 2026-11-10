@@ -3967,13 +3967,14 @@ describe("panel.html 设置全页视图", () => {
       "svg[hidden] 显式兜底规则在册（罩 4 处按钮 8 颗 SVG）");
   });
 
-  it("「主题」子 tab：左栏三项点选即生效，右栏预览为真实看板镜像", () => {
+  it("「主题」子 tab：左栏四项点选即生效，右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
     const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)" role="radio" aria-checked="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
     assert.deepEqual(items.map((m) => [m[1], m[3], m[2]]), [
       ["saas", "Default", "true"], ["aurora", "Aurora", "false"], ["sepia", "Sepia", "false"],
-    ], "三项主题与样式值一一对应，Default 按钮静态 aria-checked=\"true\"");
+      ["wallpaper", "自定义", "false"],
+    ], "四项主题与样式值一一对应，Default 按钮静态 aria-checked=\"true\"");
     assert.ok(panelJs.includes('picker.querySelectorAll(".settings-theme-item")'),
       "initStylePicker 同步选中态到新列表项");
     assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
@@ -4032,9 +4033,9 @@ describe("panel.html 设置全页视图", () => {
       "镜像头行剥栏让位（padding-left 0）、保持右对齐，与看板内容左缘对齐");
   });
 
-  it("主题存档恢复：内联脚本三项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
-    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia"];'),
-      "PANEL_STYLES 恰为 saas/aurora/sepia 三项");
+  it("主题存档恢复：内联脚本四项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
+    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];'),
+      "PANEL_STYLES 恰为 saas/aurora/sepia 三静态皮肤 + wallpaper 动态项");
     assert.ok(panelHtml.includes('? panelStyleRaw : "saas"'),
       "缺失或非法存档一律回落 \"saas\"");
     assert.ok(panelHtml.includes("if (panelStyleRaw !== panelStyle)"),
@@ -4047,8 +4048,8 @@ describe("panel.html 设置全页视图", () => {
       "panel.html 无 removeAttribute(\"data-style\") 分支");
     assert.ok(!panelJs.includes('removeAttribute("data-style")'),
       "panel.js 无 removeAttribute(\"data-style\") 分支");
-    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia"];'),
-      "panel.js 的 STYLES 数组恰为三项");
+    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia", "wallpaper"];'),
+      "panel.js 的 STYLES 数组恰为四项（三静态皮肤 + wallpaper 动态项）");
   });
 
   it("齿轮改为切入设置视图，退出回到进入前视图；设置页另用 panel-settings-open 持久化", () => {
