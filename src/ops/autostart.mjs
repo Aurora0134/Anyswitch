@@ -29,7 +29,16 @@
 // console, so node's MODULE_NOT_FOUND went nowhere). reconcileAutostart is the
 // repair path: on panel start, compare each task's stored action against what
 // this build would register today and re-register when they differ. It never
-// CREATES a task — an absent task is the user's own 关闭, not a breakage.
+// CREATES a task — an absent task is the user's own 关闭, not a breakage —
+// with one exception: the panel task is newer than the toggle itself, so an
+// absent AnyswitchPanel alongside a live AnyswitchRelay is an install from
+// before panel coverage, and reconcile backfills it (see reconcileAutostart).
+//
+// The toggle covers TWO tasks: AnyswitchRelay (relay-host.mjs) and
+// AnyswitchPanel (panel-host.mjs) — the panel is the control plane, so a
+// logon that revives the relay but not the panel leaves the user nowhere to
+// look. The panel task starts panel-host.mjs directly, NOT panel-launcher.mjs:
+// the launcher opens a browser window, which has no business firing at logon.
 
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -44,6 +53,8 @@ const LEGACY_TASK_NAME = "ApiCredRelay";
 const LEGACY_WATCHDOG_TASK_NAME = "ApiCredWatchdog";
 const TASK_NAME = "AnyswitchRelay";
 const WATCHDOG_TASK_NAME = "AnyswitchWatchdog";
+// No legacy name: the panel never had a pre-rename autostart task.
+const PANEL_TASK_NAME = "AnyswitchPanel";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -51,6 +62,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // must agree on them: the registration, the staleness probe, and the tests.
 const RELAY_SCRIPT = join("..", "relay", "relay-host.mjs");
 const WATCHDOG_SCRIPT = join("..", "agents", "agent-watchdog.mjs");
+const PANEL_SCRIPT = join("..", "panel", "panel-host.mjs");
 
 export function getAutostartCommand(script = RELAY_SCRIPT) {
   // Plain-node form of the launch line: `node "<app>/<script>"`, quoted because
@@ -247,28 +259,60 @@ async function reconcileTask({ taskName, legacyTaskName, script, register }, byN
 }
 
 // Startup reconcile: re-register any task whose stored action no longer points
-// at the tree this build lives in. Never creates a task that is absent.
+// at the tree this build lives in. Never creates a task that is absent — with
+// one migration exception: AnyswitchPanel is newer than the toggle, so a relay
+// task present in any state (even a failed heal — the intent was still ON)
+// with an absent panel task is a pre-panel-coverage install, not the user's
+// own 关闭. Backfill the panel task there; when the relay task is absent too,
+// autostart is off and both stay absent.
 export async function reconcileAutostart({ spawnFn = spawn } = {}) {
   const probed = await probeTaskActions(
-    [TASK_NAME, WATCHDOG_TASK_NAME, LEGACY_TASK_NAME, LEGACY_WATCHDOG_TASK_NAME],
+    [TASK_NAME, WATCHDOG_TASK_NAME, PANEL_TASK_NAME, LEGACY_TASK_NAME, LEGACY_WATCHDOG_TASK_NAME],
     spawnFn,
   );
   if (!probed.ok) return { ok: false, error: probed.error, tasks: [] };
   const entries = [
-    { taskName: TASK_NAME, legacyTaskName: LEGACY_TASK_NAME, script: RELAY_SCRIPT, register: enableAutostart },
+    { taskName: TASK_NAME, legacyTaskName: LEGACY_TASK_NAME, script: RELAY_SCRIPT, register: enableRelayAutostartOnly },
     { taskName: WATCHDOG_TASK_NAME, legacyTaskName: LEGACY_WATCHDOG_TASK_NAME, script: WATCHDOG_SCRIPT, register: enableWatchdogAutostart },
+    { taskName: PANEL_TASK_NAME, legacyTaskName: null, script: PANEL_SCRIPT, register: enablePanelAutostart },
   ];
   const tasks = [];
   for (const entry of entries) tasks.push(await reconcileTask(entry, probed.byName, spawnFn));
+  const relay = tasks.find((task) => task.task === TASK_NAME);
+  const panel = tasks.find((task) => task.task === PANEL_TASK_NAME);
+  if (panel.state === "absent" && relay.state !== "absent") {
+    const registered = await enablePanelAutostart({ spawnFn });
+    if (registered.ok) panel.state = "backfilled";
+    else {
+      panel.state = "heal-failed";
+      panel.error = registered.error;
+    }
+  }
   return { ok: true, tasks };
 }
 
-export async function enableAutostart({ spawnFn = spawn } = {}) {
+// Registers the relay task alone. reconcileTask heals one task at a time and
+// must not let a relay repair drag the panel task in (or vice versa) — that
+// would turn a stale-path fix into a silent policy change.
+async function enableRelayAutostartOnly({ spawnFn = spawn } = {}) {
   return registerTask(TASK_NAME, RELAY_SCRIPT, spawnFn);
+}
+
+// The toggle's ON: relay + panel tasks both. A panel registration failure
+// after a successful relay registration is reported as failure (the toggle
+// shows the error) while the relay task stays registered — the next reconcile
+// backfills the panel side.
+export async function enableAutostart({ spawnFn = spawn } = {}) {
+  const relay = await enableRelayAutostartOnly({ spawnFn });
+  if (!relay.ok) return relay;
+  const panel = await enablePanelAutostart({ spawnFn });
+  if (!panel.ok) return { ok: false, error: `panel task: ${panel.error}` };
+  return relay;
 }
 
 export async function disableAutostart({ spawnFn = spawn } = {}) {
   const result = await unregisterTask(TASK_NAME, spawnFn);
+  await unregisterTask(PANEL_TASK_NAME, spawnFn);
   await unregisterTask(LEGACY_TASK_NAME, spawnFn);
   return result;
 }
@@ -296,4 +340,20 @@ export async function isWatchdogAutostartEnabled({ spawnFn = spawn } = {}) {
   const present = await isTaskPresent(WATCHDOG_TASK_NAME, spawnFn);
   if (present) return true;
   return isTaskPresent(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
+}
+
+// Panel variant: registers the panel-host.mjs task itself — the control plane
+// the user actually opens. Called standalone only by the reconcile backfill;
+// the toggle goes through enable/disableAutostart, which register the relay
+// and panel tasks together.
+export async function enablePanelAutostart({ spawnFn = spawn } = {}) {
+  return registerTask(PANEL_TASK_NAME, PANEL_SCRIPT, spawnFn);
+}
+
+export async function disablePanelAutostart({ spawnFn = spawn } = {}) {
+  return unregisterTask(PANEL_TASK_NAME, spawnFn);
+}
+
+export async function isPanelAutostartEnabled({ spawnFn = spawn } = {}) {
+  return isTaskPresent(PANEL_TASK_NAME, spawnFn);
 }

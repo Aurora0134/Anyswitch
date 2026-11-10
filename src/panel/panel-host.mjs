@@ -186,6 +186,7 @@ export async function startPanelHost(options = {}) {
     }
     for (const task of reconciled.tasks) {
       if (task.state === "healed") logger.info(`autostart: re-registered ${task.task} — stored action pointed at ${task.was}`);
+      if (task.state === "backfilled") logger.info(`autostart: registered ${task.task} — install predates panel autostart coverage`);
       if (task.state === "heal-failed") logger.warn(`autostart: ${task.task} points at a stale path and re-registering failed (non-fatal): ${task.error}`);
     }
   } catch (err) {
