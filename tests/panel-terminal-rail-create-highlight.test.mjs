@@ -48,6 +48,8 @@ function railSandbox({ createPending = null, sessions = { "t-old": OLD_TERMINAL 
     const terminalRailIsArchived = () => false;
     ${extract("terminalRailNormDir")}
     ${extract("terminalRailSameDir")}
+    ${extract("terminalRailArchivedKey")}
+    ${extract("terminalRailClaimedRowKeys")}
     ${extract("terminalRailSessionMap")}
     ${extract("terminalRailActiveSession")}
     ${extract("terminalRailAgentId")}

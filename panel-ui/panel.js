@@ -12476,6 +12476,24 @@ async function api(method, path, body) {
   // 活跃的会话即算被接替。判据＝该终端带 agent、无 resume 记录（续接创建的真行
   // 已在列表里，不需要兜底）、绑定库身份（boundConversation）也没在列表里（全新会话
   // 终端聊出来的真行正是这一条，见 A4）、同目录没有比它更晚活跃的会话。
+  // 其他在跑终端对历史行的阳性占用（绑定库身份/续接身份 → 归档键同款
+  // 「endpoint\u0000id」）：那行是占用它的终端聊出来的，归它。兜底行的「已被接替」
+  // 判据拿它当排除集——同目录两台终端并发（一台流式输出、一台刚开新会话）时，
+  // 旧判据分不清那行是谁的，兄弟的活跃行把这台刚开的「新会话」兜底行顶掉，组顶连
+  // 占位都没有（2026-11-10 kimi 现场）。无主行不进排除集：维持旧口径，防假
+  // 「新会话」压真行复发。
+  function terminalRailClaimedRowKeys(excludeSessionId) {
+    const keys = new Set();
+    for (const other of Object.values(terminalRailSessionMap())) {
+      if (!other || other.id === excludeSessionId) continue;
+      const boundKey = other.boundConversation ? terminalRailArchivedKey(other.boundConversation) : "";
+      if (boundKey) keys.add(boundKey);
+      const resumeKey = other.resume ? terminalRailArchivedKey(other.resume) : "";
+      if (resumeKey) keys.add(resumeKey);
+    }
+    return keys;
+  }
+
   function terminalRailPendingNewTerminals() {
     const agentId = terminalRailAgentId();
     if (!agentId) return [];
@@ -12510,8 +12528,12 @@ async function api(method, path, body) {
         : Date.now();
       // 武装中的全新内切跳过「已被接替」判定：同目录旧会话的 lastActive 必然
       // ≥ 旧出生时刻，按它判这条会被立刻扣掉——而这正是本次点击要接替的那批行。
+      // 判据只认无主行：被其他在跑终端阳性占用（绑定/续接身份命中）的行归兄弟
+      // 终端，不能拿来顶掉这台终端的兜底行（见 terminalRailClaimedRowKeys）。
       if (!armed) {
+        const claimedByOthers = terminalRailClaimedRowKeys(session.id);
         const taken = terminalRailHistory.sessions.some((row) =>
+          !claimedByOthers.has(terminalRailArchivedKey(row)) &&
           terminalRailSameDir(row.project, session.cwd) && (row.lastActive || 0) >= born);
         if (taken) continue;
       }
@@ -13415,39 +13437,54 @@ async function api(method, path, body) {
 
   // 会话栏追赶（终端页内新建会话那条路径的收口）：
   // 历史列表只在进终端页时拉（全盘扫 2.7–9.8s，禁挂轮询），而「在终端页里新建会话」
-  // 不刷新它——真行不回来，组顶的「新会话」兜底行就一直压着它（用户看到的就是
-  // 「真正的新会话被压到一个（或多个）假『新会话』之下」）。判据只看一件事：栏里
-  // 正为某条**已经键入**的新会话显示兜底行——有键入说明它的会话存档已经/正在落盘，
-  // 这份列表却还看不见，那就是旧了。此时补一发强制对齐（?refresh=1，扫盘由面板侧
-  // worker 线程承担，页面不等它；屏上旧行留着，新值落地即替换）。
-  // 不挂渲染路径：挂在 1s 归属轮询收尾（数据路径）。两道闸兜住「别把全盘扫挂成
-  // 轮询」：20s 最小间隔（连点几次新建会话只补一发），以及无进展收敛——兜底行集
-  // 合连续几发都不变（agent 不落存档的怪形态）就停手，剩下的交给用户下次进终端页
-  // 那次自然重取。
+  // 不刷新它——真行不回来，组顶的「新会话」兜底行就一直压着它。追赶挂在 1s 归属
+  // 轮询收尾（数据路径），补拉走单端点强制扫描（?refresh=1&endpoint=…：只扫当前
+  // agent 一家、扫盘在面板侧 worker 线程，页面不等它；屏上旧行留着，新值落地即替换）。
+  //
+  // 点火判据（2026-11-10 重写）＝「带 agent 的在跑终端、最近一次键入还在武装窗内、
+  // 且它的会话行不能**阳性**归到屏上」。阳性归属只有两种身份：绑定库身份
+  // （boundConversation——此刻实际在跑的对话）或续接身份（resume——创建时替它续接
+  // 的对话）已经在历史列表里。修前判据是「兜底行在场且有键入」，兜底行是被推导的
+  // 渲染态，两个旧缺陷都从它来：
+  //   ① 兜底行的「已被接替」时间判据认不出同目录兄弟会话：同 cwd 两台终端并发
+  //     （一台流式输出、一台刚开新会话）时，兄弟的活跃行把兜底行顶掉，追赶驱动随
+  //     兜底行一起消失，真行只能等用户重新进终端页（2026-11-10 kimi 现场）。
+  //   ② 「连续 5 发无进展」收敛在长打字窗里把预算烧光：kimi/claude 一类的会话存档
+  //     随首条 prompt 提交才落盘，打字窗内每发追赶必然空转，Enter 之前预算已耗尽，
+  //     之后没有驱动再点火。
+  // 只认阳性归属的代价：绑定还没落地、行其实在屏上的终端也会被视作缺席而武装，
+  // 多扫几拍——由武装窗兜住，绑定捕获通常数秒内落地把口径接回阳性。「别把扫盘挂成
+  // 轮询」的收敛不再按发数计数，改跟用户动作：最后一次键入后 60s 内保持武装（首条
+  // prompt 的 Enter 本身就是键入，提交那一拍必然在窗内），之后静音、再键入即重新
+  // 武装——「agent 不落存档」的怪形态同样最多多扫两三拍就静音。
   const TERMINAL_RAIL_CATCHUP_MIN_MS = 20 * 1000;
-  const TERMINAL_RAIL_CATCHUP_MAX_MISSES = 5;
+  const TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS = 60 * 1000;
   let terminalRailCatchUpAt = 0;
-  let terminalRailCatchUpSeen = -1;
-  let terminalRailCatchUpMisses = 0;
   function maybeCatchUpTerminalRailHistory() {
     if (terminalRailFetchInFlight || !terminalBackendReady) return;
     if (Date.now() - terminalRailCatchUpAt < TERMINAL_RAIL_CATCHUP_MIN_MS) return;
-    if (terminalRailCatchUpMisses >= TERMINAL_RAIL_CATCHUP_MAX_MISSES) return;
     const endpoint = terminalRailAgentId();
     if (!endpoint) return;
-    const pending = terminalRailPendingNewTerminals();
-    const stale = pending.some((entry) => {
-      const state = terminalSessionFor(entry.id)?.backendState;
-      return !!state && Number.isFinite(state.lastInputAt) && state.lastInputAt > 0;
+    const now = Date.now();
+    const stale = Object.values(terminalRailSessionMap()).some((session) => {
+      if (!session || terminalRailAgentId(session) !== endpoint) return false;
+      const state = session.backendState;
+      if (!state || state.status !== "running") return false;
+      if (!Number.isFinite(state.lastInputAt) || state.lastInputAt <= 0) return false;
+      if (now - state.lastInputAt >= TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS) return false;
+      // 阳性归属：绑定身份按 endpoint＋id 精确匹配；续接身份按 id（历史列表本就
+      // 只装当前 agent 的行）。两者都不成立＝行可能还没上屏，武装。
+      if (session.boundConversation) {
+        const bound = session.boundConversation;
+        return !terminalRailHistory.sessions.some((row) =>
+          row && row.endpoint === bound.endpoint && row.id === bound.id);
+      }
+      if (session.resume) {
+        return !terminalRailHistory.sessions.some((row) => row && row.id === session.resume.id);
+      }
+      return true;
     });
     if (!stale) return;
-    // 兜底行集合变了（真行回来、或又新建了会话）＝这一发有用，清零重来；
-    // 一动不动＝没进展，累计到上限就收敛。
-    if (pending.length === terminalRailCatchUpSeen) terminalRailCatchUpMisses += 1;
-    else {
-      terminalRailCatchUpMisses = 0;
-      terminalRailCatchUpSeen = pending.length;
-    }
     terminalRailCatchUpAt = Date.now();
     refreshTerminalRailHistory({ endpoint, force: true });
   }
@@ -13492,9 +13529,14 @@ async function api(method, path, body) {
     }
     try {
       // force＝与会话管理页刷新钮同一条逃生口（?refresh=1）：等真扫描落地再回新值。
-      // 只有「终端页里新建了会话、兜底行正压着组顶」这条追赶路径用得上——普通复取
-      // 仍旧吃 30s 快照，请求绝不等扫描。
-      const data = await api("GET", force ? "/api/sessions/list?refresh=1" : "/api/sessions/list");
+      // 只有「终端页里新建了会话」这条追赶路径用得上——普通复取仍旧吃 30s 快照，
+      // 请求绝不等扫描。追赶另带 endpoint 参数走单端点扫描：左栏只装当前 agent 的
+      // 行，全盘十家的扫描对这个调用方纯属陪跑（kimi 单家实测 ~1s vs 全盘 2.7–9.8s，
+      // 行到屏的时延差一个量级）。旧面板（路由不认 endpoint 参数）会按全盘强制扫
+      // 处理并原样回全量行——本侧过滤后行为不变，属降级兼容。
+      const data = await api("GET", force
+        ? `/api/sessions/list?refresh=1&endpoint=${encodeURIComponent(endpoint)}`
+        : "/api/sessions/list");
       const rows = (Array.isArray(data && data.sessions) ? data.sessions : []).filter((row) => row && row.endpoint === endpoint);
       terminalRailHistory = { endpoint, sessions: rows, fetchedAt: Date.now(), error: null, retryAt: 0 };
     } catch (error) {
