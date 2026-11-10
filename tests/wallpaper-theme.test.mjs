@@ -219,23 +219,39 @@ test("文字对比度：text/text-2/text-3 对页面底与卡片面 ≥4.65，te
 // 语义色可区分（徽章靠颜色读状态）
 // ═══════════════════════════════════════════════
 
-test("语义色相互可区分：ok/warn/danger 两两 ≥25°，pool 与 accent/ok/warn/danger ≥25°", () => {
+test("语义色相互可区分：accent/ok/warn/danger 两两 ≥25°，pool 与四者 ≥25°", () => {
   for (const fixture of [BLUE, GREEN, RED, PURPLE, TWO_TONE]) {
     const theme = extractTheme(fixture);
     for (const mode of ["light", "dark"]) {
       const hue = (key) => rgbToHue(parseColor(theme[mode][key]).rgb);
-      const semantics = ["--ok", "--warn", "--danger"];
+      const semantics = ["--accent", "--ok", "--warn", "--danger"];
       for (let i = 0; i < semantics.length; i++) {
         for (let j = i + 1; j < semantics.length; j++) {
           const d = hueDistance(hue(semantics[i]), hue(semantics[j]));
-          assert.ok(d >= 25, `${mode} ${semantics[i]} 与 ${semantics[j]} 色相距离 ${d}° 不足 25°`);
+          assert.ok(d >= 25, `${mode} ${semantics[i]} 与 ${semantics[j]} 色相距离 ${d}° 不足 25°（种子 ${theme.seed}）`);
         }
       }
       const poolHue = hue("--pool");
-      for (const key of ["--accent", ...semantics]) {
+      for (const key of semantics) {
         const d = hueDistance(poolHue, hue(key));
         assert.ok(d >= 25, `${mode} --pool 与 ${key} 色相距离 ${d}° 不足 25°（种子 ${theme.seed}）`);
       }
     }
+  }
+});
+
+test("accent 色相避让：种子贴近语义色时 accent 沿色环推移到安全距离", () => {
+  // 红图种子色相 ≈0°（贴 danger），绿图 ≈142°（贴 ok）：accent 必须被推离
+  const red = extractTheme(RED);
+  const green = extractTheme(GREEN);
+  for (const mode of ["light", "dark"]) {
+    const hue = (theme, key) => rgbToHue(parseColor(theme[mode][key]).rgb);
+    for (const key of ["--ok", "--warn", "--danger"]) {
+      assert.ok(hueDistance(hue(red, "--accent"), hue(red, key)) >= 25, `红图 ${mode} accent 未避开 ${key}`);
+      assert.ok(hueDistance(hue(green, "--accent"), hue(green, key)) >= 25, `绿图 ${mode} accent 未避开 ${key}`);
+    }
+    // 避让只推 accent token，种子本身仍保原图色相
+    assert.ok(hueDistance(seedHue(red), hue(red, "--danger")) <= 15, "红图种子应仍贴近红色族");
+    assert.ok(hueDistance(seedHue(green), hue(green, "--ok")) <= 25, "绿图种子应仍贴近绿色族");
   }
 });

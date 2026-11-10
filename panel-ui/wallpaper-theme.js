@@ -91,6 +91,7 @@
 
   // —— 语义色固定色相：监控面板靠颜色读状态，色相不随壁纸漂移 ——
   const SEMANTIC_HUE = { "--ok": 160, "--warn": 32, "--danger": 0 };
+  const ACCENT_HUE_MIN_GAP = 30; // accent 与 ok/warn/danger 的最小色相距离
   const POOL_BASE_HUE = 262; // 号池色基准色相，自动避开 accent 与三个语义色
 
   // —— 与基座一致、不随壁纸变化的 token ——
@@ -489,6 +490,21 @@
     return hslToRgb(hue, s, light ? 0.35 : 0.62);
   }
 
+  // accent 色相避让：与任一语义色距离不足 ACCENT_HUE_MIN_GAP 时，沿色环推移到
+  // 最近的安全色相（双向等距取顺时针）。语义色只有三个，色环上必存在安全区。
+  function avoidSemanticHues(h) {
+    const semHues = Object.values(SEMANTIC_HUE);
+    const safe = (x) => Math.min(...semHues.map((o) => hueDistance(x, o))) >= ACCENT_HUE_MIN_GAP;
+    if (safe(h)) return h;
+    for (let d = 1; d <= 180; d++) {
+      const cw = (h + d) % 360;
+      if (safe(cw)) return cw;
+      const ccw = (h + 360 - d) % 360;
+      if (safe(ccw)) return ccw;
+    }
+    return h;
+  }
+
   // 号池色：在色环上取与 accent/ok/warn/danger 距离最远的色相，平局取最接近基准色相者
   function pickPoolHue(occupied) {
     let bestHue = POOL_BASE_HUE;
@@ -539,8 +555,9 @@
     // 边框：种子色调向亮暗两端的发丝线
     const borderRgb = hslToRgb(seedH, seedS * 0.55, light ? 0.42 : 0.62);
 
-    // 强调色：均衡档种子（暗色模式提亮），过对比度后派生 soft/border/渐变/光晕
-    const accent = ensureContrast(hslToRgb(seedH, seedS, light ? BALANCED_LIGHTNESS : 0.66), textBgs, CONTRAST_TARGET_ACCENT);
+    // 强调色：均衡档种子（暗色模式提亮），色相先避开三个语义色，再过对比度
+    const accentHue = avoidSemanticHues(seedH);
+    const accent = ensureContrast(hslToRgb(accentHue, seedS, light ? BALANCED_LIGHTNESS : 0.66), textBgs, CONTRAST_TARGET_ACCENT);
     const [accentH, accentS, accentL] = rgbToHsl(accent[0], accent[1], accent[2]);
 
     // 品牌渐变：浅端提亮、深端加深，深端保证白字可读
