@@ -2070,6 +2070,8 @@ function scanSessionTable({ endpoint, dbPath }) {
       && db.prepare("PRAGMA table_info(session)").all().some((col) => col.name === "parent_id");
     // 桌面判据依赖 message 表里的 inputIntent：表不存在时「非 desktop」不可当
     // CLI 的确证，surface 留空，交给请求 socket 谱系兜底（见 agent-metrics）。
+    // 带 parent_id 的子会话同样留空，且取面处不再走兜底：后台子会话天生不写
+    // 用户输入消息，把「无 inputIntent」确证成 CLI 会给它贴一个并不存在的 TUI。
     const surfaceKnown = endpoint === "zcode" && sqliteTableExists(db, "message");
     const rows = db
       .prepare(
@@ -2079,20 +2081,28 @@ function scanSessionTable({ endpoint, dbPath }) {
       )
       .all();
     const desktopIds = endpoint === "zcode" ? zcodeDesktopSessionIds(db) : null;
-    return rows.map((row) =>
-      makeMeta({
+    return rows.map((row) => {
+      const parentId = hasParentColumn && typeof row.parent_id === "string" && row.parent_id.trim() !== ""
+        ? row.parent_id
+        : null;
+      // 三值：桌面确证 desktop、普通命令行确证 cli、子会话与判不出的留空。
+      // 子会话属于后台执行单元，没有自己的界面，不能按「不在桌面集合」反推 CLI。
+      const surface = parentId !== null || !surfaceKnown
+        ? null
+        : (desktopIds.has(String(row.id)) ? "desktop" : "cli");
+      return makeMeta({
         endpoint,
         id: String(row.id),
         title: typeof row.title === "string" && row.title.trim() !== "" ? truncateText(row.title, TITLE_MAX_CHARS) : null,
         project: typeof row.directory === "string" ? row.directory : null,
         originator: desktopIds !== null && desktopIds.has(String(row.id)) ? "desktop" : null,
-        parentId: hasParentColumn && typeof row.parent_id === "string" ? row.parent_id : null,
-        surface: surfaceKnown ? (desktopIds.has(String(row.id)) ? "desktop" : "cli") : null,
+        parentId,
+        surface,
         file: `sqlite:${dbPath}#${row.id}`,
         createdAt: typeof row.time_created === "number" ? row.time_created : null,
         lastActive: typeof row.time_updated === "number" ? row.time_updated : null,
-      }),
-    );
+      });
+    });
   } finally {
     db.close();
   }

@@ -566,6 +566,10 @@ function createResidentDeps(options = {}) {
     logger.warn?.(`usage journal unavailable; continuing without it: ${error.message}`);
   }
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ persistRoot: root, journal: usageJournal });
+  // 启动预热：等第一笔请求才建 zcode 父子映射会留下冷窗口，重启后正在跑的
+  // workflow / subagent 会先铸成独立实例。这里按一次流量打标并触发首轮扫描，
+  // 异步进行，不阻塞 relay 监听。
+  metricsCollector.noteZcodeSessionRequest?.();
   // Socket→PID 兜底归组的共享 netstat 快照（TTL 内整个 relay 只 spawn 一次
   // netstat；机制见 instance-socket-owner.mjs）。per-launch 路径（launch.mjs）
   // 不下发——那里保持原行为。测试可注入替身。
