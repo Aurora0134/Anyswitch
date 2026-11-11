@@ -7261,7 +7261,7 @@ describe("设置项「UI版本」", () => {
     assert.ok(panelCss.includes(`${scope} .card-body {\n    padding: 12px 18px 16px;\n  }`), "标题到内容 12px、盒内 16 节奏");
     assert.ok(panelCss.includes(`${scope} .card-header {\n    background: transparent; border-bottom: 0; padding: 16px 18px 0;\n  }`), "卡头去底线、顶距 16");
     // aurora 例外：恢复皮肤原生玻璃卡材质（去影去 hover 浮），不是透明描边盒
-    const aurora = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style="aurora"\] :is\(#settingsPanelGeneral[^)]*\) \.panel-card \{([^}]*)\}/);
+    const aurora = panelCss.match(/:scope:scope\[data-ui-version="v2"\] :is\(#settingsPanelGeneral[^)]*\) \.panel-card \{([^}]*)\}/);
     assert.ok(aurora, "aurora 玻璃卡恢复规则在册");
     for (const pin of ["background: var(--surface);", "background-image: var(--card-hairline);",
       "backdrop-filter: var(--glass-blur);", "border: 1px solid var(--border);",
@@ -7272,23 +7272,21 @@ describe("设置项「UI版本」", () => {
   });
 
   it("v2 明暗关系交换：saas/sepia 内容区与栏底 token 对调，aurora 摘出，v1 原样", () => {
-    for (const skin of ["saas", "sepia"]) {
-      assert.ok(panelCss.includes(`:root[data-ui-version="v2"][data-style="${skin}"] body`),
-        `${skin} 内容区底换 --surface`);
-      assert.ok(panelCss.includes(`:root[data-ui-version="v2"][data-style="${skin}"] .rail`),
-        `${skin} 栏底换 --bg-page`);
-    }
-    assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] body,[\s\S]*?body \{ background: var\(--surface\); \}/.test(panelCss),
+    // 改写后皮肤键只在 @scope 起点上；合并块的 saas/sepia 两格选择器同形。
+    const swapScope = '@scope (:root[data-ui-version="v2"][data-style="saas"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {';
+    assert.ok(panelCss.includes(`${swapScope}\n  :scope:scope[data-ui-version="v2"] body,`),
+      "对调块覆盖 saas/sepia 内容区底换 --surface");
+    assert.ok(panelCss.includes(`${swapScope}\n  :scope:scope[data-ui-version="v2"] body,\n  :scope:scope[data-ui-version="v2"] body { background: var(--surface); }`),
       "内容区底 = --surface（亮：白；暗：抬亮一档）");
-    assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] \.rail,[\s\S]*?\.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
+    assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
       "栏底 = --bg-page（亮：灰；暗：再压暗）");
-    assert.ok(panelCss.includes('.terminal-view,\n  :root[data-ui-version="v2"][data-style="sepia"] .terminal-view { background: var(--surface); }'),
+    assert.ok(panelCss.includes('.terminal-view,\n  :scope:scope[data-ui-version="v2"] .terminal-view { background: var(--surface); }'),
       "terminal-view 同步换（切页不跳变）");
-    assert.ok(panelCss.includes('.settings-theme-preview,\n  :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }'),
+    assert.ok(panelCss.includes('.settings-theme-preview,\n  :scope:scope[data-ui-version="v2"] .settings-theme-preview { background: var(--surface); }'),
       "主题预览镜像视口同步换（镜像演示新明暗关系）");
-    assert.ok(panelCss.includes('.settings-mirror-viewport,\n  :root[data-ui-version="v2"][data-style="sepia"] .settings-mirror-viewport { background: var(--surface); }'),
+    assert.ok(panelCss.includes('.settings-mirror-viewport,\n  :scope:scope[data-ui-version="v2"] .settings-mirror-viewport { background: var(--surface); }'),
       "镜像内层画布同步换底（对调时漏同步的一处，补齐后预览承托面与真实内容区同值）");
-    assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] body'),
+    assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] body,'),
       "aurora 摘出对调（--surface 是半透玻璃料，对调毁玻璃页身层次；页面底即其「面」）");
     // aurora 栏不添底色规则：其栏玻璃规则（backdrop-filter 那条）不含 background，
     // 由阶段 1「aurora 栏材质」断言原样钉着
@@ -7298,14 +7296,14 @@ describe("设置项「UI版本」", () => {
   });
 
   it("v2 遥测四宫格扁平化：saas 收为平涂撤打光（照 sepia），aurora 与 v1 原样", () => {
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style="saas"] .telemetry-card {\n    background: var(--surface-sunken);\n    box-shadow: none;\n  }'),
+    assert.ok(panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="saas"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card {\n    background: var(--surface-sunken);\n    box-shadow: none;\n  }'),
       "saas 四宫格 v2 平涂 --surface-sunken + 撤内高光");
-    assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] .telemetry-card'),
+    assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card'),
       "aurora 四宫格保持现状（无 v2 覆写）");
-    assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="sepia"] .telemetry-card'),
+    assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card'),
       "sepia 本就是平样板（无需覆写）");
-    // v1 零变化：saas 皮肤段的渐变底 + 顶部内高光原样在册（v2 靠双属性提级覆写）
-    assert.ok(panelCss.includes(':root[data-style="saas"] .telemetry-card {\n  border-radius: var(--radius-md);\n  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);\n  box-shadow: inset 0 1px 0 var(--hl-inset);\n}'),
+    // v1 零变化：saas 皮肤段的渐变底 + 顶部内高光原样在册（v2 靠双属性提级覆写；改写只动前缀）
+    assert.ok(panelCss.includes(':scope:scope .telemetry-card {\n  border-radius: var(--radius-md);\n  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);\n  box-shadow: inset 0 1px 0 var(--hl-inset);\n}'),
       "saas 皮肤段四宫格打光规则原样（v1 观感不动）");
   });
 
@@ -7424,7 +7422,7 @@ describe("新版 UI 阶段 3：统计页平铺（描边盒 + 表格纪律 + 四�
     assert.ok(panelCss.includes(`${S3} .card-header {\n    background: transparent; border-bottom: 0; padding: 16px 18px 0;\n  }`), "卡头去底线、顶距 16");
     assert.ok(panelCss.includes(`${S3} .panel-card > .card-body:first-child {\n    padding-top: 16px;\n  }`), "无头平卡（请求日志卡）顶距同档 16");
     // aurora 例外：恢复皮肤原生玻璃卡材质（配方逐项同阶段 2）
-    const aurora = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style="aurora"\] #statsView \.panel-card \{([^}]*)\}/);
+    const aurora = panelCss.match(/:scope:scope\[data-ui-version="v2"\] #statsView \.panel-card \{([^}]*)\}/);
     assert.ok(aurora, "aurora 玻璃卡恢复规则在册");
     for (const pin of ["background: var(--surface);", "background-image: var(--card-hairline);",
       "backdrop-filter: var(--glass-blur);", "border: 1px solid var(--border);",
@@ -7598,16 +7596,18 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
   });
 
   it("aurora 栏材质：玻璃配方抄既有 token，双属性选择器压得住位置更靠后的皮肤块", () => {
-    const m = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style="aurora"\] \.rail \{([^}]*)\}/);
+    const m = panelCss.match(/:scope:scope\[data-ui-version="v2"\] \.rail \{([^}]*)\}/);
     assert.ok(m, "aurora 栏规则在册（集中在 v2 段，不进皮肤内嵌块）");
     assert.ok(m[1].includes("backdrop-filter: var(--glass-blur);") && m[1].includes("-webkit-backdrop-filter: var(--glass-blur);"),
       "玻璃模糊取既有 --glass-blur（aurora 卡片玻璃同配方）");
     assert.ok(!m[1].includes("background"), "半透底沿用基座 var(--surface)（aurora 下本就半透），不造新色值");
     // 阶段 2 材质修正后，saas/sepia 栏各多一条 v2 底色对调规则（栏底换 --bg-page）——
-    // 那是明暗交换、不是玻璃材质；本例仍钉「saas/sepia 栏的规则只有对调这一条」
-    const swapRail = [...panelCss.matchAll(/\[data-style="(?:saas|sepia)"\] \.rail[ ,]/g)];
-    assert.ok(swapRail.length === 2, "saas/sepia 栏仅底色对调一处（合并选择器各占一格）");
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style="sepia"] .rail { background: var(--bg-page); }'),
+    // 那是明暗交换、不是玻璃材质；本例仍钉「saas/sepia 栏的规则只有对调这一条」。
+    // 改写后皮肤键在 @scope 起点上、选择器统一为 :scope:scope[data-ui-version="v2"]，
+    // 合并块的两格同形：全文件该前缀的 .rail 选择器恰为 aurora 玻璃栏 + 对调两格。
+    const swapRail = [...panelCss.matchAll(/:scope:scope\[data-ui-version="v2"\] \.rail[ ,]/g)];
+    assert.equal(swapRail.length, 3, "aurora 玻璃栏一格 + saas/sepia 底色对调两格（合并选择器各占一格）");
+    assert.ok(panelCss.includes(':scope:scope[data-ui-version="v2"] .rail { background: var(--bg-page); }'),
       "saas/sepia 栏底对调为 --bg-page；玻璃材质仍只有 aurora");
   });
 
@@ -17179,7 +17179,7 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
   });
 
   it("sepia 皮肤下骨架条收 3px 方角，与 empty-hint 同档", () => {
-    assert.ok(/:root\[data-style="sepia"\] \.sessions-skel \{\s*border-radius: 3px;/.test(panelCss),
+    assert.ok(/:scope:scope \.sessions-skel \{\s*border-radius: 3px;/.test(panelCss),
       "骨架族（看板加载态 + 会话页）统一收进 sepia 的方角口径");
   });
 });

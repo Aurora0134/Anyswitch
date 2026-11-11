@@ -176,15 +176,19 @@ for (const slug of SLUGS) {
       `${slug}.css 的 @scope 之后还有内容：收边必须覆盖到文件末尾`);
     // 作用域只包皮肤覆盖规则：@scope 的作用域不含作用域根自身（实测 Chrome 157），
     // 把 `:root` 上的 token 定义收进去会让整份 token 失效。故块外只允许 root token 规则；
-    // 块内只允许「root 皮肤键 + 后代」形式的覆盖规则。@keyframes 里的帧不算选择器，跳过。
+    // 块内覆盖规则必须把「:root + 皮肤键」前缀改写成 `:scope:scope`（详见 CONTRACT.md；
+    // 与 base 版本的逐条等价性由 tests/panel-preview-isolation.test.mjs 校验）。
+    // @keyframes 里的帧不算选择器，跳过。
     const ROOT_ONLY = /^:root(\[[^\]]+\]|:not\([^)]*\))*$/;
     const tokenRule = (r) => r.sel.split(",").map((s) => s.trim()).every((s) => ROOT_ONLY.test(s));
+    const scopePrefixed = (r) => r.sel.split(",").map((s) => s.trim()).every((s) => s.startsWith(":scope"));
     const misplaced = [];
     for (const r of rules) {
       if (r.chain.some((pre) => pre.startsWith("@keyframes"))) continue;
       const inside = r.chain.includes(scope.pre);
       const isToken = tokenRule(r);
       if (inside && isToken) misplaced.push(`${slug}.css:${r.line} ${r.sel.slice(0, 80)} —— :root token 规则不能收进 @scope（会让 token 整体失效）`);
+      if (inside && !scopePrefixed(r)) misplaced.push(`${slug}.css:${r.line} ${r.sel.slice(0, 80)} —— @scope 内覆盖规则必须以 :scope 开头（:scope:scope 顶替原「:root + 皮肤键」前缀）`);
       if (!inside && !isToken) misplaced.push(`${slug}.css:${r.line} ${r.sel.slice(0, 80)} —— 皮肤覆盖规则必须收进 @scope`);
     }
     assert.deepEqual(misplaced, [],

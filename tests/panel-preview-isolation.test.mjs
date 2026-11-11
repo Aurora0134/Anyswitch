@@ -5,6 +5,11 @@
 // 一、@scope 收边：panel.css 里凡以 saas/aurora/sepia 字面量键控的皮肤规则，必须落在
 //     `@scope (…) to (.wallpaper-preview)` 内。唯一例外是 `:root` 上只声明自定义属性的
 //     皮肤 token 规则——自定义属性靠继承下发，@scope 管不到继承，收边无意义。
+//     作用域不含作用域根自身：块内选择器必须把「`:root` + 皮肤键」前缀改写成
+//     `:scope:scope`（两个伪类 = (0,2,0)，与原前缀特异性相等；其余条件原样保留），否则
+//     整块皮肤规则在真实看板与预览里都匹配不到。改写等价性（前缀归一化后选择器逐条
+//     等于 base 版本、特异性逐条相等、规则条数与多重集相等、声明逐条相同）由本文件
+//     对 base 版本（d170982）逐文件校验，并对 base CSS 反向断言必须判红。
 // 二、私有 token：`.wallpaper-preview` 上按壁纸主题生效时真实看板的 computed 值逐项补齐
 //     皮肤私有 token（基座段有定义的抄基座段，没有的显式 initial）。
 // 口径说明：
@@ -14,6 +19,7 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import WallpaperTheme from "../panel-ui/wallpaper-theme.js";
@@ -23,6 +29,23 @@ const panelCss = readFileSync(join(rootDir, "panel-ui", "panel.css"), "utf8").re
 const panelHtml = readFileSync(join(rootDir, "panel-ui", "panel.html"), "utf8");
 const SLUGS = ["saas", "aurora", "sepia"];
 const PREVIEW = ".wallpaper-preview";
+// 改写前的基准版本：@scope 收边已存在但选择器仍是「:root + 皮肤键」前缀的最后一版。
+// 断言逐文件比对选择器/特异性/条数/声明；git 取不到该版本时（浅克隆、源码包）跳过，
+// 不用假绿代替——跳过会显示在 node --test 的 skip 计数里。
+const BASE_REV = "d170982";
+const SCOPE_FILES = [
+  "panel-ui/panel.css",
+  ...SLUGS.map((slug) => `panel-ui/style-lab/${slug}.css`),
+];
+function readBaseCss(relPath) {
+  try {
+    return execFileSync("git", ["show", `${BASE_REV}:${relPath}`], {
+      cwd: rootDir, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"],
+    }).toString("utf8").replace(/\r\n/g, "\n");
+  } catch {
+    return null;
+  }
+}
 // 皮肤私有 token：皮肤片段里出现的自定义属性 − 取色引擎派生的公共 token 全集
 const ENGINE_KEYS = (() => {
   const flat = { data: new Uint8ClampedArray(16 * 16 * 4).fill(120), width: 16, height: 16 };
@@ -89,6 +112,182 @@ function declPairs(body) {
 const selectorList = (sel) => sel.split(",").map((s) => s.trim()).filter(Boolean);
 const skinKeys = (sel) => [...sel.matchAll(/data-style="(saas|aurora|sepia)"/g)].map((m) => m[1]);
 
+// ─── 作用域改写等价性：前缀归一化 / 特异性 / 与 base 逐条对账 ───
+function skipBalanced(text, i, open, close) {
+  let depth = 0;
+  let quote = null;
+  for (let k = i; k < text.length; k++) {
+    const ch = text[k];
+    if (quote) { if (ch === quote && text[k - 1] !== "\\") quote = null; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === open) depth++;
+    else if (ch === close) { depth--; if (depth === 0) return k + 1; }
+  }
+  return -1;
+}
+// 括号感知的选择器列表切分：:is(#settingsPanelA, #settingsPanelB) 里的逗号不是分隔符
+function splitSelectorList(sel) {
+  const parts = [];
+  let start = 0;
+  let depth = 0;
+  let quote = null;
+  for (let i = 0; i < sel.length; i++) {
+    const ch = sel[i];
+    if (quote) { if (ch === quote && sel[i - 1] !== "\\") quote = null; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    else if (ch === "," && depth === 0) { parts.push(sel.slice(start, i).trim()); start = i + 1; }
+  }
+  parts.push(sel.slice(start).trim());
+  return parts.filter(Boolean);
+}
+const DATA_STYLE_ATTR = /^\[\s*data-style\s*=\s*["'](saas|aurora|sepia)["']\s*\]$/;
+// 把 base 选择器的链首「:root + 皮肤键」归一化成改写后的 :scope:scope 形态。
+// 其余条件（[data-theme="dark"]、v2 块的 [data-ui-version="v2"] 等）原样保留在后。
+function canonicalSelector(sel) {
+  let ok = true;
+  const parts = splitSelectorList(sel).map((part) => {
+    if (!part.startsWith(":root")) { ok = false; return part; }
+    let j = 5;
+    const kept = [];
+    let hasSkin = false;
+    while (j < part.length) {
+      const ch = part[j];
+      if (ch === "[") {
+        const end = skipBalanced(part, j, "[", "]");
+        if (end < 0) break;
+        const text = part.slice(j, end);
+        if (DATA_STYLE_ATTR.test(text)) hasSkin = true;
+        else kept.push(text);
+        j = end;
+        continue;
+      }
+      if (ch === ":") {
+        const fn = /^:[a-zA-Z-]+\(/.exec(part.slice(j));
+        if (fn) {
+          const end = skipBalanced(part, j + fn[0].length - 1, "(", ")");
+          if (end < 0) break;
+          kept.push(part.slice(j, end));
+          j = end;
+          continue;
+        }
+        const pseudo = /^:[a-zA-Z-]+/.exec(part.slice(j));
+        if (pseudo) { kept.push(pseudo[0]); j += pseudo[0].length; continue; }
+        break;
+      }
+      break;
+    }
+    if (!hasSkin) ok = false;
+    return ":scope:scope" + kept.join("") + part.slice(j);
+  });
+  return { text: parts.join(", "), ok };
+}
+// CSS 特异性（行内即 (a,b,c)：id / class(含属性、伪类) / 元素(含伪元素)）
+function specificityOfPart(part) {
+  const maxOf = (list) => list.reduce((best, cur) => {
+    for (let k = 0; k < 3; k++) {
+      if (cur[k] !== best[k]) return cur[k] > best[k] ? cur : best;
+    }
+    return best;
+  }, [0, 0, 0]);
+  let a = 0, b = 0, c = 0;
+  let i = 0;
+  while (i < part.length) {
+    const ch = part[i];
+    const skipWord = () => { while (i < part.length && /[-\w]/.test(part[i])) i++; };
+    if (ch === "#") { a++; i++; skipWord(); continue; }
+    if (ch === ".") { b++; i++; skipWord(); continue; }
+    if (ch === "[") { const end = skipBalanced(part, i, "[", "]"); if (end < 0) break; b++; i = end; continue; }
+    if (ch === ":") {
+      if (part[i + 1] === ":") { c++; i += 2; skipWord(); if (part[i] === "(") { const end = skipBalanced(part, i, "(", ")"); i = end < 0 ? part.length : end; } continue; }
+      const m = /^:([-\w]+)/.exec(part.slice(i));
+      if (!m) { i++; continue; }
+      const name = m[1];
+      i += m[0].length;
+      let arg = null;
+      if (part[i] === "(") { const end = skipBalanced(part, i, "(", ")"); arg = end < 0 ? "" : part.slice(i + 1, end - 1); i = end < 0 ? part.length : end; }
+      if (name === "where") continue;
+      if ((name === "is" || name === "not" || name === "has" || name === "matches") && arg !== null) {
+        const inner = maxOf(splitSelectorList(arg).map(specificityOfPart));
+        a += inner[0]; b += inner[1]; c += inner[2];
+        continue;
+      }
+      b++;
+      continue;
+    }
+    if (ch === "*") { i++; continue; }
+    if (/[-\w]/.test(ch)) { c++; skipWord(); continue; }
+    i++;
+  }
+  return [a, b, c];
+}
+const specificityText = (sel) => splitSelectorList(sel)
+  .map((part) => specificityOfPart(part).join(","))
+  .sort()
+  .join(" | ");
+// base 版本里「主语是 :root 之后元素、且键控 saas/aurora/sepia」的皮肤覆盖规则；
+// 主语就是 :root 的 token 定义不计入（它们必须留在 @scope 外）。
+const ROOT_ONLY_PREFIX = /^:root(?:\[[^\]]*\]|:not\([^)]*\)|:is\([^)]*\))*(?=\s|$)/;
+function isRootFacingSkinRule(sel) {
+  const parts = splitSelectorList(sel);
+  if (parts.length === 0) return false;
+  if (!parts.every((part) => ROOT_ONLY_PREFIX.test(part) && /data-style="(saas|aurora|sepia)"/.test(part))) return false;
+  const tokenOnly = parts.every((part) => {
+    const m = part.match(ROOT_ONLY_PREFIX);
+    return Boolean(m) && part.replace(/\s+/g, "") === m[0].replace(/\s+/g, "");
+  });
+  return !tokenOnly;
+}
+const normalizeBody = (body) => body.replace(/\s+/g, " ").trim();
+function selectorMultiset(list) {
+  const map = new Map();
+  for (const sel of list) map.set(sel, (map.get(sel) ?? 0) + 1);
+  return [...map.entries()].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+}
+function auditScopedCss(cssText, baseCssText, label) {
+  const violations = [];
+  const rules = parseCss(cssText);
+  const scopeFrames = new Set();
+  for (const r of rules) for (const pre of r.chain) if (pre.startsWith("@scope")) scopeFrames.add(pre);
+  const inScope = rules.filter((r) => r.chain.some((pre) => pre.startsWith("@scope")));
+  if (scopeFrames.size === 0) violations.push(label + ": 找不到 @scope 块");
+  for (const r of inScope) {
+    for (const part of splitSelectorList(r.sel)) {
+      if (!part.startsWith(":scope")) violations.push(label + ":" + r.line + " @scope 内选择器未以 :scope 开头：" + part.slice(0, 120));
+    }
+  }
+  const baseRules = baseCssText === null ? [] : parseCss(baseCssText).filter((r) => isRootFacingSkinRule(r.sel));
+  if (baseCssText !== null) {
+    if (baseRules.length === 0) violations.push(label + ": base 版本找不到皮肤覆盖规则（基准失效）");
+    if (inScope.length !== baseRules.length) {
+      violations.push(label + ": @scope 内规则 " + inScope.length + " 条 ≠ base 皮肤覆盖规则 " + baseRules.length + " 条");
+    }
+    const canonicalBase = [];
+    for (let i = 0; i < Math.min(inScope.length, baseRules.length); i++) {
+      const b = baseRules[i];
+      const s = inScope[i];
+      const canonical = canonicalSelector(b.sel);
+      const actual = splitSelectorList(s.sel).join(", ");
+      canonicalBase.push(canonical.text);
+      if (!canonical.ok) violations.push(label + ": base 第 " + (i + 1) + " 条选择器无法归一化：" + b.sel.slice(0, 140));
+      if (canonical.text !== actual) {
+        violations.push(label + ": 第 " + (i + 1) + " 条前缀归一化后与 base 不一致\n  base: " + canonical.text + "\n  当前: " + actual);
+      }
+      if (specificityText(b.sel) !== specificityText(s.sel)) {
+        violations.push(label + ": 第 " + (i + 1) + " 条特异性与 base 不一致（base " + specificityText(b.sel) + " / 当前 " + specificityText(s.sel) + "）：" + actual.slice(0, 120));
+      }
+      if (normalizeBody(b.body) !== normalizeBody(s.body)) {
+        violations.push(label + ": 第 " + (i + 1) + " 条声明与 base 不一致：" + actual.slice(0, 120));
+      }
+    }
+    if (JSON.stringify(selectorMultiset(canonicalBase)) !== JSON.stringify(selectorMultiset(inScope.map((r) => splitSelectorList(r.sel).join(", "))))) {
+      violations.push(label + ": 选择器多重集（前缀归一化后）与 base 不一致");
+    }
+  }
+  return { violations, inScope, baseRules };
+}
+
 // ═══════════════════════════════════════════════
 // 一、@scope 收边
 // ═══════════════════════════════════════════════
@@ -124,24 +323,8 @@ describe("皮肤规则的 @scope 收边", () => {
       "——它们是「自定义」窗口预览吃到当前皮肤的直接来源；主语就是 :root 的皮肤 token 定义才是例外");
   });
 
-  it("作用域起点覆盖规则自身的皮肤键（写错皮肤会让该条在真实看板失效）", () => {
-    const mismatched = [];
-    for (const r of RULES) {
-      const keys = skinKeys(r.sel);
-      if (keys.length === 0) continue;
-      for (const pre of r.chain) {
-        if (!pre.startsWith("@scope")) continue;
-        const scope = scopeFrame(pre);
-        if (!scope || scope.end !== PREVIEW) continue;
-        for (const key of keys) {
-          if (!scope.start.includes(`data-style="${key}"`)) {
-            mismatched.push(`panel.css:${r.line} 规则键 ${key} 未出现在作用域起点 ${scope.start}`);
-          }
-        }
-      }
-    }
-    assert.deepEqual(mismatched, [], "作用域起点与规则皮肤键不一致：" + JSON.stringify(mismatched, null, 2));
-  });
+  // 作用域起点与选择器皮肤键的一一对应（改写前口径）由下方「作用域内选择器改写」组取代：
+  // 块内选择器不再带皮肤键，起点与选择器的对应改由「前缀归一化后与 base 逐条相等」校验。
 
   it("预览视口不再被皮肤换底规则命中（.wallpaper-preview-viewport 保持透明底）", () => {
     assert.ok(panelHtml.includes('class="settings-mirror-viewport wallpaper-preview-viewport"'),
@@ -155,6 +338,38 @@ describe("皮肤规则的 @scope 收边", () => {
       }))
       .map((r) => `panel.css:${r.line} ${r.sel.slice(0, 120)}`);
     assert.deepEqual(hit, [], "皮肤键控的 .settings-mirror-viewport 换底规则必须收边：" + JSON.stringify(hit, null, 2));
+  });
+});
+
+// ═══════════════════════════════════════════════
+// 一·补：@scope 内选择器的 :scope 改写（与 base 版本逐条等价）
+// ═══════════════════════════════════════════════
+// @scope 的作用域不含作用域根自身：块内保留「:root + 皮肤键」前缀的选择器一条都匹配不到，
+// 整段皮肤会静默失效。改写口径 = 只把链首的「:root + [data-style=皮肤]」换成 :scope:scope，
+// 其余条件（[data-theme="dark"]、v2 块的 [data-ui-version="v2"] 等）原样保留，从而与原
+// 前缀特异性逐条相等。下面对每个含 @scope 的文件与 base 版本（d170982）逐条对账：
+// 选择器（前缀归一化后）、特异性、规则条数、选择器多重集、声明体。对 base CSS 反向断言
+// 必须判红——否则这组断言已失去判别力。
+describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
+  for (const rel of SCOPE_FILES) {
+    const baseCss = readBaseCss(rel);
+    test(`${rel}：块内选择器以 :scope 开头，且与 base 修改前逐条等价`, {
+      skip: baseCss ? false : `git 取不到 ${BASE_REV}:${rel}（浅克隆/源码包），跳过与 base 的逐条对账`,
+    }, () => {
+      const cssText = readFileSync(join(rootDir, rel), "utf8").replace(/\r\n/g, "\n");
+      const report = auditScopedCss(cssText, baseCss, rel);
+      assert.deepEqual(report.violations, [], "作用域改写与 base 不等价：" + JSON.stringify(report.violations, null, 2));
+      assert.ok(report.inScope.length > 0, `${rel} 的 @scope 块里没有任何规则`);
+    });
+  }
+
+  test("对 base CSS 跑同一组断言必须为红（证明断言真的在查改写）", {
+    skip: readBaseCss("panel-ui/panel.css") ? false : "git 取不到 base 版本，跳过红/绿对照",
+  }, () => {
+    const baseCss = readBaseCss("panel-ui/panel.css");
+    const report = auditScopedCss(baseCss, baseCss, `base ${BASE_REV} panel.css`);
+    assert.ok(report.violations.length > 0,
+      "base CSS 竟然通过了改写断言：这组断言已失去判别力（应报出「没有 @scope 块 / 规则条数不等」）");
   });
 });
 

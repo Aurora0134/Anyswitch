@@ -316,7 +316,7 @@
 }
 
 /* ==========================================================================
-   皮肤覆盖规则（全部以 :root[data-style="aurora"] 开头限定作用域）
+   皮肤覆盖规则（全部以 :scope:scope 限定作用域）
    只补 token 做不到的风格特征：极光 hairline、玻璃模糊、辉光、胶囊化。
    ========================================================================== */
 
@@ -324,21 +324,26 @@
    作用域收边：自本行起，本文件的皮肤覆盖规则整块包在下面这个 @scope 内——
    作用域起 `:root[data-style="aurora"]`，止 `.wallpaper-preview`（终点元素及其后代不在
    作用域内，故「自定义」主题窗口里的壁纸看板预览吃不到当前皮肤；设置页「主题」子页的
-   镜像不是这个容器，继续随皮肤。选择器一律不改写（特异性与写法照旧）。
+   镜像不是这个容器，继续随皮肤。
+   块内选择器以 `:scope:scope` 顶替原来的「`:root` + 皮肤键」前缀：@scope 的作用域不含
+   作用域根自身，保留 `:root` 前缀的规则在块内一条都匹配不到（整段皮肤静默失效）。
+   `:scope:scope` 两个伪类 = (0,2,0)，与原 `:root[data-style="…"]` 的特异性相等；选择器上
+   的其他条件原样保留在其后（如 `[data-theme="dark"]`、v2 块的 `[data-ui-version="v2"]`），
+   特异性逐条不变。改动只能动前缀，规则、声明、顺序一律不动。
    上面三段 token 定义与本文件里其他 `:root[data-style=…]` 主题 token 规则必须留在块外：
    @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
-   @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内。
+   @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内（前缀同样写 `:scope:scope`）。
    ========================================================================== */
 @scope (:root[data-style="aurora"]) to (.wallpaper-preview) {
 /* 页面：三层极光晕（青/紫/粉）铺在冰底上，亮暗强度由 token 控制 */
-:root[data-style="aurora"] body {
+:scope:scope body {
   background-color: var(--bg-page);
   background-image: var(--page-bg-image);
   background-repeat: no-repeat;
 }
 
 /* Header：加强玻璃模糊；底部实线换 1px 极光渐变 hairline */
-:root[data-style="aurora"] header.site-head {
+:scope:scope header.site-head {
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border-bottom-color: transparent;
@@ -350,19 +355,19 @@
 }
 
 /* 品牌图标：冰青渐变 + 光晕 + 顶部高光，圆角放大 */
-:root[data-style="aurora"] .brand-icon {
+:scope:scope .brand-icon {
   border-radius: 12px;
   background: var(--accent-gradient);
   box-shadow: var(--accent-glow), inset 0 1px 0 var(--brand-hl);
 }
 
 /* 版本标签 / 头部信息 pill / 会话 tag：胶囊化 + 玻璃底 */
-:root[data-style="aurora"] .brand-text .version-tag,
-:root[data-style="aurora"] .meta-pill,
-:root[data-style="aurora"] .tag-bubble {
+:scope:scope .brand-text .version-tag,
+:scope:scope .meta-pill,
+:scope:scope .tag-bubble {
   border-radius: 999px;
 }
-:root[data-style="aurora"] .meta-pill {
+:scope:scope .meta-pill {
   background: var(--surface-glass);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -370,7 +375,7 @@
 }
 
 /* 卡片：玻璃面 + 顶部 1px 极光 hairline + 柔散阴影 */
-:root[data-style="aurora"] .panel-card {
+:scope:scope .panel-card {
   border-radius: var(--radius-lg);
   background-image: var(--card-hairline);
   background-position: top;
@@ -381,112 +386,112 @@
   box-shadow: var(--shadow-sm), inset 0 1px 0 var(--hl-inset);
   transition: border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
 }
-:root[data-style="aurora"] .panel-card:hover {
+:scope:scope .panel-card:hover {
   box-shadow: var(--shadow-md), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="aurora"] .card-header {
+:scope:scope .card-header {
   border-bottom-color: var(--divider);
 }
-:root[data-style="aurora"] .card-title {
+:scope:scope .card-title {
   letter-spacing: -0.01em;
 }
 
 /* 徽章：胶囊化 + 轻字距，语义色全由 token 保证可区分 */
-:root[data-style="aurora"] .badge {
+:scope:scope .badge {
   border-radius: 999px;
   letter-spacing: 0.02em;
 }
 
 /* 按钮：圆角上调；主按钮冰青渐变 + 光晕 */
-:root[data-style="aurora"] .btn {
+:scope:scope .btn {
   border-radius: var(--radius-md);
   transition: all 180ms var(--ease-out);
 }
-:root[data-style="aurora"] .btn-mini {
+:scope:scope .btn-mini {
   border-radius: var(--radius-sm);
 }
-:root[data-style="aurora"] .btn-primary {
+:scope:scope .btn-primary {
   background: var(--accent-gradient);
   border-color: transparent;
   box-shadow: var(--accent-glow), inset 0 1px 0 var(--brand-hl);
 }
-:root[data-style="aurora"] .btn-primary:hover {
+:scope:scope .btn-primary:hover {
   filter: brightness(1.08);
 }
-:root[data-style="aurora"] .btn-accent {
+:scope:scope .btn-accent {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-:root[data-style="aurora"] .icon-btn {
+:scope:scope .icon-btn {
   border-radius: 12px;
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
 /* 日志控制台：壳色随 --console-* token 亮暗换肤，青色描边微光与玻璃圆角保持皮肤语言 */
-:root[data-style="aurora"] .log-console {
+:scope:scope .log-console {
   background: var(--console-bg);
   border-color: var(--console-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
-:root[data-style="aurora"] .log-toolbar {
+:scope:scope .log-toolbar {
   background: var(--console-toolbar-bg);
   border-bottom-color: var(--console-border);
 }
-:root[data-style="aurora"] .log-clear-btn {
+:scope:scope .log-clear-btn {
   transition: all 160ms var(--ease-out);
 }
-:root[data-style="aurora"] .log-clear-btn:hover {
+:scope:scope .log-clear-btn:hover {
   background: rgba(103, 232, 249, 0.12);
 }
 
 /* 遥测四宫格：玻璃微渐变 + 顶部高光，数字收紧、标签拉开字距 */
-:root[data-style="aurora"] .telemetry-card {
+:scope:scope .telemetry-card {
   border-radius: var(--radius-md);
   background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
   backdrop-filter: blur(10px) saturate(160%);
   -webkit-backdrop-filter: blur(10px) saturate(160%);
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="aurora"] .telemetry-num {
+:scope:scope .telemetry-num {
   letter-spacing: -0.03em;
 }
-:root[data-style="aurora"] .telemetry-label {
+:scope:scope .telemetry-label {
   letter-spacing: 0.05em;
 }
 
 /* 会话明细 / 提示框 / 折叠组 / 代码块：圆角统一上调 */
-:root[data-style="aurora"] .session-table-wrapper,
-:root[data-style="aurora"] .alert-box,
-:root[data-style="aurora"] .empty-hint,
-:root[data-style="aurora"] .skills-repo-path,
-:root[data-style="aurora"] .skills-diff-list,
-:root[data-style="aurora"] .skills-dup-warn {
+:scope:scope .session-table-wrapper,
+:scope:scope .alert-box,
+:scope:scope .empty-hint,
+:scope:scope .skills-repo-path,
+:scope:scope .skills-diff-list,
+:scope:scope .skills-dup-warn {
   border-radius: var(--radius-md);
 }
-:root[data-style="aurora"] .skills-body-view .md-code {
+:scope:scope .skills-body-view .md-code {
   border-radius: var(--radius-sm);
 }
-:root[data-style="aurora"] .skills-body-view .md-inline {
+:scope:scope .skills-body-view .md-inline {
   border-radius: 5px;
 }
 
 /* Toggle：开启态冰青渐变 + 光晕，滑珠顶部高光 */
-:root[data-style="aurora"] .toggle input:checked + .slider {
+:scope:scope .toggle input:checked + .slider {
   background: var(--accent-gradient);
   box-shadow: var(--accent-glow);
 }
-:root[data-style="aurora"] .toggle .slider::before {
+:scope:scope .toggle .slider::before {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 
 /* seg-control / view-tabs：不动几何，仅选中块加一层顶部高光 */
-:root[data-style="aurora"] .seg-btn[aria-checked="true"],
-:root[data-style="aurora"] .view-tab.active {
+:scope:scope .seg-btn[aria-checked="true"],
+:scope:scope .view-tab.active {
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
 /* Toast：胶囊玻璃浮条 */
-:root[data-style="aurora"] .toast {
+:scope:scope .toast {
   border-radius: 999px;
   background: var(--surface-glass);
   backdrop-filter: var(--glass-blur);
@@ -495,147 +500,147 @@
 }
 
 /* Modal：遮罩冰蓝调加深模糊，卡片玻璃化 + 大圆角；入场 160ms 淡入 + 轻缩放 */
-:root[data-style="aurora"] .modal-overlay {
+:scope:scope .modal-overlay {
   background: var(--overlay-bg);
   backdrop-filter: blur(10px) saturate(150%);
   -webkit-backdrop-filter: blur(10px) saturate(150%);
 }
-:root[data-style="aurora"] .modal-card {
+:scope:scope .modal-card {
   border-radius: var(--radius-lg);
   background: var(--surface-glass);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="aurora"] .modal-overlay.show .modal-card {
+:scope:scope .modal-overlay.show .modal-card {
   animation: aurora-modal-in 160ms var(--ease-out);
 }
 
 /* 输入控件：圆角统一 + 聚焦冰青光环 */
-:root[data-style="aurora"] .modal-number,
-:root[data-style="aurora"] .skills-path-input {
+:scope:scope .modal-number,
+:scope:scope .skills-path-input {
   border-radius: var(--radius-sm);
 }
-:root[data-style="aurora"] .modal-number:focus,
-:root[data-style="aurora"] .skills-path-input:focus {
+:scope:scope .modal-number:focus,
+:scope:scope .skills-path-input:focus {
   box-shadow: 0 0 0 3px var(--accent-soft), 0 0 12px var(--accent-soft);
 }
 
 /* 浮层菜单（下拉 / 右键菜单）：玻璃化 + 圆角 + 高光 */
-:root[data-style="aurora"] .skills-ctx-menu {
+:scope:scope .skills-ctx-menu {
   border-radius: var(--radius-md);
   background: var(--surface-glass);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="aurora"] .skills-ctx-item {
+:scope:scope .skills-ctx-item {
   border-radius: 8px;
 }
-:root[data-style="aurora"] .skills-ctx-item:hover {
+:scope:scope .skills-ctx-item:hover {
   background: var(--accent-soft);
 }
 
 /* Skills 列表选中：冰青扫光 + 左侧强调条 */
-:root[data-style="aurora"] .skills-list-row.selected {
+:scope:scope .skills-list-row.selected {
   background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 88%);
   border-left-color: var(--accent);
 }
 
 /* Top5 微柱：hover 提亮替代跳色 */
-:root[data-style="aurora"] .ms-cell {
+:scope:scope .ms-cell {
   transition: filter 140ms var(--ease-out);
 }
-:root[data-style="aurora"] .ms-cell:not(.idle):hover {
+:scope:scope .ms-cell:not(.idle):hover {
   filter: brightness(1.15);
 }
 
 /* 状态灯：辉光略强于基座基准（6px→7px），点到为止不晃眼 */
-:root[data-style="aurora"] .lamp-green { box-shadow: 0 0 7px var(--ok); }
-:root[data-style="aurora"] .lamp-yellow { box-shadow: 0 0 7px var(--warn); }
-:root[data-style="aurora"] .lamp-red { box-shadow: 0 0 7px var(--danger); }
+:scope:scope .lamp-green { box-shadow: 0 0 7px var(--ok); }
+:scope:scope .lamp-yellow { box-shadow: 0 0 7px var(--warn); }
+:scope:scope .lamp-red { box-shadow: 0 0 7px var(--danger); }
 
 /* Agent 头像：与品牌图标同语言 */
-:root[data-style="aurora"] .agent-avatar {
+:scope:scope .agent-avatar {
   border-radius: 12px;
   box-shadow: inset 0 1px 0 var(--hl-inset);
 }
 
 /* 页脚：mono 轻字距，仪表铭牌感 */
-:root[data-style="aurora"] footer {
+:scope:scope footer {
   letter-spacing: 0.04em;
 }
 
 /* ---- 暗色微调（显式 dark）：亮青渐变上的文字反色为极夜深墨 ---- */
-:root[data-style="aurora"][data-theme="dark"] .btn-primary {
+:scope:scope[data-theme="dark"] .btn-primary {
   color: #052533;
 }
-:root[data-style="aurora"][data-theme="dark"] .brand-icon {
+:scope:scope[data-theme="dark"] .brand-icon {
   color: #062431;
 }
-:root[data-style="aurora"][data-theme="dark"] .log-console {
+:scope:scope[data-theme="dark"] .log-console {
   box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
-:root[data-style="aurora"][data-theme="dark"] .panel-card:hover {
+:scope:scope[data-theme="dark"] .panel-card:hover {
   box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
 }
 
 /* ---- 暗色微调（跟随系统，内容与显式 dark 相同） ---- */
 @media (prefers-color-scheme: dark) {
-  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
+  :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
     color: #052533;
   }
-  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
+  :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
     color: #062431;
   }
-  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
+  :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
     box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
-  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .panel-card:hover {
+  :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .panel-card:hover {
     box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
   }
 }
 
 /* Store 刷新状态小字：冰青高亮带轻辉光（半径收小防糊字） */
-:root[data-style="aurora"] .store-refresh-status .srs-ch { animation-name: srs-pulse-aurora; }
+:scope:scope .store-refresh-status .srs-ch { animation-name: srs-pulse-aurora; }
 /* 完成整体高光：冰青实色带一点轻辉光；字重由基样 600 收细为 500，防辉光糊笔画 */
-:root[data-style="aurora"] .store-refresh-status .srs-done { font-weight: 500; text-shadow: 0 0 4px var(--accent); }
+:scope:scope .store-refresh-status .srs-done { font-weight: 500; text-shadow: 0 0 4px var(--accent); }
 
 /* 使用统计热力图：高档位辉光减弱——只留 lv4 一档极淡微光，lv3 不再发光（玻璃拟态语言收敛，压自发光观感）；hover 在辉光上叠基样亮度 */
-:root[data-style="aurora"] .stats-heat-cell { rx: 3px; }
-:root[data-style="aurora"] .stats-heat-cell.lv4 { filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent)); }
-:root[data-style="aurora"] .stats-heat-cell.lv4:hover { filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 55%, transparent)) brightness(1.06); }
+:scope:scope .stats-heat-cell { rx: 3px; }
+:scope:scope .stats-heat-cell.lv4 { filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent)); }
+:scope:scope .stats-heat-cell.lv4:hover { filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 55%, transparent)) brightness(1.06); }
 
 /* ---- 占用条（ctx-meter）：玻璃条底 + --card-hairline 缎面 + 随档位辉光。
    纯皮肤：不碰几何，空态与 over 告警斜纹交还基座；行内长度徽标沿用基座默认。 ---- */
 /* 条体：玻璃底 + 透背景模糊；环色走冰蓝发丝线 */
-:root[data-style="aurora"] .ctx-bar {
+:scope:scope .ctx-bar {
   background-color: color-mix(in srgb, var(--surface-sunken) 58%, transparent);
   box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 2px rgba(16, 44, 66, 0.07);
 }
 /* 填充：极光 hairline 青→紫→粉作缎面叠加，档位语义色仍由 background-color 承担且占主导。
    排除 empty/over——over 档的 45° 危险斜纹属基座告警语言，被本条顶掉后会变成
    在 16px 平铺下横移的色带，读不出「超限」。 */
-:root[data-style="aurora"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+:scope:scope .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
   background-image: var(--card-hairline);
   opacity: 0.92;
 }
 /* 辉光按档位取语义色，暗色加强、亮色收淡 */
-:root[data-style="aurora"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 8px color-mix(in srgb, var(--ok) 28%, transparent); }
-:root[data-style="aurora"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent); }
-:root[data-style="aurora"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 9px color-mix(in srgb, var(--warn) 32%, transparent); }
+:scope:scope .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 8px color-mix(in srgb, var(--ok) 28%, transparent); }
+:scope:scope .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent); }
+:scope:scope .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 9px color-mix(in srgb, var(--warn) 32%, transparent); }
 /* 满格红线：over 档整条外发光用现成 --danger-glow */
-:root[data-style="aurora"] .ctx-meter[data-tier="over"] .ctx-bar {
+:scope:scope .ctx-meter[data-tier="over"] .ctx-bar {
   box-shadow: inset 0 0 0 1px var(--danger-border), 0 0 10px var(--danger-glow);
 }
 /* 读数：轻字距 + 发丝灰 */
-:root[data-style="aurora"] .ctx-readout { letter-spacing: 0.01em; }
-:root[data-style="aurora"][data-theme="dark"] .ctx-bar {
+:scope:scope .ctx-readout { letter-spacing: 0.01em; }
+:scope:scope[data-theme="dark"] .ctx-bar {
   box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 2px rgba(0, 0, 0, 0.4);
 }
-:root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--ok) 40%, transparent); }
-:root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--accent) 42%, transparent); }
-:root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 14px color-mix(in srgb, var(--warn) 44%, transparent); }
+:scope:scope[data-theme="dark"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--ok) 40%, transparent); }
+:scope:scope[data-theme="dark"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--accent) 42%, transparent); }
+:scope:scope[data-theme="dark"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 14px color-mix(in srgb, var(--warn) 44%, transparent); }
 
 /* ---- 终端画布上的浮层：「+」新建终端菜单。
    终端画布是满屏高对比字形，而 aurora 的 --surface 是半透玻璃（亮 0.72 / 暗 0.62），
@@ -643,7 +648,7 @@
    改用主题不透明的页面底色 --bg 作底：它与「半透底压在终端画布上的合成色」几乎
    同值（暗色差 3/5/7、亮色差 6/5/2），观感不变，但不再透字。
    注：本条依赖 --bg 为实色（aurora 亮暗两套均为实色）。 ---- */
-:root[data-style="aurora"] .terminal-add-menu {
+:scope:scope .terminal-add-menu {
   background: var(--bg);
 }
 }

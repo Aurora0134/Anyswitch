@@ -137,9 +137,9 @@ describe("壁纸态平铺盒补底（T1）", () => {
       }
     }
     // aurora 原有的玻璃卡例外原样在册（补偿不是把例外替换掉）
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] #statsView .panel-card'),
+    assert.ok(panelCss.includes(':scope:scope[data-ui-version="v2"] #statsView .panel-card'),
       "aurora 统计页玻璃卡例外原样");
-    assert.ok(/\[data-ui-version="v2"\]\[data-style="aurora"\] :is\(#settingsPanelGeneral[^)]*\) \.panel-card \{/.test(panelCss),
+    assert.ok(/:scope:scope\[data-ui-version="v2"\] :is\(#settingsPanelGeneral[^)]*\) \.panel-card \{/.test(panelCss),
       "aurora 设置页玻璃卡例外原样");
   });
 
