@@ -296,6 +296,44 @@ describe("弱字对比：默认档下卡面与下沉面合成到照片仍达标"
     }
   });
 
+  it("默认 80 档磨砂面 --surface-glass 未纳入推拉：四档最弱仍低于 4.65，实测区间钉住", () => {
+    // 磨砂面是顶栏/终端头一类大号粗体 chrome，背后照片还经 backdrop blur 平均，引擎不把它
+    // 放进文字推拉候选（见 wallpaper-theme.js buildTokens 注释）。这条按与上面同一口径
+    // （默认 80 档、五个 seed、亮暗两套、最不利照片网格）记录该取舍的当前实测面：四档在
+    // 磨砂面上仍按强度排序，但只有最强的 --text 够到 4.65，--text-2/--text-3/--text-4 全在
+    // 4.65 以下；四档最弱的 --text-4 与带 4.65 目标的 --text-3 另有实测区间钉住。若将来
+    // 把磨砂面纳入候选，弱档会被推高，这条转红——届时连同取舍一起改，不在这里悄悄放宽。
+    const LADDER = ["--text", "--text-2", "--text-3", "--text-4"];
+    // 五个 seed 实测的最小/最大对比度（两位小数）：磨砂面不随推拉走，表面 alpha 档或文字
+    // 基准色一变这些数就过期，漂出 ±0.01 即红。
+    const MEASURED = {
+      light: { "--text-3": [3.10, 3.23], "--text-4": [2.00, 2.08] },
+      dark: { "--text-3": [2.60, 2.74], "--text-4": [1.68, 1.77] },
+    };
+    const DRIFT = 0.01;
+    for (const [name, rgb] of Object.entries(FIXTURES)) {
+      const theme = WallpaperTheme.extractTheme(solidPixels(rgb), { surfaceAlpha: { light: DEFAULT_ALPHAS, dark: DEFAULT_ALPHAS } });
+      for (const mode of ["light", "dark"]) {
+        const ratios = LADDER.map((key) => minContrastOn(theme[mode]["--surface-glass"], theme[mode][key]).min);
+        const shown = LADDER.map((key, i) => `${key}=${ratios[i].toFixed(2)}`).join(" ");
+        for (let i = 1; i < ratios.length; i++) {
+          assert.ok(ratios[i - 1] > ratios[i], `${name} ${mode} 磨砂面四档应保持强度次序——${shown}`);
+        }
+        assert.ok(ratios[0] >= 4.65, `${name} ${mode} 磨砂面最强的 --text 应仍在 4.65 以上——${shown}`);
+        for (const key of ["--text-2", "--text-3", "--text-4"]) {
+          assert.ok(ratios[LADDER.indexOf(key)] < 4.65,
+            `${name} ${mode} 磨砂面 ${key} 未纳入推拉、低于 4.65——${shown}`);
+        }
+        for (const key of ["--text-3", "--text-4"]) {
+          const [lo, hi] = MEASURED[mode][key];
+          const ratio = ratios[LADDER.indexOf(key)];
+          assert.ok(ratio >= lo - DRIFT && ratio <= hi + DRIFT,
+            `${name} ${mode} 磨砂面 ${key} 实得 ${ratio.toFixed(2)}，超出实测区间 ${lo}–${hi}——${shown}`);
+        }
+      }
+    }
+  });
+
   it("核算含「合成到照片」这一层：亮套卡面压黑照片时 --text-3 从 3.13 提到 ≥4.65", () => {
     // 旧实现只按不透明基色推拉，亮套 --text-3 = #6e6e69；同一格换成合成后的卡面只有 3.13。
     // 修好后这一格必须达标——这条对「只算不透明基色」的引擎实现为红。
