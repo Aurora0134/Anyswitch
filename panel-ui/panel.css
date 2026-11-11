@@ -445,9 +445,13 @@
      同一玻璃配方（--glass-blur 既有 token，不造新色值/新模糊量）。双属性选择器提优先
      级——皮肤块同优先级且位置更靠后，不这样写会被盖。saas/sepia 的 --surface 是实底，
      基座规则已够，不添。 */
+  /* 预览隔离：镜像里的栏克隆同样是 .rail，本条收边到 .wallpaper-preview 外——
+     皮肤栏材质属于真实看板与主题页镜像，「自定义」窗口的预览要的是壁纸主题观感。 */
+  @scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {
   :root[data-ui-version="v2"][data-style="aurora"] .rail {
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
+  }
   }
 
   /* v2 布局断点校准：栏体占宽折算进塌缩阈值（宽档 +240 / 窄栏 +96，与栏+间距 240/96
@@ -549,6 +553,8 @@
      大圆角），只去投影（hover 不浮由上面通用 :hover 规则同罩）。取值逐项抄本文件
      aurora 皮肤段的 `.panel-card` 基座（即 `:root[data-style="aurora"] .panel-card`
      那一条，段内唯一），box-shadow 只留 inset 顶部高光；改基座取值须同步这条例外。 */
+  /* 预览隔离：同一口径收边，皮肤键控规则一律不作用于 .wallpaper-preview。 */
+  @scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {
   :root[data-ui-version="v2"][data-style="aurora"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {
     background: var(--surface);
     background-image: var(--card-hairline); background-position: top;
@@ -556,6 +562,7 @@
     backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--border); border-radius: var(--radius-lg);
     box-shadow: inset 0 1px 0 var(--hl-inset);
+  }
   }
   :root[data-ui-version="v2"][data-style] .view-tabs.settings-subtabs {
     background: transparent; border-color: transparent;
@@ -911,8 +918,10 @@
      处对调逐项同源。变量挂在栏本体（#v2Rail）上，栏内后代继承同一值；主题预览的栏
      克隆剥了 id、也不出终端会话栏，天然不中。 */
   :root[data-ui-version="v2"] #v2Rail { --rail-bg: var(--surface); }
+  @scope (:root[data-ui-version="v2"][data-style="saas"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {
   :root[data-ui-version="v2"][data-style="saas"] #v2Rail,
   :root[data-ui-version="v2"][data-style="sepia"] #v2Rail { --rail-bg: var(--bg-page); }
+  }
   /* 底部 24px 渐隐：静态遮罩，不吃点击、无过渡。终点取 --rail-bg（= 栏底色本身），
      换皮肤不会变成一条更亮的实色带。S4 起挂在栏体上（不在滚动层里）——它不随内容
      滚动，贴的是滚动层底边（挂 position:relative 的父级）。
@@ -1140,6 +1149,10 @@
      预览里画旧版式）。只作用 saas/sepia：aurora 摘出——它的 --surface 是半透玻璃料，
      body 换它会让极光晕透底洗白、栏换实底会毁掉玻璃层次；aurora 的页面底即其「面」，
      方向不动（它的设置在 1) 里恢复玻璃卡）。 */
+  /* 预览隔离：本块皮肤键控规则会命中主题预览镜像里的克隆体（栏 / 视口 / 页身），
+     整体收边到 .wallpaper-preview 外——真实看板与主题页镜像照旧，「自定义」窗口的
+     壁纸预览不吃当前皮肤的对调底色。 */
+  @scope (:root[data-ui-version="v2"][data-style="saas"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {
   :root[data-ui-version="v2"][data-style="saas"] body,
   :root[data-ui-version="v2"][data-style="sepia"] body { background: var(--surface); }
   :root[data-ui-version="v2"][data-style="saas"] .rail,
@@ -1150,9 +1163,12 @@
   :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }
   /* 镜像内层画布同换底：本块对调时只同步了预览外壳，视口（镜像克隆真正的承托面）
      漏同步仍坐 --bg-page，预览与真实看板内容区底色不一致——补齐同值。aurora 照旧
-     摘出（它未参与对调，预览与真实一致）。 */
+     摘出（它未参与对调，预览与真实一致）。收边后本条只作用于主题页镜像的视口；
+     「自定义」窗口的预览视口（.wallpaper-preview-viewport）保持基座的透明底，
+     否则皮肤实底会盖掉垫在下面的壁纸图。 */
   :root[data-ui-version="v2"][data-style="saas"] .settings-mirror-viewport,
   :root[data-ui-version="v2"][data-style="sepia"] .settings-mirror-viewport { background: var(--surface); }
+  }
 
   /* 主题预览镜像的头行克隆：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
      镜像原先只克隆栏+看板，板内顶栏整条缺失（「预览板内顶栏被吞」）。克隆体剥了 id，
@@ -1177,9 +1193,12 @@
      （与基座、sepia 同值）、撤内高光。圆角与字距属皮肤语言不动；aurora 按拍板保持
      现状（玻璃微渐变原样，此处不加 aurora 规则）；v1 零变化（皮肤基座段原样，此处
      仅 v2 双属性覆写）。镜像克隆同吃这条（类选择器），预览与真实一并转平。 */
+  /* 预览隔离：镜像里的遥测卡是同一类，本条同样收边，否则预览卡会读成 saas 的平涂。 */
+  @scope (:root[data-ui-version="v2"][data-style="saas"]) to (.wallpaper-preview) {
   :root[data-ui-version="v2"][data-style="saas"] .telemetry-card {
     background: var(--surface-sunken);
     box-shadow: none;
+  }
   }
 
   /* ── 新版界面阶段 3：统计页平铺——同阶段 2 定稿手法（「页面是平的，浮层才有影」） ──
@@ -1239,6 +1258,8 @@
     padding-top: 16px;
   }
   /* aurora 例外：恢复皮肤原生玻璃卡（配方逐项抄阶段 2 aurora 块） */
+  /* 预览隔离：同一口径收边。 */
+  @scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {
   :root[data-ui-version="v2"][data-style="aurora"] #statsView .panel-card {
     background: var(--surface);
     background-image: var(--card-hairline); background-position: top;
@@ -1246,6 +1267,7 @@
     backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--border); border-radius: var(--radius-lg);
     box-shadow: inset 0 1px 0 var(--hl-inset);
+  }
   }
   :root[data-ui-version="v2"][data-style] .view-tabs.stats-subtabs {
     background: transparent; border-color: transparent;
