@@ -129,7 +129,7 @@ describe("正文编辑接线", () => {
     for (const style of ["saas", "aurora", "sepia"]) {
       assert.match(
         panelCss,
-        new RegExp(`:root\\[data-style="${style}"\\] \\.modal-overlay\\.show \\.modal-card \\{[^}]*animation: ${style}-modal-in`),
+        new RegExp(`:scope:scope \\.modal-overlay\\.show \\.modal-card \\{[^}]*animation: ${style}-modal-in`),
         `${style} 皮肤变体缺失会让重播落到默认动画上，与开窗手感不一致`,
       );
     }

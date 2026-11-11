@@ -50,8 +50,37 @@ CSS 规则自然恢复生效。
 }
 ```
 
-之后可追加**皮肤覆盖规则**，一律以 `:root[data-style="SLUG"]` 开头限定作用域，例如
-`:root[data-style="SLUG"] .panel-card { ... }`。
+上面三段 token 定义**留在块外顶层**；之后追加的**皮肤覆盖规则整块包在同一个 `@scope` 内**：
+
+```css
+@scope (:root[data-style="SLUG"]) to (.wallpaper-preview) { … }
+```
+
+**块内选择器必须改写前缀**：`@scope` 的作用域不含作用域根自身，块内保留 `:root[data-style="SLUG"]`
+前缀的选择器一条都匹配不到，整段皮肤会静默失效。块内每条覆盖规则把链首的「`:root` +
+`[data-style="SLUG"]`」换成 `:scope:scope`，例如：
+
+```css
+@scope (:root[data-style="SLUG"]) to (.wallpaper-preview) {
+  :scope:scope .panel-card { ... }
+  :scope:scope[data-theme="dark"] .panel-card { ... }
+}
+```
+
+* `:scope:scope` = 两个伪类 = (0,2,0)，与原 `:root[data-style="SLUG"]`（伪类 + 属性）特异性相等。
+* 选择器上的其他条件原样保留在 `:scope:scope` 之后（`[data-theme="dark"]`、v2 块的
+  `[data-ui-version="v2"]` 等），特异性逐条不变。
+* 只动前缀；规则条数、声明、顺序一律不动。
+* 终点 `to (.wallpaper-preview)` 命中的元素及其后代不在作用域内——「自定义」主题窗口的预览是
+  壁纸看板的镜像克隆，落在 `:root` 之下，必须吃不到当前皮肤；设置页「主题」子页的镜像不是这个
+  容器，继续随皮肤。
+
+**token 规则不能收进 `@scope`**：作用域不含作用域根自身（`@scope (:root…) to (…)` 里 `:root`
+不会被作用域内的规则命中），把 `:root[data-style="SLUG"] { … }` 这类 token 定义收进去会让整份
+token 一起失效、整套皮肤退化为基座值。同理，`@keyframes` 不参与样式匹配，也留在块外顶层。
+边界（块内只许覆盖规则、块外只许 `:root` token 规则与 `@keyframes`）由
+`tests/style-lab-sync.test.mjs` 校验；改写与改写前版本（d170982）的选择器、特异性、规则条数、
+多重集、声明逐条等价由 `tests/panel-preview-isolation.test.mjs` 校验。
 
 ## 必须定义齐全的 token（亮色一套、暗色一套，语义不变只换值）
 
@@ -81,6 +110,14 @@ CSS 规则自然恢复生效。
 - 不用 `!important`（基础样式里已有的除外）；不改写全局 reset；不动 JS。
 - 徽章语义色（ok/warn/danger/accent）必须可区分——监控面板靠颜色读状态。
 - 暗色两套（段 2/段 3）内容逐字相同。
+- **预览隔离**：皮肤覆盖规则（主语是 `:root` 之后的元素）必须收在
+  `@scope (:root[data-style="SLUG"]) to (.wallpaper-preview)` 内，块内选择器以 `:scope:scope` 顶替
+  原「`:root` + 皮肤键」前缀；主语就是 `:root` 的 token 定义留在块外——`@scope` 的作用域不含
+  作用域根自身，收进去会让 token 整体失效。panel.css 里以 `data-style="saas|aurora|sepia"`
+  字面量键控的覆盖规则同样收边、同样改写前缀。
+  皮肤私有 token（不属于壁纸 token 契约、取色引擎不派生的那些）必须在 `.wallpaper-preview` 上
+  按壁纸主题生效时真实看板的取值补齐，见 panel.css「预览的皮肤隔离层」段。
+  校验：`tests/style-lab-sync.test.mjs`、`tests/panel-preview-isolation.test.mjs`。
 
 ## 参考
 

@@ -246,12 +246,14 @@ describe("终端视图左栏换血", () => {
         "基座：栏底色 = --surface");
       // --rail-bg 与「材质修正 ②」那条栏底对调逐项同源：基座 --surface，
       // saas/sepia 合并选择器里一起换成 --bg-page，aurora 不参与（沿用基座）。
-      assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] #v2Rail,\s*\n\s*:root\[data-ui-version="v2"\]\[data-style="sepia"\] #v2Rail \{ --rail-bg: var\(--bg-page\); \}/.test(panelCss),
+      // 改写后皮肤键在 @scope 起点上，块内选择器统一为 :scope:scope[data-ui-version="v2"]；
+      // 合并块的 saas/sepia 两格改写后同形，靠作用域起点限定皮肤。
+      assert.ok(/:scope:scope\[data-ui-version="v2"\] #v2Rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] #v2Rail \{ --rail-bg: var\(--bg-page\); \}/.test(panelCss),
         "saas/sepia：--rail-bg 跟随栏底对调成 --bg-page");
       // 栏底那条对调规则（合并选择器一格）确实把 saas/sepia 的 .rail 换成 --bg-page
-      assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] \.rail,\s*\n\s*:root\[data-ui-version="v2"\]\[data-style="sepia"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
+      assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
         "saas/sepia 的 .rail 底色确为 --bg-page（--rail-bg 与之同值，渐隐终点才对得上）");
-      assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] #v2Rail { --rail-bg'),
+      assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] #v2Rail'),
         "aurora 不参与对调，沿用基座 --surface（玻璃料）");
       assert.ok(fade.includes("pointer-events: none"), "遮罩不吃点击");
       // S4：遮罩挂栏体（不在滚动层里，不随内容滚），贴滚动层底、right 让出滚动条
