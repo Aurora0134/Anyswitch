@@ -2089,6 +2089,30 @@
       --terminal-bg: rgba(11, 18, 32, 0.72);
     }
   }
+  /* 壁纸态平铺盒补底：v2 设置页/统计页的平铺盒是「透明描边盒」，默认皮肤靠不透明的
+     页面底读作有卡；壁纸主题下 body 底透明（上一条规则），壁纸照片直接顶到盒后，盒里的
+     字就压在图上——这正是「部分块在自定义背景下缺乏底层」的两处来源。补偿只加一层底：
+     取主题自身的 --surface / --surface-sunken（随「阅读区不透明度」滑杆走），描边与圆角
+     沿用平铺盒那两条规则的取值（--border / --radius-md / 无影），不引入新材质；aurora 在
+     这两处已有自己的玻璃卡例外，本条只锚 data-style="wallpaper"，saas/aurora/sepia 与
+     默认外观零变化。
+     作用域照抄两条平铺规则：设置页按四面板 id 列举（不整罩——主题子页的看板预览镜像里是
+     克隆的真实看板 DOM，含 .panel-card，整罩会把镜像卡也套上新底、毁掉预览保真）；统计页
+     锚 #statsView 整罩（统计页不进镜像，无此误伤面）。 */
+  :root[data-ui-version="v2"][data-style="wallpaper"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card,
+  :root[data-ui-version="v2"][data-style="wallpaper"] #statsView .panel-card {
+    background: var(--surface);
+  }
+  /* 卡头与空态由卡片底承担，不另铺：卡头在卡内、卡已恢复实底，再叠一层会在卡顶多出一道
+     头带；空态保持纯排版（无底无框），补底等于部分推翻阶段 3 的定稿。 */
+  /* 统计页子 tab：阶段 3 撤了托盘（透明底 + 2px 下划线选中态），那套语言默认皮肤靠页面底
+     承托；壁纸主题下照片从托盘位置透上来，未选中 tab 的字直接压图。补底只恢复 .view-tabs
+     基座的托盘材质（--surface-sunken + 描边 + --radius-md），选中态仍是下划线指示条，
+     不重画胶囊、不改子 tab 的降权语言。设置页子 tab 在 v2 设置态整条让位给左栏目录，
+     不在此列。 */
+  :root[data-ui-version="v2"][data-style="wallpaper"] .view-tabs.stats-subtabs {
+    background: var(--surface-sunken); border-color: var(--border);
+  }
   /* 「自定义主题」窗口（主题列表「自定义...」点开）：上传/调参在窗口内暂存，预览
      与主题页右栏同构（settings-mirror 三层），背景图与压暗层垫在镜像下；容器上的
      .has-image 切空态/有图态，皮肤 token 由 JS 注入 #wallpaperPreview 作用域。 */
