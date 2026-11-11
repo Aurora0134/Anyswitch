@@ -18,6 +18,17 @@
    装饰均通过 background / box-shadow / backdrop-filter 实现，无占位伪元素。
    ========================================================================== */
 
+/* @keyframes 不参与样式匹配，按 CSS 规范不能收在 @scope 内：提到作用域块外顶层。 */
+@keyframes aurora-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes srs-pulse-aurora {
+  0%, 50%, 100% { color: var(--text-2); text-shadow: none; }
+  25% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
+}
+
 /* 1) 亮色 token 全集（极地白昼） */
 :root[data-style="aurora"] {
   color-scheme: light;
@@ -309,6 +320,16 @@
    只补 token 做不到的风格特征：极光 hairline、玻璃模糊、辉光、胶囊化。
    ========================================================================== */
 
+/* ==========================================================================
+   作用域收边：自本行起，本文件的皮肤覆盖规则整块包在下面这个 @scope 内——
+   作用域起 `:root[data-style="aurora"]`，止 `.wallpaper-preview`（终点元素及其后代不在
+   作用域内，故「自定义」主题窗口里的壁纸看板预览吃不到当前皮肤；设置页「主题」子页的
+   镜像不是这个容器，继续随皮肤。选择器一律不改写（特异性与写法照旧）。
+   上面三段 token 定义与本文件里其他 `:root[data-style=…]` 主题 token 规则必须留在块外：
+   @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
+   @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内。
+   ========================================================================== */
+@scope (:root[data-style="aurora"]) to (.wallpaper-preview) {
 /* 页面：三层极光晕（青/紫/粉）铺在冰底上，亮暗强度由 token 控制 */
 :root[data-style="aurora"] body {
   background-color: var(--bg-page);
@@ -486,10 +507,6 @@
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-@keyframes aurora-modal-in {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
 :root[data-style="aurora"] .modal-overlay.show .modal-card {
   animation: aurora-modal-in 160ms var(--ease-out);
 }
@@ -581,10 +598,6 @@
 
 /* Store 刷新状态小字：冰青高亮带轻辉光（半径收小防糊字） */
 :root[data-style="aurora"] .store-refresh-status .srs-ch { animation-name: srs-pulse-aurora; }
-@keyframes srs-pulse-aurora {
-  0%, 50%, 100% { color: var(--text-2); text-shadow: none; }
-  25% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
-}
 /* 完成整体高光：冰青实色带一点轻辉光；字重由基样 600 收细为 500，防辉光糊笔画 */
 :root[data-style="aurora"] .store-refresh-status .srs-done { font-weight: 500; text-shadow: 0 0 4px var(--accent); }
 
@@ -632,4 +645,5 @@
    注：本条依赖 --bg 为实色（aurora 亮暗两套均为实色）。 ---- */
 :root[data-style="aurora"] .terminal-add-menu {
   background: var(--bg);
+}
 }

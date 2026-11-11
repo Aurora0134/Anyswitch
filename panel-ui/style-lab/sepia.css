@@ -6,6 +6,19 @@
    1px 细线承担结构，阴影近乎取消，圆角收敛 2–4px。
    ============================================================ */
 
+/* @keyframes 不参与样式匹配，按 CSS 规范不能收在 @scope 内：提到作用域块外顶层。 */
+@keyframes sepia-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes srs-pulse-sepia {
+  0%, 50%, 100% { color: var(--text-2); opacity: 0.55; }
+  25% { color: var(--accent); opacity: 1; }
+}
+
+@keyframes ctxOverSepia { 0% { background-position: 0 0; } 100% { background-position: 10px 0; } }
+
 /* 1) 亮色 token 全集 */
 :root[data-style="sepia"] {
   color-scheme: light;
@@ -253,10 +266,28 @@
   }
 }
 
+/* 使用统计热力图：档位向纸底（--bg）混入而非 surface，暖纸上更柔不浮白；顶档同步降发光感（88% 压暗一档） */
+:root[data-style="sepia"] {
+  --heat-1: color-mix(in srgb, var(--accent) 26%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--accent) 46%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--accent) 68%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}
+
 /* ============================================================
    皮肤覆盖规则（不触碰布局几何，只换皮肤）
    ============================================================ */
 
+/* ==========================================================================
+   作用域收边：自本行起，本文件的皮肤覆盖规则整块包在下面这个 @scope 内——
+   作用域起 `:root[data-style="sepia"]`，止 `.wallpaper-preview`（终点元素及其后代不在
+   作用域内，故「自定义」主题窗口里的壁纸看板预览吃不到当前皮肤；设置页「主题」子页的
+   镜像不是这个容器，继续随皮肤。选择器一律不改写（特异性与写法照旧）。
+   上面三段 token 定义与本文件里其他 `:root[data-style=…]` 主题 token 规则必须留在块外：
+   @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
+   @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内。
+   ========================================================================== */
+@scope (:root[data-style="sepia"]) to (.wallpaper-preview) {
 /* 顶部导航：去玻璃模糊，纯平纸面 + 1px 细线 */
 :root[data-style="sepia"] header.site-head {
   background: var(--surface);
@@ -359,10 +390,6 @@
   border-radius: 4px;
 }
 /* Modal 入场：160ms 淡入 + 轻缩放（仅 opacity/transform，不改几何） */
-@keyframes sepia-modal-in {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
 :root[data-style="sepia"] .modal-overlay.show .modal-card {
   animation: sepia-modal-in 160ms var(--ease-out);
 }
@@ -434,18 +461,6 @@
 /* Store 刷新状态小字：斜体铅字感，窄波扫过点亮赭橙 accent */
 :root[data-style="sepia"] .store-refresh-status { font-style: italic; letter-spacing: 0.02em; }
 :root[data-style="sepia"] .store-refresh-status .srs-ch { animation-name: srs-pulse-sepia; }
-@keyframes srs-pulse-sepia {
-  0%, 50%, 100% { color: var(--text-2); opacity: 0.55; }
-  25% { color: var(--accent); opacity: 1; }
-}
-
-/* 使用统计热力图：档位向纸底（--bg）混入而非 surface，暖纸上更柔不浮白；顶档同步降发光感（88% 压暗一档） */
-:root[data-style="sepia"] {
-  --heat-1: color-mix(in srgb, var(--accent) 26%, var(--bg));
-  --heat-2: color-mix(in srgb, var(--accent) 46%, var(--bg));
-  --heat-3: color-mix(in srgb, var(--accent) 68%, var(--bg));
-  --heat-4: color-mix(in srgb, var(--accent) 86%, var(--bg));
-}
 
 /* ---- 占用条（ctx-meter）与单预设长度徽标：圆角收敛 + 只留 1px 细线 + over 斜纹收细放慢。
    纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
@@ -477,7 +492,6 @@
   background-size: 10px 10px;
   animation: ctxOverSepia 1.1s linear infinite;
 }
-@keyframes ctxOverSepia { 0% { background-position: 0 0; } 100% { background-position: 10px 0; } }
 :root[data-style="sepia"] .ctx-meter[data-tier="over"] .ctx-bar {
   box-shadow: inset 0 0 0 1px var(--danger-border);
 }
@@ -485,3 +499,4 @@
 :root[data-style="sepia"] .ctx-total { font-weight: 600; }
 /* 徽标：2px 方角 + 细线 */
 :root[data-style="sepia"] .ctx-preset-badge { border-radius: var(--radius-sm); }
+}

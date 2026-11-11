@@ -15,6 +15,12 @@
       瞬时位移，不改动静态几何）。
    ========================================================================== */
 
+/* @keyframes 不参与样式匹配，按 CSS 规范不能收在 @scope 内：提到作用域块外顶层。 */
+@keyframes saas-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 /* 1) 亮色 token 全集 */
 :root[data-style="saas"] {
   color-scheme: light;
@@ -275,6 +281,16 @@
    皮肤覆盖规则（全部以 :root[data-style="saas"] 限定作用域）
    ========================================================================== */
 
+/* ==========================================================================
+   作用域收边：自本行起，本文件的皮肤覆盖规则整块包在下面这个 @scope 内——
+   作用域起 `:root[data-style="saas"]`，止 `.wallpaper-preview`（终点元素及其后代不在
+   作用域内，故「自定义」主题窗口里的壁纸看板预览吃不到当前皮肤；设置页「主题」子页的
+   镜像不是这个容器，继续随皮肤。选择器一律不改写（特异性与写法照旧）。
+   上面三段 token 定义与本文件里其他 `:root[data-style=…]` 主题 token 规则必须留在块外：
+   @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
+   @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内。
+   ========================================================================== */
+@scope (:root[data-style="saas"]) to (.wallpaper-preview) {
 /* 页面：顶部一抹品牌色径向光晕，营造控制台氛围 */
 :root[data-style="saas"] body {
   background: var(--page-bg-image), var(--bg-page);
@@ -432,10 +448,6 @@
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-@keyframes saas-modal-in {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
 :root[data-style="saas"] .modal-overlay.show .modal-card {
   animation: saas-modal-in 160ms var(--ease-out);
 }
@@ -513,4 +525,5 @@
     inset 0 0 0 1px var(--border),
     inset 0 1.5px 2px rgba(0, 0, 0, 0.42),
     inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+}
 }
