@@ -212,6 +212,15 @@
     ];
   }
 
+  // 面体色按 alpha 合成到下层（壁纸照片）后的实际观感色
+  function compositeOver(rgb, alpha, under) {
+    return [
+      Math.round(alpha * rgb[0] + (1 - alpha) * under[0]),
+      Math.round(alpha * rgb[1] + (1 - alpha) * under[1]),
+      Math.round(alpha * rgb[2] + (1 - alpha) * under[2]),
+    ];
+  }
+
   function hueDistance(a, b) {
     const d = Math.abs((((a - b) % 360) + 360) % 360);
     return d > 180 ? 360 - d : d;
@@ -531,9 +540,10 @@
     const [seedH, seedS] = rgbToHsl(seedRgb[0], seedRgb[1], seedRgb[2]);
 
     // 背景族：种子色向白（亮）/黑（暗）按比例混合，面体带玻璃化透明度。
-    // 对比度核算以不透明基色为准；壁纸透出对观感的补偿由 UI 层阅读透明度兜底。
+    // 对比度核算见下方文字四档：不透明基色 + 阅读面合成到最不利照片后的颜色。
     const surfaceOpaque = {};
     const surfaceTokens = {};
+    const surfaceAlpha = {};
     const targetRgb = light ? [255, 255, 255] : [0, 0, 0];
     for (const [key, spec] of Object.entries(SURFACE_SPEC[mode])) {
       const mixed = mixRgb(seedRgb, targetRgb, spec.ratio);
@@ -541,11 +551,24 @@
       let alpha = spec.alpha;
       const override = alphaOverrides && alphaOverrides[key];
       if (typeof override === "number" && Number.isFinite(override)) alpha = clamp(override, 0, 1);
+      surfaceAlpha[key] = alpha;
       surfaceTokens[key] = rgba(mixed, alpha);
     }
 
-    // 文字四档：中性基准色过对比度推拉，候选背景取页面底与卡片面
+    // 文字四档：中性基准色过对比度推拉。候选背景两层：
+    //   1) 面体的不透明基色（页面底 / 卡面，静态皮肤下就是它们本身）；
+    //   2) 阅读面（卡面 / 下沉面）按当前 alpha 合成到「最不利照片」后的颜色——亮套取黑、
+    //      暗套取白。壁纸照片不受控，半透面体在照片最不利处的实际颜色被拉向照片那一端，
+    //      只按不透明基色核算，弱字档到真实壁纸上会掉到目标以下（默认档实测 3.13 / 2.09，
+    //      目标 4.65 / 3.0）。合成色入候选后，推拉会把弱字压到照片最不利处也成立的位置。
+    //      磨砂面（--surface-glass）不入候选：它是顶栏/终端头一类大号粗体 chrome，其后的
+    //      照片还经 backdrop blur 平均，按 4.65 强推会把整条灰色字阶压到近黑（实测 #313131），
+    //      改动面大于可读性诉求；该面的实测值由测试与交班报告如实列出。
+    const worstPhoto = light ? [0, 0, 0] : [255, 255, 255];
     const textBgs = [surfaceOpaque["--bg"], surfaceOpaque["--surface"]];
+    for (const key of ["--surface", "--surface-sunken"]) {
+      textBgs.push(compositeOver(surfaceOpaque[key], surfaceAlpha[key], worstPhoto));
+    }
     const textTokens = {};
     for (const key of ["--text", "--text-2", "--text-3", "--text-4"]) {
       const target = key === "--text-4" ? CONTRAST_TARGET_WEAK : CONTRAST_TARGET;

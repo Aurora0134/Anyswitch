@@ -228,3 +228,97 @@ describe("表面 token 分档（T2）", () => {
   });
 });
 
+// ═══════════════════════════════════════════════
+// 弱字对比（T3）：真实观感 = 面体按 alpha 合成到照片上
+// ═══════════════════════════════════════════════
+
+// 与引擎同式的 WCAG 核算。文字色是不透明 hex，面体是 rgba：壁纸下真实观感色 =
+// 面体按 alpha 合成到照片上，照片不受控，取全色域网格里的最不利值。
+function srgbToLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function luminance([r, g, b]) {
+  return 0.2126 * srgbToLinear(r / 255) + 0.7152 * srgbToLinear(g / 255) + 0.0722 * srgbToLinear(b / 255);
+}
+function contrast(c1, c2) {
+  const l1 = luminance(c1);
+  const l2 = luminance(c2);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+function parseColor(v) {
+  const m = v.match(/^rgba\(\s*(\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\s*\)$/);
+  if (m) return { rgb: [+m[1], +m[2], +m[3]], alpha: +m[4] };
+  const n = parseInt(v.slice(1), 16);
+  return { rgb: [(n >> 16) & 255, (n >> 8) & 255, n & 255], alpha: 1 };
+}
+function overPhoto(color, photo) {
+  const { rgb, alpha } = parseColor(color);
+  return [0, 1, 2].map((i) => Math.round(alpha * rgb[i] + (1 - alpha) * photo[i]));
+}
+// 照片色网格：每通道 0..255 步长 17（16³ = 4096 色，含两端极值）
+const PHOTO_GRID = [];
+for (let r = 0; r <= 255; r += 17) for (let g = 0; g <= 255; g += 17) for (let b = 0; b <= 255; b += 17) PHOTO_GRID.push([r, g, b]);
+function minContrastOn(colorToken, textToken) {
+  const fg = parseColor(textToken).rgb;
+  let min = Infinity, at = null;
+  for (const photo of PHOTO_GRID) {
+    const ratio = contrast(overPhoto(colorToken, photo), fg);
+    if (ratio < min) { min = ratio; at = photo; }
+  }
+  return { min, at };
+}
+function solidPixels(rgb, w = 16, h = 16) {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) data.set([rgb[0], rgb[1], rgb[2], 255], i * 4);
+  return { data, width: w, height: h };
+}
+
+describe("弱字对比（T3）：默认档下卡面与下沉面合成到照片仍达标", () => {
+  const FIXTURES = {
+    蓝: [37, 99, 235], 暖橙: [210, 120, 50], 绿: [22, 163, 74],
+    近黑: [10, 10, 10], 近白: [253, 253, 253],
+  };
+  const DEFAULT_ALPHAS = surfaceAlphasAt(80); // 滑杆默认档 80
+  const TARGETS = { "--text-2": 4.65, "--text-3": 4.65, "--text-4": 3.0 };
+
+  it("默认 80 档：--text-2/--text-3 ≥4.65、--text-4 ≥3.0（卡面与下沉面，亮暗两套）", () => {
+    for (const [name, rgb] of Object.entries(FIXTURES)) {
+      const theme = WallpaperTheme.extractTheme(solidPixels(rgb), { surfaceAlpha: { light: DEFAULT_ALPHAS, dark: DEFAULT_ALPHAS } });
+      for (const mode of ["light", "dark"]) {
+        for (const surface of ["--surface", "--surface-sunken"]) {
+          for (const [textKey, target] of Object.entries(TARGETS)) {
+            const { min, at } = minContrastOn(theme[mode][surface], theme[mode][textKey]);
+            assert.ok(min >= target - 1e-9,
+              `${name} ${mode} ${surface} 上的 ${textKey} 对最不利照片 rgb(${at.join(",")}) 只有 ${min.toFixed(2)}（目标 ${target}）`);
+          }
+        }
+      }
+    }
+  });
+
+  it("核算含「合成到照片」这一层：亮套卡面压黑照片时 --text-3 从 3.13 提到 ≥4.65", () => {
+    // 旧实现只按不透明基色推拉，亮套 --text-3 = #6e6e69；同一格换成合成后的卡面只有 3.13。
+    // 修好后这一格必须达标——这条对「只算不透明基色」的引擎实现为红。
+    const theme = WallpaperTheme.extractTheme(solidPixels([37, 99, 235]), { surfaceAlpha: { light: DEFAULT_ALPHAS, dark: DEFAULT_ALPHAS } });
+    const card = parseColor(theme.light["--surface"]);
+    const onBlack = [0, 1, 2].map((i) => Math.round(card.alpha * card.rgb[i]));
+    const fg = parseColor(theme.light["--text-3"]).rgb;
+    const ratio = contrast(onBlack, fg);
+    assert.ok(ratio >= 4.65 - 1e-9,
+      `亮套 --text-3 对压黑照片的卡面实得 ${ratio.toFixed(2)}（目标 4.65；旧实现 3.13）`);
+    // 暗套对称：卡面压白照片
+    const darkCard = parseColor(theme.dark["--surface"]);
+    const onWhite = [0, 1, 2].map((i) => Math.round(darkCard.alpha * darkCard.rgb[i] + (1 - darkCard.alpha) * 255));
+    const darkFg = parseColor(theme.dark["--text-3"]).rgb;
+    assert.ok(contrast(onWhite, darkFg) >= 4.65 - 1e-9,
+      `暗套 --text-3 对压白照片的卡面实得 ${contrast(onWhite, darkFg).toFixed(2)}（目标 4.65；旧实现 3.69）`);
+  });
+
+  it("字阶仍是四档：四个文字 token 两两不同（推拉没有把四档压成同一个颜色）", () => {
+    const theme = WallpaperTheme.extractTheme(solidPixels([37, 99, 235]), { surfaceAlpha: { light: DEFAULT_ALPHAS, dark: DEFAULT_ALPHAS } });
+    for (const mode of ["light", "dark"]) {
+      const values = ["--text", "--text-2", "--text-3", "--text-4"].map((k) => theme[mode][k]);
+      assert.equal(new Set(values).size, 4, `${mode} 四档文字色不得重合成一色`);
+    }
+  });
+});
