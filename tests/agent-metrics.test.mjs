@@ -5240,6 +5240,8 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     await collector.scanProcesses();
 
     const r1 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r1.recordFirstChunk();
+    t += 250; // 给首 token 与收尾留出可测窗口，TPS 折线才有点
     r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
 
     shellPid = 4901;
@@ -5249,12 +5251,20 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     const r2 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r2.recordFirstChunk();
+    t += 250;
     r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
 
     const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
     assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]], "the row itself survives the restart");
     assert.equal(dsh.instances[0].requests, 1, "a new app run reopens the account");
     assert.equal(dsh.instances[0].tokens.prompt, 50, "the previous run's tokens do not carry over");
+    // 产品语义：请求数/token 是本次运行的账，折线样本是「既成事实的历史」跨重启保留。
+    // 上一代 1 点 + 本代 1 点 = 2；重开账把样本窗一起清掉时这里只有 1。
+    assert.equal(dsh.instances[0].sparkHistory.tps.length, 2,
+      "the previous app run's sparkline points survive the account reopening");
+    assert.equal(dsh.instances[0].sparkHistory.ttft.length, 2,
+      "the previous app run's TTFT history survives the account reopening");
   });
 
   it("keeps the row and account through an engine gap while the shell stays up", async () => {
@@ -9398,12 +9408,15 @@ describe("已工作时间随端点关闭清零", () => {
     assert.equal(zcode.status, "running");
 
     const r = collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 起点 3000
+    r.recordFirstChunk(); // 与收尾相隔 4000ms：折线 tps / ttft 各留 1 点
     t = 7000;
     r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 结算 4000ms
 
     t = 13000; // 进程活着、空闲 6s：计数不走字
     zcode = await zcodeCard(collector);
     assert.equal(zcode.metrics.activeDurationMs, 4000, "空闲不计时，只累计忙碌区间");
+    assert.equal(zcode.metrics.sparkHistory.tps.length, 1, "基线：端点折线有 1 点");
+    assert.equal(zcode.metrics.sparkHistory.ttft.length, 1, "基线：TTFT 历史有 1 点");
 
     scan = goneScan;
     t = 17000; // 过扫描缓存（新一轮认不出 zcode），距收尾 10000ms > 3s 宽限
@@ -9413,6 +9426,10 @@ describe("已工作时间随端点关闭清零", () => {
     assert.equal(zcode.metrics.activeDurationMs, 0, "端点关闭过宽限，已工作时间清零");
     assert.equal(zcode.sessions[0].activeDurationMs, 0, "全局汇总行同步清零");
     assert.equal(zcode.metrics.totalRequests, 0, "进程全灭过宽限，本次运行的请求数一并清零");
+    // 折线样本窗是既成事实的历史，不随本次运行的账清零（行还在时端点折线也不清零，
+    // 见「已工作时间随端点关闭清零」套件里同款断言）。
+    assert.equal(zcode.metrics.sparkHistory.tps.length, 1, "run zeroing 保留端点折线历史");
+    assert.equal(zcode.metrics.sparkHistory.ttft.length, 1, "run zeroing 保留 TTFT 历史");
 
     // 重开（新 pid）：从 0 起，不接旧值。
     scan = zcodeScan(20604);
@@ -9663,5 +9680,176 @@ describe("claude conversation fold (session registry)", () => {
     await claudeCard(collector);
     collector.reportSession("tok_A", { pid: 4444, activeRequests: 1 });
     assert.deepEqual(frames.map((f) => [f.instanceId, f.activeRequests]), [["claude-sess-sess-abc", 1]]);
+  });
+});
+
+// 冷启动折线历史保留：重开账 / run zeroing / 实例行换代 / 出口零账残留行。
+// 四处都把「既成事实的样本窗」当成本次运行账一起清掉，展开实例卡时折线就缺历史。
+describe("cold-start spark history retention (four reset/eviction paths)", () => {
+  const DSH_BIN = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js";
+  const DESKTOP_EXE = "C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe";
+  const DESKTOP_HOST = "C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js";
+  const nodeRow5 = (pid, ppid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${ppid},${pid}`;
+  const desktopShellRow5 = (pid, ppid) => `LAPTOP,"${DESKTOP_EXE}",DeepSeek Harness.exe,${ppid},${pid}`;
+  const desktopHostRow5 = (pid, ppid) => `LAPTOP,"${DESKTOP_EXE}" --expose-internals "${DESKTOP_HOST}",DeepSeek Harness.exe,${ppid},${pid}`;
+  const wmic5 = (...rows) => `Node,CommandLine,Name,ParentProcessId,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+  const surfacesOf = (agent) => Object.fromEntries(agent.surfaces.map((s) => [s.label, s.count]));
+
+  it("C: a re-created instance row inherits the retired row's sparkline and keeps appending", async () => {
+    // 实例行被空闲 TTL 收走后，同名新行以零态重建：折线历史随行蒸发是第 3 处
+    // 根因。快照 Map 按 bucket:instId 播种，只继承样本窗，不继承累计量/身份/在途。
+    let t = 3000;
+    const id = "ws-custom";
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, ""), // 无进程：自定义行走空闲 TTL
+      nowFn: () => t,
+      sparkWindowPoints: 20,
+      // 每轮读会再问一次磁盘视窗：固定住它，别让本机 settings 把 20 覆盖掉。
+      loadSparkSettings: () => ({ sparkWindowPoints: 20 }),
+    });
+    const measured = (usage) => {
+      const r = collector.startRequest({ agentId: "kimi", instanceId: id, model: "m1" });
+      r.recordFirstChunk();
+      t += 250; // ≥ TPS_MIN_GEN_MS：折线上真的有点
+      r.recordEnd({ status: 200, usage });
+    };
+    measured({ prompt_tokens: 100, completion_tokens: 40 });
+
+    let kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(kimi.instances.length, 1);
+    assert.equal(kimi.instances[0].sparkHistory.tps.length, 1, "第一代折线 1 点");
+    assert.equal(kimi.instances[0].sparkHistory.ttft.length, 1);
+
+    // 多轮读不得反复 reset，也不得多播一次种（快照取出即删）。
+    for (let round = 0; round < 3; round += 1) {
+      t += 3000;
+      kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimi.instances[0].requests, 1, "多轮读不重账");
+      assert.equal(kimi.instances[0].sparkHistory.tps.length, 1, "多轮读不重复播种");
+    }
+
+    t += 10 * 60 * 1000 + 1; // 过 10min 空闲 TTL：行被收走
+    kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.deepEqual(kimi.instances.map((i) => i.id), [], "空闲档收走实例行");
+
+    measured({ prompt_tokens: 50, completion_tokens: 20 });
+    kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(kimi.instances.length, 1);
+    assert.equal(kimi.instances[0].requests, 1, "累计量是新账，不继承旧账");
+    assert.equal(kimi.instances[0].sparkHistory.tps.length, 2, "上一代 1 点 + 本代 1 点");
+    assert.equal(kimi.instances[0].sparkHistory.ttft.length, 2);
+
+    // 新请求继续 push，沿用既有 keep 窗口，不造第二套窗口、不无限增长。
+    for (let i = 0; i < 25; i += 1) measured({ prompt_tokens: 10, completion_tokens: 10 });
+    const after = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(after.instances[0].sparkHistory.tps.length, 20, "折线收满 sparkWindowPoints 后不再变长");
+    assert.equal(after.instances[0].sparkHistory.ttft.length, 20);
+  });
+
+  it("D1: folds an unclassified zero-account dsh host row into the stable row", async () => {
+    // 已退 launcher 的残留行：零账零历史、面「未知」，pid 不在活宿主集，展开时
+    // 就是一条多出来的空态虚线；只认活宿主 pid 的旧判据折不掉它。
+    let t = 3000;
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      desktopShellRow5(5300, 99),
+      desktopHostRow5(5301, 5300),
+      nodeRow5(33788, 5301, `"${DSH_BIN}"`), // 引擎，profile 读不出 → 无面
+    ));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses();
+    const r = collector.startRequest({ agentId: "dsh", instanceId: "dsh-5301", model: "m1", stream: true, path: "openai" });
+    r.recordFirstChunk();
+    t += 250;
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-desktop"], "零账残留行折进稳定行，出口只剩一行");
+    assert.equal(surfacesOf(dsh).Desktop, 1, "面汇总 Desktop ×1，不因折叠多报一票");
+    assert.equal(dsh.instances[0].sparkHistory.tps.length, 1, "折叠不动桶内账，稳定行历史照常");
+    assert.equal(dsh.instances[0].sparkHistory.ttft.length, 1);
+  });
+
+  it("D2: never folds a TUI pid row that carries its own traffic", async () => {
+    // 硬约束：带自己流量或带 TUI/Web 面的合法 pid 行绝不能被误折。
+    let t = 3000;
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      desktopShellRow5(5300, 99),
+      desktopHostRow5(5301, 5300),
+      nodeRow5(33788, 5301, `"${DSH_BIN}" --profile dsh-tui`),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses();
+    const r = collector.startRequest({ agentId: "dsh", instanceId: "dsh-33788", model: "m1", stream: true, path: "openai" });
+    r.recordFirstChunk();
+    t += 250;
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 30, completion_tokens: 12 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]).sort(), [
+      ["dsh-33788", "TUI"],
+      ["dsh-desktop", "Desktop"],
+    ], "带流量的 TUI 行仍在，不被误折");
+    assert.equal(dsh.instances.find((i) => i.id === "dsh-33788").requests, 1);
+    assert.deepEqual(surfacesOf(dsh), { Desktop: 1, TUI: 1 });
+  });
+
+  it("D4: folds the residual row even when the live host set is empty", async () => {
+    // 引擎换代空档：稳定行靠 Electron 壳锚存活，本轮 dshDesktopHostPids 为空。
+    // 旧早退条件（size===0）会整条跳过折叠，残留行便以空态虚线挂在展开里。
+    let t = 3000;
+    let rows = [
+      desktopShellRow5(5300, 99),
+      desktopHostRow5(5301, 5300),
+    ];
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(...rows));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    t += 3000;
+    await collector.scanProcesses();
+    const first = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(first.instances.map((i) => i.id), ["dsh-desktop"], "先在桶里落稳定行");
+
+    rows = [
+      desktopShellRow5(5300, 99),
+      nodeRow5(33788, 5300, `"${DSH_BIN}"`), // profile 读不出的引擎 → 零账残留行
+    ];
+    t += 3000;
+    await collector.scanProcesses();
+    await new Promise((r) => setTimeout(r, 30));
+    t += 3000;
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.dshDesktopHostPids.size, 0, "本轮活宿主集为空");
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-desktop"], "早退放宽后残留行仍被折掉");
+  });
+
+  it("D3: kimi folds the same zero-account residual shape", async () => {
+    // kimi 同形一例：一条还原进来的零账 pid 行（pid 只作为认不出的 node 行留在
+    // 全表里、不在宿主集、无面），折进 kimi-desktop，出口只剩稳定行。
+    const dir = mkTestDir();
+    try {
+      writeFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), JSON.stringify({
+        version: 2, savedAt: 3000, endpoints: {}, runPids: {},
+        instances: { kimi: [{ id: "kimi-9999", firstSeen: 3000, label: null, state: {} }] },
+      }), "utf8");
+      const KIMI_PKG = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@moonshot-ai\\kimi-code";
+      const DESKTOP_IMG = "C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi Code\\Kimi Code.exe";
+      const nodeRow = (pid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${pid}`;
+      const desktopRow = (pid) => `LAPTOP,"${DESKTOP_IMG}",kimi code.exe,${pid}`;
+      const wmic = (...rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+      const execFn = (cmd, opts, cb) => cb(null, wmic(
+        desktopRow(6001),
+        nodeRow(9999, `"C:\\elsewhere\\node_modules\\some-other-pkg\\bin\\x.mjs"`),
+      ));
+      const collector = testCollector({
+        execFn, nowFn: () => 3000, persistRoot: dir,
+        kimiRegistryLookup: async () => new Map(),
+      });
+      const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.deepEqual(kimi.instances.map((i) => i.id), ["kimi-desktop"], "kimi 零账残留行折进稳定行");
+      assert.equal(surfacesOf(kimi).Desktop, 1, "面汇总 Desktop ×1");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      // 测试同进程建多个 collector 会互抢模块级 WB 注册表反查；这里显式收尾。
+    }
   });
 });
