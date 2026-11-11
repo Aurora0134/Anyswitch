@@ -115,3 +115,91 @@ for (const slug of SLUGS) {
     }
   });
 }
+
+
+// ═══════════════════════════════════════════════
+// 预览隔离：皮肤片段整块收在 @scope 内，终点恰为 .wallpaper-preview
+// ═══════════════════════════════════════════════
+// 「自定义」主题窗口的预览是壁纸看板的镜像克隆，落在 :root 之下：皮肤规则若不收边，
+// 预览就会读成「当前皮肤 + 壁纸取色」。收边外壳的形态（作用域起点 = 皮肤键、终点 =
+// .wallpaper-preview）由本组断言钉住，选择器本身不改写。
+const PREVIEW_LIMIT = ".wallpaper-preview";
+
+// 剥注释后切规则，记录每条规则的 @ 帧链；同时回传每个 @ 块的起止偏移
+function scanCss(text) {
+  const css = text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  const rules = [];
+  const atBlocks = [];
+  const frames = [];
+  let buf = "", bufLine = 1, line = 1, bodyStart = 0;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (ch === "\n") { line++; buf += ch; continue; }
+    if (!buf.trim() && ch.trim()) bufLine = line;
+    if (ch === "{") {
+      const pre = buf.trim().replace(/\s+/g, " ");
+      frames.push({ pre, line: bufLine, bodyStart: i + 1, open: i });
+      if (pre.startsWith("@")) atBlocks.push({ pre, line: bufLine, open: i, close: -1 });
+      buf = "";
+    } else if (ch === "}") {
+      const frame = frames.pop();
+      if (frame) {
+        if (frame.pre.startsWith("@")) {
+          for (let k = atBlocks.length - 1; k >= 0; k--) if (atBlocks[k].open === frame.open) { atBlocks[k].close = i; break; }
+        } else {
+          rules.push({ chain: frames.map((f) => f.pre), sel: frame.pre, line: frame.line });
+        }
+      }
+      buf = "";
+    } else if (ch === ";") {
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+  return { rules, atBlocks, stripped: css };
+}
+
+const scopePrelude = (slug) => `@scope (:root[data-style="${slug}"]) to (${PREVIEW_LIMIT})`;
+
+for (const slug of SLUGS) {
+  test(`预览隔离：${slug}.css 全部主题规则收在 @scope 内，终点恰为 ${PREVIEW_LIMIT}`, () => {
+    const file = join(root, "../panel-ui", "style-lab", `${slug}.css`);
+    assert.ok(existsSync(file), `在册主题 ${slug} 缺少源文件 panel-ui/style-lab/${slug}.css`);
+    const { rules, atBlocks, stripped } = scanCss(readFileSync(file, "utf8").replace(/\r\n/g, "\n"));
+    const scopes = atBlocks.filter((b) => b.pre.startsWith("@scope"));
+    assert.deepEqual(scopes.map((b) => b.pre), [scopePrelude(slug)],
+      `${slug}.css 必须恰有一个 @scope 外壳且终点恰为 ${PREVIEW_LIMIT}：` +
+      "皮肤规则收边到预览容器之外（@scope 起点 = 皮肤键，终点 = .wallpaper-preview）");
+    const scope = scopes[0];
+    assert.equal(stripped.slice(scope.close + 1).trim(), "",
+      `${slug}.css 的 @scope 之后还有内容：收边必须覆盖到文件末尾`);
+    // 作用域只包皮肤覆盖规则：@scope 的作用域不含作用域根自身（实测 Chrome 157），
+    // 把 `:root` 上的 token 定义收进去会让整份 token 失效。故块外只允许 root token 规则；
+    // 块内只允许「root 皮肤键 + 后代」形式的覆盖规则。@keyframes 里的帧不算选择器，跳过。
+    const ROOT_ONLY = /^:root(\[[^\]]+\]|:not\([^)]*\))*$/;
+    const tokenRule = (r) => r.sel.split(",").map((s) => s.trim()).every((s) => ROOT_ONLY.test(s));
+    const misplaced = [];
+    for (const r of rules) {
+      if (r.chain.some((pre) => pre.startsWith("@keyframes"))) continue;
+      const inside = r.chain.includes(scope.pre);
+      const isToken = tokenRule(r);
+      if (inside && isToken) misplaced.push(`${slug}.css:${r.line} ${r.sel.slice(0, 80)} —— :root token 规则不能收进 @scope（会让 token 整体失效）`);
+      if (!inside && !isToken) misplaced.push(`${slug}.css:${r.line} ${r.sel.slice(0, 80)} —— 皮肤覆盖规则必须收进 @scope`);
+    }
+    assert.deepEqual(misplaced, [],
+      `${slug}.css 的 @scope 边界不对：` + JSON.stringify(misplaced, null, 2));
+    const tokenBlocks = rules.filter((r) => !r.chain.includes(scope.pre) && tokenRule(r));
+    assert.ok(tokenBlocks.length >= 3,
+      `${slug}.css 块外应至少有三段 :root token 规则（亮色 / 显式暗色 / 跟随系统暗色），实为 ${tokenBlocks.length} 段`);
+    // 块外允许的 @ 块：@keyframes（不能进 @scope）与承载 token 定义的 @media；
+    // 其他 @ 块（例如把覆盖规则塞进 @media 却漏在外层）一律红。
+    const atOutside = atBlocks.filter((b) => b.open < scope.open || b.open > scope.close)
+      .filter((b) => !b.pre.startsWith("@keyframes") && !b.pre.startsWith("@media"));
+    assert.deepEqual(atOutside.map((b) => `${slug}.css:${b.line} ${b.pre}`), [],
+      "\\@scope 之外只允许顶层 @keyframes 与承载 token 定义的 @media");
+    const keyframesInside = atBlocks.filter((b) => b.pre.startsWith("@keyframes") && b.open > scope.open && b.open < scope.close);
+    assert.deepEqual(keyframesInside.map((b) => `${slug}.css:${b.line} ${b.pre}`), [],
+      "\@keyframes 不能放在 @scope 内：浏览器不会为它注册动画");
+  });
+}
