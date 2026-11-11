@@ -3822,11 +3822,19 @@ export function createAgentMetricsCollector(options = {}) {
     }
   }
   // 重开账：真重启（DSH 换壳、kimi 旧主全灭后来新主）在稳定行上就地清零
-  // 请求数/token/工时/折线，行 id 与标签不动。旧账的在途请求按上面的规矩
-  // 结算进端点聚合。代际锚替换为新宿主（dsh 连同新壳）。
+  // 本次运行的账——请求数/token/工时/最近身份/在途，行 id 与标签不动。
+  // recentSamples / ttftHistory 是「既成事实的历史」不是本次运行的账，跨运行
+  // 保留（与快照层 serializeAggregateState 同口径：窗口被剪掉会比重启前卡面
+  // 少打一个数）。旧账的在途请求按上面的规矩结算进端点聚合，代际锚替换为
+  // 新宿主（dsh 连同新壳）。
   function reopenDesktopAccount(bucket, entry, clientPid, parentPid) {
     settleLeakedInstanceRequests(bucket, entry.state, nowFn());
-    entry.state = createAggregateState(sparkWindowPoints);
+    const samples = entry.state.recentSamples.slice();
+    const ttft = entry.state.ttftHistory.slice();
+    const next = createAggregateState(sparkWindowPoints);
+    next.recentSamples = samples;
+    next.ttftHistory = ttft;
+    entry.state = next;
     entry.firstSeen = nowFn();
     entry.desktopGen = {
       hostPids: new Set([clientPid]),
@@ -3937,6 +3945,34 @@ export function createAgentMetricsCollector(options = {}) {
   // the desktop app points its gateway straight at the resident relay, so it
   // has no session reporter and the socket reverse lookup is its only identity.
   const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map(), workbuddy: new Map(), zcode: new Map() };
+
+  // 实例行换代继承：行被淘汰时把它的样本窗按 `${bucket}:${instId}` 留一拍，同名
+  // 新行在 bindInstance 建立时播种，避免「行换代 = 折线历史蒸发」。只存既成事实
+  // 的历史样本，不存累计量/身份/在途。快照一次性消费（播种即删）+ 容量上限防
+  // 无界增长；播种后新请求照常 push，超窗裁剪沿用既有 keep，不另造第二套窗口。
+  const retiredInstanceSamples = new Map();
+  const RETIRED_INSTANCE_SAMPLES_MAX = 256;
+  function rememberRetiredInstanceSamples(bucket, instId, state) {
+    if (state.recentSamples.length === 0 && state.ttftHistory.length === 0) return;
+    const key = `${bucket}:${instId}`;
+    retiredInstanceSamples.delete(key); // 重新插入，刷新淘汰顺序
+    retiredInstanceSamples.set(key, {
+      recentSamples: state.recentSamples.slice(),
+      ttftHistory: state.ttftHistory.slice(),
+    });
+    while (retiredInstanceSamples.size > RETIRED_INSTANCE_SAMPLES_MAX) {
+      const oldest = retiredInstanceSamples.keys().next();
+      if (oldest.done) break;
+      retiredInstanceSamples.delete(oldest.value);
+    }
+  }
+  function takeRetiredInstanceSamples(bucket, instId) {
+    const key = `${bucket}:${instId}`;
+    const snap = retiredInstanceSamples.get(key);
+    if (snap === undefined) return null;
+    retiredInstanceSamples.delete(key); // 一次性消费：同名新行只播种一次
+    return snap;
+  }
 
   // 预留会话行的起账时刻，按桶记忆。它只服务一件事：同一条预留行在轮询之间
   // 指纹稳定（面板按 JSON.stringify(agent) 判重渲染，每拍都换 firstSeen 会让
@@ -4056,15 +4092,22 @@ export function createAgentMetricsCollector(options = {}) {
     markMetricsDirty();
   }
 
-  // 端点全账清零：原位重置（保住对象身份，在途请求/看板持有的引用随之归零），
-  // claude 连会话行与退役账一起清。实例桶不清——行有独立的生死机制（见
-  // settleAndResetRunAccount 注释），恢复的旧行（无活 pid）由逐行淘汰收走。
-  // sparkWindowPoints 是视窗设置不是账目，保留。触发方一律自己负责
-  //「可信轮 + 过宽限」的门，这里只管清。
+  // 端点本次运行的账清零：原位重置（保住对象身份，在途请求/看板持有的引用随之
+  // 归零），claude 连会话行与退役账一起清。实例桶不清——行有独立的生死机制
+  //（见 settleAndResetRunAccount 注释），恢复的旧行（无活 pid）由逐行淘汰收走。
+  // sparkWindowPoints 是视窗设置、recentSamples / ttftHistory 是既成事实的历史，
+  // 两者都不是本次运行的账，清零后回填——与快照层 serializeAggregateState 同口径。
+  // 其余字段必须保持零态：settleAndResetRunAccount 的 hadAccount 幂等闸读
+  // totalRequests / activeRequests / lastRequestAt / lastModel，回填样本不会触发
+  // 每轮重复 reset。触发方一律自己负责「可信轮 + 过宽限」的门，这里只管清。
   function resetEndpointRunAccount(id) {
     const state = endpointStates[id];
     if (state === undefined) return;
+    const samples = state.recentSamples.slice();
+    const ttft = state.ttftHistory.slice();
     Object.assign(state, createAggregateState(state.sparkWindowPoints));
+    state.recentSamples = samples;
+    state.ttftHistory = ttft;
     if (id === "claude") {
       claudeSessions.clear();
       sessionStabilitySeq.clear();
@@ -4556,6 +4599,11 @@ export function createAgentMetricsCollector(options = {}) {
       }
       if (!entry) {
         entry = { state: createAggregateState(sparkWindowPoints), firstSeen: nowFn(), label: null };
+        const inherited = takeRetiredInstanceSamples(bucketAgentId, instanceId);
+        if (inherited !== null) {
+          entry.state.recentSamples = inherited.recentSamples;
+          entry.state.ttftHistory = inherited.ttftHistory;
+        }
         if (isDesktopStableRow) {
           ensureDesktopGen(entry);
           settleDesktopGenerationOnFold(bucketAgentId, entry, norm.clientPid, cachedProcessCounts);
@@ -5648,6 +5696,8 @@ export function createAgentMetricsCollector(options = {}) {
           // zcode 会话行下场前把累计并入退役账：端点账 = 活行 + 退役账，
           // 家族连失两轮收行不该让历史凭空消失。
           if (bucket === "zcode" && isSessionRow) absorbZcodeRetiredRow(entry);
+          // 真正的淘汰点：留下样本窗，同名新行建立时继承折线历史。
+          rememberRetiredInstanceSamples(bucket, instId, entry.state);
           instMap.delete(instId);
           sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
           sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
@@ -5681,6 +5731,8 @@ export function createAgentMetricsCollector(options = {}) {
             && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             // 空闲档收 zcode 会话行同样先并账，端点总读数不随行蒸发。
             if (bucket === "zcode" && isSessionRow) absorbZcodeRetiredRow(entry);
+            // 真正的淘汰点：留下样本窗，同名新行建立时继承折线历史。
+            rememberRetiredInstanceSamples(bucket, instId, entry.state);
             instMap.delete(instId);
             sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
             sessionRowRegistryMisses.delete(`${bucket}:${instId}`);
@@ -5932,18 +5984,53 @@ export function createAgentMetricsCollector(options = {}) {
     // absorbAggregateState 口径并进一份展示态克隆，再让 instanceSnapshots 从
     // 同一份 state 派生 sparkHistory（不另造展示侧 spark 拼接）。桶内账、
     // 行身份与代际锚一概不动，请求收尾后仍由既有重折叠并账收敛。
+    // 同一出口还收编另一档：pid 不在活宿主集、零账零在途零历史、且没有
+    // TUI/Web/桌面面徽标的已退 launcher 残留行（面「未知」），展开时它是一条
+    // 空态虚线。有自己流量或带合法面的 pid 行不在此列。
     function foldDesktopHostRows(bucket, stableId, hostPids) {
       const bucketMap = instanceBuckets[bucket];
       const stable = bucketMap.get(stableId);
-      if (!stable || !(hostPids instanceof Set) || hostPids.size === 0) {
+      // 早退只留「稳定行必须存在」这一档：本轮没有活宿主时，桶里仍可能挂着已退
+      // launcher 的零账残留行要折进稳定行，不能因为 hostPids 为空就整条跳过。
+      if (!stable || !(hostPids instanceof Set)) {
         return { rows: instanceSnapshots(bucket), folded: 0 };
       }
       const pidTail = new RegExp("^" + bucket + "-(\\d+)$");
-      const dupIds = [...bucketMap.keys()].filter((id) => {
+      // 同一个判据里收两类，循环按类别分流：
+      //   第一类（merge: true）活宿主原始行——与稳定行同指一个 pid，折叠时把账并进去；
+      //   第二类（merge: false）已退 launcher 的零账残留行——无可并的量，只从展示层摘掉。
+      const dupRows = [];
+      for (const id of bucketMap.keys()) {
         const m = pidTail.exec(String(id));
-        return m !== null && hostPids.has(Number(m[1]));
-      });
-      if (dupIds.length === 0) return { rows: instanceSnapshots(bucket), folded: 0 };
+        if (m === null) continue;
+        const pid = Number(m[1]);
+        const entry = bucketMap.get(id);
+        if (entry === undefined) continue;
+        const st = entry.state;
+        // 稀疏 state（如快照里 state:{} 还原的行）字段可能缺，按零/空处理，
+        // 不对 undefined 直接取 .length。
+        const recentLen = Array.isArray(st.recentSamples) ? st.recentSamples.length : 0;
+        const ttftLen = Array.isArray(st.ttftHistory) ? st.ttftHistory.length : 0;
+        const hasTraffic = (st.totalRequests ?? 0) !== 0
+          || (st.activeRequests ?? 0) !== 0
+          || (st.lastRequestAt ?? null) !== null
+          || recentLen > 0 || ttftLen > 0;
+        if (hostPids.has(pid)) {
+          // 第一类：冷缓存窗口里原始行与稳定行同指一个活宿主，折叠并把账并进
+          // 稳定行（既有语义，稳定行的折线就来自这里）。
+          dupRows.push({ id, merge: true });
+          continue;
+        }
+        // 第二类判据：先排除「非零账或有面」再谈折叠——带自己流量或带 TUI/Web
+        // 面的合法 pid 行一律保留，这一步优先于 pid 归属，绝不误折。
+        if (hasTraffic) continue;
+        const surface = instanceSurfaceFor(bucket, id, entry);
+        if (surface !== null && surface !== DSH_UNKNOWN_SURFACE_LABEL) continue;
+        // 严格零账、零在途、零历史、无面：折进稳定行后展开时不再多一条空态
+        // 虚线；桶内账、行身份、代际锚不动。
+        dupRows.push({ id, merge: false });
+      }
+      if (dupRows.length === 0) return { rows: instanceSnapshots(bucket), folded: 0 };
 
       const displayMap = new Map(bucketMap);
       const merged = {
@@ -5955,7 +6042,13 @@ export function createAgentMetricsCollector(options = {}) {
         activeFaults: new Map(stable.state.activeFaults),
       };
       const keep = Math.max(recentSampleWindow, stable.state.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS);
-      for (const id of dupIds) {
+      for (const { id, merge } of dupRows) {
+        if (!merge) {
+          // 严格零账、无可并的量：只从展示层摘掉，不走 absorbAggregateState，
+          // 稀疏 state 的 undefined 字段便不会进累加器。
+          displayMap.delete(id);
+          continue;
+        }
         const entry = bucketMap.get(id);
         if (!entry) continue;
         absorbAggregateState(merged, entry.state, keep);
@@ -5976,7 +6069,8 @@ export function createAgentMetricsCollector(options = {}) {
         displayMap.delete(id);
       }
       displayMap.set(stableId, { ...stable, state: merged });
-      return { rows: instanceSnapshots(bucket, displayMap), folded: dupIds.length };
+      // folded 含两类，reconcileDesktopSurfaces 才会把面汇总压到实际行数。
+      return { rows: instanceSnapshots(bucket, displayMap), folded: dupRows.length };
     }
 
     // 折掉宿主行后，按引擎集算出的面副行不该比实际行数多报一票。

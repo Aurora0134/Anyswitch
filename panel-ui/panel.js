@@ -353,6 +353,7 @@ async function api(method, path, body) {
 
   let startupViewReady = Promise.resolve();
   async function init() {
+    if (typeof capturePanelAssetBaseline === "function") capturePanelAssetBaseline();
     initTheme();
     initStylePicker();
     // typeof 守卫理由同 initTerminalPreview：panel-startup 测试把 init() 抽进桩
@@ -462,6 +463,53 @@ async function api(method, path, body) {
     return firstReady;
   }
 
+  // panel-asset-freshness begin
+  // A resumed tab never re-navigates and re-requests nothing, so a swapped
+  // panel.js stays stale in memory. Snapshot the served ETag once on init,
+  // compare on returning to the foreground, and reload only when the file
+  // bytes actually changed (ETag = size + mtimeMs). Purely technical: no
+  // user-facing copy, no new DOM, no timers.
+  const PANEL_ASSET_URL = "/panel/assets/panel.js";
+  let panelAssetBaseline = null;
+  let panelAssetReloadScheduled = false;
+
+  function panelAssetVerdict({ baseline, current } = {}) {
+    const ok = (v) => typeof v === "string" && v.length > 0;
+    return ok(baseline) && ok(current) && baseline !== current;
+  }
+
+  async function readPanelAssetEtag() {
+    if (typeof fetch !== "function") return null;
+    try {
+      const res = await fetch(PANEL_ASSET_URL, { method: "HEAD", cache: "no-store" });
+      return res.headers && typeof res.headers.get === "function" ? res.headers.get("etag") : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function capturePanelAssetBaseline() {
+    try {
+      const etag = await readPanelAssetEtag();
+      if (etag) panelAssetBaseline = etag;
+    } catch {
+      return;
+    }
+  }
+
+  async function checkPanelAssetOnForeground() {
+    if (panelAssetReloadScheduled || !panelAssetBaseline) return;
+    const canCheck = typeof fetch === "function"
+      && typeof location !== "undefined"
+      && typeof location.reload === "function";
+    if (!canCheck) return;
+    const current = await readPanelAssetEtag();
+    if (!panelAssetVerdict({ baseline: panelAssetBaseline, current })) return;
+    panelAssetReloadScheduled = true;
+    location.reload();
+  }
+  // panel-asset-freshness end
+
   // 后台切回立即补刷。三处轮询（本页 1s/15s、统计页 30s）都带 document.hidden
   // 闸，隐藏期间完全不取数；而 Chrome 会把隐藏页的定时器节流到约每分钟一次，
   // 所以回前台后首个 tick 仍可能等近一分钟——期间画面停在切走前的旧数字上，
@@ -478,6 +526,7 @@ async function api(method, path, body) {
     if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     syncTerminalDataStream();
     if (document.hidden) return;
+    if (typeof checkPanelAssetOnForeground === "function") checkPanelAssetOnForeground();
     refreshStatus();
     if (currentView === "stats") {
       refreshStatsState({ silent: true });

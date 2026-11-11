@@ -17316,3 +17316,117 @@ describe("终端亮暗/颜色上报（agent match terminal 的面板半边）", 
     assert.equal(posts[1].body.foreground, "#1e293b", "前景同样按亮暗兜底");
   });
 });
+
+// ── 面板脚本资产换新后回前台自愈（防御复发；纯技术实现，零文案改动）──
+// 从后台/托盘恢复同一个 document 不会重新导航、也不重新请求任何资源，服务侧
+// panel.js 换新后旧页面会一直跑内存里的旧脚本。这里在 init 采一次 ETag 基线，
+// 回前台比对，只有文件字节真变了才 reload。判定抽成纯函数在 vm 里真跑，接入点
+// 按源码结构钉死；新增代码全英文，零文案自检直接断言无任何中文字符。
+describe("面板脚本资产 ETag：仅脚本换新才在回前台重载", () => {
+  const beginAnchor = "// panel-asset-freshness begin";
+  const endAnchor = "// panel-asset-freshness end";
+  function addedBlock() {
+    return sliceBetween(panelJs, beginAnchor, endAnchor);
+  }
+  function verdict(baseline, current) {
+    const body = panelJs.match(/function panelAssetVerdict\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(body, "panelAssetVerdict 在册");
+    return vm.runInNewContext(`(() => { ${body}; return panelAssetVerdict; })()`)({ baseline, current });
+  }
+
+  it("纯判定真跑：仅当基线/现值都非空且不等才需重载，无第三态", () => {
+    assert.equal(verdict("a-1", "a-1"), false, "相等不重载");
+    assert.equal(verdict("a-1", "a-2"), true, "不等才重载");
+    assert.equal(verdict(null, "a-2"), false, "基线 null 不重载");
+    assert.equal(verdict("", "a-2"), false, "基线空串不重载");
+    assert.equal(verdict(undefined, "a-2"), false, "基线缺失不重载");
+    assert.equal(verdict("a-1", null), false, "现值 null 不重载");
+    assert.equal(verdict("a-1", ""), false, "现值空串不重载");
+    assert.equal(verdict("a-1", undefined), false, "现值缺失不重载");
+    assert.equal(verdict(null, null), false, "两者皆空不重载");
+    assert.equal(verdict(undefined, undefined), false, "两者皆 undefined 不重载");
+    assert.equal(verdict("", ""), false, "两者皆空串不重载");
+    assert.equal(verdict(0, 1), false, "非字符串不当成可比较的 ETag");
+  });
+
+  it("主体结构：HEAD+no-store 取 etag、纯判定、一次性闸、环境守卫、失败静默", () => {
+    const block = addedBlock();
+    assert.ok(block.includes('const PANEL_ASSET_URL = "/panel/assets/panel.js";'), "恒定脚本 URL");
+    assert.ok(block.includes('fetch(PANEL_ASSET_URL, { method: "HEAD", cache: "no-store" })'), "HEAD + no-store");
+    assert.ok(block.includes('headers.get("etag")'), "取 etag 响应头");
+    assert.ok(block.includes("panelAssetVerdict({ baseline: panelAssetBaseline, current })"), "走纯判定函数比较");
+    assert.ok(block.includes("panelAssetReloadScheduled = true"), "置位后才 reload 的一次性闸");
+    assert.ok(block.includes("location.reload()"), "真变了才 reload");
+    assert.ok(block.includes('typeof fetch === "function"'), "fetch 环境守卫（桩环境不炸）");
+    assert.ok(block.includes('typeof location.reload === "function"'), "location.reload 环境守卫");
+    assert.ok(block.includes('typeof location !== "undefined"'), "location 未声明时不炸");
+    assert.ok((block.match(/catch/g) ?? []).length >= 2, "采集与读取各自失败静默");
+    assert.ok(block.includes("if (!panelAssetVerdict"), "判定为假即静默返回");
+  });
+
+  it("基线只在 init 采一次、typeof 守卫；不新增定时器/轮询", () => {
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init, "init 在册");
+    assert.ok(init.includes('if (typeof capturePanelAssetBaseline === "function") capturePanelAssetBaseline();'),
+      "init 里 fire-and-forget 采基线、带 typeof 守卫");
+    const block = addedBlock();
+    assert.ok(!block.includes("setInterval") && !block.includes("setTimeout"), "不新起任何定时器/轮询");
+  });
+
+  it("回前台校验挂在可见分支、各视图提前 return 之前，旁路无阻塞", () => {
+    const vis = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+    assert.ok(vis, "visibilitychange 处理器可取样");
+    const hiddenReturn = vis.indexOf("if (document.hidden) return;");
+    const call = vis.indexOf("checkPanelAssetOnForeground()");
+    const statsReturn = vis.indexOf('currentView === "stats"');
+    const terminalReturn = vis.indexOf('currentView === "terminal"');
+    assert.ok(hiddenReturn >= 0 && call > hiddenReturn, "挂在可见分支（hidden 早退之后）");
+    assert.ok(call > 0 && call < statsReturn, "排在 stats 提前 return 之前（stats 视图也触发）");
+    assert.ok(call < terminalReturn, "排在 terminal 提前 return 之前（terminal 视图也触发）");
+    assert.ok(vis.includes('if (typeof checkPanelAssetOnForeground === "function") checkPanelAssetOnForeground();'),
+      "typeof 守卫的 fire-and-forget 调用（不 await、桩内静默跳过）");
+    assert.ok(!vis.includes("await checkPanelAssetOnForeground"), "不阻塞既有视图分支");
+  });
+
+  it("既有 visibilitychange 行为不被破坏：可见分支调用序列与改前逐位一致", () => {
+    const vis = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+    assert.ok(vis);
+    // 新增那一行在桩里因 typeof 守卫被跳过，不进 state.calls。
+    const calls = [];
+    const state = { view: "board", calls };
+    new Function("state", "document", `
+      function refreshStatus() { state.calls.push("refreshStatus"); }
+      function refreshAgents() { state.calls.push("refreshAgents"); }
+      function refreshModelStability() { state.calls.push("refreshModelStability"); }
+      function refreshStatsState() { state.calls.push("refreshStatsState"); }
+      function pollTerminalSessions() { return Promise.resolve(); }
+      function renderTerminalPreviewSession() {}
+      function syncTerminalDataStream() { state.calls.push("syncTerminalDataStream"); }
+      function boardVisible() { return state.view === "board"; }
+      let currentView = state.view;
+      let terminalVisibilityWasHidden = false;
+      ${vis}
+    `)(state, { hidden: false });
+    assert.deepEqual(calls, ["syncTerminalDataStream", "refreshStatus", "refreshAgents", "refreshModelStability"]);
+  });
+
+  it("零文案自检：新增代码不含中文展示串 / toast / textContent 赋值 / alert / confirm / 新增 DOM", () => {
+    const initLine = panelJs.match(/[^\n]*capturePanelAssetBaseline\(\);[^\n]*/)?.[0] ?? "";
+    const visLine = panelJs.match(/[^\n]*checkPanelAssetOnForeground\(\);[^\n]*/)?.[0] ?? "";
+    const added = addedBlock() + "\n" + initLine + "\n" + visLine;
+    assert.ok(!/[\u4e00-\u9fff]/.test(added), "新增代码无任何中文字符（注释/字符串都不碰用户可见文案）");
+    assert.ok(!/toast\(/.test(added), "不出 toast");
+    assert.ok(!/textContent\s*=/.test(added), "不写 textContent");
+    assert.ok(!/\balert\s*\(/.test(added), "不弹 alert");
+    assert.ok(!/\bconfirm\s*\(/.test(added), "不弹 confirm");
+    assert.ok(!/\bprompt\s*\(/.test(added), "不弹 prompt");
+    assert.ok(!/createElement|insertAdjacentHTML|appendChild|innerHTML/.test(added), "不新增任何 DOM");
+  });
+
+  it("不因进程重启就重载：只看脚本 ETag，不读 pid/startTime/identity", () => {
+    const block = addedBlock();
+    assert.ok(!block.includes("pid") && !block.includes("startTime") && !block.includes("lastPanelIdentity"),
+      "与面板/relay 进程身份无关，单纯重启且文件未变不触发");
+  });
+});
+
