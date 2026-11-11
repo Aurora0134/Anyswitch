@@ -2147,6 +2147,94 @@
     border: 1px solid var(--border); border-radius: var(--radius-lg, 12px);
     pointer-events: none; user-select: none;
   }
+  /* 「自定义」预览的皮肤隔离层（token）：预览容器上由 JS 注入壁纸主题的整套公共
+     token（取色引擎产出），但皮肤私有 token 不在壁纸 token 契约里、引擎也不派生——
+     不在这里钉住，镜像克隆体会继续从 <html> 继承当前静态皮肤的取值，预览读成
+     「当前皮肤 + 壁纸取色」的混合体（卡片内高光、控制台配色、热力档位最先露馅）。
+     取值口径 = 壁纸主题生效时真实看板的 computed 值：基座段有定义的抄基座段取值
+     （暗色差异见后两条），基座段没定义的显式 initial——壁纸态下它们本就是未定义的
+     保证无效值，声明 initial 让预览子树与真实看板一致。与基座段绑定：
+     tests/panel-preview-isolation.test.mjs 与基座段逐项对账，改基座必须同步这里。 */
+  .wallpaper-preview {
+    /* 基座段无定义 → 壁纸态即未定义（保证无效值） */
+    --hl-inset: initial;
+    --brand-hl: initial;
+    --overlay-bg: initial;
+    --page-bg-image: initial;
+    --card-hairline: initial;
+    --glass-blur: blur(12px) saturate(150%);
+
+    --console-bg: #ffffff;
+    --console-toolbar-bg: #f8fafc;
+    --console-border: #e2e8f0;
+    --console-fg: #1e293b;
+    --console-muted: #64748b;
+    --console-hover-bg: #e2e8f0;
+    --console-hover-fg: #0f172a;
+    --console-live: var(--ok);
+    --console-info: #0284c7;
+    --console-warn: #b45309;
+    --console-error: #dc2626;
+
+    --terminal-bg: rgba(248, 250, 252, 0.78);
+    --terminal-fg: #1e293b;
+    --terminal-cursor: #334155;
+    --terminal-selection: #bfdbfe;
+    --terminal-muted: #64748b;
+
+    --store-drag-accent: var(--accent);
+    --store-drag-glow: 0 2px 14px color-mix(in srgb, var(--store-drag-accent) 32%, transparent);
+    --store-drag-ease: ease;
+
+    --heat-1: color-mix(in srgb, var(--accent) 28%, var(--surface));
+    --heat-2: color-mix(in srgb, var(--accent) 48%, var(--surface));
+    --heat-3: color-mix(in srgb, var(--accent) 70%, var(--surface));
+    --heat-4: color-mix(in srgb, var(--accent) 88%, var(--surface));
+  }
+  /* 继承型属性同理按壁纸态重设：基座 body 的 font/color 已按当前皮肤解析成计算值，预览
+     子树继承的是那份计算值——改 token 救不回来（实测 sepia 下预览仍用 Helvetica 字体、
+     文字仍是暖墨色）。这里用与基座 body 逐字相同的 font 简写与 color，保证与壁纸看板一致。 */
+  .wallpaper-preview {
+    font: 400 13.5px/1.55 var(--font-sans);
+    color: var(--text);
+  }
+  /* 暗色：只列与亮色不同的项（口径同基座段 --theme=dark 与壁纸主题的 --terminal-bg） */
+  :root[data-theme="dark"] .wallpaper-preview {
+    --console-bg: #090d16;
+    --console-toolbar-bg: #0f172a;
+    --console-border: #1e293b;
+    --console-fg: #e2e8f0;
+    --console-muted: #94a3b8;
+    --console-hover-bg: #1e293b;
+    --console-hover-fg: #f8fafc;
+    --console-info: #38bdf8;
+    --console-warn: #fbbf24;
+    --console-error: #f87171;
+    --terminal-bg: rgba(11, 18, 32, 0.72);
+    --terminal-fg: #d5e2f4;
+    --terminal-cursor: #dbeafe;
+    --terminal-selection: #29486d;
+    --terminal-muted: #71829a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]):not([data-theme="dark"]) .wallpaper-preview {
+      --console-bg: #090d16;
+      --console-toolbar-bg: #0f172a;
+      --console-border: #1e293b;
+      --console-fg: #e2e8f0;
+      --console-muted: #94a3b8;
+      --console-hover-bg: #1e293b;
+      --console-hover-fg: #f8fafc;
+      --console-info: #38bdf8;
+      --console-warn: #fbbf24;
+      --console-error: #f87171;
+      --terminal-bg: rgba(11, 18, 32, 0.72);
+      --terminal-fg: #d5e2f4;
+      --terminal-cursor: #dbeafe;
+      --terminal-selection: #29486d;
+      --terminal-muted: #71829a;
+    }
+  }
   .wallpaper-preview-backdrop { display: none; position: absolute; inset: 0; }
   .wallpaper-preview.has-image .wallpaper-preview-backdrop { display: block; }
   /* 图片层外扩 40px：模糊滤镜会把边缘透出底色，外扩把虚边推出预览区 */
