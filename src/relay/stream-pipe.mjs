@@ -455,9 +455,35 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
       return { outcome: "retryable", reason: "stream_error_before_content", committed, error: isOpenAI ? streamErr : undefined, usage: usageExtracted };
     }
 
-    // Upstream died mid-stream after content was already delivered -> emit an
-    // error frame and terminate. A dropped connection mid-response is the
-    // same fault class as a truncated stream, so it carries the same 502.
+    // Network severed mid-stream after content was already delivered. A killed
+    // connection is the same fault class as a guard-detected mid-word cut —
+    // undici surfaces it as a body-read rejection (TypeError: terminated)
+    // rather than a clean EOF — so the on tier hands the client's view (the
+    // shadow) back for a resume instead of terminating the turn. Budget,
+    // backoff and the exhaustion wording all belong to the keep-alive loop,
+    // exactly as for the verdict-path resume above.
+    if (onTier === true && guard.resumeShadow() !== null) {
+      heldOpenForResume = true;
+      closeOpenEvent();
+      return {
+        outcome: "resume",
+        reason: "stream_error_after_content",
+        committed,
+        shadow: guard.resumeShadow(),
+        // Everything the next attempt must inherit to look like the same
+        // response, same as the verdict-path resume.
+        resumeState: { translator, envelope: guard.envelope },
+        usage: usageExtracted,
+        // Only read if the budget runs out: the loop's exhaustion path swaps
+        // in the resume-exhausted wording but keeps this frame's code (502).
+        error: openAIError("api_error", streamErr?.message || "the upstream stream failed mid-response", UPSTREAM_INCOMPLETE_CODE),
+      };
+    }
+
+    // Upstream died mid-stream after content was already delivered (off tier,
+    // or nothing resumable) -> emit an error frame and terminate. A dropped
+    // connection mid-response is the same fault class as a truncated stream,
+    // so it carries the same 502.
     if (isOpenAI) {
       tracker?.recordEnd({ status: 502, error: { status: 502, message: streamErr?.message || "upstream stream error" }, usage: usageExtracted });
       try {
@@ -936,9 +962,9 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
 // onMemberSuccess contract as the other channels.
 export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
   const logger = deps?.logger;
-  const writeFailedFrame = (message, type) => {
+  const writeFailedFrame = (message, type, code = null) => {
     try {
-      res.write(new ResponsesSseTranslator(responsesCtx).fail(message, type));
+      res.write(new ResponsesSseTranslator(responsesCtx).fail(message, type, code));
     } catch {
       // socket already gone
     }
@@ -1018,7 +1044,10 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
     },
     sendExhausted: (message, lastOutcome) => {
       if (res.headersSent) {
-        writeFailedFrame(message, "api_error");
+        // A spent resume budget still reports the upstream-incomplete code: the
+        // client holds partial output and must be able to tell this fault apart
+        // from a generic upstream error (same contract as the Anthropic channel).
+        writeFailedFrame(message, "api_error", lastOutcome?.error?.error?.code ?? null);
         return;
       }
       const retryableReason = lastOutcome?.reason;

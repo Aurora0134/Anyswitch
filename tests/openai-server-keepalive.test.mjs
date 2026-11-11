@@ -89,6 +89,17 @@ function sseStream(chunks) {
   })();
 }
 
+// 网络死亡的真实形态：undici 的 fetch body 在连接被掐断时不是干净结束，
+// 而是让读流 reject（TypeError: terminated）。sseStream 只能模拟「流结束了
+// 但内容不完整」，接不住读流抛异常这条路径——续接机制曾在这里整段漏接。
+function sseStreamThenThrow(chunks) {
+  return (async function* () {
+    const enc = new TextEncoder();
+    for (const c of chunks) yield enc.encode(c);
+    throw new TypeError("terminated");
+  })();
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -894,6 +905,82 @@ describe("keep-alive resume (mid-response truncation, on tier)", () => {
       ok: true,
       status: 200,
       body: sseStream([
+        'data: {"id":"cmpl-1","choices":[{"delta":{"content":"partial output"}}]}\n\n',
+      ]),
+    });
+
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("partial output"), "the first part must survive");
+      assert.ok(text.includes('"error"'), "budget exhaustion must end in an error frame");
+      assert.ok(!text.split("\n").some((line) => line.trim() === "data: [DONE]"), "no terminator after a failed resume");
+      const errorPayload = JSON.parse(
+        text.split("\n").find((line) => line.startsWith("data:") && line.includes('"error"')).slice(5),
+      );
+      assert.match(errorPayload.error.message, /续接 1 次仍未完成/, "the message names how many resumes were spent");
+    });
+  });
+
+  it("resumes when the connection is severed mid-stream (read rejects): same budget, no error frame", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        // First attempt: content is flowing, then the network kills the
+        // connection — the body read itself rejects with TypeError: terminated.
+        return {
+          ok: true,
+          status: 200,
+          body: sseStreamThenThrow([
+            'data: {"id":"cmpl-1","choices":[{"delta":{"content":"partial output that got cut "}}]}\n\n',
+          ]),
+        };
+      }
+      // Resume attempt: the relay re-issued the request with the partial
+      // output appended, exactly as it does for a clean-EOF mid-word cut.
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"cmpl-2","choices":[{"delta":{"content":"and here is the rest"}}]}\n\n',
+          'data: {"id":"cmpl-2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const collector = createIsolatedCollector();
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 2, backoffMs: 10 }),
+      metricsCollector: collector,
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+
+      assert.ok(text.includes("partial output that got cut"), "the first part must survive the cut");
+      assert.ok(text.includes("and here is the rest"), "the resumed part must be appended");
+      assert.ok(!text.includes('"error"'), "no error frame may appear mid-stream");
+      assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1, "exactly one terminator");
+      assert.equal(callCount, 2, "upstream was called twice (1 resume)");
+    });
+  });
+
+  it("a severed stream exhausts the resume budget: the error frame carries 502, no [DONE] follows", async () => {
+    const upstreamFetch = async () => ({
+      ok: true,
+      status: 200,
+      body: sseStreamThenThrow([
         'data: {"id":"cmpl-1","choices":[{"delta":{"content":"partial output"}}]}\n\n',
       ]),
     });
