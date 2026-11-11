@@ -60,6 +60,14 @@
   const CONTRAST_TARGET_ACCENT = 4.5; // 强调色/渐变深端承载白字或文字用法的目标
   const CONTRAST_STEP = 0.035; // 亮度推拉步长
   const CONTRAST_MAX_STEPS = 28;
+  // 文字字阶的推拉步长比通用兜底细：字阶四档挨得近，粗步长会让达标那一档冲过目标，
+  // 弱档反而比次弱档更深。
+  const TEXT_LADDER_STEP = 0.006;
+  const TEXT_LADDER_MAX_STEPS = 200;
+  // 相邻字档的最小可分间距，量纲是对比度差。0.2 在 4.65 一带约合 4 级 8bit 灰阶：
+  // 同屏并排能分出两层灰；再窄（0.1 以下）只剩 1~2 级，肉眼几乎并色。间距再放大则要
+  // 把 --text-2 一起推深，正文与次级文字的层次反而被吃掉。
+  const TEXT_LADDER_MIN_GAP = 0.2;
   const CONTRAST_FALLBACKS = ["#171717", "#f7f7f5"]; // 推拉仍不达标时取对比度高者
 
   // —— 背景族：种子色向白（亮）/黑（暗）的混合比例与玻璃化默认透明度 ——
@@ -212,6 +220,15 @@
     ];
   }
 
+  // 面体色按 alpha 合成到下层（壁纸照片）后的实际观感色
+  function compositeOver(rgb, alpha, under) {
+    return [
+      Math.round(alpha * rgb[0] + (1 - alpha) * under[0]),
+      Math.round(alpha * rgb[1] + (1 - alpha) * under[1]),
+      Math.round(alpha * rgb[2] + (1 - alpha) * under[2]),
+    ];
+  }
+
   function hueDistance(a, b) {
     const d = Math.abs((((a - b) % 360) + 360) % 360);
     return d > 180 ? 360 - d : d;
@@ -251,6 +268,81 @@
       }
     }
     return best;
+  }
+
+  // 在一组候选背景上找一档明度，使最小对比度落在 [floor, ceiling] 窗口内。
+  // 从基准色朝「远离背景」的方向按 TEXT_LADDER_STEP 逐级推（对比度单调升），落到
+  // 窗口内第一档就停，落点因此贴近下界（目标值）而不是冲过去。朝外推到窗上界、
+  // 或基准色本身已在窗上界之外时，改朝反方向（靠近背景）回退，取窗内第一档。
+  // 窗口不可行（下界高过上界，通常出现在低档 alpha 撞上物理上限时）则退到上界之下
+  // 最高的一档：宁可比目标浅一点，也不让相邻档并成一色。连上界都够不到时返回对比度
+  // 最高的一端，不做假的达标。
+  function fitContrast(rgb, backgrounds, { floor = 0, ceiling = Infinity } = {}) {
+    const ratioOf = (c) => Math.min(...backgrounds.map((bg) => contrastRatio(c, bg)));
+    const r0 = ratioOf(rgb);
+    if (r0 >= floor && r0 <= ceiling) return rgb;
+    const [h, s, l0] = rgbToHsl(rgb[0], rgb[1], rgb[2]);
+    const bgLum = backgrounds.reduce((sum, bg) => sum + relativeLuminance(bg), 0) / backgrounds.length;
+    const darken = bgLum > 0.18; // 候选背景偏亮则压暗，偏暗则提亮
+    const dir = darken ? -1 : 1;
+    const lightnessAt = (steps) => clamp(l0 + dir * TEXT_LADDER_STEP * steps, 0, 1);
+    const at = (steps) => hslToRgb(h, s, lightnessAt(steps));
+    let underCeiling = r0 <= ceiling ? rgb : null;
+    let pushedPastCeiling = r0 > ceiling;
+    for (let i = 1; i <= TEXT_LADDER_MAX_STEPS; i++) {
+      const c = at(i);
+      const ratio = ratioOf(c);
+      if (ratio > ceiling) {
+        pushedPastCeiling = true;
+        break;
+      }
+      if (ratio >= floor) return c;
+      underCeiling = c;
+      if (lightnessAt(i) === 0 || lightnessAt(i) === 1) break;
+    }
+    if (pushedPastCeiling && underCeiling) return underCeiling;
+    for (let i = 1; i <= TEXT_LADDER_MAX_STEPS; i++) {
+      const c = at(-i);
+      const ratio = ratioOf(c);
+      if (ratio >= floor && ratio <= ceiling) return c;
+      if (ratio < floor) break; // 越退越弱，已经跌破下界
+      if (lightnessAt(-i) === 0 || lightnessAt(-i) === 1) break;
+    }
+    return darken ? [0, 0, 0] : [255, 255, 255];
+  }
+
+  // 文字四档的对比度标定。按从弱到强的次序（text-4 → text-3 → text-2 → text）逐档定，
+  // 每一档在自身目标之上再要求「比上一档至少高 TEXT_LADDER_MIN_GAP」，落点由上一档的
+  // 实测值决定。四档各自独立推到目标时不带这道次序，步长会让弱档冲过次弱档：默认
+  // 80 档亮套 --text-2 4.81 / --text-3 4.94，弱档反而更深，层次是反的。
+  // 强化档被半透面体的物理上限卡住时（低档 alpha 下甚至够不到 4.65），第二遍从强到弱
+  // 把弱档一并让出间距，保证四档始终可辨——此时中档会低于自身目标：滑杆 60 暗套
+  // （alpha 0.6）五个测试 seed 的 --text-3 实测约 4.25–4.64，该 alpha 最紧的物理上限约
+  // 4.71，而 4.65 目标叠加两档 0.2 间距要 5.05，这一档不可能同时满足；回归测试的边界
+  // 断言钉住这组取舍，不写假的达标。
+  function buildTextLadder(mode, backgrounds) {
+    const ratioOf = (c) => Math.min(...backgrounds.map((bg) => contrastRatio(c, bg)));
+    const rungs = [];
+    let floor = 0;
+    for (const key of ["--text-4", "--text-3", "--text-2", "--text"]) {
+      const target = key === "--text-4" ? CONTRAST_TARGET_WEAK : CONTRAST_TARGET;
+      const required = Math.max(target, floor);
+      const color = fitContrast(hexToRgb(TEXT_BASE[mode][key]), backgrounds, { floor: required });
+      rungs.push({ key, required, color, ratio: ratioOf(color) });
+      floor = rungs[rungs.length - 1].ratio + TEXT_LADDER_MIN_GAP;
+    }
+    let ceiling = Infinity;
+    for (let i = rungs.length - 1; i >= 0; i--) {
+      const rung = rungs[i];
+      if (rung.ratio > ceiling) {
+        rung.color = fitContrast(hexToRgb(TEXT_BASE[mode][rung.key]), backgrounds, { floor: rung.required, ceiling });
+        rung.ratio = ratioOf(rung.color);
+      }
+      ceiling = rung.ratio - TEXT_LADDER_MIN_GAP;
+    }
+    const tokens = {};
+    for (const rung of rungs) tokens[rung.key] = rgbToHex(rung.color);
+    return tokens;
   }
 
   // ═══════════════════════════════════════════════
@@ -531,9 +623,10 @@
     const [seedH, seedS] = rgbToHsl(seedRgb[0], seedRgb[1], seedRgb[2]);
 
     // 背景族：种子色向白（亮）/黑（暗）按比例混合，面体带玻璃化透明度。
-    // 对比度核算以不透明基色为准；壁纸透出对观感的补偿由 UI 层阅读透明度兜底。
+    // 对比度核算见下方文字四档：不透明基色 + 阅读面合成到最不利照片后的颜色。
     const surfaceOpaque = {};
     const surfaceTokens = {};
+    const surfaceAlpha = {};
     const targetRgb = light ? [255, 255, 255] : [0, 0, 0];
     for (const [key, spec] of Object.entries(SURFACE_SPEC[mode])) {
       const mixed = mixRgb(seedRgb, targetRgb, spec.ratio);
@@ -541,16 +634,27 @@
       let alpha = spec.alpha;
       const override = alphaOverrides && alphaOverrides[key];
       if (typeof override === "number" && Number.isFinite(override)) alpha = clamp(override, 0, 1);
+      surfaceAlpha[key] = alpha;
       surfaceTokens[key] = rgba(mixed, alpha);
     }
 
-    // 文字四档：中性基准色过对比度推拉，候选背景取页面底与卡片面
+    // 文字四档：中性基准色过对比度推拉。候选背景两层：
+    //   1) 面体的不透明基色（页面底 / 卡面，静态皮肤下就是它们本身）；
+    //   2) 阅读面（卡面 / 下沉面）按当前 alpha 合成到「最不利照片」后的颜色——亮套取黑、
+    //      暗套取白。壁纸照片不受控，半透面体在照片最不利处的实际颜色被拉向照片那一端，
+    //      只按不透明基色核算，弱字档到真实壁纸上会掉到目标以下（默认档实测 3.13 / 2.09，
+    //      目标 4.65 / 3.0）。合成色入候选后，推拉会把弱字压到照片最不利处也成立的位置。
+    //      磨砂面（--surface-glass）不入候选：它是顶栏/终端头一类大号粗体 chrome，其后的
+    //      照片还经 backdrop blur 平均，按 4.65 强推会把整条灰色字阶压到近黑（实测 #313131），
+    //      改动面大于可读性诉求。默认 80 档五个 seed 实测：--text-3 亮套 3.10–3.23 / 暗套
+    //      2.60–2.74（目标 4.65），四档最弱 --text-4 亮套 2.00–2.08 / 暗套 1.68–1.77
+    //      （目标 3.0），均未达标；该区间由回归测试钉住，磨砂面未纳入推拉是已知边界。
+    const worstPhoto = light ? [0, 0, 0] : [255, 255, 255];
     const textBgs = [surfaceOpaque["--bg"], surfaceOpaque["--surface"]];
-    const textTokens = {};
-    for (const key of ["--text", "--text-2", "--text-3", "--text-4"]) {
-      const target = key === "--text-4" ? CONTRAST_TARGET_WEAK : CONTRAST_TARGET;
-      textTokens[key] = rgbToHex(ensureContrast(hexToRgb(TEXT_BASE[mode][key]), textBgs, target));
+    for (const key of ["--surface", "--surface-sunken"]) {
+      textBgs.push(compositeOver(surfaceOpaque[key], surfaceAlpha[key], worstPhoto));
     }
+    const textTokens = buildTextLadder(mode, textBgs);
 
     // 边框：种子色调向亮暗两端的发丝线
     const borderRgb = hslToRgb(seedH, seedS * 0.55, light ? 0.42 : 0.62);

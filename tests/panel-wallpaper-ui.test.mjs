@@ -209,7 +209,7 @@ describe("终端透明栅格化只在壁纸底色带 alpha 时开启", () => {
 // 控制器闭包引用的模块级常量一并抽出
 const WALLPAPER_CONSTS = [
   "WALLPAPER_FX_KEY", "WALLPAPER_TOKENS_KEY", "WALLPAPER_MAX_BYTES",
-  "WALLPAPER_MIME_TYPES", "WALLPAPER_FX_DEFAULTS", "WALLPAPER_FX_LIMITS", "WALLPAPER_SURFACE_KEYS",
+  "WALLPAPER_MIME_TYPES", "WALLPAPER_FX_DEFAULTS", "WALLPAPER_FX_LIMITS", "WALLPAPER_SURFACE_TIERS",
   "WALLPAPER_FX_INPUTS",
 ].map((name) => {
   const m = panelJs.match(new RegExp(`const ${name} = [^;]+;`));
@@ -465,6 +465,65 @@ describe("壁纸控制器：暂存与确认闸门", () => {
     assert.equal(h.doc.els.get("wallpaperBackdropDim").style.background, "rgba(0, 0, 0, 0.6)", "全局压暗按新值");
     assert.deepEqual(JSON.parse(h.storage.getItem("panel-wallpaper-fx")), { blur: 0, dim: 60, surface: 80 });
     assert.equal(h.store.state.saves, 0, "未换图不重复入库");
+  });
+});
+
+// 表面 token 分档：滑杆值折成三档 alpha（内容面 1:1、玻璃面 0.8 倍、页面底 0.6+0.4×）。
+// 六键同值是修复前的形态：字压在照片上时卡面/磨砂面/页面底一起变透，分档把三者的
+// 透明度各自钉在语义位置上——这组断言对六键同值的旧实现为红。
+describe("壁纸控制器：表面 token 按档折算（内容面 / 玻璃面 / 页面底）", () => {
+  const alphaOf = (v) => {
+    const m = /^rgba\(\s*\d+,\s*\d+,\s*\d+,\s*([\d.]+)\s*\)$/.exec(v || "");
+    assert.ok(m, `表面 token 应为 rgba：${v}`);
+    return Number(m[1]);
+  };
+  async function committed(surface) {
+    const h = harness();
+    await h.controller.openModal();
+    await h.controller.pickFile(PNG_1KB);
+    if (surface !== undefined) h.controller.setStagedFx("surface", surface);
+    await h.controller.confirmModal();
+    return h;
+  }
+
+  it("默认 80 档：内容面 1:1、玻璃面 0.8 倍、页面底高档带——六键不再同值", async () => {
+    const h = await committed();
+    const p = h.rootEl._props;
+    for (const key of ["--surface", "--surface-sunken", "--surface-hover"]) {
+      assert.equal(alphaOf(p.get(key)), 0.8, `${key} 1:1 跟随滑杆值`);
+    }
+    assert.equal(alphaOf(p.get("--surface-glass")), 0.64, "玻璃面 0.8 倍跟随（默认档与引擎亮套 0.62 同档，磨砂不丢）");
+    for (const key of ["--bg", "--bg-page"]) {
+      assert.equal(alphaOf(p.get(key)), 0.92, `${key} 走 0.6+0.4×滑杆的高档带`);
+    }
+    assert.notEqual(alphaOf(p.get("--surface-glass")), alphaOf(p.get("--surface")), "玻璃面必须低于内容面");
+    assert.notEqual(alphaOf(p.get("--bg")), alphaOf(p.get("--surface")), "页面底必须高于内容面");
+    // 同一组系数作用亮暗两套：两套同档
+    const cache = JSON.parse(h.storage.getItem("panel-wallpaper-tokens"));
+    for (const key of ["--surface", "--surface-glass", "--bg"]) {
+      assert.equal(alphaOf(cache.dark[key]), alphaOf(cache.light[key]), `${key} 亮暗同档`);
+    }
+  });
+
+  it("两端档位：40 → 内容 0.4 / 玻璃 0.32 / 页面底 0.76；100 → 1 / 0.8 / 1", async () => {
+    const low = await committed(40);
+    assert.equal(alphaOf(low.rootEl._props.get("--surface")), 0.4, "最低档内容面 0.4（滑杆语义原样）");
+    assert.equal(alphaOf(low.rootEl._props.get("--surface-glass")), 0.32, "玻璃面同比折半");
+    assert.equal(alphaOf(low.rootEl._props.get("--bg")), 0.76, "页面底最低档仍留 0.76，不退成照片");
+    const high = await committed(100);
+    assert.equal(alphaOf(high.rootEl._props.get("--surface")), 1, "最高档内容面全实");
+    assert.equal(alphaOf(high.rootEl._props.get("--surface-glass")), 0.8, "最高档玻璃面仍在内容面下");
+    assert.equal(alphaOf(high.rootEl._props.get("--bg")), 1, "最高档页面底全实");
+  });
+
+  it("单调：滑杆越低每档都更透（「越低越透」不因分档改变）", async () => {
+    const low = await committed(40);
+    const mid = await committed(70);
+    const high = await committed(100);
+    const read = (h, key) => alphaOf(h.rootEl._props.get(key));
+    for (const key of ["--surface", "--surface-sunken", "--surface-hover", "--surface-glass", "--bg", "--bg-page"]) {
+      assert.ok(read(low, key) < read(mid, key) && read(mid, key) < read(high, key), `${key} 随滑杆单调变实`);
+    }
   });
 });
 

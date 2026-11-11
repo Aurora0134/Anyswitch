@@ -11347,8 +11347,19 @@ async function api(method, path, body) {
   const WALLPAPER_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
   const WALLPAPER_FX_DEFAULTS = { blur: 0, dim: 10, surface: 80 };
   const WALLPAPER_FX_LIMITS = { blur: [0, 30], dim: [0, 70], surface: [40, 100] };
-  // 「阅读区不透明度」滑杆的引擎挂钩面：surfaceAlpha 一次覆盖六个表面 token
-  const WALLPAPER_SURFACE_KEYS = ["--bg", "--bg-page", "--surface", "--surface-sunken", "--surface-hover", "--surface-glass"];
+  // 「阅读区不透明度」滑杆的引擎挂钩面：surfaceAlpha 覆盖六个表面 token，按键分三档折算
+  // （系数见 surfaceOverrides）。档位表必须覆盖引擎 SURFACE_SPEC 的全部键，漏一键该键就
+  // 停在引擎自带透明度上、不跟滑杆走。
+  //  - 内容面（卡面/下沉面/hover 面）1:1 跟随滑杆：滑杆语义原样——越低越透；
+  //  - 玻璃面（顶栏/终端头的磨砂层）0.8 倍跟随：与内容面同值就丢磨砂，默认 80 档折算
+  //    0.64，与引擎亮套规格 0.62 同档，越往低档越透、磨砂感越强；
+  //  - 页面底取 0.6+0.4×滑杆值的高档带：默认 0.92、最低 0.76，又随滑杆单调变透，但任何
+  //    档位都不退成照片（页面底是终端页与主题预览画布的承托面，透到底就是字压照片）。
+  const WALLPAPER_SURFACE_TIERS = [
+    { keys: ["--surface", "--surface-sunken", "--surface-hover"], floor: 0, scale: 1 },
+    { keys: ["--surface-glass"], floor: 0, scale: 0.8 },
+    { keys: ["--bg", "--bg-page"], floor: 0.6, scale: 0.4 },
+  ];
   // 三滑杆的窗口元素映射：开窗回显与 input 监听共用
   const WALLPAPER_FX_INPUTS = [
     { key: "blur", input: "wallpaperFxBlur", val: "wallpaperFxBlurVal", suffix: "px" },
@@ -11484,9 +11495,14 @@ async function api(method, path, body) {
       if (imageLayer) imageLayer.style.filter = fx.blur > 0 ? `blur(${fx.blur}px)` : "";
       if (dimLayer) dimLayer.style.background = `rgba(0, 0, 0, ${fx.dim / 100})`;
     }
+    // 滑杆值按档折成六个表面 token 的 alpha（三档系数与理由见 WALLPAPER_SURFACE_TIERS）
     function surfaceOverrides(values) {
+      const s = values.surface / 100;
       const overrides = {};
-      for (const key of WALLPAPER_SURFACE_KEYS) overrides[key] = values.surface / 100;
+      for (const tier of WALLPAPER_SURFACE_TIERS) {
+        const alpha = Math.round((tier.floor + tier.scale * s) * 1000) / 1000;
+        for (const key of tier.keys) overrides[key] = alpha;
+      }
       return overrides;
     }
     // 按已生效滑杆重取色：surfaceAlpha 同时覆盖亮暗两套的表面透明度
