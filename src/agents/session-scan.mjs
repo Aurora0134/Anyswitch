@@ -72,6 +72,7 @@ import { basename, dirname, join, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { zstdDecompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
+import { qoderEditionForPath } from "../launchers/qoder-merge-config.mjs";
 
 // ---------------------------------------------------------------------------
 // Shared constants & small helpers (translations of cc-switch providers/utils.rs)
@@ -96,6 +97,9 @@ const SUMMARY_MAX_CHARS = 160;
 //   dsh --profile <p> --resume <id>  (`dsh tui --resume <session>` launcher example)
 //   zcode --resume <id>      (--resume <sessionId>, session_<hex> from the CLI's own db)
 //   qodercli --resume <id>   (-r, --resume [id], project-scoped resolution)
+//   qoderclicn --resume <id> （CN 区域版同构：存档根 ~/.qoder-cn/projects 的会话
+//                            用 CN 版 CLI 续——续聊命令随存档的根归属走，见
+//                            qoder-merge-config.mjs 的双区域版指纹表）
 //   workbuddy --resume <id>  (本端点 CLI 的 -r/--resume [sessionId]；入口由本轮
 //                            shim 提供的 `workbuddy` 命令承担，见下方说明)
 // The command names are each CLI's own install command (npm bin / vendor PATH
@@ -115,7 +119,10 @@ export const RESUME_COMMAND = Object.freeze({
   grok: (meta) => `grok --resume ${meta.id}`,
   dsh: (meta) => `dsh --profile dsh-tui --resume ${meta.id}`,
   zcode: (meta) => `zcode --resume ${meta.id}`,
-  qoder: (meta) => `qodercli --resume ${meta.id}`,
+  // 双区域版：同一份会话存档按根归属选 CLI 名——~/.qoder-cn 下的对话只有
+  // qodercn 续得到（两侧数据根互不可见）。buildAgentResumeArgs 只取模板参数、
+  // 丢掉命令名，那里 meta.file 是占位符，归不到任何根 → 默认 qodercli，无害。
+  qoder: (meta) => `${qoderEditionForPath(meta.file) === "cn" ? "qoderclicn" : "qodercli"} --resume ${meta.id}`,
   workbuddy: (meta) => `workbuddy --resume ${meta.id}`,
 });
 
@@ -1252,6 +1259,8 @@ function createPiAdapter(roots) {
 // attachment / active-leaf / file-history-snapshot). ~/.qoder/logs/sessions/ is
 // only segmented RUN logs (headless plugin installs, config probes) — not a
 // conversation source, and not read here.
+// 双区域版：CN 版同构落在 ~/.qoder-cn/projects/，两个根都在扫描清单里（缺根的
+// readdir 失败自然跳过）；续聊命令的 CLI 名随存档根归属（见 RESUME_COMMAND）。
 // ---------------------------------------------------------------------------
 
 function createQoderAdapter(roots) {
@@ -2402,7 +2411,7 @@ function defaultRoots(home = homedir()) {
     dsh: [join(home, ".dsh", "sessions")],
     pi: [join(home, ".pi", "agent", "sessions")],
     opencode: [join(home, ".local", "share", "opencode")],
-    qoder: [join(home, ".qoder", "projects")],
+    qoder: [join(home, ".qoder", "projects"), join(home, ".qoder-cn", "projects")],
     codex: [join(home, ".codex", "sessions")],
     grok: [join(home, ".grok", "sessions")],
     workbuddy: [join(home, ".workbuddy", "projects")],

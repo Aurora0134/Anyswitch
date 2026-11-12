@@ -853,6 +853,41 @@ test("qoder: scans projects/ transcripts and loads messages", async () => {
   assert.ok(!existsSync(sessions[0].file));
 });
 
+// 双区域版：~/.qoder/projects 与 ~/.qoder-cn/projects 同构并扫；续聊命令的
+// CLI 名随存档根归属（intl → qodercli，cn → qoderclicn）。
+test("qoder 双区域版：双根并扫，续聊命令随根选 CLI 名", async () => {
+  const home = makeTmp();
+  const intlRoot = join(home, ".qoder", "projects");
+  const cnRoot = join(home, ".qoder-cn", "projects");
+  const writeLines = (sessionId) => [
+    JSON.stringify({ type: "workspace-directories", sessionId, directories: ["C:\\work\\qoderproj"] }),
+    JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-01T01:13:50.000Z", message: { role: "user", content: [{ type: "text", text: "提问" }] } }),
+  ];
+  writeQoderSession(intlRoot, "C--work-qoderproj", "11111111-1111-4111-8111-111111111111.jsonl", writeLines("11111111-1111-4111-8111-111111111111"));
+  writeQoderSession(cnRoot, "C--work-qoderproj", "22222222-2222-4222-8222-222222222222.jsonl", writeLines("22222222-2222-4222-8222-222222222222"));
+
+  const scanner = testScanner({ qoder: [intlRoot, cnRoot] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 2, "两个根的会话都进清单");
+  const byId = Object.fromEntries(sessions.map((s) => [s.id, s]));
+  assert.equal(
+    byId["11111111-1111-4111-8111-111111111111"]?.resumeCommand,
+    "qodercli --resume 11111111-1111-4111-8111-111111111111",
+  );
+  assert.equal(
+    byId["22222222-2222-4222-8222-222222222222"]?.resumeCommand,
+    "qoderclicn --resume 22222222-2222-4222-8222-222222222222",
+  );
+
+  // 删除/读取的白名单同样覆盖 CN 根。
+  const cnFile = byId["22222222-2222-4222-8222-222222222222"].file;
+  const messages = await scanner.loadMessages("qoder", cnFile);
+  assert.equal(messages.length > 0, true);
+  const del = await scanner.deleteSessions([{ endpoint: "qoder", file: cnFile }]);
+  assert.equal(del.ok.length, 1);
+  assert.ok(!existsSync(cnFile));
+});
+
 test("qoder: transcripts without any user turn are excluded", async () => {
   const root = makeTmp();
   writeQoderSession(root, "C--work-qoderproj", "deadc0de-0000-1111-2222-333344445555.jsonl", [
