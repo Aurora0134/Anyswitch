@@ -344,7 +344,7 @@ describe("皮肤规则的 @scope 收边", () => {
   it("预览视口不再被皮肤换底规则命中（.wallpaper-preview-viewport 保持透明底）", () => {
     assert.ok(panelHtml.includes('class="settings-mirror-viewport wallpaper-preview-viewport"'),
       "panel.html 的预览视口应同时带 settings-mirror-viewport 类——本测试的前提");
-    assert.ok(panelCss.includes(".wallpaper-preview-viewport { display: none; position: relative; background: transparent; }"),
+    assert.ok(/\.wallpaper-preview-viewport \{ display: none;[^}]*background: transparent;/.test(panelCss),
       "预览视口基座应为透明底（皮肤换底规则收边后，壁纸图才透得出来）");
     const hit = RULES.filter((r) => skinKeys(r.sel).length > 0 && r.sel.includes(".settings-mirror-viewport"))
       .filter((r) => !r.chain.some((pre) => {
