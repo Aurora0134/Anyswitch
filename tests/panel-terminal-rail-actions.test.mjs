@@ -1202,8 +1202,9 @@ describe("S4 底栏钉住", () => {
       assert.ok(body.indexOf('id="railTermSectionHead"') < body.indexOf('class="rail-term-scroll"'),
         "段头在滚动层之前（不随树滚）");
       // 中段：唯一滚动层里只有一棵工作区树（两段合并）
-      const scroll = body.match(/<div class="rail-term-scroll">([\s\S]*?)<\/div>\s*<span class="rail-term-fade"/);
-      assert.ok(scroll, "中段滚动层在册，且遮罩挂在它外面（不随内容滚）");
+      const scroll = body.match(/<div class="rail-term-scroll">([\s\S]*?)<\/div>\s*<\/nav>/);
+      assert.ok(scroll, "中段滚动层在册，且是栏体最后一段（底栏在本 nav 之外）");
+      assert.ok(!body.includes("rail-term-fade"), "渐隐不再是一颗独立元素（改由滚动层 mask 承担）");
       assert.ok(scroll[1].includes('id="railTermHistoryList"'), "工作区树在滚动层内（live 行内联其中）");
       assert.ok(!scroll[1].includes('id="railTermOpenList"'), "「打开的终端」段已拆");
       // 滚动层里不再套内层滚动容器（唯一滚动层）

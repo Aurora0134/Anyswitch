@@ -219,8 +219,7 @@ describe("终端视图左栏换血", () => {
       // （hover 卡是挂 body 的 portal 浮层，position:fixed，不属钉底机制，
       // 钉底三件——滚动层/底栏/遮罩——的规则里不许出现 sticky/fixed。）
       assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏（亮暗/返回）不参与伸缩");
-      const pinRules = [".rail-term-scroll {", ".rail-foot {", ".rail-term-fade {"]
-        .map((sel) => cssRule(sel)).join("");
+      const pinRules = [".rail-term-scroll {", ".rail-foot {"].map((sel) => cssRule(sel)).join("");
       assert.ok(!/position:\s*(sticky|fixed)/.test(pinRules), "钉底三件不碰 sticky/fixed（钉底靠 flex）");
       // 滚动条指针感知隐退：变量替换、无淡出
       assert.ok(panelCss.includes("#railTerminalDir[data-quiet] { --rail-term-scrollbar-thumb: transparent; }"),
@@ -233,37 +232,30 @@ describe("终端视图左栏换血", () => {
       assert.ok(track && track[1].includes("transparent"), "track 透明");
     });
 
-    it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留新建图标钮", () => {
-      const fade = cssRule(".rail-term-fade {");
-      assert.ok(fade.includes("height: 24px"), "底部渐隐 24px");
-      // 终点必须与栏底色同一个取值源：栏底在 saas/sepia 被对调成 --bg-page，写死
-      // --surface 会在那两套皮肤下变成一条更亮的实色带。断言钉的是「同一来源」而不是
-      // 某个具体 token 名，改取值源时测试跟着改、不会替错的实现背书。
-      assert.ok(fade.includes("var(--rail-bg"), "渐隐终点取 --rail-bg（栏底色取值源），不写死某个 token");
-      assert.ok(!/linear-gradient\(to bottom, transparent, var\(--(surface|bg-page)\)\)/.test(fade),
-        "不直接写 --surface / --bg-page（皮肤一换就错）");
-      assert.ok(panelCss.includes(":root[data-ui-version=\"v2\"] #v2Rail { --rail-bg: var(--surface); }"),
-        "基座：栏底色 = --surface");
-      // --rail-bg 与「材质修正 ②」那条栏底对调逐项同源：基座 --surface，
-      // saas/sepia 合并选择器里一起换成 --bg-page，aurora 不参与（沿用基座）。
-      // 改写后皮肤键在 @scope 起点上，块内选择器统一为 :scope:scope[data-ui-version="v2"]；
-      // 合并块的 saas/sepia 两格改写后同形，靠作用域起点限定皮肤。
-      assert.ok(/:scope:scope\[data-ui-version="v2"\] #v2Rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] #v2Rail \{ --rail-bg: var\(--bg-page\); \}/.test(panelCss),
-        "saas/sepia：--rail-bg 跟随栏底对调成 --bg-page");
-      // 栏底那条对调规则（合并选择器一格）确实把 saas/sepia 的 .rail 换成 --bg-page
+    it("列表底部 24px 渐隐＝滚动层自身 mask（不叠色）、滚条 5px、折叠态只留新建图标钮", () => {
+      // 渐隐只减内容、不加颜色。早先那块「以栏底色收尾」的渐变色块在壁纸主题下会把该段
+      // alpha 叠成两层（表面在半透明玻璃档），暗色栏底读成一道黑带——断言钉机制而非字面量。
+      const scrollBodies = [...panelCss.matchAll(/\.rail-term-scroll \{([^}]*)\}/g)].map((m) => m[1]);
+      const masked = scrollBodies.find((body) => body.includes("mask-image"));
+      assert.ok(masked, "渐隐挂在滚动层 mask 上");
+      assert.ok(/linear-gradient\(to bottom, black calc\(100% - 24px\), transparent\)/.test(masked),
+        "渐隐 24px、终点 transparent（只减内容不叠颜色）");
+      assert.ok(masked.includes("mask-size: 100% 100%, 6px 100%"), "第二层 6px 保住滚条槽（thumb 尾部不被淡掉）");
+      assert.ok(!masked.includes("--rail-bg") && !masked.includes("--surface"),
+        "mask 不取栏底色（取色的渐隐块会在半透明栏底上叠第二层）");
+      assert.ok(!scrollBodies.some((body) => /background:\s*linear-gradient\(to bottom, transparent/.test(body)),
+        "滚动层不靠刷底色做渐隐");
+      // 回归守卫：旧渐隐的三种痕迹都不许回潮
+      assert.ok(!panelCss.includes("rail-term-fade"), "栏体上的渐隐色块（含折叠态选择器）已拆除");
+      assert.ok(!panelCss.includes("--rail-bg"), "「遮罩终点＝栏底色」的取值链已删除");
+      assert.ok(!panelHtml.includes("rail-term-fade"), "HTML 里不再有渐隐 span");
+      // 栏底对调本身保留（与渐隐解耦）：saas/sepia 的 .rail 仍取 --bg-page
       assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
-        "saas/sepia 的 .rail 底色确为 --bg-page（--rail-bg 与之同值，渐隐终点才对得上）");
-      assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] #v2Rail'),
-        "aurora 不参与对调，沿用基座 --surface（玻璃料）");
-      assert.ok(fade.includes("pointer-events: none"), "遮罩不吃点击");
-      // S4：遮罩挂栏体（不在滚动层里，不随内容滚），贴滚动层底、right 让出滚动条
-      assert.ok(fade.includes("position: absolute"), "绝对定位贴滚动层底");
-      assert.ok(fade.includes("bottom: 0"), "贴底");
-      assert.ok(/right:\s*[5-9]px/.test(fade), "right 让出滚动条宽度（5px 滚条 + 余量）");
+        "saas/sepia 的 .rail 底色仍为 --bg-page");
       assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
-      assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section-head, \.rail-term-scroll, \.rail-term-fade\) \{ display: none; \}/.test(panelCss),
-        "折叠态只留新建图标钮：段头/树/渐隐整段不出");
+      assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section-head, \.rail-term-scroll\) \{ display: none; \}/.test(panelCss),
+        "折叠态只留新建图标钮：段头/树整段不出");
       assert.ok(/:root\[data-ui-version="v2"\]:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "窄栏（<1200 自动档）新建按钮收成图标钮");
       assert.ok(/:root\[data-ui-version="v2"\]\[data-rail="collapsed"\] \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
