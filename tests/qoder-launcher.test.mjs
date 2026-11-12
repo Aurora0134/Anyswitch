@@ -605,3 +605,47 @@ test("realSpawnQoder never lets a throwing onSpawned hook fail the launch", asyn
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("realSpawnQoder spawns the CN dispatcher when the CN edition is installed, without the CDP flag", async () => {
+  // CN 在装（QODER_CN_EXECUTABLE 覆盖等价于 CN 指纹命中）时拉起 CN 入口；CN 自研
+  // 工作台没有对应的 renderer store，--remote-debugging-port 不该透传给 CN CLI。
+  const dir = mkTestDir("qoder-spawn-cn-");
+  try {
+    const outFile = join(dir, "argv.txt");
+    const cmdPath = join(dir, "qodercn.cmd");
+    writeFileSync(cmdPath, `@echo off\r\n@echo %* > "${outFile}"\r\n@exit /b 0\r\n`);
+    const code = await realSpawnQoder({
+      env: { ...process.env, USERPROFILE: join(dir, "home"), QODER_CN_EXECUTABLE: cmdPath },
+      args: ["--resume"],
+      onSpawned: () => {},
+    });
+    assert.equal(code, 0);
+    const childArgs = readFileSync(outFile, "utf8").trim().split(/\s+/).filter(Boolean);
+    assert.deepEqual(childArgs, ["--resume"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runQoderLauncher 在 CN 在装时把 BYOK 写进 CN 数据根（~/.qoder-cn/settings.json）", async () => {
+  const dir = mkTestDir("qoder-launcher-cn-");
+  try {
+    // CN CLI 执行体在盘即「CN 在装」（resolveQoderLaunchEdition 的指纹判据）。
+    mkdirSync(join(dir, "home", ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
+    writeFileSync(join(dir, "home", ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"), "MZ");
+    const deps = recordingDeps();
+    const code = await runQoderLauncher({
+      ...deps,
+      ...relayReturning(deps),
+      base: { USERPROFILE: join(dir, "home"), LOCALAPPDATA: join(dir, "local") },
+    });
+    assert.equal(code, 0);
+    assert.equal(
+      deps.written.settingsPath,
+      join(dir, "home", ".qoder-cn", "settings.json"),
+      "BYOK 配置跟随拉起区域版的数据根",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

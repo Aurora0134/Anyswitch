@@ -910,3 +910,25 @@ test("续接错误归类：载荷/身份问题 resume-invalid，端点不支持�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("qoder 终端一键启动：CN 在装拉起 CN 入口，注入的 env 键集不变", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    // CN CLI 执行体在盘即「CN 在装」：entry 调度器缺席时直取 qoderclicn.exe。
+    mkdirSync(join(base.USERPROFILE, ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
+    const cnCli = join(base.USERPROFILE, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe");
+    writeFileSync(cnCli, "MZ");
+    let launch = buildAgentSessionLaunch({ agentId: "qoder", cwd: root, token: TOKEN, base });
+    assert.equal(launch.launch.args[6], cnCli, "CN 在装时终端拉起 CN CLI 执行体");
+    assert.deepEqual(Object.keys(launch.env).sort(), ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"], "注入键集与国际版一致");
+    // entry/qodercn.cmd 在盘时按契约列序优先调度器（.cmd 由 cmd 包装承载）。
+    mkdirSync(join(base.USERPROFILE, ".qoder-cn", "entry"), { recursive: true });
+    const cnEntry = join(base.USERPROFILE, ".qoder-cn", "entry", "qodercn.cmd");
+    writeFileSync(cnEntry, "@echo off\r\n");
+    launch = buildAgentSessionLaunch({ agentId: "qoder", cwd: root, token: TOKEN, base });
+    assert.equal(launch.launch.args[6], cnEntry);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

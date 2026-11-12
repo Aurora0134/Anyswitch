@@ -9853,3 +9853,62 @@ describe("cold-start spark history retention (four reset/eviction paths)", () =>
     }
   });
 });
+
+// qoder 双区域版（2026-11-13）：国际版与 CN 版镜像名同桶聚合、同一端点一卡，
+// 卡头的 edition 字段分辨主区域版（运行中 > 在装 > 缺省 intl）。
+describe("qoder dual-edition image buckets and the card edition field", () => {
+  const PS_DUAL_EDITION_SCAN = [
+    String.raw`5150,900,Qoder IDE.exe,C:\Users\tester\AppData\Local\Programs\Qoder IDE\Qoder IDE.exe`,
+    String.raw`5151,5150,Qoder IDE.exe,C:\Users\tester\AppData\Local\Programs\Qoder IDE\Qoder IDE.exe --type=renderer`,
+    String.raw`6100,900,Qoder CN.exe,C:\Users\tester\AppData\Local\Programs\Qoder CN\Qoder CN.exe`,
+    String.raw`6101,6100,Qoder CN.exe,C:\Users\tester\AppData\Local\Programs\Qoder CN\Qoder CN.exe --type=gpu`,
+    String.raw`7200,900,qoderclicn.exe,C:\Users\tester\.qoder-cn\bin\qoderclicn\qoderclicn.exe`,
+    String.raw`7201,7200,qoderclicn.exe,C:\Users\tester\.qoder-cn\bin\qoderclicn\qoderclicn.exe --internal-sites-mcp C:\Users\tester\.qoder-cn\plugins\cache\qoder-sites`,
+    String.raw`900,4,cmd.exe,C:\Windows\system32\cmd.exe`,
+  ].join("\r\n") + "\r\n";
+
+  it("认全三个新镜像名：同桶计数、helper 同口径滤掉、区域版分型落 qoderEditions", async () => {
+    const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_DUAL_EDITION_SCAN), nowFn: () => 10000 });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.qoder, 3, "Qoder IDE/Qoder CN/qoderclicn 主进程各计一，--type= 与 sites-mcp 滤掉");
+    assert.ok(procs.qoderPids.has(5150));
+    assert.ok(procs.qoderPids.has(6100));
+    assert.ok(procs.qoderPids.has(7200));
+    assert.ok(!procs.qoderPids.has(5151));
+    assert.ok(!procs.qoderPids.has(7201));
+    assert.deepEqual([...procs.qoderEditions].sort(), ["cn", "intl"]);
+  });
+
+  it("运行中的区域版决定卡头 edition：CN 进程在跑即 cn", async () => {
+    const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_DUAL_EDITION_SCAN), nowFn: () => 10000 });
+    const qoder = (await collector.getAgentsStatus()).find((a) => a.id === "qoder");
+    assert.equal(qoder.edition, "cn");
+  });
+
+  it("只有国际版在跑时 edition 为 intl", async () => {
+    const scan = String.raw`5150,900,Qoder IDE.exe,C:\Users\tester\AppData\Local\Programs\Qoder IDE\Qoder IDE.exe` + "\r\n";
+    const collector = testCollector({ execFn: (c, o, cb) => cb(null, scan), nowFn: () => 10000 });
+    const qoder = (await collector.getAgentsStatus()).find((a) => a.id === "qoder");
+    assert.equal(qoder.edition, "intl");
+  });
+
+  it("没在跑时看在装：CN 指纹在盘即 cn，两版都没有缺省 intl", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-qoder-edition-"));
+    try {
+      const quiet = (c, o, cb) => cb(null, "");
+      // CN CLI 在盘 → cn（不碰真实 HOME，env 钉进临时目录）。
+      const cnHome = join(dir, "cn-home");
+      mkdirSync(join(cnHome, ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
+      writeFileSync(join(cnHome, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"), "MZ");
+      const cnCollector = testCollector({ execFn: quiet, nowFn: () => 10000, env: { USERPROFILE: cnHome, LOCALAPPDATA: join(cnHome, "local") } });
+      const cnCard = (await cnCollector.getAgentsStatus()).find((a) => a.id === "qoder");
+      assert.equal(cnCard.edition, "cn");
+
+      const cleanCollector = testCollector({ execFn: quiet, nowFn: () => 10000, env: { USERPROFILE: join(dir, "clean"), LOCALAPPDATA: join(dir, "clean-local") } });
+      const cleanCard = (await cleanCollector.getAgentsStatus()).find((a) => a.id === "qoder");
+      assert.equal(cleanCard.edition, "intl");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
