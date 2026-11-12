@@ -530,7 +530,13 @@ async function api(method, path, body) {
     // 的只有垫片，切回时它就是「新画面画好之前的内容」。typeof 闸护单测桩环境。
     if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     syncTerminalDataStream();
+    // 垫片兜底窗只在前台计时：隐藏页的定时器会被节流甚至冻结，回调常拖到切回前台
+    // 才跑，那时窗口已可见，按普通档到点就把「切回时的那一屏」撤走了。隐藏这一拍
+    // 直接停表（并作废旧回调），回前台重新起一窗，从切回时刻起算。两处都带 typeof
+    // 闸：桩环境没有这套设施时静默跳过，可见分支的调用序列一字不变。
+    if (document.hidden && typeof pauseTerminalStaleScreenCap === "function") pauseTerminalStaleScreenCap();
     if (document.hidden) return;
+    if (typeof resumeTerminalStaleScreenCap === "function") resumeTerminalStaleScreenCap();
     if (typeof checkPanelAssetOnForeground === "function") checkPanelAssetOnForeground();
     refreshStatus();
     if (currentView === "stats") {
@@ -7641,15 +7647,31 @@ async function api(method, path, body) {
     // 那只（terminalBoundSessionId），拿不到时按普通档走（见 terminalSwitchStaleWidened）。
     const staleCapMs = () => (terminalSwitchStaleWidened(parkSessionId) ? TERMINAL_SWITCH_STALE_SCREEN_MAX_MS : TERMINAL_STALE_SCREEN_MAX_MS);
     //
-    // 窗口在后台时不撤：隐藏期 rAF 停摆，观察循环叫不醒，撤了就等于把「切回时的那一
-    // 屏」也撤了。此时重新起一次计时，回前台由观察循环（按「新画面有内容」揭幕）接手。
-    // 这一支**不计入 capRenewals**：隐藏期本来就无法撤，回前台后的第一次到点才重新
-    // 按上面的续窗上限处置（5 窗＝30s 的「有界」承诺从回前台那一拍起算）。
+    // 兜底只在窗口前台计时（2026-11-12）：隐藏页定时器会被节流甚至冻结，原来
+    // 「回调执行那一刻再看 document.hidden」挡不住它——回调常拖到切回前台才跑，
+    // 那时窗口已可见，判据不成立就当场撤走垫片；而画面重建排在 pollTerminalSessions
+    // 的一次网络往返之后，屏上于是露出「旧帧消失 → 空白 → 新画面整屏重绘」整段。
+    // 现在隐藏那一拍取消在册窗并作废旧回调（pauseTerminalStaleScreenCap），回前台
+    // 重新起一窗（resumeTerminalStaleScreenCap），有界承诺从切回那一拍起算。
+    // capToken 是关键：冻结的回调即使仍被派发到前台，代次对不上也只空转退出。
     let capRenewals = 0;
+    let capToken = 0;
     const armCap = () => {
+      const token = capToken;
       stale.timer = setTimeout(() => {
         stale.timer = null;
-        if (typeof document !== "undefined" && document.hidden) { armCap(); return; }
+        // 老窗（已暂停／已被回前台重起的窗顶替）或垫片已撤：整组作废，不碰当前屏。
+        if (token !== capToken || stale.done || terminalStaleScreen !== stale) return;
+        // 没收到 visibilitychange 的兜底：窗口还在后台就不能撤「切回时的那一屏」。
+        if (typeof document !== "undefined" && document.hidden) { pauseCap(); return; }
+        // 后台切回的重建排在 pollTerminalSessions 之后；这一拍之前屏上只有垫片，撤了
+        // 必然露白。只续窗等重建，次数沿用既有上限；新实例与流都建出来后判据自动失效。
+        if (stale.foregroundRebuildPending && (!terminalXterm || !terminalEventSource)
+            && capRenewals < TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS) {
+          capRenewals += 1;
+          armCap();
+          return;
+        }
         // /switch 还在飞：POST 自己要 6~12s（探针＋terminate＋spawn），而「正在加载」
         // 占位是 POST **落地之后**才武装的。此刻撤垫片会露出一块既没有旧帧、也没有
         // 占位的纯底色——正是这次要消灭的那块空白。续一窗等落地：落地后由占位层
@@ -7670,9 +7692,33 @@ async function api(method, path, body) {
         dropTerminalStaleScreen();
       }, staleCapMs());
     };
+    const pauseCap = () => {
+      capToken += 1;
+      if (stale.timer !== null) clearTimeout(stale.timer);
+      stale.timer = null;
+    };
+    const resumeCap = () => {
+      pauseCap();
+      capRenewals = 0;
+      stale.foregroundRebuildPending = true;
+      armCap();
+    };
+    stale.pauseCap = pauseCap;
+    stale.resumeCap = resumeCap;
     armCap();
     watchTerminalStaleScreen(stale);
     return stale;
+  }
+
+  // 隐藏 / 回前台两拍的兜底窗收口：只作用于当前在册的垫片，垫片已撤或桩环境没有
+  // 这套设施时一律空转，不额外登记定时器。揭幕仍由观察循环按「新画面真的出字」做。
+  function pauseTerminalStaleScreenCap() {
+    const stale = terminalStaleScreen;
+    if (stale && typeof stale.pauseCap === "function") stale.pauseCap();
+  }
+  function resumeTerminalStaleScreenCap() {
+    const stale = terminalStaleScreen;
+    if (stale && typeof stale.resumeCap === "function") stale.resumeCap();
   }
 
   // 就绪判据（唯一一条）：新实例的缓冲区里真的**有字**——首帧回放的字节被解析了。

@@ -939,6 +939,82 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
 });
 
 /* ============================================================
+   T13 · 后台切回：旧垫片挂到新画面出字为止（2026-11-12）
+   ============================================================ */
+// 病灶：兜底计时器按墙上时钟撤垫片，判「是否后台」看的又是回调执行那一刻的
+// document.hidden。隐藏页定时器被节流/冻结后，回调常拖到切回前台才跑，那时窗口
+// 已可见 → 当场撤图；而画面重建排在 pollTerminalSessions 的一次网络往返之后，
+// 于是「旧帧消失 → 空白 → 新画面整屏重绘」整段暴露，看起来像页面重新加载。
+describe("T13 后台切回：兜底只在前台计时，旧帧挂到重建出字", () => {
+  const plainMax = () => Number(/TERMINAL_STALE_SCREEN_MAX_MS = (\d+)/.exec(panelJs)[1]);
+
+  it("源码：隐藏那一拍停表、回前台那一拍重新起窗，既有 hidden 早退原样保留", () => {
+    const vis = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+    assert.ok(vis, "visibilitychange 处理器可取样");
+    const hiddenReturn = vis.indexOf("if (document.hidden) return;");
+    assert.ok(hiddenReturn >= 0, "隐藏早退原样保留（既有钉子按这一句定位）");
+    const pause = vis.indexOf("pauseTerminalStaleScreenCap()");
+    const resume = vis.indexOf("resumeTerminalStaleScreenCap()");
+    const poll = vis.indexOf("pollTerminalSessions()");
+    assert.ok(pause > 0 && pause < hiddenReturn, "停表排在隐藏早退之前");
+    assert.ok(resume > hiddenReturn && resume < poll, "重起排在回前台分支、画面重建之前");
+    const park = extractFn("parkTerminalScreen");
+    assert.match(park, /capToken/, "老计时器代次作废（冻结回调落到前台也不能撤图）");
+    assert.match(park, /foregroundRebuildPending/, "等待重建期间不撤");
+  });
+
+  it("真跑：隐藏期不续窗，回前台重新起一窗且从切回时刻起算", async () => {
+    const w = makeTerminalWorld();
+    await primeSession(w, terminalSession("A"));
+    w.world.parkTerminalScreen();
+    assert.deepEqual(w.clock.timerDelays(), [plainMax()], "前置：停放即登记一窗");
+    w.ctx.docHidden = true;
+    w.world.stale()?.pauseCap?.();            // visibilitychange 隐藏那一拍
+    w.clock.flushAll();
+    assert.equal(w.clock.pendingTimers(), 0, "隐藏期不续窗（旧实现会一窗接一窗）");
+    assert.notEqual(w.world.stale(), null, "旧帧仍挂在屏上");
+    w.ctx.docHidden = false;
+    w.world.stale()?.resumeCap?.();           // visibilitychange 回前台那一拍
+    assert.deepEqual(w.clock.timerDelays(), [plainMax()], "从切回时刻重新起一窗");
+  });
+
+  it("真跑：拖到回前台才跑的老回调不许撤垫片", async () => {
+    const w = makeTerminalWorld();
+    await primeSession(w, terminalSession("A"));
+    w.world.parkTerminalScreen();
+    w.ctx.docHidden = true;
+    w.clock.flushAll();                      // 冻结/节流：这一窗的回调落到前台那一拍
+    w.ctx.docHidden = false;
+    w.world.parkTerminalScreen();            // 回前台那一拍：无可停画面，不撤已有垫片
+    w.world.stale()?.resumeCap?.();
+    w.clock.fireOldestTimer();
+    assert.notEqual(w.world.stale(), null, "老回调即使在前台到点也不能把旧帧撤走");
+    assert.ok(w.clock.pendingTimers() >= 1, "只续窗等重建，屏上不留空白");
+  });
+
+  it("真跑：等待重建期间到点只续窗，新画面出字才揭幕", async () => {
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    w.world.parkTerminalScreen();
+    w.ctx.docHidden = true;
+    w.world.stale()?.pauseCap?.();
+    w.ctx.docHidden = false;
+    w.world.stale()?.resumeCap?.();
+    // 回前台重建排在 pollTerminalSessions 的一拍网络往返之后：这一刻还没有实例、没有流
+    w.clock.fireOldestTimer();
+    assert.notEqual(w.world.stale(), null, "等待重建期间到点不撤");
+    assert.equal(termA.disposed, false, "旧帧整屏盖着");
+    assert.ok(w.clock.pendingTimers() >= 1, "只续窗");
+    await w.world.connectTerminalStream(terminalSession("B"));
+    w.sources[w.sources.length - 1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
+    w.sources[w.sources.length - 1].emit("data", JSON.stringify("B-screen\n"));
+    w.clock.flushAll();
+    assert.equal(w.world.stale(), null, "新画面出字后揭幕");
+    assert.equal(termA.disposed, true, "旧实例随之销毁");
+  });
+});
+
+/* ============================================================
    T12 · 换绑前先停帧 + exit 帧消费（2026-11-05 A1/A2）
    ============================================================ */
 describe("T12 换绑前停帧、退出帧落地", () => {
