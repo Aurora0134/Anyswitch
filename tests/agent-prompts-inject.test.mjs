@@ -175,6 +175,44 @@ describe("agent-prompts-inject block rendering and application", () => {
     assert.equal(existsSync(target), false);
   });
 
+  // 双区域版（契约：intl=~/.qoder、cn=~/.qoder-cn 结构同构）：注入对每个
+  // 已识别在装的数据根各写一份；识别按数据根目录在盘判定。
+  it("qoder 双区域版：双装双写、仅 CN 在装只写 CN 根", () => {
+    const { injector, homeDir } = makeInjector();
+    const intlTarget = join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md");
+    const cnTarget = join(homeDir, ".qoder-cn", "rules", "anyswitch-managed-prompts.md");
+    mkdirSync(join(homeDir, ".qoder"), { recursive: true });
+    mkdirSync(join(homeDir, ".qoder-cn"), { recursive: true });
+
+    const both = injector.syncEndpoint("qoder", [PRESET_A]);
+    assert.equal(both.changed, true);
+    assert.equal(readFileSync(intlTarget, "utf8"), `${buildManagedBlock([PRESET_A])}\n`);
+    assert.equal(readFileSync(cnTarget, "utf8"), `${buildManagedBlock([PRESET_A])}\n`);
+
+    // 幂等：两个根都已是最新时整单不变。
+    assert.equal(injector.syncEndpoint("qoder", [PRESET_A]).changed, false);
+  });
+
+  it("qoder 双区域版：仅 CN 在装时不给国际版造目录", () => {
+    const { injector, homeDir } = makeInjector();
+    mkdirSync(join(homeDir, ".qoder-cn"), { recursive: true });
+    const result = injector.syncEndpoint("qoder", [PRESET_A]);
+    assert.equal(result.changed, true);
+    assert.equal(existsSync(join(homeDir, ".qoder-cn", "rules", "anyswitch-managed-prompts.md")), true);
+    assert.equal(existsSync(join(homeDir, ".qoder")), false, "未在装的国际版根不该被创建");
+  });
+
+  it("qoder 双区域版：空预设移除覆盖双根（含已卸载区域版的残留）", () => {
+    const { injector, homeDir } = makeInjector();
+    const cnTarget = join(homeDir, ".qoder-cn", "rules", "anyswitch-managed-prompts.md");
+    mkdirSync(join(homeDir, ".qoder-cn", "rules"), { recursive: true });
+    writeFileSync(cnTarget, `${buildManagedBlock([PRESET_A])}\n`, "utf8");
+    // intl 根从未存在、CN 根留有托管块：移除不做「在装」过滤，双根全覆盖。
+    const result = injector.syncEndpoint("qoder", []);
+    assert.equal(result.removed, true);
+    assert.equal(existsSync(cnTarget), false);
+  });
+
   it("replaces an existing block in place, preserving content around it", () => {
     const { injector, homeDir } = makeInjector();
     const target = join(homeDir, ".dsh", "AGENTS.md");

@@ -329,6 +329,163 @@ describe("deploy / undeploy", () => {
   });
 });
 
+// 双区域版端点（qoder：~/.qoder ↔ ~/.qoder-cn 同构）：部署对已识别在装的根
+// 双写，摘除/收编/清理覆盖全部根。
+describe("qoder 双区域版 skills", () => {
+  function setupQoder() {
+    const { dir, cleanup } = tempRoot();
+    const home = join(dir, "home");
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    return { dir, home, repo, cleanup };
+  }
+  const qoderDir = (home) => join(home, ".qoder", "skills");
+  const qoderCnDir = (home) => join(home, ".qoder-cn", "skills");
+
+  it("deploy 双装双写且整单幂等", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    const calls = [];
+    try {
+      mkdirSync(join(home, ".qoder"), { recursive: true });
+      mkdirSync(join(home, ".qoder-cn"), { recursive: true });
+      const r1 = await deploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle(calls) });
+      assert.equal(r1.ok, true);
+      for (const dir of [qoderDir(home), qoderCnDir(home)]) {
+        assert.equal(lstatSync(join(dir, "skill-a")).isSymbolicLink(), true, `${dir} 应有 junction`);
+        assert.equal(existsSync(join(dir, "skill-a", "SKILL.md")), true);
+      }
+      const r2 = await deploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle(calls) });
+      assert.equal(r2.idempotent, true);
+      assert.equal(calls.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("deploy 仅 CN 根在装时只写 CN 根；一根都不在退回主根预置", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    try {
+      mkdirSync(join(home, ".qoder-cn"), { recursive: true });
+      const r1 = await deploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      assert.equal(r1.ok, true);
+      assert.equal(existsSync(join(qoderCnDir(home), "skill-a", "SKILL.md")), true);
+      assert.equal(existsSync(qoderDir(home)), false, "未在装的国际版根不该被创建");
+    } finally {
+      cleanup();
+    }
+
+    const second = setupQoder();
+    try {
+      const r2 = await deploy({ endpointId: "qoder", skillName: "skill-a", repoPath: second.repo }, { homeDir: second.home, recycleDirFn: mockRecycle([]) });
+      assert.equal(r2.ok, true);
+      assert.equal(existsSync(join(qoderDir(second.home), "skill-a", "SKILL.md")), true, "无根可认时主根预置");
+      assert.equal(existsSync(join(second.home, ".qoder-cn")), false);
+    } finally {
+      second.cleanup();
+    }
+  });
+
+  it("deploy 任一根冲突即整单不动：另一根不留半份部署", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    try {
+      mkdirSync(join(home, ".qoder"), { recursive: true });
+      mkdirSync(join(home, ".qoder-cn"), { recursive: true });
+      writeSkill(join(qoderCnDir(home), "skill-a"), { name: "skill-a", extra: "x: 1\n" });
+      const r = await deploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      assert.equal(r.ok, false);
+      assert.equal(r.conflict, true);
+      assert.equal(existsSync(join(qoderDir(home), "skill-a")), false, "国际版根不许先挂上半份 junction");
+      assert.equal(existsSync(join(qoderCnDir(home), "skill-a", "SKILL.md")), true, "冲突的本地目录原样保留");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("undeploy 覆盖全部根：只落在 CN 根的链接也摘得掉", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    try {
+      mkdirSync(qoderDir(home), { recursive: true });
+      mkdirSync(qoderCnDir(home), { recursive: true });
+      createJunction(join(qoderDir(home), "skill-a"), join(repo, "skill-a"));
+      createJunction(join(qoderCnDir(home), "skill-a"), join(repo, "skill-a"));
+      const r = await undeploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home });
+      assert.equal(r.ok, true);
+      assert.equal(existsSync(join(qoderDir(home), "skill-a")), false);
+      assert.equal(existsSync(join(qoderCnDir(home), "skill-a")), false);
+
+      createJunction(join(qoderCnDir(home), "skill-a"), join(repo, "skill-a"));
+      const r2 = await undeploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home });
+      assert.equal(r2.ok, true);
+      assert.equal(existsSync(join(qoderCnDir(home), "skill-a")), false);
+      const r3 = await undeploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home });
+      assert.equal(r3.idempotent, true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("scanEndpoints 同名合并（国际版根优先），仅 CN 根的本地技能照常见于清单", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    try {
+      mkdirSync(qoderDir(home), { recursive: true });
+      mkdirSync(qoderCnDir(home), { recursive: true });
+      createJunction(join(qoderDir(home), "skill-a"), join(repo, "skill-a"));
+      createJunction(join(qoderCnDir(home), "skill-a"), join(repo, "skill-a"));
+      writeSkill(join(qoderCnDir(home), "cn-only"), { name: "cn-only" });
+      const scanned = scanEndpoints(repo, { homeDir: home });
+      const qoder = scanned.find((ep) => ep.id === "qoder");
+      assert.equal(qoder.dirExists, true);
+      const names = qoder.entries.map((e) => e.name);
+      assert.deepEqual(names, ["cn-only", "skill-a"]);
+      const merged = qoder.entries.find((e) => e.name === "skill-a");
+      assert.equal(merged.kind, "junction");
+      assert.equal(merged.repoSkill, "skill-a");
+      assert.equal(qoder.entries.filter((e) => e.name === "skill-a").length, 1, "同名不重复出行");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("mergeLocalSkill 从 CN 根收编并向全部在装根挂回 junction", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    const calls = [];
+    try {
+      mkdirSync(join(home, ".qoder"), { recursive: true });
+      writeSkill(join(qoderCnDir(home), "mine"), { name: "mine" });
+      const r = await mergeLocalSkill({ endpointId: "qoder", skillName: "mine", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle(calls) });
+      assert.equal(r.ok, true);
+      assert.equal(existsSync(join(repo, "mine", "SKILL.md")), true, "已收进主仓库");
+      assert.equal(existsSync(join(qoderCnDir(home), "mine")), true);
+      assert.equal(lstatSync(join(qoderCnDir(home), "mine")).isSymbolicLink(), true, "CN 根原地换挂 junction");
+      assert.equal(lstatSync(join(qoderDir(home), "mine")).isSymbolicLink(), true, "国际版根同步挂 junction");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("deleteLocalSkill 双根回收；deleteRepoSkill 解开全部根上的链接", async () => {
+    const { home, repo, cleanup } = setupQoder();
+    const calls = [];
+    try {
+      mkdirSync(join(home, ".qoder"), { recursive: true });
+      mkdirSync(join(home, ".qoder-cn"), { recursive: true });
+      writeSkill(join(qoderDir(home), "junk"), { name: "junk" });
+      writeSkill(join(qoderCnDir(home), "junk"), { name: "junk" });
+      await deleteLocalSkill({ endpointId: "qoder", skillName: "junk" }, { homeDir: home, recycleDirFn: mockRecycle(calls) });
+      assert.equal(calls.length, 2, "两个根的实体目录都进回收站");
+
+      createJunction(join(qoderDir(home), "skill-a"), join(repo, "skill-a"));
+      createJunction(join(qoderCnDir(home), "skill-a"), join(repo, "skill-a"));
+      const r = await deleteRepoSkill({ repoPath: repo, skillName: "skill-a" }, { homeDir: home, recycleDirFn: mockRecycle(calls) });
+      assert.equal(r.ok, true);
+      assert.equal(existsSync(join(qoderDir(home), "skill-a")), false);
+      assert.equal(existsSync(join(qoderCnDir(home), "skill-a")), false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("importSkill", () => {
   it("imports a valid skill and refuses duplicates / SKILL.md-less sources", () => {
     const { dir, cleanup } = tempRoot();

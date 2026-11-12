@@ -12,6 +12,10 @@
 //     Qoder keeps watching a rule file once loaded, so edits land on the next
 //     turn → hotReload true. `~/.qoder/AGENTS.md` injects too but is read only
 //     at session start and is the user's own file — hence rules.
+//     双区域版（2026-11-12 契约）：CN 版同构落在 ~/.qoder-cn/rules/ 下，
+//     def 用 altHomes 表达；注入只写「已识别在装」的数据根（根目录在盘即在装，
+//     一个都不在时退回主根保住装了没跑过的预置口径），移除则双根全覆盖——
+//     区域版卸载后残留的托管块也摘得掉。
 //   - grok: `$GROK_HOME/rules/` (default `~/.grok/rules/`) is a home-level
 //     rules directory Grok always scans — every *.md directly inside it loads
 //     as a user rule. Rules are read at session start with no file watcher
@@ -56,7 +60,7 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "dsh", label: "DeepSeek Harness", hotReload: false, targetRel: "~/.dsh/AGENTS.md", home: [".dsh", "AGENTS.md"] },
   { id: "pi", label: "Pi", hotReload: false, targetRel: "~/.pi/agent/AGENTS.md", home: [".pi", "agent", "AGENTS.md"] },
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
-  { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },
+  { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"], altHomes: [[".qoder-cn", "rules", "anyswitch-managed-prompts.md"]] },
   { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
   { id: "grok", label: "Grok Build", hotReload: false, targetRel: "~/.grok/rules/anyswitch-managed-prompts.md", home: [".grok", "rules", "anyswitch-managed-prompts.md"] },
   // WorkBuddy（Electron 桌面壳 + 内置 CodeBuddy Code CLI）：用户级规则目录
@@ -173,26 +177,42 @@ export function createPromptsInjector({ homeDir = homedir() } = {}) {
   /**
    * Sync one endpoint's instructions file to its effective preset set.
    * Returns { ok:true, changed, removed?, target }.
+   * 双区域版端点（qoder）：注入只写已识别在装的数据根（一个都不在退回主根），
+   * 空预设集的移除对全部数据根生效；返回的 target 恒为主根落点。
    */
   function syncEndpoint(endpointId, presets) {
     const def = findDef(endpointId);
-    const target = targetFor(def);
     const block = presets.length > 0 ? buildManagedBlock(presets) : null;
-    const current = existsSync(target) ? readFileSync(target, "utf8") : null;
-
-    if (current === null && block === null) return { ok: true, changed: false, target };
-
-    const next = applyManagedBlock(current ?? "", block);
-    if (current !== null && next === current) return { ok: true, changed: false, target };
-
-    // The file held only the managed block: remove the file itself.
-    if (next === "") {
-      rmSync(target, { force: true });
-      return { ok: true, changed: true, removed: true, target };
+    const homes = [def.home, ...(def.altHomes ?? [])];
+    let targets;
+    if (block === null || homes.length === 1) {
+      targets = homes.map((parts) => join(homeDir, ...parts));
+    } else {
+      const recognized = homes.filter((parts) => existsSync(join(homeDir, parts[0])));
+      targets = (recognized.length > 0 ? recognized : [def.home]).map((parts) => join(homeDir, ...parts));
     }
-    mkdirSync(dirname(target), { recursive: true });
-    atomicWriteFile(target, next);
-    return { ok: true, changed: true, target };
+    let changed = false;
+    let removed = false;
+    for (const target of targets) {
+      const current = existsSync(target) ? readFileSync(target, "utf8") : null;
+
+      if (current === null && block === null) continue;
+
+      const next = applyManagedBlock(current ?? "", block);
+      if (current !== null && next === current) continue;
+
+      // The file held only the managed block: remove the file itself.
+      if (next === "") {
+        rmSync(target, { force: true });
+        changed = true;
+        removed = true;
+        continue;
+      }
+      mkdirSync(dirname(target), { recursive: true });
+      atomicWriteFile(target, next);
+      changed = true;
+    }
+    return { ok: true, changed, ...(removed ? { removed: true } : {}), target: targetFor(def) };
   }
 
   /**
