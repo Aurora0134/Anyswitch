@@ -9,7 +9,7 @@
 > *「渠道配一次，十个 agent 一起用。」*
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.3](https://img.shields.io/badge/Version-0.7.3-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.3)
+[![Version: 0.7.4](https://img.shields.io/badge/Version-0.7.4-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.4)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#这些边界要先接受)
 [![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
 
@@ -24,7 +24,7 @@
 这个工具存在的全部理由，是让「只配一次」「只存一份密文」「一眼看到谁在跑、走的哪条路」三件事同时成立。
 
 ```bat
-git clone --branch v0.7.3 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.4 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
@@ -281,7 +281,7 @@ Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills �
 ## 这些边界要先接受
 
 - **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows。
-- **没有安装器。** 0.7.3 以源码发行。不过，安装好之后，面板「关于」页可以自更新。
+- **没有安装器。** 0.7.4 以源码发行。不过，安装好之后，面板「关于」页可以自更新。
 - **虚拟终端仍是预览功能。** 它要单独装依赖；如模拟GUI Agent的UI框架还在继续打磨。
 - **重启 relay 会中断在途请求，并结束当时所有终端进程。** 面板里的「重启」会先换 relay 再换面板宿主，请在空档执行。
 - **左侧导航的新版界面是默认布局。** 没碰过界面开关的浏览器一律按新版呈现；显式选过旧版的保持原样。切换入口在 设置 → 通用 → 显示，即时生效。本文截图取的就是默认布局。
@@ -317,7 +317,7 @@ Anyswitch/
 想核对这一版的实际改动范围：
 
 ```bat
-git log --no-merges --oneline v0.7.2..v0.7.3
+git log --no-merges --oneline v0.7.3..v0.7.4
 ```
 
 ---
@@ -336,8 +336,8 @@ git status --short
 有输出就先处理自己的改动，别为了升级直接丢弃。工作树干净后，只取目标标签：
 
 ```bat
-git fetch --no-tags origin tag v0.7.3
-git switch --detach v0.7.3
+git fetch --no-tags origin tag v0.7.4
+git switch --detach v0.7.4
 npm install
 ```
 
