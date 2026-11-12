@@ -1502,12 +1502,12 @@ describe("终端视图左栏换血", () => {
       const branch = render.slice(render.indexOf("if (deferScreen)"));
       assert.ok(branch.includes("requestAnimationFrame(() => requestAnimationFrame(runDeferredScreen))"),
         "双 rAF 调度（一帧给渲染器排程、一帧给合成器上屏）");
-      assert.ok(branch.indexOf("parkTerminalScreen();") < branch.indexOf("connectTerminalStream(session, { revive });"),
+      assert.ok(branch.indexOf("parkTerminalScreen(session);") < branch.indexOf("connectTerminalStream(session, { revive });"),
         "停放排在建流之前：92f6ced 垫片次序，park 与 connect 成对延后");
       assert.ok(branch.includes('if (currentView === "terminal") scheduleTerminalFit();'), "fit 同组延后");
       assert.ok(branch.includes("if (terminalScreenSeq !== screenSeq) return;"), "帧令牌：连点时旧帧醒来即退场");
       // 非 defer 路径保持同步直排（panel-terminal-loading 的切换入口断言同款字面）
-      assert.ok(render.includes("if (typeof parkTerminalScreen === \"function\") parkTerminalScreen();\n    connectTerminalStream(session, { revive });"),
+      assert.ok(render.includes("if (typeof parkTerminalScreen === \"function\") parkTerminalScreen(session);\n    connectTerminalStream(session, { revive });"),
         "默认路径原样：停放→建流同步直排");
       const passers = panelJs.match(/renderTerminalPreviewSession\(\{[^}]*deferScreen[^}]*\}\)/g) || [];
       assert.equal(passers.length, 1, "只有一处传 deferScreen");

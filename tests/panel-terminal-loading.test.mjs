@@ -342,6 +342,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     let terminalEventSource = null;
     let terminalInputDisposable = null;
     let terminalBoundSessionId = null;
+    let terminalBoundAgentId = "";
     let terminalFitAddon = null;
     let terminalWebglAddon = null;
     let terminalHostResizeObserver = null;
@@ -379,6 +380,8 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     let terminalGeometryRealignTimer = null;
     let activeTerminalPreviewId = null;
     function terminalSessionFor() { return null; }
+    // 垫片身份判据读它（与产线同一取值口径：endpointId 优先、agentId 次之）。
+    ${extractFn("terminalRailAgentId")}
     ${declOfGeom("TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS")}
     ${declOfGeom("TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS")}
     ${declOfGeom("TERMINAL_GEOMETRY_REALIGN_STALL_MS")}
@@ -411,6 +414,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
       stale: () => terminalStaleScreen,
       instance: () => terminalXterm,
       bound: () => terminalBoundSessionId,
+      boundAgent: () => terminalBoundAgentId,
       pending: () => terminalReplayFramePending,
       epoch: () => terminalReplayEpoch,
       contentEpoch: () => terminalContentEpoch,
@@ -577,7 +581,7 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     // 切换入口有两条路径（deferScreen 让帧路径 / 默认直排路径），各有同一对
     // 「停放 → 建流」。逐路径配对核对——indexOf 首次命中只会落进 deferScreen
     // 分支，默认路径反转时它无感。
-    const parkAt = [...render.matchAll(/parkTerminalScreen\(\);/g)].map((m) => m.index);
+    const parkAt = [...render.matchAll(/parkTerminalScreen\(session\);/g)].map((m) => m.index);
     const connectAt = [...render.matchAll(/connectTerminalStream\(session, \{ revive \}\);/g)].map((m) => m.index);
     assert.equal(parkAt.length, 2, "两条切换路径各停放一次");
     assert.equal(connectAt.length, 2, "两条切换路径各建流一次");
@@ -1015,6 +1019,77 @@ describe("T13 后台切回：兜底只在前台计时，旧帧挂到重建出字
 });
 
 /* ============================================================
+   T3b · 跨 agent 换屏：旧帧不跟着身份走
+   ============================================================ */
+// 报障（用户裁决 2026-11-12）：页签条「+」新建另一个 agent 的终端后，UI 已切到新页签，
+// 屏上还是上一只 agent 的画面。原因是垫片只问「有没有旧帧」、不问「换过去的是不是
+// 另一条终端身份」——身份一变，那帧就是别的会话的工作现场。这里钉住：身份已知且
+// 不同就当场撤帧兼拆流；同身份（换页签/换绑）与身份未知（空白外壳、归属未落地）
+// 一律照原样停放。
+describe("T3b 跨 agent 换屏：旧帧不跨身份保留", () => {
+  const kimi = terminalSession("A", { agent: { endpointId: "kimi" } });
+  const claudeB = terminalSession("B", { agent: { endpointId: "claude" } });
+  const kimiB = terminalSession("B", { agent: { endpointId: "kimi" } });
+
+  it("真跑：切到另一个 agent 的终端不停放，旧实例当场销毁、屏面无垫片", async () => {
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, kimi);
+    assert.equal(w.world.boundAgent(), "kimi", "建连即固化屏上身份");
+    assert.equal(w.world.parkTerminalScreen(claudeB), null, "不停放");
+    assert.equal(w.world.stale(), null, "屏上没有垫片");
+    assert.equal(termA.disposed, true, "旧实例连同 DOM 一起销毁：内容直接撤掉");
+    assert.equal(w.host.children.includes(termA.element), false, "旧实例的 DOM 已摘走");
+    assert.equal(termA.classes.has("terminal-stale-frame"), false, "不挂垫片类");
+    await w.world.connectTerminalStream(claudeB);
+    assert.equal(w.world.boundAgent(), "claude", "新连接固化新身份");
+  });
+
+  it("真跑：同一个 agent 换另一条会话仍照常停放（原机制不动）", async () => {
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, kimi);
+    const parked = w.world.parkTerminalScreen(kimiB);
+    assert.notEqual(parked, null, "同身份照旧停放");
+    assert.equal(w.world.stale().term, termA, "停的就是屏上这只");
+    assert.deepEqual(w.clock.timerDelays(), [2000], "普通档上限不变");
+  });
+
+  it("真跑：身份未知不误撤（空白外壳 / 归属未落地 / 无目标一律沿用原行为）", async () => {
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, kimi);
+    assert.notEqual(w.world.parkTerminalScreen(terminalSession("C")), null, "目标无归属：照常停放");
+    assert.equal(termA.disposed, false, "不许把 agent 的旧帧误撤成底色");
+
+    const w2 = makeTerminalWorld();
+    const { term: shell } = await primeSession(w2, terminalSession("S"));
+    assert.equal(w2.world.boundAgent(), "", "空白外壳没有身份");
+    assert.notEqual(w2.world.parkTerminalScreen(claudeB), null, "屏上无归属：照常停放");
+    assert.equal(shell.disposed, false);
+
+    const w3 = makeTerminalWorld();
+    await primeSession(w3, kimi);
+    assert.notEqual(w3.world.parkTerminalScreen(), null, "不传目标（后台切回/闲剪重建/换绑）：照常停放");
+  });
+
+  it("真跑：在册垫片遇另一身份的目标也要撤（无实例可停那一拍）", async () => {
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, kimi);
+    w.world.parkTerminalScreen();                 // 垫片在册、实例已拆，屏上只剩这帧旧画面
+    assert.notEqual(w.world.stale(), null);
+    assert.equal(w.world.parkTerminalScreen(claudeB), null);
+    assert.equal(w.world.stale(), null, "旧垫片按身份撤掉");
+    assert.equal(termA.disposed, true, "旧实例随之销毁");
+  });
+
+  it("源码：两条换屏路径都把目标会话交给停放，拆流清身份", () => {
+    const render = extractFn("renderTerminalPreviewSession");
+    assert.equal([...render.matchAll(/parkTerminalScreen\(session\);/g)].length, 2, "两条路径各一次");
+    assert.equal([...render.matchAll(/parkTerminalScreen\(\);/g)].length, 0, "不许留下无目标的停放");
+    assert.match(extractFn("closeTerminalStream"), /terminalBoundAgentId = "";/);
+    assert.match(extractFn("connectTerminalStream"), /terminalBoundAgentId = .*terminalRailAgentId\(session\)/);
+  });
+});
+
+/* ============================================================
    T12 · 换绑前先停帧 + exit 帧消费（2026-11-05 A1/A2）
    ============================================================ */
 describe("T12 换绑前停帧、退出帧落地", () => {
@@ -1025,7 +1100,7 @@ describe("T12 换绑前停帧、退出帧落地", () => {
     assert.ok(parkAt >= 0, "换绑前有一次停放");
     assert.ok(postAt > parkAt, "停放排在 POST 之前（反了就等于停到一张刚被清空的图）");
     // render 里那次停放置于 POST 之后仍保留：此刻 terminalXterm 已是 null，走幂等空转
-    assert.match(extractFn("renderTerminalPreviewSession"), /parkTerminalScreen\(\)/);
+    assert.match(extractFn("renderTerminalPreviewSession"), /parkTerminalScreen\(session\)/);
   });
 
   it("源码：换绑期判据复用既有两个信号，不新起状态位", () => {

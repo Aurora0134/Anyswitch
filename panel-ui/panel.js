@@ -6527,6 +6527,9 @@ async function api(method, path, body) {
   // onData 闭包内的定投局部量同。附着在 xterm 实例上的键位处理器不再随连接重建
   // 闭包，改经此量读到与 onData 一致的定投目标，同样不读活动会话。
   let terminalBoundSessionId = null;
+  // 定投会话的 agent 身份：与上面那条同拍固化、同拍清空。垫片判据靠它认「屏上这帧
+  // 属于谁」，见 parkTerminalScreen。
+  let terminalBoundAgentId = "";
   // 输入法锚点：组字期间钉住隐藏输入框。空闲为 null；组字中为 { textarea, compositionView }。
   let terminalImeHold = null;
   let terminalImeHoldFrame = null;
@@ -7420,6 +7423,7 @@ async function api(method, path, body) {
     terminalInputDisposable?.dispose();
     terminalInputDisposable = null;
     terminalBoundSessionId = null;
+    terminalBoundAgentId = "";
     // 列宽重对齐的待办随流销毁：定时器再来时实例已经没了，重建只会空转。typeof 闸
     // 护单测桩环境（同 renderTerminalRail）：那些沙箱把本函数整段切出真跑，没有
     // 这套列宽设施。
@@ -7618,7 +7622,14 @@ async function api(method, path, body) {
 
   // 停放当前实例当垫片：返回垫片句柄；没有可停的画面时照旧整条拆流（首连、或上次
   // 就没建出实例）。
-  function parkTerminalScreen() {
+  //
+  // nextSession＝这一拍要换成的那条会话（换屏路径传，其余入口不传）。垫片的前提是
+  // 「同一条终端身份」：屏上这帧属于另一个 agent 的终端时，用户看的是一屏别人 agent
+  // 的工作现场——UI 早已切走（栏体与页签先渲），旧像素却还盖着，正好是 2026-10-27
+  // 「宁可短暂空白也不显示别的会话」明令禁止的那一态。所以目标身份与屏上身份都已知
+  // 且不同就当场撤帧＋拆流，交给新画面或占位层自绘；身份相同（换绑那种换进程不换
+  // 身份）与身份未知（空白外壳、归属还没落地）一律照原样停放。
+  function parkTerminalScreen(nextSession) {
     // 隐藏期不停放也不拆流：与 connectTerminalStream 的隐藏闸同一条口径——离开终端页
     // 后活着的那条流，不能被隐藏期的重渲染路径关掉。
     if ($("terminalView")?.hidden) return null;
@@ -7628,9 +7639,24 @@ async function api(method, path, body) {
     // 定投会话归零，之后再取恒为 null。它只服务垫片的放宽档判据（见 staleCapMs）。
     // typeof 闸护单测桩环境（同 renderTerminalRail）：那些沙箱只切本函数，不声明这个名字。
     const parkSessionId = typeof terminalBoundSessionId === "string" ? terminalBoundSessionId : null;
+    // 屏上身份与目标身份：同一取值口径（terminalRailAgentId），空串一律当未知。
+    const parkAgentId = typeof terminalBoundAgentId === "string" ? terminalBoundAgentId : "";
+    const nextAgentId = nextSession && typeof terminalRailAgentId === "function" ? terminalRailAgentId(nextSession) : "";
+    const identityChanged = !!parkAgentId && !!nextAgentId && parkAgentId !== nextAgentId;
+    // 在册垫片同样要过身份闸：上一拍没有实例可停时本函数走下面的空转分支、不经过
+    // dropTerminalStaleScreen，那块旧帧会一直盖到揭幕判据成立。
+    if (terminalStaleScreen && nextAgentId && terminalStaleScreen.agentId
+      && terminalStaleScreen.agentId !== nextAgentId) dropTerminalStaleScreen();
     if (!term || !el) {
       // 没有可停的画面（首连；或后台切回时实例已在隐藏期拆掉）：**不撤**已有的垫片
       // ——它正是此刻屏上唯一的内容，撤了就是一块底色。照旧整条拆流。
+      closeTerminalStream();
+      return null;
+    }
+    // 换到另一个 agent 的终端：屏上这帧是别人的画面，不留。拆流照跑——旧实例连 DOM
+    // 一起销毁，屏面交给紧接着的建流与占位层。
+    if (identityChanged) {
+      dropTerminalStaleScreen();
       closeTerminalStream();
       return null;
     }
@@ -7647,7 +7673,7 @@ async function api(method, path, body) {
     } finally {
       term.dispose = originalDispose;
     }
-    const stale = { term, el, timer: null, frame: null, done: false, contentEpochAtPark: terminalContentEpoch };
+    const stale = { term, el, timer: null, frame: null, done: false, contentEpochAtPark: terminalContentEpoch, agentId: parkAgentId };
     terminalStaleScreen = stale;
     // 兜底撤垫片：新画面迟迟不来（握手失败、宿主在飞）时不能把旧画面永久留在屏上
     // ——那是一屏别的会话的内容，看久了就是错的信息。到点撤走，退回既有三态覆盖层，
@@ -9244,6 +9270,9 @@ async function api(method, path, body) {
     // 定投的会话（见 fitTerminalXterm）。
     const boundSessionId = session?.backend ? session.id : null;
     terminalBoundSessionId = boundSessionId;
+    // 屏上这只终端属于哪个 agent：与定投会话同拍固化（typeof 闸护单测桩环境），拆流时
+    // 同拍归零。身份一变，屏上这帧就不再是「同一条终端的旧画面」，见 parkTerminalScreen。
+    terminalBoundAgentId = typeof terminalRailAgentId === "function" ? terminalRailAgentId(session) : "";
     // 建流前先同步 fit：SSE 首帧回放与 rAF 谁先到达是竞速，回放若按 xterm 出厂
     // 默认列宽（80）落进缓冲区，之后加大列宽不会重排已折行内容——先量准列宽、
     // 把真实尺寸 POST 进 PTY，再开流收首帧。POST 真发出时等它落定再开流（返回
@@ -10776,7 +10805,7 @@ async function api(method, path, body) {
       const screenSeq = terminalScreenSeq;
       const runDeferredScreen = () => {
         if (terminalScreenSeq !== screenSeq) return;
-        if (typeof parkTerminalScreen === "function") parkTerminalScreen();
+        if (typeof parkTerminalScreen === "function") parkTerminalScreen(session);
         connectTerminalStream(session, { revive });
         // 「正在加载」占位只在这一拍挂（见 syncTerminalBootingOverlay 前的时序注释）：
         // 停放之后新实例已重置成空屏，旧帧还盖着的话占位在垫片之下不露脸。
@@ -10793,7 +10822,7 @@ async function api(method, path, body) {
     // 切签/切回都经这里重建流：先把旧画面停成垫片（见 parkTerminalScreen），新画面
     // 首帧落绘后由观察循环撤走——切换期间屏上始终有内容，不再是纯底色。停放与建流
     // 之间没有 await，旧画面不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
-    if (typeof parkTerminalScreen === "function") parkTerminalScreen();
+    if (typeof parkTerminalScreen === "function") parkTerminalScreen(session);
     connectTerminalStream(session, { revive });
     // 同上：挂层排在建流之后，点当拍不挂——内切的 /switch 在飞期间屏上还是上一屏。
     if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(session.id);
