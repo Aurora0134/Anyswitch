@@ -570,7 +570,7 @@ describe("S1 会话归档（finding 1a）", () => {
       assert.ok(archive.includes("durationMs: 6000"), "驻留 6s");
       // toast(msg, isErr, opts) 支持 opts.actions = [{label, onClick}, …]（多钮）
       // 与 opts.action（单钮，既有调用形状不破）
-      const toastFn = panelJs.match(/function toast\(msg, isErr, opts\)[\s\S]*?\n  \}/)?.[0];
+      const toastFn = panelJs.match(/function toast\(msg, level, opts\)[\s\S]*?\n  \}/)?.[0];
       assert.ok(toastFn && toastFn.includes("opts.actions"), "toast 件有多钮入口");
       assert.ok(toastFn && toastFn.includes("opts.action"), "单 action 兼容保留");
     });
@@ -3997,7 +3997,7 @@ describe("归档/撤销动效（FLIP）＋toast 引导钮", () => {
     });
 
     it("驻留期满两段收场：先转 1s 淡出（is-leaving），期满落暗（源码钉死）", () => {
-      const toastFn = panelJs.match(/function toast\(msg, isErr, opts\)[\s\S]*?\n  \}/)?.[0];
+      const toastFn = panelJs.match(/function toast\(msg, level, opts\)[\s\S]*?\n  \}/)?.[0];
       assert.ok(toastFn, "toast 件在册");
       assert.ok(/classList\.add\("is-leaving"\)/.test(toastFn), "驻留期满转淡出类");
       assert.ok(/remove\("show", "is-leaving"\)/.test(toastFn), "淡出期满落暗（摘两类）");

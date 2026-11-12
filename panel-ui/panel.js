@@ -36,12 +36,16 @@
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // 第二参数 level 是色档：true / "danger" = 报错红，"warn" = 需要用户注意但
+  // 不是失败的琥珀，false / "ok" / 省略 = 常规。新增的「成功但不完整」类结论用
+  // "warn" 表达，不要再借报错红顶替——语义一错，成功会被读成故障。
+  //
   // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick }（单钮）或
   // opts.actions = [{ label, onClick }, …]（多钮）在文案后追加可点小字——点中即
   // 瞬时收起 toast 再执行 onClick。动效：入场 -6px 滑入＋淡入
   // 160ms（CSS 基座过渡）；驻留期满先转 1s 淡出（is-leaving）再落暗；动作点击
   // 瞬时消失（is-gone 压掉过渡）。
-  function toast(msg, isErr, opts) {
+  function toast(msg, level, opts) {
     const t = $("toast");
     const actions = opts && (opts.actions || (opts.action ? [opts.action] : null));
     if (actions) {
@@ -58,7 +62,8 @@
     } else {
       t.textContent = msg;
     }
-    t.className = "toast" + (isErr ? " err" : "") + " show";
+    const tone = level === true || level === "danger" ? " err" : level === "warn" ? " warn" : "";
+    t.className = "toast" + tone + " show";
     clearTimeout(t._tid);
     t._tid = setTimeout(() => {
       t.classList.add("is-leaving");
@@ -3186,6 +3191,18 @@ async function api(method, path, body) {
     };
   }
 
+  // 自更新结论 → 提示色档。关于页终态、/last 补显、页面级观察者三条渲染路径
+  // 共用这一份，别在各处另写条件——同一结论各写一套条件就会一红一灰。
+  // 色档名与 .toast / data-tone 同词：ok / warn / danger / ""（常规）。
+  // 「装好待重启」与「成功但 Relay 没起来」都是以成功为主、需要用户动手，
+  // 归 warn；只有 failed / rolled_back 才按报错红。
+  function selfUpdateTone(status) {
+    if (status?.outcome === "updated") return status?.relayRestartFailed ? "warn" : "ok";
+    if (status?.outcome === "updated_pending_restart") return "warn";
+    if (status?.outcome === "failed" || status?.outcome === "rolled_back") return "danger";
+    return "";
+  }
+
   function createAboutController({ request, doc, now = () => Date.now(), notify = () => {}, schedule = setTimeout, cancelSchedule = clearTimeout }) {
     const get = (id) => doc.getElementById(id);
     const pending = new Map();
@@ -3447,11 +3464,13 @@ async function api(method, path, body) {
     }
     function reportLifecycleOutcome(status, id) {
       const name = clientName(id);
-      if (status?.outcome === "updated") { notify(`${name} ${status.message}`, false); return; }
+      if (status?.outcome === "updated") { notify(`${name} ${status.message}`, "ok"); return; }
       let text = `${name}：${status?.message || "更新失败，请重新检测确认结果"}`;
       const detail = typeof status?.detail === "string" ? status.detail.split("\n").find(Boolean) : "";
       if (detail) text += `（${detail}）`;
-      notify(text, true);
+      // 「命令跑完但版本没变」与行内结论同口径（attemptTone 给 warn）：要用户
+      // 注意，但不是报错。其余（失败 / 装上了跑不起来）才是报错红。
+      notify(text, status?.outcome === "unchanged" ? "warn" : true);
     }
     // 一次运行结束后，行内先按结果落状态；再由这里补一次「晚于结果」的重新检测。
     // 检测有去重：并行的两个单点更新若共用先完成者触发的那次重检，后者会扫不到
@@ -3658,21 +3677,22 @@ async function api(method, path, body) {
       };
       if (status?.outcome === "updated") {
         get("aboutSelfUpdate").hidden = true;
+        const tone = selfUpdateTone(status);
         if (window.panelStartupRestart) {
           // 本页就是换装后的新页面（结局经接回的轮询落在这里）：直接显示最终结论，
           // 不存在「即将刷新」。同时记入已读，/last 补显通道不再为它重弹一次。
           selfUpdateLastOutcome = status;
           statusEl.textContent = status?.message || `已更新到 ${status?.targetVersion || ""}`;
-          statusEl.dataset.tone = "ok";
+          statusEl.dataset.tone = tone;
           try { if (status?.runId) localStorage.setItem(`anyswitch:self-update-shown:${status.runId}`, "1"); } catch { /* 存档不可写：/last 会再补显一次 */ }
-          if (status?.message) notify(status.message);
+          if (status?.message) notify(status.message, tone);
           return;
         }
         // 旧页面（本页发起的应用）：换装完成、页面随换新刷新在即，只交代「即将刷新」，
         // 版本结论交给新页面（上面那条分支），不与旧版本号同框。
         statusEl.textContent = "更新完成，页面即将刷新…";
-        statusEl.dataset.tone = "ok";
-        if (status?.message) notify(status.message);
+        statusEl.dataset.tone = tone;
+        if (status?.message) notify(status.message, tone);
         return;
       }
       const copy = {
@@ -3681,10 +3701,13 @@ async function api(method, path, body) {
         failed: status?.message || "更新失败，请重新检查更新",
       };
       statusEl.textContent = copy[status?.outcome] || "更新已结束";
-      statusEl.dataset.tone = status?.outcome === "updated_pending_restart" ? "" : "danger";
+      // 状态行与 toast 同源取色：这里曾对「装好待重启」只把状态行放宽、toast 仍按
+      // 报错红弹，同一结论一句话两种颜色。
+      const tone = selfUpdateTone(status);
+      statusEl.dataset.tone = tone;
       get("aboutSelfUpdate").hidden = true;
       markShown();
-      notify(copy[status?.outcome] || "更新已结束", true);
+      notify(copy[status?.outcome] || "更新已结束", tone);
     }
     function pollSelfUpdate(runId, isApply) {
       const gen = selfUpdateGen;
@@ -3800,9 +3823,10 @@ async function api(method, path, body) {
       if (!last.message) return;
       selfUpdateLastOutcome = last;
       const statusEl = get("aboutUpdateStatus");
+      const tone = selfUpdateTone(last);
       statusEl.textContent = last.message;
-      statusEl.dataset.tone = last.outcome === "updated" ? "ok" : last.outcome === "failed" || last.outcome === "rolled_back" ? "danger" : "";
-      notify(last.message, last.outcome !== "updated");
+      statusEl.dataset.tone = tone;
+      notify(last.message, tone);
     }
     async function adoptSelfUpdate() {
       selfUpdateAdopted = false;
@@ -11103,9 +11127,10 @@ async function api(method, path, body) {
           dispatchSwap();
           return;
         }
-        // 无刷新终态（待重启生效 / 失败 / 回滚）：就地提示并落已读。
+        // 无刷新终态（待重启生效 / 失败 / 回滚）：就地提示并落已读。色档与关于页
+        // 共用 selfUpdateTone——同一结论不因停在哪个页签而一红一灰。
         try { storage.setItem(`anyswitch:self-update-shown:${current.runId}`, "1"); } catch { /* 存档不可写：可能重复提示一次，可接受 */ }
-        toast(current.message || "更新已结束", outcome === "failed" || outcome === "rolled_back");
+        toast(current.message || "更新已结束", selfUpdateTone(current));
       },
     };
   }
