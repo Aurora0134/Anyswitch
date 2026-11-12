@@ -2061,19 +2061,25 @@
     border-color: var(--border-strong); box-shadow: var(--shadow-xs);
   }
   .settings-theme-item[aria-checked="true"]::after { content: "✓"; color: var(--accent); font-weight: 700; }
-  /* 预览画布：inert + pointer-events 双保险不响应交互。看板镜像两层结构：
-     sizer 撑出缩放后真实尺寸 → scale 按预览栏宽等比微缩；预览随内容全高，
-     整块看板完整可见，页面滚动衔接（不再定高内滚截断）。 */
+  /* 预览画布：比例由 --preview-aspect（panel.js 按当前浏览器视口更新）给定，模拟一个
+     真实窗口而不是把整张长页压成长条。镜像三层：viewport 高度由容器比例给出、长页
+     在窗内滚动 → sizer 撑整页缩放后尺寸 → scale 等比微缩。克隆体 inert；viewport
+     单独开放 pointer-events，滚轮才能翻到长页下半段。 */
   .settings-theme-preview {
     pointer-events: none; user-select: none;
     background: var(--bg-page); border: 1px solid var(--border);
     border-radius: var(--radius-lg, 12px); padding: 10px;
+    min-width: 0; min-height: 0; overflow: hidden;
+    aspect-ratio: var(--preview-aspect, 1.6);
+    display: flex; flex-direction: column;
   }
   .settings-mirror-viewport {
     border-radius: var(--radius-md, 8px); background: var(--bg-page);
+    flex: 1; min-height: 0; pointer-events: auto;
+    overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
   }
-  .settings-mirror-sizer { position: relative; overflow: hidden; }
-  .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
+  .settings-mirror-sizer { position: relative; width: 100%; overflow: hidden; }
+  .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; pointer-events: none; }
   .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
   /* v2 的镜像：主导航在左栏，镜像改克隆一份迷你栏与看板镜像横排（captureSettingsMirror
      只在 v2 下才放栏克隆进来）。真栏是 fixed 通高，进镜像后剥成静态、与看板镜像横排
@@ -2148,7 +2154,10 @@
     position: relative; overflow: hidden; min-height: 280px;
     border: 1px solid var(--border); border-radius: var(--radius-lg, 12px);
     pointer-events: none; user-select: none;
+    aspect-ratio: var(--preview-aspect, 1.6);
   }
+  /* 空态留 280px 占位；有图态由视口比例精确裁切，垫底图与真实 fixed 层同取景 */
+  .wallpaper-preview.has-image { min-height: 0; }
   /* 「自定义」预览的皮肤隔离层（token）：预览容器上由 JS 注入壁纸主题的整套公共
      token（取色引擎产出），但皮肤私有 token 不在壁纸 token 契约里、引擎也不派生——
      不在这里钉住，镜像克隆体会继续从 <html> 继承当前静态皮肤的取值，预览读成
@@ -2247,7 +2256,9 @@
     font-size: 12px; color: var(--text-3);
   }
   .wallpaper-preview.has-image .wallpaper-preview-empty { display: none; }
-  .wallpaper-preview-viewport { display: none; position: relative; background: transparent; }
+  /* 视口绝对定位铺满预览窗：容器高度只由 aspect-ratio 决定，整页克隆体撑不高它；
+     壁纸垫底是兄弟层，滚动镜像时垫底不动，与真实 fixed 壁纸随视口不动一致。 */
+  .wallpaper-preview-viewport { display: none; position: absolute; inset: 0; background: transparent; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; pointer-events: auto; }
   .wallpaper-preview.has-image .wallpaper-preview-viewport { display: block; }
   /* 高级选项展开钮复用关于页 about-details 构造，左侧缩进是该页版式专属，这里抹掉 */
   .wallpaper-advanced { margin: 12px 0 0; }

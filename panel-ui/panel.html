@@ -2434,10 +2434,10 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
         <!-- 预览 = 真实看板镜像：进主题子页时克隆看板页当前 DOM（剥 id、inert、CSS
              缩放），换主题/切亮暗经全局 token 即时反映；看板改版预览自动跟随 -->
-        <div class="settings-theme-preview" id="settingsThemePreview" inert>
+        <div class="settings-theme-preview" id="settingsThemePreview">
           <div class="settings-mirror-viewport" id="settingsMirrorViewport">
             <div class="settings-mirror-sizer" id="settingsMirrorSizer">
-              <div class="settings-mirror-scale" id="settingsMirrorScale"></div>
+              <div class="settings-mirror-scale" id="settingsMirrorScale" inert></div>
             </div>
           </div>
         </div>
@@ -2970,9 +2970,9 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="wallpaper-preview-dim" id="wallpaperPreviewDim"></div>
         </div>
         <div class="wallpaper-preview-empty" id="wallpaperPreviewEmpty">上传背景图后在此预览效果</div>
-        <div class="settings-mirror-viewport wallpaper-preview-viewport" id="wallpaperPreviewViewport" inert>
+        <div class="settings-mirror-viewport wallpaper-preview-viewport" id="wallpaperPreviewViewport">
           <div class="settings-mirror-sizer" id="wallpaperPreviewSizer">
-            <div class="settings-mirror-scale" id="wallpaperPreviewScale"></div>
+            <div class="settings-mirror-scale" id="wallpaperPreviewScale" inert></div>
           </div>
         </div>
       </div>
