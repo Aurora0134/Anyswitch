@@ -1449,9 +1449,9 @@ describe("panel.html workbuddy endpoint card", () => {
     assert.ok(chainMatch && chainMatch[1].includes('"workbuddy"'), "ROUTE_CHAIN_ENDPOINTS contains workbuddy");
     const menuMatch = panelJs.match(/TERMINAL_ADD_MENU_AGENT_IDS\s*=\s*\[([^\]]+)\]/);
     assert.ok(menuMatch && menuMatch[1].includes('"workbuddy"'), "terminal add menu offers workbuddy");
-    // 三处首帧脚本的清单与运行时基准序同尾，否则首帧预画静默失效
+    // 四处首帧脚本的清单与运行时基准序同尾，否则首帧预画静默失效
     const prepaintLists = [...panelHtml.matchAll(/const AGENT_IDS = \[([^\]]+)\];/g)].map((m) => m[1]);
-    assert.equal(prepaintLists.length, 3, "three prepaint scripts carry AGENT_IDS");
+    assert.equal(prepaintLists.length, 4, "four prepaint scripts carry AGENT_IDS");
     for (const list of prepaintLists) {
       assert.ok(list.trim().endsWith('"workbuddy"'), "prepaint AGENT_IDS ends with workbuddy");
     }

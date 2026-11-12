@@ -1099,6 +1099,26 @@ async function api(method, path, body) {
     if (boardLiveSettled) boardLiveSettled();
   }
 
+  // ── 端点区域版快照（首帧卡名的存档源）─────────────────────────────────
+  // 分区域发行的端点（qoder 国际版/CN 版聚合为同一端点）由 /api/agents 带
+  // edition 字段（主区域版：运行中的区域版 > 在装的区域版 > 缺省 intl，服务端口径），
+  // 卡头名与空态文案跟着它走（renderQoder）。这里把最近一次真值存进
+  // localStorage，供 panel.html 的 panelAgentEditionsPrepaint 在首绘前把卡名
+  // 直接画对。只收录在册取值（"intl"/"cn"），变了才写（每秒轮询不空转）；
+  // 旧后端不下发 edition 时写成空对象，首帧回落静态默认卡名，与运行时一致。
+  const AGENT_EDITIONS_LS_KEY = "anyswitch.agent-editions";
+  let agentEditionsSnapshotJson = null;
+  function syncAgentEditionsSnapshot(agents) {
+    const editions = {};
+    for (const agent of agents) {
+      if (agent && (agent.edition === "intl" || agent.edition === "cn")) editions[agent.id] = agent.edition;
+    }
+    const json = JSON.stringify(editions);
+    if (json === agentEditionsSnapshotJson) return;
+    agentEditionsSnapshotJson = json;
+    try { localStorage.setItem(AGENT_EDITIONS_LS_KEY, json); } catch {}
+  }
+
   // 在飞请求返回同一个 promise：展开补行时若 1s 轮询正好在飞，等它落地即可，
   // 不会被守卫吞成「什么都没做」。
   async function refreshAgents() {
@@ -1120,6 +1140,7 @@ async function api(method, path, body) {
         // 名单的卡，补挂台阶取的序位必须是重排后的最终卡序。
         reorderAgentCards(res.agents);
         applyBoardLiveAgentIds(new Set(res.agents.filter((a) => a && a.status === "running").map((a) => a.id)));
+        syncAgentEditionsSnapshot(res.agents);
         const zc = res.agents.find(a => a.id === "zcode");
         const cc = res.agents.find(a => a.id === "claude");
         const dsh = res.agents.find(a => a.id === "dsh");
@@ -2283,6 +2304,15 @@ async function api(method, path, body) {
     const errorBanner = $("qoderErrorBanner");
     const empty = $("qoderEmpty");
     const metricsBlock = $("qoderMetricsBlock");
+
+    // 区域版差分（qoder 国际版/CN 版聚合为同一端点）：卡名与空态跟着
+    // /api/agents 的 edition 字段走——CN 主区域版挂「Qoder CN」口径，其余
+    // （含缺省 intl 与字段缺失的旧后端帧）维持「Qoder」。首帧名由 panel.html
+    // 的 panelAgentEditionsPrepaint 预画，这里接棒挂真值。
+    const cnEdition = p.edition === "cn";
+    const cardTitle = $("qoderCardTitle");
+    if (cardTitle) cardTitle.textContent = cnEdition ? "Qoder CN" : "Qoder";
+    if (empty) empty.textContent = cnEdition ? "未检测到运行中的 Qoder CN 客户端" : "未检测到运行中的 Qoder 客户端";
 
     if (modelBadgesList) renderModelBadges(modelBadgesList, "qoder", p);
 
