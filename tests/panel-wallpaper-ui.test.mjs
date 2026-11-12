@@ -90,9 +90,9 @@ describe("壁纸主题静态接线", () => {
       "wallpaperFxBlur", "wallpaperFxDim", "wallpaperFxSurface"]) {
       assert.ok(panelHtml.includes(`id="${id}"`), `${id} 在册`);
     }
-    assert.ok(panelHtml.includes('id="wallpaperFxBlur" min="0" max="30" step="1" value="0"'), "模糊 0–30 默认 0");
-    assert.ok(panelHtml.includes('id="wallpaperFxDim" min="0" max="70" step="1" value="10"'), "压暗 0–70 默认 10");
-    assert.ok(panelHtml.includes('id="wallpaperFxSurface" min="40" max="100" step="1" value="80"'), "阅读区不透明度 40–100 默认 80");
+    assert.ok(panelHtml.includes('id="wallpaperFxBlur" min="0" max="30" step="1" value="5"'), "模糊 0–30 默认 5");
+    assert.ok(panelHtml.includes('id="wallpaperFxDim" min="0" max="70" step="1" value="15"'), "压暗 0–70 默认 15");
+    assert.ok(panelHtml.includes('id="wallpaperFxSurface" min="40" max="100" step="1" value="75"'), "阅读区不透明度 40–100 默认 75");
     assert.ok(panelHtml.includes('accept="image/png,image/jpeg,image/webp,image/gif"'), "文件选择器限四种格式");
     assert.ok(!panelHtml.includes("wallpaperControls") && !panelHtml.includes("wallpaperChangeBtn"),
       "主题页旧从属区与「更换背景图」已拆除");
@@ -380,7 +380,7 @@ describe("壁纸控制器：暂存与确认闸门", () => {
     const preview = h.doc.els.get("wallpaperPreview");
     assert.equal(preview._classes.has("has-image"), true, "预览进有图态");
     assert.equal(h.doc.els.get("wallpaperPreviewImage").style.backgroundImage, 'url("blob:mock")');
-    assert.equal(h.doc.els.get("wallpaperPreviewDim").style.background, "rgba(0, 0, 0, 0.1)", "默认压暗 10%");
+    assert.equal(h.doc.els.get("wallpaperPreviewDim").style.background, "rgba(0, 0, 0, 0.15)", "默认压暗 15%");
     assert.ok(preview._props.get("--accent"), "引擎 token 注入预览容器");
     assert.equal(h.calls.captures, 1, "首次有图拍一次镜像");
     assert.equal(h.doc.els.get("wallpaperUploadBtn").textContent, "重新上传", "有图态上传钮改名");
@@ -415,7 +415,7 @@ describe("壁纸控制器：暂存与确认闸门", () => {
     h.controller.setStagedFx("surface", 40);
     await h.controller.confirmModal();
     assert.equal(h.store.state.saves, 1, "blob 入库");
-    assert.deepEqual(JSON.parse(h.storage.getItem("panel-wallpaper-fx")), { blur: 12, dim: 10, surface: 40 },
+    assert.deepEqual(JSON.parse(h.storage.getItem("panel-wallpaper-fx")), { blur: 12, dim: 15, surface: 40 },
       "滑杆值记本机");
     const cache = JSON.parse(h.storage.getItem("panel-wallpaper-tokens"));
     assert.ok(cache?.light?.["--accent"] && cache?.dark?.["--accent"], "亮暗双套写入首帧缓存");
@@ -463,7 +463,7 @@ describe("壁纸控制器：暂存与确认闸门", () => {
     h.controller.setStagedFx("dim", 60);
     await h.controller.confirmModal();
     assert.equal(h.doc.els.get("wallpaperBackdropDim").style.background, "rgba(0, 0, 0, 0.6)", "全局压暗按新值");
-    assert.deepEqual(JSON.parse(h.storage.getItem("panel-wallpaper-fx")), { blur: 0, dim: 60, surface: 80 });
+    assert.deepEqual(JSON.parse(h.storage.getItem("panel-wallpaper-fx")), { blur: 5, dim: 60, surface: 75 });
     assert.equal(h.store.state.saves, 0, "未换图不重复入库");
   });
 });
@@ -486,15 +486,15 @@ describe("壁纸控制器：表面 token 按档折算（内容面 / 玻璃面 / 
     return h;
   }
 
-  it("默认 80 档：内容面 1:1、玻璃面 0.8 倍、页面底高档带——六键不再同值", async () => {
+  it("默认 75 档：内容面 1:1、玻璃面 0.8 倍、页面底高档带——六键不再同值", async () => {
     const h = await committed();
     const p = h.rootEl._props;
     for (const key of ["--surface", "--surface-sunken", "--surface-hover"]) {
-      assert.equal(alphaOf(p.get(key)), 0.8, `${key} 1:1 跟随滑杆值`);
+      assert.equal(alphaOf(p.get(key)), 0.75, `${key} 1:1 跟随滑杆值`);
     }
-    assert.equal(alphaOf(p.get("--surface-glass")), 0.64, "玻璃面 0.8 倍跟随（默认档与引擎亮套 0.62 同档，磨砂不丢）");
+    assert.equal(alphaOf(p.get("--surface-glass")), 0.6, "玻璃面 0.8 倍跟随（默认档与引擎亮套 0.62 同档，磨砂不丢）");
     for (const key of ["--bg", "--bg-page"]) {
-      assert.equal(alphaOf(p.get(key)), 0.92, `${key} 走 0.6+0.4×滑杆的高档带`);
+      assert.equal(alphaOf(p.get(key)), 0.9, `${key} 走 0.6+0.4×滑杆的高档带`);
     }
     assert.notEqual(alphaOf(p.get("--surface-glass")), alphaOf(p.get("--surface")), "玻璃面必须低于内容面");
     assert.notEqual(alphaOf(p.get("--bg")), alphaOf(p.get("--surface")), "页面底必须高于内容面");
@@ -704,7 +704,7 @@ describe("壁纸控制器：主题进出与亮暗跟随", () => {
     const h = harness({ fxSaved: JSON.stringify({ blur: 99, dim: -3, surface: "x" }) });
     assert.equal(h.controller.fx.blur, 30);
     assert.equal(h.controller.fx.dim, 0);
-    assert.equal(h.controller.fx.surface, 80);
+    assert.equal(h.controller.fx.surface, 75);
   });
 });
 

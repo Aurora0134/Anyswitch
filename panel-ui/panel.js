@@ -11419,15 +11419,15 @@ async function api(method, path, body) {
   const WALLPAPER_TOKENS_KEY = "panel-wallpaper-tokens";
   const WALLPAPER_MAX_BYTES = 20 * 1024 * 1024;
   const WALLPAPER_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-  const WALLPAPER_FX_DEFAULTS = { blur: 0, dim: 10, surface: 80 };
+  const WALLPAPER_FX_DEFAULTS = { blur: 5, dim: 15, surface: 75 };
   const WALLPAPER_FX_LIMITS = { blur: [0, 30], dim: [0, 70], surface: [40, 100] };
   // 「阅读区不透明度」滑杆的引擎挂钩面：surfaceAlpha 覆盖六个表面 token，按键分三档折算
   // （系数见 surfaceOverrides）。档位表必须覆盖引擎 SURFACE_SPEC 的全部键，漏一键该键就
   // 停在引擎自带透明度上、不跟滑杆走。
   //  - 内容面（卡面/下沉面/hover 面）1:1 跟随滑杆：滑杆语义原样——越低越透；
-  //  - 玻璃面（顶栏/终端头的磨砂层）0.8 倍跟随：与内容面同值就丢磨砂，默认 80 档折算
-  //    0.64，与引擎亮套规格 0.62 同档，越往低档越透、磨砂感越强；
-  //  - 页面底取 0.6+0.4×滑杆值的高档带：默认 0.92、最低 0.76，又随滑杆单调变透，但任何
+  //  - 玻璃面（顶栏/终端头的磨砂层）0.8 倍跟随：与内容面同值就丢磨砂，默认 75 档折算
+  //    0.6，与引擎亮套规格 0.62 同档，越往低档越透、磨砂感越强；
+  //  - 页面底取 0.6+0.4×滑杆值的高档带：默认 0.9、最低 0.76，又随滑杆单调变透，但任何
   //    档位都不退成照片（页面底是终端页与主题预览画布的承托面，透到底就是字压照片）。
   const WALLPAPER_SURFACE_TIERS = [
     { keys: ["--surface", "--surface-sunken", "--surface-hover"], floor: 0, scale: 1 },
