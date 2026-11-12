@@ -4475,20 +4475,23 @@ async function api(method, path, body) {
     scaleEl.appendChild(boardClone);
     // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
     // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
-    // 预览窗高度由容器 aspect-ratio（当前视口比例）给定，不随整页内容长高；sizer
-    // 只撑整页缩放后高度供窗内滚动。缩放比封顶 1：窄窗口下不把缩略图放大成怪图。
+    // 预览窗＝当前视口的一屏：高度由容器 aspect-ratio 给定且视口不可滚，sizer 只撑
+    // 一屏，整页克隆体超出部分被它裁掉；缩放比封顶 1，窄窗口下不把缩略图放大成怪图。
     const mainCs = getComputedStyle(main);
     const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
     const availW = viewport.clientWidth;
-    if (!naturalW || !availW) return false;
+    // 视口此刻应为可见态；万一被空态样式收起，退回预览容器高度，避免首拍算出零高。
+    const availH = viewport.clientHeight || (viewport.parentElement && viewport.parentElement.clientHeight) || 0;
+    if (!naturalW || !availW || !availH) return false;
     scaleEl.style.width = naturalW + "px";
     const s = Math.min(1, availW / naturalW);
-    const naturalH = scaleEl.offsetHeight;
     scaleEl.style.transform = `scale(${s})`;
+    // 镜像栏的 fixed 通高折算成一屏自然高：按 s 缩放后栏底正好等于视口底。
+    scaleEl.style.setProperty("--preview-vh", availH / s + "px");
     // sizer 不写死 px 宽：设置页右栏是 grid 1fr，固定 px 宽会把列撑开，下一轮
     // availW 读到撑开后的旧宽，窄窗口下缩放比自锁放大。
     sizer.style.width = "";
-    sizer.style.height = naturalH * s + "px";
+    sizer.style.height = availH + "px";
     return true;
   }
 

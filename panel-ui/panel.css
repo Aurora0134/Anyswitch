@@ -2067,9 +2067,8 @@
   }
   .settings-theme-item[aria-checked="true"]::after { content: "✓"; color: var(--accent); font-weight: 700; }
   /* 预览画布：比例由 --preview-aspect（panel.js 按当前浏览器视口更新）给定，模拟一个
-     真实窗口而不是把整张长页压成长条。镜像三层：viewport 高度由容器比例给出、长页
-     在窗内滚动 → sizer 撑整页缩放后尺寸 → scale 等比微缩。克隆体 inert；viewport
-     单独开放 pointer-events，滚轮才能翻到长页下半段。 */
+     真实窗口的静止一屏。镜像三层：viewport 高度由容器比例给出且不可滚 → sizer 只撑
+     一屏高度，整页克隆体由它裁掉 → scale 等比微缩。整块预览不响应交互，克隆体 inert。 */
   .settings-theme-preview {
     pointer-events: none; user-select: none;
     background: var(--bg-page); border: 1px solid var(--border);
@@ -2080,21 +2079,25 @@
   }
   .settings-mirror-viewport {
     border-radius: var(--radius-md, 8px); background: var(--bg-page);
-    flex: 1; min-height: 0; pointer-events: auto;
-    overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
+    flex: 1; min-height: 0; overflow: hidden;
   }
   .settings-mirror-sizer { position: relative; width: 100%; overflow: hidden; }
   .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; pointer-events: none; }
   .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
   /* v2 的镜像：主导航在左栏，镜像改克隆一份迷你栏与看板镜像横排（captureSettingsMirror
-     只在 v2 下才放栏克隆进来）。真栏是 fixed 通高，进镜像后剥成静态、与看板镜像横排
-     同高（stretch），栏内 tab 组仍靠自身的 margin-top:auto 贴底；皮肤 token 全局生效，
-     栏自动着色。栏与内容区间的 24px 间隔照真实布局以 gap 呈现；栏宽与间隔不占镜像里
-     main 的内容宽，自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、窄栏 72+24）。
-     头行进镜像后画布改两列网格：栏跨头行/看板两行通高，右列上头行下看板；行距 24
-     照真实布局 main 的 padding-top（头行底边到看板顶卡的间距）。 */
+     只在 v2 下才放栏克隆进来）。真栏 fixed 通高贴视口、长页滚动时不动；进镜像后剥成
+     静态，若沿用 grid 的 stretch 就会随整页看板一起长高，栏内 margin-top:auto 的 tab
+     组与底行被推到整页底部而非视口底部。故按 --preview-vh（JS 按一屏高 ÷ 缩放比写入）
+     定死高度并 align-self:start，栏底恒等于视口底。皮肤 token 全局生效，栏自动着色。
+     栏与内容区间的 24px 间隔照真实布局以 gap 呈现；栏宽与间隔不占镜像里 main 的内容宽，
+     自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、窄栏 72+24）。头行进镜像后画布
+     改两列网格：栏跨头行/看板两行，右列上头行下看板；行距 24 照真实布局 main 的
+     padding-top（头行底边到看板顶卡的间距）。 */
   :root[data-ui-version="v2"] .settings-mirror-scale { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 24px; row-gap: 24px; }
-  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; grid-row: 1 / span 2; }
+  :root[data-ui-version="v2"] .settings-mirror-scale .rail {
+    position: static; grid-row: 1 / span 2; align-self: start;
+    height: var(--preview-vh, 100vh); overflow: hidden;
+  }
   :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { grid-column: 2; min-width: 0; }
 
   /* ═══ 「自定义」壁纸主题 ═══
@@ -2262,8 +2265,8 @@
   }
   .wallpaper-preview.has-image .wallpaper-preview-empty { display: none; }
   /* 视口绝对定位铺满预览窗：容器高度只由 aspect-ratio 决定，整页克隆体撑不高它；
-     壁纸垫底是兄弟层，滚动镜像时垫底不动，与真实 fixed 壁纸随视口不动一致。 */
-  .wallpaper-preview-viewport { display: none; position: absolute; inset: 0; background: transparent; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; pointer-events: auto; }
+     视口不可滚，一屏之外由 sizer 裁掉；壁纸垫底是兄弟层，与真实 fixed 壁纸同取景。 */
+  .wallpaper-preview-viewport { display: none; position: absolute; inset: 0; background: transparent; overflow: hidden; }
   .wallpaper-preview.has-image .wallpaper-preview-viewport { display: block; }
   /* 高级选项展开钮复用关于页 about-details 构造，左侧缩进是该页版式专属，这里抹掉 */
   .wallpaper-advanced { margin: 12px 0 0; }

@@ -4035,12 +4035,12 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(subTab[1].includes("captureSettingsMirror()"), "进主题子页即抓看板快照");
   });
 
-  it("预览窗按当前视口比例定高：长页只在窗内滚动，缩放比封顶 1，窄窗口不再自锁放大", () => {
-    // 旧尺寸链 s = availW / naturalW 只认宽度，且 sizer.style.width 写死 naturalW*s，
-    // 把设置页右栏 grid 的 1fr 列撑开：下一轮 availW 读到撑开后的旧宽，窄窗口下 s
-    // 反而涨到 >1（缩略图变放大图）；sizer.style.height = naturalH*s 又让预览框跟着
-    // 整页内容越拉越长，壁纸 cover 的取景基准与真实 fixed 视口越偏越远。修法：预览框
-    // 高度交给容器 aspect-ratio（＝当前视口比例），sizer 只撑整页高度供窗内滚动，s 封顶 1。
+  it("预览窗＝静止一屏：视口不可滚、sizer 与镜像栏都按一屏定高，长页不再把栏底推出屏幕", () => {
+    // 上一版容器按视口比例定高，镜像内部却仍是整页长图：viewport 内滚、sizer 撑整页，
+    // v2 镜像栏只剥成 static 而未定高，grid 的 stretch 把它拉到整页高，栏内
+    // margin-top:auto 的 tab 组与底行被推到整页底部——短页栏底就超出视口，长页整组
+    // 跑到屏幕外。用户裁决：视口不可滚。改法：sizer 只撑一屏、整页由它裁掉，镜像栏按
+    // --preview-vh（一屏自然高）定高并 align-self:start；缩放比封顶 1 与比例注入保留。
     // 基座规则要按声明锚定：皮肤覆盖段里还有一条同名的 .settings-theme-preview 换底规则
     const themeBox = panelCss.match(/\.settings-theme-preview \{\s*pointer-events: none;([^}]*)\}/)[1];
     for (const pin of ["aspect-ratio: var(--preview-aspect, 1.6)", "min-width: 0", "min-height: 0", "overflow: hidden", "display: flex"]) {
@@ -4051,46 +4051,66 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".wallpaper-preview.has-image { min-height: 0; }"),
       "有图态撤掉 280px 占位，比例精确；空态保留占位");
     const themeViewport = panelCss.match(/\.settings-mirror-viewport \{\s*border-radius: var\(--radius-md, 8px\);([^}]*)\}/)[1];
-    for (const pin of ["flex: 1; min-height: 0", "overflow-y: auto", "pointer-events: auto", "scrollbar-gutter: stable"]) {
-      assert.ok(themeViewport.includes(pin), `主题预览视口含 ${pin}`);
-    }
+    assert.ok(themeViewport.includes("flex: 1; min-height: 0"), "主题预览视口由容器比例定高");
+    assert.ok(themeViewport.includes("overflow: hidden"), "主题预览视口不可滚");
+    assert.ok(!/overflow-y:\s*auto|scrollbar-gutter|pointer-events:\s*auto/.test(themeViewport),
+      "主题预览视口不留滚动槽、不开放交互");
     const modalViewport = panelCss.match(/\.wallpaper-preview-viewport \{([^}]*)\}/)[1];
-    for (const pin of ["position: absolute; inset: 0", "overflow-y: auto", "pointer-events: auto"]) {
-      assert.ok(modalViewport.includes(pin), `窗内预览视口含 ${pin}`);
+    assert.ok(modalViewport.includes("position: absolute; inset: 0"), "窗内预览视口铺满容器");
+    assert.ok(modalViewport.includes("overflow: hidden"), "窗内预览视口不可滚");
+    assert.ok(modalViewport.includes("background: transparent"), "壁纸垫底仍透得出来");
+    assert.ok(!/overflow-y:\s*auto|scrollbar-gutter|pointer-events:\s*auto/.test(modalViewport),
+      "窗内预览视口不留滚动槽、不开放交互");
+    const railRule = panelCss.match(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{([^}]*)\}/)[1];
+    for (const pin of ["align-self: start", "height: var(--preview-vh, 100vh)", "overflow: hidden"]) {
+      assert.ok(railRule.includes(pin), `镜像栏含 ${pin}`);
     }
     assert.ok(panelCss.includes(".settings-mirror-sizer { position: relative; width: 100%; overflow: hidden; }"),
-      "sizer 宽度交还容器，不写死 px 撑开 grid 列");
+      "sizer 宽度交还容器，整页克隆体由它裁掉");
 
     const capture = extractFn("captureMirrorInto", "viewport, sizer, scaleEl");
     assert.ok(capture.includes("Math.min(1, availW / naturalW)"), "缩放比封顶 1：窄窗口不放大");
     assert.ok(capture.includes('sizer.style.width = ""'), "sizer 不写死 px 宽");
-    assert.ok(capture.includes('sizer.style.height = naturalH * s + "px"'), "sizer 只撑整页高度供内滚");
+    assert.ok(capture.includes('sizer.style.height = availH + "px"'), "sizer 只撑一屏高度");
+    assert.ok(capture.includes('setProperty("--preview-vh", availH / s + "px")'),
+      "一屏自然高注入镜像栏，缩放后栏底贴视口底");
+    assert.ok(!capture.includes("scaleEl.offsetHeight"), "整页自然高不再参与尺寸链");
     assert.ok(!capture.includes('naturalW * s + "px"'), "旧的 sizer 固定 px 宽已撤");
     assert.ok(!capture.includes("viewport.scrollTop = 0"), "旧的定高内滚复位已撤");
 
     // 真跑尺寸链：切出源码里的计算段，驱动经典/长页/窄窗口/超宽四种组合
     const chain = capture.slice(capture.indexOf("const mainCs = getComputedStyle(main);"), capture.lastIndexOf("return true;"));
-    const runChain = (mainW, paddingL, paddingR, railW, availW, contentH) => {
+    const runChain = (mainW, paddingL, paddingR, railW, availW, availH, contentH) => {
       const main = { clientWidth: mainW };
-      const viewport = { clientWidth: availW };
+      const viewport = { clientWidth: availW, clientHeight: availH, parentElement: { clientHeight: availH } };
       const sizer = { style: { width: "keep", height: "keep" } };
-      const scaleEl = { style: {}, offsetHeight: contentH };
+      const cssVars = {};
+      const scaleEl = {
+        style: { setProperty: (k, v) => { cssVars[k] = v; } },
+        offsetHeight: contentH,
+      };
       const getComputedStyle = () => ({ paddingLeft: `${paddingL}px`, paddingRight: `${paddingR}px` });
       new Function("main", "viewport", "sizer", "scaleEl", "mirrorRailW", "getComputedStyle", chain)(
         main, viewport, sizer, scaleEl, railW, getComputedStyle);
       const s = Number(/scale\(([^)]+)\)/.exec(scaleEl.style.transform)[1]);
-      return { s, width: scaleEl.style.width, sizerW: sizer.style.width, sizerH: parseFloat(sizer.style.height) };
+      return {
+        s, width: scaleEl.style.width, sizerW: sizer.style.width,
+        sizerH: parseFloat(sizer.style.height), railH: parseFloat(cssVars["--preview-vh"]),
+      };
     };
-    const classic = runChain(1430, 216, 48, 216, 948, 969);   // naturalW 1406
-    const longPage = runChain(1430, 216, 48, 216, 948, 2321);
-    const narrow = runChain(1014, 72, 48, 72, 1174, 1856);    // naturalW 990，availW 被旧列宽自锁撑大
-    const wide = runChain(1656, 216, 48, 216, 1700, 969);     // naturalW 1632，预览栏更宽
+    const classic = runChain(1430, 216, 48, 216, 948, 584, 969);   // naturalW 1406
+    const longPage = runChain(1430, 216, 48, 216, 948, 584, 2321);
+    const narrow = runChain(1014, 72, 48, 72, 1174, 584, 1856);    // naturalW 990，availW 被旧列宽自锁撑大
+    const wide = runChain(1656, 216, 48, 216, 1700, 584, 969);     // naturalW 1632，预览栏更宽
     assert.equal(classic.width, "1406px", "镜像画布按自然宽布局");
     assert.ok(classic.s < 1 && classic.s > 0.6, "经典比例按宽度等比缩");
-    assert.equal(longPage.s, classic.s, "长页不改缩放比：只有窗内滚动高度变长");
-    assert.ok(longPage.sizerH > classic.sizerH, "长页撑高 sizer 供内滚，预览窗本身不随之变高");
+    assert.equal(classic.sizerH, 584, "sizer 高＝视口高，整页由它裁掉");
+    assert.ok(Math.abs(classic.railH * classic.s - 584) < 0.001, "镜像栏按 s 缩放后正好一屏高");
+    assert.equal(longPage.s, classic.s, "长页不改缩放比");
+    assert.equal(longPage.sizerH, classic.sizerH, "长页不撑高 sizer：预览框与内容裁切位都不变");
+    assert.equal(longPage.railH, classic.railH, "长页不改镜像栏高：栏底恒等于视口底");
     assert.equal(narrow.s, 1, "窄窗口缩放比封顶 1，不再放大成怪图");
-    assert.equal(narrow.sizerH, 1856, "封顶后 sizer 按 1:1 撑高");
+    assert.ok(Math.abs(narrow.railH * narrow.s - 584) < 0.001, "封顶后镜像栏仍贴一屏");
     assert.equal(wide.s, 1, "预览栏宽于自然宽时同样不放大");
     assert.equal(classic.sizerW, "", "sizer 宽度清空，交还容器");
     assert.equal(longPage.sizerW, "", "长页同样不写死 px 宽");
@@ -4126,9 +4146,9 @@ describe("panel.html 设置全页视图", () => {
       "镜像自然宽补回栏克隆实渲宽 + 24px 栏间隔（宽档 216+24、窄栏随媒体查询 72+24，与布局左让同源）");
     assert.ok(/railClone\.offsetWidth/.test(body), "栏宽按克隆实渲取值，不硬编码档宽");
     assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: grid; grid-template-columns: auto minmax\(0, 1fr\); column-gap: 24px; row-gap: 24px; \}/.test(panelCss),
-      "镜像画布在新版下两列网格：栏跨头行/看板两行通高，栏与内容区间照真实布局留 24px 间隔，行距 24 照 main padding-top");
-    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{ position: static;/.test(panelCss),
-      "镜像内的栏剥 fixed 通高形态，随画布静态铺开");
+      "镜像画布在新版下两列网格：栏跨头行/看板两行，栏与内容区间照真实布局留 24px 间隔，行距 24 照 main padding-top");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{\s*position: static;[^}]*align-self: start;[^}]*height: var\(--preview-vh, 100vh\)/.test(panelCss),
+      "镜像内的栏剥 fixed 通高形态并按一屏高定高：栏底贴视口底而非整页底");
     assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale > \.telemetry-view \{ grid-column: 2; min-width: 0; \}/.test(panelCss),
       "看板镜像落右列第二行、吃掉栏外全部宽度，不超宽也不缩水");
     assert.ok(body.includes('document.querySelector("#mainHeadInner")'),
