@@ -12753,6 +12753,43 @@ async function api(method, path, body) {
     return out;
   }
 
+  // live 推导（2026-11-12）：全新会话终端的空窗补位。真行进列表（兜底行已退场）到
+  // 绑定落地（boundConversation 进阳性身份）之间，绑定捕获在退避窗里可能拖最长
+  // 60s——这段时间终端没有 resume 也没有 boundConversation，terminalRailFindOpenSession
+  // 认不出它，真行退回普通历史行：无高亮、无转圈、无关闭叉、水位线不保护，用户看着
+  // 自己刚发出去的那条会话「凭空消失」（2026-11-12 行抖动案形态一）。推导口径与
+  // terminalRailPendingNewTerminals 的「已被接替」完全同源：同目录、lastActive ≥ 终端
+  // 出生（spawnedAt 优先）、未被其他终端阳性占用（terminalRailClaimedRowKeys 排除集）
+  // 的**最新**行——正是顶掉兜底行的那行，这里把它认回给这台终端当 live 行。边界与
+  // 绑定捕获同款：同目录双会话并发时可能认错行，只影响显示标记（高亮/转圈/关闭叉/
+  // 水位线），绑定一落地即被阳性身份接管。只供 live map 构建使用——续接去重、切换
+  // 去重、归档关终端三个行为级消费点仍走阳性身份，推导不外溢（认错行顶多高亮错半
+  // 分钟，误路由/误杀终端不可接受）。
+  function terminalRailDerivedLiveRows(agentId) {
+    const claims = new Map();
+    if (!agentId) return claims;
+    for (const session of Object.values(terminalRailSessionMap())) {
+      if (!session || terminalRailAgentId(session) !== agentId) continue;
+      // 带绑定或带 resume 的终端有阳性身份，不参与推导（绑定在列的由精确匹配接住；
+      // 绑定不在列的是扫描未回，等下一拍，不拿目录近似顶上）。
+      if (session.resume || session.boundConversation) continue;
+      const state = session.backendState;
+      const born = state && Number.isFinite(state.spawnedAt) ? state.spawnedAt
+        : state && Number.isFinite(state.createdAt) ? state.createdAt
+        : Date.now();
+      const claimedByOthers = terminalRailClaimedRowKeys(session.id);
+      let best = null;
+      for (const row of terminalRailHistory.sessions) {
+        if (!row || claimedByOthers.has(terminalRailArchivedKey(row))) continue;
+        if (!terminalRailSameDir(row.project, session.cwd)) continue;
+        if ((row.lastActive || 0) < born) continue;
+        if (!best || (row.lastActive || 0) > (best.lastActive || 0)) best = row;
+      }
+      if (best) claims.set(best.id, session);
+    }
+    return claims;
+  }
+
   // ── 段头搜索 ──
   // 行内展开不是浮层：点搜索钮＝展开＋自动聚焦；已展开再点不退出（非 toggle，只
   // 重新聚焦）。退出手势：Esc／清空钮／点开结果行＝清空＋收起；点搜索区外**仅当
@@ -13288,10 +13325,13 @@ async function api(method, path, body) {
       group.pending.push(entry);
     }
     // live 映射：行 → 开着终端（resume 两键）。selected 由渲染时的活跃终端定。
+    // 阳性身份找不到时回落推导（terminalRailDerivedLiveRows）：绑定未落地窗口里
+    // 真行照常进组渲染，缺的是 live 标记——推导行不改变行集合，只把标记补上。
+    const derivedLive = terminalRailDerivedLiveRows(agentId);
     for (const group of groups) {
       if (!group.live) group.live = new Map();
       for (const row of group.rows) {
-        const live = terminalRailFindOpenSession(row.endpoint, row.id);
+        const live = terminalRailFindOpenSession(row.endpoint, row.id) || derivedLive.get(row.id) || null;
         if (live) group.live.set(row.id, live);
       }
     }
