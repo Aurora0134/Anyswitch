@@ -987,6 +987,19 @@ describe("GET /panel/api/status 的 selfUpdate 捎带", () => {
     });
   });
 
+  test("成功结论的结构位 relayRestartFailed 原样捎带到 status 帧", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, {
+        ...stagedRun({ runId: "00000000-0000-4000-8000-0000000000a4" }),
+        result: { outcome: "updated_pending_restart", message: "新版本已安装，重启面板后生效", relayRestartFailed: true },
+        finishedAt: new Date(Date.now() - 30 * 1000).toISOString(),
+      });
+      const body = (await get("/panel/api/status")).body;
+      assert.equal(body.selfUpdate.outcome, "updated_pending_restart");
+      assert.equal(body.selfUpdate.relayRestartFailed, true, "面板要拿到结构位，不靠嗅探文案");
+    });
+  });
+
   test("超过 15 分钟的旧结论：不捎带（补显窗口由 /last 单独管）", async () => {
     await withPanel({}, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, {
@@ -1010,13 +1023,15 @@ describe("自更新页面级观察者（panel.js createSelfUpdateFrameWatcher）
       getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
       setItem: (key, value) => storage.set(String(key), String(value)),
     };
-    const factory = vm.runInNewContext(`(${match[0]})`, { localStorage });
+    const toneMatch = panelJs.match(/  function selfUpdateTone\([\s\S]*?\n  \}/);
+    assert.ok(toneMatch, "共享色档映射 selfUpdateTone 必须存在于 panel.js");
+    const factory = vm.runInNewContext(`${toneMatch[0]}\n;(${match[0]})`, { localStorage });
     const toasts = [];
     const swaps = [];
     const flags = { restarting: false, startupRestart: false };
     let aboutTracking = false;
     const watcher = factory({
-      toast: (message, isErr) => toasts.push({ message, isErr }),
+      toast: (message, level) => toasts.push({ message, level }),
       dispatchSwap: () => swaps.push(1),
       isPanelRestarting: () => flags.restarting,
       isStartupRestartPage: () => flags.startupRestart,
@@ -1050,10 +1065,11 @@ describe("自更新页面级观察者（panel.js createSelfUpdateFrameWatcher）
 
   test("无刷新终态（失败/回滚/待重启生效）：toast 一次并落已读，重帧不重弹", () => {
     const h = watcherHarness();
-    for (const [outcome, isErr] of [["failed", true], ["rolled_back", true], ["updated_pending_restart", false]]) {
+    // 与关于页、/last 补显同源取色：待重启生效是警示档，失败/回滚才是报错红
+    for (const [outcome, level] of [["failed", "danger"], ["rolled_back", "danger"], ["updated_pending_restart", "warn"]]) {
       h.frame(h.doneFrame(outcome));
       assert.equal(h.toasts.length, 1, `${outcome} 就地提示一次`);
-      assert.equal(h.toasts[0].isErr, isErr);
+      assert.equal(h.toasts[0].level, level);
       assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), "1");
       h.frame(h.doneFrame(outcome));
       assert.equal(h.toasts.length, 1, "已读标记压制重弹");

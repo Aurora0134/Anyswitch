@@ -346,9 +346,28 @@ describe("runSelfUpdate · apply 阶段", () => {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "updated_pending_restart");
       assert.match(result.message, /重启面板后生效/);
+      assert.equal(result.relayRestartFailed, false, "Relay 重启成功：结构位不得误报");
       assert.equal(events.panelHostSpawns, 0);
       assert.equal(events.watchdogStops, 1);
       assert.equal(events.watchdogSpawns, 1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("面板不退场且 Relay 没起来：待重启结论带 relayRestartFailed 结构位", async () => {
+    const probe = scriptedProbe([{ version: "0.6.1-preview" }]);
+    const { deps, journalDir, cleanup } = baseDeps({
+      probeWatchdogFn: async () => true,
+      probePanelFn: probe.probePanelFn,
+      restartRelayFn: async () => ({ ok: false }),
+    });
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated_pending_restart");
+      assert.equal(result.relayRestartFailed, true);
+      assert.match(result.message, /Relay 未能自动重启/);
     } finally {
       cleanup();
     }
@@ -369,6 +388,7 @@ describe("runSelfUpdate · apply 阶段", () => {
       assert.equal(result.outcome, "updated");
       assert.match(result.message, /已更新到 0\.7\.0/);
       assert.match(result.message, /Relay 未能自动重启/);
+      assert.equal(result.relayRestartFailed, true, "成功结论也要带住 Relay 没起来这个事实");
     } finally {
       cleanup();
     }

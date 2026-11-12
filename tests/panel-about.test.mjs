@@ -150,6 +150,9 @@ function harness(respond = () => latest(), options = {}) {
   const flushJobs = () => { const pending = jobs.splice(0); for (const fn of pending) fn(); };
   const match = source.match(/  function createAboutController\([\s\S]*?\n  \}/);
   assert.ok(match, "testable About controller exists in panel.js");
+  // 色档映射是三条渲染路径共用的同一份源码：注入沙箱，别在用例里另抄一套
+  const toneMatch = source.match(/  function selfUpdateTone\([\s\S]*?\n  \}/);
+  assert.ok(toneMatch, "shared self-update tone mapping exists in panel.js");
   // localStorage 存档（逐 harness 独立的 mock）：vm 沙箱里没有全局 localStorage，
   // 不一致提示行的「不再显示」按状态指纹读写它，测试据此断言静默与复现。
   const storage = new Map();
@@ -158,7 +161,7 @@ function harness(respond = () => latest(), options = {}) {
     setItem: (key, value) => { storage.set(String(key), String(value)); },
     removeItem: (key) => { storage.delete(String(key)); },
   };
-  const factory = vm.runInNewContext(`(${match[0]})`, {
+  const factory = vm.runInNewContext(`${toneMatch[0]}\n;(${match[0]})`, {
     URL, URLSearchParams, setTimeout, clearTimeout, localStorage,
     // 自更新流程会触到换装事件与「本页是否换装产物」判定：给最小桩。
     window: {},
@@ -1334,7 +1337,7 @@ const appUpdateAvailable = () => ({
 });
 
 // 一键流程公共驱动：进页 → 点「立即更新」→ 确认弹层 → POST 登记 → 轮询帧脚本。
-function selfUpdateHarness({ frames, last = null } = {}) {
+function selfUpdateHarness({ frames, last = null, updates = null } = {}) {
   let frameIndex = 0;
   let lastOutcome = last;
   const h = harness((path) => {
@@ -1344,7 +1347,7 @@ function selfUpdateHarness({ frames, last = null } = {}) {
       if (!frame) throw new Error("poll transient failure");
       return frame;
     }
-    if (path === "/api/updates") return appUpdateAvailable();
+    if (path === "/api/updates") return updates ?? appUpdateAvailable();
     if (path === "/api/self-update/active") return { ok: true, runs: [], staged: null };
     if (path === "/api/self-update/last") return lastOutcome;
     return normal(path);
@@ -1422,4 +1425,74 @@ test("无刷新终态（失败）：本页 toast+落已读，再进页 /last 补
   await h.controller.enter();
   await tick(); await tick();
   assert.equal(h.toasts.length, toastsBefore, "已读标记压制 /last 补显");
+});
+
+test("待重启生效：状态行与弹窗同给警示档，不再涂成报错红", async () => {
+  const pendingRecord = {
+    ok: true, runId: "r1", state: "done", step: "apply", phase: "waiting-panel", track: "stable",
+    targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: new Date().toISOString(),
+    outcome: "updated_pending_restart", message: "新版本已安装，重启面板后生效",
+    beforeVersion: "0.6.1", afterVersion: "0.7.0", latestVersion: "0.7.0",
+  };
+  const { h } = selfUpdateHarness({
+    frames: [
+      { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+      pendingRecord,
+    ],
+  });
+  await startOneClick(h);
+  for (let index = 0; index < 3; index++) {
+    h.flushJobs();
+    await tick();
+  }
+  assert.equal(h.get("aboutUpdateStatus").textContent, "新版本已安装，重启面板后生效");
+  assert.equal(h.get("aboutUpdateStatus").dataset.tone, "warn", "状态行给警示档");
+  const done = h.toasts.find((toast) => /重启面板后生效/.test(toast.message));
+  assert.ok(done, "本页要交代结论");
+  assert.equal(done.isErr, "warn", "弹窗与状态行同档：需要用户动手，但不是失败");
+});
+
+test("成功但 Relay 没起来：结构位把成功绿降为警示档", async () => {
+  const degradedRecord = {
+    ok: true, runId: "r1", state: "done", step: "apply", phase: "waiting-panel", track: "stable",
+    targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: new Date().toISOString(),
+    outcome: "updated", message: "已更新到 0.7.0；Relay 未能自动重启，请在面板中手动重启 Relay",
+    beforeVersion: "0.6.1", afterVersion: "0.7.0", latestVersion: "0.7.0", relayRestartFailed: true,
+  };
+  const { h } = selfUpdateHarness({
+    frames: [
+      { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+      degradedRecord,
+    ],
+  });
+  await startOneClick(h);
+  for (let index = 0; index < 3; index++) {
+    h.flushJobs();
+    await tick();
+  }
+  assert.equal(h.get("aboutUpdateStatus").dataset.tone, "warn", "主结论成功、但有尾巴没落地：警示档，不报错也不涂成功绿");
+  const done = h.toasts.find((toast) => /已更新到 0\.7\.0/.test(toast.message));
+  assert.ok(done, "结论要交代到用户眼前");
+  assert.equal(done.isErr, "warn");
+});
+
+test("刷新后 /last 补显：待重启生效仍是警示档，与关于页、观察者同色", async () => {
+  const pendingRecord = {
+    ok: true, runId: "r1", state: "done", step: "apply", phase: "waiting-panel", track: "stable",
+    targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: new Date().toISOString(),
+    outcome: "updated_pending_restart", message: "新版本已安装，重启面板后生效",
+    beforeVersion: "0.6.1", latestVersion: "0.7.0",
+  };
+  const { h } = selfUpdateHarness({
+    frames: [],
+    last: pendingRecord,
+    // 检查结果显示已是最新，才不会被「有新版本」盖掉——那是有意为之的优先级，不是本用例的对象
+    updates: { state: "current", track: "stable", checkedAt: "2026-09-18T08:01:00Z", drift: null, release: null },
+  });
+  h.controller.enter();
+  await tick(); await tick(); await tick();
+  assert.equal(h.get("aboutUpdateStatus").dataset.tone, "warn");
+  const done = h.toasts.find((toast) => /重启面板后生效/.test(toast.message));
+  assert.ok(done, "/last 补显要弹一次");
+  assert.equal(done.isErr, "warn", "补显通道与关于页同一份色档");
 });
