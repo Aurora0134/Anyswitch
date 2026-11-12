@@ -610,9 +610,10 @@
        可缩到剩余空间，flex:1 的滚动层成为唯一 scroller，底栏常驻；overflow:hidden
        保证极端矮窗下溢出的也是被裁切而不是画到段头/底栏上（e160790 的病征是可见
        重叠；500px 矮窗下新建钮+段头 73px 远装得进，根本裁不到）。
-       position:relative 仍留：底部渐隐遮罩挂在栏体上（绝对定位贴滚动层底）。两个
-       菜单已 portal 到 body（overflow:hidden 会裁栏内浮层，见 .rail-term-menu）。 */
-    margin-top: 12px; flex: 1 1 auto; gap: 0; position: relative;
+       底部渐隐不再挂在这层（改由滚动层自身 mask 承担，见 .rail-term-scroll），
+       栏体已无绝对定位后代，position 不必留。两个菜单早 portal 到 body
+       （overflow:hidden 会裁栏内浮层，见 .rail-term-menu）。 */
+    margin-top: 12px; flex: 1 1 auto; gap: 0;
     min-height: 0; overflow: hidden;
   }
   /* 栏体分段的 flex 纪律（矮窗口不重叠的前提，见 #railTerminalDir 注释）：
@@ -912,24 +913,29 @@
     min-height: 26px; padding: 0 8px 0 30px; border-radius: var(--radius-md);
   }
   .rail-term-more:hover { color: var(--text-2); }
-  /* 栏底色取值源：渐隐遮罩的终点必须与栏底色是同一个值，任何皮肤都成立。栏底在基座
-     是 --surface，saas/sepia 于「阶段 2 材质修正 ②」对调成 --bg-page（亮色栏灰<内容
-     白、暗色栏再压暗），aurora 不参与对调、仍是 --surface 玻璃料——两条皮肤分支与那
-     处对调逐项同源。变量挂在栏本体（#v2Rail）上，栏内后代继承同一值；主题预览的栏
-     克隆剥了 id、也不出终端会话栏，天然不中。 */
-  :root[data-ui-version="v2"] #v2Rail { --rail-bg: var(--surface); }
-  @scope (:root[data-ui-version="v2"][data-style="saas"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {
-  :scope:scope[data-ui-version="v2"] #v2Rail,
-  :scope:scope[data-ui-version="v2"] #v2Rail { --rail-bg: var(--bg-page); }
-  }
-  /* 底部 24px 渐隐：静态遮罩，不吃点击、无过渡。终点取 --rail-bg（= 栏底色本身），
-     换皮肤不会变成一条更亮的实色带。S4 起挂在栏体上（不在滚动层里）——它不随内容
-     滚动，贴的是滚动层底边（挂 position:relative 的父级）。
-     right 让出滚动条槽位（5px 滚条 + 1px 余量）：遮罩不该盖到 thumb 上。 */
-  .rail-term-fade {
-    position: absolute; bottom: 0; left: 0; right: 6px; height: 24px;
-    background: linear-gradient(to bottom, transparent, var(--rail-bg, var(--surface)));
-    pointer-events: none;
+  /* 底部 24px 渐隐：让内容自己淡出，不往内容上刷颜色。
+     早先是栏体上一块绝对定位的渐变色块，终点取「栏底色」——不透底的老皮肤收尾无缝；壁纸
+     主题把六档表面换成半透明玻璃后，同色再叠一层会把该段 alpha 推高（暗色档 0.75→0.94，
+     见 wallpaper-theme.js 的 SURFACE_SPEC），栏底读成一道黑带。改挂滚动层自身的 mask：
+     淡出由内容自己承担，底下是什么（栏底色 / 玻璃 / 照片）都只透出一层，任何皮肤都不会
+     多叠一块，列表不满时也不再凭空画一条带。
+     第二层是滚条槽那 6px 的满不透明块：单层 mask 会把 thumb 尾部一起淡掉，而这块地方在
+     早先的色块里本就是让开的（5px 滚条 + 1px 余量）。mask 只看 alpha 通道，故用 black
+     而非色值 token——渐隐不是颜色决策。
+     不吃点击、无过渡；渐隐贴的是滚动层底边而非内容行，内容滚动时它不动。 */
+  .rail-term-scroll {
+    -webkit-mask-image:
+      linear-gradient(to bottom, black calc(100% - 24px), transparent),
+      linear-gradient(black, black);
+    -webkit-mask-size: 100% 100%, 6px 100%;
+    -webkit-mask-position: 0 0, right 0;
+    -webkit-mask-repeat: no-repeat;
+    mask-image:
+      linear-gradient(to bottom, black calc(100% - 24px), transparent),
+      linear-gradient(black, black);
+    mask-size: 100% 100%, 6px 100%;
+    mask-position: 0 0, right 0;
+    mask-repeat: no-repeat;
   }
   @media (prefers-reduced-motion: reduce) {
     .rail-term-group-arrow { transition: none; }
@@ -999,17 +1005,16 @@
     :root[data-ui-version="v2"] #railThemeToggle { display: none; }
   }
 
-  /* 终端会话栏的折叠态（72px 图标栏）：只留新建图标钮，两个列表段与底部渐隐整段
-     不出（空列表上遮罩是一条无意义的渐变带）。两个来处各挂
-     一条，与上面收窄两态同一套条件：窄栏自动档用 :not([data-rail="expanded"]) 让开
-     手动展开，宽档只有 collapsed 才是图标栏。规则放在收窄两态块之后，与既有栏态块
-     同序。 */
+  /* 终端会话栏的折叠态（72px 图标栏）：只留新建图标钮，两个列表段整段不出。
+     两个来处各挂一条，与上面收窄两态同一套条件：窄栏自动档用
+     :not([data-rail="expanded"]) 让开手动展开，宽档只有 collapsed 才是图标栏。
+     规则放在收窄两态块之后，与既有栏态块同序。 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section-head, .rail-term-scroll, .rail-term-fade) { display: none; }
+    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section-head, .rail-term-scroll) { display: none; }
     :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section-head, .rail-term-scroll, .rail-term-fade) { display: none; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section-head, .rail-term-scroll) { display: none; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
 

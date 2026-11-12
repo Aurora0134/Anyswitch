@@ -37,6 +37,18 @@ const SCOPE_FILES = [
   "panel-ui/panel.css",
   ...SLUGS.map((slug) => `panel-ui/style-lab/${slug}.css`),
 ];
+// 有意下线的 base 皮肤规则（按 splitSelectorList 归一化后的选择器登记）。
+// 本组对账防的是「@scope 改写把规则漏掉或写错」，皮肤规则本身随产品演进会合法增减：
+// 登记一条＝从 base 侧扣除一条，未登记的增删照旧判红。登记必须带日期与下线理由，
+// 否则它就退化成消音器。
+const RETIRED_BASE_SKIN_RULES = new Map([
+  ["panel-ui/panel.css", new Set([
+    // 2026-11-12：终端会话栏底部渐隐改挂滚动层 mask（原渐变色块在壁纸主题的半透明栏底
+    // 上会叠出第二层 alpha，暗色下读成一道黑带）。渐隐不再取栏底色，--rail-bg 的
+    // saas/sepia 对调失去用点，随渐隐一并删除。
+    ':root[data-ui-version="v2"][data-style="saas"] #v2Rail, :root[data-ui-version="v2"][data-style="sepia"] #v2Rail',
+  ])],
+]);
 function readBaseCss(relPath) {
   try {
     return execFileSync("git", ["show", `${BASE_REV}:${relPath}`], {
@@ -257,7 +269,10 @@ function auditScopedCss(cssText, baseCssText, label) {
       if (!part.startsWith(":scope")) violations.push(label + ":" + r.line + " @scope 内选择器未以 :scope 开头：" + part.slice(0, 120));
     }
   }
-  const baseRules = baseCssText === null ? [] : parseCss(baseCssText).filter((r) => isRootFacingSkinRule(r.sel));
+  const retired = RETIRED_BASE_SKIN_RULES.get(label) ?? new Set();
+  const baseRules = baseCssText === null ? [] : parseCss(baseCssText)
+    .filter((r) => isRootFacingSkinRule(r.sel))
+    .filter((r) => !retired.has(splitSelectorList(r.sel).join(", ")));
   if (baseCssText !== null) {
     if (baseRules.length === 0) violations.push(label + ": base 版本找不到皮肤覆盖规则（基准失效）");
     if (inScope.length !== baseRules.length) {
