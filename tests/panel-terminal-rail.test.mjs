@@ -610,6 +610,7 @@ describe("终端视图左栏换血", () => {
         ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
+        ${extractFn("terminalRailDerivedLiveRows")}
         ${extractFn("renderTerminalRailHistory")}
         return { render: renderTerminalRailHistory, rendered: terminalRailRendered };
       `)(list, state);
@@ -1841,6 +1842,7 @@ ${extractFn("terminalRailPendingNewTerminals")}
 ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
+          ${extractFn("terminalRailDerivedLiveRows")}
           ${extractFn("renderTerminalRailHistory")}
           return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
         `)(list, state, history, activeSession);
@@ -1957,6 +1959,7 @@ ${extractFn("terminalRailPendingNewTerminals")}
 ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
+        ${extractFn("terminalRailDerivedLiveRows")}
         ${extractFn("renderTerminalRailHistory")}
         return {
           render: renderTerminalRailHistory,
@@ -2167,6 +2170,7 @@ describe("运行中转圈与水位线联动", () => {
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
+    ${extractFn("terminalRailDerivedLiveRows")}
     ${extractFn("renderTerminalRailHistory")}
     return { render: renderTerminalRailHistory };
   `)(list, state, history, sessions, activeId);
@@ -2261,6 +2265,186 @@ describe("运行中转圈与水位线联动", () => {
     fn.sync("");
     assert.deepEqual(fn.rendered, [""], "同参二次调用早退");
     assert.deepEqual(fn.refetched, [], "空态不发重拉");
+  });
+});
+
+// live 推导（2026-11-12 行消失案形态一）：全新会话终端在「真行进列表（兜底行退场）
+// → 绑定落地（boundConversation 进阳性身份）」之间的空窗——绑定捕获退避最长 60s，
+// 期间真行没有任何前台标记（无高亮/转圈/关闭叉/水位线保护），用户看着自己刚发的
+// 会话「消失」。推导与兜底行的「已被接替」判据同源：同目录、lastActive ≥ 终端出生、
+// 未被其他终端阳性占用的最新行。沙盒形制同 watermarkSandbox，SPINNER 换成可断言
+// 桩值以钉转圈。
+describe("live 推导（绑定未落地空窗）", () => {
+  const derivedSandbox = (list, state, history, sessions, activeId) => new Function("list", "state", "history", "sessions", "activeId", `
+    let terminalRailRendered = { open: null, history: null };
+    let terminalRailAutoExpandedFor = "";
+    let terminalRailScrolledFor = "";
+    let terminalRailFlipMode = "instant";
+    const terminalRailCollapsedGroups = state.collapsed;
+    function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
+    const terminalRailWatermarks = new Map();
+    const terminalRailPrefs = { archived: [], removedGroups: [] };
+    const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+    const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+    let terminalRailLastGroups = [];
+    const TERMINAL_RAIL_WATERMARK = 5;
+    const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+    const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
+    const TERMINAL_RAIL_ICON_CHEVRON = "";
+    const TERMINAL_RAIL_ICON_ARCHIVE = "";
+    const TERMINAL_RAIL_ICON_UNARCHIVE = "";
+    const TERMINAL_RAIL_ICON_ELLIPSIS = "";
+    const TERMINAL_RAIL_ICON_PLUS = "";
+    const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
+    const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
+    const TERMINAL_RAIL_SPINNER = "SPINNER-STUB";
+    const TERMINAL_RAIL_DONE_DOT = "DONE-STUB";
+    const terminalDoneUnread = new Map();
+    let terminalRailSelectPending = null;
+    ${extractFn("terminalRailStateSlotHtml")}
+    let terminalRailHistory = history;
+    let activeTerminalPreviewId = activeId;
+    function $(id) { return id === "railTermHistoryList" ? list : null; }
+    let terminalBackendReady = true;
+    const terminalBackendSessions = sessions;
+    ${extractFn("terminalRailSessionMap")}
+    ${extractFn("terminalRailActiveSession")}
+    ${extractFn("terminalRailAgentId")}
+    ${extractFn("terminalRailFindOpenSession")}
+    function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
+    function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+    function sessRelTime() { return "刚刚"; }
+    function terminalRailRelTime() { return "3 分钟前"; }
+    function esc(v) { return String(v); }
+    function escapeHtml(v) { return String(v || ""); }
+    function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
+    function terminalRailMotionTops() { return null; }
+    function playTerminalRailFlip() {}
+    function terminalRailMotionEnabled() { return false; }
+    function terminalRailPendingRowKeys() { return new Set(); }
+    function terminalRailSnapshotMotion() { return new Map(); }
+    function terminalRailMountExitGhosts() {}
+    let terminalRailLastDiffAgent = null;
+    let terminalRailLastDiffSearch = false;
+    ${extractFn("terminalRailNormDir")}
+    ${extractFn("terminalRailGroupSessions")}
+    ${extractFn("terminalRailWatermarkView")}
+    ${extractFn("terminalRailNextWatermark")}
+    ${extractFn("terminalRailMoreLabel")}
+    ${extractFn("terminalRailSameDir")}
+    ${extractFn("terminalRailGroupForDir")}
+    ${extractFn("terminalRailRegroupRemoved")}
+    function terminalRailSelfHealRemovedGroups() { return false; }
+    ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailClaimedRowKeys")}
+    ${extractFn("terminalRailIsArchived")}
+    ${extractFn("terminalRailVisibleSessions")}
+    ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
+    ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailDerivedLiveRows")}
+    ${extractFn("renderTerminalRailHistory")}
+    return { render: renderTerminalRailHistory };
+  `)(list, state, history, sessions, activeId);
+
+  const makeList = () => {
+    const list = { html: "", writes: 0 };
+    Object.defineProperty(list, "innerHTML", {
+      get: () => list.html,
+      set: (v) => { list.writes += 1; list.html = v; },
+    });
+    return list;
+  };
+  const countOf = (html, needle) => html.split(needle).length - 1;
+
+  it("主场景：无绑定无 resume 的终端认领同目录新行——高亮/转圈/关闭叉全齐，兜底行已退场", () => {
+    // 用户报的形态一：kimi 新会话终端（无 resume、绑定还在退避窗里），Enter 后
+    // 真行已扫进列表（lastActive 600 ≥ 出生 500）、无主——推导把行认回给它。
+    const history = { endpoint: "kimi", sessions: [
+      { id: "s-new", endpoint: "kimi", project: "C:\\dev\\alpha", title: "刚发的需求", lastActive: 600 },
+    ], fetchedAt: 1, error: null };
+    const sessions = {
+      t1: { id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", backendState: { spawnedAt: 500 } },
+    };
+    const list = makeList();
+    derivedSandbox(list, { collapsed: new Set(), scrolled: [] }, history, sessions, "t1").render("kimi");
+    const html = list.html;
+    assert.ok(html.includes('data-rail-term-resume="s-new"'), "真行在树里");
+    assert.ok(html.includes("is-live"), "行带上 live 标记（推导认领）");
+    assert.ok(html.includes("is-active"), "聚焦终端的行选中态");
+    assert.ok(html.includes('data-rail-term-close="t1"'), "关闭叉指向这台终端");
+    assert.ok(html.includes("SPINNER-STUB"), "working 行首转圈（状态槽吃推导 live）");
+    assert.ok(!html.includes("新会话"), "兜底行已被真行接替（不再双行）");
+  });
+
+  it("他终端阳性占用该行：推导不抢——行归绑定的兄弟终端，本终端兜底行照常在", () => {
+    // 排除集同源（terminalRailClaimedRowKeys）：t2 的 boundConversation 命中 s-new，
+    // t1 的推导跳过它（那是兄弟聊出来的行），兜底行维持（等自己的绑定落地）。
+    const history = { endpoint: "kimi", sessions: [
+      { id: "s-new", endpoint: "kimi", project: "C:\\dev\\alpha", title: "兄弟会话", lastActive: 600 },
+    ], fetchedAt: 1, error: null };
+    const sessions = {
+      t1: { id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", backendState: { spawnedAt: 500 } },
+      t2: { id: "t2", cwd: "C:\\dev\\beta", agent: { endpointId: "kimi" }, status: "idle", boundConversation: { endpoint: "kimi", id: "s-new" } },
+    };
+    const list = makeList();
+    derivedSandbox(list, { collapsed: new Set(), scrolled: [] }, history, sessions, "t1").render("kimi");
+    const html = list.html;
+    // 兜底行自身就带关闭叉（挂在终端 id 上），判「谁认领了真行」要看 s-new 行段内
+    // 的关闭叉归属：真行渲染在兜底行之后，t1 的叉只允许出现在兜底行段。
+    const rowAt = html.indexOf('data-rail-term-resume="s-new"');
+    assert.ok(rowAt >= 0, "真行在树里");
+    assert.ok(html.indexOf('data-rail-term-close="t2"', rowAt) >= 0
+      && html.indexOf('data-rail-term-close="t2"', rowAt) < html.indexOf("</button>", rowAt),
+      "真行段内的关闭叉指向绑定的 t2（阳性身份，不掺推导）");
+    assert.ok(html.lastIndexOf('data-rail-term-close="t1"') < rowAt, "t1 的关闭叉只在兜底行段（没抢到真行）");
+    assert.ok(html.includes("新会话"), "t1 兜底行照常（行没被它顶走）");
+  });
+
+  it("行早于终端出生或目录不符：不推导，行保持普通历史行、兜底行维持", () => {
+    // s-old 同目录但 lastActive 100 < 出生 500（那是终端开起来之前的旧会话）；
+    // s-other 更晚活跃但在别的目录——都不能认。
+    const history = { endpoint: "kimi", sessions: [
+      { id: "s-old", endpoint: "kimi", project: "C:\\dev\\alpha", title: "旧会话", lastActive: 100 },
+      { id: "s-other", endpoint: "kimi", project: "C:\\dev\\beta", title: "别目录", lastActive: 900 },
+    ], fetchedAt: 1, error: null };
+    const sessions = {
+      t1: { id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", backendState: { spawnedAt: 500 } },
+    };
+    const list = makeList();
+    derivedSandbox(list, { collapsed: new Set(), scrolled: [] }, history, sessions, "t1").render("kimi");
+    const html = list.html;
+    // 兜底行恒带 is-live 与关闭叉：判「历史行没被点亮」看历史行段内有没有叉/转圈。
+    const oldAt = html.indexOf('data-rail-term-resume="s-old"');
+    const otherAt = html.indexOf('data-rail-term-resume="s-other"');
+    assert.ok(oldAt >= 0 && otherAt >= 0, "两行历史都在树里");
+    const rowHasClose = (at) => {
+      const closeAt = html.indexOf("rail-term-row-close", at);
+      return closeAt >= 0 && closeAt < html.indexOf("</button>", at);
+    };
+    assert.ok(!rowHasClose(oldAt), "旧会话行段内无关闭叉（没被推导点亮）");
+    assert.ok(!rowHasClose(otherAt), "别目录行段内无关闭叉（没被推导点亮）");
+    assert.ok(!html.includes("SPINNER-STUB"), "无转圈（idle 终端兜底槽留空，历史行无 live）");
+    assert.ok(html.includes("新会话"), "兜底行维持（同目录无新行接替）");
+  });
+
+  it("带 resume 的终端走精确匹配不参与推导：旧行照常 live，同目录新行不误认", () => {
+    const history = { endpoint: "kimi", sessions: [
+      { id: "s-old", endpoint: "kimi", project: "C:\\dev\\alpha", title: "续接的旧会话", lastActive: 100 },
+      { id: "s-new", endpoint: "kimi", project: "C:\\dev\\alpha", title: "别人的新行", lastActive: 600 },
+    ], fetchedAt: 1, error: null };
+    const sessions = {
+      t1: { id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-old" } },
+    };
+    const list = makeList();
+    derivedSandbox(list, { collapsed: new Set(), scrolled: [] }, history, sessions, "t1").render("kimi");
+    const html = list.html;
+    assert.equal(countOf(html, "is-live"), 1, "只有 resume 精确匹配的那行 live");
+    assert.ok(html.includes('data-rail-term-close="t1"'), "关闭叉在旧行上（精确匹配）");
+    assert.ok(html.indexOf('data-rail-term-resume="s-old"') < html.indexOf('data-rail-term-close="t1"'), "关闭叉挂在旧行（不是新行）");
+    assert.ok(!html.includes("新会话"), "带 resume 的终端不出兜底行（既有口径）");
   });
 });
 

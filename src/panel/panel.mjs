@@ -318,9 +318,11 @@ function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, t
 // 用户显式要「现在刷一遍」（会话管理 tab 的刷新按钮）走 refresh()——那是唯一
 // 会等真扫描的入口，见列表路由的 ?refresh=1。这是 TTL 的逃生口：没有它，刷新
 // 按钮在窗口内就是个假动作（返回旧数据 + toast「已刷新」）。
-// 另一条改快照的通路是 dropRows（本进程刚删完行）。这里刻意不提供 invalidate
-// 式的「整份作废」入口：没有真实调用方，留着就是没人用也没人测的半截 API；
-// 需要「立刻与盘面对齐」就走 ?refresh=1，需要「摘掉某行」就走 dropRows。
+// 另两条改快照的通路：dropRows（本进程刚删完行，就地摘行＋置脏）与
+// mergeEndpoint（会话栏追赶把单端点新鲜扫描并进来，见该方法注释）。这里刻意
+// 不提供 invalidate 式的「整份作废」入口：没有真实调用方，留着就是没人用也没
+// 人测的半截 API；需要「立刻与盘面对齐」就走 ?refresh=1，需要「摘掉某行」就
+// 走 dropRows。
 // （session-scan.mjs 的头注释只描述「怎么读盘」，缓存语义全在这里。）
 function createSessionsListSnapshot(load, ttlMs) {
   const inFlight = { p: null };
@@ -329,6 +331,10 @@ function createSessionsListSnapshot(load, ttlMs) {
   // 有删除——那份结果可能含刚删的行（删前扫的盘面），整份丢弃，绝不让已删的
   // 行被写回快照。
   let dropSeq = 0;
+  // 删除墓碑：dropRows 摘掉的行记 endpoint＋id。全量扫描成功写快照时清空（盘面
+  // 已是删后真值）；mergeEndpoint 拿它挡「删除之后追赶扫描又把该行带回来」的复活
+  // ——单端点合并没有 dropSeq 那套起扫记代际的护栏，墓碑就是它的删除语义。
+  let droppedKeys = new Set();
 
   function refresh() {
     if (inFlight.p) return inFlight.p;
@@ -338,7 +344,10 @@ function createSessionsListSnapshot(load, ttlMs) {
         const value = await load();
         // 代际不符＝扫描期间删过行：保持当前快照（它已摘掉那些行），只把值交给
         // 调用方。冷缓存时 snap 仍为 null，下一次 get 会重扫。
-        if (seqAtStart === dropSeq) snap = { at: Date.now(), value };
+        if (seqAtStart === dropSeq) {
+          snap = { at: Date.now(), value };
+          droppedKeys = new Set();
+        }
         return value;
       } finally {
         // 微任务延迟一拍再摘，避免「round 已落定但等待者还没读到」时的同步重扫。
@@ -371,14 +380,57 @@ function createSessionsListSnapshot(load, ttlMs) {
     refresh,
     // 本进程刚删掉的行就地摘掉（响应里立刻不再出现），并把快照置为过期：
     // 下一拍请求先拿这份（已摘掉那行）的旧值，同时后台补一扫与盘面对齐。
-    // 没有快照时什么都不做——下一拍自然是冷扫。
+    // 没有快照时什么都不做——下一拍自然是冷扫。摘行同时记墓碑（见 droppedKeys），
+    // 供 mergeEndpoint 挡复活。
     dropRows(predicate) {
       if (!snap || !Array.isArray(snap.value?.sessions)) return;
       dropSeq += 1;
-      snap = {
-        at: 0,
-        value: { ...snap.value, sessions: snap.value.sessions.filter((session) => !predicate(session)) },
+      const kept = [];
+      for (const session of snap.value.sessions) {
+        if (predicate(session)) droppedKeys.add(`${session?.endpoint}\u0000${session?.id}`);
+        else kept.push(session);
+      }
+      snap = { at: 0, value: { ...snap.value, sessions: kept } };
+    },
+    // 单端点合并（会话栏追赶，2026-11-12 行消失案形态二）：把该 agent 的最新
+    // 单家扫描并进当前快照——替换该端点行集、刷新 at。修前追赶只回单家结果、
+    // 绝不碰快照：等待窗里没人碰它，快照内容停在物化前；切出终端视图再切回时
+    // 30s TTL 过期、非强制拉取交回旧快照，整表替换把刚出现的真行抹掉。合并后
+    // 刷新 at 只代表「被追赶的那家是新鲜的」，别家的行最多停在上一轮全量扫描
+    // ——会话栏一次只显示一个 agent、追赶跟着用户实际在用的终端走，别家行晚到
+    // 的代价可接受（全量 TTL 兜底仍在）。约束三条：冷缓存（还没全量扫过）不并
+    // ——半份快照会当「已扫过」服务下一拍非强制读；空表不并——scanEndpoint 对
+    // 读盘失败与真空表一律降级空表，一次扫描抖动不该有抹掉该家全部行的权力；
+    // 墓碑行不复活——删除语义见 droppedKeys。并进来的行集在本地重排＋去重，
+    // 维持 scanAll 落快照的两道不变量（lastActive 倒序；endpoint＋id 去重保留
+    // 最近活跃那份——单家扫描不经 scanAll，同 id 双份不处理就会进快照）。
+    // 在飞的全量扫描落地时会整体覆写快照（起扫早于行物化就把合并进来的行抹回
+    // 去）——落地后补一次同样的替换，两种先后都收敛。
+    mergeEndpoint(endpoint, sessions) {
+      if (!snap || !Array.isArray(snap.value?.sessions)) return;
+      const fresh = Array.isArray(sessions) ? sessions : [];
+      if (!fresh.length) return;
+      const apply = () => {
+        if (!snap || !Array.isArray(snap.value?.sessions)) return;
+        const merged = snap.value.sessions.filter((row) => !row || row.endpoint !== endpoint);
+        for (const row of fresh) {
+          if (!row || row.endpoint !== endpoint) continue;
+          if (droppedKeys.has(`${row.endpoint}\u0000${row.id}`)) continue;
+          merged.push(row);
+        }
+        merged.sort((a, b) => (b.lastActive ?? b.createdAt ?? 0) - (a.lastActive ?? a.createdAt ?? 0));
+        const seen = new Set();
+        const deduped = [];
+        for (const session of merged) {
+          const key = `${session?.endpoint}\u0000${session?.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          deduped.push(session);
+        }
+        snap = { at: Date.now(), value: { ...snap.value, sessions: deduped } };
       };
+      apply();
+      if (inFlight.p) inFlight.p.then(apply, () => {});
     },
   };
 }
@@ -4418,14 +4470,17 @@ export function createPanelRouter({
         // ?refresh=1 是 TTL 的逃生口：会话管理 tab 的刷新按钮用它，等真扫描落地
         // 再回新值——否则按钮在窗口内就是「返回旧数据 + toast 已刷新」的假动作。
         // ?endpoint=<agent> 是会话栏追赶的专用形：只扫该 agent 一家的存档（worker
-        // 线程，与绑定捕获同一条通路），响应只带 { sessions }（该家的行），绝不
-        // 碰全量快照——追赶本来就是要等真扫描的强制语义，且全量十家对只显示一个
-        // agent 的左栏纯属陪跑（全盘 2.7–9.8s vs 单家 ~1s）。未知 agent 按空表处理
-        // （scanEndpoint 的纪律：名单外降级空表，不抛错）。
+        // 线程，与绑定捕获同一条通路），响应只带 { sessions }（该家的行）——追赶
+        // 本来就是要等真扫描的强制语义，且全量十家对只显示一个 agent 的左栏纯属
+        // 陪跑（全盘 2.7–9.8s vs 单家 ~1s）。扫到的行集顺手并进全量快照
+        // （mergeEndpoint，行消失案形态二）：不并的话快照停在物化前，等待窗里
+        // 切出再切回终端视图会拿旧快照把刚出现的行整表抹掉。未知 agent 按空表
+        // 处理（scanEndpoint 的纪律：名单外降级空表，不抛错；空表不触发合并）。
         const endpointParam = url.searchParams.get("endpoint");
         if (endpointParam) {
           try {
             const sessions = await svc.scanAgent(endpointParam);
+            sessionsListSnapshotFor(svc).mergeEndpoint(endpointParam, sessions);
             return sendJson(res, 200, { sessions });
           } catch (err) {
             return sendJson(res, 500, { ok: false, error: err.message });

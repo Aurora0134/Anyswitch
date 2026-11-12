@@ -166,6 +166,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
+    ${extractFn("terminalRailDerivedLiveRows")}
     ${extractFn("renderTerminalRailHistory")}
     return {
       render: renderTerminalRailHistory,
@@ -1793,6 +1794,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
+      ${extractFn("terminalRailDerivedLiveRows")}
       ${extractFn("renderTerminalRailHistory")}
       return {
         render: renderTerminalRailHistory,

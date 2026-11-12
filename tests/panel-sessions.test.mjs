@@ -191,12 +191,16 @@ parentPort.on("message", (message) => {
   });
 
   // 会话栏追赶的专用形（?endpoint=<agent>）：只扫该 agent 一家（worker 线程、与
-  // 绑定捕获同一条通路），响应只带该家的行，绝不碰全量快照——全量十家对只显示
-  // 一个 agent 的左栏纯属陪跑（全盘 2.7–9.8s vs 单家 ~1s）。
-  it("?endpoint=<agent> 走单端点扫描：只回该家的行，不碰全量快照", async () => {
+  // 绑定捕获同一条通路），响应只带该家的行——追赶本来就是要等真扫描的强制语义，
+  // 且全量十家对只显示一个 agent 的左栏纯属陪跑（全盘 2.7–9.8s vs 单家 ~1s）。
+  // 扫到的行集并进全量快照（mergeEndpoint，2026-11-12 行消失案形态二）：不并的
+  // 话快照停在物化前，等待窗里切出再切回终端视图（30s TTL 过期、非强制拉取）
+  // 会拿旧快照把刚出现的行整表抹掉。合并刷新 at：随后的普通 GET 在 TTL 内拿到
+  // 含新行的合并值，且不为全量重扫付一次 2.7–9.8s。
+  it("?endpoint=<agent> 走单端点扫描：只回该家的行，结果并进全量快照（行消失案形态二）", async () => {
     const svc = mockSessionScan({
       scanResult: { sessions: [{ endpoint: "claude", id: "full-1", file: "C:/s/full.jsonl" }], endpointErrors: [] },
-      scanAgentResult: [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1" }],
+      scanAgentResult: [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 }],
     });
     const router = sessionsRouter(svc, { sessionsListTtlMs: 3_600_000 });
     // 先把全量快照建起来（这一拍扫全量）。
@@ -206,14 +210,101 @@ parentPort.on("message", (message) => {
     const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
     await router.handle(hit.req, hit.res);
     assert.equal(hit.res.statusCode, 200);
-    assert.deepEqual(hit.json().sessions, [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1" }]);
+    assert.deepEqual(hit.json().sessions, [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 }]);
     assert.deepEqual(svc.calls.scanAgent, ["kimi"], "只扫 kimi 一家");
     assert.equal(svc.calls.scanAll, 1, "全量一次没多扫");
-    // 单端点结果不回写全量快照：随后的普通 GET 仍拿全量值。
+    // 形态二回归钉：合并后的普通 GET（TTL 内、非强制）拿到含新行的合并值——
+    // 修前这里拿回旧快照，新行整表替换时消失。
     const after = fakeReqRes("/panel/api/sessions/list", "GET");
     await router.handle(after.req, after.res);
-    assert.equal(after.json().sessions[0].id, "full-1");
+    const ids = after.json().sessions.map((row) => row.id).sort();
+    assert.deepEqual(ids, ["full-1", "k-1"], "合并值含该 agent 的既有行与追赶新行");
+    assert.equal(svc.calls.scanAll, 1, "合并不触发全量重扫");
+  });
+
+  // mergeEndpoint 的空表护栏：scanEndpoint 对读盘失败与真空表一律降级空表，两者
+  // 在路由面不可区分——一次扫描抖动（或名单外 agent）不该有把该家全部行从快照
+  // 抹掉的权力。空表不并，别家/该家的行维持到下一轮全量刷新。
+  it("?endpoint= 空表不并进快照：扫描降级/未知 agent 不抹既有行", async () => {
+    const svc = mockSessionScan({
+      scanResult: { sessions: [
+        { endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 },
+        { endpoint: "claude", id: "c-1", file: "C:/s/c-1", lastActive: 400 },
+      ], endpointErrors: [] },
+      scanAgentResult: [],
+    });
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 3_600_000 });
+    const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(warm.req, warm.res);
+    const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
+    await router.handle(hit.req, hit.res);
+    assert.equal(hit.res.statusCode, 200);
+    assert.deepEqual(hit.json().sessions, [], "响应仍按契约回该家（空）结果");
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    assert.deepEqual(after.json().sessions.map((row) => row.id).sort(), ["c-1", "k-1"], "空表没抹掉快照里的既有行");
     assert.equal(svc.calls.scanAll, 1);
+  });
+
+  // mergeEndpoint 的删除墓碑：用户刚删的行，随后追赶的单端点扫描又把它带回来
+  // （扫描与删除竞态的形状），合并必须滤掉——dropRows 的删除语义不许被合并复活。
+  it("删除后的行不被单端点合并复活（墓碑）", async () => {
+    const svc = mockSessionScan({
+      scanResult: { sessions: [
+        { endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 },
+        { endpoint: "claude", id: "c-1", file: "C:/s/c-1", lastActive: 400 },
+      ], endpointErrors: [] },
+      // 删后新一轮单家扫描仍带回 k-1（删前起的扫描/盘面滞后的形状）。
+      scanAgentResult: [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 }],
+    });
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 3_600_000 });
+    const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(warm.req, warm.res);
+    const del = fakeReqRes("/panel/api/sessions/delete", "POST", { items: [{ endpoint: "kimi", file: "C:/k/k-1" }] });
+    await router.handle(del.req, del.res);
+    assert.deepEqual(del.json().ok, [{ endpoint: "kimi", file: "C:/k/k-1" }]);
+    const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
+    await router.handle(hit.req, hit.res);
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    assert.deepEqual(after.json().sessions.map((row) => row.id), ["c-1"], "已删行被墓碑挡住，没有复活");
+  });
+
+  // mergeEndpoint 与在飞全量扫描的竞态：TTL 过期触发后台全量补一拍（起扫早于
+  // 新行物化，结果里没有它），追赶合并先行落进快照——全量落地整体覆写时会把
+  // 合并行抹回去（形态二在竞态窗里的窄版）。落地后合并补拍一次，两种先后都收敛。
+  it("在飞全量扫描落地后合并补拍：新行不被起扫更早的全量结果抹掉", async () => {
+    let round = 0;
+    const svc = {
+      scanAll: async () => {
+        round += 1;
+        // 第二拍（后台补扫）慢且不含新行：模拟起扫早于行物化。
+        if (round > 1) await new Promise((resolve) => setTimeout(resolve, 50));
+        return { sessions: [{ endpoint: "claude", id: `full-${round}`, file: `C:/s/full-${round}.jsonl`, lastActive: round }], endpointErrors: [] };
+      },
+      scanAgent: async () => [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 }],
+      loadMessages: async () => [],
+      deleteSessions: async () => ({ ok: [], fail: [] }),
+    };
+    // ttl=0：第一拍冷扫；第二拍 GET 过期先回旧值、后台补扫（在飞 50ms）。
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 0 });
+    const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(warm.req, warm.res);
+    assert.equal(round, 1);
+    const stale = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(stale.req, stale.res);
+    // 在飞全量还没落地时追赶合并先行。
+    const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
+    await router.handle(hit.req, hit.res);
+    // 等后台全量落地（覆写快照）+ 合并补拍。
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    const ids = after.json().sessions.map((row) => row.id).sort();
+    assert.deepEqual(ids, ["full-2", "k-1"], "在飞全量落地后合并行仍在（补拍把行带回来）");
+    // ttl=0：这最后一拍 GET 自身也过期，会再起一拍后台扫描（round 3，不进响应）——
+    // 响应值来自落地前的快照，行为面不受它影响。
+    assert.equal(round, 3);
   });
 
   it("?endpoint= 单端点扫描失败回 500（前端保旧行不空栏）", async () => {
