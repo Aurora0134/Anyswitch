@@ -388,6 +388,9 @@ export async function runSelfUpdate({
     }
     const relay = await restartRelayFn(relayRoot).catch(() => ({ ok: false }));
     const relayClause = relay?.ok ? null : "Relay 未能自动重启，请在面板中手动重启 Relay";
+    // 结构化同行：面板据此把「装好了但 Relay 没起来」从成功绿降为警示琥珀，
+    // 不靠嗅探 message 里的子句。
+    const relayRestartFailed = relay?.ok !== true;
     // 面板内监听器看到 ready-to-restart 就会拉起 helper 并按宽限自退；这里等它退场。
     // 注意监听器在 ready-to-restart 就点火：relay 重启要花几秒，面板可能在我们
     // 还没到这一步时就换完了。所以「退场」的证据有两种——探测落空（旧面板走了、
@@ -409,6 +412,7 @@ export async function runSelfUpdate({
         beforeVersion,
         afterVersion: targetVersion,
         latestVersion: targetVersion,
+        relayRestartFailed,
       });
     }
     // 等新面板接管（helper 拉起的新 panel-host 载的就是刚换装的代码）。
@@ -424,7 +428,7 @@ export async function runSelfUpdate({
       // 终态文案按轨道：先行版带提交标识；回退轨明说「回到稳定版」；稳定轨原样。
       const afterLabel = track === "bleeding" ? (treeVersion ? `${treeVersion}-${shortSha}` : shortSha) : targetVersion;
       const verb = track === "rollback" ? "已回到稳定版" : "已更新到";
-      return finish({ outcome: "updated", message: `${verb} ${afterLabel}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: afterLabel, latestVersion: targetVersion });
+      return finish({ outcome: "updated", message: `${verb} ${afterLabel}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: afterLabel, latestVersion: targetVersion, relayRestartFailed });
     }
     // 新面板没有接管：有恢复点就退回旧版并重装依赖（旧代码配旧依赖才算恢复
     // 完整），再把面板与 relay 拉起；没有恢复点就把面板尽力拉起并如实报告。

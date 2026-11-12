@@ -8519,7 +8519,7 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   );
 
   it("toast 支持动作小字与自定义驻留（可见态开回命中）", () => {
-    assert.ok(/function toast\(msg, isErr, opts\)/.test(panelJs), "toast 接收 opts 第三参数");
+    assert.ok(/function toast\(msg, level, opts\)/.test(panelJs), "toast 接收色档与 opts 第三参数");
     assert.ok(panelJs.includes("(opts && opts.durationMs) || 3000"), "默认 3s、可覆盖驻留时长");
     assert.ok(panelJs.includes('link.className = "toast-action"'), "动作小字挂 toast-action 类");
     // 前提：基座 toast 不拦指针（浮动层不遮下方操作）；动作小字必须在可见态

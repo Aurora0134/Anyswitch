@@ -1844,6 +1844,8 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.err { color: var(--danger); border-color: var(--danger-border); }
+  /* 需要用户注意但不算失败（如更新装好待重启）：与 .about-status 的 warn 同色 */
+  .toast.warn { color: var(--warn); border-color: var(--warn-border); }
   /* 驻留期满的收场：只淡出不位移，1s；须后置于 .toast.show（同特异性，
      层叠序取胜），is-gone 同理再后置 */
   .toast.is-leaving { opacity: 0; transition: opacity 1s var(--ease-out); }

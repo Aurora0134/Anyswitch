@@ -36,12 +36,16 @@
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // 第二参数 level 是色档：true / "danger" = 报错红，"warn" = 需要用户注意但
+  // 不是失败的琥珀，false / "ok" / 省略 = 常规。新增的「成功但不完整」类结论用
+  // "warn" 表达，不要再借报错红顶替——语义一错，成功会被读成故障。
+  //
   // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick }（单钮）或
   // opts.actions = [{ label, onClick }, …]（多钮）在文案后追加可点小字——点中即
   // 瞬时收起 toast 再执行 onClick。动效：入场 -6px 滑入＋淡入
   // 160ms（CSS 基座过渡）；驻留期满先转 1s 淡出（is-leaving）再落暗；动作点击
   // 瞬时消失（is-gone 压掉过渡）。
-  function toast(msg, isErr, opts) {
+  function toast(msg, level, opts) {
     const t = $("toast");
     const actions = opts && (opts.actions || (opts.action ? [opts.action] : null));
     if (actions) {
@@ -58,7 +62,8 @@
     } else {
       t.textContent = msg;
     }
-    t.className = "toast" + (isErr ? " err" : "") + " show";
+    const tone = level === true || level === "danger" ? " err" : level === "warn" ? " warn" : "";
+    t.className = "toast" + tone + " show";
     clearTimeout(t._tid);
     t._tid = setTimeout(() => {
       t.classList.add("is-leaving");
@@ -525,7 +530,13 @@ async function api(method, path, body) {
     // 的只有垫片，切回时它就是「新画面画好之前的内容」。typeof 闸护单测桩环境。
     if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     syncTerminalDataStream();
+    // 垫片兜底窗只在前台计时：隐藏页的定时器会被节流甚至冻结，回调常拖到切回前台
+    // 才跑，那时窗口已可见，按普通档到点就把「切回时的那一屏」撤走了。隐藏这一拍
+    // 直接停表（并作废旧回调），回前台重新起一窗，从切回时刻起算。两处都带 typeof
+    // 闸：桩环境没有这套设施时静默跳过，可见分支的调用序列一字不变。
+    if (document.hidden && typeof pauseTerminalStaleScreenCap === "function") pauseTerminalStaleScreenCap();
     if (document.hidden) return;
+    if (typeof resumeTerminalStaleScreenCap === "function") resumeTerminalStaleScreenCap();
     if (typeof checkPanelAssetOnForeground === "function") checkPanelAssetOnForeground();
     refreshStatus();
     if (currentView === "stats") {
@@ -3186,6 +3197,18 @@ async function api(method, path, body) {
     };
   }
 
+  // 自更新结论 → 提示色档。关于页终态、/last 补显、页面级观察者三条渲染路径
+  // 共用这一份，别在各处另写条件——同一结论各写一套条件就会一红一灰。
+  // 色档名与 .toast / data-tone 同词：ok / warn / danger / ""（常规）。
+  // 「装好待重启」与「成功但 Relay 没起来」都是以成功为主、需要用户动手，
+  // 归 warn；只有 failed / rolled_back 才按报错红。
+  function selfUpdateTone(status) {
+    if (status?.outcome === "updated") return status?.relayRestartFailed ? "warn" : "ok";
+    if (status?.outcome === "updated_pending_restart") return "warn";
+    if (status?.outcome === "failed" || status?.outcome === "rolled_back") return "danger";
+    return "";
+  }
+
   function createAboutController({ request, doc, now = () => Date.now(), notify = () => {}, schedule = setTimeout, cancelSchedule = clearTimeout }) {
     const get = (id) => doc.getElementById(id);
     const pending = new Map();
@@ -3447,11 +3470,13 @@ async function api(method, path, body) {
     }
     function reportLifecycleOutcome(status, id) {
       const name = clientName(id);
-      if (status?.outcome === "updated") { notify(`${name} ${status.message}`, false); return; }
+      if (status?.outcome === "updated") { notify(`${name} ${status.message}`, "ok"); return; }
       let text = `${name}：${status?.message || "更新失败，请重新检测确认结果"}`;
       const detail = typeof status?.detail === "string" ? status.detail.split("\n").find(Boolean) : "";
       if (detail) text += `（${detail}）`;
-      notify(text, true);
+      // 「命令跑完但版本没变」与行内结论同口径（attemptTone 给 warn）：要用户
+      // 注意，但不是报错。其余（失败 / 装上了跑不起来）才是报错红。
+      notify(text, status?.outcome === "unchanged" ? "warn" : true);
     }
     // 一次运行结束后，行内先按结果落状态；再由这里补一次「晚于结果」的重新检测。
     // 检测有去重：并行的两个单点更新若共用先完成者触发的那次重检，后者会扫不到
@@ -3658,21 +3683,22 @@ async function api(method, path, body) {
       };
       if (status?.outcome === "updated") {
         get("aboutSelfUpdate").hidden = true;
+        const tone = selfUpdateTone(status);
         if (window.panelStartupRestart) {
           // 本页就是换装后的新页面（结局经接回的轮询落在这里）：直接显示最终结论，
           // 不存在「即将刷新」。同时记入已读，/last 补显通道不再为它重弹一次。
           selfUpdateLastOutcome = status;
           statusEl.textContent = status?.message || `已更新到 ${status?.targetVersion || ""}`;
-          statusEl.dataset.tone = "ok";
+          statusEl.dataset.tone = tone;
           try { if (status?.runId) localStorage.setItem(`anyswitch:self-update-shown:${status.runId}`, "1"); } catch { /* 存档不可写：/last 会再补显一次 */ }
-          if (status?.message) notify(status.message);
+          if (status?.message) notify(status.message, tone);
           return;
         }
         // 旧页面（本页发起的应用）：换装完成、页面随换新刷新在即，只交代「即将刷新」，
         // 版本结论交给新页面（上面那条分支），不与旧版本号同框。
         statusEl.textContent = "更新完成，页面即将刷新…";
-        statusEl.dataset.tone = "ok";
-        if (status?.message) notify(status.message);
+        statusEl.dataset.tone = tone;
+        if (status?.message) notify(status.message, tone);
         return;
       }
       const copy = {
@@ -3681,10 +3707,13 @@ async function api(method, path, body) {
         failed: status?.message || "更新失败，请重新检查更新",
       };
       statusEl.textContent = copy[status?.outcome] || "更新已结束";
-      statusEl.dataset.tone = status?.outcome === "updated_pending_restart" ? "" : "danger";
+      // 状态行与 toast 同源取色：这里曾对「装好待重启」只把状态行放宽、toast 仍按
+      // 报错红弹，同一结论一句话两种颜色。
+      const tone = selfUpdateTone(status);
+      statusEl.dataset.tone = tone;
       get("aboutSelfUpdate").hidden = true;
       markShown();
-      notify(copy[status?.outcome] || "更新已结束", true);
+      notify(copy[status?.outcome] || "更新已结束", tone);
     }
     function pollSelfUpdate(runId, isApply) {
       const gen = selfUpdateGen;
@@ -3800,9 +3829,10 @@ async function api(method, path, body) {
       if (!last.message) return;
       selfUpdateLastOutcome = last;
       const statusEl = get("aboutUpdateStatus");
+      const tone = selfUpdateTone(last);
       statusEl.textContent = last.message;
-      statusEl.dataset.tone = last.outcome === "updated" ? "ok" : last.outcome === "failed" || last.outcome === "rolled_back" ? "danger" : "";
-      notify(last.message, last.outcome !== "updated");
+      statusEl.dataset.tone = tone;
+      notify(last.message, tone);
     }
     async function adoptSelfUpdate() {
       selfUpdateAdopted = false;
@@ -7617,15 +7647,31 @@ async function api(method, path, body) {
     // 那只（terminalBoundSessionId），拿不到时按普通档走（见 terminalSwitchStaleWidened）。
     const staleCapMs = () => (terminalSwitchStaleWidened(parkSessionId) ? TERMINAL_SWITCH_STALE_SCREEN_MAX_MS : TERMINAL_STALE_SCREEN_MAX_MS);
     //
-    // 窗口在后台时不撤：隐藏期 rAF 停摆，观察循环叫不醒，撤了就等于把「切回时的那一
-    // 屏」也撤了。此时重新起一次计时，回前台由观察循环（按「新画面有内容」揭幕）接手。
-    // 这一支**不计入 capRenewals**：隐藏期本来就无法撤，回前台后的第一次到点才重新
-    // 按上面的续窗上限处置（5 窗＝30s 的「有界」承诺从回前台那一拍起算）。
+    // 兜底只在窗口前台计时（2026-11-12）：隐藏页定时器会被节流甚至冻结，原来
+    // 「回调执行那一刻再看 document.hidden」挡不住它——回调常拖到切回前台才跑，
+    // 那时窗口已可见，判据不成立就当场撤走垫片；而画面重建排在 pollTerminalSessions
+    // 的一次网络往返之后，屏上于是露出「旧帧消失 → 空白 → 新画面整屏重绘」整段。
+    // 现在隐藏那一拍取消在册窗并作废旧回调（pauseTerminalStaleScreenCap），回前台
+    // 重新起一窗（resumeTerminalStaleScreenCap），有界承诺从切回那一拍起算。
+    // capToken 是关键：冻结的回调即使仍被派发到前台，代次对不上也只空转退出。
     let capRenewals = 0;
+    let capToken = 0;
     const armCap = () => {
+      const token = capToken;
       stale.timer = setTimeout(() => {
         stale.timer = null;
-        if (typeof document !== "undefined" && document.hidden) { armCap(); return; }
+        // 老窗（已暂停／已被回前台重起的窗顶替）或垫片已撤：整组作废，不碰当前屏。
+        if (token !== capToken || stale.done || terminalStaleScreen !== stale) return;
+        // 没收到 visibilitychange 的兜底：窗口还在后台就不能撤「切回时的那一屏」。
+        if (typeof document !== "undefined" && document.hidden) { pauseCap(); return; }
+        // 后台切回的重建排在 pollTerminalSessions 之后；这一拍之前屏上只有垫片，撤了
+        // 必然露白。只续窗等重建，次数沿用既有上限；新实例与流都建出来后判据自动失效。
+        if (stale.foregroundRebuildPending && (!terminalXterm || !terminalEventSource)
+            && capRenewals < TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS) {
+          capRenewals += 1;
+          armCap();
+          return;
+        }
         // /switch 还在飞：POST 自己要 6~12s（探针＋terminate＋spawn），而「正在加载」
         // 占位是 POST **落地之后**才武装的。此刻撤垫片会露出一块既没有旧帧、也没有
         // 占位的纯底色——正是这次要消灭的那块空白。续一窗等落地：落地后由占位层
@@ -7646,9 +7692,33 @@ async function api(method, path, body) {
         dropTerminalStaleScreen();
       }, staleCapMs());
     };
+    const pauseCap = () => {
+      capToken += 1;
+      if (stale.timer !== null) clearTimeout(stale.timer);
+      stale.timer = null;
+    };
+    const resumeCap = () => {
+      pauseCap();
+      capRenewals = 0;
+      stale.foregroundRebuildPending = true;
+      armCap();
+    };
+    stale.pauseCap = pauseCap;
+    stale.resumeCap = resumeCap;
     armCap();
     watchTerminalStaleScreen(stale);
     return stale;
+  }
+
+  // 隐藏 / 回前台两拍的兜底窗收口：只作用于当前在册的垫片，垫片已撤或桩环境没有
+  // 这套设施时一律空转，不额外登记定时器。揭幕仍由观察循环按「新画面真的出字」做。
+  function pauseTerminalStaleScreenCap() {
+    const stale = terminalStaleScreen;
+    if (stale && typeof stale.pauseCap === "function") stale.pauseCap();
+  }
+  function resumeTerminalStaleScreenCap() {
+    const stale = terminalStaleScreen;
+    if (stale && typeof stale.resumeCap === "function") stale.resumeCap();
   }
 
   // 就绪判据（唯一一条）：新实例的缓冲区里真的**有字**——首帧回放的字节被解析了。
@@ -11103,9 +11173,10 @@ async function api(method, path, body) {
           dispatchSwap();
           return;
         }
-        // 无刷新终态（待重启生效 / 失败 / 回滚）：就地提示并落已读。
+        // 无刷新终态（待重启生效 / 失败 / 回滚）：就地提示并落已读。色档与关于页
+        // 共用 selfUpdateTone——同一结论不因停在哪个页签而一红一灰。
         try { storage.setItem(`anyswitch:self-update-shown:${current.runId}`, "1"); } catch { /* 存档不可写：可能重复提示一次，可接受 */ }
-        toast(current.message || "更新已结束", outcome === "failed" || outcome === "rolled_back");
+        toast(current.message || "更新已结束", selfUpdateTone(current));
       },
     };
   }
@@ -11394,15 +11465,15 @@ async function api(method, path, body) {
   const WALLPAPER_TOKENS_KEY = "panel-wallpaper-tokens";
   const WALLPAPER_MAX_BYTES = 20 * 1024 * 1024;
   const WALLPAPER_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-  const WALLPAPER_FX_DEFAULTS = { blur: 0, dim: 10, surface: 80 };
+  const WALLPAPER_FX_DEFAULTS = { blur: 5, dim: 15, surface: 75 };
   const WALLPAPER_FX_LIMITS = { blur: [0, 30], dim: [0, 70], surface: [40, 100] };
   // 「阅读区不透明度」滑杆的引擎挂钩面：surfaceAlpha 覆盖六个表面 token，按键分三档折算
   // （系数见 surfaceOverrides）。档位表必须覆盖引擎 SURFACE_SPEC 的全部键，漏一键该键就
   // 停在引擎自带透明度上、不跟滑杆走。
   //  - 内容面（卡面/下沉面/hover 面）1:1 跟随滑杆：滑杆语义原样——越低越透；
-  //  - 玻璃面（顶栏/终端头的磨砂层）0.8 倍跟随：与内容面同值就丢磨砂，默认 80 档折算
-  //    0.64，与引擎亮套规格 0.62 同档，越往低档越透、磨砂感越强；
-  //  - 页面底取 0.6+0.4×滑杆值的高档带：默认 0.92、最低 0.76，又随滑杆单调变透，但任何
+  //  - 玻璃面（顶栏/终端头的磨砂层）0.8 倍跟随：与内容面同值就丢磨砂，默认 75 档折算
+  //    0.6，与引擎亮套规格 0.62 同档，越往低档越透、磨砂感越强；
+  //  - 页面底取 0.6+0.4×滑杆值的高档带：默认 0.9、最低 0.76，又随滑杆单调变透，但任何
   //    档位都不退成照片（页面底是终端页与主题预览画布的承托面，透到底就是字压照片）。
   const WALLPAPER_SURFACE_TIERS = [
     { keys: ["--surface", "--surface-sunken", "--surface-hover"], floor: 0, scale: 1 },
