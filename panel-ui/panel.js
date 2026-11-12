@@ -12832,10 +12832,12 @@ async function api(method, path, body) {
   // terminalRailPendingNewTerminals 的「已被接替」完全同源：同目录、lastActive ≥ 终端
   // 出生（spawnedAt 优先）、未被其他终端阳性占用（terminalRailClaimedRowKeys 排除集）
   // 的**最新**行——正是顶掉兜底行的那行，这里把它认回给这台终端当 live 行。边界与
-  // 绑定捕获同款：同目录双会话并发时可能认错行，只影响显示标记（高亮/转圈/关闭叉/
-  // 水位线），绑定一落地即被阳性身份接管。只供 live map 构建使用——续接去重、切换
-  // 去重、归档关终端三个行为级消费点仍走阳性身份，推导不外溢（认错行顶多高亮错半
-  // 分钟，误路由/误杀终端不可接受）。
+  // 绑定捕获同款：同目录双会话并发时可能认错行——影响面是整套 live 消费（高亮/转圈/
+  // 关闭叉/水位线，以及行点击聚焦与关闭叉路由），绑定一落地即被阳性身份接管；窗
+  // ≤60s。正常窗内这恰是更对的行点击语义：修前点这条行走续接分支，去重认不出身份
+  // 会给同一份会话存档再起一个进程。只供 live map 构建使用——续接去重、切换去重、
+  // 归档关终端三个行为级消费点仍走阳性身份，推导不外溢（误路由到续接/归档层不可
+  // 接受）。
   function terminalRailDerivedLiveRows(agentId) {
     const claims = new Map();
     if (!agentId) return claims;

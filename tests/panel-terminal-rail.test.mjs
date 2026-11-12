@@ -2311,7 +2311,6 @@ describe("live 推导（绑定未落地空窗）", () => {
     ${extractFn("terminalRailActiveSession")}
     ${extractFn("terminalRailAgentId")}
     ${extractFn("terminalRailFindOpenSession")}
-    ${extractFn("terminalRailDerivedLiveRows")}
     function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
     function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
     function sessRelTime() { return "刚刚"; }
