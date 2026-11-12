@@ -10,9 +10,12 @@
 //      otherwise start a per-launch OpenAI relay against the real v2 store;
 //      when BOTH fail, Qoder still launches on its own native configuration
 //      (no relay token injected) instead of the launch being refused;
-//   2. write the BYOK config into ~/.qoder/settings.json (via qoder-merge-config);
-//   3. spawn the qoder.cmd dispatcher (COMSPEC /d /c, like the other .cmd
-//      CLIs) with ANYSWITCH_RELAY_TOKEN injected via process-level env vars
+//   2. write the BYOK config into the launched edition's settings.json
+//      (~/.qoder, or ~/.qoder-cn when the CN edition is the one installed;
+//      via qoder-merge-config);
+//   3. spawn the edition's dispatcher (qoder.cmd, or qodercn.cmd for the CN
+//      edition; COMSPEC /d /c, like the other .cmd CLIs) with
+//      ANYSWITCH_RELAY_TOKEN injected via process-level env vars
 //      only — never written to disk;
 //   4. tear the per-launch relay down when Qoder exits, so nothing leaks.
 // Qoder-side endpoint overrides ride the QODER_BIG_MODEL_ENDPOINT /
@@ -30,7 +33,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
 import { loadStore } from "../store/store-io.mjs";
-import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
+import { writeQoderConfig } from "./qoder-merge-config.mjs";
 import { refreshQoderModelCatalog, QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
 import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
@@ -79,7 +82,15 @@ export async function startOpenAIRelay(options = {}) {
 // qodercli.exe), so pointing the launcher at the dispatcher keeps that
 // resolution in one place. The direct CLI path is only the fallback for
 // entry-dir-less layouts.
-import { resolveQoderExecutable } from "../agents/agent-discovery.mjs";
+// 双区域版：CN 在装（resolveQoderLaunchEdition）时整组换 CN 镜像——
+// qodercn.cmd 调度器在 ~/.qoder-cn/entry，BYOK 配置写 ~/.qoder-cn/settings.json，
+// 与国际版一一对应（契约 cli-cn 指纹序）。
+import {
+  qoderDataRoot,
+  resolveQoderExecutable,
+  resolveQoderCnExecutable,
+  resolveQoderLaunchEdition,
+} from "../agents/agent-discovery.mjs";
 export { resolveQoderExecutable };
 
 export function buildQoderLauncherEnv({ token, base = {} }) {
@@ -155,7 +166,12 @@ export async function runQoderLauncher({
         const syncToken = relay ? relay.token : loadNativeSyncToken({ loadToken, root: relayDataRoot(base), endpoint: "qoder", log });
         if (syncToken) {
           const sidecarRoot = relayDataRoot(base);
-          const settingsPath = qoderSettingsPath(base.USERPROFILE ?? "");
+          // BYOK 写入的 settings.json 跟随要拉起的区域版：CN 在装时写
+          // ~/.qoder-cn/settings.json，否则 ~/.qoder/settings.json。数据根目录
+          // 名以 discovery 的 qoderDataRoot 为准（qoder-merge-config 的
+          // qoderSettingsPath 只管国际版那一份）。
+          const edition = resolveQoderLaunchEdition(base);
+          const settingsPath = join(qoderDataRoot(base, edition), "settings.json");
           const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, syncToken, sidecarRoot, settingsPath);
           if (!writeResult.ok) {
             log(`warning: qoder settings.json not updated: ${writeResult.reason ?? "unknown error"}`);
@@ -192,14 +208,18 @@ export async function runQoderLauncher({
 
 export function realSpawnQoder({ env, args, onSpawned }) {
   return new Promise((resolve, reject) => {
-    const exe = resolveQoderExecutable(env);
+    // 拉起目标跟随区域版：CN 在装时经 qodercn.cmd 调度器进 CN CLI（契约
+    // cli-cn 指纹序），否则维持国际版 qoder.cmd 调度器/CLI 回退。
+    const edition = resolveQoderLaunchEdition(env);
+    const exe = edition === "cn" ? resolveQoderCnExecutable(env) : resolveQoderExecutable(env);
     const isCmd = exe.toLowerCase().endsWith(".cmd");
     const comspec = process.env.COMSPEC || "cmd.exe";
     // Inject the CDP port so the launcher can warm up the model catalog after
     // the renderer comes up. Qoder ignores the flag harmlessly when debugging
-    // is unavailable.
-    const cdpArg = `--remote-debugging-port=${QODER_CDP_PORT}`;
-    const fullArgs = [cdpArg, ...args];
+    // is unavailable. CN 区域版不注这个口：CN 拉起的是 qoderclicn CLI（自研
+    // 工作台没有对应的 renderer store），调度器会把参数原样透传给 CLI，
+    // 一个不被认识的 flag 不该跟着进 CN 的命令行。
+    const fullArgs = edition === "cn" ? [...args] : [`--remote-debugging-port=${QODER_CDP_PORT}`, ...args];
     const child = isCmd
       ? spawn(comspec, ["/d", "/c", exe, ...fullArgs], {
           env,

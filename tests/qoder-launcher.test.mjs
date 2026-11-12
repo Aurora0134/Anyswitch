@@ -572,7 +572,9 @@ test("realSpawnQoder prepends the CDP debugging port and fires onSpawned", async
     writeFileSync(cmdPath, `@echo off\r\n@echo %* > "${outFile}"\r\n@exit /b 0\r\n`);
     let spawned = false;
     const code = await realSpawnQoder({
-      env: { ...process.env, QODER_EXECUTABLE: cmdPath },
+      // USERPROFILE 钉进临时目录：区域版裁决（resolveQoderLaunchEdition）读的是
+      // ~/.qoder-cn 指纹，不钉住会撞上测试机真实安装的 CN 版而改走 CN 分支。
+      env: { ...process.env, USERPROFILE: join(dir, "home"), QODER_EXECUTABLE: cmdPath },
       args: ["--resume", "--user-flag"],
       onSpawned: () => { spawned = true; },
     });
@@ -593,7 +595,8 @@ test("realSpawnQoder never lets a throwing onSpawned hook fail the launch", asyn
     const cmdPath = join(dir, "qoder.cmd");
     writeFileSync(cmdPath, `@echo off\r\n@exit /b 0\r\n`);
     const code = await realSpawnQoder({
-      env: { ...process.env, QODER_EXECUTABLE: cmdPath },
+      // 同上：USERPROFILE 钉进临时目录，隔断测试机真实 CN 指纹对区域版裁决的干扰。
+      env: { ...process.env, USERPROFILE: join(dir, "home"), QODER_EXECUTABLE: cmdPath },
       args: [],
       onSpawned: () => { throw new Error("hook exploded"); },
     });

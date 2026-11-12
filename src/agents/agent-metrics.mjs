@@ -12,6 +12,9 @@ import { workbuddyConfigRoot } from "../launchers/workbuddy-merge-models.mjs";
 // 「锚 pid 之下有没有活命令」与切换守卫同一个函数、同一份数据，面板的忙显示与
 // 守卫的拒换因此同源，不会各说各话。
 import { hasRunningCommand } from "../terminal/terminal-switch-guard.mjs";
+// qoder 卡头主区域版的在装判据：双区域指纹解析的唯一实现归 discovery
+// （该模块不 import 本文件，无循环依赖）。
+import { resolveQoderCnExecutable, resolveQoderCnDesktopExecutable } from "./agent-discovery.mjs";
 // Claude 会话折叠的正源读侧（pid → 会话 id）：CC 自维护的注册表 + 进程启动
 // 刻度对账，细则见模块头注释。
 import {
@@ -613,6 +616,14 @@ function extractParentPid(line) {
 // nowhere else.
 const AGENT_IMAGE_BUCKETS = [
   ["qoder.exe", "qoder"],
+  // Qoder 双区域版的其余镜像（与国际版两枚同小写语义、同桶聚合）：
+  // "qoder ide.exe" 是国际版 IDE 的现行安装名（Qoder IDE\Qoder IDE.exe）；
+  // "qoder cn.exe" 是 CN 工作台（Qoder CN\Qoder CN.exe，同为 Electron，--type=
+  // 辅助进程过滤与 qoder.exe 同口径）；"qoderclicn.exe" 是 CN 版 CLI
+  // （~/.qoder-cn/bin/qoderclicn，与 qodercli.exe 同型的 Bun 单文件）。
+  ["qoder ide.exe", "qoder"],
+  ["qoder cn.exe", "qoder"],
+  ["qoderclicn.exe", "qoder"],
   // Qoder CLI 的官方形态是 Bun 单文件 qodercli.exe（resolveQoderCliExecutable，
   // 终端一键启动用的就是它）：不收进认领表的话 CLI 进程永远不进 detected feed，
   // 虚拟终端的 Qoder 会话归属不到端点。它自带的
@@ -1426,7 +1437,7 @@ export function parseDshConsoleQueryOutput(out) {
 //   可信模式常关。自进程与裸 node 脚本的命令行不带 node_modules，不入计数；
 //   unclaimedNodeRows === 0 的轮次，护栏逐位等价于不存在。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), claudeSessionByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, unclaimedNodeRows: 0, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, workbuddy: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), claudeSessionByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), qoderEditions: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), workbuddyPids: new Set(), workbuddyEnginePids: new Set(), workbuddySurfaceByPid: new Map(), ppidByPid: new Map(), countsAuthoritative: false, unclaimedNodeRows: 0, seenPids: new Set(), cmdByPid: new Map(), imageByPid: new Map() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，
@@ -1581,6 +1592,12 @@ function parseTasklistCsv(stdout, priorCounted = null, workbuddySessionLookup = 
       } else {
         result.qoder += 1;
         if (pid) result.qoderPids.add(pid);
+        // 卡头主区域版（/api/agents 的 edition 字段）的运行中判据：按镜像名记下
+        // 本轮计到的是哪个区域版。CN 的镜像是 "qoder cn.exe"（工作台）与
+        // "qoderclicn.exe"（CN CLI），其余 qoder 镜像（qoder.exe /
+        // "qoder ide.exe" / qodercli.exe）都是国际版。只记被计数的行——
+        // 被滤掉的 helper/探针行不代表用户在用哪个区域版。
+        result.qoderEditions.add(image === "qoder cn.exe" || image === "qoderclicn.exe" ? "cn" : "intl");
       }
     } else if (bucket === "codex") {
       // The engine family under %LOCALAPPDATA%\OpenAI\Codex\bin\*\ (codex.exe,
@@ -5266,6 +5283,23 @@ export function createAgentMetricsCollector(options = {}) {
     );
   }
 
+  // qoder 卡头的主区域版（/api/agents 的 edition 字段）：运行中的区域版 >
+  // 在装的区域版 > 缺省 "intl"。「运行中」读本轮计数的 qoderEditions（镜像名
+  // 分型，见 qoder 桶分支）；都没跑时看盘上——CN 的 CLI 指纹或桌面端任一在
+  // 装即 cn。两区域版同跑/同在装时偏向 cn，与终端一键启动「CN 在装拉起 CN
+  // 入口」（resolveQoderLaunchEdition）同一偏向。覆盖变量写坏等解析异常
+  // 不该掀翻整张看板：按缺省 intl 落。
+  function qoderCardEdition(procCounts) {
+    if (procCounts?.qoderEditions?.has("cn")) return "cn";
+    if (procCounts?.qoderEditions?.has("intl")) return "intl";
+    try {
+      const base = options.env ?? process.env;
+      const io = { existsSync };
+      if (existsSync(resolveQoderCnExecutable(base, io)) || existsSync(resolveQoderCnDesktopExecutable(base, io))) return "cn";
+    } catch { /* 覆盖变量写坏只影响区域版展示，按缺省落 */ }
+    return "intl";
+  }
+
   async function getAgentsStatus() {
     try {
       const loaded = typeof loadSparkSettings === "function" ? loadSparkSettings() : loadSettings();
@@ -6492,15 +6526,20 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Qoder Agent Status（汇总卡 + 实例桶；qodercli.exe 每终端一进程，kimi/grok
     // 同款多实例语义，实例号由 socket 反查合成 qoder-<pid>）
-    const qoderAgent = buildAggregateAgentStatus({
-      id: "qoder",
-      name: "Qoder",
-      state: qoderState,
-      processCount: procCounts.qoder || 0,
-      tpsWindow: recentSampleWindow,
-      nowFn,
-      instances: instanceSnapshots("qoder"),
-    });
+    // edition 是看板卡头差分用的主区域版（口径见 qoderCardEdition）：双区域版
+    // 聚合在同一端点下，卡片仍能分辨当前以哪个区域版为主。
+    const qoderAgent = {
+      ...buildAggregateAgentStatus({
+        id: "qoder",
+        name: "Qoder",
+        state: qoderState,
+        processCount: procCounts.qoder || 0,
+        tpsWindow: recentSampleWindow,
+        nowFn,
+        instances: instanceSnapshots("qoder"),
+      }),
+      edition: qoderCardEdition(procCounts),
+    };
 
     // Codex Agent Status（汇总卡 + 实例桶；实例按会话一行 codex-sess-<会话 id>，
     // GUI/CLI 同构，进程家族只决定卡片运行状态与会话行的生灭）
