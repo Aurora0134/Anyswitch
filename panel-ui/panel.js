@@ -4397,6 +4397,16 @@ async function api(method, path, body) {
     };
   }
 
+  // 预览窗比例＝当前浏览器视口比例：两个预览容器的 aspect-ratio 共用这一变量。
+  // resize 即时更新（镜像重拍各自走 200ms 防抖），窗口比例变了预览窗同帧跟上。
+  function syncPreviewAspect() {
+    if (window.innerWidth > 0 && window.innerHeight > 0) {
+      document.documentElement.style.setProperty("--preview-aspect", String(window.innerWidth / window.innerHeight));
+    }
+  }
+  syncPreviewAspect();
+  window.addEventListener("resize", syncPreviewAspect);
+
   // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（导航 + telemetry-view），剥 id
   // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
   // 去掉，元素级 hidden（路由链卡/错误横幅等）是真实显隐态，保留。快照随进主题子页
@@ -4465,16 +4475,19 @@ async function api(method, path, body) {
     scaleEl.appendChild(boardClone);
     // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
     // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
-    // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开（预览随内容全高）。
+    // 预览窗高度由容器 aspect-ratio（当前视口比例）给定，不随整页内容长高；sizer
+    // 只撑整页缩放后高度供窗内滚动。缩放比封顶 1：窄窗口下不把缩略图放大成怪图。
     const mainCs = getComputedStyle(main);
     const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
     const availW = viewport.clientWidth;
     if (!naturalW || !availW) return false;
     scaleEl.style.width = naturalW + "px";
-    const s = availW / naturalW;
+    const s = Math.min(1, availW / naturalW);
     const naturalH = scaleEl.offsetHeight;
     scaleEl.style.transform = `scale(${s})`;
-    sizer.style.width = naturalW * s + "px";
+    // sizer 不写死 px 宽：设置页右栏是 grid 1fr，固定 px 宽会把列撑开，下一轮
+    // availW 读到撑开后的旧宽，窄窗口下缩放比自锁放大。
+    sizer.style.width = "";
     sizer.style.height = naturalH * s + "px";
     return true;
   }
