@@ -16,9 +16,17 @@
 // "qoder-custom-anyswitch-<hash>" suffix derived from the Anyswitch provider
 // id, and a sync deletes the previously-managed set before writing the current
 // one, so removed providers/chains drop out on the next sync.
+//
+// 双区域版（2026-11-12 契约）：Qoder 国际版与 CN 版是同一端点 "qoder" 的两枚
+// 指纹——数据根 ~/.qoder ↔ ~/.qoder-cn，CLI qodercli.exe ↔ qoderclicn.exe
+// （嵌在各自数据根 bin/ 下），两侧 settings.json 结构同构。写入面对「已识别
+// 在装」的每个数据根分别写入（双装双写）：识别纯按 home 下的数据根目录在不在
+// （已安装且跑过一次的形态必然建根；从没跑过的新装形态等首轮过后随下一次同步
+// 追平）。根目录名是 relay URL 前缀（qoder~）与托管连接 id 之外唯一的位置事实，
+// 发现层（agent-discovery）的 edition 字段与本模块的目录取同一份表。
 
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
-import { join, dirname, isAbsolute } from "node:path";
+import { join, dirname, basename, isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -55,9 +63,68 @@ function timestamp() {
 
 export { extractManagedProviders } from "../channels/pool-providers.mjs";
 
+// ── 双区域版指纹（数据根 / CLI 落点）────────────────────────────────────
+// 各写入/清理面共享同一份位置事实，避免每个模块各抄一份目录名。CLI 路径与
+// agent-discovery 的 resolveQoderCliExecutable 是同一份事实的两处表达（发现层
+// 归 M5 线维护，这里不动它）。
+export const QODER_EDITIONS = Object.freeze(["intl", "cn"]);
+const QODER_ROOT_DIRS = Object.freeze({ intl: ".qoder", cn: ".qoder-cn" });
+const QODER_CLI_REL = Object.freeze({
+  intl: Object.freeze(["bin", "qodercli", "qodercli.exe"]),
+  cn: Object.freeze(["bin", "qoderclicn", "qoderclicn.exe"]),
+});
+
+function assertQoderEdition(edition) {
+  if (!Object.hasOwn(QODER_ROOT_DIRS, edition)) throw new Error(`unknown qoder edition: ${edition}`);
+}
+
+// 某个区域版的数据根目录（<home>/.qoder 或 <home>/.qoder-cn）。
+export function qoderDataRoot(home, edition = "intl") {
+  assertQoderEdition(edition);
+  return join(home, QODER_ROOT_DIRS[edition]);
+}
+
+// 某个区域版的 CLI 执行体落点（数据根内 bin/<cli>/<cli>.exe）。
+export function qoderCliExecutablePath(home, edition = "intl") {
+  assertQoderEdition(edition);
+  return join(qoderDataRoot(home, edition), ...QODER_CLI_REL[edition]);
+}
+
+// 由 qoder 会话/配置文件的路径反推它归属哪个区域版：数据根目录名是唯一判据。
+// 段级精确匹配（.qoder-cn-foo 不算）；认不出归属返回 null。
+export function qoderEditionForPath(file) {
+  if (typeof file !== "string" || file === "") return null;
+  const norm = file.toLowerCase().replace(/\\/g, "/");
+  if (/(^|\/)\.qoder-cn(\/|$)/.test(norm)) return "cn";
+  if (/(^|\/)\.qoder(\/|$)/.test(norm)) return "intl";
+  return null;
+}
+
+// 「已识别在装」的区域版清单：数据根目录在盘即算（CLI/桌面形态的首轮运行都会
+// 建根）。纯存在性判断，不 spawn、不读版本。home 不是绝对路径时返回空——
+// 调用方按「一个都没认出来」走各自的原路径兜底。
+export function recognizedQoderEditions(home, io = { existsSync }) {
+  if (typeof home !== "string" || !isAbsolute(home)) return [];
+  return QODER_EDITIONS.filter((edition) => {
+    try {
+      return io.existsSync(qoderDataRoot(home, edition));
+    } catch {
+      return false;
+    }
+  });
+}
+
 // Resolve the Qoder settings.json path from a base directory (USERPROFILE).
-export function qoderSettingsPath(base) {
-  return join(base, ".qoder", "settings.json");
+// edition 缺省 "intl"（历史单根口径）；CN 版落在 ~/.qoder-cn/settings.json。
+export function qoderSettingsPath(base, edition = "intl") {
+  return join(qoderDataRoot(base, edition), "settings.json");
+}
+
+// settingsPath 形如 <home>/<.qoder|.qoder-cn>/settings.json 时才推得出 home；
+// 其他形态（测试随手拼的路径）返回 null，调用方按旧单文件口径直写。
+function homeFromSettingsPath(settingsPath) {
+  if (basename(settingsPath) !== "settings.json") return null;
+  return qoderEditionForPath(dirname(settingsPath)) !== null ? dirname(dirname(settingsPath)) : null;
 }
 
 // Deterministic managed connection id for an Anyswitch provider id, so a sync
@@ -259,20 +326,9 @@ export function writeQoderSettingsWithBackup(filePath, data) {
   return { ok: true, unchanged: false, backupPath };
 }
 
-// High-level write: read existing settings, merge managed providers, write
-// back with backup. Returns { ok, unchanged, backupPath?, reason? }.
-export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
-  // 调用方 home 变量缺失时会把 join("", ".qoder", …) 的相对路径喂进来：真实用户
-  // 配置不会被更新，下面的 mkdirSync 却会在进程 CWD 静默建出 .qoder/settings.json。
-  // 这类失败必须可见——不是绝对路径就判失败，绝不落盘。协调器以外的调用链
-  // （qoder-launcher 的启动期同步、uninstall 的清理）也从这里过，闸门放在入口一并兜住。
-  if (!isAbsolute(settingsPath)) {
-    return {
-      ok: false,
-      unchanged: true,
-      reason: `refusing to write relative qoder settings path ("${settingsPath}"); home directory unresolved`,
-    };
-  }
+// High-level write for ONE settings.json: read existing settings, merge
+// managed providers, write back with backup. Returns { ok, unchanged, backupPath?, reason? }.
+function writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, catalog, effortsEnabled) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAnyswitchChannel(store, "qoder");
   const previousManaged = readSidecar(sidecarRoot).providers;
@@ -300,4 +356,58 @@ export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, 
     writeSidecar(sidecarRoot, managed);
   }
   return writeResult;
+}
+
+// High-level write: 对「已识别在装」的每个数据根分别写入（契约：双装双写）。
+// settingsPath 仍是调用方给的既有落点（<home>/.qoder/settings.json）；能推出
+// home 且认得出在装根时逐根各写一份，一个都没认出来（没跑过的新装、发现层
+// 判 uncertain 后的 fail-open 调用）退回只写 settingsPath 的既有单根行为。
+// sidecar 两个根共用一份：托管连接集合两侧本就一致，sidecar 记的是「我们写过
+// 哪些 id」，逐根合并语义在「先删旧托管集再写新集」下同一份记录对两个根都
+// 精确。返回 { ok, unchanged, backupPath?, reason?, roots? }：ok/unchanged 是
+// 各根聚合（全 ok 才 ok、全 unchanged 才 unchanged），roots 给逐根明细。
+export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null, io = { existsSync }) {
+  // 调用方 home 变量缺失时会把 join("", ".qoder", …) 的相对路径喂进来：真实用户
+  // 配置不会被更新，下面的 mkdirSync 却会在进程 CWD 静默建出 .qoder/settings.json。
+  // 这类失败必须可见——不是绝对路径就判失败，绝不落盘。协调器以外的调用链
+  // （qoder-launcher 的启动期同步、uninstall 的清理）也从这里过，闸门放在入口一并兜住。
+  if (!isAbsolute(settingsPath)) {
+    return {
+      ok: false,
+      unchanged: true,
+      reason: `refusing to write relative qoder settings path ("${settingsPath}"); home directory unresolved`,
+    };
+  }
+  const home = homeFromSettingsPath(settingsPath);
+  const editions = home ? recognizedQoderEditions(home, io) : [];
+  if (!home || editions.length === 0) {
+    return writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, catalog, effortsEnabled);
+  }
+  const roots = {};
+  let ok = true;
+  let unchanged = true;
+  let firstReason;
+  let failReason;
+  let backupPath;
+  for (const edition of editions) {
+    const result = writeQoderConfigFile(store, port, token, sidecarRoot, qoderSettingsPath(home, edition), catalog, effortsEnabled);
+    roots[edition] = result;
+    if (!result.ok) {
+      ok = false;
+      failReason ??= result.reason ?? "unknown error";
+    }
+    firstReason ??= result.reason;
+    if (!result.unchanged) unchanged = false;
+    backupPath ??= result.backupPath;
+  }
+  // 汇总 reason 优先报失败根的原因；全 ok 时如实带第一根的提示（如空仓库早退），
+  // 与旧单根返回的语义保持一致。
+  const reason = failReason ?? firstReason;
+  return {
+    ok,
+    unchanged,
+    ...(reason !== undefined ? { reason } : {}),
+    ...(backupPath !== undefined ? { backupPath } : {}),
+    roots,
+  };
 }
