@@ -4014,6 +4014,7 @@ async function api(method, path, body) {
       function detail(label, value) { list.append(element("dt", "", label), element("dd", "", value)); }
       // 主行归并为每端点一行：徽标｜本地版本｜最新｜结论｜动作位。
       // 徽标是端点入口形态枚举（服务端 entryForms 数据下发），「/」连写。
+      // 例外：安装记录全部带 edition 的端点（qoder 国际版/CN 版）按区域版分行，见下方。
       const primary = client.installations[0] ?? null;
       const forms = Array.isArray(client.entryForms) && client.entryForms.length
         ? client.entryForms
@@ -4048,132 +4049,173 @@ async function api(method, path, body) {
         : installation.status !== "found" ? "检测失败"
         : installation.issue === "not_runnable" ? "已安装但无法运行"
         : !validLocal(installation) ? "版本无法读取" : "已发现";
-      const line = element("div", "about-version-line");
-      line.appendChild(element("span", "about-kind", forms.join("/")));
-      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex / kimi 例外：
-      // 两形态的版本都摆，带形态小注并排；dsh 摆终端插件（CLI 段）与桌面端，
-      // 顺序固定 CLI 在前。某形态没装（not_found）不占位，装着却读不出版本时
-      // 状态词占它的位。
-      const localParts = [];
-      if (tuiInstallation) {
-        const shown = [tuiInstallation, ...client.installations.filter((installation) => installation.kind === "desktop")];
-        for (const installation of shown) {
-          const version = shownVersion(installation);
-          if (installation.status === "found" && version) localParts.push(`${formTag(installation)} ${version}`);
-          else if (installation.status !== "not_found") localParts.push(localStatus(installation));
-        }
-      } else if (client.id === "codex" || client.id === "kimi") {
-        for (const installation of client.installations) {
-          const version = shownVersion(installation);
-          if (installation.status === "found" && version) localParts.push(`${formTag(installation)} ${version}`);
-          else if (installation.status !== "not_found") localParts.push(localStatus(installation));
-        }
-      } else if (primary && primary.status === "found" && shownVersion(primary)) {
-        localParts.push(shownVersion(primary));
+      // 区域版分行（当前仅 qoder：国际版与 CN 版聚合为同一端点，差分仅限识别表现）：
+      // 安装记录全部带 edition 时按区域版分组——形态与区域是两个正交维度，形态维仍由
+      // 行首徽标承担，区域维每个在装的区域版一条子行，intl 在前 CN 在后，有界恒定
+      // 最多 2 行；区域标签是徽标后的灰阶小注（复用 about-kind 样式）。动作位与
+      // 「本次操作结果」仍是端点级、只摆第一行；某区域版全形态未装（not_found）不占行，
+      // 两版都没装时回落 intl 单行，与卡头「缺省 intl」同口径。记录不带 edition 的
+      // 端点走原单行路径，渲染零变化。
+      const editionGroups = client.installations.length
+        && client.installations.every((installation) => installation && (installation.edition === "intl" || installation.edition === "cn"))
+        ? ["intl", "cn"]
+            .map((edition) => ({ edition, items: client.installations.filter((installation) => installation.edition === edition) }))
+            .filter((group) => group.items.some((installation) => installation.status !== "not_found"))
+        : null;
+      if (editionGroups && !editionGroups.length) {
+        editionGroups.push({ edition: "intl", items: client.installations.filter((installation) => installation.edition === "intl") });
       }
-      const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : displayPrimary ? localStatus(displayPrimary) : "未找到"}`);
-      if (displayPrimary && (displayPrimary.status === "error" || displayPrimary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
-      line.appendChild(localSpan);
-      // 最新格：主更新形态那条渠道的版本。codex / kimi 的桌面渠道官方版本查得到就
-      // 同口径并排，查不到不占位；dsh 的 CLI 段取终端插件、Desktop 段取桌面端；
-      // 没有官方版本源的端点直述「自带更新」。
-      const primaryRemote = goodRemote(displayPrimary);
-      let remoteText = "自带更新";
-      if (tuiInstallation) {
-        const remoteParts = [];
-        const tuiRemote = goodRemote(tuiInstallation);
-        if (tuiRemote) remoteParts.push(`CLI ${tuiRemote.version}`);
-        else if (tuiInstallation.status !== "not_found") remoteParts.push(loading ? "查询中…" : "查询失败");
-        for (const installation of client.installations) {
-          if (installation.kind !== "desktop") continue;
-          const remote = goodRemote(installation);
-          if (remote) remoteParts.push(`Desktop ${remote.version}`);
-        }
-        remoteText = remoteParts.length ? remoteParts.join(" · ") : "自带更新";
-      } else if (primary?.remoteId) {
-        const perFormRemotes = client.id === "codex" || client.id === "kimi";
-        const remoteParts = [];
-        if (primaryRemote) remoteParts.push(perFormRemotes ? `${formTag(primary)} ${primaryRemote.version}` : primaryRemote.version);
-        else remoteParts.push(loading ? "查询中…" : "查询失败");
-        if (perFormRemotes) {
-          for (const installation of client.installations.slice(1)) {
-            const remote = goodRemote(installation);
-            if (remote) remoteParts.push(`${formTag(installation)} ${remote.version}`);
-          }
-        }
-        remoteText = remoteParts.join(" · ");
-      }
-      // dsh 行前缀不带「官方」：CLI 段是社区插件，它的版本源不是官方发布渠道。
-      line.appendChild(element("span", "about-version", `${tuiInstallation ? "最新" : "官方最新"} ${remoteText}`));
-      // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿（CLI 腿 +
-      // 桌面腿），前端不拼逐形态消息。dsh 的结论跟着终端插件比对，harness 的
-      // 比对只留详情区。
-      // 结论位同一时间只归一个状态所有：本次操作结果 > 查询中 > 检测结论。
-      // 之前「查询中…」是追加在结论后面的独立小字，重检时会读成「有新版本查询中…」，
-      // 同一位上同时出现两个状态；现在它接管这一位，不再追加。
-      const comparison = primaryRemote && validLocal(displayPrimary) ? primaryRemote.comparison : "unknown";
-      const compared = { update_available: "有新版本", current: tuiInstallation ? "与最新版本一致" : "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
-      const querying = loading && Boolean(remoteOf(displayPrimary));
-      let resultView = null;
-      if (attempt) {
-        resultView = {
-          text: attemptText(attempt),
-          tone: attemptTone(attempt),
-          title: [attempt.message, attempt.detail].filter(Boolean).join("\n"),
-        };
-      } else if (querying) {
-        resultView = { text: "查询中…", tone: "", title: "" };
-      } else if (compared || primaryRemote) {
-        resultView = {
-          text: compared || "无法比较版本",
-          tone: comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "",
-          title: "",
-        };
-      }
-      if (resultView) {
-        const result = element("span", "about-result", resultView.text);
-        result.dataset.tone = resultView.tone;
-        if (resultView.title) result.title = resultView.title;
-        line.appendChild(result);
-      }
-      // 动作位端点级一颗：本端点任务在跑 > 本次结果 > 可更新/可安装；锁按客户端分，
-      // 别人在跑不影响本行。刚更新完待确认的行不再出「更新」——那等于把同一次更新
-      // 再装一遍；失败行给「重试」，批量或确认期间先不出现，等整段结束。
-      if (primary && updatableClients.has(client.id)) {
-        const ownRun = lifecycleRuns.get(client.id);
-        const retryable = attempt && attempt.outcome !== "updated";
-        let intent = null;
-        if (ownRun) {
-          intent = { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true, busy: true };
-        } else if (pendingSuccess(client.id)) {
-          intent = null;
-        } else if (retryable) {
-          if (!lifecycleBatch && !confirming) intent = { label: "重试", action: attempt.action, disabled: false };
+      // 逐行渲染上下文：分行时一组一份（行内版本格/最新格/结论都看本组主形态——第一条
+      // 在装记录），不分行时整端点一份（现状）。
+      const lineContexts = editionGroups
+        ? editionGroups.map((group, index) => ({
+            region: group.edition,
+            installations: group.items,
+            primary: group.items.find((installation) => installation.status === "found") ?? group.items[0] ?? null,
+            mainRow: index === 0,
+          }))
+        : [{ region: null, installations: client.installations, primary: displayPrimary, mainRow: true }];
+      for (const lineCtx of lineContexts) {
+        const linePrimary = lineCtx.primary;
+        const lineInstallations = lineCtx.installations;
+        const line = element("div", "about-version-line");
+        if (lineCtx.region) {
+          // 区域子行：徽标按本组形态连写，区域小注紧随其后
+          line.appendChild(element("span", "about-kind", [...new Set(lineInstallations.map(formTag))].join("/")));
+          line.appendChild(element("span", "about-kind", lineCtx.region === "cn" ? "CN" : "国际"));
         } else {
-          const act = client.installations
-            .map((installation) => installationAction(client, installation))
-            .find((action) => action?.kind === "update") ?? installationAction(client, primary);
-          if (act) {
-            intent = {
-              label: act.kind === "update" ? "更新" : "安装",
-              action: act.kind,
-              disabled: Boolean(lifecycleBatch),
-              reason: Boolean(lifecycleBatch) ? "有更新任务正在进行" : "",
-            };
+          line.appendChild(element("span", "about-kind", forms.join("/")));
+        }
+        // 本地版本格：只摆主更新形态（installations[0]）的版本。codex / kimi 例外：
+        // 两形态的版本都摆，带形态小注并排；dsh 摆终端插件（CLI 段）与桌面端，
+        // 顺序固定 CLI 在前；区域子行同口径摆本组各形态。某形态没装（not_found）
+        // 不占位，装着却读不出版本时状态词占它的位。
+        const localParts = [];
+        if (tuiInstallation) {
+          const shown = [tuiInstallation, ...client.installations.filter((installation) => installation.kind === "desktop")];
+          for (const installation of shown) {
+            const version = shownVersion(installation);
+            if (installation.status === "found" && version) localParts.push(`${formTag(installation)} ${version}`);
+            else if (installation.status !== "not_found") localParts.push(localStatus(installation));
+          }
+        } else if (lineCtx.region || client.id === "codex" || client.id === "kimi") {
+          for (const installation of lineInstallations) {
+            const version = shownVersion(installation);
+            if (installation.status === "found" && version) localParts.push(`${formTag(installation)} ${version}`);
+            else if (installation.status !== "not_found") localParts.push(localStatus(installation));
+          }
+        } else if (linePrimary && linePrimary.status === "found" && shownVersion(linePrimary)) {
+          localParts.push(shownVersion(linePrimary));
+        }
+        const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : linePrimary ? localStatus(linePrimary) : "未找到"}`);
+        if (linePrimary && (linePrimary.status === "error" || linePrimary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
+        line.appendChild(localSpan);
+        // 最新格：主更新形态那条渠道的版本。codex / kimi 与区域子行的各形态官方版本
+        // 查得到就同口径并排，查不到不占位；dsh 的 CLI 段取终端插件、Desktop 段取桌面端；
+        // 没有官方版本源的端点直述「自带更新」。
+        const primaryRemote = goodRemote(linePrimary);
+        let remoteText = "自带更新";
+        if (tuiInstallation) {
+          const remoteParts = [];
+          const tuiRemote = goodRemote(tuiInstallation);
+          if (tuiRemote) remoteParts.push(`CLI ${tuiRemote.version}`);
+          else if (tuiInstallation.status !== "not_found") remoteParts.push(loading ? "查询中…" : "查询失败");
+          for (const installation of client.installations) {
+            if (installation.kind !== "desktop") continue;
+            const remote = goodRemote(installation);
+            if (remote) remoteParts.push(`Desktop ${remote.version}`);
+          }
+          remoteText = remoteParts.length ? remoteParts.join(" · ") : "自带更新";
+        } else if (linePrimary?.remoteId) {
+          const perFormRemotes = Boolean(lineCtx.region) || client.id === "codex" || client.id === "kimi";
+          const remoteParts = [];
+          if (primaryRemote) remoteParts.push(perFormRemotes ? `${formTag(linePrimary)} ${primaryRemote.version}` : primaryRemote.version);
+          else remoteParts.push(loading ? "查询中…" : "查询失败");
+          if (perFormRemotes) {
+            for (const installation of lineInstallations) {
+              if (installation === linePrimary) continue;
+              const remote = goodRemote(installation);
+              if (remote) remoteParts.push(`${formTag(installation)} ${remote.version}`);
+            }
+          }
+          remoteText = remoteParts.join(" · ");
+        }
+        // dsh 行前缀不带「官方」：CLI 段是社区插件，它的版本源不是官方发布渠道。
+        line.appendChild(element("span", "about-version", `${tuiInstallation ? "最新" : "官方最新"} ${remoteText}`));
+        // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿（CLI 腿 +
+        // 桌面腿），前端不拼逐形态消息。dsh 的结论跟着终端插件比对，harness 的
+        // 比对只留详情区；区域子行的结论跟本组主形态比对，「本次操作结果」是端点级
+        // 回执、只在主行占位。
+        // 结论位同一时间只归一个状态所有：本次操作结果 > 查询中 > 检测结论。
+        // 之前「查询中…」是追加在结论后面的独立小字，重检时会读成「有新版本查询中…」，
+        // 同一位上同时出现两个状态；现在它接管这一位，不再追加。
+        const comparison = primaryRemote && validLocal(linePrimary) ? primaryRemote.comparison : "unknown";
+        const compared = { update_available: "有新版本", current: tuiInstallation ? "与最新版本一致" : "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
+        const querying = loading && Boolean(remoteOf(linePrimary));
+        let resultView = null;
+        if (attempt && lineCtx.mainRow) {
+          resultView = {
+            text: attemptText(attempt),
+            tone: attemptTone(attempt),
+            title: [attempt.message, attempt.detail].filter(Boolean).join("\n"),
+          };
+        } else if (querying) {
+          resultView = { text: "查询中…", tone: "", title: "" };
+        } else if (compared || primaryRemote) {
+          resultView = {
+            text: compared || "无法比较版本",
+            tone: comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "",
+            title: "",
+          };
+        }
+        if (resultView) {
+          const result = element("span", "about-result", resultView.text);
+          result.dataset.tone = resultView.tone;
+          if (resultView.title) result.title = resultView.title;
+          line.appendChild(result);
+        }
+        // 动作位端点级一颗：本端点任务在跑 > 本次结果 > 可更新/可安装；锁按客户端分，
+        // 别人在跑不影响本行。刚更新完待确认的行不再出「更新」——那等于把同一次更新
+        // 再装一遍；失败行给「重试」，批量或确认期间先不出现，等整段结束。
+        // 区域版分行时也只摆主行（第一行）。
+        if (lineCtx.mainRow && primary && updatableClients.has(client.id)) {
+          const ownRun = lifecycleRuns.get(client.id);
+          const retryable = attempt && attempt.outcome !== "updated";
+          let intent = null;
+          if (ownRun) {
+            intent = { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true, busy: true };
+          } else if (pendingSuccess(client.id)) {
+            intent = null;
+          } else if (retryable) {
+            if (!lifecycleBatch && !confirming) intent = { label: "重试", action: attempt.action, disabled: false };
+          } else {
+            const act = client.installations
+              .map((installation) => installationAction(client, installation))
+              .find((action) => action?.kind === "update") ?? installationAction(client, primary);
+            if (act) {
+              intent = {
+                label: act.kind === "update" ? "更新" : "安装",
+                action: act.kind,
+                disabled: Boolean(lifecycleBatch),
+                reason: Boolean(lifecycleBatch) ? "有更新任务正在进行" : "",
+              };
+            }
+          }
+          if (intent) {
+            const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
+            actionButton.type = "button";
+            actionButton.disabled = intent.disabled;
+            if (intent.reason) actionButton.title = intent.reason;
+            if (intent.busy) actionButton.setAttribute("aria-busy", "true");
+            if (!intent.disabled) actionButton.onclick = () => updateClient(client.id, intent.action);
+            line.appendChild(actionButton);
           }
         }
-        if (intent) {
-          const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
-          actionButton.type = "button";
-          actionButton.disabled = intent.disabled;
-          if (intent.reason) actionButton.title = intent.reason;
-          if (intent.busy) actionButton.setAttribute("aria-busy", "true");
-          if (!intent.disabled) actionButton.onclick = () => updateClient(client.id, intent.action);
-          line.appendChild(actionButton);
-        }
+        lines.appendChild(line);
       }
-      lines.appendChild(line);
       // 详情区逐安装项补行：路径、版本来源、来源、查询时间，一条安装记录一组。
+      // 区域版端点（qoder）逐版各出一组同名条目（intl 组在前），区域差异由上方
+      // 子行承担，详情区不再拆维度。
       // dsh 的 CLI 入口是社区插件（kind "tui"）：它按 CLI 组呈现，来源行说「上游来源」、
       // 链接指 npm 包页，后面补一句说明。本体 harness 不单列——官方没有 CLI 入口产品，
       // 它的存在由那句说明交代；桌面组仍按原样跟在 CLI 组之后。
