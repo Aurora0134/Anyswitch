@@ -48,7 +48,7 @@ import {
   resolveDshExecutable,
   resolveOpencodeExecutable,
   resolveGrokExecutable,
-  resolveQoderCliExecutable,
+  resolveQoderLaunchCliExecutable,
   resolveZcodeCliExecutable,
   resolveWorkbuddyExecutable,
 } from "./agent-discovery.mjs";
@@ -84,7 +84,8 @@ const UTF8_CODEPAGE_PREFIX = ["/d", "/c", "chcp", "65001", ">nul", "&"];
 // zcode 条目拉起的是 CLI 形态：经 zcode-cli-launcher.mjs 中转，因为 CLI 入口
 // 是 node 拉起的 bin\zcode.mjs，cmd /d /c 不能直接执行 .mjs；relay 复用、
 // 槽位同步与防物化 pin 全在 launcher 内部完成。qoder 已有独立 CLI 形态
-// （qodercli.exe，与环境检测同一执行体），同样收进白名单。
+// （qodercli.exe，与环境检测同一执行体），同样收进白名单；双区域版共用这个
+// 条目，拉起哪个由 resolveQoderLaunchCliExecutable 裁决（CN 在装拉起 CN 入口）。
 // `name` 是显示名，与 environment-service.mjs CLIENTS 共用：页签、菜单与环境页
 // 读的是同一句。
 export const AGENT_TERMINAL_TARGETS = {
@@ -199,7 +200,9 @@ const EXECUTABLE_RESOLVERS = {
   dsh: resolveDshExecutable,
   opencode: resolveOpencodeExecutable,
   grok: resolveGrokExecutable,
-  qoder: resolveQoderCliExecutable,
+  // qoder 双区域版共用这一条：CN 在装（resolveQoderLaunchEdition）时解析到 CN
+  // 入口（qodercn.cmd / qoderclicn.exe），否则维持国际版 qodercli.exe。
+  qoder: resolveQoderLaunchCliExecutable,
   zcode: resolveZcodeTerminalExecutable,
   workbuddy: resolveWorkbuddyTerminalExecutable,
 };

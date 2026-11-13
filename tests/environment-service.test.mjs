@@ -275,6 +275,90 @@ test("Qoder CLI row reads its version from qodercli.exe's own --version report",
   assert.equal(vanished.issue, "entry_missing");
 });
 
+test("Qoder 国际版桌面端：现行 Qoder IDE 名优先，旧名 Qoder.exe 兜底", async (t) => {
+  const f = fixture(t);
+  // 现行官方名：%LOCALAPPDATA%\Programs\Qoder IDE\Qoder IDE.exe（IDE 线）。
+  const ide = f.put(join(f.base.LOCALAPPDATA, "Programs/Qoder IDE/Qoder IDE.exe"));
+  asarPackage(f, ide, "qoder", "1.39.0");
+  const found = installation(await f.service().getState(), "qoder", 1);
+  assert.equal(found.status, "found");
+  assert.equal(found.edition, "intl");
+  assert.equal(found.path, ide);
+  assert.equal(found.version, "1.39.0");
+  assert.equal(found.versionSource, "app.asar/package.json");
+
+  // 两个候选都在时按契约列序取首个命中（Qoder IDE 优先于旧名）。
+  const legacy = f.put(join(f.base.LOCALAPPDATA, "Programs/Qoder/Qoder.exe"));
+  asarPackage(f, legacy, "qoder", "0.5.0");
+  const both = installation(await f.service().getState({ force: true }), "qoder", 1);
+  assert.equal(both.path, ide);
+
+  // 只有旧名的机器照常认旧名。
+  fs.rmSync(join(f.base.LOCALAPPDATA, "Programs/Qoder IDE"), { recursive: true, force: true });
+  const legacyOnly = installation(await f.service().getState(), "qoder", 1);
+  assert.equal(legacyOnly.status, "found");
+  assert.equal(legacyOnly.path, legacy);
+});
+
+test("Qoder CN 桌面工作台：版本直读安装根 resources/app.asar，包名认 qoder-cn", async (t) => {
+  const f = fixture(t);
+  // CN 工作台没有 .qoder-versions 版本目录机制（本机实测），版本只能直读
+  // 安装根的 resources/app.asar；记录落 index 3（desktop-cn），edition "cn"。
+  const exe = f.put(join(f.base.LOCALAPPDATA, "Programs/Qoder CN/Qoder CN.exe"));
+  asarPackage(f, exe, "qoder-cn", "0.5.7");
+  const found = installation(await f.service().getState(), "qoder", 3);
+  assert.equal(found.kind, "desktop");
+  assert.equal(found.edition, "cn");
+  assert.equal(found.remoteId, null);
+  assert.equal(found.status, "found");
+  assert.equal(found.path, exe);
+  assert.equal(found.version, "0.5.7");
+  assert.equal(found.versionSource, "app.asar/package.json");
+
+  // CN IDE（Qoder CN IDE\Qoder CN IDE.exe）是同 (kind, edition) 内的兜底候选。
+  fs.rmSync(join(f.base.LOCALAPPDATA, "Programs/Qoder CN"), { recursive: true, force: true });
+  const cnIde = f.put(join(f.base.LOCALAPPDATA, "Programs/Qoder CN IDE/Qoder CN IDE.exe"));
+  asarPackage(f, cnIde, "qoder-cn", "1.39.0");
+  const fallback = installation(await f.service().getState({ force: true }), "qoder", 3);
+  assert.equal(fallback.status, "found");
+  assert.equal(fallback.path, cnIde);
+  assert.equal(fallback.version, "1.39.0");
+});
+
+test("Qoder CN 桌面条不认包名对不上的 asar（intl 的 qoder 包不算 CN）", async (t) => {
+  const f = fixture(t);
+  const exe = f.put(join(f.base.LOCALAPPDATA, "Programs/Qoder CN/Qoder CN.exe"));
+  asarPackage(f, exe, "qoder", "0.5.7");
+  const item = installation(await f.service().getState(), "qoder", 3);
+  assert.equal(item.status, "found");
+  assert.equal(item.version, null);
+  assert.equal(item.issue, "version_unavailable");
+});
+
+test("Qoder CN CLI 记录：qoderclicn.exe 自报版本，edition cn、remoteId null", async (t) => {
+  const f = fixture(t);
+  const exe = f.put(join(f.base.USERPROFILE, ".qoder-cn/bin/qoderclicn/qoderclicn.exe"));
+  const ok = await f.service({ probeVersion: async (path) => (assert.equal(path, exe), { missing: false, version: "1.1.64" }) }).getState();
+  const found = installation(ok, "qoder", 2);
+  assert.equal(found.kind, "cli");
+  assert.equal(found.edition, "cn");
+  assert.equal(found.remoteId, null);
+  assert.equal(found.status, "found");
+  assert.equal(found.path, exe);
+  assert.equal(found.version, "1.1.64");
+  assert.equal(found.versionSource, "cli --version");
+  // CN CLI 缺席时照常 not_found、不探版本（空安装用例已覆盖四条记录的缺省面）。
+  fs.rmSync(join(f.base.USERPROFILE, ".qoder-cn"), { recursive: true, force: true });
+  const probed = [];
+  const absent = installation(
+    await f.service({ probeVersion: async (path) => { probed.push(path); return { missing: true, version: null }; } }).getState(),
+    "qoder", 2,
+  );
+  assert.equal(absent.status, "not_found");
+  assert.equal(absent.edition, "cn");
+  assert.deepEqual(probed, [], "CN CLI 不在盘时不应起版本探针");
+});
+
 test("Codex reads its CLI version from the npm package manifest, never from a probe", async (t) => {
   const f = fixture(t);
   const { root, entry } = npmInstall(f, "codex", "@openai/codex", "0.155.1", "bin/codex.js");
@@ -533,9 +617,14 @@ test("an empty installation reports all ten clients, with the registered install
   assert.equal(state.nodeVersion, process.version);
   assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok", "workbuddy"]);
   assert.deepEqual(state.clients[1].installations.map((i) => [i.kind, i.remoteId]), [["cli", "codex"], ["desktop", "codex-desktop"]]);
-  // Qoder 与 Codex 同序 [cli, desktop]：index 0 是 qodercli.exe（remoteId qoder-cli）。
+  // Qoder 双区域版四条记录，键 = (kind, edition)：intl 两条守住 index 0/1
+  // （0 是 qodercli.exe，remoteId qoder-cli；1 是桌面端），CN 两条追加在 2/3，
+  // 没有可核验的官方版本源，remoteId 恒 null；四条都带 edition 字段。
   const qoder = state.clients.find((c) => c.id === "qoder");
-  assert.deepEqual(qoder.installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder-cli"], ["desktop", "qoder"]]);
+  assert.deepEqual(
+    qoder.installations.map((i) => [i.kind, i.remoteId, i.edition]),
+    [["cli", "qoder-cli", "intl"], ["desktop", "qoder", "intl"], ["cli", null, "cn"], ["desktop", null, "cn"]],
+  );
   // DSH 官方桌面端上线后同样是两条安装记录：index 0 是 npm 全局 CLI（更新按钮装的
   // 就是这个包），index 1 是官方桌面端（官方发布文件渠道，remoteId dsh-desktop）。
   // 终端形态的第二个组件 dsh-tui 追加为 index 2，前两条的顺序与语义不动。
@@ -558,9 +647,13 @@ test("an empty installation reports all ten clients, with the registered install
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
-    assert.equal(client.installations.length, client.id === "dsh" ? 3 : ["codex", "qoder", "claude", "kimi", "zcode", "workbuddy"].includes(client.id) ? 2 : 1);
+    assert.equal(client.installations.length, client.id === "qoder" ? 4 : client.id === "dsh" ? 3 : ["codex", "claude", "kimi", "zcode", "workbuddy"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
-      assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
+      // edition 字段只有 qoder 的双区域记录携带，其余端点的记录形状不变。
+      const expectedKeys = client.id === "qoder"
+        ? ["edition", "issue", "kind", "path", "remoteId", "status", "version", "versionSource"]
+        : ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"];
+      assert.deepEqual(Object.keys(item).sort(), expectedKeys);
       assert.equal(item.status, "not_found");
       assert.equal(item.path, null);
       assert.equal(item.version, null);

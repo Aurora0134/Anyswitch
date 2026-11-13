@@ -380,11 +380,32 @@ export function resolveGrokExecutable(base = process.env) {
   return join(base.USERPROFILE ?? "", ".grok", "bin", "grok.exe");
 }
 
+// Qoder 分国际版与 CN 版两个区域发行（同流水线双发行、内核一致），数据根、
+// CLI 入口、桌面端安装位整组镜像：intl 用 ~/.qoder 与 Programs\Qoder*，cn 用
+// ~/.qoder-cn 与 Programs\Qoder CN*。端点仍是一个（id 恒为 "qoder"），区域版
+// 只是指纹与安装记录上的维度（installation 记录的 edition 字段）。
+// 数据根目录名收在这一处：下方四个解析器与 qoder-launcher 的 settings.json
+// 落点都从这里取，区域版改名时只动这一张表。
+export const QODER_DATA_ROOT_NAMES = Object.freeze({ intl: ".qoder", cn: ".qoder-cn" });
+
+export function qoderDataRoot(base = process.env, edition = "intl") {
+  return join(base.USERPROFILE ?? "", QODER_DATA_ROOT_NAMES[edition] ?? QODER_DATA_ROOT_NAMES.intl);
+}
+
 export function resolveQoderExecutable(base = process.env, io = { existsSync }) {
   const override = absoluteOverride(base, "QODER_EXECUTABLE");
   if (override !== null) return override;
-  const entryPath = join(base.USERPROFILE ?? "", ".qoder", "entry", "qoder.cmd");
-  return io.existsSync(entryPath) ? entryPath : join(base.USERPROFILE ?? "", ".qoder", "bin", "qodercli", "qodercli.exe");
+  const entryPath = join(qoderDataRoot(base), "entry", "qoder.cmd");
+  return io.existsSync(entryPath) ? entryPath : join(qoderDataRoot(base), "bin", "qodercli", "qodercli.exe");
+}
+
+// CN 版 CLI 入口，与国际版同序的镜像指纹：CN 变体覆盖变量 → ~/.qoder-cn/entry/
+// qodercn.cmd 调度器（qodercn-dispatcher.ps1 再解 qoderclicn）→ CLI 执行体本体。
+export function resolveQoderCnExecutable(base = process.env, io = { existsSync }) {
+  const override = absoluteOverride(base, "QODER_CN_EXECUTABLE");
+  if (override !== null) return override;
+  const entryPath = join(qoderDataRoot(base, "cn"), "entry", "qodercn.cmd");
+  return io.existsSync(entryPath) ? entryPath : join(qoderDataRoot(base, "cn"), "bin", "qoderclicn", "qoderclicn.exe");
 }
 
 // WorkBuddy 的内置 CLI：Electron 安装包内 resources/app.asar.unpacked/cli/bin/codebuddy
@@ -405,14 +426,54 @@ export function resolveWorkbuddyExecutable(base = process.env) {
 // 上面的 resolveQoderExecutable 偏向 IDE 的 qoder.cmd 调度器，环境检测与终端
 // 一键启动要的都是 CLI 执行体本身，路径因此单独解析。
 export function resolveQoderCliExecutable(base = process.env) {
-  return join(base.USERPROFILE ?? "", ".qoder", "bin", "qodercli", "qodercli.exe");
+  return join(qoderDataRoot(base), "bin", "qodercli", "qodercli.exe");
+}
+
+// CN 版 CLI 执行体（qoderclicn.exe，与 qodercli.exe 同型的 Bun 单文件），
+// 数据根 ~/.qoder-cn。CN 入口的 qodercn.cmd 调度器不做检测目标，与国际版同口径。
+export function resolveQoderCnCliExecutable(base = process.env) {
+  return join(qoderDataRoot(base, "cn"), "bin", "qoderclicn", "qoderclicn.exe");
 }
 
 // Qoder 桌面端（IDE 本体）。~/.qoder/entry/qoder.cmd 是 IDE 自带的命令调度器
 // （IDE 安装器丢下的 code.cmd 式垫片），不是独立安装的 CLI 产品，不做检测目标；
 // CLI 形态的检测目标是 ~/.qoder/bin/qodercli/qodercli.exe（resolveQoderCliExecutable）。
-export function resolveQoderDesktopExecutable(base = process.env) {
-  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
+// 现行官方安装名是 Qoder IDE\Qoder IDE.exe（IDE 线，VS Code fork），旧名
+// Programs\Qoder\Qoder.exe 兜底；按契约列序取首个命中，都不在时报旧名
+//（未安装的报法与历史口径一致，存在性由调用方判）。
+export function resolveQoderDesktopExecutable(base = process.env, io = { existsSync }) {
+  const programs = join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs");
+  const ide = join(programs, "Qoder IDE", "Qoder IDE.exe");
+  return io.existsSync(ide) ? ide : join(programs, "Qoder", "Qoder.exe");
+}
+
+// CN 版桌面端：工作台（Qoder CN\Qoder CN.exe，自研 Electron 工作台线）优先，
+// CN IDE（Qoder CN IDE\Qoder CN IDE.exe，IDE 线）兜底；同序取首个命中。
+export function resolveQoderCnDesktopExecutable(base = process.env, io = { existsSync }) {
+  const programs = join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs");
+  const workbench = join(programs, "Qoder CN", "Qoder CN.exe");
+  return io.existsSync(workbench) ? workbench : join(programs, "Qoder CN IDE", "Qoder CN IDE.exe");
+}
+
+// 终端一键启动与 launcher 共用「拉起哪个区域版」的裁决：CN 在装（显式
+// QODER_CN_EXECUTABLE 覆盖，或 CN CLI 两枚指纹——entry 调度器、CLI 执行体——
+// 任一在盘）就拉起 CN 入口，否则维持国际版。只覆盖/在装国际版时行为与
+// 双区域改造前逐位一致。
+export function resolveQoderLaunchEdition(base = process.env, io = { existsSync }) {
+  const override = base.QODER_CN_EXECUTABLE;
+  if (override !== undefined && override !== null && override !== "") return "cn";
+  if (io.existsSync(join(qoderDataRoot(base, "cn"), "bin", "qoderclicn", "qoderclicn.exe"))) return "cn";
+  if (io.existsSync(join(qoderDataRoot(base, "cn"), "entry", "qodercn.cmd"))) return "cn";
+  return "intl";
+}
+
+// 拉起用的 CLI 入口：CN 在装时按契约 cli-cn 指纹序解析（覆盖 → entry 调度器 →
+// CLI 执行体，.cmd 由调用方的 cmd 包装承载，与 dsh 的 .cmd shim 同形）；
+// 国际版维持终端现状，直取 CLI 执行体，不经 IDE 的 qoder.cmd 调度器。
+export function resolveQoderLaunchCliExecutable(base = process.env, io = { existsSync }) {
+  return resolveQoderLaunchEdition(base, io) === "cn"
+    ? resolveQoderCnExecutable(base, io)
+    : resolveQoderCliExecutable(base);
 }
 
 // DSH 官方桌面端（Electron 包，安装器默认落点）。它在进程面上自带运行时，
@@ -444,12 +505,14 @@ export function resolveWorkbuddyDesktopExecutable(base = process.env) {
 // 不进本表——同步子进程 store 一变就跑，spawn 探测会把探测进程喂进 relay 扫描
 // （qoder 幽灵卡的病根）；codex 桌面版自带 CLI 副本落 %LOCALAPPDATA%\OpenAI\Codex\bin，
 // resolveCodexExecutable 的原生分支已覆盖桌面-only 机器，无需求助 MSIX。
+// qoder 的双区域版各出两形态（CLI/桌面 × intl/cn），任一命中即端点在装——
+// agentInstallState 的聚合语义天然覆盖「只装了 CN」的机器。
 export const AGENT_INSTALL_FORMS = Object.freeze({
   zcode: Object.freeze([resolveZcodeExecutable, resolveZcodeCliExecutable]),
   dsh: Object.freeze([resolveDshExecutable, resolveDshDesktopExecutable]),
   pi: Object.freeze([resolvePiExecutable]),
   kimi: Object.freeze([resolveKimiExecutable, resolveKimiDesktopExecutable]),
-  qoder: Object.freeze([resolveQoderCliExecutable, resolveQoderDesktopExecutable]),
+  qoder: Object.freeze([resolveQoderCliExecutable, resolveQoderDesktopExecutable, resolveQoderCnCliExecutable, resolveQoderCnDesktopExecutable]),
   codex: Object.freeze([resolveCodexExecutable]),
   opencode: Object.freeze([resolveOpencodeExecutable]),
   grok: Object.freeze([resolveGrokExecutable]),

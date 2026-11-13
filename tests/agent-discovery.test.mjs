@@ -6,7 +6,9 @@ import {
   defaultClaudeExecutable, resolveClaudeExecutable, resolveCodexExecutable,
   resolveOpencodeExecutable, resolvePiExecutable, resolveKimiExecutable,
   resolveDshExecutable, resolveDshTuiExecutable, resolveZcodeExecutable, resolveZcodeCliExecutable,
-  resolveQoderExecutable,
+  resolveQoderExecutable, resolveQoderDesktopExecutable,
+  resolveQoderCnExecutable, resolveQoderCnCliExecutable, resolveQoderCnDesktopExecutable,
+  resolveQoderLaunchEdition, resolveQoderLaunchCliExecutable,
   resolveQoderCliExecutable, resolveGrokExecutable, resolveWorkbuddyExecutable,
   AGENT_INSTALL_FORMS, agentInstallState,
 } from "../src/agents/agent-discovery.mjs";
@@ -407,6 +409,105 @@ test("dsh-tui 解析：一份都没有返回 null，清单坏了不吞掉已装�
       () => resolveDshTuiExecutable({ ...base, DSH_TUI_EXECUTABLE: "dsh-tui.js" }),
       /must be an absolute path/,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("qoder 双区域指纹：CN 按契约列序解析（覆盖 → entry 调度器 → CLI 执行体）", () => {
+  const base = { USERPROFILE: "C:\\Users\\fixture" };
+  // QODER_CN_EXECUTABLE 覆盖只验绝对路径，值原样返回。
+  assert.equal(
+    resolveQoderCnExecutable({ ...base, QODER_CN_EXECUTABLE: "D:\\tools\\qodercn.exe" }),
+    "D:\\tools\\qodercn.exe",
+  );
+  assert.throws(
+    () => resolveQoderCnExecutable({ ...base, QODER_CN_EXECUTABLE: "qodercn" }),
+    /must be an absolute path/,
+  );
+  // entry/qodercn.cmd 在盘取调度器，不在才落 CLI 执行体本体。
+  assert.equal(
+    resolveQoderCnExecutable(base, { existsSync: () => true }),
+    join(base.USERPROFILE, ".qoder-cn", "entry", "qodercn.cmd"),
+  );
+  assert.equal(
+    resolveQoderCnExecutable(base, { existsSync: () => false }),
+    join(base.USERPROFILE, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"),
+  );
+  // 环境检测与终端一键启动认 CLI 执行体本身，不经 entry 调度器。
+  assert.equal(
+    resolveQoderCnCliExecutable(base),
+    join(base.USERPROFILE, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"),
+  );
+});
+
+test("qoder 桌面端双候选：intl 现行名 Qoder IDE 优先、旧名兜底；CN 工作台优先、CN IDE 兜底", () => {
+  const base = { USERPROFILE: "C:\\Users\\fixture", LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local" };
+  const programs = join(base.LOCALAPPDATA, "Programs");
+  // 同名候选按契约列序取首个命中；都不在时仍报兜底位（未安装的报法与历史口径一致）。
+  assert.equal(
+    resolveQoderDesktopExecutable(base, { existsSync: (p) => p.includes("Qoder IDE") }),
+    join(programs, "Qoder IDE", "Qoder IDE.exe"),
+  );
+  assert.equal(
+    resolveQoderDesktopExecutable(base, { existsSync: () => false }),
+    join(programs, "Qoder", "Qoder.exe"),
+  );
+  assert.equal(
+    resolveQoderCnDesktopExecutable(base, { existsSync: (p) => p.endsWith(join("Qoder CN", "Qoder CN.exe")) }),
+    join(programs, "Qoder CN", "Qoder CN.exe"),
+  );
+  assert.equal(
+    resolveQoderCnDesktopExecutable(base, { existsSync: () => false }),
+    join(programs, "Qoder CN IDE", "Qoder CN IDE.exe"),
+  );
+});
+
+test("resolveQoderLaunchEdition：CN 覆盖或在装判 cn，否则维持 intl", () => {
+  const dir = mkTestDir("qoder-edition-");
+  try {
+    const base = { USERPROFILE: dir };
+    // 两枚 CN 指纹都不在盘：国际版。
+    assert.equal(resolveQoderLaunchEdition(base), "intl");
+    // entry/qodercn.cmd 在盘即判 CN 在装。
+    mkdirSync(join(dir, ".qoder-cn", "entry"), { recursive: true });
+    writeFileSync(join(dir, ".qoder-cn", "entry", "qodercn.cmd"), "@echo off\r\n");
+    assert.equal(resolveQoderLaunchEdition(base), "cn");
+    // 显式覆盖最高优先，相对路径的坏值也只影响拉起侧（解析器抛错由调用方收口）。
+    assert.equal(resolveQoderLaunchEdition({ USERPROFILE: "C:\\nowhere", QODER_CN_EXECUTABLE: "D:\\x\\qodercn.exe" }), "cn");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveQoderLaunchCliExecutable：CN 在装拉起 CN 入口，否则国际版 CLI 执行体", () => {
+  const dir = mkTestDir("qoder-launch-cli-");
+  try {
+    const base = { USERPROFILE: dir };
+    // 只有国际版 CLI：维持现状，直取 qodercli.exe，不经 IDE 调度器。
+    mkdirSync(join(dir, ".qoder", "bin", "qodercli"), { recursive: true });
+    writeFileSync(join(dir, ".qoder", "bin", "qodercli", "qodercli.exe"), "MZ");
+    assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder", "bin", "qodercli", "qodercli.exe"));
+    // CN 在装后切换 CN 入口：entry/qodercn.cmd 优先于 CN CLI 执行体。
+    mkdirSync(join(dir, ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
+    writeFileSync(join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"), "MZ");
+    assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"));
+    mkdirSync(join(dir, ".qoder-cn", "entry"), { recursive: true });
+    writeFileSync(join(dir, ".qoder-cn", "entry", "qodercn.cmd"), "@echo off\r\n");
+    assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder-cn", "entry", "qodercn.cmd"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("agentInstallState qoder：只装 CN 区域版也判在装（双指纹聚合）", () => {
+  const dir = mkTestDir("qoder-cn-install-");
+  try {
+    const base = { USERPROFILE: dir, LOCALAPPDATA: join(dir, "local") };
+    assert.equal(agentInstallState("qoder", base), "absent");
+    mkdirSync(join(dir, ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
+    writeFileSync(join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"), "MZ");
+    assert.equal(agentInstallState("qoder", base), "installed", "CN CLI 在盘即端点在装");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

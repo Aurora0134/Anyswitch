@@ -6,7 +6,8 @@ import {
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
   resolveZcodeCliExecutable, resolveDshTuiExecutable, resolveWorkbuddyExecutable,
-  resolveQoderDesktopExecutable, resolveDshDesktopExecutable,
+  resolveQoderDesktopExecutable, resolveQoderCnCliExecutable, resolveQoderCnDesktopExecutable,
+  resolveDshDesktopExecutable,
   resolveKimiDesktopExecutable, resolveWorkbuddyDesktopExecutable,
 } from "../agents/agent-discovery.mjs";
 import { compareVersions, parseVersion } from "./version-check.mjs";
@@ -100,11 +101,12 @@ const CLIENTS = [
 // 只有桌面形态的端点：本地那条记录就是桌面端，inspect 走 kind="desktop" 分支
 // （版本从 app.asar 读）。dsh / kimi / codex / qoder / claude 是「CLI + 桌面端」
 // 两形态，不在此列。
-const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
+const DESKTOP_CLIENTS = new Set(["zcode"]);
 
 // 原生二进制、没有 npm 包清单可读的安装记录：本地版本只认执行体自报的
 // --version（inspect 里的 probeVersion 分支），探不出来降级 not_runnable。
-const PROBE_VERSION_CLIENTS = new Set(["grok", "qoder-cli"]);
+// qoder-cli-cn 是 CN 区 CLI（qoderclicn.exe），与 qoder-cli 同型同口径。
+const PROBE_VERSION_CLIENTS = new Set(["grok", "qoder-cli", "qoder-cli-cn"]);
 
 // 两种安装形态都有的端点：npm 形态读包清单，原生形态（执行体旁边没有
 // package.json）回退到 --version。Kimi Code 是唯一两者兼备的客户端——npm 全局包
@@ -200,7 +202,9 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
   // Qoder's updater installs every release into <installRoot>/.qoder-versions/<version>/
   // and never rewrites the install root, whose app.asar keeps reporting the first
   // installed version. The newest payload carrying both its executable and its
-  // app.asar is the one that runs.
+  // app.asar is the one that runs. CN 工作台没有这套版本目录机制（id "qoder-cn"
+  // 对应的 .qoder-cn-versions 在盘上不存在），readdirSync 落空即回退到安装根的
+  // resources/app.asar 直读——这正是 CN 区域的常规路径。
   function desktopPayloads(id, executable) {
     const root = join(dirname(executable), `.${id}-versions`);
     let entries;
@@ -249,11 +253,13 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       if (!/^\d+$/.test(entry.offset) || entry.size > 1024 * 1024) throw Object.assign(new Error(), { code: "METADATA_INVALID" });
       const pkg = JSON.parse(readAt(entry.size, 8 + headerSize + Number(entry.offset)).toString("utf8"));
       // 只认归档确实属于这个产品：目录里的 app.asar 可能是别人的，包名对不上
-      // 就不报版本（与 qoder / zcode 同一条防线）。
+      // 就不报版本（与 qoder / zcode 同一条防线）。qoder 双区域版分居两个 id：
+      // intl 认 "qoder"，cn 认 "qoder-cn"（CN 工作台 asar 里的真实包名）。
       const expected = id === "zcode" ? ["zcode"]
         : id === "dsh-desktop" ? ["@deepseek-ai/dsh-desktop"]
         : id === "kimi-desktop" ? ["kimi-code-app"]
         : id === "workbuddy-desktop" ? ["@genie/workbuddy-desktop", "workbuddy-desktop"]
+        : id === "qoder-cn" ? ["qoder-cn"]
         : ["qoder"];
       return [pkg.name, pkg.productName].some((name) => typeof name === "string" && expected.includes(name.toLowerCase()))
         ? productVersion(pkg.version) : null;
@@ -323,10 +329,14 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     return pointsAtEntry ? productVersion(pkg.version) : null;
   }
 
-  async function inspect(id, kind, locate) {
+  async function inspect(id, kind, locate, extras = {}) {
     // Every client row carries the remoteId the about page queries its official
     // latest from; release-service.mjs CLIENTS is the authoritative source list.
-    const result = { kind, remoteId: id, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    // extras.remoteId 显式覆盖 remoteId（null＝没有可核验的官方版本源，与 zcode
+    // CLI 同一条纪律，关于页不为它发查询）；extras.edition 目前只有 qoder 用——
+    // 同一端点的双区域版各出一条安装记录，区域版只挂在记录上，不改端点 id。
+    const result = { kind, remoteId: extras.remoteId === undefined ? id : extras.remoteId, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    if (extras.edition !== undefined) result.edition = extras.edition;
     try {
       let path = locate(base, resolverIo);
       if (!isFile(path)) return result;
@@ -538,7 +548,16 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       const installations = await Promise.all(id === "workbuddy"
         ? [inspectWorkbuddyCli(), inspectWorkbuddyDesktop()]
         : id === "qoder"
-        ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
+        // qoder 双区域版共四条安装记录，键 = (kind, edition)：intl 两条守住
+        // index 0/1 的既有语义（0 是原生 CLI、1 是桌面端，「动作位认哪一条」
+        // 不变），CN 两条只追加在后。未安装的区域版照常产出 not_found 记录，
+        // 关于页据此声明全支持面；CN 两条没有可核验的官方版本源，remoteId 恒
+        // 为 null。CN 桌面记录用 id "qoder-cn" 只是 asar 包名防线的钥匙
+        // （CN 工作台无版本目录机制，desktopPayloads 落空即回退安装根直读）。
+        ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable, { edition: "intl" }),
+          inspect(id, "desktop", resolver, { edition: "intl" }),
+          inspect("qoder-cli-cn", "cli", resolveQoderCnCliExecutable, { edition: "cn", remoteId: null }),
+          inspect("qoder-cn", "desktop", resolveQoderCnDesktopExecutable, { edition: "cn", remoteId: null })]
         : id === "zcode"
           // zcode 与 qoder 同型（同一端点 id 下挂 CLI 形态安装记录），但桌面是它
           // 的主形态：desktop 守 index 0 是有意为之，CLI 记录只追加在后。
