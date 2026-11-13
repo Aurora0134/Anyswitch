@@ -63,13 +63,15 @@ describe("壁纸主题静态接线", () => {
       "壁纸主题下 body 底透明（否则画布色盖住垫底）");
   });
 
-  it("终端屏半透明：壁纸主题 --terminal-bg 带 alpha（亮/暗/跟随系统三态）", () => {
-    assert.ok(panelCss.includes(':root[data-style="wallpaper"] {\n    --terminal-bg: rgba(248, 250, 252, 0.78);'),
-      "亮态终端底色带 alpha");
-    assert.ok(panelCss.includes(':root[data-style="wallpaper"][data-theme="dark"] {\n    --terminal-bg: rgba(11, 18, 32, 0.72);'),
-      "暗态终端底色带 alpha");
-    assert.ok(/@media \(prefers-color-scheme: dark\) \{\n    :root\[data-style="wallpaper"\]:not\(\[data-theme="light"\]\):not\(\[data-theme="dark"\]\) \{\n      --terminal-bg: rgba\(11, 18, 32, 0\.72\);/.test(panelCss),
-      "跟随系统暗态终端底色带 alpha");
+  it("终端屏不透明：壁纸主题 --terminal-bg 与静态皮肤同源实色（亮/暗/跟随系统三态）", () => {
+    assert.ok(panelCss.includes(':root[data-style="wallpaper"] {\n    --terminal-bg: #f8fafc;'),
+      "亮态终端底色为不透明实色（与基座段同值）");
+    assert.ok(panelCss.includes(':root[data-style="wallpaper"][data-theme="dark"] {\n    --terminal-bg: #0b1220;'),
+      "暗态终端底色为不透明实色");
+    assert.ok(/@media \(prefers-color-scheme: dark\) \{\n    :root\[data-style="wallpaper"\]:not\(\[data-theme="light"\]\):not\(\[data-theme="dark"\]\) \{\n      --terminal-bg: #0b1220;/.test(panelCss),
+      "跟随系统暗态终端底色为不透明实色");
+    // 白芯蓝环/透明路径缺陷回归闸：壁纸三态不得再写回带 alpha 的底色
+    assert.ok(!panelCss.includes("--terminal-bg: rgba("), "全 CSS 无带 alpha 的终端底色");
   });
 
   it("配置窗口骨架：modal 体系 + 标题/说明/按钮/预览/高级选项逐字在册", () => {
@@ -139,7 +141,7 @@ describe("壁纸主题静态接线", () => {
 // 终端透明栅格化门控（vm 沙箱）
 // ═══════════════════════════════════════════════
 
-describe("终端透明栅格化只在壁纸底色带 alpha 时开启", () => {
+describe("终端透明栅格化守门闸：底色带 alpha 才开（2026-11-13 起全皮肤不透明，恒关）", () => {
   function sandbox(initialBg) {
     const state = { bg: initialBg };
     const log = [];
@@ -172,7 +174,7 @@ describe("终端透明栅格化只在壁纸底色带 alpha 时开启", () => {
     }
   });
 
-  it("壁纸主题亮/暗/跟随系统三态带 alpha，开关打开", () => {
+  it("守门闸：带 alpha 的 rgba 取值如实打开（当前全皮肤不透明，防未来写回 alpha 的回归）", () => {
     for (const bg of ["rgba(248, 250, 252, 0.78)", "rgba(11, 18, 32, 0.72)"]) {
       const { api, log } = sandbox(bg);
       assert.equal(api.hasAlpha(), true, `${bg} 带 alpha`);
@@ -187,15 +189,15 @@ describe("终端透明栅格化只在壁纸底色带 alpha 时开启", () => {
     assert.equal(sandbox("#f8fafcc8").api.hasAlpha(), true);
   });
 
-  it("同一实例换肤：开关随底色在开/关之间翻转，且每次都先于 theme 落定", () => {
+  it("同一实例换肤：开关随底色在开/关之间如实翻转，且每次都先于 theme 落定", () => {
     const { api, state, log } = sandbox("#f8fafc");
     api.apply();
-    state.bg = "rgba(248, 250, 252, 0.78)";
+    state.bg = "rgba(248, 250, 252, 0.78)"; // 模拟未来某皮肤写回带 alpha 底色的假想态
     api.apply();
     state.bg = "#faf6ec";
     api.apply();
     assert.deepEqual(log.filter(([k]) => k === "allowTransparency").map(([, v]) => v),
-      [false, true, false], "Default → 自定义 → Sepia 依次关/开/关");
+      [false, true, false], "不透明 → 假想带 alpha → 不透明，依次关/开/关");
     assert.deepEqual(log.map(([k]) => k),
       ["allowTransparency", "theme", "allowTransparency", "theme", "allowTransparency", "theme"],
       "每次都先设开关再设 theme（theme 赋值触发图集重建）");

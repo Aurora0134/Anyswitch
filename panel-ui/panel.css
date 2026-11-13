@@ -2103,7 +2103,7 @@
   /* ═══ 「自定义」壁纸主题 ═══
      动态主题：整套皮肤 token 由取色引擎按背景图生成，JS 差量注入 <html> 内联
      样式，这里没有 token 段（也不进 style-lab 静态片段机制）；本段只含全局垫底结构、
-     终端屏半透明与「自定义主题」窗口（上传/预览/高级选项）这几条结构性规则。 */
+     终端屏取色与「自定义主题」窗口（上传/预览/高级选项）这几条结构性规则。 */
   .wallpaper-backdrop {
     display: none; position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none;
   }
@@ -2114,17 +2114,19 @@
   .wallpaper-backdrop-dim { position: absolute; inset: 0; }
   /* 垫底在负 z 层：body 底色会提升为画布色盖在壁纸上方，壁纸主题下必须透明 */
   :root[data-style="wallpaper"] body { background: transparent; }
-  /* 终端屏半透明：壁纸主题下 --terminal-bg 带 alpha，屏下透出垫底图。xterm 主题
-     与亮暗上报链同取此 token（上报侧剥 alpha 转六位 hex，宿主契约只收 hex）。 */
+  /* 终端屏不透明：曾为壁纸主题开过半透明底（屏下透出垫底图），因 xterm 透明渲染
+     路径两缺陷收回——底色在画布上逐帧叠成实色、四周 CSS 单层读浅，白芯蓝环；
+     dim 字走 alpha 栅格化被洗到近底色（2026-11-13 裁决，实测在专区 DECISIONS）。
+     取值与基座段静态皮肤同源，亮暗上报链同取此 token。 */
   :root[data-style="wallpaper"] {
-    --terminal-bg: rgba(248, 250, 252, 0.78);
+    --terminal-bg: #f8fafc;
   }
   :root[data-style="wallpaper"][data-theme="dark"] {
-    --terminal-bg: rgba(11, 18, 32, 0.72);
+    --terminal-bg: #0b1220;
   }
   @media (prefers-color-scheme: dark) {
     :root[data-style="wallpaper"]:not([data-theme="light"]):not([data-theme="dark"]) {
-      --terminal-bg: rgba(11, 18, 32, 0.72);
+      --terminal-bg: #0b1220;
     }
   }
   /* 壁纸态平铺盒补底：v2 设置页/统计页的平铺盒是「透明描边盒」，默认皮肤靠不透明的
@@ -2195,7 +2197,7 @@
     --console-warn: #b45309;
     --console-error: #dc2626;
 
-    --terminal-bg: rgba(248, 250, 252, 0.78);
+    --terminal-bg: #f8fafc;
     --terminal-fg: #1e293b;
     --terminal-cursor: #334155;
     --terminal-selection: #bfdbfe;
@@ -2229,7 +2231,7 @@
     --console-info: #38bdf8;
     --console-warn: #fbbf24;
     --console-error: #f87171;
-    --terminal-bg: rgba(11, 18, 32, 0.72);
+    --terminal-bg: #0b1220;
     --terminal-fg: #d5e2f4;
     --terminal-cursor: #dbeafe;
     --terminal-selection: #29486d;
@@ -2247,7 +2249,7 @@
       --console-info: #38bdf8;
       --console-warn: #fbbf24;
       --console-error: #f87171;
-      --terminal-bg: rgba(11, 18, 32, 0.72);
+      --terminal-bg: #0b1220;
       --terminal-fg: #d5e2f4;
       --terminal-cursor: #dbeafe;
       --terminal-selection: #29486d;
