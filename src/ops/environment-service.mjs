@@ -202,9 +202,10 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
   // Qoder's updater installs every release into <installRoot>/.qoder-versions/<version>/
   // and never rewrites the install root, whose app.asar keeps reporting the first
   // installed version. The newest payload carrying both its executable and its
-  // app.asar is the one that runs. CN 工作台没有这套版本目录机制（id "qoder-cn"
-  // 对应的 .qoder-cn-versions 在盘上不存在），readdirSync 落空即回退到安装根的
-  // resources/app.asar 直读——这正是 CN 区域的常规路径。
+  // app.asar is the one that runs. Qoder CN 桌面版没有这套版本目录机制（id
+  // "qoder-cn" 对应的 .qoder-cn-versions 在盘上不存在，2026-11-13 实测），
+  // readdirSync 落空即回退到安装根的 resources/app.asar 直读——这正是 CN 区域的
+  // 常规路径。
   function desktopPayloads(id, executable) {
     const root = join(dirname(executable), `.${id}-versions`);
     let entries;
@@ -254,7 +255,8 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       const pkg = JSON.parse(readAt(entry.size, 8 + headerSize + Number(entry.offset)).toString("utf8"));
       // 只认归档确实属于这个产品：目录里的 app.asar 可能是别人的，包名对不上
       // 就不报版本（与 qoder / zcode 同一条防线）。qoder 双区域版分居两个 id：
-      // intl 认 "qoder"，cn 认 "qoder-cn"（CN 工作台 asar 里的真实包名）。
+      // intl 认 "qoder"，cn 认 "qoder-cn"（Qoder CN 桌面版 asar 里的真实包名，
+      // 2026-11-13 实测）。
       const expected = id === "zcode" ? ["zcode"]
         : id === "dsh-desktop" ? ["@deepseek-ai/dsh-desktop"]
         : id === "kimi-desktop" ? ["kimi-code-app"]
@@ -552,9 +554,10 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         // index 0/1 的既有语义（0 是原生 CLI、1 是桌面端，「动作位认哪一条」
         // 不变），CN 两条只追加在后。未安装的区域版照常产出 not_found 记录，
         // 关于页据此声明全支持面。CN 两条的官方版本源＝release-service 的
-        // qoder-cli-cn（npm 镜像包）与 qoder-desktop-cn（CN 工作台 latest.yml），
-        // remoteId 各指各的渠道；CN 桌面记录用 id "qoder-cn" 只是 asar 包名防线
-        // 的钥匙（CN 工作台无版本目录机制，desktopPayloads 落空即回退安装根直读）。
+        // qoder-cli-cn（npm 镜像包）与 qoder-desktop-cn（Qoder CN 桌面版
+        // qoder-app 的 latest.yml），remoteId 各指各的渠道；CN 桌面记录用 id
+        // "qoder-cn" 只是 asar 包名防线的钥匙（Qoder CN 桌面版无版本目录机制，
+        // desktopPayloads 落空即回退安装根直读）。
         ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable, { edition: "intl" }),
           inspect(id, "desktop", resolver, { edition: "intl" }),
           inspect("qoder-cli-cn", "cli", resolveQoderCnCliExecutable, { edition: "cn" }),
@@ -570,7 +573,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
             ...(extraInstallations[id] ? [extraInstallations[id]()] : [])]);
       return { id, name, entryForms: CLIENT_ENTRY_FORMS[id], installations };
     }));
-    const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };
+    const state = { platform: process.platform, nodeVersion: process.version, clients };
     cache = { at, state };
     return state;
   }

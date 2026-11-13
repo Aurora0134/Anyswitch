@@ -137,7 +137,7 @@ test("app-info 在本地有 git 身份时附带 HEAD 短哈希，无身份时不
 
 test("环境接口保留已发现但版本未知的客户端，并支持主动刷新", async () => {
   const state = {
-    checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
+    platform: "win32", nodeVersion: "v24.18.0",
     clients: [{ id: "codex", name: "Codex", installations: [{ kind: "cli", remoteId: "codex", status: "found", path: "C:/fixture/codex.exe", version: null, versionSource: null, issue: "version_unavailable" }] }],
   };
   const requests = [];
@@ -270,7 +270,7 @@ function deferred() {
 
 function clientState(versions = {}, issues = {}) {
   return {
-    checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
+    platform: "win32", nodeVersion: "v24.18.0",
     clients: ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].map((id) => ({
       id, name: id,
       installations: id === "qoder"
@@ -561,7 +561,7 @@ test("qoder 更新受理：执行体路径取 CLI 安装项，官方版本查询
 // CN 行 remoteId 各指各的官方渠道（2026-11-13 接线）：钉版与收尾比对照常发起。
 function qoderCnState(cnVersion) {
   return {
-    checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
+    platform: "win32", nodeVersion: "v24.18.0",
     clients: [{
       id: "qoder", name: "qoder",
       installations: [

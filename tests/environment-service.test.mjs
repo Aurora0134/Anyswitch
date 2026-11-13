@@ -611,8 +611,10 @@ test("probeExecutableVersion parses the first SemVer and classifies spawn failur
 
 test("an empty installation reports all ten clients, with the registered installation records", async (t) => {
   const f = fixture(t);
-  const state = await f.service({ now: () => Date.parse("2026-09-18T08:00:00Z") }).getState();
-  assert.equal(state.checkedAt, "2026-09-18T08:00:00.000Z");
+  const state = await f.service().getState();
+  // 检测时刻不上屏已随关于页那一行一起下线，状态里也不再下发（缓存另用内部时刻，
+  // 不经接口）。
+  assert.deepEqual(Object.keys(state).sort(), ["clients", "nodeVersion", "platform"]);
   assert.equal(state.platform, process.platform);
   assert.equal(state.nodeVersion, process.version);
   assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok", "workbuddy"]);

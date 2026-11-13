@@ -204,14 +204,18 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
     ["grok", "https://registry.npmjs.org/-/package/%40xai-official%2Fgrok/dist-tags", { latest: "1.0.41", alpha: "1.0.41" }, "1.0.41", "https://www.npmjs.com/package/@xai-official/grok", "npm:@xai-official/grok:latest"],
     ["zcode", "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1", 'version: "3.12.3"\nfiles:\n  - version: 99.0.0\n', "3.12.3", "https://zcode.z.ai/cn/changelog", "zcode:windows-x86_64:stable"],
     // qoder 桌面端（intl IDE 线）：官方源是 VS Code 式更新 API（零 commit 探针
-    // 回最新版），版本取 productVersion 字段。旧钉指向 download.qoder.com.cn
-    // /qoder-app 是归属错误——那份 feed 实测服务 CN 工作台，见下一条。
+    // 回最新版），版本取 productVersion 字段。旧钉的 download.qoder.com.cn
+    // /qoder-app 是另一条版本线（0.5.x）的 feed；CN 桌面版的源在 static 主机，
+    // 见下一条。
     ["qoder", "https://center.qoder.sh/algo/api/update/win32-x64/stable/0000000000000000000000000000000000000000", { productVersion: "1.39.2", name: "1.39.2", url: "https://example.invalid/setup.exe" }, "1.39.2", "https://qoder.com/changelog", "qoder:desktop:win32-x64:stable"],
-    // qoder CN 桌面端（CN 工作台线）：electron-updater 频道文件，与内置更新器同源。
-    ["qoder-desktop-cn", "https://static.qoder.com.cn/qoder-work-cn/releases/latest.yml", "version: '0.9.18' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.9.18", "https://qoder.com.cn/changelog", "qoder-desktop-cn:win-x64:latest"],
+    // qoder CN 桌面版：与已装应用内置 electron-updater 同源的频道文件（app-update.yml
+    // 的 url 是 static.qoder.com.cn/qoder-app/releases）。旧钉的 qoder-work-cn 是
+    // QoderWork CN 的源——另一条产品线，0.9.18 与已装应用不在同一版本线。
+    ["qoder-desktop-cn", "https://static.qoder.com.cn/qoder-app/releases/latest.yml", "version: 0.5.7\nfiles:\n  - url: Qoder-CN-win-x64-user.exe\n", "0.5.7", "https://qoder.com.cn/changelog", "qoder-desktop-cn:win-x64:latest"],
     // Kimi 桌面端与 DSH 桌面端同型：官方最新查它内置 electron-updater 的那份频道文件。
-    // endpoint 钉 CDN 最终地址（code.kimi.com 会 302，查询不追跳转）。
-    ["kimi-desktop", "https://cdn.kimi.com/kimi-code/desktop/latest.yml", "version: 1.0.4\nfiles:\n  - url: binaries/99.0.0/KimiCode-99.0.0-win-x64.exe\n", "1.0.4", "https://github.com/MoonshotAI/kimi-code-app", "kimi-desktop:win-x64:latest"],
+    // endpoint 钉 CDN 最终地址（code.kimi.com 会 302，查询不追跳转）；官方来源链接
+    // 是官方文档站的桌面端变更记录页（桌面端没有独立仓库）。
+    ["kimi-desktop", "https://cdn.kimi.com/kimi-code/desktop/latest.yml", "version: 1.0.4\nfiles:\n  - url: binaries/99.0.0/KimiCode-99.0.0-win-x64.exe\n", "1.0.4", "https://www.kimi.com/code/docs/kimi-code-desktop/changelog.html", "kimi-desktop:win-x64:latest"],
   ];
   for (const [id, endpoint, payload, version, page, source] of fixtures) {
     const service = createReleaseService({ now, fetchFn: async (url, options) => {
@@ -329,7 +333,10 @@ it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改�
   // 关于页 safeLink 只放行 products 里登记的仓库与 npm 包名：CLIENTS 改了包名
   // 或官方链接而 products 没跟上，前端会静默拒掉后端给出的官方链接、测试照绿
   // （products 与 CLIENTS 的注释都自称同源，却是同类配对里唯一漏钉的一对）。
-  // 照上一条白名单的钉法读 panel.js 源码，把 products 逐条取出对值。
+  // 照上一条白名单的钉法读 panel.js 源码，把 products 逐条取出对值。官方来源是
+  // 厂商自家站点、靠 safeLink 域白名单放行的条目（zcode / qoder / 各桌面副形态）
+  // 在表里只有空映射 []：[] 表示「不登记仓库与包名」而不是「不收录」，放行依据在
+  // 下一条用例的域白名单里；本用例只对登记了仓库或包名的条目取值比对。
   const panelSource = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
   const block = panelSource.match(/const products = \{[\s\S]*?\n    \};/);
   assert.ok(block, "panel.js 里存在 products 表字面量");
@@ -362,6 +369,73 @@ it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改�
         `${id} 的官方仓库链接与 products 登记的 ${repo} 漂移`,
       );
     }
+  }
+});
+
+it("pins the panel.js safeLink domain whitelists to CLIENTS in both directions — 官方来源漏改一侧即红", () => {
+  // 不在 products 里登记仓库与包名的条目（zcode / qoder / 各桌面副形态）只有一条
+  // 放行依据：safeLink 的域白名单。它与 CLIENTS 的 url 分居两处手写，只钉一个方向
+  // 会各留一个洞：白名单 → CLIENTS 抓不到「新增客户端只加了 CLIENTS、没加白名单」，
+  // CLIENTS → 白名单抓不到「删掉某条白名单分支」（claude-desktop / codex-desktop
+  // 这类 products 不收的桌面副形态，删掉分支只做方向一时实测全绿）；而只比 hostname
+  // 还会放过「域名对、路径漂走」——kimi 桌面端的官方来源就在这一层由精确 URL 退成
+  // 过域名。所以三件事一起钉：两个方向的主机互钉＋整串钉住白名单条目的官方来源 URL。
+  const panelSource = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
+  const whitelists = {};
+  for (const [, id, list] of panelSource.matchAll(/id === "([\w-]+)" \? (\[[^\]]*\])/g)) whitelists[id] = JSON.parse(list);
+  assert.ok(Object.keys(whitelists).length >= 5, "safeLink 的域白名单应逐条取出而不是匹配到空壳");
+  // products 表照上一条用例的读法再取一份：CLIENTS 的 url 已由仓库/包名规则覆盖的
+  // 条目不需要域白名单，其余都必须能在白名单里找到放行域。
+  const block = panelSource.match(/const products = \{[\s\S]*?\n    \};/);
+  assert.ok(block, "panel.js 里存在 products 表字面量");
+  const products = {};
+  for (const [, rawKey, rawValue] of block[0].matchAll(/("[\w/-]+"|[\w-]+)\s*:\s*\[([^\]]*)\]/g)) {
+    products[JSON.parse(rawKey.startsWith('"') ? rawKey : `"${rawKey}"`)] = JSON.parse(`[${rawValue}]`);
+  }
+  assert.ok(Object.keys(products).length >= 10, "products 表应逐条取出而不是匹配到空壳");
+
+  // 方向一（白名单 → CLIENTS）：表里每个 id 都要在 CLIENTS 里、且放行自己 url 的主机。
+  for (const [id, hosts] of Object.entries(whitelists)) {
+    assert.ok(CLIENTS[id], `safeLink 白名单里的 ${id} 在 CLIENTS 已不存在`);
+    assert.ok(hosts.length, `${id} 的域白名单为空`);
+    assert.ok(hosts.includes(new URL(CLIENTS[id].url).hostname), `${id} 的官方来源链接域名与 safeLink 白名单漂移`);
+  }
+
+  // 方向二（CLIENTS → 白名单）：url 由 products 的仓库/包名规则放行的条目不需要白名单，
+  // 其余每个条目都必须登记在白名单里，否则新增客户端只改一侧时前端静默拒链、方向一全绿。
+  // dsh（本体 CLI 形态）与 dsh-desktop 是刻意不上屏的两条：关于页不渲染它们的官方来源
+  // （panel.js 的 products 与域白名单都不收录），safeLink 因此恒返 null、链接行不出现。
+  const offscreen = new Set(["dsh", "dsh-desktop"]);
+  for (const id of offscreen) {
+    assert.equal(products[id], undefined, `${id} 刻意不上屏，products 不收录`);
+    assert.equal(whitelists[id], undefined, `${id} 刻意不上屏，safeLink 白名单不收录`);
+  }
+  for (const [id, entry] of Object.entries(CLIENTS)) {
+    if (offscreen.has(id)) continue;
+    const url = new URL(entry.url);
+    const path = decodeURIComponent(url.pathname).replace(/\/$/, "");
+    const [repo, pkg] = products[id] ?? [];
+    const coveredByProducts = (url.hostname === "github.com" && repo && (path === `/${repo}` || path.startsWith(`/${repo}/releases`)))
+      || (url.hostname === "www.npmjs.com" && pkg && path === `/package/${pkg}`);
+    if (coveredByProducts) continue;
+    assert.ok(whitelists[id], `${id} 的官方来源 ${entry.url} 既不在 products 的仓库/包名规则里，也没有 safeLink 域白名单`);
+    assert.ok(whitelists[id].includes(url.hostname), `${id} 的官方来源主机 ${url.hostname} 不在 safeLink 白名单里`);
+  }
+
+  // 整串钉住：白名单条目只有域白名单这一条放行依据，只比主机时 url 的路径可以漂到
+  // 任意位置仍全绿。这里把每个白名单条目的官方来源写死，改 URL 或删分支都红。
+  const expected = {
+    zcode: "https://zcode.z.ai/cn/changelog",
+    qoder: "https://qoder.com/changelog",
+    "qoder-desktop-cn": "https://qoder.com.cn/changelog",
+    "codex-desktop": "https://apps.microsoft.com/detail/9PLM9XGG6VKS",
+    "claude-desktop": "https://claude.ai/download",
+    "kimi-desktop": "https://www.kimi.com/code/docs/kimi-code-desktop/changelog.html",
+  };
+  assert.deepEqual(Object.keys(whitelists).sort(), Object.keys(expected).sort(),
+    "safeLink 白名单的条目集合与本文钉住的官方来源集合漂移（新增或删掉白名单分支都要同步这里）");
+  for (const [id, url] of Object.entries(expected)) {
+    assert.equal(CLIENTS[id].url, url, `${id} 的官方来源不是钉住的 ${url}`);
   }
 });
 
