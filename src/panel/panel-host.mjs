@@ -69,6 +69,11 @@ export function createPanelServer(options = {}) {
       interval.unref?.();
       return { first, interval };
     }),
+    // 预设注入回填预热与冷扫预热同一接线纪律：直接建 server 的测试注入 mock
+    // 兜住（environmentService/promptsService 透传，见 panel.mjs 注入语义），
+    // 生产不传即走真懒加载。
+    environmentService: options.environmentService,
+    promptsService: options.promptsService,
   });
   // Warm the watchdog drift snapshot at startup: the panel frontend fetches
   // /api/settings on every page load to hydrate the 抗截断 toggle, and an
@@ -80,6 +85,12 @@ export function createPanelServer(options = {}) {
   // new-terminal menu's agent list and the terminal rail history stop paying
   // the cold scan inline. Fire-and-forget; failures fall back to lazy paths.
   router.prewarmColdScans();
+  // Prompts-injection backfill prewarm: the injector's only write trigger used
+  // to be a preset mutation, so machines whose preset data predates the dual-
+  // root write code never saw their injection files until the first mutation.
+  // Same fire-and-forget deal; missing this wiring means no startup backfill —
+  // the panel-host level test covers it.
+  router.prewarmPromptsBackfill();
   const server = createServer(async (req, res) => {
     if (!isLoopback(req.socket.remoteAddress)) {
       res.writeHead(403, { "content-type": "application/json" });

@@ -627,6 +627,33 @@ test("realSpawnQoder spawns the CN dispatcher when the CN edition is installed, 
   }
 });
 
+// 桌面-only 机器形态（CN entry 调度器在盘、CLI 本体不在、PATH 无 qoderclicn）：
+// 官方序解析到不存在的兜底路径 → spawn 落空报 ENOENT——明确失败优于旧路径经
+// entry 调度器的 exit 127 秒退。env 不带 PATH（也不带真实 process.env），PATH
+// 扫描必须落空，测试不依赖本机装没装 CN CLI。
+test("realSpawnQoder 在 entry-only 形态（无覆盖无本体无 PATH）报 ENOENT，不拉 entry 调度器", async () => {
+  const dir = mkTestDir("qoder-spawn-cn-entryonly-");
+  try {
+    const home = join(dir, "home");
+    mkdirSync(join(home, ".qoder-cn", "entry"), { recursive: true });
+    writeFileSync(join(home, ".qoder-cn", "entry", "qodercn.cmd"), "@echo off\r\n@exit /b 0\r\n");
+    let failure = null;
+    const code = await realSpawnQoder({
+      env: { USERPROFILE: home },
+      args: ["--resume"],
+      onSpawned: () => {},
+    }).catch((error) => {
+      failure = error;
+      return -1;
+    });
+    assert.equal(code, -1, "spawn 落空即拒绝");
+    assert.ok(failure, "rejected");
+    assert.equal(failure.code, "ENOENT");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runQoderLauncher 在 CN 在装时把 BYOK 写进 CN 数据根（~/.qoder-cn/settings.json）", async () => {
   const dir = mkTestDir("qoder-launcher-cn-");
   try {

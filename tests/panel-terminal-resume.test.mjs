@@ -1,7 +1,7 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter } from "../src/panel/panel.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
@@ -177,6 +177,11 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
   // qoderclicn 根下的存档只会续空（两侧 CLI 互不认对方的存档）。
   it("qoder 续接 CN 根存档：执行体换 qoderclicn；CN CLI 不在盘时维持原解析", async () => {
     await withFakeAgents(async (cwd) => {
+      // PATH 钉进沙箱：CN 拉起解析序含 PATH 扫描（qoderclicn shim），不钉住会
+      // 撞上测试机真实 PATH 上的 qoderclicn——本文件纪律是测试不依赖本机安装。
+      const savedPath = process.env.PATH;
+      process.env.PATH = join(cwd, "bin");
+      try {
       const cnExe = join(process.env.USERPROFILE, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe");
       const intlExe = join(process.env.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe");
       const CN_FILE = join(process.env.USERPROFILE, ".qoder-cn", "projects", "p", "cn.jsonl");
@@ -244,6 +249,57 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         const args = calls[0].body.launch.args;
         assert.ok(args.includes(intlExe), "CN 入口形态也换回 intl 执行体");
         assert.ok(!args.some((token) => /qodercn\.cmd$/i.test(token)), "CN 调度器不留在命令行");
+      }
+      // PATH shim 形态（npm 全局 qoderclicn.cmd）：官方序拉起解析会命中 shim，
+      // 续 intl 存档时换靶识别必须认得出 shim（比对基准＝剥掉覆盖分支的官方
+      // 序输出）并换回 intl 本体——不认得会把 CN shim 留在命令行里、双装机上
+      // 现行能工作的跨版续接就被改坏。
+      {
+        const shimDir = mkTestDir("anyswitch-resume-qoder-shim-");
+        writeFileSync(join(shimDir, "qoderclicn.cmd"), "@echo off\r\n");
+        const saved = process.env.PATH;
+        process.env.PATH = [shimDir, saved].join(delimiter);
+        try {
+          const { router, calls } = resumeRouter({ root: mkTestDir("anyswitch-resume-qoder-shim-root-") });
+          const { req, res } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
+            agentId: "qoder", cwd, resume: { endpoint: "qoder", id: SESSION_ID, file: INTL_FILE },
+          });
+          await router.handle(req, res);
+          assert.equal(res.statusCode, 201, "PATH shim 形态续接起终端");
+          const args = calls[0].body.launch.args;
+          assert.ok(args.includes(intlExe), "shim 形态也换回 intl 本体");
+          assert.ok(
+            !args.some((token) => typeof token === "string" && /qoderclicn\.(exe|cmd|bat)$/i.test(token)),
+            "shim/调度器 token 不留在命令行",
+          );
+        } finally {
+          process.env.PATH = saved;
+        }
+      }
+      // 覆盖值保留护栏（既有语义）：QODER_CN_EXECUTABLE 指向的 wrapper 不被换
+      // 靶动——比对基准剥掉了覆盖分支，覆盖值认不出 → 原样保留（用户显式指定
+      // 的执行体不被动换）。
+      {
+        const wrapperDir = mkTestDir("anyswitch-resume-qoder-override-");
+        const wrapper = join(wrapperDir, "qodercn-wrapper.exe");
+        writeFileSync(wrapper, "MZ");
+        const saved = process.env.QODER_CN_EXECUTABLE;
+        process.env.QODER_CN_EXECUTABLE = wrapper;
+        try {
+          const { router, calls } = resumeRouter({ root: mkTestDir("anyswitch-resume-qoder-override-root-") });
+          const { req, res } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
+            agentId: "qoder", cwd, resume: { endpoint: "qoder", id: SESSION_ID, file: INTL_FILE },
+          });
+          await router.handle(req, res);
+          assert.equal(res.statusCode, 201);
+          assert.ok(calls[0].body.launch.args.includes(wrapper), "覆盖指定的执行体原样保留在命令行");
+        } finally {
+          if (saved === undefined) delete process.env.QODER_CN_EXECUTABLE;
+          else process.env.QODER_CN_EXECUTABLE = saved;
+        }
+      }
+      } finally {
+        process.env.PATH = savedPath;
       }
     });
   });

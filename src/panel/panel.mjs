@@ -75,6 +75,7 @@ import {
 } from "../terminal/terminal-conversation-bindings.mjs";
 import { createRailStore, TERMINAL_RAIL_STORE_FILE } from "../terminal/terminal-rail-store.mjs";
 import { qoderCliExecutablePath, qoderEditionForPath } from "../launchers/qoder-merge-config.mjs";
+import { resolveQoderCnCliByOfficialOrder, resolveQoderCliExecutable } from "../agents/agent-discovery.mjs";
 
 // 面板自身的安装目录：git 身份查询（HEAD）与自更新登记都锚在这里。放在
 // APP_VERSION 之前——panel-environment 的 VM 切片从版本声明起、到面板 HTML
@@ -210,6 +211,13 @@ export function createPromptsPanelService({ base = process.env, homeDir, isEndpo
         throw error;
       }
       return mutateAndSync(data.setOverride(args));
+    },
+    // 非变更回填：与 mutateAndSync 同一 syncAll 体，但不碰数据面。「注入文件
+    // 在写入面代码合入之前出生/被外部删掉」时按当前预设集补写（启动回填与
+    // 可见集变更钩子两个非用户主动触发面走这里）。幂等：内容不变不写。
+    resync() {
+      lastSync = injector.syncAll((endpointId) =>
+        (isEndpointVisible(endpointId) ? data.resolveForEndpoint(endpointId) : []));
     },
   };
 }
@@ -1579,14 +1587,39 @@ export function createPanelRouter({
   // （agent-discovery resolveQoderLaunchEdition）；而续聊的归属判据是会话/存档
   // 落在哪个数据根，与「哪个在装」正交——双装机器上续 intl 存档仍要换回
   // qodercli。归属判据两侧互补：跑着的会话看 launch 里的执行体路径（entry
-  // 调度器与 CLI 本体都算），绑定/目标会话看存档文件的根。
+  // 调度器、CLI 本体与 PATH 上的 shim 都算），绑定/目标会话看存档文件的根。
   const QODER_INTL_EXE_RE = /[\\/]\.qoder[\\/]bin[\\/]qodercli[\\/]qodercli\.exe$/i;
   const QODER_CN_EXE_RE = /[\\/]\.qoder-cn[\\/]bin[\\/]qoderclicn[\\/]qoderclicn\.exe$/i;
   const QODER_CN_ENTRY_RE = /[\\/]\.qoder-cn[\\/]entry[\\/]qodercn\.cmd$/i;
 
+  // 换靶识别的比对基准（按需缓存一次）：CN 侧取 agent-discovery 剥掉
+  // QODER_CN_EXECUTABLE 覆盖分支后的官方序输出（QODERCN_CLI_BIN→PATH 上的
+  // qoderclicn→bin 本体）——覆盖值因此认不出→原样保留；intl 侧取
+  // resolveQoderCliExecutable 的本体输出（无覆盖分支、直接可用）。PATH 扫描
+  // 逐会话逐 token 重复跑会拖列表轮询，缓存一份基准即可；解析抛错（如覆盖
+  // 给了相对路径）按认不出处理（null），不让续接路由跟着炸。
+  let qoderCnLaunchBaseline;
+  let qoderIntlLaunchBaseline;
+  function cnLaunchBaseline() {
+    if (qoderCnLaunchBaseline === undefined) {
+      try { qoderCnLaunchBaseline = resolveQoderCnCliByOfficialOrder(base); }
+      catch { qoderCnLaunchBaseline = null; }
+    }
+    return qoderCnLaunchBaseline;
+  }
+  function intlLaunchBaseline() {
+    if (qoderIntlLaunchBaseline === undefined) {
+      qoderIntlLaunchBaseline = resolveQoderCliExecutable(base);
+    }
+    return qoderIntlLaunchBaseline;
+  }
+
   function qoderTokenEdition(token) {
     if (QODER_CN_EXE_RE.test(token) || QODER_CN_ENTRY_RE.test(token)) return "cn";
     if (QODER_INTL_EXE_RE.test(token)) return "intl";
+    const cnBaseline = cnLaunchBaseline();
+    if (cnBaseline !== null && token === cnBaseline) return "cn";
+    if (token === intlLaunchBaseline()) return "intl";
     return null;
   }
 
@@ -1605,7 +1638,8 @@ export function createPanelRouter({
   // 与 RESUME_COMMAND 的 qodercli/qoderclicn 模板同口径）。目标 CLI 不在盘时
   // 不换：留原解析结果让既有「executable_missing / agent 自身报错」口径兜住，
   // 不拼必死的命令。只替换认得出归属的异根执行体 token（entry 调度器/CLI
-  // 本体）；认不出的（如 QODER_*_EXECUTABLE 覆盖值）原样保留。
+  // 本体/PATH 上的 shim，见 qoderTokenEdition 的比对基准）；认不出的（如
+  // QODER_*_EXECUTABLE 覆盖值）原样保留——用户显式指定的执行体不被动换。
   function retargetQoderLaunchEdition(launch, edition) {
     if (edition !== "intl" && edition !== "cn") return launch;
     const targetExe = qoderCliExecutablePath(base?.USERPROFILE ?? "", edition);
@@ -2542,6 +2576,8 @@ export function createPanelRouter({
   let endpointVisibility = null;
   let endpointVisibilityRefresh = null; // in-flight 去重：并发请求共享同一次检测
   let endpointVisibilityTimer = null;
+  let endpointVisibilityKey; // 变更检测用：undefined=首算前；之后每轮检测后更新（null→"null"）
+  let promptsPrewarmed = false; // prewarmPromptsBackfill 仅首调做显式回填（见该方法注释）
   async function refreshEndpointVisibility() {
     if (endpointVisibilityRefresh) return endpointVisibilityRefresh;
     endpointVisibilityRefresh = (async () => {
@@ -2554,14 +2590,26 @@ export function createPanelRouter({
       } finally {
         endpointVisibilityRefresh = null;
       }
+      // 可见集变更钩子（注入面非变更回填的运行中触发面）：上一轮 key 在册
+      // （非首算）且新快照非 null 且 key 变了 → 回填一次注入面（fire-and-
+      // forget，失败静默）。首算不触发——启动回填归 prewarmPromptsBackfill
+      // 的显式 resync，避免双计；运行中检测失败翻转（Set→null）不触发——
+      // 非用户主动路径零写盘，不给未装端点造文件；检测恢复（null→Set）照
+      // 触发——补填，无永久漏回填。
+      const key = endpointVisibility === null ? "null" : [...endpointVisibility].sort().join(",");
+      if (endpointVisibilityKey !== undefined && endpointVisibility !== null && key !== endpointVisibilityKey) {
+        try { promptsService?.resync?.(); } catch { /* 钩子失败静默：预设变更路径照旧兜底 */ }
+      }
+      endpointVisibilityKey = key;
     })();
     return endpointVisibilityRefresh;
   }
   const isEndpointVisible = (endpointId) =>
     endpointVisibility === null || endpointVisibility.has(endpointId);
   // 定时刷新让进程长驻期间新装/新卸的 Agent 一分钟内反映到面板；unref 掉，
-  // 定时器不单独拖住进程退出。只在第一个真实（非注入）skills/prompts 服务
-  // 创建时启动，注入 mock 服务的测试永远不会碰到真检测。
+  // 定时器不单独拖住进程退出。第一个真实（非注入）skills/prompts 服务创建
+  // 时与 prewarmPromptsBackfill（panel-host 启动预热）各会启动一次；注入
+  // mock 服务、且不调预热的测试永远不会碰到真检测。
   function ensureEndpointVisibilityFreshness() {
     if (endpointVisibilityTimer) return;
     endpointVisibilityTimer = setInterval(() => { refreshEndpointVisibility(); }, 60_000);
@@ -5037,6 +5085,27 @@ export function createPanelRouter({
       try {
         sessionsListSnapshotFor(ensureSessionScanService()).refresh().catch(() => {});
       } catch { /* 扫描承载不可用：与懒加载同败法 */ }
+    },
+    // 预设注入面的启动回填（panel-host 启动时调一次）：注入文件唯一的写入
+    // 触发面原本是面板预设变更——写入面代码合入到首次预设变更之间的窗口
+    // 里，已装端点的注入文件不会被补写（预设没进 Agent 上下文症状的 anys
+    // 侧根因）。这里把回填提前到进程启动：先等一次可见性快照，检测正常时
+    // 做一次显式 resync；检测失败（快照 null）跳过落盘，检测恢复后 60s 内
+    // 由 null→Set 翻转的变更钩子自动补上（无永久漏回填）。fire-and-forget、
+    // 失败静默；仅首调做显式回填，后续调用只刷新可见性。直接建路由器的测
+    // 试不调即不触发（与 prewarmColdScans 同测试纪律）。
+    prewarmPromptsBackfill() {
+      return (async () => {
+        await refreshEndpointVisibility();
+        promptsService ??= createPromptsPanelService({ base, isEndpointVisible });
+        ensureEndpointVisibilityFreshness();
+        if (!promptsPrewarmed) {
+          promptsPrewarmed = true;
+          if (endpointVisibility !== null) {
+            try { promptsService.resync(); } catch { /* 静默：预设变更路径照旧兜底 */ }
+          }
+        }
+      })().catch(() => {});
     },
     // 面板宿主退出时调用：把导入预览留在 %TEMP% 的暂存目录、以及票据内存里的
     // 明文密钥副本一并丢掉。没被调用过时，弃用票据靠新建票据时的过期清扫兜底。

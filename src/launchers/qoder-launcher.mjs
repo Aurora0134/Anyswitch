@@ -83,12 +83,13 @@ export async function startOpenAIRelay(options = {}) {
 // resolution in one place. The direct CLI path is only the fallback for
 // entry-dir-less layouts.
 // 双区域版：CN 在装（resolveQoderLaunchEdition）时整组换 CN 镜像——
-// qodercn.cmd 调度器在 ~/.qoder-cn/entry，BYOK 配置写 ~/.qoder-cn/settings.json，
-// 与国际版一一对应（契约 cli-cn 指纹序）。
+// BYOK 配置写 ~/.qoder-cn/settings.json，与国际版一一对应；拉起走官方序
+// 本体解析（resolveQoderCnCliLaunchExecutable），不再经 ~/.qoder-cn/entry
+// 的 qodercn.cmd 调度器（桌面-only 机器上调度器三源全空只会 exit 127 秒退）。
 import {
   qoderDataRoot,
   resolveQoderExecutable,
-  resolveQoderCnExecutable,
+  resolveQoderCnCliLaunchExecutable,
   resolveQoderLaunchEdition,
 } from "../agents/agent-discovery.mjs";
 export { resolveQoderExecutable };
@@ -208,10 +209,12 @@ export async function runQoderLauncher({
 
 export function realSpawnQoder({ env, args, onSpawned }) {
   return new Promise((resolve, reject) => {
-    // 拉起目标跟随区域版：CN 在装时经 qodercn.cmd 调度器进 CN CLI（契约
-    // cli-cn 指纹序），否则维持国际版 qoder.cmd 调度器/CLI 回退。
+    // 拉起目标跟随区域版：CN 在装时按官方序解析 CN CLI 本体（覆盖→
+    // QODERCN_CLI_BIN→PATH 上的 qoderclicn→bin 兜底；本体缺位时 spawn 落空
+    // 报 ENOENT——明确失败优于旧路径经 entry 调度器的 127 秒退），否则维持
+    // 国际版 qoder.cmd 调度器/CLI 回退。
     const edition = resolveQoderLaunchEdition(env);
-    const exe = edition === "cn" ? resolveQoderCnExecutable(env) : resolveQoderExecutable(env);
+    const exe = edition === "cn" ? resolveQoderCnCliLaunchExecutable(env) : resolveQoderExecutable(env);
     const isCmd = exe.toLowerCase().endsWith(".cmd");
     const comspec = process.env.COMSPEC || "cmd.exe";
     // Inject the CDP port so the launcher can warm up the model catalog after

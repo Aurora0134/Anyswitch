@@ -40,13 +40,14 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   return { req, res, json };
 }
 
-function promptsRouter(promptsService) {
+function promptsRouter(promptsService, environmentService) {
   return createPanelRouter({
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
     fetchRelayAgents: async () => null,
     promptsService,
+    ...(environmentService ? { environmentService } : {}),
   });
 }
 
@@ -276,6 +277,60 @@ describe("panel router prompts routes", () => {
   });
 });
 
+// 启动回填与可见集变更钩子（prewarmPromptsBackfill / refreshEndpointVisibility
+// 的注入面触发口径）：注入文件唯一的写入触发面原本是面板预设变更，这里钉住
+// 两个非用户主动触发面各自的 fire 条件——首算不 fire、null 首算跳过落盘、
+// null→Set 恢复补填、同集不 fire、Set→null 运行中翻转零写盘。
+describe("panel router prompts injection backfill", () => {
+  const clients = (...ids) => ids.map((id) => ({ id, installations: [{ status: "found" }] }));
+
+  it("检测正常：首调恰一次显式回填（首算不触发钩子），注入的 mock 服务原样保留", async () => {
+    const env = { getState: async () => ({ clients: clients("claude") }) };
+    let resyncs = 0;
+    const svc = mockService({ resync: () => { resyncs += 1; } });
+    const router = promptsRouter(svc, env);
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 1, "首调显式回填恰一次（只有 prewarm 自己的 resync）");
+    const { req, res, json } = fakeReqRes("/panel/api/prompts/state", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(
+      json().endpoints,
+      [{ id: "claude", label: "Claude Code", hotReload: false, targetRel: "~/.claude/CLAUDE.md" }],
+      "GET state 仍由注入 mock 服务应答（未被懒建真服务顶掉）",
+    );
+  });
+
+  it("检测失败首算跳过落盘；恢复后经 null→Set 变更钩子自补（spy 0→1）", async () => {
+    const env = { getState: async () => { throw new Error("detection broken"); } };
+    let resyncs = 0;
+    const svc = mockService({ resync: () => { resyncs += 1; } });
+    const router = promptsRouter(svc, env);
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 0, "null 首算：跳过落盘（不给未装端点造文件）");
+    env.getState = async () => ({ clients: clients("claude") });
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 1, "恢复后的下一轮经变更钩子补恰一次（显式名额已在首调消费）");
+  });
+
+  it("可见集变化再触发、同集不触发、运行中检测失败翻转零写盘", async () => {
+    const env = { getState: async () => ({ clients: clients("claude") }) };
+    let resyncs = 0;
+    const svc = mockService({ resync: () => { resyncs += 1; } });
+    const router = promptsRouter(svc, env);
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 1, "首调显式回填");
+    env.getState = async () => ({ clients: clients("claude", "kimi") });
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 2, "可见集变化经钩子再触发恰一次");
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 2, "同集不触发");
+    env.getState = async () => { throw new Error("detection broken again"); };
+    await router.prewarmPromptsBackfill();
+    assert.equal(resyncs, 2, "运行中 Set→null 翻转不触发（非用户主动路径零写盘）");
+  });
+});
+
 // Facade integration: real data plane + injector over temp dirs. Verifies
 // the mutation → syncAll wiring and that sync failures never fail mutations.
 describe("createPromptsPanelService facade", () => {
@@ -299,6 +354,9 @@ describe("createPromptsPanelService facade", () => {
     assert.deepEqual(state.sync, {});
     assert.equal(state.endpoints.length, 10);
     assert.equal(state.endpoints.some((e) => e.id === "qoder"), true, "qoder must reach the panel endpoint list");
+    // API 级互钉：qoder 行 hotReload 与注入表口径一致（CN 实证＝会话启动
+    // 一次性读取、无热加载），面板提示分支据此渲染「运行中会话需重开生效」。
+    assert.equal(state.endpoints.find((e) => e.id === "qoder").hotReload, false, "qoder hotReload must be false in the served state");
     assert.equal(state.endpoints.some((e) => e.id === "codex"), true, "codex must reach the panel endpoint list");
     assert.equal(state.endpoints.some((e) => e.id === "grok"), true, "grok must reach the panel endpoint list");
     assert.deepEqual(Object.keys(state.endpoints[0]).sort(), ["hotReload", "id", "label", "targetRel"]);
@@ -368,6 +426,54 @@ describe("createPromptsPanelService facade", () => {
       () => facade.setOverride({ endpointId: "ghost", presetId: preset.id, off: true }),
       (err) => err.statusCode === 400,
     );
+  });
+
+  it("resync()：注入文件缺失时无变更回填（数据面零写入）", () => {
+    const { facade, homeDir, base } = makeFacade();
+    // 预置双根（双装形态）后注入一轮并落盘
+    mkdirSync(join(homeDir, ".qoder"), { recursive: true });
+    mkdirSync(join(homeDir, ".qoder-cn"), { recursive: true });
+    facade.createPreset({ title: "规则A", content: "内容" });
+    facade.setMaster(true);
+    const claudeTarget = join(homeDir, ".claude", "CLAUDE.md");
+    const intlTarget = join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md");
+    const cnTarget = join(homeDir, ".qoder-cn", "rules", "anyswitch-managed-prompts.md");
+    const expected = {
+      claude: readFileSync(claudeTarget, "utf8"),
+      intl: readFileSync(intlTarget, "utf8"),
+      cn: readFileSync(cnTarget, "utf8"),
+    };
+    const presetsBefore = facade.getState().presets;
+
+    // 删文件（模拟注入文件晚于写入面出生/被外部删掉），同 base 新建 facade
+    // （模拟新进程：数据面每次落盘重读，同 base 即同预设集）
+    rmSync(claudeTarget);
+    rmSync(intlTarget);
+    rmSync(cnTarget);
+    const fresh = createPromptsPanelService({ base, homeDir });
+    fresh.resync();
+    assert.equal(readFileSync(claudeTarget, "utf8"), expected.claude, "claude 逐字节复原");
+    assert.equal(readFileSync(intlTarget, "utf8"), expected.intl, "qoder intl 根逐字节复原");
+    assert.equal(readFileSync(cnTarget, "utf8"), expected.cn, "qoder CN 根逐字节复原");
+    assert.deepEqual(fresh.getState().presets, presetsBefore, "数据面零写入");
+  });
+
+  it("resync()：无可注入内容时不新建任何文件", () => {
+    const { facade, homeDir } = makeFacade();
+    facade.resync();
+    assert.equal(existsSync(join(homeDir, ".claude")), false);
+    assert.equal(existsSync(join(homeDir, ".qoder")), false);
+  });
+
+  it("resync()：对不可见端点按空集清理（隐藏端点的残留托管块被摘除）", () => {
+    const { facade, homeDir, base } = makeFacade();
+    facade.createPreset({ title: "A", content: "正文" });
+    facade.setMaster(true);
+    const grokTarget = join(homeDir, ".grok", "rules", "anyswitch-managed-prompts.md");
+    assert.equal(existsSync(grokTarget), true, "先注入出残留");
+    const hidden = createPromptsPanelService({ base, homeDir, isEndpointVisible: (id) => id !== "grok" });
+    hidden.resync();
+    assert.equal(existsSync(grokTarget), false, "不可见端点的托管块被清（文件只剩块时连文件删）");
   });
 
   it("隐藏端点：清单不出、不再写入、残留托管块被摘除（卸载清理语义）", () => {

@@ -200,8 +200,10 @@ const EXECUTABLE_RESOLVERS = {
   dsh: resolveDshExecutable,
   opencode: resolveOpencodeExecutable,
   grok: resolveGrokExecutable,
-  // qoder 双区域版共用这一条：CN 在装（resolveQoderLaunchEdition）时解析到 CN
-  // 入口（qodercn.cmd / qoderclicn.exe），否则维持国际版 qodercli.exe。
+  // qoder 双区域版共用这一条：CN 在装（resolveQoderLaunchEdition）时按官方序
+  // 解析 CN CLI 本体（覆盖→QODERCN_CLI_BIN→PATH→bin 兜底；entry 调度器不再
+  // 优先），否则维持国际版 qodercli.exe。本体缺位（桌面-only 机器）解析到
+  // 不存在的兜底路径 → 下方存在性校验转成 executable_missing 文案。
   qoder: resolveQoderLaunchCliExecutable,
   zcode: resolveZcodeTerminalExecutable,
   workbuddy: resolveWorkbuddyTerminalExecutable,

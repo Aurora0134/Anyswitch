@@ -17,13 +17,16 @@
 // id, and a sync deletes the previously-managed set before writing the current
 // one, so removed providers/chains drop out on the next sync.
 //
-// 双区域版（2026-11-12 契约）：Qoder 国际版与 CN 版是同一端点 "qoder" 的两枚
-// 指纹——数据根 ~/.qoder ↔ ~/.qoder-cn，CLI qodercli.exe ↔ qoderclicn.exe
-// （嵌在各自数据根 bin/ 下），两侧 settings.json 结构同构。写入面对「已识别
-// 在装」的每个数据根分别写入（双装双写）：识别纯按 home 下的数据根目录在不在
-// （已安装且跑过一次的形态必然建根；从没跑过的新装形态等首轮过后随下一次同步
-// 追平）。根目录名是 relay URL 前缀（qoder~）与托管连接 id 之外唯一的位置事实，
-// 发现层（agent-discovery）的 edition 字段与本模块的目录取同一份表。
+// 双区域版（2026-11-12 契约，结构同构）：Qoder 国际版与 CN 版是同一端点
+// "qoder" 的两枚指纹——数据根 ~/.qoder ↔ ~/.qoder-cn，CLI qodercli.exe ↔
+// qoderclicn.exe（嵌在各自数据根 bin/ 下），两侧 settings.json 结构同构
+// （本模块的写入面只依赖结构）。行为差异（rules 热加载＝无、CLI 入口形态、
+// 更新渠道三个子面）与写入面无关，真值留档见 agent-prompts-inject 头注、
+// agent-discovery 的 CN 解析器与 release-service 的渠道登记。写入面对「已识
+// 别在装」的每个数据根分别写入（双装双写）：识别纯按 home 下的数据根目录在
+// 不在（已安装且跑过一次的形态必然建根；从没跑过的新装形态等首轮过后随下一
+// 次同步追平）。根目录名是 relay URL 前缀（qoder~）与托管连接 id 之外唯一的
+// 位置事实，发现层（agent-discovery）的 edition 字段与本模块的目录取同一份表。
 
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname, basename, isAbsolute } from "node:path";
@@ -328,10 +331,14 @@ export function writeQoderSettingsWithBackup(filePath, data) {
 
 // High-level write for ONE settings.json: read existing settings, merge
 // managed providers, write back with backup. Returns { ok, unchanged, backupPath?, reason? }.
-function writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, catalog, effortsEnabled) {
+// preSyncManaged（双根批次专用）：本根所属批次的「批次前」托管集快照。传入时
+// 本根不自读、批内不自写 sidecar——改为在返回值附 managed，由调用方整批统一
+// 落账；未传时保持现状自读自写（单根兑底路径：没跑过的新装、fail-open 调用，
+// sidecar 照旧自写、离开集合的 id 在该路径照常被清）。
+function writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, catalog, effortsEnabled, preSyncManaged = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAnyswitchChannel(store, "qoder");
-  const previousManaged = readSidecar(sidecarRoot).providers;
+  const previousManaged = preSyncManaged ?? readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
@@ -352,20 +359,24 @@ function writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, cat
   const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds, autoChannel, effectiveCatalog);
 
   const writeResult = writeQoderSettingsWithBackup(settingsPath, config);
-  if (writeResult.ok) {
+  if (writeResult.ok && preSyncManaged === null) {
     writeSidecar(sidecarRoot, managed);
   }
-  return writeResult;
+  return preSyncManaged === null ? writeResult : { ...writeResult, managed };
 }
 
 // High-level write: 对「已识别在装」的每个数据根分别写入（契约：双装双写）。
 // settingsPath 仍是调用方给的既有落点（<home>/.qoder/settings.json）；能推出
 // home 且认得出在装根时逐根各写一份，一个都没认出来（没跑过的新装、发现层
 // 判 uncertain 后的 fail-open 调用）退回只写 settingsPath 的既有单根行为。
-// sidecar 两个根共用一份：托管连接集合两侧本就一致，sidecar 记的是「我们写过
-// 哪些 id」，逐根合并语义在「先删旧托管集再写新集」下同一份记录对两个根都
-// 精确。返回 { ok, unchanged, backupPath?, reason?, roots? }：ok/unchanged 是
-// 各根聚合（全 ok 才 ok、全 unchanged 才 unchanged），roots 给逐根明细。
+// sidecar 两个根共用一份，但批次内逐根自写会让首根把 sidecar 重写成新集——
+// 第二根的 previous 随即等于 current，离开托管集的 id 两边都不在、在第二根
+// 永久残留（共享 sidecar 的逐根漂移）。故双根批次：批次前托管集快照整批共
+// 享一份 previous，全部根写成功后统一落账一次；有根失败时 sidecar 留批次前
+// 值，下一轮两个根都按同一份旧账清理离开者。单根兑底路径（未认出根）不经
+// 批次，照旧自读自写。返回 { ok, unchanged, backupPath?, reason?, roots? }：
+// ok/unchanged 是各根聚合（全 ok 才 ok、全 unchanged 才 unchanged），roots 给
+// 逐根明细（不含内部 managed 字段）。
 export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null, io = { existsSync }) {
   // 调用方 home 变量缺失时会把 join("", ".qoder", …) 的相对路径喂进来：真实用户
   // 配置不会被更新，下面的 mkdirSync 却会在进程 CWD 静默建出 .qoder/settings.json。
@@ -383,22 +394,34 @@ export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, 
   if (!home || editions.length === 0) {
     return writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, catalog, effortsEnabled);
   }
+  // 批次前托管集快照：整批共享，批内任何根都不重写 sidecar（见上注释）。
+  const preSyncManaged = readSidecar(sidecarRoot).providers;
   const roots = {};
   let ok = true;
   let unchanged = true;
   let firstReason;
   let failReason;
   let backupPath;
+  let batchManaged = null;
   for (const edition of editions) {
-    const result = writeQoderConfigFile(store, port, token, sidecarRoot, qoderSettingsPath(home, edition), catalog, effortsEnabled);
-    roots[edition] = result;
-    if (!result.ok) {
+    const { managed, ...rootResult } = writeQoderConfigFile(
+      store, port, token, sidecarRoot, qoderSettingsPath(home, edition), catalog, effortsEnabled, preSyncManaged,
+    );
+    roots[edition] = rootResult;
+    // 空仓库早退的根不带 managed（无落账面）；managed 各根同值（同一 store 派生）。
+    if (managed !== undefined) batchManaged = managed;
+    if (!rootResult.ok) {
       ok = false;
-      failReason ??= result.reason ?? "unknown error";
+      failReason ??= rootResult.reason ?? "unknown error";
     }
-    firstReason ??= result.reason;
-    if (!result.unchanged) unchanged = false;
-    backupPath ??= result.backupPath;
+    firstReason ??= rootResult.reason;
+    if (!rootResult.unchanged) unchanged = false;
+    backupPath ??= rootResult.backupPath;
+  }
+  // 整批全 ok 才统一落账；全早退（batchManaged null）时 sidecar 本就是空集，
+  // 无落账面。有根失败时留批次前值，下一轮两侧按旧账清理。
+  if (ok && batchManaged !== null) {
+    writeSidecar(sidecarRoot, batchManaged);
   }
   // 汇总 reason 优先报失败根的原因；全 ok 时如实带第一根的提示（如空仓库早退），
   // 与旧单根返回的语义保持一致。

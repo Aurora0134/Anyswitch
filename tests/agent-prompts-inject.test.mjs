@@ -57,13 +57,47 @@ describe("agent-prompts-inject endpoint table", () => {
     assert.equal(byId.workbuddy.target, join(homeDir, ".workbuddy", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
-    // Qoder re-watches a loaded rule file, so preset edits land next turn.
-    assert.equal(byId.qoder.hotReload, true);
-    // codex and grok read their rule files once at session start, no watcher.
-    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok", "workbuddy"]) {
+    // Qoder (CN 实证：worker 于会话启动一次性加载 rules、无文件监听、同会话
+    // 不重读) reads its rule file once at session start → cold, like codex/grok.
+    assert.equal(byId.qoder.hotReload, false);
+    // codex/grok/qoder/workbuddy read their rule files once at session start, no watcher.
+    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok", "qoder", "workbuddy"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
     assert.equal(PROMPT_ENDPOINTS.length, 10);
+  });
+
+  // 裁决①：qoder 行的落点展示按「在装数据根」动态生成——写入面只写在装根
+  // （syncEndpoint 的识别判据同一 existsSync），恒显主根会与真实落点不符。
+  // target（syncEndpoint 返回值）恒主根契约不变。
+  it("qoder 行 targetRel 按在装数据根动态生成：仅 CN 显 CN 落点、双装并列、无根回退主根", () => {
+    // 仅 CN 在装：显 CN 落点，不显国际版落点。
+    const cnOnly = makeInjector();
+    mkdirSync(join(cnOnly.homeDir, ".qoder-cn"), { recursive: true });
+    const cnRow = cnOnly.injector.listEndpoints().find((e) => e.id === "qoder");
+    assert.equal(cnRow.targetRel, "~/.qoder-cn/rules/anyswitch-managed-prompts.md");
+    assert.ok(!cnRow.targetRel.includes("~/.qoder/"), "不含国际版落点");
+    assert.equal(cnRow.target, join(cnOnly.homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"),
+      "target 恒主根契约不变");
+
+    // 双装：两落点并列。
+    const dual = makeInjector();
+    mkdirSync(join(dual.homeDir, ".qoder"), { recursive: true });
+    mkdirSync(join(dual.homeDir, ".qoder-cn"), { recursive: true });
+    const dualRow = dual.injector.listEndpoints().find((e) => e.id === "qoder");
+    assert.equal(
+      dualRow.targetRel,
+      "~/.qoder/rules/anyswitch-managed-prompts.md；~/.qoder-cn/rules/anyswitch-managed-prompts.md",
+    );
+
+    // 一个都不在：回退主根（与写入面兜底一致）。
+    const none = makeInjector();
+    const noneRow = none.injector.listEndpoints().find((e) => e.id === "qoder");
+    assert.equal(noneRow.targetRel, "~/.qoder/rules/anyswitch-managed-prompts.md");
+
+    // 其余端点单根恒真，不受影响。
+    const claudeRow = none.injector.listEndpoints().find((e) => e.id === "claude");
+    assert.equal(claudeRow.targetRel, "~/.claude/CLAUDE.md");
   });
 });
 

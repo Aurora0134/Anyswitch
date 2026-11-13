@@ -1,4 +1,4 @@
-import { join, isAbsolute, basename } from "node:path";
+import { join, isAbsolute, basename, delimiter } from "node:path";
 import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { compareVersions, parseVersion } from "../ops/version-check.mjs";
 
@@ -401,6 +401,8 @@ export function resolveQoderExecutable(base = process.env, io = { existsSync }) 
 
 // CN 版 CLI 入口，与国际版同序的镜像指纹：CN 变体覆盖变量 → ~/.qoder-cn/entry/
 // qodercn.cmd 调度器（qodercn-dispatcher.ps1 再解 qoderclicn）→ CLI 执行体本体。
+// 拉起链已改走官方序本体解析（resolveQoderCnCliLaunchExecutable，entry 调度器
+// 不再优先）；本函数保留 entry 优先的入口形态解析口径。
 export function resolveQoderCnExecutable(base = process.env, io = { existsSync }) {
   const override = absoluteOverride(base, "QODER_CN_EXECUTABLE");
   if (override !== null) return override;
@@ -435,6 +437,47 @@ export function resolveQoderCnCliExecutable(base = process.env) {
   return join(qoderDataRoot(base, "cn"), "bin", "qoderclicn", "qoderclicn.exe");
 }
 
+// PATH 上找 qoderclicn 的可执行形态（.exe/.cmd/.bat，逐目录查存在性、不
+// spawn——npm 全局装的 qoderclicn.cmd 就是这个形态）。找不到返回 null。
+function qodercnOnPath(base, io) {
+  const value = typeof base.PATH === "string" ? base.PATH : "";
+  if (value === "") return null;
+  for (const dir of value.split(delimiter)) {
+    if (dir === "") continue;
+    for (const ext of [".exe", ".cmd", ".bat"]) {
+      const candidate = join(dir, `qoderclicn${ext}`);
+      try {
+        if (io.existsSync(candidate)) return candidate;
+      } catch { /* 不可读目录跳过，看下一处 */ }
+    }
+  }
+  return null;
+}
+
+// CN CLI 本体的官方序解析（与官方调度器 qodercn-dispatcher.ps1 的 Find-Cli 三源
+// 同序：QODERCN_CLI_BIN → PATH 上的 qoderclicn → ~/.qoder-cn/bin/qoderclicn/
+// qoderclicn.exe 兜底）。entry/qodercn.cmd 调度器不在序内——官方自身在三源全空
+// 时报「QoderCN CLI is not installed」（exit 127），本解析器兜底返回本体路径、
+// 存在性由调用方判：拉起侧由此走「明确报未找到」而非调度器秒退死链。
+// QODER_CN_EXECUTABLE 覆盖刻意不在此层——它表达「拉起什么」的用户意志，属于
+// 外层拉起解析器；换靶识别的比对基准恰好要用这层「剥掉覆盖」的官方序输出
+// （覆盖值认不出 → 原样保留，见 panel.mjs retargetQoderLaunchEdition）。
+export function resolveQoderCnCliByOfficialOrder(base = process.env, io = { existsSync }) {
+  const envBin = absoluteOverride(base, "QODERCN_CLI_BIN");
+  if (envBin !== null) return envBin;
+  const shim = qodercnOnPath(base, io);
+  if (shim !== null) return shim;
+  return resolveQoderCnCliExecutable(base);
+}
+
+// CN CLI 拉起解析器：QODER_CN_EXECUTABLE 绝对覆盖最优先（用户显式指定的执行
+// 体），其余按官方序本体解析。与 intl 拉起（直取本体、不经调度器）从此同构。
+export function resolveQoderCnCliLaunchExecutable(base = process.env, io = { existsSync }) {
+  const override = absoluteOverride(base, "QODER_CN_EXECUTABLE");
+  if (override !== null) return override;
+  return resolveQoderCnCliByOfficialOrder(base, io);
+}
+
 // Qoder 桌面端（IDE 本体）。~/.qoder/entry/qoder.cmd 是 IDE 自带的命令调度器
 // （IDE 安装器丢下的 code.cmd 式垫片），不是独立安装的 CLI 产品，不做检测目标；
 // CLI 形态的检测目标是 ~/.qoder/bin/qodercli/qodercli.exe（resolveQoderCliExecutable）。
@@ -467,12 +510,14 @@ export function resolveQoderLaunchEdition(base = process.env, io = { existsSync 
   return "intl";
 }
 
-// 拉起用的 CLI 入口：CN 在装时按契约 cli-cn 指纹序解析（覆盖 → entry 调度器 →
-// CLI 执行体，.cmd 由调用方的 cmd 包装承载，与 dsh 的 .cmd shim 同形）；
-// 国际版维持终端现状，直取 CLI 执行体，不经 IDE 的 qoder.cmd 调度器。
+// 拉起用的 CLI 入口：CN 在装时按官方序解析 CN CLI 本体（QODER_CN_EXECUTABLE
+// 覆盖 → QODERCN_CLI_BIN → PATH 上的 qoderclicn → bin 本体兜底，entry 调度器
+// 不再优先——桌面-only 机器上调度器三源全空只会 exit 127 秒退死链，本体缺位
+// 的明确失败由调用方既有 executable_missing 口径兜住）；国际版维持终端现状，
+// 直取 CLI 执行体，不经 IDE 的 qoder.cmd 调度器——CN 与 intl 拉起口径同构。
 export function resolveQoderLaunchCliExecutable(base = process.env, io = { existsSync }) {
   return resolveQoderLaunchEdition(base, io) === "cn"
-    ? resolveQoderCnExecutable(base, io)
+    ? resolveQoderCnCliLaunchExecutable(base, io)
     : resolveQoderCliExecutable(base);
 }
 
