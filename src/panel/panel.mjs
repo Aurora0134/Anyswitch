@@ -2607,8 +2607,9 @@ export function createPanelRouter({
   const isEndpointVisible = (endpointId) =>
     endpointVisibility === null || endpointVisibility.has(endpointId);
   // 定时刷新让进程长驻期间新装/新卸的 Agent 一分钟内反映到面板；unref 掉，
-  // 定时器不单独拖住进程退出。只在第一个真实（非注入）skills/prompts 服务
-  // 创建时启动，注入 mock 服务的测试永远不会碰到真检测。
+  // 定时器不单独拖住进程退出。第一个真实（非注入）skills/prompts 服务创建
+  // 时与 prewarmPromptsBackfill（panel-host 启动预热）各会启动一次；注入
+  // mock 服务、且不调预热的测试永远不会碰到真检测。
   function ensureEndpointVisibilityFreshness() {
     if (endpointVisibilityTimer) return;
     endpointVisibilityTimer = setInterval(() => { refreshEndpointVisibility(); }, 60_000);
