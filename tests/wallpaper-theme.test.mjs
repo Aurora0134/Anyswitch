@@ -98,10 +98,20 @@ const GREEN = makePixels(64, 64, [22, 163, 74]); // 纯色绿
 const RED = makePixels(64, 64, [192, 32, 32]); // 纯色红
 const PURPLE = makePixels(64, 64, [124, 58, 237]); // 纯色紫（号池基准色相，压测避让）
 const TWO_TONE = makePixels(64, 64, (i) => ((i % 64) < 32 ? [192, 32, 32] : [32, 64, 192])); // 左红右蓝
-const WHITE_DOMINANT = makePixels(80, 80, (i) => (i % 10 === 0 ? [22, 163, 74] : [253, 253, 253])); // 近白主导
+const WHITE_DOMINANT = makePixels(80, 80, (i) => (i % 10 === 0 ? [22, 163, 74] : [253, 253, 253])); // 近白主导（彩色占一成）
+// 近白洪泛＋采样首格彩色：近白像素三通道 ≥ 251，HSL 亮度恒 ≥ 0.984，过不了种子的
+// 亮度上限（0.9）——白色成不了种子，ignoreWhite 的可观测面在占比稀释：采样步长 8
+// 下 512 采样格只有首格彩色，滤近白时彩色满占比成种子；不滤则 1/512 跌破 1% 占比
+// 下限，全色板无合格种子、回退 #667788（色相 210°，远离绿色锚）。
+const WHITE_FLOOD = makePixels(64, 64, (i) => (i === 0 ? [22, 163, 74] : [253, 253, 253])); // 近白洪泛
 const NEAR_BLACK = makePixels(32, 32, [10, 10, 10]); // 近黑
 const GRAY = makePixels(32, 32, [128, 128, 128]); // 低饱和灰
-const TRANSPARENT_RED = makePixels(32, 32, [200, 30, 30, 0]); // 全透明（透明通道下仍带 RGB）
+// 全透明互补双色（上半洋红、下半绿，alpha 全 0）：通道均值恰为无彩色 (115,115,115)。
+// 第三档 alphaThreshold=0 采样不看 alpha、仍按像素 RGB 聚类，种子取绿簇（饱和度
+// 1.0 胜洋红 0.8）；删掉第三档则两级采样全空、落入全图均值兜底——均值过不了饱和
+// 度下限，回退 #667788，与不透明孪生的聚类种子分道扬镳。
+const TRANSPARENT_DUO = makePixels(64, 64, (i) => (i < 2048 ? [230, 30, 230, 0] : [0, 200, 0, 0])); // 全透明互补双色
+const OPAQUE_DUO = makePixels(64, 64, (i) => (i < 2048 ? [230, 30, 230] : [0, 200, 0])); // 同 RGB 不透明孪生
 const EMPTY = { data: new Uint8ClampedArray(0), width: 0, height: 0 }; // 零像素输入
 
 // ═══════════════════════════════════════════════
@@ -164,10 +174,10 @@ test("双色图：种子取自两主色之一", () => {
 });
 
 test("近白主导：ignoreWhite 过滤近白像素，种子取自少数彩色", () => {
-  const theme = extractTheme(WHITE_DOMINANT);
+  const theme = extractTheme(WHITE_FLOOD);
   assert.ok(
     hueDistance(seedHue(theme), 145) <= 15,
-    `近白主导图应忽略白色、取绿色为种子，实得色相 ${seedHue(theme)}`,
+    `近白主导图应滤近白保住彩色占比成种子（不滤则占比跌破 1%、回退 #667788 色相 210），实得色相 ${seedHue(theme)}`,
   );
 });
 
@@ -179,9 +189,17 @@ test("低饱和图：饱和度低于下限，种子回退 #667788", () => {
   assert.equal(extractTheme(GRAY).seed, "#667788");
 });
 
-test("全透明图：透明阈值放宽后仍取像素 RGB，种子贴近红色", () => {
-  const theme = extractTheme(TRANSPARENT_RED);
-  assert.ok(hueDistance(seedHue(theme), 0) <= 15, `全透明红图种子色相 ${seedHue(theme)} 偏离 0 过远`);
+test("全透明图：透明阈值放宽后仍取像素 RGB，与同 RGB 不透明图取色一致", () => {
+  const theme = extractTheme(TRANSPARENT_DUO);
+  // 第三档（alphaThreshold=0）采样不看 alpha：同 RGB 的透明/不透明输入同输出。
+  // 删掉该档则透明图两级采样全空、走全图均值兜底，互补双色的均值是无彩色、过不了
+  // 饱和度下限，种子回退 #667788，与不透明图的绿簇种子分道扬镳。
+  assert.deepEqual(theme, extractTheme(OPAQUE_DUO),
+    "全透明图应与同 RGB 的不透明图取色一致（透明阈值放宽档仍在采样）");
+  assert.ok(
+    hueDistance(seedHue(theme), 120) <= 20,
+    `全透明图种子应取自像素绿簇（色相 120 附近，聚类往返漂移约 13°），实得色相 ${seedHue(theme)}`,
+  );
 });
 
 test("零像素输入：种子回退 #667788，token 仍齐全", () => {
