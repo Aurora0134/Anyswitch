@@ -8112,8 +8112,10 @@ async function api(method, path, body) {
   };
   const TERMINAL_ANSI_KEYS = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
     "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
-  // 静态皮肤的 --terminal-bg 是六位 hex：开透明路径会跳过 clearColor 与背景色
-  // 描边，亮态浅底上笔画变细、dim 字发白。只有壁纸主题带 alpha 的底色才需要开。
+  // 透明渲染路径的守门闸：全皮肤 --terminal-bg 已不透明（2026-11-13 收回壁纸主题的
+  // 半透明底——xterm 透明路径背景逐帧叠层读白成环、dim 字 alpha 栅格化被洗到近底色，
+  // 两处均为上游缺陷），常态恒 false。保留取值而非写死：若未来任何皮肤再把 token
+  // 写回带 alpha 的值，闸门如实跟随，透明路径的代价见专区 DECISIONS 同日条。
   function terminalBackgroundHasAlpha() {
     const raw = getComputedStyle(document.documentElement).getPropertyValue("--terminal-bg").trim().toLowerCase();
     const rgba = /^rgba?\(([^)]+)\)$/.exec(raw);
@@ -8155,8 +8157,9 @@ async function api(method, path, body) {
       if (value.length === 6) return `#${value}`;
       return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`;
     }
-    // 壁纸主题的终端底色带 alpha（rgba(...)）：上报契约只收六位 hex，剥掉透明
-    // 通道报 RGB 部分——宿主按此回答 agent 的颜色询问，不可解析的值会被当没上报
+    // 若 --terminal-bg 写成 rgba(...)（历史上壁纸主题半透明底用过，2026-11-13 起已
+    // 全皮肤不透明）：上报契约只收六位 hex，剥掉透明通道报 RGB 部分——宿主按此
+    // 回答 agent 的颜色询问，不可解析的值会被当没上报
     const rgb = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/.exec(raw);
     if (rgb) {
       const channel = (i) => Math.min(255, Number(rgb[i])).toString(16).padStart(2, "0");
@@ -12109,7 +12112,7 @@ async function api(method, path, body) {
     return STYLES.includes(s) ? s : "saas";
   }
   // 换皮肤：落属性、记存档、同步列表选中态，再让壁纸控制器进/出「自定义」、
-  // 重刷终端屏配色（--terminal-bg 随皮肤变，壁纸主题下还带 alpha）
+  // 重刷终端屏配色（--terminal-bg 随皮肤变；全皮肤均为不透明取值）
   function setPanelStyle(s) {
     document.documentElement.setAttribute("data-style", s);
     try { localStorage.setItem("panel-style", s); } catch {}
