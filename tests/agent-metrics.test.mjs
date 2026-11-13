@@ -1691,7 +1691,8 @@ describe("createAgentMetricsCollector", () => {
     it("drops a session row after two consecutive trusted rounds see no family", async () => {
       // 会话行声明不了属主 pid，生死只能看端点的进程家族；而单轮「家族不在」
       // 不是判决——探针可能被时间预算截断，正在重启的家族也会有一轮空白。
-      // 连续两轮都看不到才收行。
+      // 连续两轮都看不到才收行。缺席计数按可信扫描轮推进（源码在扫描落地时
+      // 结算），同一轮读多少次都不会把一次空白放大成多轮。
       let t = 3000;
       let alive = true;
       const execFn = (c, o, cb) => cb(null, alive ? PS_OPENCODE_SCAN : wmicOc());
@@ -1702,13 +1703,18 @@ describe("createAgentMetricsCollector", () => {
       const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "opencode").instances.map((i) => i.id);
       assert.deepEqual(await read(), ["opencode-sess-ses_x"]);
 
-      // 家族全灭。第一轮读：行仍在（单轮不判死）。
+      // 家族全灭。第一轮空白：行仍在（单轮不判死）。
       alive = false;
       t += 3000;
       await collector.scanProcesses();
       await new Promise((r) => setTimeout(r, 30));
       assert.deepEqual(await read(), ["opencode-sess-ses_x"], "单轮空白不收行");
-      // 第二轮仍是空白：判决成立，行收走。
+      // 同一轮内再读：缺席计数不随读取次数推进，行仍不得收。
+      assert.deepEqual(await read(), ["opencode-sess-ses_x"], "同一轮的重复读取不把空白记成多轮");
+      // 第二轮空白扫描落地：判决成立，行收走。
+      t += 3000;
+      await collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
       assert.deepEqual(await read(), [], "连续两轮看不到家族，会话行收走");
     });
 
@@ -1793,8 +1799,11 @@ describe("createAgentMetricsCollector", () => {
     it("mints a session row from the request, with no placeholder rows for live family processes", async () => {
       // zcode 的行是流量生的、按会话划分（codex/opencode 同款）：扫描到活的
       // 桌面主进程不起占位行——否则 0 请求的占位行会常驻在会话行旁边。
+      // 会话库统一注入空桩：卡上有行时 getAgentsStatus 会顺带刷 zcode 会话
+      // 派生表，默认实现读真实 ~/.zcode（本组用例的行 id 都是编造的，桩空
+      // 与真实库对断言同效，但不吃本机会话库的规模与耗时）。
       let t = 3000;
-      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t, zcodeSessionLookup: async () => [] });
       await collector.scanProcesses();
       const r = collector.startRequest({
         agentId: "zcode", providerId: "north-main", model: "glm-5.3",
@@ -1812,14 +1821,14 @@ describe("createAgentMetricsCollector", () => {
       // 面从请求 socket 的属主 pid 沿谱系定档：utility 子进程（5001）自身即
       // zcode.exe → Desktop；CLI node（6001）走完整条链见不到 zcode.exe → TUI。
       let t = 3000;
-      const desktop = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      const desktop = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t, zcodeSessionLookup: async () => [] });
       await desktop.scanProcesses();
       const r1 = desktop.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_d", surfacePid: 5001, model: "m1", stream: true, path: "openai" });
       r1.recordEnd({ status: 200, usage: {} });
       const rowD = (await desktop.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
       assert.equal(rowD.surface, "Desktop");
 
-      const cli = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t });
+      const cli = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t, zcodeSessionLookup: async () => [] });
       await cli.scanProcesses();
       const r2 = cli.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_c", surfacePid: 6001, model: "m1", stream: true, path: "openai" });
       r2.recordEnd({ status: 200, usage: {} });
@@ -1831,7 +1840,7 @@ describe("createAgentMetricsCollector", () => {
       // 判不出不贴（kimi/workbuddy 同款纪律）：属主 pid 不在本轮谱系表里就不
       // 定档；也不缓存——下一个请求带着可判的 pid 再定档。
       let t = 3000;
-      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t, zcodeSessionLookup: async () => [] });
       await collector.scanProcesses();
       const r1 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_u", surfacePid: 9999, model: "m1", stream: true, path: "openai" });
       r1.recordEnd({ status: 200, usage: {} });
@@ -1844,18 +1853,30 @@ describe("createAgentMetricsCollector", () => {
       assert.equal(row.surface, "Desktop", "未定的档不缓存，下个请求再定");
     });
 
-    it("caches the classification per row once decided", async () => {
-      // undici 空闲约 4s 断连，断连期查不到属主：已定档的行不随后续请求的
-      // surfacePid 缺失/变化而翻案。
+    it("re-decides the surface per request: a resolvable pid overrides, an unresolvable one keeps the last", async () => {
+      // 每个请求重判，换界面不钉死（与源码口径一致）：请求能从 socket 属主
+      // pid 判出面就覆盖旧档——会话从桌面挪进终端，下一笔请求的属主换成 CLI
+      // node，行徽标跟着翻；判不出（undici 空闲约 4s 断连、属主 pid 不在谱系
+      // 表）才保留旧档，等下个请求再判。谱系里同摆桌面链与 CLI 链两条。
       let t = 3000;
-      const collector = testCollector({ execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN), nowFn: () => t });
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, wmicZc(...zcDesktopRows, ...zcCliRows.slice(1))),
+        nowFn: () => t,
+        zcodeSessionLookup: async () => [],
+      });
       await collector.scanProcesses();
       const r1 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_k", surfacePid: 5001, model: "m1", stream: true, path: "openai" });
       r1.recordEnd({ status: 200, usage: {} });
-      const r2 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_k", model: "m1", stream: true, path: "openai" });
+      // 属主换成 CLI node（可判）：翻案成 TUI，首判的 Desktop 不钉死。
+      const r2 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_k", surfacePid: 6001, model: "m1", stream: true, path: "openai" });
       r2.recordEnd({ status: 200, usage: {} });
       const row = (await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
-      assert.equal(row.surface, "Desktop");
+      assert.equal(row.surface, "TUI", "可判的不同属主 pid 覆盖旧档（换界面不钉死）");
+      // 断连期查不到属主（请求不带 surfacePid）：判不出，保留最后一档。
+      const r3 = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_k", model: "m1", stream: true, path: "openai" });
+      r3.recordEnd({ status: 200, usage: {} });
+      const row2 = (await collector.getAgentsStatus()).find((a) => a.id === "zcode").instances[0];
+      assert.equal(row2.surface, "TUI", "判不出不翻案，保留旧档");
     });
 
     it("counts the zcode CLI node process into the zcode family (both path separators)", async () => {
@@ -1890,11 +1911,12 @@ describe("createAgentMetricsCollector", () => {
 
     it("drops a session row after two consecutive trusted rounds see no family", async () => {
       // 与 opencode 同一判据：单轮「家族不在」不是判决（探针可能被时间预算截断），
-      // 连续两轮都看不到才收行。
+      // 连续两轮都看不到才收行。缺席计数按可信扫描轮推进，同一轮读多少次都
+      // 不放大（与 opencode 同款语义，见对应用例）。
       let t = 3000;
       let alive = true;
       const execFn = (c, o, cb) => cb(null, alive ? CLI_SCAN : wmicZc());
-      const collector = testCollector({ execFn, nowFn: () => t });
+      const collector = testCollector({ execFn, nowFn: () => t, zcodeSessionLookup: async () => [] });
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_x", model: "m1", stream: true, path: "openai" });
       r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
@@ -1906,6 +1928,10 @@ describe("createAgentMetricsCollector", () => {
       await collector.scanProcesses();
       await new Promise((r) => setTimeout(r, 30));
       assert.deepEqual(await read(), ["zcode-sess-sess_x"], "单轮空白不收行");
+      assert.deepEqual(await read(), ["zcode-sess-sess_x"], "同一轮的重复读取不把空白记成多轮");
+      t += 3000;
+      await collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
       assert.deepEqual(await read(), [], "连续两轮看不到家族，会话行收走");
     });
 
@@ -1914,7 +1940,7 @@ describe("createAgentMetricsCollector", () => {
       // 空闲档对齐 codex / WorkBuddy 的 5min；行下场前把累计并进退役账，端点账 =
       // 活行 + 退役账，读数不随行蒸发。
       let t = 3000;
-      const collector = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t });
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, CLI_SCAN), nowFn: () => t, zcodeSessionLookup: async () => [] });
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "zcode", instanceId: "zcode-sess-sess_idle", model: "m1", stream: true, path: "openai" });
       r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
@@ -1988,6 +2014,7 @@ describe("createAgentMetricsCollector", () => {
       const collector = testCollector({
         execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
         nowFn: () => t,
+        zcodeSessionLookup: async () => [],
       });
       await collector.scanProcesses();
       const empty = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
@@ -2010,6 +2037,7 @@ describe("createAgentMetricsCollector", () => {
       const collector = testCollector({
         execFn: (c, o, cb) => cb(null, ZC_DESKTOP_SCAN),
         nowFn: () => t,
+        zcodeSessionLookup: async () => [],
       });
       await collector.scanProcesses();
       const r = collector.startRequest({
@@ -2726,7 +2754,8 @@ describe("createAgentMetricsCollector", () => {
 
     // GUI app and every CLI exited: the session row clears once two consecutive
     // trusted rounds confirm it — a single empty round is not a verdict (the
-    // probe can be truncated, a family can be mid-restart).
+    // probe can be truncated, a family can be mid-restart). 缺席计数按扫描轮
+    // 推进：同轮再读不放大，要等下一轮空白落地才收行。
     familyAlive = false;
     t += 3000;
     // Reads never block on a rescan: first call serves stale + kicks the round.
@@ -2734,6 +2763,11 @@ describe("createAgentMetricsCollector", () => {
     await new Promise((r) => setTimeout(r, 30));
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.equal(codex.instances.length, 1, "单轮空白不收行");
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1, "同一轮的重复读取不把空白记成多轮");
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 30));
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.deepEqual(codex.instances, [], "连续两轮无家族即收行");
     assert.equal(codex.status, "stopped");
@@ -6865,17 +6899,17 @@ describe("WorkBuddy 进程分桶与面（一名九进程）", () => {
       assert.equal(midRow.requests, 1, "计数不清零");
 
       // 引擎退场：扫描是 stale-while-revalidate（当拍吐旧快照、后台换新），先
-      // 让无引擎那一轮落地，再数缺席轮次。
+      // 让无引擎那一轮落地，再数缺席轮次；缺席计数按扫描轮推进（读取不放大），
+      // 每轮等扫描真正落地再断言。
       withEngine = false;
       t += 5 * 1000;
-      await collector.scanProcesses();
-      await collector.getAgentsStatus(); // 无引擎快照落地（这拍仍伺服旧快照）
-      t += 5 * 1000;
-      await collector.scanProcesses();
+      collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
       assert.ok(wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-sub1"),
         "缺席第 1 轮：行还在（1 轮不成判决）");
       t += 5 * 1000;
-      await collector.scanProcesses();
+      collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
       assert.ok(!wb(await collector.getAgentsStatus()).instances.some((i) => i.id === "workbuddy-sess-sub1"),
         "引擎退场后缺席满 2 轮：行收走");
     });
@@ -9825,7 +9859,11 @@ describe("cold-start spark history retention (four reset/eviction paths)", () =>
   it("D3: kimi folds the same zero-account residual shape", async () => {
     // kimi 同形一例：一条还原进来的零账 pid 行（pid 只作为认不出的 node 行留在
     // 全表里、不在宿主集、无面），折进 kimi-desktop，出口只剩稳定行。
+    // 本用例没注入 workbuddySessionDirectory：collector 构造时会把模块级
+    // workbuddySessionRowIdForPid 接管成读真实 ~/.workbuddy 的闭包，dispose
+    // 是唯一还原点——声明提到 try 外，finally 无条件收尾，断言失败也不漏。
     const dir = mkTestDir();
+    let collector = null;
     try {
       writeFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), JSON.stringify({
         version: 2, savedAt: 3000, endpoints: {}, runPids: {},
@@ -9840,7 +9878,7 @@ describe("cold-start spark history retention (four reset/eviction paths)", () =>
         desktopRow(6001),
         nodeRow(9999, `"C:\\elsewhere\\node_modules\\some-other-pkg\\bin\\x.mjs"`),
       ));
-      const collector = testCollector({
+      collector = testCollector({
         execFn, nowFn: () => 3000, persistRoot: dir,
         kimiRegistryLookup: async () => new Map(),
       });
@@ -9848,8 +9886,10 @@ describe("cold-start spark history retention (four reset/eviction paths)", () =>
       assert.deepEqual(kimi.instances.map((i) => i.id), ["kimi-desktop"], "kimi 零账残留行折进稳定行");
       assert.equal(surfacesOf(kimi).Desktop, 1, "面汇总 Desktop ×1");
     } finally {
+      // 测试同进程建多个 collector 会互抢模块级 WB 注册表反查；这里显式收尾
+      //（dispose 恢复前一个注入，是模块级反查的唯一还原点）。
+      collector?.dispose();
       rmSync(dir, { recursive: true, force: true });
-      // 测试同进程建多个 collector 会互抢模块级 WB 注册表反查；这里显式收尾。
     }
   });
 });

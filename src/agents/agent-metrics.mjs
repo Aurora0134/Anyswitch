@@ -3366,6 +3366,9 @@ export function createAgentMetricsCollector(options = {}) {
           // 本轮扫描——顺序反了就永远比不出「旧 run 是否还活着」。
           resolvePendingRunVerdicts(counts);
           refreshRunAnchors(counts);
+          // 会话行家族缺席计数随可信轮落地推进（写入点唯一，见
+          // settleSessionRowFamilyMisses）；读取侧只消费。
+          settleSessionRowFamilyMisses(counts);
         }
         cachedProcessCounts = counts;
         // Stamped where the data lands, not when the probe started, so the age
@@ -4004,8 +4007,33 @@ export function createAgentMetricsCollector(options = {}) {
   // the first such round wipes rows that are still in use: the terminal panel's
   // row binding drops to null and the card looks like the session never
   // existed. Two consecutive trusted zero rounds is the verdict; any round that
-  // sees the family clears the streak.
+  // sees the family clears the streak. 计数只在可信扫描轮落地时由
+  // settleSessionRowFamilyMisses 推进/清零——「轮」数的是扫描轮，不是读取次数
+  //（面板 1s 轮询比扫描窗口密得多，按读推进会把一轮空白记成 N 轮）；
+  // getAgentsStatus 的回收循环只消费它判收行。
   const sessionRowFamilyMisses = new Map();
+
+  // 家族缺席计数的唯一写入点（startProcessScan 的 land 在可信轮落地时调用）：
+  // 本轮桶内进程数为零的会话行缺席 +1，非零（家族在场）清零。行集合取落地
+  // 那一刻的 instanceBuckets——落地后才由 startRequest 铸的新行错过本轮结算，
+  // 从 0 起算，下一轮才轮得到缺席判定，新行不会一出生就被判死。
+  function settleSessionRowFamilyMisses(counts) {
+    for (const bucket of Object.keys(SESSION_ROW_PREFIXES)) {
+      const instMap = instanceBuckets[bucket];
+      if (instMap === undefined || instMap.size === 0) continue;
+      const prefix = SESSION_ROW_PREFIXES[bucket];
+      const count = counts[bucket] || 0;
+      for (const instId of instMap.keys()) {
+        if (!instId.startsWith(prefix)) continue;
+        const missKey = `${bucket}:${instId}`;
+        if (count === 0) {
+          sessionRowFamilyMisses.set(missKey, (sessionRowFamilyMisses.get(missKey) ?? 0) + 1);
+        } else {
+          sessionRowFamilyMisses.delete(missKey);
+        }
+      }
+    }
+  }
 
   // WB 会话行的注册表缺席轮次，keyed "<bucket>:<instId>"。注册表（行的身份
   // 正源）不再列出该 sessionId ＝ 内核已删该会话的注册行；连续缺席满
@@ -5664,11 +5692,12 @@ export function createAgentMetricsCollector(options = {}) {
         } else if (countsTrusted && isSessionRow) {
           const missKey = `${bucket}:${instId}`;
           if (count === 0) {
-            const misses = (sessionRowFamilyMisses.get(missKey) ?? 0) + 1;
-            sessionRowFamilyMisses.set(missKey, misses);
-            evict = misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
+            // 缺席计数由可信扫描轮落地时推进（settleSessionRowFamilyMisses 是
+            // 唯一写入点）：同一轮的多次读取共用同一份计数，一次空白不会被
+            // 读取次数放大成「连续多轮」。
+            evict = (sessionRowFamilyMisses.get(missKey) ?? 0) >= SESSION_ROW_FAMILY_MISS_ROUNDS;
           } else {
-            sessionRowFamilyMisses.delete(missKey);
+            // 家族在场：缺席计数已在扫描落地时清零，这里不再写它。
             if (bucket === "workbuddy" && wbSessionOpen !== null) {
               // 家族活着时的 WB 会话行生死：注册表说了算。开着＝清缺席计数；
               // 缺席＝轮次推进，连续满 SESSION_ROW_FAMILY_MISS_ROUNDS 轮且无
