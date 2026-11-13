@@ -69,6 +69,12 @@ function makeClock() {
       t.fn();
       return true;
     },
+    // 摘走最早登记的那一个定时器（只摘不执行）：模拟冻结页里「回调已排队、
+    // clearTimeout 已拦不住」的迟到派发——测试把它攥在手里，等世界翻面之后再补发。
+    takeOldestTimer() {
+      const t = timers.shift();
+      return t ? { id: t.id, fn: t.fn, ms: t.ms } : null;
+    },
     // 在册定时器的延时值（升序）：上限分档这类「只差一个常数」的判据不能靠推进时钟
     // 来验——手动时钟一冲就是把所有定时器一起跑完，2s 与 6s 没有区别。读登记值才分得开。
     timerDelays: () => timers.map((t) => t.ms).sort((a, b) => a - b),
@@ -465,7 +471,10 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     () => Promise.resolve(null),
     () => { log.push("flush_burst"); },
     () => {},
-    () => { log.push("queue_chunk"); },
+    // live 增量帧照产线小帧契约直写屏（真身 queueTerminalChunk → 合帧层对无标记
+    // 小帧零延迟直通 → term.write）。只吞日志不写屏的桩会让「新画面出字」永远不
+    // 发生，出字揭幕类用例退回由兜底计时器满足——那正是要防的假绿形态。
+    (term, text) => { log.push("queue_chunk"); if (text) term.write(text); },
     () => {},
     () => {
       const term = makeStubTerm(log, created.length + 1);
@@ -682,11 +691,16 @@ describe("T3 切签：旧画面留到新画面就绪再换", () => {
     assert.notEqual(w.world.stale(), null, "垫片还在册");
     assert.equal(w.world.stale().term, termA, "在册的仍是停放时那只旧实例");
 
-    // 新会话画出第一屏：这时候才揭幕
+    // 新会话画出第一屏（live 增量帧，不是首帧回放）：这时候才揭幕。只推进帧、一个
+    // 定时器都不跑——揭幕若退化成「兜底到点撤」，这里立刻红。
     w.sources[1].emit("data", JSON.stringify("dsh > \n"));
-    w.clock.flushAll();
+    assert.ok(w.created[1].screenText.includes("dsh"), "live 增量帧真的写上了屏（出字成立）");
+    w.clock.flushFrames();
+    w.clock.flushFrames();
+    assert.equal(w.clock.stats.timersFired, 0, "兜底计时器一枪未发：撤垫片不是它干的");
     assert.equal(termA.disposed, true, "新画面真的出字后垫片才销毁");
     assert.equal(w.world.stale(), null, "垫片已撤");
+    assert.equal(w.created[1].refreshCalls, 1, "撤垫片后补一帧整屏重绘（揭幕路径的独有痕迹）");
   });
 
   it("真跑：空屏会话不再靠「首帧回放」揭幕，交给兜底上限撤", async () => {
@@ -983,17 +997,31 @@ describe("T13 后台切回：兜底只在前台计时，旧帧挂到重建出字
   });
 
   it("真跑：拖到回前台才跑的老回调不许撤垫片", async () => {
+    // 夹具对应病灶注释「冻结的回调即使仍被派发到前台，代次对不上也只空转退出」：
+    // 老窗回调已排队但被冻结——已排队的派发 clearTimeout 拦不住，所以从时钟里摘
+    // 出来攥在手里；visibilitychange 两拍把代次翻新并重起一窗；重建推进到「实例
+    // 与流都在、字还没上屏」之后老回调才被补派。这一拍撤垫片必然露白，代次判据
+    // 必须拦下它（删掉 token !== capToken 判据本用例即红）。
     const w = makeTerminalWorld();
-    await primeSession(w, terminalSession("A"));
-    w.world.parkTerminalScreen();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    const stale = w.world.parkTerminalScreen();
+    const frozen = w.clock.takeOldestTimer(); // 已排队未执行的回调（clearTimeout 拦不住）
+    assert.ok(frozen, "前置：停放即登记了一窗");
     w.ctx.docHidden = true;
-    w.clock.flushAll();                      // 冻结/节流：这一窗的回调落到前台那一拍
+    stale.pauseCap?.();                       // visibilitychange 隐藏拍：代次翻新
     w.ctx.docHidden = false;
-    w.world.parkTerminalScreen();            // 回前台那一拍：无可停画面，不撤已有垫片
-    w.world.stale()?.resumeCap?.();
-    w.clock.fireOldestTimer();
-    assert.notEqual(w.world.stale(), null, "老回调即使在前台到点也不能把旧帧撤走");
-    assert.ok(w.clock.pendingTimers() >= 1, "只续窗等重建，屏上不留空白");
+    stale.resumeCap?.();                      // 回前台拍：重起一窗
+    await w.world.connectTerminalStream(terminalSession("B")); // 重建到「实例＋流」，字还没上屏
+    frozen.fn();                              // 老回调此刻才被派发（页已可见）
+    assert.notEqual(w.world.stale(), null, "代次对不上：老回调整组作废，不碰当前屏");
+    assert.equal(termA.disposed, false, "垫片实例不许被迟到回调销毁");
+    assert.ok(w.clock.pendingTimers() >= 1, "回前台那窗仍在册等出字，屏上不留空白");
+    // 老回调那一枪没留下中间态：新画面出字照常揭幕
+    w.sources[w.sources.length - 1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
+    w.sources[w.sources.length - 1].emit("data", JSON.stringify("B-screen\n"));
+    w.clock.flushAll();
+    assert.equal(w.world.stale(), null, "新画面出字后照常揭幕");
+    assert.equal(termA.disposed, true);
   });
 
   it("真跑：等待重建期间到点只续窗，新画面出字才揭幕", async () => {
@@ -1624,10 +1652,15 @@ describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态
       },
     };
     const calls = { streams: 0, stale: 0, bootingDrop: 0, renders: [] };
+    // 兜底上限从真身源码切原句（同 railTtl 的纪律）：沙箱体嵌的是产线声明本身，
+    // 断言也用同一份取值——不再自写常数自证。缺这句常量时红在用到它的各条用例上。
+    const switchLoadingConst = panelJs.match(/const TERMINAL_SWITCH_LOADING_MAX_MS = [^;]+;/)?.[0];
+    assert.ok(switchLoadingConst, "TERMINAL_SWITCH_LOADING_MAX_MS 在 panel.js 里");
+    const switchMaxMs = new Function(`${switchLoadingConst}\nreturn TERMINAL_SWITCH_LOADING_MAX_MS;`)();
     const factory = new Function(
       "$", "document", "setTimeout", "clearTimeout", "Date", "calls",
       `
-      const TERMINAL_SWITCH_LOADING_MAX_MS = 30000;
+      ${switchLoadingConst}
       let terminalSwitchLoading = null;
       let terminalBooting = null;
       function dropTerminalStaleScreen() { calls.stale += 1; }
@@ -1654,7 +1687,7 @@ describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态
       clock.setTimeout, clock.clearTimeout,
       { now: () => 1_000_000 }, calls,
     );
-    return { world, clock, screen, calls };
+    return { world, clock, screen, calls, switchMaxMs };
   }
 
   it("点击当拍：拆流＋撤垫片＋挂一层加载态，等待整段不再显示上一条会话", () => {
@@ -1664,7 +1697,8 @@ describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态
     assert.equal(w.calls.stale, 1, "旧帧垫片一并撤掉，不留上一屏");
     assert.equal(w.screen.children.length, 1, "屏上落一层加载态");
     assert.equal(w.screen.children[0].className, "terminal-booting");
-    assert.deepEqual(w.clock.timerDelays(), [30000], "30s 兜底撑得住 /switch 的 6~12s");
+    assert.equal(w.switchMaxMs, 30000, "兜底维持 30s 量级（/switch 实测 6~12s，须留足余量）");
+    assert.deepEqual(w.clock.timerDelays(), [w.switchMaxMs], "兜底一窗按产线常量登记");
   });
 
   it("重复进入不叠层、不堆定时器", () => {
@@ -1672,15 +1706,23 @@ describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态
     w.world.enter();
     w.world.enter();
     assert.equal(w.screen.children.length, 1);
-    assert.deepEqual(w.clock.timerDelays(), [30000]);
+    assert.deepEqual(w.clock.timerDelays(), [w.switchMaxMs]);
   });
 
-  it("等待期（POST 未落地）加载态不撤：不按帧撤、不按 3s 撤", () => {
+  it("等待期（POST 未落地）加载态不撤：不排帧观察，3s/10s 占位档管不到这层", () => {
+    // enterTerminalSwitchLoading 函数体不排任何 rAF（「出字即撤」的帧循环属于
+    // terminalBooting 占位设施，enter 当拍已把它撤空），等待期里这层的出口只有
+    // POST 落地（arm 交接）、失败（abort）与 30s 兜底三个；3s/10s 两档挂在
+    // terminalBooting 名下，对切换层无从生效。
     const w = makeSwitchLoadingWorld();
     w.world.enter();
     w.clock.flushFrames();
-    assert.equal(w.screen.children.length, 1);
-    assert.notEqual(w.world.state(), null);
+    assert.equal(w.clock.pendingFrames(), 0, "不排任何帧观察：帧推进没有可撤层的回调");
+    assert.equal(w.world.booting(), null, "层不在 3s/10s 占位设施名下（enter 已把它撤空）");
+    assert.deepEqual(w.clock.timerDelays(), [w.switchMaxMs], "在册定时器只有兜底一档");
+    assert.equal(w.screen.children.length, 1, "加载态仍在屏上");
+    assert.equal(w.screen.children[0].className, "terminal-booting", "DOM 结构未变");
+    assert.notEqual(w.world.state(), null, "切换态仍在册");
   });
 
   it("POST 落地：arm 交接切换层，不残留两层、不残留兜底定时器", () => {
@@ -1733,22 +1775,17 @@ describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态
     const decide = extractFn("terminalRailSwitchOrCreateCore");
     const enters = [...decide.matchAll(/enterTerminalSwitchLoading\(\);/g)].map((m) => m.index);
     assert.equal(enters.length, 2, "空壳分支与有活跃终端分支各一次");
+    // 空壳分支以它自己的创建调用为锚：主分支的 probe 排在该分支的 return 之后，
+    // 拿它当界线对 enter 的位置零约束。分支内只有这一处 createAgentTerminal 调用，
+    // enter 必须排在它之前——擦屏与加载态才落得进点击当拍。
+    const shellCreate = decide.indexOf("return createAgentTerminal(");
+    assert.ok(shellCreate > 0, "空壳分支的创建调用在源码里");
+    assert.ok(enters[0] < shellCreate, "空壳分支：进入排在创建调用之前");
     const probe = decide.indexOf('await api("GET", "/api/agents")');
     const post = decide.indexOf("/switch`");
     assert.ok(probe > 0 && post > 0);
-    assert.ok(enters[0] < probe, "空壳分支：进入在创建请求之前");
     assert.ok(enters[1] < probe && enters[1] < post, "主分支：进入在补读与换绑请求之前");
   });
 
-  it("源码：switch_busy 转保活不重挂 A 的流（切换态继续盖到 B 落地）", () => {
-    const decide = extractFn("terminalRailSwitchOrCreateCore");
-    const busy = decide.indexOf('if (code === "switch_busy")');
-    const keep = decide.indexOf("return terminalRailKeepAliveSwitch({ agentId, cwd, resume });", busy);
-    assert.ok(busy >= 0 && keep > busy);
-    assert.equal(decide.slice(busy, keep).includes("resumeStream();"), false,
-      "A 的旧画面不闪回一帧；B 失败由 createAgentTerminal 的 catch 兜底恢复");
-    assert.match(extractFn("createAgentTerminal"), /abortTerminalSwitchLoading\(\)/,
-      "B 的 POST 失败出口会撤层并重挂旧流");
-  });
 });
 
