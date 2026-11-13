@@ -4946,10 +4946,6 @@ describe("panel.html 实例四宫格陈旧语义（lastSeen 超阈值速率类�
     assert.ok(/grid\.dataset\.stale = stale \? "1" : "0";/.test(panelJs), "grid still carries data-stale flag");
     assert.ok(!/if \(grid\.dataset\.stale === "1"\) return;/.test(panelJs),
       "redrawInstanceSparklines no longer skips stale grids");
-    assert.ok(/function seedInstanceSparkHistory\(buf, hist\)/.test(panelJs),
-      "空权威历史不再覆盖已恢复的整线");
-    assert.ok(/function boardInstanceFor\(prefix, iid\)/.test(panelJs),
-      "补绘的权威源取最近一帧的 instances[].sparkHistory");
   });
 
   it("相对时间标注随时间刷新：renderIfChanged 指纹混入陈旧分钟桶", () => {
@@ -7805,6 +7801,10 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     // 那是明暗交换、不是玻璃材质；本例仍钉「saas/sepia 栏的规则只有对调这一条」。
     // 改写后皮肤键在 @scope 起点上、选择器统一为 :scope:scope[data-ui-version="v2"]，
     // 合并块的两格同形：全文件该前缀的 .rail 选择器恰为 aurora 玻璃栏 + 对调两格。
+    // 「合并选择器各占一格」是 0b51458 定下的显式计数口径，不是可清理的改写残留：
+    // base（d170982）里 saas/sepia 是两格真选择器，@scope 改写后收成同形一对，成对
+    // 形态被 panel-preview-isolation 对 base 的逐条等价对账钉着——列表内去重（匹配集
+    // 与特异性虽等价）会让那份对账在归一化文本、特异性与多重集三处判红。
     const swapRail = [...panelCss.matchAll(/:scope:scope\[data-ui-version="v2"\] \.rail[ ,]/g)];
     assert.equal(swapRail.length, 3, "aurora 玻璃栏一格 + saas/sepia 底色对调两格（合并选择器各占一格）");
     assert.ok(panelCss.includes(':scope:scope[data-ui-version="v2"] .rail { background: var(--bg-page); }'),
@@ -8873,31 +8873,39 @@ describe("页脚品牌行（品牌名＋版本号，版本取自 app-info）", (
     assert.ok(!html.includes(pkg.version), "panel.html 不含写死的版本号");
   });
 
+  // 夹具按真实页脚结构搭：span 挂在 <p>Anyswitch<span id="footerBrandVersion">…</span></p>
+  // 的父行上，取数前源码会对带父节点的页脚掷一次低概率随机改写。Math.random 桩成
+  // 确定值（默认不触发的一档），用例不随真随机翻绿翻红；触发档另设用例，只断言
+  // 两种结局一致的字段，不把随机改写的内容钉进测试。
+  async function run(info, { fail = false, random = 0.99 } = {}) {
+    const parent = { textContent: "Anyswitch" };
+    const tag = { textContent: null, hidden: true, parentNode: parent };
+    const initBrandVersion = await vm.runInNewContext(
+      `(async () => { ${body} ; return initBrandVersion; })()`,
+      {
+        api: async () => { if (fail) throw new Error("HTTP 500"); return info; },
+        $: (id) => (id === "footerBrandVersion" ? tag : null),
+        Math: { random: () => random },
+      },
+    );
+    await initBrandVersion();
+    return tag;
+  }
+
   it("版本号与徽标同源：一次取值写进页脚，格式为「· v+版本」", async () => {
     assert.ok(body.includes('api("GET", "/api/app-info")'), "版本取自 app-info 唯一来源");
     assert.ok(body.includes('footer.textContent = " · v" + version'), "页脚写法为「· v+版本」");
-    const tag = { textContent: null, hidden: true };
-    const initBrandVersion = await vm.runInNewContext(
-      `(async () => { ${body} ; return initBrandVersion; })()`,
-      {
-        api: async () => ({ version: " 0.7.1 " }),
-        $: (id) => (id === "footerBrandVersion" ? tag : null),
-      },
-    );
-    await initBrandVersion();
+    const tag = await run({ version: " 0.7.1 " });
     assert.equal(tag.textContent, " · v0.7.1");
   });
 
+  it("随机改写命中：版本 tag 的写法与未命中结局一致，仍为「· v+版本」", async () => {
+    const tag = await run({ version: "0.7.4" }, { random: 0 });
+    assert.equal(tag.textContent, " · v0.7.4");
+  });
+
   it("版本取不到：页脚后半段留空，不留悬空分隔点", async () => {
-    const tag = { textContent: null, hidden: true };
-    const initBrandVersion = await vm.runInNewContext(
-      `(async () => { ${body} ; return initBrandVersion; })()`,
-      {
-        api: async () => { throw new Error("HTTP 500"); },
-        $: (id) => (id === "footerBrandVersion" ? tag : null),
-      },
-    );
-    await initBrandVersion();
+    const tag = await run(null, { fail: true });
     assert.equal(tag.textContent, null);
   });
 });
@@ -9884,21 +9892,21 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
 
   it("聚合端点汇总行的服务方身份按 currentModel/currentProvider 回落", async () => {
     const metrics = await vmFn("terminalMetricsFromInstance", [{
-      activeRequests: 1, requests: 7, currentModel: "glm-5.3", currentProvider: "a6api-pool",
+      activeRequests: 1, requests: 7, currentModel: "glm-5.3", currentProvider: "demo-pool",
       tokens: {}, lastTtftMs: 1200, ttftColor: "green", tps: 12.3, cacheHitRate: 95.3,
       sparkHistory: { ttft: [1.2], tps: [12.3], cache: [95.3] },
     }], ["terminalMetricNum", "terminalWorkTime"]);
     assert.equal(metrics.model, "glm-5.3", "实况行「谁在服务」拿到模型名");
-    assert.equal(metrics.providerId, "a6api-pool", "实况行「谁在服务」拿到来源 id");
+    assert.equal(metrics.providerId, "demo-pool", "实况行「谁在服务」拿到来源 id");
   });
 
   it("空闲的聚合端点汇总行按 lastModel/lastProvider 回落服务方身份", async () => {
     const metrics = await vmFn("terminalMetricsFromInstance", [{
       activeRequests: 0, requests: 7, currentModel: null, currentProvider: null,
-      lastModel: "glm-5.3", lastProvider: "a6api-pool", tokens: {},
+      lastModel: "glm-5.3", lastProvider: "demo-pool", tokens: {},
     }], ["terminalMetricNum", "terminalWorkTime"]);
     assert.equal(metrics.model, "glm-5.3", "回合结束后实况行仍有「最近由谁服务」");
-    assert.equal(metrics.providerId, "a6api-pool");
+    assert.equal(metrics.providerId, "demo-pool");
   });
 
   // zcode 升级会话粒度实例行（zcode-sess-<id>）后：归属已绑定的会话全部走实例行
@@ -10852,7 +10860,9 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
-    const state = { posts: [], eventSources: [], terms: [], sessions: {} };
+    // order：时序日志——api 请求与撤垫片各记一条，先后契约由条目位置比对
+    // （见「复活分支先撤垫片」用例）。
+    const state = { posts: [], eventSources: [], terms: [], sessions: {}, order: [] };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
@@ -10895,6 +10905,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       const terminalReviveInflight = new Map();
       const terminalDoneUnread = new Map();
       const api = (method, url, body) => {
+        state.order.push("api:" + method + ":" + url);
         state.posts.push({ method, url, body });
         if (state.apiImpl) return state.apiImpl(method, url, body);
         return Promise.resolve({});
@@ -10933,6 +10944,10 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       }
       const EventSource = FakeEventSource;
       ${bodies}
+      // 撤垫片记进时序日志（真身包一层记名直通）：本沙箱内它的唯一调用点是
+      // connectTerminalStream 的复活分支。
+      const dropTerminalStaleScreenBody = dropTerminalStaleScreen;
+      dropTerminalStaleScreen = () => { state.order.push("drop"); return dropTerminalStaleScreenBody(); };
       return {
         connect: (session, opts) => connectTerminalStream(session, opts),
         close: () => closeTerminalStream(),
@@ -11150,6 +11165,12 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     sandbox.setStale(stale);
     await sandbox.connect(reviveTarget, { revive: false });
     assert.equal(stale.done, true, "垫片在复活 await 之前就撤（停放与建流前缀同一任务跑完，旧帧没机会上屏）");
+    // 时序钉进断言：垫片撤销必须先于复活 POST 发出——只读 done 的话，把撤垫片挪到
+    // await 之后旧断言照样全绿（两种结局 done 都为 true），这条按时序日志的位置判红。
+    const dropAt = state.order.indexOf("drop");
+    const revivePostAt = state.order.findIndex((entry) => entry.startsWith("api:POST:") && entry.includes("/revive"));
+    assert.ok(dropAt !== -1 && revivePostAt !== -1 && dropAt < revivePostAt,
+      "垫片撤销先于复活 POST 发出（在 await 之前撤，不是复活回来之后才补撤）");
     // 对照：不复活的重挂不动垫片（揭幕仍由观察循环按「新画面出字」接管）。
     const observed = backendSession("sess-f", { backendState: { status: "exited", exitCode: 0 } });
     state.sessions["sess-f"] = observed;

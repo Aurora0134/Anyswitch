@@ -249,7 +249,10 @@ describe("终端视图左栏换血", () => {
       assert.ok(!panelCss.includes("rail-term-fade"), "栏体上的渐隐色块（含折叠态选择器）已拆除");
       assert.ok(!panelCss.includes("--rail-bg"), "「遮罩终点＝栏底色」的取值链已删除");
       assert.ok(!panelHtml.includes("rail-term-fade"), "HTML 里不再有渐隐 span");
-      // 栏底对调本身保留（与渐隐解耦）：saas/sepia 的 .rail 仍取 --bg-page
+      // 栏底对调本身保留（与渐隐解耦）：saas/sepia 的 .rail 仍取 --bg-page。
+      // 成对正则钉的是 0b51458 的显式口径「合并选择器各占一格」：@scope 改写把 base
+      // （d170982）的 saas/sepia 两格真选择器收成同形一对，成对形态被 panel-preview-
+      // isolation 对 base 的逐条等价对账钉着，列表内去重会让对账判红——不是可清理残留。
       assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
         "saas/sepia 的 .rail 底色仍为 --bg-page");
       assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
