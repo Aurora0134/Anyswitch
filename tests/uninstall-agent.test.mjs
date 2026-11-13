@@ -384,6 +384,38 @@ test("qoder 双区域版：仅 CN 根在装时只清 CN 根，不碰国际版落
   assert.ok(!existsSync(join(home, ".qoder")), "国际版落点不被新建");
 });
 
+// 卸载 qoder 也摘双根的提示词托管块（与 claude/workbuddy 的 prompt-block 对称）：
+// 空集移除对全部数据根生效，文件只剩块时连文件一起删；用户手写内容保留。
+test("qoder 双区域版：卸载摘双根提示词托管块，只剩块的文件连文件删，幂等", async () => {
+  const home = mkTestDir("uninstall-qoder-prompt-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const intlSettings = seedQoder(home, sidecarRoot);
+  const cnSettings = join(home, ".qoder-cn", "settings.json");
+  writeJson(cnSettings, { providers: { "user-cn": { baseUrl: "https://api.example.cn", models: [] } } });
+  // 双根各预置 rules 托管块：intl 带用户手写内容（摘块后用户内容保留），CN
+  // 只有托管块（文件只剩块 → 连文件删）。
+  const intlRules = join(home, ".qoder", "rules", "anyswitch-managed-prompts.md");
+  const cnRules = join(home, ".qoder-cn", "rules", "anyswitch-managed-prompts.md");
+  const block = buildManagedBlock([{ title: "规则", content: "preset body" }]);
+  mkdirSync(dirname(intlRules), { recursive: true });
+  mkdirSync(dirname(cnRules), { recursive: true });
+  writeFileSync(intlRules, "# My notes\n\n" + block + "\n");
+  writeFileSync(cnRules, block + "\n");
+
+  const result = await driver.uninstallEndpoint("qoder");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  assert.equal(stepsByName(result)["prompt-block"].changed, true, "prompt-block 步存在且有实际改动");
+  assert.equal(readFileSync(intlRules, "utf8"), "# My notes\n", "intl 根摘块后用户内容保留");
+  assert.ok(!existsSync(cnRules), "只剩托管块的文件连文件删");
+  // 双根的 settings 托管连接照常被清（既有行为不回归）
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(intlSettings, "utf8")).providers), ["user-conn"]);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(cnSettings, "utf8")).providers), ["user-cn"]);
+
+  const again = await driver.uninstallEndpoint("qoder");
+  assert.equal(again.ok, true);
+  for (const step of again.steps) assert.equal(step.changed, false, step.step);
+});
+
 // ─────────────────────────────────────────────────────────────
 // zcode
 // ─────────────────────────────────────────────────────────────

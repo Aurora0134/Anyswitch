@@ -313,6 +313,16 @@ async function stripQoder(ctx) {
     }));
     reclaimCreatedHusk(steps, target, existedBefore.get(target), (parsed) => isSingleEmptyMapKey(parsed, "providers"));
   }
+  // 提示词托管块（双根的 rules/anyswitch-managed-prompts.md）：空集移除语义
+  // 天然双根全覆盖（agent-prompts-inject 的 altHomes——移除不做「在装」过滤），
+  // 文件只剩块时连文件一起删。与 stripClaude/stripWorkbuddy 的 prompt-block
+  // 同名同形，失败经 stepFail 隔离不拖垮其余步。
+  try {
+    const result = ctx.promptsInjector.syncEndpoint("qoder", []);
+    steps.push({ step: "prompt-block", ok: result.ok !== false, changed: result.changed === true });
+  } catch (error) {
+    steps.push(stepFail("prompt-block", error));
+  }
   return steps;
 }
 
