@@ -57,10 +57,11 @@ describe("agent-prompts-inject endpoint table", () => {
     assert.equal(byId.workbuddy.target, join(homeDir, ".workbuddy", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
-    // Qoder re-watches a loaded rule file, so preset edits land next turn.
-    assert.equal(byId.qoder.hotReload, true);
-    // codex and grok read their rule files once at session start, no watcher.
-    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok", "workbuddy"]) {
+    // Qoder (CN 实证：worker 于会话启动一次性加载 rules、无文件监听、同会话
+    // 不重读) reads its rule file once at session start → cold, like codex/grok.
+    assert.equal(byId.qoder.hotReload, false);
+    // codex/grok/qoder/workbuddy read their rule files once at session start, no watcher.
+    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok", "qoder", "workbuddy"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
     assert.equal(PROMPT_ENDPOINTS.length, 10);

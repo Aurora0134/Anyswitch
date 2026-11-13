@@ -354,6 +354,9 @@ describe("createPromptsPanelService facade", () => {
     assert.deepEqual(state.sync, {});
     assert.equal(state.endpoints.length, 10);
     assert.equal(state.endpoints.some((e) => e.id === "qoder"), true, "qoder must reach the panel endpoint list");
+    // API 级互钉：qoder 行 hotReload 与注入表口径一致（CN 实证＝会话启动
+    // 一次性读取、无热加载），面板提示分支据此渲染「运行中会话需重开生效」。
+    assert.equal(state.endpoints.find((e) => e.id === "qoder").hotReload, false, "qoder hotReload must be false in the served state");
     assert.equal(state.endpoints.some((e) => e.id === "codex"), true, "codex must reach the panel endpoint list");
     assert.equal(state.endpoints.some((e) => e.id === "grok"), true, "grok must reach the panel endpoint list");
     assert.deepEqual(Object.keys(state.endpoints[0]).sort(), ["hotReload", "id", "label", "targetRel"]);

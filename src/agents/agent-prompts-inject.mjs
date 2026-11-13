@@ -4,18 +4,20 @@
 // body) — the agent reads the preset's subject and its rules together.
 //
 // Target facts this module depends on:
-//   - kimi/opencode re-read their file at runtime (hot); the other six read
+//   - kimi/opencode re-read their file at runtime (hot); the other eight read
 //     it once at session start — surfaced to the UI as `hotReload`.
-//   - qoder: `~/.qoder/rules/**/*.md` is a user-level injection surface in
-//     Qoder Desktop, and its loaded text is observable in model context. A
-//     rule file with no loading frontmatter defaults to `always_on`, and
-//     Qoder keeps watching a rule file once loaded, so edits land on the next
-//     turn → hotReload true. `~/.qoder/AGENTS.md` injects too but is read only
-//     at session start and is the user's own file — hence rules.
-//     双区域版（2026-11-12 契约）：CN 版同构落在 ~/.qoder-cn/rules/ 下，
-//     def 用 altHomes 表达；注入只写「已识别在装」的数据根（根目录在盘即在装，
-//     一个都不在时退回主根保住装了没跑过的预置口径），移除则双根全覆盖——
-//     区域版卸载后残留的托管块也摘得掉。
+//   - qoder: `~/.qoder/rules/**/*.md` 是用户级注入面，无 frontmatter 的规则
+//     文件默认 always_on、全文进模型上下文。CN 侧实证（agent 运行体＝桌面
+//     app 拉起的 CLI worker，代码级核实＋qodercli.log 的 memory.load_rules
+//     阶段佐证）：rules 于会话启动一次性加载，无 rules 目录文件监听、同
+//     会话 cachedUserContext 不重读——改文件须新会话才生效 → hotReload
+//     false。intl 本机未装未实测，按同一保守 false 口径（最坏情形＝intl
+//     端多一条保守提示，无破坏）。`~/.qoder/AGENTS.md` 亦会注入但属用户
+//     自有文件——故落点用 rules/ 下的专属文件。
+//     双区域版（2026-11-12 契约，结构同构）：CN 版同构落在 ~/.qoder-cn/rules/
+//     下，def 用 altHomes 表达；注入只写「已识别在装」的数据根（根目录在盘
+//     即在装，一个都不在时退回主根保住装了没跑过的预置口径），移除则双根
+//     全覆盖——区域版卸载后残留的托管块也摘得掉。
 //   - grok: `$GROK_HOME/rules/` (default `~/.grok/rules/`) is a home-level
 //     rules directory Grok always scans — every *.md directly inside it loads
 //     as a user rule. Rules are read at session start with no file watcher
@@ -60,7 +62,7 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "dsh", label: "DeepSeek Harness", hotReload: false, targetRel: "~/.dsh/AGENTS.md", home: [".dsh", "AGENTS.md"] },
   { id: "pi", label: "Pi", hotReload: false, targetRel: "~/.pi/agent/AGENTS.md", home: [".pi", "agent", "AGENTS.md"] },
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
-  { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"], altHomes: [[".qoder-cn", "rules", "anyswitch-managed-prompts.md"]] },
+  { id: "qoder", label: "Qoder", hotReload: false, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"], altHomes: [[".qoder-cn", "rules", "anyswitch-managed-prompts.md"]] },
   { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
   { id: "grok", label: "Grok Build", hotReload: false, targetRel: "~/.grok/rules/anyswitch-managed-prompts.md", home: [".grok", "rules", "anyswitch-managed-prompts.md"] },
   // WorkBuddy（Electron 桌面壳 + 内置 CodeBuddy Code CLI）：用户级规则目录
