@@ -4014,7 +4014,7 @@ async function api(method, path, body) {
       function detail(label, value) { list.append(element("dt", "", label), element("dd", "", value)); }
       // 主行归并为每端点一行：徽标｜本地版本｜最新｜结论｜动作位。
       // 徽标是端点入口形态枚举（服务端 entryForms 数据下发），「/」连写。
-      // 例外：安装记录全部带 edition 的端点（qoder 国际版/CN 版）按区域版分行，见下方。
+      // 例外：安装记录带 edition 的端点（qoder 国际版/CN 版）按区域版分行，见下方。
       const primary = client.installations[0] ?? null;
       const forms = Array.isArray(client.entryForms) && client.entryForms.length
         ? client.entryForms
@@ -4050,23 +4050,19 @@ async function api(method, path, body) {
         : installation.issue === "not_runnable" ? "已安装但无法运行"
         : !validLocal(installation) ? "版本无法读取" : "已发现";
       // 区域版分行（当前仅 qoder：国际版与 CN 版聚合为同一端点，差分仅限识别表现）：
-      // 安装记录全部带 edition 时按区域版分组——形态与区域是两个正交维度，形态维仍由
-      // 行首徽标承担，区域维每个在装的区域版一条子行，intl 在前 CN 在后，有界恒定
-      // 最多 2 行；区域标签是徽标后的灰阶小注（复用 about-kind 样式）。动作位与
-      // 「本次操作结果」仍是端点级、只摆第一行；某区域版全形态未装（not_found）不占行，
-      // 两版都没装时回落 intl 单行，与卡头「缺省 intl」同口径。记录不带 edition 的
-      // 端点走原单行路径，渲染零变化。
-      const editionGroups = client.installations.length
-        && client.installations.every((installation) => installation && (installation.edition === "intl" || installation.edition === "cn"))
+      // 安装记录带 edition 时按区域版分组——形态与区域是两个正交维度，形态维仍由
+      // 行首徽标承担，区域维每个区域版一条子行，intl 在前 CN 在后，有界恒定最多 2 行。
+      // 本页职责是全量声明支持面：某区域版全形态未装（not_found 记录）子行仍在，如实
+      // 报「未找到」，官方版本查询与结论口径同 not_found 惯例；整版无记录则不虚构该版
+      // 子行。区域标签是徽标后的灰阶小注（复用 about-kind 样式）；动作位与「本次操作
+      // 结果」仍是端点级、只摆第一行。完全不含 edition 记录的端点走原单行路径，零变化。
+      const editionGroups = client.installations.some((installation) => installation && (installation.edition === "intl" || installation.edition === "cn"))
         ? ["intl", "cn"]
             .map((edition) => ({ edition, items: client.installations.filter((installation) => installation.edition === edition) }))
-            .filter((group) => group.items.some((installation) => installation.status !== "not_found"))
+            .filter((group) => group.items.length)
         : null;
-      if (editionGroups && !editionGroups.length) {
-        editionGroups.push({ edition: "intl", items: client.installations.filter((installation) => installation.edition === "intl") });
-      }
-      // 逐行渲染上下文：分行时一组一份（行内版本格/最新格/结论都看本组主形态——第一条
-      // 在装记录），不分行时整端点一份（现状）。
+      // 逐行渲染上下文：分行时一组一份（行内版本格/最新格/结论都看本组主形态——优先
+      // 第一条在装记录，全未装取首条），不分行时整端点一份（现状）。
       const lineContexts = editionGroups
         ? editionGroups.map((group, index) => ({
             region: group.edition,

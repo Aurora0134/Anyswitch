@@ -631,8 +631,10 @@ test("Qoder CLI 形态的官方来源链接放行 npm 包页，仿冒域名被�
 // ── qoder 区域版（国际/CN）子行 ─────────────────────────────
 // 数据契约：qoder 国际版与 CN 版聚合为同一端点，installations 元素带 edition
 // （至多 cli-intl/cli-cn/desktop-intl/desktop-cn 四条，未装的区域版是 not_found
-// 记录）。关于页按区域版分行：形态徽标行首不变，区域小注（国际/CN）紧随其后，
-// intl 在前 CN 在后；动作位端点级一颗摆主行（第一行）；详情区逐安装记录照常。
+// 记录）。关于页职责是全量声明支持面：按区域版分行，intl 在前 CN 在后，两条子行
+// 恒在——未装的区域版子行如实报「未找到」（not_found 惯例）；形态徽标行首不变，
+// 区域小注（国际/CN）紧随其后；动作位端点级一颗摆主行（第一行）；详情区逐安装
+// 记录照常。
 const qoderEditioned = ({ intl = true, cn = true } = {}) => {
   const record = (kind, edition, found) => ({
     kind, edition,
@@ -688,33 +690,45 @@ test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，�
   assert.equal(dts.filter((text) => text === "桌面 路径").length, 2);
 });
 
-test("qoder 仅 CN 版在装：只出 CN 子行且它是主行", async () => {
+test("qoder 仅 CN 版在装：国际版子行恒在、如实报未找到", async () => {
   const h = harness(editionRemotes(qoderEditioned({ intl: false, cn: true })));
   await h.controller.enter();
   const lines = editionLines(h);
-  assert.equal(lines.length, 1, "未装的区域版不占行");
-  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "CN"]);
-  assert.match(lines[0].textContent, /本地 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/);
-  assert.doesNotMatch(lines[0].textContent, /国际/);
+  assert.equal(lines.length, 2, "未装的区域版子行恒在");
+  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"], "intl 仍在前");
+  assert.match(lines[0].textContent, /本地 未找到/, "未装的区域版按 not_found 惯例呈现");
+  assert.equal((lines[0].textContent.match(/未找到/g) || []).length, 1, "状态词只在「本地」列出现一次");
+  assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 2\.0\.0/, "未装区域版的官方版本照常查询");
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"]);
+  assert.match(lines[1].textContent, /本地 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/);
 });
 
-test("qoder 仅国际版在装：只出国际子行", async () => {
+test("qoder 仅国际版在装：CN 子行恒在、如实报未找到", async () => {
   const h = harness(editionRemotes(qoderEditioned({ intl: true, cn: false })));
   await h.controller.enter();
   const lines = editionLines(h);
-  assert.equal(lines.length, 1);
+  assert.equal(lines.length, 2);
   assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"]);
   assert.match(lines[0].textContent, /本地 CLI 1\.0\.0 · Desktop 2\.0\.0/);
-  assert.doesNotMatch(lines[0].textContent, /\bCN\b/);
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"], "CN 仍在后");
+  assert.match(lines[1].textContent, /本地 未找到/);
+  // 动作位仍是端点级一颗摆主行：intl 组有新版本 → 更新
+  const actions = descendants(h.row("qoder"), (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1, "动作位端点级一颗");
+  assert.equal(actions[0].textContent, "更新");
+  assert.equal(descendants(lines[0], (node) => node.tagName === "button").length, 1, "按钮摆在主行（第一行）");
+  assert.equal(descendants(lines[1], (node) => node.tagName === "button").length, 0, "未装的 CN 行无动作位");
 });
 
-test("qoder 两版都未装：回落 intl 单行如实报未找到", async () => {
+test("qoder 两版都未装：双行恒在、各自如实报未找到", async () => {
   const h = harness(editionRemotes(qoderEditioned({ intl: false, cn: false })));
   await h.controller.enter();
   const lines = editionLines(h);
-  assert.equal(lines.length, 1);
+  assert.equal(lines.length, 2, "支持面全量声明，不回落单行");
   assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"]);
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"]);
   assert.match(lines[0].textContent, /本地 未找到/);
+  assert.match(lines[1].textContent, /本地 未找到/);
 });
 
 test("安装记录不带 edition 的端点渲染零变化（qoder 旧形记录仍归并为一行）", async () => {
