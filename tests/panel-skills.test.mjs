@@ -1118,13 +1118,25 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
     // 10px 小标签的 0.12em 宽字距挂在 .skills-group-title 整类上，整句标题也吃满——
     // 12.5px 下每个字多 1.5px，19 字标题比自然宽度多出 28.5px。短标签保留题感，
     // 整句式标题（折叠组 + 分叉冲突）按正文口径 0.02em。
-    const rawCss = read("panel.css");
-    assert.match(rawCss, /:scope:scope \.skills-group-title \{\n  font-size: 10px;\n  letter-spacing: 0\.12em;\n\}/,
-      "短分区标签仍保留 0.12em 题感宽字距");
-    assert.match(rawCss, /:scope:scope \.skills-group-title\.skills-anomaly-fold,\n:scope:scope \.skills-group-title\.skills-group-title-sentence \{\n  letter-spacing: 0\.02em;\n\}/,
-      "整句式分组标题必须把字距回落到正文口径 0.02em");
-    assert.match(rawCss, /:scope:scope \.skills-group-title\.skills-anomaly-fold \{\n  font-size: 12\.5px;\n\}/,
-      "折叠组标题字号仍为 12.5px，不被上面的 10px 带走");
+    // 皮肤归属锚定：这组规则的真实归属是 sepia 的 @scope 块（改写后块内选择器不再带
+    // 皮肤键），匹配域收进剥注释后的 sepia 作用域块——规则被注释掉（剥注释后消失）、
+    // 或整条挪进 saas / aurora 的 @scope 块，都会因 sepia 块内找不到而红；全文件文本
+    // 匹配只守「文件里存在这段文字」，守不住用例名声称的 sepia 前提。
+    const scopeOpen = panelCss.indexOf('@scope (:root[data-style="sepia"]) to (.wallpaper-preview) {');
+    assert.ok(scopeOpen >= 0, "panel.css 里找不到 sepia 皮肤的 @scope 收边外壳（本用例的前提）");
+    let depth = 0, scopeClose = -1;
+    for (let i = scopeOpen; i < panelCss.length; i++) {
+      if (panelCss[i] === "{") depth++;
+      else if (panelCss[i] === "}") { depth--; if (depth === 0) { scopeClose = i; break; } }
+    }
+    assert.ok(scopeClose > scopeOpen, "sepia @scope 块的花括号配对扫描失败");
+    const sepiaScope = panelCss.slice(scopeOpen, scopeClose + 1);
+    assert.match(sepiaScope, /:scope:scope \.skills-group-title \{\n  font-size: 10px;\n  letter-spacing: 0\.12em;\n\}/,
+      "sepia 块内：短分区标签仍保留 0.12em 题感宽字距");
+    assert.match(sepiaScope, /:scope:scope \.skills-group-title\.skills-anomaly-fold,\n:scope:scope \.skills-group-title\.skills-group-title-sentence \{\n  letter-spacing: 0\.02em;\n\}/,
+      "sepia 块内：整句式分组标题必须把字距回落到正文口径 0.02em");
+    assert.match(sepiaScope, /:scope:scope \.skills-group-title\.skills-anomaly-fold \{\n  font-size: 12\.5px;\n\}/,
+      "sepia 块内：折叠组标题字号仍为 12.5px，不被上面的 10px 带走");
     assert.match(extractFn("renderSkillsAnomalies", ""),
       /class="skills-group-title skills-group-title-sentence"[^>]*>分叉冲突（与仓库同名但内容不同）</,
       "分叉冲突标题同为整句，必须带 sentence 修饰类才吃到上面的回落");

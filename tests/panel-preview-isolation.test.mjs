@@ -9,7 +9,7 @@
 //     `:scope:scope`（两个伪类 = (0,2,0)，与原前缀特异性相等；其余条件原样保留），否则
 //     整块皮肤规则在真实看板与预览里都匹配不到。改写等价性（前缀归一化后选择器逐条
 //     等于 base 版本、特异性逐条相等、规则条数与多重集相等、声明逐条相同）由本文件
-//     对 base 版本（d170982）逐文件校验，并对 base CSS 反向断言必须判红。
+//     对 base 版本（218f6f9）逐文件校验，并对 base CSS 反向断言必须判红。
 // 二、私有 token：`.wallpaper-preview` 上按壁纸主题生效时真实看板的 computed 值逐项补齐
 //     皮肤私有 token（基座段有定义的抄基座段，没有的显式 initial）。
 // 口径说明：
@@ -30,9 +30,12 @@ const panelHtml = readFileSync(join(rootDir, "panel-ui", "panel.html"), "utf8");
 const SLUGS = ["saas", "aurora", "sepia"];
 const PREVIEW = ".wallpaper-preview";
 // 改写前的基准版本：@scope 收边已存在但选择器仍是「:root + 皮肤键」前缀的最后一版。
+// e01ede8 首个把皮肤覆盖规则收进 @scope，218f6f9 补齐 v2 集中段的收边，0b51458 才把
+// 块内前缀改写成 :scope:scope——基准必须取 218f6f9：早于 e01ede8 的版本里 inScope
+// 恒空、逐条比较循环零次迭代，红测只剩「找不到 @scope 块」一道闸。
 // 断言逐文件比对选择器/特异性/条数/声明；git 取不到该版本时（浅克隆、源码包）跳过，
 // 不用假绿代替——跳过会显示在 node --test 的 skip 计数里。
-const BASE_REV = "d170982";
+const BASE_REV = "218f6f9";
 const SCOPE_FILES = [
   "panel-ui/panel.css",
   ...SLUGS.map((slug) => `panel-ui/style-lab/${slug}.css`),
@@ -87,6 +90,7 @@ function parseCss(text) {
           chain: frames.map((f) => f.pre),
           sel: frame.pre,
           line: frame.line,
+          endLine: line,
           body: css.slice(frame.bodyStart, i),
         });
       }
@@ -257,6 +261,17 @@ function selectorMultiset(list) {
   for (const sel of list) map.set(sel, (map.get(sel) ?? 0) + 1);
   return [...map.entries()].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
 }
+// 规则所在 @scope 块起点（前导）携带的皮肤键集合：块内选择器改写后不再带皮肤键，
+// 皮肤归属只剩起点这一个载体。
+function scopeSkinKeys(rule) {
+  const keys = new Set();
+  for (const pre of rule.chain) {
+    if (!pre.startsWith("@scope")) continue;
+    const frame = scopeFrame(pre);
+    if (frame) for (const k of skinKeys(frame.start)) keys.add(k);
+  }
+  return keys;
+}
 function auditScopedCss(cssText, baseCssText, label) {
   const violations = [];
   const rules = parseCss(cssText);
@@ -286,6 +301,17 @@ function auditScopedCss(cssText, baseCssText, label) {
       const actual = splitSelectorList(s.sel).join(", ");
       canonicalBase.push(canonical.text);
       if (!canonical.ok) violations.push(label + ": base 第 " + (i + 1) + " 条选择器无法归一化：" + b.sel.slice(0, 140));
+      // 皮肤键闸（文件头口径「作用域起点必须覆盖规则自身的皮肤键」的落实）：base 侧
+      // 选择器链首的皮肤键必须全部出现在当前规则所在 @scope 块的起点里。规则被挪进
+      // 别的皮肤块（或块起点写错皮肤）时，展平顺序、前缀归一化、特异性、声明全部照旧
+      // 相等，只有这道闸会红——挪动正是「静默丢样式」。
+      const scopeKeys = scopeSkinKeys(s);
+      for (const k of skinKeys(b.sel)) {
+        if (!scopeKeys.has(k)) {
+          violations.push(label + ": 第 " + (i + 1) + " 条的皮肤键 " + k + " 不在其 @scope 起点内（起点皮肤：" +
+            (scopeKeys.size ? [...scopeKeys].join("/") : "无") + "）——该条对 " + k + " 看板整条静默失效：" + actual.slice(0, 120));
+        }
+      }
       if (canonical.text !== actual) {
         violations.push(label + ": 第 " + (i + 1) + " 条前缀归一化后与 base 不一致\n  base: " + canonical.text + "\n  当前: " + actual);
       }
@@ -307,13 +333,15 @@ function auditScopedCss(cssText, baseCssText, label) {
 // 一、@scope 收边
 // ═══════════════════════════════════════════════
 describe("皮肤规则的 @scope 收边", () => {
-  it("panel.css 的每个 @scope 终点都恰为 .wallpaper-preview", () => {
+  it("panel.css 的每个 @scope 起点都带皮肤键、终点都恰为 .wallpaper-preview", () => {
     const frames = new Set();
     for (const r of RULES) for (const pre of r.chain) if (pre.startsWith("@scope")) frames.add(pre);
     assert.ok(frames.size > 0, "panel.css 找不到任何 @scope ——收边外壳缺失");
     for (const pre of frames) {
       const scope = scopeFrame(pre);
       assert.ok(scope, `@scope 写法不可解析：${pre}`);
+      assert.ok(skinKeys(scope.start).length > 0,
+        `@scope 起点必须携带皮肤键（saas/aurora/sepia），实为「${scope.start}」——皮肤归属只剩起点这一个载体，起点不带皮肤键等于给挪块开了门`);
       assert.equal(scope.end, PREVIEW, `@scope 终点应恰为 ${PREVIEW}，实为 ${scope.end}`);
     }
   });
@@ -338,8 +366,10 @@ describe("皮肤规则的 @scope 收边", () => {
       "——它们是「自定义」窗口预览吃到当前皮肤的直接来源；主语就是 :root 的皮肤 token 定义才是例外");
   });
 
-  // 作用域起点与选择器皮肤键的一一对应（改写前口径）由下方「作用域内选择器改写」组取代：
-  // 块内选择器不再带皮肤键，起点与选择器的对应改由「前缀归一化后与 base 逐条相等」校验。
+  // 作用域起点与选择器皮肤键的一一对应（改写前口径）由下方「作用域内选择器改写」组接手：
+  // 块内选择器不再带皮肤键，「前缀归一化后与 base 逐条相等」只保证选择器本身没改样，
+  // 挡不住把规则挪进别的皮肤块（挪动后顺序、特异性、声明都可以照旧）——起点覆盖由
+  // auditScopedCss 的皮肤键闸与防挪用例承担。
 
   it("预览视口不再被皮肤换底规则命中（.wallpaper-preview-viewport 保持透明底）", () => {
     assert.ok(panelHtml.includes('class="settings-mirror-viewport wallpaper-preview-viewport"'),
@@ -362,9 +392,11 @@ describe("皮肤规则的 @scope 收边", () => {
 // @scope 的作用域不含作用域根自身：块内保留「:root + 皮肤键」前缀的选择器一条都匹配不到，
 // 整段皮肤会静默失效。改写口径 = 只把链首的「:root + [data-style=皮肤]」换成 :scope:scope，
 // 其余条件（[data-theme="dark"]、v2 块的 [data-ui-version="v2"] 等）原样保留，从而与原
-// 前缀特异性逐条相等。下面对每个含 @scope 的文件与 base 版本（d170982）逐条对账：
-// 选择器（前缀归一化后）、特异性、规则条数、选择器多重集、声明体。对 base CSS 反向断言
-// 必须判红——否则这组断言已失去判别力。
+// 前缀特异性逐条相等。下面对每个含 @scope 的文件与 base 版本（218f6f9）逐条对账：
+// 选择器（前缀归一化后）、特异性、规则条数、选择器多重集、声明体，外加皮肤键闸——
+// base 侧选择器的皮肤键必须仍在当前规则所在 @scope 块的起点内（规则被挪进别的皮肤块
+// 时其余各项都可以照旧相等，只有起点对不上）。对 base CSS 反向断言必须判红——否则这
+// 组断言已失去判别力。
 describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
   for (const rel of SCOPE_FILES) {
     const baseCss = readBaseCss(rel);
@@ -385,6 +417,41 @@ describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
     const report = auditScopedCss(baseCss, baseCss, `base ${BASE_REV} panel.css`);
     assert.ok(report.violations.length > 0,
       "base CSS 竟然通过了改写断言：这组断言已失去判别力（应报出「没有 @scope 块 / 规则条数不等」）");
+  });
+
+  test("把规则挪进别的皮肤 @scope 块必须判红（静默丢样式防挪闸）", {
+    skip: readBaseCss("panel-ui/panel.css") ? false : "git 取不到 base 版本，跳过防挪对照",
+  }, () => {
+    const baseCss = readBaseCss("panel-ui/panel.css");
+    const lines = panelCss.split("\n");
+    // 挪动设计：取 saas/sepia 合并块的第一条规则，挪到它前面最近的 aurora 块内末尾。
+    // 两块之间没有别的 @scope 内规则，尾接尾挪动后展平顺序不变——前缀归一化、特异性、
+    // 声明、多重集全部照旧绿，唯一该红的是皮肤键闸（复核复现过：这条变异在闸补上前
+    // violations=[]、175/175 全绿）。挪进 aurora 块后，该条对 saas/sepia 看板整条失效，
+    // 正是文件头口径声明要拦的「静默丢样式」。
+    const mergeRule = RULES.find((r) => {
+      if (!r.chain.some((p) => p.startsWith("@scope"))) return false;
+      const keys = scopeSkinKeys(r);
+      return keys.size === 2 && keys.has("saas") && keys.has("sepia");
+    });
+    assert.ok(mergeRule, "panel.css 应存在 saas/sepia 合并 @scope 块内的规则（本用例的挪动源）");
+    const auroraBefore = RULES.filter((r) => {
+      const keys = scopeSkinKeys(r);
+      return keys.size === 1 && keys.has("aurora") && r.line < mergeRule.line;
+    });
+    assert.ok(auroraBefore.length > 0, "合并块之前应存在 aurora @scope 块内的规则（本用例的挪动目标）");
+    const lastAurora = auroraBefore[auroraBefore.length - 1];
+    const span = mergeRule.endLine - mergeRule.line + 1;
+    const moved = lines.splice(mergeRule.line - 1, span);
+    lines.splice(lastAurora.endLine, 0, ...moved);
+    const report = auditScopedCss(lines.join("\n"), baseCss, "panel-ui/panel.css");
+    const skinGate = report.violations.filter((v) => v.includes("不在其 @scope 起点内"));
+    assert.deepEqual(skinGate.map((v) => /皮肤键 (\w+)/.exec(v)[1]).sort(), ["saas", "sepia"],
+      "挪进 aurora 块的 saas/sepia 规则必须报出两个皮肤键都不在起点内：" + JSON.stringify(report.violations, null, 2));
+    const others = report.violations.filter((v) => !v.includes("不在其 @scope 起点内"));
+    assert.deepEqual(others, [],
+      "尾接尾挪动保持展平顺序——前缀归一化/条数/特异性/声明/多重集必须照旧全绿，红只能来自皮肤键闸：" +
+      JSON.stringify(others, null, 2));
   });
 });
 
