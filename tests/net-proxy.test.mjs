@@ -1,6 +1,7 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { join } from "node:path";
 import { normalizeProxyUrl, resolveHttpProxy, fetchViaProxy } from "../src/ops/net-proxy.mjs";
 
 it("normalizeProxyUrl accepts only http:// proxies with a hostname", () => {
@@ -33,8 +34,9 @@ it("resolveHttpProxy falls back to git config, tries the install path on ENOENT,
     callback(null, "http://from-git:7890\n", "");
   });
   assert.equal(await resolveHttpProxy({ env: {}, spawnFn }), "http://from-git:7890/");
-  assert.deepEqual(calls, ["git", calls[1]]);
-  assert.notEqual(calls[1], "git");
+  // ENOENT 换腿后的第二候选是安装位 git.exe：夹具 env 为空，钉住按缺省
+  // ProgramFiles 派生的完整路径——候选写成 bin 变体、派生段或缺省值写错都会红。
+  assert.deepEqual(calls, ["git", join("C:\\Program Files", "Git", "cmd", "git.exe")]);
 
   // 键缺席（退出码 1，error 但非 ENOENT）即定论「未配置」，不再试下一个候选。
   const absent = await resolveHttpProxy({
@@ -87,6 +89,9 @@ it("fetchViaProxy forwards CONNECT target and Proxy-Authorization, and fails hon
       fetchViaProxy({ url: "https://api.github.com/", proxyUrl: `http://127.0.0.1:${port}`, signal: controller.signal }),
       /aborted/,
     );
+    // 复查代理侧记录：预中止在建连前短路，seen 必须仍停留在上一腿的唯一一条
+    // CONNECT——短路若被挪到建连之后仍以 aborted 收尾，这里会红。
+    assert.equal(seen.length, 1);
   } finally {
     await new Promise((resolve) => proxy.close(resolve));
   }

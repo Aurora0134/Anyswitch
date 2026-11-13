@@ -254,24 +254,30 @@ test("预览拒绝：非 zip、缺 manifest、格式版本不符、store 非法"
 
   // credentials.json 里的 credentialFile 同样不可信：逐条过 validateCredentialRef，
   // 越界形态（../、..\、8.3 短名中间段、盘符形）任一命中即整包拒绝，最后一条
-  // 合法裸名救不了整单。
-  const hostileCreds = writeBadZip({
-    "manifest.json": JSON.stringify({ format: 1 }),
-    "store.json": JSON.stringify(validStore()),
-    "credentials.json": JSON.stringify({ entries: [
-      { providerId: "p0", credentialFile: "../escape.txt", plaintextBase64: "U0VDUkVUMA==" },
-      { providerId: "p1", credentialFile: "..\\escape2.txt", plaintextBase64: "U0VDUkVUMQ==" },
-      { providerId: "p2", credentialFile: "LONGVI~1/short83.txt", plaintextBase64: "U0VDUkVUMg==" },
-      { providerId: "p3", credentialFile: "C:drive.txt", plaintextBase64: "U0VDUkVUMw==" },
-      { providerId: "p9", credentialFile: "alpha.dpapi", plaintextBase64: "U0VDUkVUOQ==" },
-    ] }),
-  });
-  await pack(hostileCreds.staging, hostileCreds.zip);
-  const credReject = await service.previewBundle(hostileCreds.zip);
-  assert.equal(credReject.ok, false, "带越界 credentialFile 的包必须在预览整包拒绝");
-  assert.match(credReject.error, /包里的 credentials\.json 不合法：entries\[0\]\.credentialFile: /);
-  assert.match(credReject.error, /path separator/, "ref.reason 部分原样复用既有句式");
-  assert.equal(credReject.token, undefined, "预览被拒就不能签发票据");
+  // 合法裸名救不了整单。inspectBundle 命中首条非法即 return（报错只带索引与
+  // 判词，不带形态原文），所以每种形态单独成包排到首条来钉：判词若没走到该
+  // 形态该命中的检查（如 ..\ 形落到字符白名单而不是分隔符检查），这里会红。
+  for (const [file, pattern] of [
+    ["../escape.txt", /path separator/],
+    ["..\\escape2.txt", /path separator/],
+    ["LONGVI~1/short83.txt", /path separator/],
+    ["C:drive.txt", /drive letter/],
+  ]) {
+    const hostileCreds = writeBadZip({
+      "manifest.json": JSON.stringify({ format: 1 }),
+      "store.json": JSON.stringify(validStore()),
+      "credentials.json": JSON.stringify({ entries: [
+        { providerId: "p0", credentialFile: file, plaintextBase64: "U0VDUkVUMA==" },
+        { providerId: "p9", credentialFile: "alpha.dpapi", plaintextBase64: "U0VDUkVUOQ==" },
+      ] }),
+    });
+    await pack(hostileCreds.staging, hostileCreds.zip);
+    const credReject = await service.previewBundle(hostileCreds.zip);
+    assert.equal(credReject.ok, false, `${file} 带越界 credentialFile 的包必须在预览整包拒绝`);
+    assert.match(credReject.error, /包里的 credentials\.json 不合法：entries\[0\]\.credentialFile: /, file);
+    assert.match(credReject.error, pattern, `${file}: ref.reason 部分原样复用既有句式`);
+    assert.equal(credReject.token, undefined, "预览被拒就不能签发票据");
+  }
 
   // 逐条扫描：首条合法时，报错要指向真正出问题的那条（含索引与盘符形判词）。
   const hostileCredsLate = writeBadZip({
@@ -639,8 +645,9 @@ test("落定守门：预览后才落进暂存的毒 credentials.json，写盘前
     const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
     assert.equal(applied.ok, false, "毒密钥条目必须在写盘前被拒");
     assert.match(applied.error, /包里的 credentials\.json 不合法：entries\[0\]\.credentialFile: /);
+    // 毒条目的真实落点是 canary 本身（credentialFile 决定写盘路径），上面逐字节
+    // 钉住即可；credentialsDir/alpha.dpapi 在一切行为分支下都不存在，钉它是恒真。
     assert.equal(readFileSync(canary, "utf8"), "keep\n", "credentials 目录之外的路径一个字节都不能被写");
-    assert.equal(existsSync(join(dst.paths.credentialsDir, "alpha.dpapi")), false, "毒条目不落盘");
     assert.equal(existsSync(join(dst.root, "backups")), false, "拒绝要发生在备份之前，不留备份残留");
     assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["beta"], "本机 store 未动");
   });

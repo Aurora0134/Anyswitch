@@ -1143,7 +1143,10 @@ test("通用: 全失败调用不建备份目录，也不触碰既有备份", asy
   const { dir, backupRoot } = setup();
   const filePath = writeFixture(dir, "kimi/config.toml", kimiFixture());
 
-  for (let i = 1; i <= 3; i++) {
+  // 6 个历史备份目录（> keep=5）把「不收敛」钉出区分度：收敛闸若失效
+  // （无条件 prune），最旧的 1 个会被删，末尾的清单对比才会真的红。
+  // backupDir===null 拒删腿与「kimi: baseURL 不一致」用例重复，那里已钉。
+  for (let i = 1; i <= 6; i++) {
     const old = join(backupRoot, `byok-import-2026010${i}-000000`);
     mkdirSync(old, { recursive: true });
     writeFileSync(join(old, "config.toml"), `old-${i}\n`, "utf8");
@@ -1159,6 +1162,5 @@ test("通用: 全失败调用不建备份目录，也不触碰既有备份", asy
   assert.deepEqual(result.removed, []);
   assert.equal(result.failed.length, 1);
   assert.ok(result.failed[0].error.startsWith("identity-mismatch"), result.failed[0].error);
-  assert.equal(result.backupDir, null);
-  assert.deepEqual(readdirSync(backupRoot).sort(), before, "无文件改动时不收敛用户历史备份");
+  assert.deepEqual(readdirSync(backupRoot).sort(), before, "无文件改动时不收敛用户历史备份：6 个历史目录一个都不能少");
 });
