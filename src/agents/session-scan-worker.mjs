@@ -40,8 +40,11 @@ const SCAN_TIMEOUT_MS = 120_000;
 const REVIVE_COOLDOWN_MS = 5 * 60_000;
 
 // One request/response channel to the scan worker, plus the in-process
-// fallback. `fallback.scanAll()` / `fallback.scanAgent(id)` must be the same
-// session-scan entry points, so both paths return the same shape.
+// fallback. `fallback.scanAll()` / `fallback.scanAgent(id)` /
+// `fallback.loadMessagesResponse(endpoint, file)` must be the same
+// session-scan entry points, so every request returns the same shape on
+// both paths — a key missing from the fallback only surfaces when that
+// request degrades to in-process, as a TypeError at the call site.
 export function createSessionScanOffload({
   workerFile = WORKER_FILE,
   workerData = null,
