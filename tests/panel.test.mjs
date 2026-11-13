@@ -3704,6 +3704,19 @@ describe("panel.html 设置全页视图", () => {
     }
   });
 
+  // 裁决②定稿：跟随说明弃枚举式（旧句枚举 7 个端点，anyAgent 实际计 10——
+  // 枚举必然再漂移），改用户逐字确认的概括式定稿句（注意逗号）。
+  it("「跟随 Coding Agent 启动」说明为概括式定稿句，不再枚举端点", () => {
+    const iTitle = panelHtml.indexOf("跟随 Coding Agent 启动");
+    assert.ok(iTitle > 0, "说明行在设置页内");
+    const desc = panelHtml.slice(iTitle, iTitle + 400).match(/<div class="modal-item-desc">([\s\S]*?)<\/div>/)?.[1] ?? "";
+    assert.ok(
+      desc.includes("检测到受支持的 Coding Agent 运行时，自动保持 Relay 链路就绪。"),
+      "概括式定稿句逐字在场（含逗号）",
+    );
+    assert.doesNotMatch(desc, /ZCode.*Claude Code.*Qoder/, "不再枚举端点名（枚举式必然再漂移）");
+  });
+
   it("「通用」子 tab 分六张卡：启动/显示/抗截断/Claude Code/实时输出 带图标卡头，其余未归类平卡", () => {
     const general = panelHtml.slice(
       panelHtml.indexOf('id="settingsPanelGeneral"'),
