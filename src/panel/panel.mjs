@@ -3958,7 +3958,7 @@ export function createPanelRouter({
         }
         return sendJson(res, 200, { ...result, comparison });
       } catch {
-        return sendJson(res, 200, { state: "error", version: null, url: null, source: "", checkedAt: new Date().toISOString(), errorCode: "update_unavailable", comparison: "unknown" });
+        return sendJson(res, 200, { state: "error", version: null, url: null, source: "", errorCode: "update_unavailable", comparison: "unknown" });
       }
     }
     if (path === "/panel/api/environment/update" && method === "POST") return handleClientUpdate(req, res);

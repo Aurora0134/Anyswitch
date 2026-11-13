@@ -111,7 +111,7 @@ function environment() {
     })),
   };
 }
-const latest = (version = "1.1.0", comparison = "update_available") => ({ state: "ok", version, comparison, source: "npm", checkedAt: "2026-09-18T08:01:00Z", url: "https://www.npmjs.com/package/@anthropic-ai/claude-code" });
+const latest = (version = "1.1.0", comparison = "update_available") => ({ state: "ok", version, comparison, source: "npm", url: "https://www.npmjs.com/package/@anthropic-ai/claude-code" });
 
 function harness(respond = () => latest(), options = {}) {
   const nodes = new Map();
@@ -451,12 +451,12 @@ test("DSH 双组件并段：CLI 段摆社区插件版本、最新格前缀「最
   assert.doesNotMatch(text, /官方最新/);
   assert.match(text, /有新版本/, "结论跟社区插件的比对走");
   assert.ok(h.calls.includes("/api/environment/latest/dsh-tui?localVersion=0.15.0"), "插件按自己的远端 id 查最新");
-  // 详情区：CLI 组就是社区插件（路径/版本来源/上游来源/查询时间 + 一句说明），
+  // 详情区：CLI 组就是社区插件（路径/版本来源/上游来源 + 一句说明），
   // 桌面组原样跟在后面；本体 harness 不单列。
   assert.match(row.textContent, /CLI 路径C:\\Apps\\dsh\\tui\\bin\\dsh-tui\.js/);
   assert.match(row.textContent, /CLI 版本来源安装包资料/);
   assert.match(row.textContent, /CLI 上游来源/);
-  assert.match(row.textContent, /CLI 查询时间/);
+  assert.doesNotMatch(row.textContent, /查询时间/, "详情区不再有查询时间行");
   assert.match(row.textContent, /CLI 说明由社区插件提供，内核为官方版本/);
   assert.doesNotMatch(row.textContent, /终端插件/, "终端插件那组文案整组撤掉");
   assert.match(row.textContent, /桌面 路径C:\\Apps\\dsh\\desktop/, "桌面组原样保留");
@@ -694,7 +694,7 @@ test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，�
     ["国际", "CN"], "列头国际在左 CN 在右");
   const colDts = (col) => descendants(col, (node) => node.tagName === "dt").map((node) => node.textContent);
   assert.deepEqual(colDts(cols[0]),
-    ["CLI 路径", "CLI 版本来源", "CLI 官方来源", "CLI 查询时间", "桌面 路径", "桌面 版本来源", "桌面 官方来源", "桌面 查询时间"],
+    ["CLI 路径", "CLI 版本来源", "CLI 官方来源", "桌面 路径", "桌面 版本来源", "桌面 官方来源"],
     "intl 列行结构与其他端点一致");
   assert.deepEqual(colDts(cols[1]), colDts(cols[0]), "CN 列与 intl 列同构（CN 官方源已接线）");
   assert.ok(cols[0].textContent.includes("C:\\Apps\\qoder-intl") && !cols[0].textContent.includes("qoder-cn"), "intl 列只摆 intl 组");
