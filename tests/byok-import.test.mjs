@@ -378,6 +378,30 @@ test("qoder: qoder-custom-anyswitch-<hash> excluded, user connection listed", as
   assert.equal(entry.status, "ok");
 });
 
+// 双区域版（2026-11-12 契约）：intl 与 CN 根各扫各的，候选按 sourcePath 记
+// 真实根；同名连接两侧都有时按 sourceId 去重，intl 根先扫胜出。
+test("qoder 双区域版：双根候选合并扫描，同名连接 intl 根胜出", async () => {
+  const fixture = makeFixture();
+  writeJson(join(fixture.homeDir, ".qoder", "settings.json"), {
+    providers: {
+      "intl-only": { baseUrl: "https://intl.example.com/v1", apiKey: "i-secret", models: [{ model: "im1" }] },
+      shared: { baseUrl: "https://shared-intl.example.com/v1", apiKey: "s-intl", models: [{ model: "sm1" }] },
+    },
+  });
+  writeJson(join(fixture.homeDir, ".qoder-cn", "settings.json"), {
+    providers: {
+      "cn-only": { baseUrl: "https://cn.example.com/v1", apiKey: "c-secret", displayName: "CN Conn", models: [{ model: "cm1" }] },
+      shared: { baseUrl: "https://shared-cn.example.com/v1", apiKey: "s-cn", models: [{ model: "sm1" }] },
+      "qoder-custom-anyswitch-0123456789abcdef": { baseUrl: "http://127.0.0.1:47820/openai/qoder~mg/v1", apiKey: "k", models: [] },
+    },
+  });
+  const service = makeService(fixture);
+  const scan = await service.scanLocalConfigs();
+  assert.deepEqual(agentKeys(scan, "qoder"), ["qoder::intl-only", "qoder::shared", "qoder::cn-only"]);
+  assert.equal(findEntry(scan, "qoder", "shared").baseURL, "https://shared-intl.example.com/v1", "同名连接 intl 根的胜出");
+  assert.equal(findEntry(scan, "qoder", "cn-only").displayName, "CN Conn");
+});
+
 test("grok: one [model.x] table = one candidate, managed and [models] excluded", async () => {
   const fixture = makeFixture();
   writeText(

@@ -56,7 +56,7 @@ import {
 import { readOpencodeConfig } from "../launchers/opencode-merge-config.mjs";
 import { readModelsJson } from "../launchers/pi-merge-models.mjs";
 import { dshManagedKeys, dshProfilePatchPaths, getYamlModule, dshYamlSchema } from "../launchers/dsh-merge-config.mjs";
-import { readQoderSettings } from "../launchers/qoder-merge-config.mjs";
+import { readQoderSettings, qoderSettingsPath, QODER_EDITIONS } from "../launchers/qoder-merge-config.mjs";
 import { workbuddyModelsPath } from "../launchers/workbuddy-merge-models.mjs";
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
@@ -466,25 +466,31 @@ async function scanDsh(homeDir, sidecarIds) {
 
 const QODER_MANAGED_ID = /^qoder-custom-anyswitch-[0-9a-f]{16}$/;
 
+// 双区域版（2026-11-12 契约）：intl 与 CN 根各扫各的 settings.json，候选按根
+// 合并、sourcePath 记真实根（移除面按 sourcePath 落刀，天然逐根）。同名连接
+// 两侧都有时下游按 sourceId 去重，先扫到的根（intl）胜出；读不出/不存在的根
+// readQoderSettings 回 {}，天然跳过。
 function scanQoder(homeDir, sidecarIds) {
-  const settingsPath = join(homeDir, ".qoder", "settings.json");
-  const settings = readQoderSettings(settingsPath); // {} when absent
   const candidates = [];
-  for (const [id, connection] of Object.entries(settings?.providers ?? {})) {
-    if (!isRecord(connection)) continue;
-    if (QODER_MANAGED_ID.test(id) || sidecarIds.has(id)) continue;
-    const baseURL = connection.baseUrl;
-    if (typeof baseURL !== "string" || baseURL.length === 0) continue;
-    candidates.push({
-      sourceId: id,
-      sourcePath: settingsPath,
-      displayName: typeof connection.displayName === "string" && connection.displayName ? connection.displayName : id,
-      baseURL,
-      models: (Array.isArray(connection.models) ? connection.models : [])
-        .filter((m) => isRecord(m) && typeof m.model === "string" && m.model.length > 0)
-        .map((m) => ({ id: m.model, displayName: typeof m.displayName === "string" && m.displayName ? m.displayName : m.model })),
-      keySource: literalKey(connection.apiKey),
-    });
+  for (const edition of QODER_EDITIONS) {
+    const settingsPath = qoderSettingsPath(homeDir, edition);
+    const settings = readQoderSettings(settingsPath); // {} when absent
+    for (const [id, connection] of Object.entries(settings?.providers ?? {})) {
+      if (!isRecord(connection)) continue;
+      if (QODER_MANAGED_ID.test(id) || sidecarIds.has(id)) continue;
+      const baseURL = connection.baseUrl;
+      if (typeof baseURL !== "string" || baseURL.length === 0) continue;
+      candidates.push({
+        sourceId: id,
+        sourcePath: settingsPath,
+        displayName: typeof connection.displayName === "string" && connection.displayName ? connection.displayName : id,
+        baseURL,
+        models: (Array.isArray(connection.models) ? connection.models : [])
+          .filter((m) => isRecord(m) && typeof m.model === "string" && m.model.length > 0)
+          .map((m) => ({ id: m.model, displayName: typeof m.displayName === "string" && m.displayName ? m.displayName : m.model })),
+        keySource: literalKey(connection.apiKey),
+      });
+    }
   }
   return candidates;
 }
