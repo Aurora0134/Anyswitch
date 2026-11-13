@@ -168,7 +168,7 @@ test("检查更新接口提供真实预览版发布链接，网络失败不转�
 });
 
 test("官方客户端版本查询只允许已支持客户端", async () => {
-  const latest = { state: "ok", version: "0.1.5-rc.2", url: "https://github.com/deepseek-ai/deepseek-harness/releases", source: "npm", checkedAt: "2026-09-18T00:00:00Z", errorCode: null };
+  const latest = { state: "ok", version: "0.1.5-rc.2", url: "https://github.com/deepseek-ai/deepseek-harness/releases", source: "npm", errorCode: null };
   await withPanel({ releaseService: { async getClientLatest(id, options) {
     assert.equal(id, "dsh");
     assert.deepEqual(options, { force: true });
@@ -184,7 +184,7 @@ test("官方客户端版本查询只允许已支持客户端", async () => {
 });
 
 test("Codex 桌面端纳入官方版本查询白名单，不再吃 unknown_client", async () => {
-  const latest = { state: "ok", version: "26.915.4066", url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS", source: "codex-desktop:windows-store:latest", checkedAt: "2026-09-18T00:00:00Z", errorCode: null };
+  const latest = { state: "ok", version: "26.915.4066", url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS", source: "codex-desktop:windows-store:latest", errorCode: null };
   await withPanel({ releaseService: { async getClientLatest(id, options) {
     assert.equal(id, "codex-desktop", "远端 id 原样传给发布服务");
     assert.deepEqual(options, { force: false });
@@ -200,7 +200,7 @@ test("Codex 桌面端纳入官方版本查询白名单，不再吃 unknown_clien
 });
 
 test("qoder-cli 纳入官方版本查询白名单，与 qoder 桌面端渠道各查各的", async () => {
-  const latest = { state: "ok", version: "1.1.64", url: "https://www.npmjs.com/package/@qoder-ai/qodercli", source: "npm:@qoder-ai/qodercli:latest", checkedAt: "2026-09-18T00:00:00Z", errorCode: null };
+  const latest = { state: "ok", version: "1.1.64", url: "https://www.npmjs.com/package/@qoder-ai/qodercli", source: "npm:@qoder-ai/qodercli:latest", errorCode: null };
   await withPanel({ releaseService: { async getClientLatest(id, options) {
     assert.equal(id, "qoder-cli", "远端 id 原样传给发布服务");
     assert.deepEqual(options, { force: false });
@@ -218,7 +218,7 @@ test("qoder-cli 纳入官方版本查询白名单，与 qoder 桌面端渠道各
 test("客户端预发布版本按数字比较，未知和查询失败保持无法比较", async () => {
   let offline = false;
   const service = { async getClientLatest() {
-    return { state: offline ? "error" : "ok", version: offline ? null : "0.5.0-preview.10", url: null, source: "npm", checkedAt: "2026-09-18T00:00:00Z", errorCode: offline ? "timeout" : null };
+    return { state: offline ? "error" : "ok", version: offline ? null : "0.5.0-preview.10", url: null, source: "npm", errorCode: offline ? "timeout" : null };
   } };
   await withPanel({ releaseService: service }, async (get) => {
     const update = await get("/panel/api/environment/latest/dsh?localVersion=0.5.0-preview.2");
@@ -290,7 +290,7 @@ function clientState(versions = {}, issues = {}) {
 }
 
 const latestFor = (version) => ({
-  state: "ok", version, url: null, source: "npm", checkedAt: "2026-09-18T00:00:00.000Z", errorCode: null,
+  state: "ok", version, url: null, source: "npm", errorCode: null,
 });
 
 async function waitForRun(get, runId) {

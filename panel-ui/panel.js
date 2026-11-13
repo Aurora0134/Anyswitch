@@ -4219,7 +4219,7 @@ async function api(method, path, body) {
         }
         lines.appendChild(line);
       }
-      // 详情区逐安装项补行：路径、版本来源、来源、查询时间，一条安装记录一组。
+      // 详情区逐安装项补行：路径、版本来源、来源，一条安装记录一组。
       // 区域版端点（qoder）详情区按区域版分两列——形态与区域两个正交维度在详情区的
       // 落法：区域＝列（列头小注「国际」「CN」，国际在左 CN 在右），形态＝列内行标签
       // 前缀；列内行结构与其他端点一致、信息零删减，满配视觉高度减半。窄屏时两列塌成
@@ -4239,8 +4239,6 @@ async function api(method, path, body) {
           link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
           linkTarget.appendChild(link); target.append(element("dt", "", `${kind} ${installation.kind === "tui" ? "上游来源" : "官方来源"}`), linkTarget);
         }
-        const remote = remoteOf(installation);
-        if (remote?.checkedAt) put(`${kind} 查询时间`, timeText(remote.checkedAt));
         if (installation.kind === "tui") put("CLI 说明", "由社区插件提供，内核为官方版本");
       };
       if (editionGroups) {

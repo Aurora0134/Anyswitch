@@ -236,8 +236,7 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, proxyRes
     // 渲染链接行，version null 表示「此渠道不提供可比对的版本号」。
     if (spec.format === "static") {
       return {
-        state: "ok", version: null, url: spec.url, source: spec.source,
-        checkedAt: new Date(now()).toISOString(), errorCode: null,
+        state: "ok", version: null, url: spec.url, source: spec.source, errorCode: null,
       };
     }
     try {
@@ -258,13 +257,12 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, proxyRes
       const parsed = parseVersion(version);
       if (!parsed) throw new ReleaseError("invalid_response");
       return {
-        state: "ok", version, url: spec.url, source: spec.source,
-        checkedAt: new Date(now()).toISOString(), errorCode: null,
+        state: "ok", version, url: spec.url, source: spec.source, errorCode: null,
       };
     } catch (error) {
       return {
         state: "error", version: null, url: null, source: spec.source,
-        checkedAt: new Date(now()).toISOString(), errorCode: error instanceof ReleaseError ? error.code : "network_error",
+        errorCode: error instanceof ReleaseError ? error.code : "network_error",
       };
     }
   }

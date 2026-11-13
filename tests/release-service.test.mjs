@@ -168,7 +168,6 @@ it("reports unavailable or malformed sources without claiming a latest version",
     assert.equal(result.errorCode, errorCode);
     assert.equal(result.version, null);
     assert.equal(result.url, null);
-    assert.equal(result.checkedAt, checkedAt);
     assert.equal(typeof result.source, "string");
   }
   const service = createReleaseService({ fetchFn: () => { assert.fail("unsupported id must not fetch"); } });
@@ -226,7 +225,7 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
       }
       return typeof payload === "string" ? new Response(payload) : json(payload);
     } });
-    assert.deepEqual(await service.getClientLatest(id), { state: "ok", version, url: page, source, checkedAt, errorCode: null });
+    assert.deepEqual(await service.getClientLatest(id), { state: "ok", version, url: page, source, errorCode: null });
   }
 });
 
@@ -236,12 +235,11 @@ it("answers the Claude desktop static source without any network request", async
   const service = createReleaseService({ now: () => current, fetchFn: async () => { fetched++; return json({}); } });
   const first = await service.getClientLatest("claude-desktop");
   assert.deepEqual(first, {
-    state: "ok", version: null, url: "https://claude.ai/download", source: "claude-desktop:win32-x64:msix", checkedAt, errorCode: null,
+    state: "ok", version: null, url: "https://claude.ai/download", source: "claude-desktop:win32-x64:msix", errorCode: null,
   });
   assert.equal(fetched, 0, "静态条目没有可请求的版本端点");
-  // 十分钟缓存同样覆盖静态条目：时钟推进后仍命中缓存，返回的还是同一个结果
-  // 对象；若静态分支被重新执行，新对象的 checkedAt 会跟着新时钟走（时钟冻结时
-  // 此断言恒真，钉不住缓存复用）。
+  // 十分钟缓存同样覆盖静态条目：时钟推进后仍命中缓存，返回的仍是同一个结果
+  // 对象（引用相等）；静态分支若被重新执行会造出一个新对象，这条断言随之失败。
   current += 599999;
   assert.equal(await service.getClientLatest("claude-desktop"), first);
 });
@@ -258,7 +256,7 @@ it("reads the Codex desktop version from the Windows Store update manifest", asy
       assert.deepEqual(options.headers, { Accept: "application/json" });
       return json({ schemaVersion: 1, buildVersion, storeProductId: "9PLM9XGG6VKS" });
     } });
-    assert.deepEqual(await service.getClientLatest("codex-desktop"), { state: "ok", version, url, source, checkedAt, errorCode: null });
+    assert.deepEqual(await service.getClientLatest("codex-desktop"), { state: "ok", version, url, source, errorCode: null });
   }
   const invalid = [
     { schemaVersion: 1, storeProductId: "9PLM9XGG6VKS" },
@@ -285,7 +283,6 @@ it("reads the Codex desktop version from the Windows Store update manifest", asy
     assert.equal(result.version, null);
     assert.equal(result.url, null);
     assert.equal(result.source, source);
-    assert.equal(result.checkedAt, checkedAt);
   }
 });
 
@@ -312,7 +309,7 @@ it("queries npm latest for each fixed CLI package, preserving preview channels",
       return json({ latest: version, stable: "1.0.0", alpha: "99.0.0-alpha" });
     } });
     assert.deepEqual(await service.getClientLatest(id), {
-      state: "ok", version, url: page, source: `npm:${name}:latest`, checkedAt, errorCode: null,
+      state: "ok", version, url: page, source: `npm:${name}:latest`, errorCode: null,
     });
   }
 });
