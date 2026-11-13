@@ -36,8 +36,10 @@ export const CLIENTS = {
   // provider/url/channel）——代更新按钮拿它与本地安装比对、再去同一个源取安装
   // 包，两处口径因此完全一致。频道 nightly、平台 win-x64 固定为常量：它们与
   // app-update.yml 是同一份事实，改了要跟着改。
-  // 官方来源链接指官网产品页（与仓库 homepage 同值）：旧值 harness.deepseek.com
-  // 整站 404。关于页当前不渲染这一条（panel.js 的 products 与域白名单都未收录）。
+  // 官方来源链接指官网产品页：旧值 harness.deepseek.com 整站 404；仓库 homepage 是
+  // 同站的 https://deepseek.com/harness（无 www、无尾斜杠，2026-11-13 实测），本条目
+  // 取带 www 与尾斜杠的形式。关于页当前不渲染这一条（panel.js 的 products 与域白名单
+  // 都未收录）。
   "dsh-desktop": {
     endpoint: "https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml",
     source: "dsh-desktop:win-x64:nightly", format: "yaml",
@@ -73,9 +75,12 @@ export const CLIENTS = {
   // Qoder 桌面端（intl IDE 线）的官方更新服务是 VS Code 式查询 API（IDE
   // product.json 的 updateUrl=https://center.qoder.sh/algo）：零 commit 探针即
   // 「给我最新版」，应答 JSON 的 productVersion 是官方语义化版本（实测 1.39.2，
-  // 工作台/IDE 两条产品线里 IDE 线的版本段）。旧条目指向的
-  // download.qoder.com.cn/qoder-app 实测服务的是 Qoder CN 桌面版（另一条产品
-  // 线，见下一条）——归属错误，CN 侧改由 "qoder-desktop-cn" 条目承担。
+  // 工作台/IDE 两条产品线里 IDE 线的版本段）。本条目原来的端点是
+  // download.qoder.com.cn/qoder-app/releases/latest.yml：那个路径下只有这一份可访问
+  // （2026-11-13 实测 version 0.5.7、产物 Qoder-win-x64-user.exe，根路径与 /latest.yml
+  // 均 404），与 IDE 线不在同一版本段。CN 桌面版的源是同路径的 static 主机那份
+  // （产物 Qoder-CN-win-x64-user.exe，与已装应用 app-update.yml 同源），由
+  // "qoder-desktop-cn" 条目承担。
   qoder: {
     endpoint: "https://center.qoder.sh/algo/api/update/win32-x64/stable/0000000000000000000000000000000000000000",
     source: "qoder:desktop:win32-x64:stable",

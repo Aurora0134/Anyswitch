@@ -202,9 +202,10 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
   // Qoder's updater installs every release into <installRoot>/.qoder-versions/<version>/
   // and never rewrites the install root, whose app.asar keeps reporting the first
   // installed version. The newest payload carrying both its executable and its
-  // app.asar is the one that runs. CN 工作台没有这套版本目录机制（id "qoder-cn"
-  // 对应的 .qoder-cn-versions 在盘上不存在），readdirSync 落空即回退到安装根的
-  // resources/app.asar 直读——这正是 CN 区域的常规路径。
+  // app.asar is the one that runs. Qoder CN 桌面版没有这套版本目录机制（id
+  // "qoder-cn" 对应的 .qoder-cn-versions 在盘上不存在，2026-11-13 实测），
+  // readdirSync 落空即回退到安装根的 resources/app.asar 直读——这正是 CN 区域的
+  // 常规路径。
   function desktopPayloads(id, executable) {
     const root = join(dirname(executable), `.${id}-versions`);
     let entries;
@@ -254,7 +255,8 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       const pkg = JSON.parse(readAt(entry.size, 8 + headerSize + Number(entry.offset)).toString("utf8"));
       // 只认归档确实属于这个产品：目录里的 app.asar 可能是别人的，包名对不上
       // 就不报版本（与 qoder / zcode 同一条防线）。qoder 双区域版分居两个 id：
-      // intl 认 "qoder"，cn 认 "qoder-cn"（CN 工作台 asar 里的真实包名）。
+      // intl 认 "qoder"，cn 认 "qoder-cn"（Qoder CN 桌面版 asar 里的真实包名，
+      // 2026-11-13 实测）。
       const expected = id === "zcode" ? ["zcode"]
         : id === "dsh-desktop" ? ["@deepseek-ai/dsh-desktop"]
         : id === "kimi-desktop" ? ["kimi-code-app"]
