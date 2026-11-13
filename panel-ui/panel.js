@@ -3265,7 +3265,8 @@ async function api(method, path, body) {
       // 原生二进制没有公开仓库发布页，官方来源只有 npm 包页（与服务端 release-service 同源）。
       grok: ["", "@xai-official/grok"],
       "qoder-cli": ["", "@qoder-ai/qodercli"],
-      zcode: [], qoder: [],
+      "qoder-cli-cn": ["", "@qodercn-ai/qoderclicn"],
+      zcode: [], qoder: [], "qoder-desktop-cn": [],
       // 桌面副形态的官方来源与主形态不同源：kimi 桌面端是独立仓库（仓库页照 github
       // 分支放行），claude 桌面端官方入口只有下载页（域名白名单在 safeLink）。
       "claude-desktop": [],
@@ -3290,6 +3291,7 @@ async function api(method, path, body) {
         if (url.hostname === "www.npmjs.com" && pkg && path === `/package/${pkg}`) return url.href;
         const hosts = id === "zcode" ? ["zcode.z.ai"]
           : id === "qoder" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn"]
+          : id === "qoder-desktop-cn" ? ["qoder.com.cn", "www.qoder.com.cn"]
           : id === "codex-desktop" ? ["apps.microsoft.com", "www.microsoft.com"]
           : id === "claude-desktop" ? ["claude.ai", "www.claude.ai"] : [];
         return hosts.includes(url.hostname) ? url.href : null;

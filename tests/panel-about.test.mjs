@@ -637,11 +637,11 @@ test("Qoder CLI 形态的官方来源链接放行 npm 包页，仿冒域名被�
 // 分两列（列头小注标区域，国际在左 CN 在右，列内行结构与其他端点一致），「检测
 // 时间」端点级一行通栏摆在两列之下。
 const qoderEditioned = ({ intl = true, cn = true } = {}) => {
-  // 与生产同构：CN 两条记录的 remoteId 恒为 null（environment-service 显式覆盖），
-  // 面板不为 CN 形态发官方版本查询，详情区 CN 列因此没有官方来源/查询时间行。
+  // 与生产同构：CN 两条记录的 remoteId 各指各的官方渠道（qoder-cli-cn／
+  // qoder-desktop-cn，2026-11-13 接线），面板为 CN 形态照常发官方版本查询。
   const record = (kind, edition, found) => ({
     kind, edition,
-    remoteId: edition === "cn" ? null : (kind === "cli" ? "qoder-cli" : "qoder"),
+    remoteId: kind === "cli" ? (edition === "cn" ? "qoder-cli-cn" : "qoder-cli") : (edition === "cn" ? "qoder-desktop-cn" : "qoder"),
     status: found ? "found" : "not_found",
     path: found ? `C:\\Apps\\qoder-${edition}\\${kind}` : null,
     version: found ? (edition === "cn" ? (kind === "cli" ? "1.0.0-cn" : "2.0.0-cn") : kind === "cli" ? "1.0.0" : "2.0.0") : null,
@@ -657,8 +657,11 @@ const qoderEditioned = ({ intl = true, cn = true } = {}) => {
   ];
   return local;
 };
+// 两个区域版的官方渠道各自查询：先判 CN 后缀，免得被 intl 的 remoteId 前缀吃掉
 const editionRemotes = (local) => (path) => {
   if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
+  if (path.includes("/latest/qoder-cli-cn")) return { ...latest("1.0.0-cn", "current"), url: "https://www.npmjs.com/package/@qodercn-ai/qoderclicn" };
+  if (path.includes("/latest/qoder-desktop-cn")) return { ...latest("2.0.0-cn", "current"), url: "https://qoder.com.cn/changelog" };
   if (path.includes("/latest/qoder-cli")) return { ...latest("1.1.0", "update_available"), url: "https://www.npmjs.com/package/@qoder-ai/qodercli" };
   if (path.includes("/latest/qoder")) return { ...latest("2.0.0", "current"), url: "https://qoder.com" };
   return normal(path);
@@ -677,8 +680,8 @@ test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，�
   assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 2\.0\.0/, "intl 行官方版本同口径并排");
   assert.match(lines[0].textContent, /有新版本/, "intl 行结论跟本组主形态比对");
   assert.match(lines[1].textContent, /本地 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/, "CN 行只摆 CN 组的版本");
-  assert.match(lines[1].textContent, /官方最新 自带更新/, "CN 记录 remoteId 恒 null：官方位直述自带更新");
-  assert.equal(descendants(lines[1], (node) => node.className === "about-result").length, 0, "无官方源可比 → CN 行不出结论位");
+  assert.match(lines[1].textContent, /官方最新 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/, "CN 行官方版本走 CN 渠道同口径并排");
+  assert.match(lines[1].textContent, /与官方最新版本一致/, "CN 行结论跟本组主形态比对");
   const actions = descendants(h.row("qoder"), (node) => node.tagName === "button" && node.className.includes("about-client-action"));
   assert.equal(actions.length, 1, "动作位端点级一颗");
   assert.equal(actions[0].textContent, "更新", "intl 组有新版本 → 端点级更新");
@@ -694,16 +697,33 @@ test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，�
   assert.deepEqual(colDts(cols[0]),
     ["CLI 路径", "CLI 版本来源", "CLI 官方来源", "CLI 查询时间", "桌面 路径", "桌面 版本来源", "桌面 官方来源", "桌面 查询时间"],
     "intl 列行结构与其他端点一致");
-  assert.deepEqual(colDts(cols[1]),
-    ["CLI 路径", "CLI 版本来源", "桌面 路径", "桌面 版本来源"],
-    "CN 列无官方源可查：只有路径与版本来源两行（无官方来源/查询时间）");
+  assert.deepEqual(colDts(cols[1]), colDts(cols[0]), "CN 列与 intl 列同构（CN 官方源已接线）");
   assert.ok(cols[0].textContent.includes("C:\\Apps\\qoder-intl") && !cols[0].textContent.includes("qoder-cn"), "intl 列只摆 intl 组");
   assert.ok(cols[1].textContent.includes("C:\\Apps\\qoder-cn") && !cols[1].textContent.includes("qoder-intl"), "CN 列只摆 CN 组");
+  // CN 列官方来源链接放行各自官方渠道（npm 镜像包页／CN 站 changelog）
+  const qoderLinks = descendants(h.row("qoder"), (node) => node.tagName === "a").map((node) => node.href);
+  assert.ok(qoderLinks.includes("https://www.npmjs.com/package/@qodercn-ai/qoderclicn"), "CN CLI 官方来源指 npm 镜像包页");
+  assert.ok(qoderLinks.includes("https://qoder.com.cn/changelog"), "CN 桌面官方来源指 CN 站 changelog");
   // 「检测时间」端点级一行，通栏摆在两列之下（不进任何一列）
   const checkTimes = descendants(h.row("qoder"), (node) => node.tagName === "dt" && node.textContent === "检测时间");
   assert.equal(checkTimes.length, 1);
   assert.ok(descendants(cols[0], (node) => node.textContent === "检测时间").length === 0
     && descendants(cols[1], (node) => node.textContent === "检测时间").length === 0, "检测时间不进区域列");
+});
+
+test("Qoder CN 官方来源只放行各自官方域名，仿冒域名被丢弃", async () => {
+  const local = qoderEditioned();
+  const base = editionRemotes(local);
+  const spoofed = harness((path) => {
+    if (path.includes("/latest/qoder-desktop-cn")) return { ...latest("2.0.0-cn", "current"), url: "https://qoder.com.cn.evil.test/changelog" };
+    if (path.includes("/latest/qoder-cli-cn")) return { ...latest("1.0.0-cn", "current"), url: "https://www.npmjs.com.evil.test/package/@qodercn-ai/qoderclicn" };
+    return base(path);
+  });
+  await spoofed.controller.enter();
+  const links = descendants(spoofed.row("qoder"), (node) => node.tagName === "a").map((node) => node.href);
+  assert.deepEqual(links.sort(), ["https://qoder.com/", "https://www.npmjs.com/package/@qoder-ai/qodercli"].sort(), "CN 两条仿冒链接被丢弃，intl 两条照常在");
+  const lines = editionLines(spoofed);
+  assert.match(lines[1].textContent, /官方最新 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/, "只是不放链接，CN 行版本比对照常");
 });
 
 test("qoder 仅 CN 版在装：国际版子行恒在、如实报未找到", async () => {

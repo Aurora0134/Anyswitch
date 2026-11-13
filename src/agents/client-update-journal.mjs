@@ -164,8 +164,9 @@ export async function executeClientUpdate({
     // 不同源；按 index 取会把插件版本当成本体版本去判 peer 适配。
     const dshCliVersion = (after?.installations ?? []).find((item) => item.kind === "cli")?.version ?? null;
     // 官方版本查询渠道跟被更新那条安装项的 remoteId 走：qoder 的客户端 id 是桌面端
-    // 渠道，CLI 更新要比对的是 CLI 行的 remoteId（intl 是 "qoder-cli"）。该行没有
-    // 可核验的官方版本源（remoteId 显式 null，如 qoder 的 CN 行）时不比对——没有
+    // 渠道，CLI 更新要比对的是 CLI 行的 remoteId（intl 是 "qoder-cli"，CN 行各自
+    // 指 "qoder-cli-cn"／"qoder-desktop-cn"）。该行没有可核验的官方版本源
+    // （remoteId 显式 null，如 zcode 的 CLI 行）时不比对——没有
     // 官方结论可依，下方「未变化」守卫按 unknown 口径如实报。
     const latestRemoteId = installation === null
       ? run.clientId

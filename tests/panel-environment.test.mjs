@@ -558,7 +558,7 @@ test("qoder 更新受理：执行体路径取 CLI 安装项，官方版本查询
 
 // 双区域版（2026-11-12 契约，M5 合并后的四条安装记录形态）：只装 CN 的机器上
 // 盲取 installations[0] 是 intl 的 not_found 空记录——更新腿必须落在 CN CLI 行。
-// CN 行 remoteId 为 null（无可核验源）：不做钉版查询，收尾也不比对官方版本。
+// CN 行 remoteId 各指各的官方渠道（2026-11-13 接线）：钉版与收尾比对照常发起。
 function qoderCnState(cnVersion) {
   return {
     checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
@@ -567,14 +567,14 @@ function qoderCnState(cnVersion) {
       installations: [
         { kind: "cli", edition: "intl", remoteId: "qoder-cli", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" },
         { kind: "desktop", edition: "intl", remoteId: "qoder", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" },
-        { kind: "cli", edition: "cn", remoteId: null, status: "found", path: "C:/fixture/qoderclicn.exe", version: cnVersion, versionSource: "cli --version", issue: null },
-        { kind: "desktop", edition: "cn", remoteId: null, status: "found", path: "C:/fixture/QoderCN", version: "0.9.0", versionSource: "app.asar", issue: null },
+        { kind: "cli", edition: "cn", remoteId: "qoder-cli-cn", status: "found", path: "C:/fixture/qoderclicn.exe", version: cnVersion, versionSource: "cli --version", issue: null },
+        { kind: "desktop", edition: "cn", remoteId: "qoder-desktop-cn", status: "found", path: "C:/fixture/QoderCN", version: "0.9.0", versionSource: "app.asar", issue: null },
       ],
     }],
   };
 }
 
-test("qoder 双区域版：仅 CN 在装时更新腿落 qoderclicn，remoteId null 不做官方比对", async () => {
+test("qoder 双区域版：仅 CN 在装时更新腿落 qoderclicn，钉版与比对走 CN 渠道", async () => {
   const requested = [];
   const services = {
     environmentService: {
@@ -594,7 +594,7 @@ test("qoder 双区域版：仅 CN 在装时更新腿落 qoderclicn，remoteId nu
     spawnClientUpdateWorkerFn: driveWorker(services, async ({ id, action, commandPath, targetVersion }) => {
       assert.deepEqual({ id, action }, { id: "qoder", action: "update" });
       assert.equal(commandPath, "C:/fixture/qoderclicn.exe", "更新腿落在装的 CN CLI 行，不是 intl 空记录");
-      assert.equal(targetVersion, null, "CN 行没有可核验的官方版本源，不钉版");
+      assert.equal(targetVersion, "1.1.88", "CN 行 remoteId 指 qoder-cli-cn：钉版读 CN 渠道官方最新");
       return { ok: true, output: "" };
     }),
   }, async (get, post) => {
@@ -603,7 +603,7 @@ test("qoder 双区域版：仅 CN 在装时更新腿落 qoderclicn，remoteId nu
     const finished = await waitForRun(get, started.body.runId);
     assert.equal(finished.body.outcome, "updated");
     assert.match(finished.body.message, /1\.1\.88/, "收尾版本读 CN CLI 行（按执行体路径认记录）");
-    assert.deepEqual(requested, [], "CN 行 remoteId 为 null：全程不发起官方版本查询");
+    assert.deepEqual(requested, [{ id: "qoder-cli-cn", force: false }, { id: "qoder-cli-cn", force: true }], "钉版与收尾比对都打 CN 渠道，不碰 intl");
   });
 });
 
