@@ -75,6 +75,7 @@ import {
 } from "../terminal/terminal-conversation-bindings.mjs";
 import { createRailStore, TERMINAL_RAIL_STORE_FILE } from "../terminal/terminal-rail-store.mjs";
 import { qoderCliExecutablePath, qoderEditionForPath } from "../launchers/qoder-merge-config.mjs";
+import { resolveQoderCnCliByOfficialOrder, resolveQoderCliExecutable } from "../agents/agent-discovery.mjs";
 
 // 面板自身的安装目录：git 身份查询（HEAD）与自更新登记都锚在这里。放在
 // APP_VERSION 之前——panel-environment 的 VM 切片从版本声明起、到面板 HTML
@@ -1586,14 +1587,39 @@ export function createPanelRouter({
   // （agent-discovery resolveQoderLaunchEdition）；而续聊的归属判据是会话/存档
   // 落在哪个数据根，与「哪个在装」正交——双装机器上续 intl 存档仍要换回
   // qodercli。归属判据两侧互补：跑着的会话看 launch 里的执行体路径（entry
-  // 调度器与 CLI 本体都算），绑定/目标会话看存档文件的根。
+  // 调度器、CLI 本体与 PATH 上的 shim 都算），绑定/目标会话看存档文件的根。
   const QODER_INTL_EXE_RE = /[\\/]\.qoder[\\/]bin[\\/]qodercli[\\/]qodercli\.exe$/i;
   const QODER_CN_EXE_RE = /[\\/]\.qoder-cn[\\/]bin[\\/]qoderclicn[\\/]qoderclicn\.exe$/i;
   const QODER_CN_ENTRY_RE = /[\\/]\.qoder-cn[\\/]entry[\\/]qodercn\.cmd$/i;
 
+  // 换靶识别的比对基准（按需缓存一次）：CN 侧取 agent-discovery 剥掉
+  // QODER_CN_EXECUTABLE 覆盖分支后的官方序输出（QODERCN_CLI_BIN→PATH 上的
+  // qoderclicn→bin 本体）——覆盖值因此认不出→原样保留；intl 侧取
+  // resolveQoderCliExecutable 的本体输出（无覆盖分支、直接可用）。PATH 扫描
+  // 逐会话逐 token 重复跑会拖列表轮询，缓存一份基准即可；解析抛错（如覆盖
+  // 给了相对路径）按认不出处理（null），不让续接路由跟着炸。
+  let qoderCnLaunchBaseline;
+  let qoderIntlLaunchBaseline;
+  function cnLaunchBaseline() {
+    if (qoderCnLaunchBaseline === undefined) {
+      try { qoderCnLaunchBaseline = resolveQoderCnCliByOfficialOrder(base); }
+      catch { qoderCnLaunchBaseline = null; }
+    }
+    return qoderCnLaunchBaseline;
+  }
+  function intlLaunchBaseline() {
+    if (qoderIntlLaunchBaseline === undefined) {
+      qoderIntlLaunchBaseline = resolveQoderCliExecutable(base);
+    }
+    return qoderIntlLaunchBaseline;
+  }
+
   function qoderTokenEdition(token) {
     if (QODER_CN_EXE_RE.test(token) || QODER_CN_ENTRY_RE.test(token)) return "cn";
     if (QODER_INTL_EXE_RE.test(token)) return "intl";
+    const cnBaseline = cnLaunchBaseline();
+    if (cnBaseline !== null && token === cnBaseline) return "cn";
+    if (token === intlLaunchBaseline()) return "intl";
     return null;
   }
 
@@ -1612,7 +1638,8 @@ export function createPanelRouter({
   // 与 RESUME_COMMAND 的 qodercli/qoderclicn 模板同口径）。目标 CLI 不在盘时
   // 不换：留原解析结果让既有「executable_missing / agent 自身报错」口径兜住，
   // 不拼必死的命令。只替换认得出归属的异根执行体 token（entry 调度器/CLI
-  // 本体）；认不出的（如 QODER_*_EXECUTABLE 覆盖值）原样保留。
+  // 本体/PATH 上的 shim，见 qoderTokenEdition 的比对基准）；认不出的（如
+  // QODER_*_EXECUTABLE 覆盖值）原样保留——用户显式指定的执行体不被动换。
   function retargetQoderLaunchEdition(launch, edition) {
     if (edition !== "intl" && edition !== "cn") return launch;
     const targetExe = qoderCliExecutablePath(base?.USERPROFILE ?? "", edition);

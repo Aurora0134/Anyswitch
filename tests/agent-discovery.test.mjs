@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { dirname, join, delimiter } from "node:path";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import {
   defaultClaudeExecutable, resolveClaudeExecutable, resolveCodexExecutable,
@@ -9,6 +9,7 @@ import {
   resolveQoderExecutable, resolveQoderDesktopExecutable,
   resolveQoderCnExecutable, resolveQoderCnCliExecutable, resolveQoderCnDesktopExecutable,
   resolveQoderLaunchEdition, resolveQoderLaunchCliExecutable,
+  resolveQoderCnCliByOfficialOrder, resolveQoderCnCliLaunchExecutable,
   resolveQoderCliExecutable, resolveGrokExecutable, resolveWorkbuddyExecutable,
   AGENT_INSTALL_FORMS, agentInstallState,
 } from "../src/agents/agent-discovery.mjs";
@@ -480,7 +481,51 @@ test("resolveQoderLaunchEdition：CN 覆盖或在装判 cn，否则维持 intl",
   }
 });
 
-test("resolveQoderLaunchCliExecutable：CN 在装拉起 CN 入口，否则国际版 CLI 执行体", () => {
+// CN CLI 本体的官方序解析器（与官方调度器 qodercn-dispatcher.ps1 的 Find-Cli
+// 三源同序）：QODERCN_CLI_BIN 绝对 → PATH 上的 qoderclicn（.exe/.cmd/.bat，
+// 逐目录查存在性、不 spawn）→ bin 本体兜底（存在性由调用方判）。
+// QODER_CN_EXECUTABLE 覆盖不在此层——拉起解析器最优先收它，换靶识别的比对
+// 基准用的恰是这层「剥掉覆盖」的输出（覆盖值认不出 → 原样保留）。
+test("resolveQoderCnCliByOfficialOrder：QODERCN_CLI_BIN→PATH→bin 本体三源序", () => {
+  const dir = mkTestDir("qoder-cn-official-");
+  try {
+    const base = { USERPROFILE: dir };
+    const binExe = join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe");
+    // 三源全空 → bin 本体兜底（存在性由调用方判）。
+    assert.equal(resolveQoderCnCliByOfficialOrder(base), binExe);
+    // CN entry 调度器在盘＋本体不在盘＋PATH 空：调度器不参与拉起序，仍解析本体。
+    mkdirSync(join(dir, ".qoder-cn", "entry"), { recursive: true });
+    writeFileSync(join(dir, ".qoder-cn", "entry", "qodercn.cmd"), "@echo off\r\n");
+    assert.equal(resolveQoderCnCliByOfficialOrder(base), binExe);
+    // PATH 上有 qoderclicn（npm shim 形态 .cmd）→ 返回 shim 绝对路径。
+    const npmBin = join(dir, "npm-global");
+    mkdirSync(npmBin, { recursive: true });
+    const shim = join(npmBin, "qoderclicn.cmd");
+    writeFileSync(shim, "@echo off\r\n");
+    assert.equal(
+      resolveQoderCnCliByOfficialOrder({ ...base, PATH: [npmBin, join(dir, "empty")].join(delimiter) }),
+      shim,
+    );
+    // QODERCN_CLI_BIN 绝对命中即返回，优先于 PATH。
+    const envBin = join(dir, "custom-qoderclicn.exe");
+    writeFileSync(envBin, "MZ");
+    assert.equal(
+      resolveQoderCnCliByOfficialOrder({ ...base, PATH: npmBin, QODERCN_CLI_BIN: envBin }),
+      envBin,
+    );
+    // 拉起解析器：QODER_CN_EXECUTABLE 覆盖最优先（高于 QODERCN_CLI_BIN/PATH）。
+    const overrideExe = join(dir, "wrapper.exe");
+    writeFileSync(overrideExe, "MZ");
+    assert.equal(
+      resolveQoderCnCliLaunchExecutable({ ...base, PATH: npmBin, QODERCN_CLI_BIN: envBin, QODER_CN_EXECUTABLE: overrideExe }),
+      overrideExe,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveQoderLaunchCliExecutable：CN 在装按官方序解析 CN 本体，否则国际版 CLI 执行体", () => {
   const dir = mkTestDir("qoder-launch-cli-");
   try {
     const base = { USERPROFILE: dir };
@@ -488,13 +533,14 @@ test("resolveQoderLaunchCliExecutable：CN 在装拉起 CN 入口，否则国际
     mkdirSync(join(dir, ".qoder", "bin", "qodercli"), { recursive: true });
     writeFileSync(join(dir, ".qoder", "bin", "qodercli", "qodercli.exe"), "MZ");
     assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder", "bin", "qodercli", "qodercli.exe"));
-    // CN 在装后切换 CN 入口：entry/qodercn.cmd 优先于 CN CLI 执行体。
+    // CN 在装后切换 CN 本体：entry/qodercn.cmd 调度器在盘也不再优先——官方调度
+    // 器三源全空时只会 exit 127 秒退死链，拉起按官方序解析本体、缺位时由调用
+    // 方走既有「明确报未找到」口径。
     mkdirSync(join(dir, ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
     writeFileSync(join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"), "MZ");
-    assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"));
     mkdirSync(join(dir, ".qoder-cn", "entry"), { recursive: true });
     writeFileSync(join(dir, ".qoder-cn", "entry", "qodercn.cmd"), "@echo off\r\n");
-    assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder-cn", "entry", "qodercn.cmd"));
+    assert.equal(resolveQoderLaunchCliExecutable(base), join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

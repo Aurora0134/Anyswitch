@@ -922,12 +922,37 @@ test("qoder 终端一键启动：CN 在装拉起 CN 入口，注入的 env 键�
     let launch = buildAgentSessionLaunch({ agentId: "qoder", cwd: root, token: TOKEN, base });
     assert.equal(launch.launch.args[6], cnCli, "CN 在装时终端拉起 CN CLI 执行体");
     assert.deepEqual(Object.keys(launch.env).sort(), ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"], "注入键集与国际版一致");
-    // entry/qodercn.cmd 在盘时按契约列序优先调度器（.cmd 由 cmd 包装承载）。
+    // entry/qodercn.cmd 在盘时不再优先：拉起按官方序解析 CN CLI 本体（调度器
+    // 三源全空只会 exit 127 秒退，桌面-only 机器由此走 executable_missing 的
+    // 明确失败）。
     mkdirSync(join(base.USERPROFILE, ".qoder-cn", "entry"), { recursive: true });
     const cnEntry = join(base.USERPROFILE, ".qoder-cn", "entry", "qodercn.cmd");
     writeFileSync(cnEntry, "@echo off\r\n");
     launch = buildAgentSessionLaunch({ agentId: "qoder", cwd: root, token: TOKEN, base });
-    assert.equal(launch.launch.args[6], cnEntry);
+    assert.equal(launch.launch.args[6], cnCli, "entry 在盘仍解析本体");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 桌面-only 机器形态（CN entry 调度器在盘、CLI 本体不在、PATH 无 qoderclicn）：
+// 官方序解析到不存在的兜底路径 → 存在性校验转成既有 executable_missing 文案，
+// 而非旧路径经 entry 调度器的 127 秒退死链。
+test("qoder 终端一键启动：entry-only 形态（无本体无 PATH）抛 executable_missing", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    delete base.PATH; // fakeBase 无 PATH 键，防御性再删一次：PATH 扫描必须落空
+    mkdirSync(join(base.USERPROFILE, ".qoder-cn", "entry"), { recursive: true });
+    writeFileSync(join(base.USERPROFILE, ".qoder-cn", "entry", "qodercn.cmd"), "@echo off\r\n");
+    assert.throws(
+      () => buildAgentSessionLaunch({ agentId: "qoder", cwd: root, token: TOKEN, base }),
+      (error) => {
+        assert.equal(error.code, "executable_missing");
+        assert.match(error.message, /没有找到这个 CLI Agent 的程序/);
+        return true;
+      },
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -335,6 +335,27 @@ test("Qoder CN 桌面条不认包名对不上的 asar（intl 的 qoder 包不算
   assert.equal(item.issue, "version_unavailable");
 });
 
+// CN CLI 记录与拉起链同一解析器（官方序本体解析）：PATH/npm shim 形态如实
+// 报 found（.cmd 探不出版本带 not_runnable），三源全空报 not_found。
+test("Qoder CN CLI 记录：PATH 上的 qoderclicn shim 如实报 found，三源全空 not_found", async (t) => {
+  const f = fixture(t);
+  const shim = f.put(join(f.root, "npm-bin", "qoderclicn.cmd"), "@echo off\r\n");
+  f.base.PATH = join(f.root, "npm-bin");
+  const found = installation(
+    await f.service({ probeVersion: async () => ({ missing: false, version: null }) }).getState(),
+    "qoder", 2,
+  );
+  assert.equal(found.status, "found", "PATH/npm shim 形态不再漏报");
+  assert.equal(found.path, shim);
+  assert.equal(found.edition, "cn");
+  assert.equal(found.issue, "not_runnable", ".cmd 形态探不出版本，如实带 issue");
+  // 三源全空（QODERCN_CLI_BIN 未设、PATH 无 qoderclicn、bin 本体不在盘）。
+  f.base.PATH = "";
+  fs.rmSync(join(f.root, "npm-bin"), { recursive: true, force: true });
+  const empty = installation(await f.service().getState({ force: true }), "qoder", 2);
+  assert.equal(empty.status, "not_found");
+});
+
 test("Qoder CN CLI 记录：qoderclicn.exe 自报版本，edition cn、remoteId 指 qoder-cli-cn 渠道", async (t) => {
   const f = fixture(t);
   const exe = f.put(join(f.base.USERPROFILE, ".qoder-cn/bin/qoderclicn/qoderclicn.exe"));

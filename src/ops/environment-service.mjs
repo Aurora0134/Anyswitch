@@ -6,7 +6,7 @@ import {
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
   resolveZcodeCliExecutable, resolveDshTuiExecutable, resolveWorkbuddyExecutable,
-  resolveQoderDesktopExecutable, resolveQoderCnCliExecutable, resolveQoderCnDesktopExecutable,
+  resolveQoderDesktopExecutable, resolveQoderCnCliLaunchExecutable, resolveQoderCnDesktopExecutable,
   resolveDshDesktopExecutable,
   resolveKimiDesktopExecutable, resolveWorkbuddyDesktopExecutable,
 } from "../agents/agent-discovery.mjs";
@@ -553,14 +553,17 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         // qoder 双区域版共四条安装记录，键 = (kind, edition)：intl 两条守住
         // index 0/1 的既有语义（0 是原生 CLI、1 是桌面端，「动作位认哪一条」
         // 不变），CN 两条只追加在后。未安装的区域版照常产出 not_found 记录，
-        // 关于页据此声明全支持面。CN 两条的官方版本源＝release-service 的
-        // qoder-cli-cn（npm 镜像包）与 qoder-desktop-cn（Qoder CN 桌面版
-        // qoder-app 的 latest.yml），remoteId 各指各的渠道；CN 桌面记录用 id
-        // "qoder-cn" 只是 asar 包名防线的钥匙（Qoder CN 桌面版无版本目录机制，
-        // desktopPayloads 落空即回退安装根直读）。
+        // 关于页据此声明全支持面。CN CLI 记录与拉起链同一解析器（官方序本体
+        // 解析：QODER_CN_EXECUTABLE 覆盖→QODERCN_CLI_BIN→PATH 上的 qoderclicn
+        // →bin 兜底）——检测/拉起两口径一致，PATH/npm shim 形态如实报 found。
+        // CN 两条的官方版本源＝release-service 的 qoder-cli-cn（npm 镜像包）
+        // 与 qoder-desktop-cn（Qoder CN 桌面版 qoder-app 的 latest.yml），
+        // remoteId 各指各的渠道；CN 桌面记录用 id "qoder-cn" 只是 asar 包名
+        // 防线的钥匙（Qoder CN 桌面版无版本目录机制，desktopPayloads 落空即
+        // 回退安装根直读）。
         ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable, { edition: "intl" }),
           inspect(id, "desktop", resolver, { edition: "intl" }),
-          inspect("qoder-cli-cn", "cli", resolveQoderCnCliExecutable, { edition: "cn" }),
+          inspect("qoder-cli-cn", "cli", resolveQoderCnCliLaunchExecutable, { edition: "cn" }),
           inspect("qoder-cn", "desktop", resolveQoderCnDesktopExecutable, { edition: "cn", remoteId: "qoder-desktop-cn" })]
         : id === "zcode"
           // zcode 与 qoder 同型（同一端点 id 下挂 CLI 形态安装记录），但桌面是它
