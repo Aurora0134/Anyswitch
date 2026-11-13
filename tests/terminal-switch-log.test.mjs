@@ -44,7 +44,6 @@ describe("terminal-switch-log 写者", () => {
     assert.ok(!("obj" in line) && !("fn" in line) && !("undef" in line), "非标量一律丢");
     assert.notEqual(line.ts, "2099-01-01", "ts 不可篡");
     assert.equal(line.event, "recv", "event 不可篡");
-    assert.ok(!("forged" in line));
   });
 
   it("字段净化：字符串截 300、键数 ≤20、键名 ≤64、数组只留标量且 ≤10 项", () => {

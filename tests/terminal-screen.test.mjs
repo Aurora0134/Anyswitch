@@ -371,7 +371,7 @@ test("G1 加宽：历史行右半不丢，快照/回放都按新列宽输出", (
 // 用新宽」这条规则本身——它保护的是加宽那侧的修法不被回退，不是复现另一个 bug。
 test("G1 收窄：历史行按新列宽重新折行，不按旧宽输出", () => {
   const mirror = createScreenMirror({ cols: 135, rows: 10 });
-  const long = `${"X".repeat(60)}RIGHTHALF${"Y".repeat(60)}`; // 126 字符
+  const long = `${"X".repeat(60)}RIGHTHALF${"Y".repeat(60)}`; // 129 字符
   mirror.write(long);
   mirror.write("\r\n");
   for (let i = 0; i < 30; i += 1) mirror.write(`hist ${i}\r\n`);
@@ -381,7 +381,7 @@ test("G1 收窄：历史行按新列宽重新折行，不按旧宽输出", () =>
   assert.equal(snapshot.cols, 82, "快照自报新列宽");
   const history = snapshot.history.map((entry) => stripSgr(entry.t));
   assert.equal(history.every((text) => text.length <= 82), true,
-    "历史行不超过新列宽：否则客户端按 82 折行、宿主按 126 定位，纵向错位");
+    "历史行不超过新列宽：否则客户端按 82 折行、宿主按 129 定位，纵向错位");
   // 内容按新宽折到多行，字符一个不少（X 前段、RIGHTHALF 中段、Y 后段都要在）。
   const joined = history.join("");
   for (const piece of ["RIGHTHALF", "Y".repeat(60)]) {
@@ -1337,6 +1337,12 @@ describe("渲染快照（跨宿主重启的恢复原料）", () => {
 // ---- 真 xterm 判画面：本次两种错画面的成因钉（2026-11-08）----
 // 台架证的是因果关系，不是「事发那天确实丢了哪一帧」：现场只留下静态截图，没有
 // 运行态帧序记录。但它足以判定修法取向——半帧/旧基线一律不许落屏，只能整屏重放。
+// 台架定位（2026-11-12 审计）：paintFrames 与下面两条用例不接 SUT——只把字节
+// 喂给真 @xterm/xterm 再断言其视口渲染，createScreenMirror 不参与，镜像写坏/
+// 删除后依旧全绿。它们不是本文件的产品回归钉，仅记录修法前提；产品侧同形态的
+// 真钉在 tests/panel.test.mjs 一带。
+// 版本浮动风险：断言逐字面量钉死 xterm 视口，依赖为 ^5.5.0 浮动版本，小版本
+// 变动可能无产品改动而变红（未做跨版本交叉验证）。
 async function paintFrames(cols, rows, frames) {
   const t = new Terminal({ cols, rows, convertEol: true, allowProposedApi: true, scrollback: 5000 });
   t.loadAddon(new Unicode11Addon());
@@ -1345,7 +1351,7 @@ async function paintFrames(cols, rows, frames) {
   return { term: t, lines: xtermViewport(t) };
 }
 
-test("判画面：丢掉 CUU 上移回退的帧逐行累积成阶梯，完整帧只留一行", async () => {
+test("台架·判画面：丢掉 CUU 上移回退的帧逐行累积成阶梯，完整帧只留一行", async () => {
   const cols = 30;
   const rows = 8;
   let acc = "";
@@ -1365,7 +1371,7 @@ test("判画面：丢掉 CUU 上移回退的帧逐行累积成阶梯，完整帧
     "腰斩掉上移回退的帧逐行累积成图三那种阶梯——所以 ?2026 兜底必须丢弃半块，不能冲刷");
 });
 
-test("判画面：整屏回放被作废且不清屏，后续相对重绘把输入框复制成多份", async () => {
+test("台架·判画面：整屏回放被作废且不清屏，后续相对重绘把输入框复制成多份", async () => {
   const cols = 32;
   const rows = 12;
   const top = "╭" + "─".repeat(cols - 2) + "╮";
