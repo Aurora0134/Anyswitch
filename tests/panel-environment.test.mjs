@@ -556,6 +556,95 @@ test("qoder 更新受理：执行体路径取 CLI 安装项，官方版本查询
   });
 });
 
+// 双区域版（2026-11-12 契约，M5 合并后的四条安装记录形态）：只装 CN 的机器上
+// 盲取 installations[0] 是 intl 的 not_found 空记录——更新腿必须落在 CN CLI 行。
+// CN 行 remoteId 为 null（无可核验源）：不做钉版查询，收尾也不比对官方版本。
+function qoderCnState(cnVersion) {
+  return {
+    checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
+    clients: [{
+      id: "qoder", name: "qoder",
+      installations: [
+        { kind: "cli", edition: "intl", remoteId: "qoder-cli", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" },
+        { kind: "desktop", edition: "intl", remoteId: "qoder", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" },
+        { kind: "cli", edition: "cn", remoteId: null, status: "found", path: "C:/fixture/qoderclicn.exe", version: cnVersion, versionSource: "cli --version", issue: null },
+        { kind: "desktop", edition: "cn", remoteId: null, status: "found", path: "C:/fixture/QoderCN", version: "0.9.0", versionSource: "app.asar", issue: null },
+      ],
+    }],
+  };
+}
+
+test("qoder 双区域版：仅 CN 在装时更新腿落 qoderclicn，remoteId null 不做官方比对", async () => {
+  const requested = [];
+  const services = {
+    environmentService: {
+      async getState(options = {}) {
+        return qoderCnState(options.force ? "1.1.88" : "1.1.0");
+      },
+    },
+    releaseService: {
+      async getClientLatest(id, options) {
+        requested.push({ id, force: Boolean(options?.force) });
+        return latestFor("1.1.88");
+      },
+    },
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async ({ id, action, commandPath, targetVersion }) => {
+      assert.deepEqual({ id, action }, { id: "qoder", action: "update" });
+      assert.equal(commandPath, "C:/fixture/qoderclicn.exe", "更新腿落在装的 CN CLI 行，不是 intl 空记录");
+      assert.equal(targetVersion, null, "CN 行没有可核验的官方版本源，不钉版");
+      return { ok: true, output: "" };
+    }),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "qoder", action: "update" });
+    assert.equal(started.status, 202);
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "updated");
+    assert.match(finished.body.message, /1\.1\.88/, "收尾版本读 CN CLI 行（按执行体路径认记录）");
+    assert.deepEqual(requested, [], "CN 行 remoteId 为 null：全程不发起官方版本查询");
+  });
+});
+
+test("qoder 双区域版：双装在案时更新腿取第一个在装的 CLI 行（intl 序在前）", async () => {
+  const requested = [];
+  const dualState = (intlVersion) => {
+    const state = qoderCnState("1.1.0");
+    state.clients[0].installations[0] = {
+      kind: "cli", edition: "intl", remoteId: "qoder-cli", status: "found",
+      path: "C:/fixture/qodercli.exe", version: intlVersion, versionSource: "cli --version", issue: null,
+    };
+    return state;
+  };
+  const services = {
+    environmentService: {
+      async getState(options = {}) {
+        return dualState(options.force ? "1.1.64" : "1.0.0");
+      },
+    },
+    releaseService: {
+      async getClientLatest(id, options) {
+        requested.push({ id, force: Boolean(options?.force) });
+        return latestFor("1.1.64");
+      },
+    },
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async ({ commandPath }) => {
+      assert.equal(commandPath, "C:/fixture/qodercli.exe", "双装时 intl CLI 行序在前，落在 intl");
+      return { ok: true, output: "" };
+    }),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "qoder", action: "update" });
+    assert.equal(started.status, 202);
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "updated");
+    assert.deepEqual(requested, [{ id: "qoder-cli", force: false }, { id: "qoder-cli", force: true }], "intl 行有 remoteId，官方比对照常走 qoder-cli");
+  });
+});
+
 test("qoder 命令成功但版本原地踏步归为未生效，命令失败带出末行错误", async () => {
   const makeServices = () => ({
     environmentService: { async getState() { return clientState({ qoder: "1.0.0" }); } },

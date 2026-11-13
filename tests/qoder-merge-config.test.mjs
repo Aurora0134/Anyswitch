@@ -16,6 +16,8 @@ import {
   deriveAutoRouteChannel,
   writeQoderConfig,
   qoderSettingsPath,
+  qoderEditionForPath,
+  recognizedQoderEditions,
 } from "../src/launchers/qoder-merge-config.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -676,5 +678,96 @@ describe("qoderSettingsPath", () => {
     // 同一个 join 表达式——否则实现换成任何等价拼接都测不出差异。分隔符归一
     // 让同一条断言在 win32/POSIX 下都成立。
     assert.equal(qoderSettingsPath("/home/user").replaceAll("\\", "/"), "/home/user/.qoder/settings.json");
+  });
+
+  it("resolves the cn edition to <base>/.qoder-cn/settings.json", () => {
+    assert.equal(qoderSettingsPath("/home/user", "cn").replaceAll("\\", "/"), "/home/user/.qoder-cn/settings.json");
+  });
+});
+
+describe("qoderEditionForPath", () => {
+  it("归属按数据根目录段判定，认不出返回 null", () => {
+    assert.equal(qoderEditionForPath("C:\\Users\\u\\.qoder\\settings.json"), "intl");
+    assert.equal(qoderEditionForPath("C:\\Users\\u\\.qoder-cn\\projects\\p\\a.jsonl"), "cn");
+    assert.equal(qoderEditionForPath("/home/u/.qoder/settings.json"), "intl");
+    // 段级精确匹配：.qoder-cn-foo 这样的兄弟目录不算数。
+    assert.equal(qoderEditionForPath("C:\\Users\\u\\.qoder-cn-foo\\settings.json"), null);
+    assert.equal(qoderEditionForPath("C:\\Users\\u\\projects\\x"), null);
+    assert.equal(qoderEditionForPath(""), null);
+    assert.equal(qoderEditionForPath(null), null);
+  });
+});
+
+describe("recognizedQoderEditions", () => {
+  it("数据根目录在盘即在装；home 非绝对路径时一个都不认", () => {
+    const dir = mkTestDir("qoder-roots-test-");
+    assert.deepEqual(recognizedQoderEditions(dir), []);
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    assert.deepEqual(recognizedQoderEditions(dir), ["cn"]);
+    mkdirSync(join(dir, ".qoder"), { recursive: true });
+    assert.deepEqual(recognizedQoderEditions(dir), ["intl", "cn"]);
+    assert.deepEqual(recognizedQoderEditions(""), []);
+    assert.deepEqual(recognizedQoderEditions("relative/home"), []);
+  });
+});
+
+describe("writeQoderConfig 双区域版双根写入", () => {
+  it("两个数据根都在装时逐根各写一份，二次调用幂等", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    mkdirSync(join(dir, ".qoder"), { recursive: true });
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    const result = writeQoderConfig(STORE, PORT, TOKEN, dir, join(dir, ".qoder", "settings.json"));
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, false);
+    assert.deepEqual(Object.keys(result.roots ?? {}).sort(), ["cn", "intl"]);
+    for (const root of [".qoder", ".qoder-cn"]) {
+      const written = JSON.parse(readFileSync(join(dir, root, "settings.json"), "utf8"));
+      assert.ok(written.providers?.[managedConnectionId("poke-api")], `${root} 应写入托管连接`);
+      assert.equal(
+        written.providers[managedConnectionId("poke-api")].baseUrl,
+        "http://127.0.0.1:47821/openai/qoder~poke-api/v1",
+      );
+    }
+
+    const second = writeQoderConfig(STORE, PORT, TOKEN, dir, join(dir, ".qoder", "settings.json"));
+    assert.equal(second.ok, true);
+    assert.equal(second.unchanged, true, "两侧内容已是最新时整单幂等");
+  });
+
+  it("只有 CN 根在装时只写 CN 根，不给国际版造目录", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    const result = writeQoderConfig(STORE, PORT, TOKEN, dir, join(dir, ".qoder", "settings.json"));
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, false);
+    assert.deepEqual(Object.keys(result.roots ?? {}), ["cn"]);
+    assert.equal(existsSync(join(dir, ".qoder-cn", "settings.json")), true);
+    assert.equal(existsSync(join(dir, ".qoder", "settings.json")), false, "未在装的国际版根不该被创建");
+  });
+
+  it("一个根都认不出时退回旧单根直写（装了没跑过 / fail-open 口径）", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    const settingsPath = join(dir, ".qoder", "settings.json");
+    const result = writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, false);
+    assert.equal(result.roots, undefined, "兜底单写不带逐根明细");
+    assert.equal(existsSync(settingsPath), true);
+    assert.equal(existsSync(join(dir, ".qoder-cn", "settings.json")), false);
+  });
+
+  it("单根失败不拖垮另一根，聚合成整单失败并保留逐根明细", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    mkdirSync(join(dir, ".qoder"), { recursive: true });
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    writeFileSync(join(dir, ".qoder-cn", "settings.json"), "{ broken json", "utf8");
+    const result = writeQoderConfig(STORE, PORT, TOKEN, dir, join(dir, ".qoder", "settings.json"));
+    assert.equal(result.ok, false);
+    assert.ok(result.reason.includes("unparseable"), "失败原因取自失败根");
+    assert.equal(result.roots?.intl?.ok, true, "国际版根照常写入");
+    assert.equal(result.roots?.cn?.ok, false);
+    assert.equal(existsSync(join(dir, ".qoder", "settings.json")), true);
+    // 坏文件原样保留，不被覆盖。
+    assert.equal(readFileSync(join(dir, ".qoder-cn", "settings.json"), "utf8"), "{ broken json");
   });
 });

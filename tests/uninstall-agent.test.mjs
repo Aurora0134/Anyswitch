@@ -344,6 +344,46 @@ for (const withSidecar of [true, false]) {
   });
 }
 
+// 双区域版（2026-11-12 契约）：两个数据根都「在装」时，卸载清理逐根覆盖——
+// 托管连接两侧同集合（双装双写）都清掉，用户自建连接各根独立保留。
+test("qoder 双区域版：双根的托管连接都清掉，各根用户自建连接保留", async () => {
+  const home = mkTestDir("uninstall-qoder-dual-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const intlPath = seedQoder(home, sidecarRoot);
+  const cnPath = join(home, ".qoder-cn", "settings.json");
+  const cnManaged = qoderMerge.buildQoderProviders(managedProviders(), FIXTURE_PORT, "tok");
+  writeJson(cnPath, {
+    providers: { ...cnManaged, "user-cn": { baseUrl: "https://api.example.cn", models: [] } },
+  });
+
+  const result = await driver.uninstallEndpoint("qoder");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  const intl = JSON.parse(readFileSync(intlPath, "utf8"));
+  const cn = JSON.parse(readFileSync(cnPath, "utf8"));
+  assert.deepEqual(Object.keys(intl.providers), ["user-conn"], "国际版根清托管留用户");
+  assert.deepEqual(Object.keys(cn.providers), ["user-cn"], "CN 根清托管留用户");
+  assert.ok(!existsSync(join(sidecarRoot, "qoder-sidecar.json")));
+});
+
+// 双区域版的另一面：只装 CN（国际版根不在盘）时清理只覆盖 CN 根，不在国际版
+// 落点新建文件（扇出认根，不认就不写）。
+test("qoder 双区域版：仅 CN 根在装时只清 CN 根，不碰国际版落点", async () => {
+  const home = mkTestDir("uninstall-qoder-cn-only-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const cnPath = join(home, ".qoder-cn", "settings.json");
+  const cnManaged = qoderMerge.buildQoderProviders(managedProviders(), FIXTURE_PORT, "tok");
+  writeJson(cnPath, {
+    providers: { ...cnManaged, "user-cn": { baseUrl: "https://api.example.cn", models: [] } },
+  });
+  seedSidecar(sidecarRoot, "qoder-sidecar.json", ["chan1"]);
+
+  const result = await driver.uninstallEndpoint("qoder");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  const cn = JSON.parse(readFileSync(cnPath, "utf8"));
+  assert.deepEqual(Object.keys(cn.providers), ["user-cn"]);
+  assert.ok(!existsSync(join(home, ".qoder")), "国际版落点不被新建");
+});
+
 // ─────────────────────────────────────────────────────────────
 // zcode
 // ─────────────────────────────────────────────────────────────

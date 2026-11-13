@@ -897,6 +897,32 @@ test("qoder: 删 settings.json 的 providers.<connectionId>，其余原样", asy
   assert.deepEqual(after.modelConfigs, { other: true });
 });
 
+// 双区域版（2026-11-12 契约）：移除按扫描记录的 sourcePath 落刀——CN 根扫出
+// 的条目只动 .qoder-cn 那份，国际版根的同名单连接原样保留。
+test("qoder 双区域版：CN 根条目按 sourcePath 移除，intl 根同名连接不动", async () => {
+  const { dir, backupRoot } = setup();
+  const cnPath = writeFixture(dir, ".qoder-cn/settings.json", JSON.stringify({
+    providers: {
+      shared: { baseUrl: "https://shared.example/v1", apiKey: "sk-cn", models: [{ model: "m1" }] },
+    },
+  }, null, 2) + "\n");
+  const intlPath = writeFixture(dir, ".qoder/settings.json", JSON.stringify({
+    providers: {
+      shared: { baseUrl: "https://shared.example/v1", apiKey: "sk-intl", models: [{ model: "m1" }] },
+    },
+  }, null, 2) + "\n");
+
+  const result = await removeImportedEntries(
+    [entryOf("qoder", cnPath, "shared", "https://shared.example/v1")],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.failed, []);
+  assert.deepEqual(JSON.parse(readFileSync(cnPath, "utf8")).providers, {}, "CN 根的条目删掉");
+  const intl = JSON.parse(readFileSync(intlPath, "utf8"));
+  assert.equal(intl.providers.shared.apiKey, "sk-intl", "intl 根同名连接原样");
+});
+
 // --- grok ----------------------------------------------------------------------
 
 test("grok: 删块外 [model.<name>] 及其子表；[models] 复数表永不碰", async () => {

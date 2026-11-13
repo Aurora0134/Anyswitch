@@ -201,6 +201,19 @@ describe("terminal-conversation-bindings", () => {
       const later = meta("later", { createdAt: 5000, lastActive: 9000 });
       assert.equal(pickConversationMeta([later], { ...window, lastActiveAt: null }).id, "later");
     });
+
+    // qoder 双区域版：给得出会话区域版归属时只接同一数据根的存档（CLI 互不认
+    // 对方根下的对话）；给不出（null）则不加约束，维持旧行为。
+    it("qoder: edition 约束只接同一数据根的存档", () => {
+      const intlMeta = meta("intl", { endpoint: "qoder", file: "C:\\Users\\u\\.qoder\\projects\\p\\intl.jsonl" });
+      const cnMeta = meta("cn", { endpoint: "qoder", file: "C:\\Users\\u\\.qoder-cn\\projects\\p\\cn.jsonl" });
+      const qWindow = { ...window, agentId: "qoder" };
+      assert.equal(pickConversationMeta([intlMeta, cnMeta], { ...qWindow, edition: "cn" }).id, "cn");
+      assert.equal(pickConversationMeta([intlMeta, cnMeta], { ...qWindow, edition: "intl" }).id, "intl");
+      assert.equal(pickConversationMeta([intlMeta], { ...qWindow, edition: "cn" }), null, "异根存档不接");
+      assert.equal(pickConversationMeta([intlMeta, cnMeta], qWindow), null, "不给 edition 时两条并列判不出——宁可不接");
+      assert.equal(pickConversationMeta([cnMeta], qWindow)?.id, "cn", "不带 edition 时旧行为不受影响");
+    });
   });
 
   describe("pickRefreshedMeta", () => {

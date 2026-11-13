@@ -29,12 +29,16 @@ import {
   rmdirSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { casWriteFile, contentHash, PreconditionFailedError, atomicWriteFile } from "../store/atomic-write.mjs";
 import { relayDataRoot } from "../relay/relay-settings.mjs";
 import { diffFileText } from "../shared/skill-diff.mjs";
 
 // Endpoint registry. `relSkillsDir` is relative to the user's home directory.
+// 双区域版端点（qoder）：`altRelSkillsDirs` 列出其余区域版数据根下的同构技能
+// 目录（CN 版 ~/.qoder-cn/skills）。部署对「已识别在装」的根各挂一份 junction
+// （根目录在盘即在装，一个都不在退回主根——装了没跑过的新装也能预置）；
+// 摘除/清理类操作对全部根生效，区域版卸载后的残留链接照样摘得掉。
 export const ENDPOINT_DEFS = Object.freeze([
   { id: "claude", label: "Claude Code", relSkillsDir: [".claude", "skills"] },
   { id: "zcode", label: "ZCode", relSkillsDir: [".zcode", "skills"] },
@@ -42,7 +46,7 @@ export const ENDPOINT_DEFS = Object.freeze([
   { id: "pi", label: "Pi", relSkillsDir: [".pi", "agent", "skills"] },
   { id: "kimi", label: "Kimi Code", relSkillsDir: [".kimi-code", "skills"] },
   { id: "dsh", label: "DeepSeek Harness", relSkillsDir: [".dsh", "skills"] },
-  { id: "qoder", label: "Qoder", relSkillsDir: [".qoder", "skills"] },
+  { id: "qoder", label: "Qoder", relSkillsDir: [".qoder", "skills"], altRelSkillsDirs: [[".qoder-cn", "skills"]] },
   { id: "codex", label: "Codex", relSkillsDir: [".codex", "skills"] },
   { id: "grok", label: "Grok Build", relSkillsDir: [".grok", "skills"] },
   // WorkBuddy：桌面壳与内置 CLI 共用同一份 skills 目录（与 models.json 同根）。
@@ -69,12 +73,18 @@ const SKIP_DIRS = new Set([".git", "node_modules"]);
 
 /** Resolve the endpoint list for a given home directory. */
 export function listEndpoints(homeDir = homedir()) {
-  return ENDPOINT_DEFS.map((def) => ({
-    id: def.id,
-    label: def.label,
-    enabled: def.enabled !== false,
-    skillsDir: join(homeDir, ...def.relSkillsDir),
-  }));
+  return ENDPOINT_DEFS.map((def) => {
+    // skillsDir 恒为主根（国际版）目录——面板行/既有断言的单值口径不变；
+    // skillsDirs 是全量清单（双区域版端点含各区域版根），写/扫面一律走它。
+    const skillsDirs = [def.relSkillsDir, ...(def.altRelSkillsDirs ?? [])].map((parts) => join(homeDir, ...parts));
+    return {
+      id: def.id,
+      label: def.label,
+      enabled: def.enabled !== false,
+      skillsDir: skillsDirs[0],
+      skillsDirs,
+    };
+  });
 }
 
 function findEndpoint(endpointId, homeDir) {
@@ -362,6 +372,68 @@ export function createJunction(link, target) {
 // Endpoint scan
 // ─────────────────────────────────────────────────────────────
 
+// 部署面目录口径：双区域版端点只往「已识别在装」的数据根写（根目录在盘即在装），
+// 一个根都不在时退回主目录——「装了没跑过」的首跑前预置与单根端点行为都靠这个
+// 兜底保住。清理面不走这里：undeploy/删除/收编要覆盖全部根（含卸载残留）。
+function activeSkillsDirs(endpoint) {
+  if (endpoint.skillsDirs.length === 1) return endpoint.skillsDirs;
+  const recognized = endpoint.skillsDirs.filter((dir) => existsSync(dirname(dir)));
+  return recognized.length > 0 ? recognized : [endpoint.skillsDirs[0]];
+}
+
+// 扫描一个技能目录。返回 { dirExists, entries }；目录本身是 junction 时整个跳过
+//（那意味着有人把端点技能目录整目录指去别处，里面的内容不归我们管）。
+function scanSkillsDir(skillsDir, byDirName, repoAbs) {
+  const result = { dirExists: false, entries: [] };
+  if (!existsSync(skillsDir) || isJunction(skillsDir)) return result;
+  result.dirExists = true;
+  let entries;
+  try {
+    entries = readdirSync(skillsDir, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+  for (const entry of entries) {
+    // VCS metadata and other non-skill dot entries are not manageable skills
+    // (e.g. the opencode skills dir is itself a git repo — its .git showed
+    // up as a bogus "local skill" entry).
+    if (entry.name.startsWith(".")) continue;
+    const abs = join(skillsDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      const linkTarget = junctionTarget(abs);
+      const normalized = normalizePath(linkTarget);
+      result.entries.push({
+        name: entry.name,
+        kind: "junction",
+        linkTarget,
+        broken: linkTarget ? !existsSync(linkTarget) : true,
+        matchesRepo: null,
+        repoSkill: repoAbs.get(normalized) ?? null,
+      });
+    } else if (entry.isDirectory()) {
+      const repoSkill = byDirName.get(entry.name) ?? null;
+      let matchesRepo = null;
+      if (repoSkill) {
+        try {
+          matchesRepo = hashDir(abs) === hashDir(repoSkill.absPath);
+        } catch {
+          matchesRepo = null;
+        }
+      }
+      result.entries.push({
+        name: entry.name,
+        kind: "local",
+        linkTarget: null,
+        broken: false,
+        matchesRepo,
+        repoSkill: repoSkill?.dirName ?? null,
+      });
+    }
+    // plain files in a skills directory are not skills; ignore them
+  }
+  return result;
+}
+
 /**
  * Scan every registered endpoint's skills directory. Each endpoint reports
  * { id, label, enabled, dirExists, entries } where an entry is:
@@ -371,6 +443,8 @@ export function createJunction(link, target) {
  * - local: a real directory; matchesRepo compares content hash against the
  *   same-named repo skill (true/false, or null when the repo has no such
  *   skill — or no repo is configured).
+ * 双区域版端点（qoder）逐根扫描后按名字合并成一行：同名条目取先扫到的根
+ * （国际版在前）；只落在 CN 根的技能照常见于清单。
  */
 export function scanEndpoints(repoPath, { homeDir = homedir() } = {}) {
   const repoSkills = repoPath ? scanRepo(repoPath) : [];
@@ -378,51 +452,15 @@ export function scanEndpoints(repoPath, { homeDir = homedir() } = {}) {
   const repoAbs = new Map(repoSkills.map((s) => [normalizePath(s.absPath), s.dirName]));
   return listEndpoints(homeDir).map((endpoint) => {
     const result = { ...endpoint, dirExists: false, entries: [] };
-    if (!existsSync(endpoint.skillsDir) || isJunction(endpoint.skillsDir)) return result;
-    result.dirExists = true;
-    let entries;
-    try {
-      entries = readdirSync(endpoint.skillsDir, { withFileTypes: true });
-    } catch {
-      return result;
-    }
-    for (const entry of entries) {
-      // VCS metadata and other non-skill dot entries are not manageable skills
-      // (e.g. the opencode skills dir is itself a git repo — its .git showed
-      // up as a bogus "local skill" entry).
-      if (entry.name.startsWith(".")) continue;
-      const abs = join(endpoint.skillsDir, entry.name);
-      if (entry.isSymbolicLink()) {
-        const linkTarget = junctionTarget(abs);
-        const normalized = normalizePath(linkTarget);
-        result.entries.push({
-          name: entry.name,
-          kind: "junction",
-          linkTarget,
-          broken: linkTarget ? !existsSync(linkTarget) : true,
-          matchesRepo: null,
-          repoSkill: repoAbs.get(normalized) ?? null,
-        });
-      } else if (entry.isDirectory()) {
-        const repoSkill = byDirName.get(entry.name) ?? null;
-        let matchesRepo = null;
-        if (repoSkill) {
-          try {
-            matchesRepo = hashDir(abs) === hashDir(repoSkill.absPath);
-          } catch {
-            matchesRepo = null;
-          }
-        }
-        result.entries.push({
-          name: entry.name,
-          kind: "local",
-          linkTarget: null,
-          broken: false,
-          matchesRepo,
-          repoSkill: repoSkill?.dirName ?? null,
-        });
+    const seen = new Set();
+    for (const skillsDir of endpoint.skillsDirs) {
+      const one = scanSkillsDir(skillsDir, byDirName, repoAbs);
+      result.dirExists = result.dirExists || one.dirExists;
+      for (const entry of one.entries) {
+        if (seen.has(entry.name)) continue;
+        seen.add(entry.name);
+        result.entries.push(entry);
       }
-      // plain files in a skills directory are not skills; ignore them
     }
     result.entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return result;
@@ -867,6 +905,8 @@ function assertEndpointOutsideRepo(endpoint, repoPath, message) {
  *   recycled and replaced by a junction; different content returns
  *   { ok:false, conflict:true, diffs } unless force is set, in which case
  *   the local copy is recycled and replaced.
+ * - 双区域版端点（qoder）：每个已识别在装的数据根各挂一份（activeSkillsDirs）。
+ *   先对全部目标目录做只读预检，任一根冲突即整单不动——绝不留半份部署。
  * Returns { ok:true, idempotent? } on success.
  */
 export async function deploy(
@@ -876,33 +916,50 @@ export async function deploy(
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
-  assertEndpointOutsideRepo(endpoint, repoPath, "主仓库就在该目录中，技能已在里面，无需部署");
   const skill = findRepoSkill(repoPath, skillName);
   if (!skill) throw new Error(`repo 中不存在 skill: ${skillName}`);
+  const dirs = activeSkillsDirs(endpoint);
+  for (const skillsDir of dirs) {
+    assertEndpointOutsideRepo({ skillsDir }, repoPath, "主仓库就在该目录中，技能已在里面，无需部署");
+  }
 
-  mkdirSync(endpoint.skillsDir, { recursive: true });
-  const linkPath = join(endpoint.skillsDir, skill.dirName);
-
-  if (lexists(linkPath)) {
+  // 只读预检：逐目录定出动作（建/换/不动），冲突与异向 junction 在这一步拦完。
+  const plans = [];
+  for (const skillsDir of dirs) {
+    const linkPath = join(skillsDir, skill.dirName);
+    if (!lexists(linkPath)) {
+      plans.push({ skillsDir, linkPath, action: "create" });
+      continue;
+    }
     if (isJunction(linkPath)) {
       const current = normalizePath(junctionTarget(linkPath));
-      if (current === normalizePath(skill.absPath)) return { ok: true, idempotent: true };
+      if (current === normalizePath(skill.absPath)) {
+        plans.push({ skillsDir, linkPath, action: "none" });
+        continue;
+      }
       throw new Error(`端点已存在指向其他目录的 junction: ${linkPath}`);
     }
     // Same-named real directory: only replace after content comparison.
     if (hashDir(linkPath) !== hashDir(skill.absPath) && !force) {
       return { ok: false, conflict: true, diffs: diffDirs(skill.absPath, linkPath) };
     }
-    await recycleDirFn(linkPath);
+    plans.push({ skillsDir, linkPath, action: "replace" });
   }
 
-  createJunction(linkPath, skill.absPath);
-  return { ok: true };
+  for (const plan of plans) {
+    if (plan.action === "none") continue;
+    mkdirSync(plan.skillsDir, { recursive: true });
+    if (plan.action === "replace") await recycleDirFn(plan.linkPath);
+    createJunction(plan.linkPath, skill.absPath);
+  }
+  return plans.every((plan) => plan.action === "none") ? { ok: true, idempotent: true } : { ok: true };
 }
 
 /**
  * Remove a deployed junction. Refuses to touch real directories — undeploy
  * must never delete user data, only links we (or the user) created.
+ * 清理面：覆盖端点的全部数据根（含已卸载区域版的残留根），任一根上挂着
+ * 同名实体目录就整单拒动。
  */
 export async function undeploy(
   { endpointId, skillName, repoPath },
@@ -915,13 +972,19 @@ export async function undeploy(
   // 扫描命中分支的 dirName 来自 scanRepo（恒为单段目录名）；兜底分支
   // 直接采用调用方传入的 skillName，后者也必须是纯目录名才能 join
   assertPlainSkillDirName(dirName);
-  const linkPath = join(endpoint.skillsDir, dirName);
-  if (!lexists(linkPath)) return { ok: true, idempotent: true };
-  if (!isJunction(linkPath)) {
-    throw new Error(`拒绝解除部署：${linkPath} 是实体目录，不是 junction`);
+  const linkPaths = endpoint.skillsDirs.map((skillsDir) => join(skillsDir, dirName));
+  for (const linkPath of linkPaths) {
+    if (lexists(linkPath) && !isJunction(linkPath)) {
+      throw new Error(`拒绝解除部署：${linkPath} 是实体目录，不是 junction`);
+    }
   }
-  rmdirSync(linkPath); // rmdir on a junction removes only the link
-  return { ok: true };
+  let removedAny = false;
+  for (const linkPath of linkPaths) {
+    if (!lexists(linkPath)) continue;
+    rmdirSync(linkPath); // rmdir on a junction removes only the link
+    removedAny = true;
+  }
+  return removedAny ? { ok: true } : { ok: true, idempotent: true };
 }
 
 /**
@@ -1056,11 +1119,13 @@ export async function deleteRepoSkill(
   const target = normalizePath(skill.absPath);
   const unlinked = [];
   for (const endpoint of listEndpoints(homeDir)) {
-    const linkPath = join(endpoint.skillsDir, skill.dirName);
-    if (!lexists(linkPath) || !isJunction(linkPath)) continue;
-    if (normalizePath(junctionTarget(linkPath)) !== target) continue;
-    rmdirSync(linkPath);
-    unlinked.push(endpoint.id);
+    for (const skillsDir of endpoint.skillsDirs) {
+      const linkPath = join(skillsDir, skill.dirName);
+      if (!lexists(linkPath) || !isJunction(linkPath)) continue;
+      if (normalizePath(junctionTarget(linkPath)) !== target) continue;
+      rmdirSync(linkPath);
+      unlinked.push(endpoint.id);
+    }
   }
   await recycleDirFn(skill.absPath);
   return { ok: true, unlinked };
@@ -1075,6 +1140,9 @@ export async function deleteRepoSkill(
  * - repo copy diverged: nothing is touched; returns
  *   { ok:false, conflict:true, diffs } for the user to resolve through
  *   resolveConflictSkill().
+ * 双区域版端点（qoder）：本地实体目录可能落在任一数据根，逐根收集；内容基准
+ * 取仓库副本（缺省时取第一处本地副本），所有本地副本与基准一致才动手——
+ * 任一分歧整单回到冲突出口。收编成功后每个已识别在装的根都挂上 junction。
  */
 export async function mergeLocalSkill(
   { endpointId, skillName, repoPath },
@@ -1083,33 +1151,48 @@ export async function mergeLocalSkill(
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
-  assertEndpointOutsideRepo(endpoint, repoPath, "该 skill 就在主仓库里，无需收编");
+  for (const skillsDir of endpoint.skillsDirs) {
+    assertEndpointOutsideRepo({ skillsDir }, repoPath, "该 skill 就在主仓库里，无需收编");
+  }
   assertPlainSkillDirName(skillName);
-  const localPath = join(endpoint.skillsDir, skillName);
-  if (!existsSync(localPath) || isJunction(localPath)) {
+  const locals = [];
+  for (const skillsDir of endpoint.skillsDirs) {
+    const localPath = join(skillsDir, skillName);
+    if (existsSync(localPath) && !isJunction(localPath)) locals.push(localPath);
+  }
+  if (locals.length === 0) {
     throw new Error(`端点上不存在本地实体目录: ${skillName}`);
   }
-  if (!existsSync(join(localPath, "SKILL.md"))) {
-    throw new Error(`本地目录缺少 SKILL.md，不是有效 skill: ${skillName}`);
+  for (const localPath of locals) {
+    if (!existsSync(join(localPath, "SKILL.md"))) {
+      throw new Error(`本地目录缺少 SKILL.md，不是有效 skill: ${skillName}`);
+    }
   }
   const existing = findRepoSkill(repoPath, skillName);
-  if (existing) {
-    if (hashDir(existing.absPath) !== hashDir(localPath)) {
-      return { ok: false, conflict: true, diffs: diffDirs(existing.absPath, localPath) };
+  // 内容基准：仓库副本优先，缺省取第一处本地副本。逐副本哈希比对，全一致才动手。
+  const basePath = existing ? existing.absPath : locals[0];
+  const baseHash = hashDir(basePath);
+  for (const localPath of locals) {
+    if (hashDir(localPath) !== baseHash) {
+      return { ok: false, conflict: true, diffs: diffDirs(basePath, localPath) };
     }
-    // Identical: no copy needed, just swap the local dir for a junction.
-    await recycleDirFn(localPath);
-    createJunction(localPath, existing.absPath);
-    return { ok: true, reusedRepoCopy: true };
   }
-  const dest = join(repoPath, basename(localPath));
-  cpSync(localPath, dest, {
-    recursive: true,
-    filter: (src) => !src.split(/[\\/]/).includes(".git"),
-  });
-  await recycleDirFn(localPath);
-  createJunction(localPath, dest);
-  return { ok: true };
+  let repoAbs = existing?.absPath ?? null;
+  if (!existing) {
+    repoAbs = join(repoPath, basename(locals[0]));
+    cpSync(locals[0], repoAbs, {
+      recursive: true,
+      filter: (src) => !src.split(/[\\/]/).includes(".git"),
+    });
+  }
+  for (const localPath of locals) await recycleDirFn(localPath);
+  for (const skillsDir of activeSkillsDirs(endpoint)) {
+    const linkPath = join(skillsDir, skillName);
+    if (lexists(linkPath)) continue;
+    mkdirSync(skillsDir, { recursive: true });
+    createJunction(linkPath, repoAbs);
+  }
+  return existing ? { ok: true, reusedRepoCopy: true } : { ok: true };
 }
 
 /**
@@ -1119,6 +1202,7 @@ export async function mergeLocalSkill(
  * Bin) groups. Junctions are refused outright: deleting a link is undeploy's
  * job, and this operation must only ever touch real data. There is no
  * hard-delete fallback — a recycle failure aborts with the dir in place.
+ * 双区域版端点（qoder）：实体目录落在几个根就回收几个，一根都没有才报错。
  */
 export async function deleteLocalSkill(
   { endpointId, skillName },
@@ -1128,11 +1212,15 @@ export async function deleteLocalSkill(
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
   assertPlainSkillDirName(skillName);
-  const localPath = join(endpoint.skillsDir, skillName);
-  if (!existsSync(localPath) || isJunction(localPath)) {
+  const locals = [];
+  for (const skillsDir of endpoint.skillsDirs) {
+    const localPath = join(skillsDir, skillName);
+    if (existsSync(localPath) && !isJunction(localPath)) locals.push(localPath);
+  }
+  if (locals.length === 0) {
     throw new Error(`端点上不存在本地实体目录: ${skillName}`);
   }
-  await recycleDirFn(localPath);
+  for (const localPath of locals) await recycleDirFn(localPath);
   return { ok: true };
 }
 /**
@@ -1156,35 +1244,47 @@ export async function resolveConflictSkill(
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
-  assertEndpointOutsideRepo(endpoint, repoPath, "该 skill 就在主仓库里，无需收编");
+  for (const skillsDir of endpoint.skillsDirs) {
+    assertEndpointOutsideRepo({ skillsDir }, repoPath, "该 skill 就在主仓库里，无需收编");
+  }
   if (direction !== "repo" && direction !== "local") {
     throw new Error(`direction 必须是 "repo" 或 "local": ${direction}`);
   }
   assertPlainSkillDirName(skillName);
-  const localPath = join(endpoint.skillsDir, skillName);
-  if (!existsSync(localPath) || isJunction(localPath)) {
+  // 双区域版：实体目录可能落在多个根。方向 local 时内容以第一处本地副本为准
+  // （扫描合并同名单行，用户看到的就是这一处），其余根的副本随收编一并回收。
+  const locals = [];
+  for (const skillsDir of endpoint.skillsDirs) {
+    const localPath = join(skillsDir, skillName);
+    if (existsSync(localPath) && !isJunction(localPath)) locals.push(localPath);
+  }
+  if (locals.length === 0) {
     throw new Error(`端点上不存在本地实体目录: ${skillName}`);
   }
-  if (!existsSync(join(localPath, "SKILL.md"))) {
-    throw new Error(`本地目录缺少 SKILL.md，不是有效 skill: ${skillName}`);
+  for (const localPath of locals) {
+    if (!existsSync(join(localPath, "SKILL.md"))) {
+      throw new Error(`本地目录缺少 SKILL.md，不是有效 skill: ${skillName}`);
+    }
   }
   const repoSkill = findRepoSkill(repoPath, skillName);
   if (!repoSkill) throw new Error(`repo 中不存在 skill: ${skillName}`);
 
-  if (direction === "repo") {
-    await recycleDirFn(localPath);
-    createJunction(localPath, repoSkill.absPath);
-    return { ok: true };
+  if (direction === "local") {
+    // Recycle the old repo copy BEFORE overwriting so it stays recoverable,
+    // then copy local content into the same repo path.
+    await recycleDirFn(repoSkill.absPath);
+    cpSync(locals[0], repoSkill.absPath, {
+      recursive: true,
+      filter: (src) => !src.split(/[\\/]/).includes(".git"),
+    });
   }
-  // direction === "local": recycle the old repo copy BEFORE overwriting so it
-  // stays recoverable, then copy local content into the same repo path.
-  await recycleDirFn(repoSkill.absPath);
-  cpSync(localPath, repoSkill.absPath, {
-    recursive: true,
-    filter: (src) => !src.split(/[\\/]/).includes(".git"),
-  });
-  await recycleDirFn(localPath);
-  createJunction(localPath, repoSkill.absPath);
+  for (const localPath of locals) await recycleDirFn(localPath);
+  for (const skillsDir of activeSkillsDirs(endpoint)) {
+    const linkPath = join(skillsDir, skillName);
+    if (lexists(linkPath)) continue;
+    mkdirSync(skillsDir, { recursive: true });
+    createJunction(linkPath, repoSkill.absPath);
+  }
   return { ok: true };
 }
 
@@ -1196,8 +1296,11 @@ export function diffLocalSkill({ endpointId, skillName, repoPath }, { homeDir = 
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   assertPlainSkillDirName(skillName);
-  const localPath = join(endpoint.skillsDir, skillName);
-  if (!existsSync(localPath) || isJunction(localPath)) {
+  // 双区域版：比对第一根落在盘上的实体目录（扫描合并同名行时展示的就是它）。
+  const localPath = endpoint.skillsDirs
+    .map((skillsDir) => join(skillsDir, skillName))
+    .find((candidate) => existsSync(candidate) && !isJunction(candidate));
+  if (!localPath) {
     throw new Error(`端点上不存在本地实体目录: ${skillName}`);
   }
   const repoSkill = findRepoSkill(repoPath, skillName);
@@ -1237,8 +1340,10 @@ export function diffSkillContent({ endpointId, skillName, repoPath }, { homeDir 
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   assertPlainSkillDirName(skillName);
-  const localPath = join(endpoint.skillsDir, skillName);
-  if (!existsSync(localPath) || isJunction(localPath)) {
+  const localPath = endpoint.skillsDirs
+    .map((skillsDir) => join(skillsDir, skillName))
+    .find((candidate) => existsSync(candidate) && !isJunction(candidate));
+  if (!localPath) {
     throw new Error(`端点上不存在本地实体目录: ${skillName}`);
   }
   const repoSkill = findRepoSkill(repoPath, skillName);
@@ -1455,9 +1560,9 @@ export function createSkillsService({
       // 同径退让：技能目录与主仓库重叠的端点撤下（按配置路径判定，目录暂不
       // 存在同样退让）——该目录以主仓库身份在场，技能全部在仓库列表，重叠端
       // 点上的本地/部署状态只会是同一段磁盘的幻影（收编比一致、异常卡可一
-      // 键删到本体），不撤会误导与误删。
+      // 键删到本体），不撤会误导与误删。双区域版端点任一根重叠即退让。
       const scanned = scanEndpoints(repoExists ? repoPath : null, { homeDir })
-        .filter((ep) => !pathsOverlap(ep.skillsDir, repoPath));
+        .filter((ep) => !(ep.skillsDirs ?? [ep.skillsDir]).some((dir) => pathsOverlap(dir, repoPath)));
       return {
         repoPath,
         repoConfigured: Boolean(repoPath),

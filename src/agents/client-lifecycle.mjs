@@ -25,9 +25,10 @@ export const CLIENT_PACKAGES = Object.freeze({
 // 会把执行体降级。allowScripts 同理不能省：把新二进制安置进 ~/.grok/bin 的正是该包的
 // postinstall，而 npm 的脚本白名单默认不放行它，被拦下就成「命令成功、版本没动」。
 // qoder 同型（Bun 单文件 qodercli.exe）但只跑自身的 `qodercli update`：spec 里没有
-// package 即没有 npm 兜底——npm 上的 @qoder-ai/qodercli 只是官方版本探测渠道，拿它
-// 兜底安装已被明确否决（会把原生单文件执行体换成另一种安装形态），升级失败就如实报
-// 失败，不留第二跳。
+// package 即没有 npm 兜底——npm 上的 @qoder-ai/qodercli（CN 区镜像
+// @qodercn-ai/qoderclicn）只是官方版本探测渠道，拿它兜底安装已被明确否决（会把原生
+// 单文件执行体换成另一种安装形态），升级失败就如实报失败，不留第二跳。双区域版的
+// 执行体由面板按在装记录的路径喂进来（commandPath），intl/CN 各跑各的 update。
 export const NATIVE_CLIENTS = Object.freeze({
   grok: Object.freeze({
     package: "@xai-official/grok",
