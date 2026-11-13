@@ -18,6 +18,12 @@
 // scan() returns SessionMeta[] with an 11-field contract:
 //   endpoint / id / title / summary / project / cwd / originator / file /
 //   createdAt / lastActive / resumeCommand
+//   — plus two zcode-only keys that makeMeta mounts only when it can
+//   establish them (every other endpoint's rows stay exactly 11 fields):
+//   `parentId` (child session → its parent session id; agent-metrics folds
+//   child rows under the parent) and `surface` ("desktop" / "cli", the
+//   source of truth for agent-metrics' zcode surface classification). Rows
+//   where the value cannot be established simply omit the key.
 // `originator` is the client-surface tag the codex CLI writes into its
 // session_meta (`codex-tui` for CLI / VS Code surfaces, `codex_work_desktop`
 // for the desktop GUI). The zcode adapter derives the same tag from its
@@ -2039,8 +2045,6 @@ function sqliteTableExists(db, name) {
   return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
 }
 
-// Shared row shape for zcode/opencode `session` tables (same columns on both):
-// id / title / directory / time_created / time_updated (ms since epoch).
 // zcode 桌面会话判据。桌面端与 CLI 共用一个会话库（桌面的
 // ZCODE_DESKTOP_SESSION_DATA_DIR 只是 Electron 的 Chromium sessionData，agent
 // 会话库恒为 ~/.zcode/cli/db/db.sqlite），session 表本身没有 surface 列。能区分
@@ -2066,6 +2070,11 @@ function zcodeDesktopSessionIds(db) {
   return new Set(rows.map((row) => String(row.session_id)));
 }
 
+// Shared row shape for zcode/opencode `session` tables: id / title / directory /
+// time_created / time_updated (ms since epoch). zcode additionally selects
+// parent_id when its session table carries the column (probed below — a
+// missing column means "no parent link", never a failed scan); opencode
+// never selects it, so its rows keep the base five columns.
 function scanSessionTable({ endpoint, dbPath }) {
   if (!sqliteStorePresent(dbPath)) return [];
   const db = openSqliteReadOnly(dbPath);

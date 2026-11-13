@@ -16,22 +16,26 @@ import { atomicWriteFile } from "../src/store/atomic-write.mjs";
 import { managedConnectionId } from "../src/launchers/qoder-merge-config.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
+function markInstallFile(path) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "stub");
+}
+
 // 九端点「已安装」的盘上形状，落点取自 agent-discovery 各解析器的候选路径
 // （每端点一份主形态）。同步闸门上线后，happy-path 断言「配置被写入」的用例
 // 都要先让端点在盘上「在装」，否则整轮被跳过。opencode 的解析器不认 npm 垫片
 // （Anyswitch 接管 shim 会绕回启动器），须摆真实包布局。
-function installAgentShapes(home) {
-  const mark = (path) => {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, "stub");
-  };
+// homeDataRoots=false 不摆 qoder/grok 两枚安装指纹：它们的数据根就在 home 顶层
+// （~/.qoder、~/.grok），摆了会在夹具根顶层预建目录——「同步结果摘要」区的
+// 「home 缺失」用例靠 CWD 顶层清单前后 diff 观测落盘，预建即把这两端点的相对
+// 路径落盘从观测面里遮掉；该区要九端点全在装的用例改调 markHomeDataRootShapes。
+function installAgentShapes(home, { homeDataRoots = true } = {}) {
   const npm = join(home.APPDATA, "npm");
-  mark(join(home.LOCALAPPDATA, "Programs", "zcode", "ZCode.exe"));
-  mark(join(npm, "dsh.cmd"));
-  mark(join(npm, "pi.cmd"));
-  mark(join(npm, "kimi.cmd"));
-  mark(join(home.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"));
-  mark(join(npm, "codex.cmd"));
+  markInstallFile(join(home.LOCALAPPDATA, "Programs", "zcode", "ZCode.exe"));
+  markInstallFile(join(npm, "dsh.cmd"));
+  markInstallFile(join(npm, "pi.cmd"));
+  markInstallFile(join(npm, "kimi.cmd"));
+  markInstallFile(join(npm, "codex.cmd"));
   const ocPkg = join(npm, "node_modules", "@opencode", "cli");
   mkdirSync(ocPkg, { recursive: true });
   writeFileSync(join(ocPkg, "package.json"), JSON.stringify({
@@ -39,9 +43,16 @@ function installAgentShapes(home) {
     bin: { opencode: "bin/opencode.js" },
     optionalDependencies: { "@opencode/cli-windows-x64": "1.0.0" },
   }));
-  mark(join(ocPkg, "node_modules", "@opencode", "cli-windows-x64", "bin", "opencode.js"));
-  mark(join(home.USERPROFILE, ".grok", "bin", "grok.exe"));
-  mark(join(home.LOCALAPPDATA, "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy"));
+  markInstallFile(join(ocPkg, "node_modules", "@opencode", "cli-windows-x64", "bin", "opencode.js"));
+  markInstallFile(join(home.LOCALAPPDATA, "Programs", "WorkBuddy", "resources", "app.asar.unpacked", "cli", "bin", "codebuddy"));
+  if (homeDataRoots) markHomeDataRootShapes(home);
+}
+
+// qoder/grok 的安装指纹（home 顶层数据根）。单独拆出：摆它们必建 .qoder/.grok
+// 顶层目录，installAgentShapes 的 homeDataRoots 开关即为此而设（见其注释）。
+function markHomeDataRootShapes(home) {
+  markInstallFile(join(home.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"));
+  markInstallFile(join(home.USERPROFILE, ".grok", "bin", "grok.exe"));
 }
 
 describe("agent-sync", () => {
@@ -606,7 +617,7 @@ describe("agent-sync 同步结果摘要", () => {
 
   beforeEach(() => {
     tmpRoot = mkTestDir("agent-sync-summary-test-");
-    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot }, { homeDataRoots: false });
   });
 
   afterEach(() => {
@@ -656,6 +667,10 @@ describe("agent-sync 同步结果摘要", () => {
   });
 
   it("单个端点写不进去时整体仍算成功，失败名单列出该端点", async () => {
+    // 末尾断言九端点各归一个名单，须九端点全在装；qoder/grok 的安装指纹
+    // beforeEach 默认不摆（顶层预建会遮掉「home 缺失」用例的落盘观测面，
+    // 见 installAgentShapes 注释），这里补上。
+    markHomeDataRootShapes({ USERPROFILE: tmpRoot });
     // 拿目录顶住 codex 的配置文件：只有 codex 这一步读不出来，其余端点照常写。
     mkdirSync(join(tmpRoot, ".codex", "config.toml"), { recursive: true });
     const res = await syncAllAgentConfigs({

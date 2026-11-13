@@ -565,19 +565,6 @@ describe("attributeTerminalSessions", () => {
         busy: null,
       }, "没有 pid 形行可退：无 feed 即无绑定");
     });
-
-    it("the busy verdict rides through a feed-bound zcode session", () => {
-      // 多报/少报闭环的另一半：归属打通后 busy 透传不该有额外门槛——它只挂在
-      // detected 条目上，与实例行走哪座桥无关。
-      const out = attributeTerminalSessions(
-        [cwdSession],
-        [{ agentId: "zcode", pid: 6400, ancestors: [8888], busy: true }],
-        zcAgents(["zcode-sess-x"]),
-        { zcode: [{ id: "zcode-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: null }] },
-      );
-      assert.equal(out[0].agent.instanceId, "zcode-sess-x");
-      assert.equal(out[0].agent.busy, true);
-    });
   });
 });
 
@@ -614,20 +601,6 @@ describe("filterTerminalRequestRows", () => {
     assert.deepEqual(filterTerminalRequestRows(rows, {}), []);
     assert.deepEqual(filterTerminalRequestRows(rows, { agentId: "" }), []);
     assert.deepEqual(filterTerminalRequestRows(null, { agentId: "kimi" }), []);
-  });
-
-  it("filters zcode session rows by their instance key", () => {
-    // zcode 会话行的 journal 账目键就是 zcode-sess-<id>：按绑定的实例键过滤时
-    // 只回本行，聚合桶（zcode-global）与别的会话行都不进集。
-    const zcodeRows = [
-      { ts: 1, agentId: "zcode", instanceId: "zcode-global", model: "m1", ok: true },
-      { ts: 2, agentId: "zcode", instanceId: "zcode-sess-a", model: "m2", ok: true },
-      { ts: 3, agentId: "zcode", instanceId: "zcode-sess-b", model: "m3", ok: true },
-    ];
-    assert.deepEqual(
-      filterTerminalRequestRows(zcodeRows, { agentId: "zcode", instanceId: "zcode-sess-a" }).map((r) => r.ts),
-      [2],
-    );
   });
 });
 

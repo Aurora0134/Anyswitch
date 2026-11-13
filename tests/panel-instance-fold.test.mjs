@@ -65,16 +65,18 @@ function fakeElement() {
 }
 
 function makeEnv() {
-  const calls = { update: [], push: [], redraw: [], redrawEp: [], ensure: [], renderBoard: [] };
+  // order：实例级 ensure / redraw 两个桩的调用先后总账——两者是独立数组，
+  // 各自 deepEqual 钉不住「先补行后补绘」的顺序，消融对调源码两行调用即漏。
+  const calls = { update: [], push: [], redraw: [], redrawEp: [], ensure: [], renderBoard: [], order: [] };
   const created = [];
   const env = {
     calls,
     created,
     instanceSparkBuffers: {},
     endpointStaleFlags: {},
-    redrawInstanceSparklines: (prefix) => { calls.redraw.push(prefix); },
+    redrawInstanceSparklines: (prefix) => { calls.redraw.push(prefix); calls.order.push("redraw:" + prefix); },
     redrawEndpointSparklines: (prefix) => { calls.redrawEp.push(prefix); },
-    ensureFoldInstanceRows: (prefix) => { calls.ensure.push(prefix); return false; },
+    ensureFoldInstanceRows: (prefix) => { calls.ensure.push(prefix); calls.order.push("ensure:" + prefix); return false; },
     boardInstanceFor: () => null,
     seedInstanceSparkHistory,
     isDetailOpen: () => false,
@@ -247,10 +249,16 @@ describe("panel.js 端点级旧机制（只剩 qoder）收起不绘制、展开�
 
   it("四宫格隐藏（收起）时不绘制；可见时按端点级 buffer 画三条（cache 锁 0-100）", () => {
     const env = makeEnv();
-    const { fn, keys } = makeRedrawEndpoint(env);
+    const { fn, keys, gridEls } = makeRedrawEndpoint(env);
     assert.equal(keys.zc, undefined, "zc 已无端点级四宫格，不再登记端点折线容器");
     fn("zc");
     assert.equal(env.calls.update.length, 0, "zc 零绘制（端点级折线整块摘除）");
+    // 隐藏门控的真钉必须用键表内的端点（qoder）造 hidden 网格：zc 走空键表，
+    // 删掉源码的 grid.hidden 判断它也零绘制，钉不住门控。
+    gridEls.qoderTelemetryGrid.hidden = true;
+    fn("qoder");
+    assert.equal(env.calls.update.length, 0, "四宫格隐藏（收起）时不绘制（键表内端点，门控被删即红）");
+    gridEls.qoderTelemetryGrid.hidden = false;
     fn("qoder");
     assert.deepEqual(env.calls.update.map((c) => c.id), ["qoderSparkTtft", "qoderSparkTps", "qoderSparkCache"], "可见栏照常绘制");
   });
@@ -419,6 +427,7 @@ describe("panel.js 冷启动展开：权威历史不因未渲染 / 空历史 / �
     fold.fn("kimi");
     assert.deepEqual(env.calls.ensure, ["kimi"], "展开时先补建实例行 DOM/buffer");
     assert.deepEqual(env.calls.redraw, ["kimi"], "补建后照常补绘");
+    assert.deepEqual(env.calls.order, ["ensure:kimi", "redraw:kimi"], "先 ensureFoldInstanceRows 后 redrawInstanceSparklines（源码两行对调即红）");
   });
 
   it("ensureFoldInstanceRows：无行且有数据时走整卡渲染器；行已在时不重渲", () => {

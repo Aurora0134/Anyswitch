@@ -4,21 +4,25 @@
 // ② mock 路由级：敌意 Host 403（GET 与 POST 都拦在 POST 写门之前）、缺头 403、
 //   环回照常放行；写门兜底漏洞闭合（环回 Origin＋敌意 Host 的 POST 原先放行）；
 //   环回 Host＋双头（x-anyswitch-panel / 旧名 x-apicred-panel）写门兼容不变。
-// ③ 活体腿：仿上轮 AUTH-1 复现手法——DI 起 createPanelServer 绑临时端口，
-//   node:http.request 覆写 Host（undici fetch 会静默丢弃 Host 覆写，上轮已证）：
-//   attacker.example 下读路由全 403 且响应体无合成秘密，真实环回 Host 全 200。
-//   此即 rebinding 的服务端等效证明；浏览器侧 LNA/PNA 闸门不依赖、不测。
+// ③ 活体腿：仿上轮 AUTH-1 复现手法——生产 createPanelRouter 配齐探针注入后
+//   绑临时端口，node:http.request 覆写 Host（undici fetch 会静默丢弃 Host 覆写，
+//   上轮已证）：attacker.example 下读路由全 403 且响应体无合成秘密，真实环回
+//   Host 全 200。此即 rebinding 的服务端等效证明；浏览器侧 LNA/PNA 闸门不
+//   依赖、不测。不经 createPanelServer——它不透传 relay/终端宿主/watchdog 探
+//   针（透传清单见 panel-host.mjs），走它必真打 127.0.0.1:47821 与真实
+//   PowerShell，探针注入只能在路由器层完成。
 //
 // env 沙箱先于 panel.mjs 的动态 import：session-scan 的 defaultScanner 在模块
 // 加载期按 HOME 固化各 adapter 的存档根，先 import 后改 env 会让活体腿的
 // messages 路由拿真实 HOME 当根（沙箱 transcript 判越界 500）。mock 腿全走
 // 注入不受 env 影响；env 只活在本测试进程（test runner 每文件独立进程）。
 // 动态 import 同时让待测导出缺失时给出逐腿断言红，而非整文件链接期崩。
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 // ── 沙箱（活体腿与 env 重定向共用）──
@@ -44,7 +48,7 @@ writeFileSync(transcript, [
 ].join("\n") + "\n");
 
 const prevEnv = Object.fromEntries(
-  ["USERPROFILE", "HOME", "LOCALAPPDATA", "TEMP", "TMP", "APPDATA", "ANYSWITCH_UPDATE_DISABLED", "ANYSWITCH_JOURNAL_DIR"].map((k) => [k, process.env[k]]),
+  ["USERPROFILE", "HOME", "LOCALAPPDATA", "TEMP", "TMP", "APPDATA"].map((k) => [k, process.env[k]]),
 );
 process.env.USERPROFILE = home;
 process.env.HOME = home;
@@ -52,8 +56,6 @@ process.env.LOCALAPPDATA = local;
 process.env.TEMP = temp;
 process.env.TMP = temp;
 process.env.APPDATA = join(home, "AppData", "Roaming");
-process.env.ANYSWITCH_UPDATE_DISABLED = "1";
-process.env.ANYSWITCH_JOURNAL_DIR = join(sandbox, "journal");
 
 const panel = await import("../src/panel/panel.mjs");
 
@@ -97,7 +99,10 @@ describe("AUTH-1 · isTrustedPanelHostHeader 纯函数", () => {
 // ── mock 路由级 ──
 // fakeReqRes 与 routerWith 的 DI 形状照抄 tests/panel.test.mjs（已验证能让
 // GET /panel/api/status 返回 200）。GET 走 /panel/api/status：不触发 watchdog
-// 探针（PowerShell / 常驻端口 GET），mock 腿保持零真实副作用。
+// 探针（PowerShell / 常驻端口 GET）。status 路由在调注入桩之前会先求值
+// relayPullToken()——token 缺失时按 storePaths.root 真实落盘 pi-relay-token
+// （注入的 fetchTerminalHostStatus 桩挡不住参数求值），所以 root 必须指测试
+// 自己的临时目录而非任何真实机器路径，「mock 腿保持零真实副作用」才成立。
 function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   const res = {
     statusCode: null,
@@ -131,9 +136,14 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   return { req, res, json };
 }
 
+// mock 腿数据根（承接上段说明：status 路由会在这里落 pi-relay-token）。
+// after 钩子清走；进程退出钩子兜底异常退出。
+const gateRoot = mkdtempSync(join(tmpdir(), "anyswitch-auth1-gate-"));
+after(() => rmSync(gateRoot, { recursive: true, force: true }));
+
 function gateRouter(logger = null) {
   return panel.createPanelRouter({
-    storePaths: { root: "C:/fake/anyswitch" },
+    storePaths: { root: gateRoot },
     logger,
     metricsCollector: null,
     startTime: 123456,
@@ -217,23 +227,38 @@ describe("AUTH-1 · 路由级 Host 门（mock）", () => {
 });
 
 // ── 活体腿 ──
-// 生产栈（createPanelServer）绑 127.0.0.1 临时端口，node:http.request 显式
-// 覆写 Host。prewarm 会照生产语义发只读探针（PowerShell 计划任务/进程查询、
-// 常驻 watchdog 健康探活），与上轮留档探针同一副作用面。
-describe("AUTH-1 · 活体腿：createPanelServer＋Host 覆写", () => {
+// 生产路由（createPanelRouter，探针全注入）绑 127.0.0.1 临时端口，
+// node:http.request 显式覆写 Host。relay 健康、终端宿主状态、watchdog 注册
+// 表/进程探针全走注入桩：零真实网络、零 PowerShell。不经 createPanelServer
+// 的原因见文件头 ③——那四项探针它透传不过去，prewarm 还会在建服期就打真实
+// 探针。
+describe("AUTH-1 · 活体腿：生产路由＋Host 覆写", () => {
   it("attacker.example 读路由全 403 且无泄漏；真实环回 Host 全 200", async () => {
     const warnings = [];
     let server = null;
     try {
-      const { createPanelServer } = await import("../src/panel/panel-host.mjs");
       const { storePaths } = await import("../src/store/store-io.mjs");
-      const built = createPanelServer({
-        paths: storePaths(root),
-        settingsFile,
-        selfUpdateAutoDownloadScheduleFn: () => ({ first: null, interval: null }),
+      const router = panel.createPanelRouter({
+        storePaths: storePaths(root),
         logger: { warn: (line) => warnings.push(String(line)) },
+        metricsCollector: null,
+        selfUpdateAutoDownloadScheduleFn: () => ({ first: null, interval: null }),
+        // 探针注入（与 mock 腿同纪律，另含 getRelayStatusFn）：走生产默认的话，
+        // status 路由会真发 HTTP 到 127.0.0.1:47821（relay 健康＋终端宿主状态
+        // 各一条），settings 冷路径会真跑 PowerShell 计划任务查询（runPS 无超
+        // 时）＋watchdog 常驻端口 47822 探活——打到宿主机在跑的产品实例，还留
+        // 一个无界挂起面。全数回落后断言不再依赖宿主机状态。
+        getRelayStatusFn: async () => ({ status: "stopped", pid: null, port: 47821 }),
+        fetchTerminalHostStatus: async () => null,
+        isWatchdogAutostartEnabledFn: async () => false,
+        probeWatchdogFn: async () => false,
       });
-      server = built.server;
+      server = createServer((req, res) => {
+        router.handle(req, res).catch(() => {
+          res.writeHead(500);
+          res.end("unhandled route error");
+        });
+      });
       await new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(0, "127.0.0.1", resolve);
@@ -312,4 +337,5 @@ describe("AUTH-1 · 活体腿：createPanelServer＋Host 覆写", () => {
 
 process.on("exit", () => {
   rmSync(sandbox, { recursive: true, force: true });
+  rmSync(gateRoot, { recursive: true, force: true });
 });

@@ -772,9 +772,11 @@ function seedWorkbuddy(home, sidecarRoot, { sidecar = true } = {}) {
     "# My notes\n\n" + buildManagedBlock([{ title: "规则", content: "preset body" }]) + "\n",
   );
   // 旧版落点（≤0.7.1 写 ~/.workbuddy/AGENTS.md，WorkBuddy 从不读它）：残留也要清。
+  // 真实旧残留没有 ## 标题行——旧版 buildManagedBlock 只写正文，夹具按旧形状
+  // 造块（无 title），别给旧残留补上新版才有的标题。
   writeFileSync(
     join(home, ".workbuddy", "AGENTS.md"),
-    buildManagedBlock([{ title: "规则", content: "preset body" }]) + "\n",
+    buildManagedBlock([{ content: "preset body" }]) + "\n",
   );
   if (sidecar) seedSidecar(sidecarRoot, "workbuddy-sidecar.json", ["chan1"]);
   return modelsPath;

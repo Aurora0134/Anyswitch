@@ -1001,6 +1001,7 @@ describe("keep-alive resume (mid-response truncation, on tier)", () => {
         text.split("\n").find((line) => line.startsWith("data:") && line.includes('"error"')).slice(5),
       );
       assert.match(errorPayload.error.message, /续接 1 次仍未完成/, "the message names how many resumes were spent");
+      assert.equal(errorPayload.error.code, 502, "the terminal frame names the upstream-incomplete code");
     });
   });
 

@@ -1355,12 +1355,14 @@ test("同时到来的运行中确认排队逐个弹，离开关于页时排队�
 });
 
 test("更新失败与未生效分别提示，失败带出错误末行", async () => {
+  // notify 第二参已是色档（true / "warn" / "ok"…）：非成功集合必须按档判——三档全
+  // truthy，旧的 truthy 口径会放成功档 "ok" 溜进「非成功提示」断言。
   const cases = [
-    { run: doneRun("run-f", "kimi", { outcome: "failed", message: "更新命令执行失败，请稍后重试", detail: "npm error code EACCES\nnpm error path C:\\npm" }), expect: /npm error code EACCES/ },
-    { run: doneRun("run-f", "kimi", { outcome: "unchanged", message: "更新已完成，但本地版本未变化，可能仍有旧版本在生效", comparison: "update_available" }), expect: /本地版本未变化/ },
-    { run: doneRun("run-f", "kimi", { outcome: "installed_not_runnable", message: "已安装但无法运行，请先检查运行环境（如 Node 版本）" }), expect: /运行环境/ },
+    { run: doneRun("run-f", "kimi", { outcome: "failed", message: "更新命令执行失败，请稍后重试", detail: "npm error code EACCES\nnpm error path C:\\npm" }), expect: /npm error code EACCES/, grade: true },
+    { run: doneRun("run-f", "kimi", { outcome: "unchanged", message: "更新已完成，但本地版本未变化，可能仍有旧版本在生效", comparison: "update_available" }), expect: /本地版本未变化/, grade: "warn" },
+    { run: doneRun("run-f", "kimi", { outcome: "installed_not_runnable", message: "已安装但无法运行，请先检查运行环境（如 Node 版本）" }), expect: /运行环境/, grade: true },
   ];
-  for (const { run, expect } of cases) {
+  for (const { run, expect, grade } of cases) {
     const h = harness(
       (path) => (path.startsWith("/api/environment/update/") ? run : normal(path)),
       { respondPost: () => ({ ok: true, runId: "run-f" }) },
@@ -1369,7 +1371,10 @@ test("更新失败与未生效分别提示，失败带出错误末行", async ()
     await actionButton(h, "kimi").click();
     const text = h.toasts.map((toast) => toast.message).join("\n");
     assert.match(text, expect);
-    assert.ok(h.toasts.every((toast) => toast.isErr), "这三类结果都要用户注意，不走普通成功提示");
+    assert.ok(h.toasts.every((toast) => toast.isErr === true || toast.isErr === "warn" || toast.isErr === "danger"), "这三类结果都要用户注意，不走普通成功提示（成功档 \"ok\" 被排除）");
+    const outcome = h.toasts.find((toast) => expect.test(toast.message));
+    assert.ok(outcome, "结论 toast 必须在场");
+    assert.equal(outcome.isErr, grade, "结论 toast 的色档逐案钉死：failed / installed_not_runnable 报错红，unchanged 警示档");
     assert.equal(actionButton(h, "kimi").disabled, false, "失败后按钮恢复可点");
   }
 });
@@ -1623,6 +1628,26 @@ test("成功但 Relay 没起来：结构位把成功绿降为警示档", async (
   const done = h.toasts.find((toast) => /已更新到 0\.7\.0/.test(toast.message));
   assert.ok(done, "结论要交代到用户眼前");
   assert.equal(done.isErr, "warn");
+
+  // 反例：同一句「Relay 未能自动重启」文案、结构位 relayRestartFailed 未置——色档
+  // 必须仍是成功绿。生产里两信号同源恒共见，此反例专防「按文案嗅探降档」的变异体：
+  // 色档只随结构位走，不读 message。
+  const sameTextRecord = { ...degradedRecord, relayRestartFailed: false };
+  const { h: sameTextH } = selfUpdateHarness({
+    frames: [
+      { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+      sameTextRecord,
+    ],
+  });
+  await startOneClick(sameTextH);
+  for (let index = 0; index < 3; index++) {
+    sameTextH.flushJobs();
+    await tick();
+  }
+  assert.equal(sameTextH.get("aboutUpdateStatus").dataset.tone, "ok", "结构位未置：同一句文案不升档，仍是成功绿");
+  const sameTextDone = sameTextH.toasts.find((toast) => /已更新到 0\.7\.0/.test(toast.message));
+  assert.ok(sameTextDone, "结论要交代到用户眼前");
+  assert.equal(sameTextDone.isErr, "ok", "色档只随结构位：message 带 Relay 子句但未置位，仍是成功档");
 });
 
 test("刷新后 /last 补显：待重启生效仍是警示档，与关于页、观察者同色", async () => {

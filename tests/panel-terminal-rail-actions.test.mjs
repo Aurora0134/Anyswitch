@@ -5593,7 +5593,7 @@ describe("视口化验收（页签＝视口）", () => {
       assert.deepEqual(sandbox.viewportBackgrounds("viewport-1"), ["t-2"], "t-2 保持后台");
       assert.equal(sandbox.activeTerminal(), "t-3", "显示指针换到接班的会话");
       assert.equal(log.renders - rendersBefore, 2,
-        "交接渲染一拍＋尾拍指针变更补渲一拍（生产里第二刀被同会话流短路收成零成本）");
+        "交接渲染一拍（advance 的 wasActive 分支）＋sync 尾拍指针变更补渲一拍（第二拍生产里先重渲栏/数据/页签，屏面停放/建流/fit 被同会话流短路整组跳过）");
       assert.ok((log.switchEvents || []).some((row) => row.event === "viewport-advance"), "交接留痕一拍");
     });
 
@@ -5957,15 +5957,19 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
     return terminalSessionRunning(session, now);
   `)(session, now);
 
-  it("现场快照：旧口径判空闲，统一判据按在跑（busy 位 / 非回显输出单变量对照）", () => {
-    const oldVerdict = SNAP.status === "working" || SNAP.metrics.activeRequests > 0;
-    assert.equal(oldVerdict, false, "旧口径：0 请求 + idle → 空闲（误杀起点）");
+  it("现场快照：统一判据按在跑（busy 位 / 非回显输出单变量对照，旧口径两信号并入判据仍单独成立）", () => {
     assert.equal(running(SNAP), true, "统一判据保住它");
     const noBusy = { ...SNAP, agent: { ...SNAP.agent, busy: false } };
     const staleOutput = { ...SNAP, backendState: { ...SNAP.backendState, lastActiveAt: SNAP_NOW - 60_000 } };
     assert.equal(running(noBusy), true, "只留非回显输出：仍保活（刷新丢闸、请求没归属）");
     assert.equal(running(staleOutput), true, "只留 busy 位：仍保活（输出静默的长命令）");
-    assert.equal(running({ ...noBusy, backendState: staleOutput.backendState }), false, "两条都没有＝确定空闲，照旧可收");
+    // 旧口径两信号（working 位／在途请求）如今是统一判据的前两行，真调生产函数钉
+    // 它们仍单独成立：基座＝两条新信号都剥掉的「确定空闲」，单加一枚即翻在跑。快照
+    // 里两信号皆无——当年的误杀起点正是旧口径只看这两条。
+    const idleBase = { ...noBusy, backendState: staleOutput.backendState };
+    assert.equal(running({ ...idleBase, status: "working" }), true, "旧口径信号之一（working 位）并入判据后仍单独成立");
+    assert.equal(running({ ...idleBase, metrics: { activeRequests: 1 } }), true, "旧口径信号之二（在途请求）并入判据后仍单独成立");
+    assert.equal(running(idleBase), false, "两条都没有＝确定空闲，照旧可收");
     assert.equal(running({ ...SNAP, backendState: { ...SNAP.backendState, status: "exited" } }), false,
       "exited 优先：迟到的活跃信号不救已退出的进程");
   });

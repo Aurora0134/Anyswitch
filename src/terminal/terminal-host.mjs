@@ -689,6 +689,11 @@ export function createTerminalHost({
   // 恢复清扫的身份校验：只有命令行对得上本会话启动执行体的 pid 才允许树杀。
   // 查询失败（null）按「对不上」处理，测试注入固定字符串。
   getCommandLineFn = (pid) => getProcessCommandLineAsync(pid),
+  // 会话活跃度时钟：lastActiveAt 的写入（emit / 退出回调）与 resize 回声的 2s
+  // 静默门、lastResizeAt 戳统一从这只钟取值。默认墙钟，不传时行为不变；测试注入
+  // 受控时钟后，跨 2s 静默门的判定不再靠真实 sleep 赌墙钟竞速。日志时刻照旧用
+  // 真实墙钟——诊断面记录的是真实观察时刻，不该跟着测试时钟走。
+  nowFn = Date.now,
 } = {}) {
   const dataRoot = root || join(process.env.LOCALAPPDATA || process.cwd(), "Anyswitch");
   mkdirSync(dataRoot, { recursive: true });
@@ -1493,7 +1498,7 @@ export function createTerminalHost({
     session.bufferBytes += chunkBytes(text);
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     feedMirror(session, text);
-    session.lastActiveAt = Date.now();
+    session.lastActiveAt = nowFn();
     // 可见文本指纹与 lastActiveAt 分开：扫光这类纯颜色帧不能算「画面有新内容」，
     // 只刷新真正看得见的变化（面板据此判「这屏还在动吗」）。
     touchVisibleAt(session);
@@ -1633,7 +1638,7 @@ export function createTerminalHost({
       );
       session.exitCode = exitCode;
       session.pty = null;
-      session.lastActiveAt = Date.now();
+      session.lastActiveAt = nowFn();
       // 退出改写的是落盘记录里的 exitCode/状态/lastActiveAt 三样：置脏后再触发
       // 立即写，退出码不能只活在内存里（宿主随后被杀时盘上还是 running）。
       markSessionDirty(session);
@@ -2091,8 +2096,8 @@ export function createTerminalHost({
         // 改。同尺寸 resize 走上面的短路天然不记：没动 PTY 就没有回声。放在
         // pty.resize 之前，保证重渲染输出的时刻晚于它（面板的顺序闸才判得出「回声」）。
         const stampedResizeEcho = sizeChanged
-          && !(Number.isFinite(session.lastActiveAt) && Date.now() - session.lastActiveAt < 2000);
-        if (stampedResizeEcho) session.lastResizeAt = Date.now();
+          && !(Number.isFinite(session.lastActiveAt) && nowFn() - session.lastActiveAt < 2000);
+        if (stampedResizeEcho) session.lastResizeAt = nowFn();
         try {
           if (!session.screen) session.screen = createScreenMirror({ cols, rows });
           else session.screen.resize(cols, rows);

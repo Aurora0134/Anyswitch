@@ -166,7 +166,6 @@ parentPort.on("message", (message) => {
         round += 1;
         return { sessions: [{ endpoint: "claude", id: `r${round}`, file: `C:/s/r${round}.jsonl` }], endpointErrors: [] };
       },
-      loadMessages: async () => [],
       deleteSessions: async () => ({ ok: [], fail: [] }),
     };
     // TTL 拉长到 1 小时：普通 GET 一定命中旧快照，只有 ?refresh=1 能穿透。
@@ -283,7 +282,6 @@ parentPort.on("message", (message) => {
         return { sessions: [{ endpoint: "claude", id: `full-${round}`, file: `C:/s/full-${round}.jsonl`, lastActive: round }], endpointErrors: [] };
       },
       scanAgent: async () => [{ endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 500 }],
-      loadMessages: async () => [],
       deleteSessions: async () => ({ ok: [], fail: [] }),
     };
     // ttl=0：第一拍冷扫；第二拍 GET 过期先回旧值、后台补扫（在飞 50ms）。
@@ -337,7 +335,6 @@ parentPort.on("message", (message) => {
         if (round > 1) await new Promise((resolve) => setTimeout(resolve, 50));
         return { sessions: [{ endpoint: "claude", id: `s${round}`, file: `C:/s/${round}.jsonl` }], endpointErrors: [] };
       },
-      loadMessages: async () => [],
       deleteSessions: async () => ({ ok: [], fail: [] }),
     };
     // ttl=0：每一拍都过期，但只有冷缓存那一拍会等扫描。
@@ -410,7 +407,6 @@ parentPort.on("message", (message) => {
         // 之后：盘面已无 gone。
         return { sessions: [{ endpoint: "claude", id: "keep", file: "C:/s/keep.jsonl" }], endpointErrors: [] };
       },
-      loadMessages: async () => [],
       deleteSessions: async () => ({ ok: [{ endpoint: "claude", file: "C:/s/gone.jsonl" }], fail: [] }),
     };
     const router = sessionsRouter(svc, { sessionsListTtlMs: 0 });

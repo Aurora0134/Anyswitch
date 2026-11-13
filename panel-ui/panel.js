@@ -327,6 +327,11 @@ async function api(method, path, body) {
     const tags = [$("brandVersion"), $("railBrandVersion")].filter(Boolean);
     const footer = $("footerBrandVersion");
     if (!tags.length && !footer) return;
+    // 彩蛋分支（1/25）：整段改写页脚品牌行——给 footer.parentNode 赋 textContent
+    // 会摘掉该行的全部子节点，footer span 随之脱离 DOM。其后那次页脚版本号写入
+    // （下方 try 内）落到游离节点上、不再上屏：页脚版本号偶尔「消失」正是这条分支
+    // 的机制，不是取值失败；头行与栏顶两处徽标不走这条分支，版本单一来源（见上）
+    // 不受影响。
     if (footer && footer.parentNode && Math.random() < 1 / 25) footer.parentNode.textContent = "Ciallo～(∠・ω< )⌒☆";
     try {
       const info = await api("GET", "/api/app-info");
@@ -1610,13 +1615,8 @@ async function api(method, path, body) {
     }
   }
 
-  // 展开瞬间补绘：按当前 DOM 行序把权威历史画回本栏实例折线（不串其他栏），
-  // 供 applyDetailFold（data-prefix 栏）与旧 id 接线栏的 setFold（zcode/qoder）
-  // 展开时调用——否则折叠期间攒的数据要等下一轮 1s 轮询才上屏。
-  // 行→实例配对与 renderInstanceRows 同构（.instance-telemetry-grid[data-instance-id]），
-  // ttft 取 buffer 暂存的权威历史、cache 锁 0-100 量程，与渲染时口径一致。
-  // 权威源取最近一帧 /api/agents 的 instances[].sparkHistory：buffer 缺键时按它
-  // 播种，不依赖「这张卡此前渲染过」。陈旧只压暗速率数值，历史曲线照常补绘。
+  // 只查不画：从最近一帧 /api/agents 的 instances 里取本栏某实例的权威数据，
+  // 折线绘制都在下方 redrawInstanceSparklines 一侧。
   function boardInstanceFor(prefix, iid) {
     const id = BOARD_AGENT_ID[prefix] || prefix;
     const agent = lastBoardAgents.find((a) => a && a.id === id);
@@ -1624,6 +1624,13 @@ async function api(method, path, body) {
     return agent.instances.find((inst) => String(inst && inst.id) === String(iid)) || null;
   }
 
+  // 展开瞬间补绘：按当前 DOM 行序把权威历史画回本栏实例折线（不串其他栏），
+  // 供 applyDetailFold（data-prefix 栏）与旧 id 接线栏的 setFold（zcode/qoder）
+  // 展开时调用——否则折叠期间攒的数据要等下一轮 1s 轮询才上屏。
+  // 行→实例配对与 renderInstanceRows 同构（.instance-telemetry-grid[data-instance-id]），
+  // ttft 取 buffer 暂存的权威历史、cache 锁 0-100 量程，与渲染时口径一致。
+  // 权威源取最近一帧 /api/agents 的 instances[].sparkHistory：buffer 缺键时按它
+  // 播种，不依赖「这张卡此前渲染过」。陈旧只压暗速率数值，历史曲线照常补绘。
   function redrawInstanceSparklines(prefix) {
     document.querySelectorAll('.instance-telemetry-grid[data-instance-id]').forEach((grid) => {
       const card = grid.closest(".panel-card");
@@ -8293,9 +8300,9 @@ async function api(method, path, body) {
   // 滚动区高度被瞬刻算成一屏大小——scrollTop 从底部 40095 被浏览器钳到 345），
   // 钳制派发的 scroll 事件不带任何标记，xterm 拿它当「用户滚动」写进 ydisp；此后
   // ydisp≠ybase，新输出不再带动视口，画面卡死在接近顶端的位置不自行恢复。
-  // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态下、最近没有用户
-  // 语义（2026-10-20
-  // 用户拍板）：空区出现时不自动折回——视口原地不动，空白带留在屏上；用户
+  // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态、且最近没有用户
+  // 滚动意图时（语义对齐 Claude Desktop 实证规格，2026-10-20 用户拍板），空区出现
+  // 不自动折回——视口原地不动，空白带留在屏上；用户
   // 上滚翻看历史时「地板」随滚动逐拍收紧（trim 只缩不扩），空区被吃掉而视口不跳；滚回
   // 地板即恢复跟随，落点恰好是修剪后的内容底。用户主动离底的各条通路都先记意图——滚轮/
   // 拖滚动条/触摸/选择拖动，以及键盘翻页（xterm 把 Shift+PageUp/PageDown 译为
@@ -10909,9 +10916,12 @@ async function api(method, path, body) {
       }
       return;
     }
-    // 切签/切回都经这里重建流：先把旧画面停成垫片（见 parkTerminalScreen），新画面
-    // 首帧落绘后由观察循环撤走——切换期间屏上始终有内容，不再是纯底色。停放与建流
-    // 之间没有 await，旧画面不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
+    // 切签/切回都经这里重建流：旧画面的去向由 parkTerminalScreen 按身份判定（见其
+    // 头注释）——身份未知或同一条终端身份（换绑换进程不换身份）照旧停成垫片，新
+    // 画面首帧落绘后由观察循环撤走；跨 agent 换屏（屏上与目标身份都已知且不同）
+    // 当场撤帧＋拆流，切换期没有旧帧、会看到一瞬底色（2026-10-27 裁决：宁可短暂
+    // 空白也不显示别的会话）。停放与建流之间没有 await，保住垫片的那一档里旧画面
+    // 不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
     if (typeof parkTerminalScreen === "function") parkTerminalScreen(session);
     connectTerminalStream(session, { revive });
     // 同上：挂层排在建流之后，点当拍不挂——内切的 /switch 在飞期间屏上还是上一屏。
@@ -17630,8 +17640,10 @@ async function api(method, path, body) {
   const PRESET_GREEN_MAX = 200;      // 单预设：≤200 绿
   const PRESET_YELLOW_MAX = 500;     // 201–500 黄，>500 红
   const CTX_TIER_NAME = { empty: "空", low: "少", mid: "中", high: "多", over: "超过 100%" };
-  // 注入量口径＝正文＋标题＋标题行开销（“## ”3 字＋两个换行）。标题也进端点
-  // 指令文件，只数正文会低报真实注入量。
+  // 注入量口径＝正文＋标题＋标题行开销。开销恰为 6（与下方常量同源）：标题行
+  // 前缀「## 」3 字，加 3 个换行——标题前一条空行、标题行自身行尾、标题后一条
+  // 空行，即注入侧每段「\n## 标题\n\n」的形状。标题也进端点指令文件，只数正文
+  // 会低报真实注入量。
   function presetCharCount(p) {
     const content = ((p && p.content) || "").length;
     const title = ((p && p.title) || "").length;

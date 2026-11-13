@@ -147,7 +147,7 @@ function scanCss(text) {
         if (frame.pre.startsWith("@")) {
           for (let k = atBlocks.length - 1; k >= 0; k--) if (atBlocks[k].open === frame.open) { atBlocks[k].close = i; break; }
         } else {
-          rules.push({ chain: frames.map((f) => f.pre), sel: frame.pre, line: frame.line });
+          rules.push({ chain: frames.map((f) => f.pre), sel: frame.pre, line: frame.line, body: css.slice(frame.bodyStart, i) });
         }
       }
       buf = "";
@@ -193,17 +193,30 @@ for (const slug of SLUGS) {
     }
     assert.deepEqual(misplaced, [],
       `${slug}.css 的 @scope 边界不对：` + JSON.stringify(misplaced, null, 2));
-    const tokenBlocks = rules.filter((r) => !r.chain.includes(scope.pre) && tokenRule(r));
-    assert.ok(tokenBlocks.length >= 3,
-      `${slug}.css 块外应至少有三段 :root token 规则（亮色 / 显式暗色 / 跟随系统暗色），实为 ${tokenBlocks.length} 段`);
+    // 三段身份逐段在册（计数 >=3 区分不了身份：sepia 块外实有 4 段，第 4 段是 --heat-*
+    // 热力档位、与亮色段同为 :root[data-style=sepia] 顶层段，删掉任一暗色段后计数仍为
+    // 3、原计数断言照绿）。亮色段与 --heat 段同形，靠 color-scheme: light 判别；显式
+    // 暗色段带显式 [data-theme="dark"] 条件；跟随系统暗色段在 @media 内且内容与之相同。
+    const outsideTokens = rules.filter((r) => !r.chain.includes(scope.pre) && tokenRule(r));
+    const plainRoot = (r) => r.chain.every((p) => !p.startsWith("@media"));
+    const hasSeg = (pred, what) => {
+      assert.ok(outsideTokens.some(pred),
+        `${slug}.css 块外缺少${what}——三段身份各自在册，删掉任一段或改写形态都会红`);
+    };
+    hasSeg((r) => plainRoot(r) && r.sel === `:root[data-style="${slug}"]` && /color-scheme:\s*light/.test(r.body),
+      `亮色 token 段（:root[data-style="${slug}"] 顶层 + color-scheme: light）`);
+    hasSeg((r) => plainRoot(r) && r.sel === `:root[data-style="${slug}"][data-theme="dark"]`,
+      `显式暗色 token 段（:root[data-style="${slug}"][data-theme="dark"]）`);
+    hasSeg((r) => r.chain.some((p) => p.startsWith("@media (prefers-color-scheme: dark)")),
+      "跟随系统暗色 token 段（@media (prefers-color-scheme: dark) 内）");
     // 块外允许的 @ 块：@keyframes（不能进 @scope）与承载 token 定义的 @media；
     // 其他 @ 块（例如把覆盖规则塞进 @media 却漏在外层）一律红。
     const atOutside = atBlocks.filter((b) => b.open < scope.open || b.open > scope.close)
       .filter((b) => !b.pre.startsWith("@keyframes") && !b.pre.startsWith("@media"));
     assert.deepEqual(atOutside.map((b) => `${slug}.css:${b.line} ${b.pre}`), [],
-      "\\@scope 之外只允许顶层 @keyframes 与承载 token 定义的 @media");
+      "@scope 之外只允许顶层 @keyframes 与承载 token 定义的 @media");
     const keyframesInside = atBlocks.filter((b) => b.pre.startsWith("@keyframes") && b.open > scope.open && b.open < scope.close);
     assert.deepEqual(keyframesInside.map((b) => `${slug}.css:${b.line} ${b.pre}`), [],
-      "\@keyframes 不能放在 @scope 内：浏览器不会为它注册动画");
+      "@keyframes 不能放在 @scope 内：浏览器不会为它注册动画");
   });
 }

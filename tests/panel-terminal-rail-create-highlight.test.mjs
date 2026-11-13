@@ -107,10 +107,27 @@ describe("新建会话：创建请求挂起期间左栏高亮当拍切换", () =
   });
 
   it("乐观态令牌：武装幂等、按令牌撤销、TTL 兜底撤假行", () => {
-    const sb = new Function(`
+    // TTL 常量从源码切（勿硬写）：值改了或定时器回调被删，这里必须跟着红。
+    const ttlDecl = panelJs.match(/const TERMINAL_RAIL_CREATE_TTL_MS = [^;]+;/)?.[0];
+    assert.ok(ttlDecl, "TERMINAL_RAIL_CREATE_TTL_MS 在 panel.js 里");
+    const ttl = new Function(`${ttlDecl}\nreturn TERMINAL_RAIL_CREATE_TTL_MS;`)();
+    // 假时钟：setTimeout 只登记不真跑，advance(ms) 跑掉所有到点回调。
+    const timers = [];
+    const fakeSetTimeout = (fn, delay) => {
+      const timer = { fn, delay: Number(delay) || 0, cancelled: false, fired: false, unref() { return timer; } };
+      timers.push(timer);
+      return timer;
+    };
+    const fakeClearTimeout = (timer) => { if (timer) timer.cancelled = true; };
+    const advance = (ms) => {
+      for (const timer of timers) {
+        if (!timer.cancelled && !timer.fired && timer.delay <= ms) { timer.fired = true; timer.fn(); }
+      }
+    };
+    const sb = new Function("setTimeout", "clearTimeout", `
       let terminalRailCreatePending = null;
       let terminalRailCreateSeq = 0;
-      const TERMINAL_RAIL_CREATE_TTL_MS = 30000;
+      ${ttlDecl}
       let renders = 0;
       function renderTerminalRail() { renders += 1; }
       ${extract("terminalRailArmCreate")}
@@ -121,7 +138,7 @@ describe("新建会话：创建请求挂起期间左栏高亮当拍切换", () =
         pending: () => terminalRailCreatePending,
         renders: () => renders,
       };
-    `)();
+    `)(fakeSetTimeout, fakeClearTimeout);
     const token = sb.arm({ endpoint: "kimi", cwd: "C:\\dev\\alpha" });
     assert.ok(sb.pending(), "武装后乐观态在册");
     assert.equal(sb.renders(), 1, "武装当拍重渲左栏");
@@ -138,6 +155,15 @@ describe("新建会话：创建请求挂起期间左栏高亮当拍切换", () =
     assert.ok(sb.pending(), "旧请求落地清不掉新点击的占位");
     sb.disarm(null);
     assert.equal(sb.pending(), null, "无条件作废用于失败回滚与用户改主意");
+    // TTL 兜底：POST 卡死不回来，到点占位行自己撤（假时钟推进到 TTL，不真等 30s）。
+    sb.arm({ endpoint: "kimi", cwd: "C:\\dev\\delta" });
+    assert.ok(sb.pending(), "TTL 用例起点：占位行在册");
+    const rendersBeforeTtl = sb.renders();
+    advance(ttl - 1);
+    assert.ok(sb.pending(), "TTL 未到点：占位行还在（请求挂着不凭空消失）");
+    advance(ttl);
+    assert.equal(sb.pending(), null, "TTL 到点：兜底撤掉假行");
+    assert.equal(sb.renders(), rendersBeforeTtl + 1, "撤假行当拍重渲左栏");
   });
 
   it("创建请求挂起即武装；落地、失败两出口都撤销；续接创建不武装", async () => {
@@ -186,9 +212,15 @@ describe("新建会话：创建请求挂起期间左栏高亮当拍切换", () =
 
   it("判定门：武装排在补读两拍之前，内切路径先撤占位再点亮真实兜底行", () => {
     const core = extract("terminalRailSwitchOrCreateCore");
-    const armAt = core.indexOf("terminalRailArmCreate(");
+    // 锚法：core 里有两处 arm——「无视口/无后端」分支那处随 return 提前武装、走不到
+    // 补读，按首次出现取 indexOf 会钉到它。本条要钉的是「在飞闸置位后、补读之前」
+    // 那处，故从闸之后起搜；闸或补读锚点自身缺失先红，不留「锚丢了仍绿」的缝。
+    const gateAt = core.indexOf("terminalSwitchInFlight = true");
     const rereadAt = core.indexOf('api("GET", "/api/agents")');
-    assert.ok(armAt >= 0 && armAt < rereadAt, "在飞闸置位后、补读之前就点亮，不等宿主探测");
+    assert.ok(gateAt >= 0, "锚点在册：在飞闸置位");
+    assert.ok(rereadAt > gateAt, "锚点在册：补读两拍在闸之后");
+    const armAt = core.indexOf("terminalRailArmCreate(", gateAt);
+    assert.ok(armAt > gateAt && armAt < rereadAt, "在飞闸置位后、补读之前就点亮，不等宿主探测");
     const disarmAt = core.indexOf("terminalRailDisarmCreate(");
     const armSelectAt = core.indexOf("terminalRailArmSelect(");
     assert.ok(disarmAt >= 0 && disarmAt < armSelectAt, "同记录内切撤掉占位，交给既有真实兜底行");

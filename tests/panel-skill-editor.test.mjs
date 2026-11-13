@@ -127,10 +127,17 @@ describe("正文编辑接线", () => {
     assert.match(panelCss, /\.modal-overlay\.show \.modal-card \{[^}]*animation: modal-in/);
     assert.match(panelCss, /@keyframes modal-in \{/);
     for (const style of ["saas", "aurora", "sepia"]) {
+      // 成对断言：animation 引用与 @keyframes 定义同名成对出现。只断引用不断定义时，
+      // 删掉或改名任一 @keyframes 都会让动画名解析不到、换态重播退化成硬切。
       assert.match(
         panelCss,
         new RegExp(`:scope:scope \\.modal-overlay\\.show \\.modal-card \\{[^}]*animation: ${style}-modal-in`),
         `${style} 皮肤变体缺失会让重播落到默认动画上，与开窗手感不一致`,
+      );
+      assert.match(
+        panelCss,
+        new RegExp(`@keyframes ${style}-modal-in \\{`),
+        `${style} 的 animation 引用了 ${style}-modal-in，对应的 @keyframes 却不存在——动画名解析不到，换态重播退化成硬切`,
       );
     }
   });

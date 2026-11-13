@@ -203,6 +203,15 @@ describe("A 口径：聚合汇总数不进单条终端状态（读数一个不�
     run([]);
     assert.equal(sessions["t-s"].status, "working", "普通外壳输出窗即真值，不受本次改动影响");
   });
+
+  it("源码契约：聚合端点集合在册且只含 zcode", () => {
+    // enrichSandbox 在沙箱里自造同名常量，抽出的 enrichTerminalSessions 闭包解析到
+    // 的是沙箱这份而非源码那份——三例全绿不代表源码取值如此。钉住源码字面量：源码
+    // 改集合取值这里先红，逼着沙箱常量与用例跟改（同文件 109 行对
+    // TERMINAL_COUNT_TRUTH_ENDPOINTS 的同款钉法，补齐两侧对称）。
+    assert.ok(/const TERMINAL_AGGREGATE_ONLY_ENDPOINTS = new Set\(\["zcode"\]\);/.test(panelJs),
+      "模块级聚合端点集合在册且只含 zcode");
+  });
 });
 
 // ── P-D 后台回收器 ──
@@ -240,9 +249,15 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
       scan: (now) => maybeRecycleTerminalBackground(now),
       background: () => Array.from(terminalBackgroundIds),
       // 记账形态与生产同款（2026-11-07 瘦身后只记起点时刻）：若回归重新读写
-      // since.endpointId，这里因字段缺位而暴露，不会静默通过。
-      mark: (id, at) => { terminalBackgroundIds.add(id); terminalBackgroundSince.set(id, { at }); },
-      drop: (id) => { terminalBackgroundIds.delete(id); terminalBackgroundSince.delete(id); },
+      // since.endpointId，这里因字段缺位而暴露，不会静默通过。at 缺席＝只进集合
+      // 不写记账条目——loadTerminalViewports 从存档恢复后台集合正是这个形态。
+      mark: (id, at) => {
+        terminalBackgroundIds.add(id);
+        if (at != null) terminalBackgroundSince.set(id, { at });
+      },
+      // 真身的撤引用函数（切回视口/回收成功都经它）：直调它取代旧的自家 drop 助手，
+      // 「切回即取消」钉的是这条真腿而不是沙箱自己的账本。
+      refDrop: (id) => terminalViewportRefDrop(id),
       viewport: (id) => viewportIdsInUse.add(id),
       retryAt: (id) => terminalBackgroundRecycleRetryAfter.get(id) || null,
       payload: (next) => { terminalAgentsPayload = next; },
@@ -371,23 +386,24 @@ describe("P-D 后台回收器（agent 会话）", () => {
   it("没有进后台记账（刷新恢复的后台集合）不回收", () => {
     const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
-    // 只进集合、没有起点：模拟 loadTerminalViewports 从存档恢复
-    fn.mark("t-z", NOW - 30 * MIN, "zcode");
-    fn.drop("t-z");
+    // 只进集合、没有记账条目：模拟 loadTerminalViewports 从存档恢复——生产路径只
+    // terminalBackgroundIds.add 不写 since，回收判据里的 !since 正是为这形态设的。
     fn.mark("t-z", undefined, "zcode");
     fn.scan(NOW);
     assert.deepEqual(calls.posts, [], "起点不明＝不回收");
   });
 
-  it("切回该终端即取消：记账删除后不再发 /close", () => {
+  it("切回该终端即取消：terminalViewportRefDrop 撤掉后台引用后不再发 /close", () => {
     const sessions = { "t-z": agentBack() };
     const { calls, fn } = recycleSandbox({ sessions });
     fn.mark("t-z", NOW - 30 * MIN, "zcode");
-    // terminalViewportAttach / Create 的同一拍：集合与记账一起删
-    fn.drop("t-z");
+    // terminalViewportAttach / Create 的同一拍都先经真身 terminalViewportRefDrop 撤
+    // 引用（attach/create 再补删 since 条目）。它若不再撤集合，回收器会把用户正
+    // 看着的会话当后台僵尸发 /close——旧用例调沙箱自家 drop 助手，恒真测不到这条。
+    fn.refDrop("t-z");
+    assert.deepEqual(fn.background(), [], "真身 RefDrop 撤掉后台集合引用");
     fn.scan(NOW);
     assert.deepEqual(calls.posts, [], "回到视口＝不是后台会话了");
-    assert.deepEqual(fn.background(), [], "集合里也没了");
   });
 
   it("/close 失败：留一条开发者日志、30s 退避，退避满后再试", async () => {

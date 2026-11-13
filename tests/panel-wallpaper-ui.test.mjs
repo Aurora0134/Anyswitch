@@ -164,8 +164,33 @@ describe("终端透明栅格化守门闸：底色带 alpha 才开（2026-11-13 �
     return { api, state, log };
   }
 
+  // 六档终端底色从 panel.css 的皮肤 token 规则切出（亮档 :root[data-style=…]、暗档
+  // 同选择器加 [data-theme="dark"]），手抄字面量退役——皮肤改值或写回带 alpha 的底色，
+  // 这里取到的是新值，六档观测才落在现行 token 上。saas 暗档须取皮肤段而非基座
+  // :root[data-theme="dark"] 段：基座特异性低一档，saas 态被皮肤段压住，喂基座值
+  // 观测的是不生效的 token。
+  function skinTerminalBg(selector) {
+    const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    let idx = -1;
+    while ((idx = css.indexOf(selector, idx + 1)) >= 0) {
+      const open = css.indexOf("{", idx);
+      const close = css.indexOf("}", open);
+      const m = open > idx && close > open && css.slice(open + 1, close).match(/--terminal-bg:\s*([^;]+);/);
+      if (m) return m[1].trim();
+    }
+    assert.ok(false, `panel.css 无声明 --terminal-bg 的规则：${selector}`);
+  }
+
   it("三静态皮肤亮暗六档都是六位 hex，透明开关恒关", () => {
-    for (const bg of ["#f8fafc", "#0b1220", "#eef7fb", "#050e1a", "#faf6ec", "#120d08"]) {
+    for (const [label, bg] of [
+      ["saas 亮档", skinTerminalBg(':root[data-style="saas"] {')],
+      ["saas 暗档", skinTerminalBg(':root[data-style="saas"][data-theme="dark"] {')],
+      ["aurora 亮档", skinTerminalBg(':root[data-style="aurora"] {')],
+      ["aurora 暗档", skinTerminalBg(':root[data-style="aurora"][data-theme="dark"] {')],
+      ["sepia 亮档", skinTerminalBg(':root[data-style="sepia"] {')],
+      ["sepia 暗档", skinTerminalBg(':root[data-style="sepia"][data-theme="dark"] {')],
+    ]) {
+      assert.match(bg, /^#[0-9a-f]{6}$/, `${label}终端底色应为六位 hex，实得 ${bg}`);
       const { api, log } = sandbox(bg);
       assert.equal(api.hasAlpha(), false, `${bg} 不带 alpha`);
       api.apply();

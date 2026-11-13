@@ -217,10 +217,10 @@ describe("终端视图左栏换血", () => {
       // 钉底不靠 sticky/fixed，是 flex:1+min-height:0 的唯一
       // 可伸缩层 + flex:none 的兄弟节点。栏体与设置态共用骨架，底栏一颗钮两态共用。
       // （hover 卡是挂 body 的 portal 浮层，position:fixed，不属钉底机制，
-      // 钉底三件——滚动层/底栏/遮罩——的规则里不许出现 sticky/fixed。）
+      // 钉底两件——滚动层/底栏——的规则里不许出现 sticky/fixed。）
       assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏（亮暗/返回）不参与伸缩");
       const pinRules = [".rail-term-scroll {", ".rail-foot {"].map((sel) => cssRule(sel)).join("");
-      assert.ok(!/position:\s*(sticky|fixed)/.test(pinRules), "钉底三件不碰 sticky/fixed（钉底靠 flex）");
+      assert.ok(!/position:\s*(sticky|fixed)/.test(pinRules), "钉底两件不碰 sticky/fixed（钉底靠 flex）");
       // 滚动条指针感知隐退：变量替换、无淡出
       assert.ok(panelCss.includes("#railTerminalDir[data-quiet] { --rail-term-scrollbar-thumb: transparent; }"),
         "离开 2s 后 thumb 变量替换成透明（瞬时消失，无过渡）");
@@ -249,7 +249,10 @@ describe("终端视图左栏换血", () => {
       assert.ok(!panelCss.includes("rail-term-fade"), "栏体上的渐隐色块（含折叠态选择器）已拆除");
       assert.ok(!panelCss.includes("--rail-bg"), "「遮罩终点＝栏底色」的取值链已删除");
       assert.ok(!panelHtml.includes("rail-term-fade"), "HTML 里不再有渐隐 span");
-      // 栏底对调本身保留（与渐隐解耦）：saas/sepia 的 .rail 仍取 --bg-page
+      // 栏底对调本身保留（与渐隐解耦）：saas/sepia 的 .rail 仍取 --bg-page。
+      // 成对正则钉的是 0b51458 的显式口径「合并选择器各占一格」：@scope 改写把 base
+      // （d170982）的 saas/sepia 两格真选择器收成同形一对，成对形态被 panel-preview-
+      // isolation 对 base 的逐条等价对账钉着，列表内去重会让对账判红——不是可清理残留。
       assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
         "saas/sepia 的 .rail 底色仍为 --bg-page");
       assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
@@ -981,10 +984,14 @@ describe("终端视图左栏换血", () => {
     });
 
     it("页签条缺席：行内 × 照常关当屏会话并把视口交给名下活成员（不再依赖 DOM 找页签）", () => {
+      // background 入参真种 terminalBackgroundIds（真实加载路径同款播种）：起点集合
+      // 非空，末尾的清集断言才钉得住 close 路径的 terminalBackgroundIds.delete。
       const absent = runRail({
         sessions: { t1: { id: "t1", backend: true }, t2: { id: "t2", backend: true } }, tabs: null,
         viewports: [{ id: "viewport-1", terminalId: "t1", background: ["t2"] }],
+        background: ["t2"],
       });
+      assert.deepEqual(absent.sandbox.background(), ["t2"], "起点：t2 在后台保活集合（夹具播种）");
       absent.sandbox.close("t1");
       assert.deepEqual(absent.log.posts, [{ method: "POST", path: "/api/terminal/sessions/t1/close" }], "直杀 t1");
       assert.equal(absent.sandbox.viewports().length, 1, "视口守恒：入口不折损");
@@ -2371,7 +2378,7 @@ describe("live 推导（绑定未落地空窗）", () => {
     assert.ok(!html.includes("新会话"), "兜底行已被真行接替（不再双行）");
   });
 
-  it("他终端阳性占用该行：推导不抢——行归绑定的兄弟终端，本终端兜底行照常在", () => {
+  it("他终端阳性占用该行：推导不抢——行归绑定的兄弟终端，自己的无主行才被认领", () => {
     // 排除集同源（terminalRailClaimedRowKeys）：t2 的 boundConversation 命中 s-new，
     // t1 的推导跳过它（那是兄弟聊出来的行），兜底行维持（等自己的绑定落地）。
     const history = { endpoint: "kimi", sessions: [
@@ -2393,6 +2400,25 @@ describe("live 推导（绑定未落地空窗）", () => {
       "真行段内的关闭叉指向绑定的 t2（阳性身份，不掺推导）");
     assert.ok(html.lastIndexOf('data-rail-term-close="t1"') < rowAt, "t1 的关闭叉只在兜底行段（没抢到真行）");
     assert.ok(html.includes("新会话"), "t1 兜底行照常（行没被它顶走）");
+    // 推导行真出现的对照格（推导与兜底行判据互补，同一格夹具里二者不同时出现，故
+    // 另起一格）：同一排除集下，t1 自己的无主新行（同目录、未被占用、晚于出生）被
+    // 推导认领为 live；推导整段改成返回空 Map 时本格必须红，上一格钉不住它。
+    const historyMine = { endpoint: "kimi", sessions: [
+      { id: "s-new", endpoint: "kimi", project: "C:\\dev\\alpha", title: "兄弟会话", lastActive: 800 },
+      { id: "s-mine", endpoint: "kimi", project: "C:\\dev\\alpha", title: "自己的新行", lastActive: 700 },
+    ], fetchedAt: 1, error: null };
+    const listMine = makeList();
+    derivedSandbox(listMine, { collapsed: new Set(), scrolled: [] }, historyMine, sessions, "t1").render("kimi");
+    const htmlMine = listMine.html;
+    const rowLiveId = (rowId, terminalId) => {
+      const mineAt = htmlMine.indexOf(`data-rail-term-resume="${rowId}"`);
+      const liveAt = htmlMine.indexOf(`data-rail-term-live="${terminalId}"`, mineAt);
+      return mineAt >= 0 && liveAt >= 0 && liveAt < htmlMine.indexOf("</button>", mineAt);
+    };
+    assert.ok(rowLiveId("s-mine", "t1"), "自己的无主行被推导认领为 t1 的 live 行（推导行真出现）");
+    assert.ok(rowLiveId("s-new", "t2"), "兄弟行照常归绑定终端（阳性身份优先）");
+    assert.ok(!rowLiveId("s-new", "t1"), "兄弟行不被 t1 认领（排除集拒掉，推导不抢）");
+    assert.ok(!htmlMine.includes("新会话"), "无主行已接替兜底行（互补判据，不双行）");
   });
 
   it("行早于终端出生或目录不符：不推导，行保持普通历史行、兜底行维持", () => {
@@ -2427,8 +2453,10 @@ describe("live 推导（绑定未落地空窗）", () => {
       { id: "s-old", endpoint: "kimi", project: "C:\\dev\\alpha", title: "续接的旧会话", lastActive: 100 },
       { id: "s-new", endpoint: "kimi", project: "C:\\dev\\alpha", title: "别人的新行", lastActive: 600 },
     ], fetchedAt: 1, error: null };
+    // 出生锚必填：缺 spawnedAt 推导回退 Date.now()，历史行永远早于「出生」、推导分支
+    // 不可达，resume 跳过被删就用例测不出。
     const sessions = {
-      t1: { id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-old" } },
+      t1: { id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-old" }, backendState: { spawnedAt: 500 } },
     };
     const list = makeList();
     derivedSandbox(list, { collapsed: new Set(), scrolled: [] }, history, sessions, "t1").render("kimi");

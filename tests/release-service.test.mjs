@@ -111,7 +111,10 @@ it("follows all release pages before deciding and never trusts partial results",
   assert.equal(result.state, "update_available");
   assert.equal(result.release.version, "0.5.0");
   for (const second of [() => { throw new Error("offline"); }, () => json({}, { status: 429 })]) {
-    const partial = createReleaseService({ currentVersion: "0.4.3", now, fetchFn: async (url) => url === appEndpoint
+    // offline 子例钉「无代理」：默认代理解析器读真实环境变量与 git http.proxy，
+    // 配了代理且网络可达的机器上「fetchFn 抛错＝离线」前提失效（数据真的会经
+    // 代理取回），显式 null 让离线语义在任何机器上成立。
+    const partial = createReleaseService({ currentVersion: "0.4.3", now, proxyResolveFn: async () => null, fetchFn: async (url) => url === appEndpoint
       ? json([release("v0.4.3")], { headers: { Link: `<${next}>; rel="next"` } }) : second() });
     const failure = await partial.getAppUpdate();
     assert.equal(failure.state, "error");
@@ -158,7 +161,9 @@ it("reports unavailable or malformed sources without claiming a latest version",
     ["zcode", () => new Response("version: !!str 1.2.3\n"), "invalid_response"],
   ];
   for (const [id, fetchFn, errorCode] of fixtures) {
-    const result = await createReleaseService({ now, fetchFn }).getClientLatest(id);
+    // offline 夹具钉「无代理」（默认解析器读真实代理配置，配了的机器上
+    // network_error 前提会失效），见「follows all release pages」用例同款注释。
+    const result = await createReleaseService({ now, fetchFn, proxyResolveFn: async () => null }).getClientLatest(id);
     assert.equal(result.state, "error", `${id}: ${errorCode}`);
     assert.equal(result.errorCode, errorCode);
     assert.equal(result.version, null);
@@ -269,7 +274,8 @@ it("reads the Codex desktop version from the Windows Store update manifest", asy
     [() => { throw new Error("offline"); }, "network_error"],
   ];
   for (const [fetchFn, errorCode] of httpErrors) {
-    const result = await createReleaseService({ now, fetchFn }).getClientLatest("codex-desktop");
+    // offline 夹具钉「无代理」，保住 network_error 前提（同上两处）。
+    const result = await createReleaseService({ now, fetchFn, proxyResolveFn: async () => null }).getClientLatest("codex-desktop");
     assert.equal(result.state, "error", errorCode);
     assert.equal(result.errorCode, errorCode);
     assert.equal(result.version, null);
@@ -424,7 +430,10 @@ it("falls back to the configured proxy only on transport failure, resolving it o
   assert.equal(stillDown.state, "error");
   assert.equal(stillDown.errorCode, "network_error");
 
-  // 服务端已作答（429 限额）：不回退、不放大请求量，错误码原样透出。
+  // 服务端已作答（429 限额）：不回退、不放大请求量，错误码原样透出。429 在
+  // queryAppUpdate 内直抛、从不进 request 的 catch，转发守卫对它零鉴别力——
+  // 真正穿过守卫的是 request 内抛出的非 timeout ReleaseError，用下面的超限
+  // 子例钉住（超限在 attempt 读完 body 才能判，必经 request 的 catch）。
   let limitedProxyCalls = 0;
   const limited = createReleaseService({ currentVersion: "0.4.3", now,
     fetchFn: async () => json({}, { status: 429 }),
@@ -435,4 +444,20 @@ it("falls back to the configured proxy only on transport failure, resolving it o
   assert.equal(rateLimited.state, "error");
   assert.equal(rateLimited.errorCode, "rate_limited");
   assert.equal(limitedProxyCalls, 0);
+
+  // 超限＋配代理：非 timeout 的 ReleaseError 必须被守卫原样转发，代理解析与
+  // 代理腿都不出现。删掉守卫时这条会红两次——代理解析被触发（解析计数变 1）、
+  // 代理腿取回数据把错误吞成 update_available。
+  let oversizedResolves = 0;
+  let oversizedProxyCalls = 0;
+  const oversized = createReleaseService({ currentVersion: "0.4.3", now, maxResponseBytes: 30,
+    fetchFn: async () => json({ releases: "x".repeat(100) }),
+    proxyResolveFn: async () => { oversizedResolves++; return "http://127.0.0.1:7890/"; },
+    proxyFetchFn: async () => { oversizedProxyCalls++; return releases(); },
+  });
+  const tooLarge = await oversized.getAppUpdate();
+  assert.equal(tooLarge.state, "error");
+  assert.equal(tooLarge.errorCode, "response_too_large");
+  assert.equal(oversizedResolves, 0, "超限是服务端已作答的形态，代理解析不该发生");
+  assert.equal(oversizedProxyCalls, 0);
 });

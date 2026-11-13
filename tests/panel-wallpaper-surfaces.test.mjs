@@ -27,16 +27,14 @@ function surfaceTierTable() {
   return vm.runInNewContext(`(${m[1]})`);
 }
 
-// 滑杆值 → 六个表面 token 的 alpha（与 panel.js surfaceOverrides 同式：floor + scale×滑杆值，
-// 三位小数）。测试用它算出「用户停在某一档时引擎实际拿到的 alpha」。
-function surfaceAlphasAt(slider) {
-  const s = slider / 100;
-  const overrides = {};
-  for (const tier of surfaceTierTable()) {
-    const alpha = Math.round((tier.floor + tier.scale * s) * 1000) / 1000;
-    for (const key of tier.keys) overrides[key] = alpha;
-  }
-  return overrides;
+// T2「默认档下」的滑杆折算值（0..1）：从 panel.js 的 WALLPAPER_FX_DEFAULTS 切出，
+// 默认档改值时口径跟着源走，不手抄 0.75。
+function surfaceDefaultS() {
+  const m = panelJs.match(/const WALLPAPER_FX_DEFAULTS = (\{[^;]+\});/);
+  assert.ok(m, "panel.js 含 WALLPAPER_FX_DEFAULTS");
+  const defaults = vm.runInNewContext(`(${m[1]})`);
+  assert.ok(typeof defaults.surface === "number", "WALLPAPER_FX_DEFAULTS.surface 应为数值");
+  return defaults.surface / 100;
 }
 
 // 取一条规则的声明体：selector 必须逐字命中，取其后第一个 {...}
@@ -73,6 +71,26 @@ function cssRules() {
 // 壁纸作用域的选择器（补偿段审计用；token 段与垫底结构也在内，故按需再筛目标元素）
 function wallpaperSelectors() {
   return cssRules().flatMap((r) => r.sel.filter((s) => s.includes('data-style="wallpaper"')));
+}
+// @scope 块切分（皮肤归属锚用）：剥注释后从每个 @scope 起点按花括号深度配平到块尾。
+// 收边改写后皮肤键只在 @scope 起点上、规则文本本身不带皮肤——规则归哪个皮肤，要按
+// 所在块的前导判位。
+function splitScopes() {
+  const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+  const blocks = [];
+  const re = /@scope[^{]*\{/g;
+  let m;
+  while ((m = re.exec(css))) {
+    let depth = 1;
+    let end = m.index + m[0].length;
+    while (end < css.length && depth > 0) {
+      if (css[end] === "{") depth++;
+      else if (css[end] === "}") depth--;
+      end++;
+    }
+    blocks.push({ prelude: m[0].slice(0, -1), start: m.index, end });
+  }
+  return { css, blocks };
 }
 // 补偿段命中的元素：卡面与统计子 tab 托盘（卡头/空态不在补偿范围，见对应断言）
 const COMPENSATION_SURFACE = /\.panel-card|\.view-tabs\.stats-subtabs/;
@@ -131,16 +149,24 @@ describe("壁纸态平铺盒补底（T1）", () => {
       "卡面规则恰好两个选择器（设置页四面板 + 统计页）");
     for (const { sel } of compensation) {
       assert.ok(sel.includes('[data-ui-version="v2"]'), "补偿只作用于 v2（v1 平铺段不存在，无需补）");
-      assert.ok(sel.includes('[data-style="wallpaper"]'), "选择器逐条锚 wallpaper");
       for (const skin of ["saas", "aurora", "sepia"]) {
         assert.ok(!sel.includes(skin), `${skin} 不得进补偿段作用域`);
       }
     }
-    // aurora 原有的玻璃卡例外原样在册（补偿不是把例外替换掉）
-    assert.ok(panelCss.includes(':scope:scope[data-ui-version="v2"] #statsView .panel-card'),
-      "aurora 统计页玻璃卡例外原样");
-    assert.ok(/:scope:scope\[data-ui-version="v2"\] :is\(#settingsPanelGeneral[^)]*\) \.panel-card \{/.test(panelCss),
-      "aurora 设置页玻璃卡例外原样");
+    // aurora 原有的玻璃卡例外原样在册（补偿不是把例外替换掉）：收边后皮肤键只在
+    // @scope 起点上、断言串本身不含 aurora，归属按 @scope 块切分落位——两条例外
+    // 须仍在 aurora 块内，挪进他皮肤块或散到块外都判红。
+    const { css: scopeCss, blocks } = splitScopes();
+    for (const [needle, label] of [
+      [':scope:scope[data-ui-version="v2"] #statsView .panel-card {', "统计页玻璃卡例外"],
+      [':scope:scope[data-ui-version="v2"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {', "设置页玻璃卡例外"],
+    ]) {
+      const idx = scopeCss.indexOf(needle);
+      assert.ok(idx >= 0, `aurora ${label}：规则不在册`);
+      const host = blocks.filter((b) => idx > b.start && idx < b.end).at(-1);
+      assert.ok(host !== undefined && host.prelude.includes('[data-style="aurora"]'),
+        `aurora ${label}：规则不在 aurora @scope 块内`);
+    }
   });
 
   it("卡头与空态不铺底：壁纸态仍无背景，由卡片实底承担（塔台口径）", () => {
@@ -207,7 +233,7 @@ describe("表面 token 分档（T2）", () => {
     }
   });
 
-  it("三档语义：内容面 1:1、玻璃面较低系数、页面底高档带，且六键不同值", () => {
+  it("三档语义：内容面 1:1、玻璃面较低系数、页面底高档带，默认档六键至少三值不同", () => {
     const byKey = {};
     for (const tier of surfaceTierTable()) for (const key of tier.keys) byKey[key] = tier;
     for (const key of ["--surface", "--surface-sunken", "--surface-hover"]) {
@@ -221,10 +247,11 @@ describe("表面 token 分档（T2）", () => {
       assert.ok(tier.floor > 0, `${key} 有高档底座（最低档也不退成照片）`);
       assert.ok(tier.scale > 0 && tier.floor + tier.scale <= 1, `${key} 满档不超过 1`);
     }
-    // 分档的本质：默认档下六键至少三种不同 alpha（六键同值的旧形态过不了这关）
-    const s = 0.8;
+    // 分档的本质：默认档下六键至少三种不同 alpha——内容面三键同值是设计行为（1:1
+    // 跟随滑杆），判据只要求玻璃面、页面底与之拉开；六键全同值的旧形态过不了这关。
+    const s = surfaceDefaultS();
     const alphas = new Set(Object.values(byKey).map((t) => Math.round((t.floor + t.scale * s) * 1000) / 1000));
-    assert.ok(alphas.size >= 3, "默认档下内容面/玻璃面/页面底三值不同");
+    assert.ok(alphas.size >= 3, `默认档（surface=${s * 100}）下六键应至少三值不同（内容面三键同值），实得 ${[...alphas]}`);
   });
 });
 

@@ -39,15 +39,20 @@ function cwdKey(value) {
 // across sessions, opencode's in a resident `serve --service`, and zcode 从不
 // 产 pid 形行（relay 按请求头 x-session-id 铸会话行，进程身份对它没有实例
 // 语义）. The relay's per-endpoint session feeds (row-id-shaped ids with
-// cwd/lastActive/originator, from the on-disk session scan) bridge the gap: a
-// terminal session binds the most-recently-active session of that endpoint
-// whose cwd matches the session's. Desktop-originated sessions are excluded
-// (their originator carries "desktop") so a GUI session in the same directory
-// cannot steal the binding. The residual ambiguity is two concurrent CLI
-// sessions in one cwd — both bind the latest-active one, the other waits until
-// it becomes the most recent; the endpoint-level card aggregates both
-// regardless. Only rows that exist in the agents payload bind, mirroring the
-// pid path.
+// cwd/lastActive/originator, from the on-disk session scan) bridge the gap.
+// The match rule splits by endpoint. codex/opencode: a terminal session binds
+// the most-recently-active session of that endpoint whose cwd matches the
+// terminal's. Desktop-originated sessions are excluded (their originator
+// carries "desktop") so a GUI session in the same directory cannot steal the
+// binding. The residual ambiguity is two concurrent CLI sessions in one cwd —
+// both bind the latest-active one, the other waits until it becomes the most
+// recent; the endpoint-level card aggregates both regardless. zcode binds
+// exactly instead: the terminal's own resume.id names the row directly
+// (zcodeResumeRowId), and only when that misses does a cwd fallback run —
+// which binds only on a unique match (zcodeCwdRowId; same-cwd rows are the
+// norm there and picking by recency would be a guess), so two same-cwd
+// sessions never both collapse onto the latest-active one under zcode. Only
+// rows that exist in the agents payload bind, mirroring the pid path.
 // opencode 2.1.x breaks the cwd premise itself (see soleInteractiveTui): its
 // TUI can display a session in any project, so the recency rule supersedes the
 // cwd match there while it is the machine's only TUI.

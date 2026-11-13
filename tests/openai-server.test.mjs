@@ -599,12 +599,14 @@ describe("openai relay transport", () => {
       it("shapes scanned metas into row-id form, stripping internal prefixes like the client", async () => {
         const body = await fetchDetected({
           getZcodeSessionsForTerminalJoin: async () => [
-            { id: "sess_abc", project: "C:\\work\\alpha", lastActive: 2000, originator: "zcode" },
+            // originator 生产取值域只有 "desktop"（桌面端会话）/null（CLI 扫描行），
+            // 造值不越界：按真实 CLI 形给 null（desktop 形走同一条透传路径）。
+            { id: "sess_abc", project: "C:\\work\\alpha", lastActive: 2000, originator: null },
             { id: "subagent_agent_xyz", project: "C:\\work\\beta", lastActive: 1000, originator: null },
           ],
         });
         assert.deepEqual(body.zcodeSessions, [
-          { id: "zcode-sess-abc", cwd: "C:\\work\\alpha", lastActive: 2000, originator: "zcode" },
+          { id: "zcode-sess-abc", cwd: "C:\\work\\alpha", lastActive: 2000, originator: null },
           { id: "zcode-sess-xyz", cwd: "C:\\work\\beta", lastActive: 1000, originator: null },
         ], "sess_/subagent_agent_ 剥除后与请求路径同 id；cwd/lastActive/originator 透传");
       });
