@@ -309,7 +309,7 @@ test("Qoder CN 桌面工作台：版本直读安装根 resources/app.asar，包�
   const found = installation(await f.service().getState(), "qoder", 3);
   assert.equal(found.kind, "desktop");
   assert.equal(found.edition, "cn");
-  assert.equal(found.remoteId, null);
+  assert.equal(found.remoteId, "qoder-desktop-cn");
   assert.equal(found.status, "found");
   assert.equal(found.path, exe);
   assert.equal(found.version, "0.5.7");
@@ -335,14 +335,14 @@ test("Qoder CN 桌面条不认包名对不上的 asar（intl 的 qoder 包不算
   assert.equal(item.issue, "version_unavailable");
 });
 
-test("Qoder CN CLI 记录：qoderclicn.exe 自报版本，edition cn、remoteId null", async (t) => {
+test("Qoder CN CLI 记录：qoderclicn.exe 自报版本，edition cn、remoteId 指 qoder-cli-cn 渠道", async (t) => {
   const f = fixture(t);
   const exe = f.put(join(f.base.USERPROFILE, ".qoder-cn/bin/qoderclicn/qoderclicn.exe"));
   const ok = await f.service({ probeVersion: async (path) => (assert.equal(path, exe), { missing: false, version: "1.1.64" }) }).getState();
   const found = installation(ok, "qoder", 2);
   assert.equal(found.kind, "cli");
   assert.equal(found.edition, "cn");
-  assert.equal(found.remoteId, null);
+  assert.equal(found.remoteId, "qoder-cli-cn");
   assert.equal(found.status, "found");
   assert.equal(found.path, exe);
   assert.equal(found.version, "1.1.64");
@@ -619,11 +619,11 @@ test("an empty installation reports all ten clients, with the registered install
   assert.deepEqual(state.clients[1].installations.map((i) => [i.kind, i.remoteId]), [["cli", "codex"], ["desktop", "codex-desktop"]]);
   // Qoder 双区域版四条记录，键 = (kind, edition)：intl 两条守住 index 0/1
   // （0 是 qodercli.exe，remoteId qoder-cli；1 是桌面端），CN 两条追加在 2/3，
-  // 没有可核验的官方版本源，remoteId 恒 null；四条都带 edition 字段。
+  // remoteId 各指各的官方渠道（qoder-cli-cn / qoder-desktop-cn）；四条都带 edition 字段。
   const qoder = state.clients.find((c) => c.id === "qoder");
   assert.deepEqual(
     qoder.installations.map((i) => [i.kind, i.remoteId, i.edition]),
-    [["cli", "qoder-cli", "intl"], ["desktop", "qoder", "intl"], ["cli", null, "cn"], ["desktop", null, "cn"]],
+    [["cli", "qoder-cli", "intl"], ["desktop", "qoder", "intl"], ["cli", "qoder-cli-cn", "cn"], ["desktop", "qoder-desktop-cn", "cn"]],
   );
   // DSH 官方桌面端上线后同样是两条安装记录：index 0 是 npm 全局 CLI（更新按钮装的
   // 就是这个包），index 1 是官方桌面端（官方发布文件渠道，remoteId dsh-desktop）。

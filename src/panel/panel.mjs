@@ -2722,9 +2722,10 @@ export function createPanelRouter({
     // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
     // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
     // 查询渠道按被更新那条安装项的 remoteId 取：qoder 的客户端 id 挂在桌面端渠道上，
-    // CLI 形态的官方版本要走 CLI 行的 remoteId（intl 是 "qoder-cli"）。remoteId
+    // CLI 形态的官方版本要走 CLI 行的 remoteId（intl 是 "qoder-cli"，CN 是
+    // "qoder-cli-cn"——更新腿跟随在装 CLI 行，渠道自然随区域版走）。remoteId
     // 显式为 null 的记录＝没有可核验的官方版本源（zcode CLI 同一条纪律），不发起
-    // 钉版查询——qoder 原生腿没有 npm 兜底，targetVersion 对它本无消费方。
+    // 钉版查询——qoder 原生腿没有 npm 兜底，targetVersion 只用于收尾比对。
     const remoteId = cliRow === null ? id : (cliRow.remoteId === null ? null : (cliRow.remoteId ?? id));
     const targetVersion = kind === "native" && remoteId !== null
       ? await getReleaseService()
