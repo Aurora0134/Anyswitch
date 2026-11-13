@@ -2041,10 +2041,13 @@
   .about-details dl { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 4px 10px; margin: 8px 0; line-height: 1.6; }
   .about-details dt { color: var(--text-3); }
   .about-details dd { margin: 0; overflow-wrap: anywhere; color: var(--text-2); }
+  .about-region-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .about-region-name { display: block; margin-top: 8px; font-weight: 600; }
   #settingsPanelAbout :is(button, a, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   @media (max-width: 640px) {
     .about-client-main { grid-template-columns: 1fr; gap: 6px; }
     .about-details { margin-left: 0; }
+    .about-region-cols { grid-template-columns: 1fr; }
   }
   .settings-theme-desc { margin: 0 0 12px; font-size: 12px; color: var(--text-3); }
   .settings-theme-grid { display: grid; grid-template-columns: 180px 1fr; gap: 16px; align-items: start; }

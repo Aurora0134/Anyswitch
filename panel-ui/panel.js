@@ -4210,32 +4210,49 @@ async function api(method, path, body) {
         lines.appendChild(line);
       }
       // 详情区逐安装项补行：路径、版本来源、来源、查询时间，一条安装记录一组。
-      // 区域版端点（qoder）逐版各出一组同名条目（intl 组在前），区域差异由上方
-      // 子行承担，详情区不再拆维度。
+      // 区域版端点（qoder）详情区按区域版分两列——形态与区域两个正交维度在详情区的
+      // 落法：区域＝列（列头小注「国际」「CN」，国际在左 CN 在右），形态＝列内行标签
+      // 前缀；列内行结构与其他端点一致、信息零删减，满配视觉高度减半。窄屏时两列塌成
+      // 单列竖排（CSS 媒体查询承担）。「检测时间」是端点级一行，通栏摆在两列之下。
       // dsh 的 CLI 入口是社区插件（kind "tui"）：它按 CLI 组呈现，来源行说「上游来源」、
       // 链接指 npm 包页，后面补一句说明。本体 harness 不单列——官方没有 CLI 入口产品，
       // 它的存在由那句说明交代；桌面组仍按原样跟在 CLI 组之后。
-      const detailed = client.id === "dsh"
-        ? [...client.installations.filter((installation) => installation.kind === "tui"),
-          ...client.installations.filter((installation) => installation.kind === "desktop")]
-        : client.installations;
-      for (const installation of detailed) {
+      const appendDetail = (target, installation) => {
+        const put = (label, value) => target.append(element("dt", "", label), element("dd", "", value));
         const kind = installation.kind === "desktop" ? "桌面" : "CLI";
-        detail(`${kind} 路径`, installation.path || "未找到");
-        detail(`${kind} 版本来源`, sourceText(installation.versionSource));
+        put(`${kind} 路径`, installation.path || "未找到");
+        put(`${kind} 版本来源`, sourceText(installation.versionSource));
         const href = safeLink(remoteOf(installation)?.url, installation.remoteId);
         if (href) {
-          const target = element("dd", "");
+          const linkTarget = element("dd", "");
           const link = element("a", "about-link", installation.kind === "tui" ? "查看上游版本" : "查看官方版本");
           link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
-          target.appendChild(link); list.append(element("dt", "", `${kind} ${installation.kind === "tui" ? "上游来源" : "官方来源"}`), target);
+          linkTarget.appendChild(link); target.append(element("dt", "", `${kind} ${installation.kind === "tui" ? "上游来源" : "官方来源"}`), linkTarget);
         }
         const remote = remoteOf(installation);
-        if (remote?.checkedAt) detail(`${kind} 查询时间`, timeText(remote.checkedAt));
-        if (installation.kind === "tui") detail("CLI 说明", "由社区插件提供，内核为官方版本");
+        if (remote?.checkedAt) put(`${kind} 查询时间`, timeText(remote.checkedAt));
+        if (installation.kind === "tui") put("CLI 说明", "由社区插件提供，内核为官方版本");
+      };
+      if (editionGroups) {
+        const grid = element("div", "about-region-cols");
+        for (const group of editionGroups) {
+          const col = element("div", "about-region-col");
+          col.appendChild(element("div", "about-kind about-region-name", group.edition === "cn" ? "CN" : "国际"));
+          const colList = element("dl", "");
+          for (const installation of group.items) appendDetail(colList, installation);
+          col.appendChild(colList);
+          grid.appendChild(col);
+        }
+        details.appendChild(grid);
+      } else {
+        const detailed = client.id === "dsh"
+          ? [...client.installations.filter((installation) => installation.kind === "tui"),
+            ...client.installations.filter((installation) => installation.kind === "desktop")]
+          : client.installations;
+        for (const installation of detailed) appendDetail(list, installation);
       }
       if (local?.checkedAt) detail("检测时间", timeText(local.checkedAt));
-      details.appendChild(list);
+      if (list.children.length) details.appendChild(list);
       main.append(name, lines);
       row.replaceChildren(main, details);
     }
