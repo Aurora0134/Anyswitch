@@ -161,9 +161,26 @@ export function createPromptsInjector({ homeDir = homedir() } = {}) {
       id: def.id,
       label: def.label,
       hotReload: def.hotReload,
-      targetRel: def.targetRel,
+      targetRel: targetRelFor(def),
       target: targetFor(def),
     }));
+  }
+
+  // 展示口径（裁决①）：带 altHomes 的端点（qoder 双根）按「在装数据根」动态
+  // 生成落点清单——判据与写入面 syncEndpoint 的识别同一 existsSync（根目录在
+  // 盘即在装），否则纯 CN 机器显示 ~/.qoder 落点而实际只写 ~/.qoder-cn；双装
+  // 两根并列。一个都不在回退主根（与写入面的兜底一致：写也走主根）。仅 qoder
+  // 受影响（其余端点单根恒真）；target（syncEndpoint 返回值）恒主根契约不变。
+  // 已知边界：仅 PATH 装 CN CLI 且未跑过首次的机器，根不在盘 → 展示与写入都
+  // 走主根兜底（qoderclicn 实读 ~/.qoder-cn），首轮建根后等下一回填触发对齐。
+  function targetRelFor(def) {
+    if (!def.altHomes) return def.targetRel;
+    const installed = [
+      [def.home, def.targetRel],
+      ...def.altHomes.map((parts) => [parts, `~/${parts.join("/")}`]),
+    ].filter(([parts]) => existsSync(join(homeDir, parts[0])));
+    if (installed.length === 0) return def.targetRel;
+    return installed.map(([, rel]) => rel).join("；");
   }
 
   function findDef(endpointId) {
