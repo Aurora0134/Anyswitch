@@ -66,13 +66,32 @@ export const CLIENTS = {
     source: "zcode:windows-x86_64:stable", format: "yaml", url: "https://zcode.z.ai/cn/changelog",
     headers: { "X-Platform": "windows-x86_64", "X-Release-Channel": "stable" },
   },
+  // Qoder 桌面端（intl IDE 线）的官方更新服务是 VS Code 式查询 API（IDE
+  // product.json 的 updateUrl=https://center.qoder.sh/algo）：零 commit 探针即
+  // 「给我最新版」，应答 JSON 的 productVersion 是官方语义化版本（实测 1.39.2，
+  // 工作台/IDE 两条产品线里 IDE 线的版本段）。旧条目指向的
+  // download.qoder.com.cn/qoder-app 实测服务的是 CN 工作台——归属错误，CN 侧
+  // 改由 "qoder-desktop-cn" 条目承担。
   qoder: {
-    endpoint: "https://download.qoder.com.cn/qoder-app/releases/latest.yml",
-    source: "qoder:desktop:latest", format: "yaml", url: "https://qoder.com/changelog",
+    endpoint: "https://center.qoder.sh/algo/api/update/win32-x64/stable/0000000000000000000000000000000000000000",
+    source: "qoder:desktop:win32-x64:stable",
+    url: "https://qoder.com/changelog",
+    field: "productVersion",
+  },
+  // Qoder CN 桌面端（CN 工作台线）的官方更新通道：应用内置 electron-updater 读的
+  // 就是这份 latest.yml（实测 0.9.18；旧 "qoder" 条目的 qoder-app 路径是同一份
+  // 事实的旧位）。官方链接走 CN 站 changelog 入口。
+  "qoder-desktop-cn": {
+    endpoint: "https://static.qoder.com.cn/qoder-work-cn/releases/latest.yml",
+    source: "qoder-desktop-cn:win-x64:latest", format: "yaml",
+    url: "https://qoder.com.cn/changelog",
   },
   // Qoder CLI 是 Bun 单文件原生二进制（与 grok 同型）：官方最新以
   // @qoder-ai/qodercli 的 npm dist-tag 为准，官方链接因此指 npm 包页而非发布页。
   "qoder-cli": npmSource("@qoder-ai/qodercli", null, "https://www.npmjs.com/package/@qoder-ai/qodercli"),
+  // CN 区 CLI 镜像包 @qodercn-ai/qoderclicn（实测 latest 在册），与 qoder-cli
+  // 同型同口径。
+  "qoder-cli-cn": npmSource("@qodercn-ai/qoderclicn", null, "https://www.npmjs.com/package/@qodercn-ai/qoderclicn"),
 };
 
 function yamlVersion(text) {

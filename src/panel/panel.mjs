@@ -2700,13 +2700,25 @@ export function createPanelRouter({
     }
     const before = (await getEnvironmentService().then((service) => service.getState()))
       .clients.find((client) => client.id === id);
+    // qoder 双区域版：安装记录按 (kind,edition) 最多四条（intl 在前），盲取
+    // installations[0] 在只装 CN 的机器上拿到的是 intl 的 not_found 空记录——
+    // 更新腿跟随「实际在装的 CLI 行」（第一条有 path 的 CLI 记录）。其余端点
+    // 只有一条 CLI 记录，同一谓词命中的就是原来的 installations[0]。
+    const installations = before?.installations ?? [];
+    const cliRow = installations.find((i) => i?.kind === "cli" && typeof i?.path === "string" && i.path !== "")
+      ?? installations.find((i) => i?.kind === "cli")
+      ?? installations[0]
+      ?? null;
     // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
     // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
     // 查询渠道按被更新那条安装项的 remoteId 取：qoder 的客户端 id 挂在桌面端渠道上，
-    // CLI 形态的官方版本要走 installations[0] 的 "qoder-cli"。
-    const targetVersion = kind === "native"
+    // CLI 形态的官方版本要走 CLI 行的 remoteId（intl 是 "qoder-cli"）。remoteId
+    // 显式为 null 的记录＝没有可核验的官方版本源（zcode CLI 同一条纪律），不发起
+    // 钉版查询——qoder 原生腿没有 npm 兜底，targetVersion 对它本无消费方。
+    const remoteId = cliRow === null ? id : (cliRow.remoteId === null ? null : (cliRow.remoteId ?? id));
+    const targetVersion = kind === "native" && remoteId !== null
       ? await getReleaseService()
-        .then((service) => service.getClientLatest(before?.installations?.[0]?.remoteId ?? id))
+        .then((service) => service.getClientLatest(remoteId))
         .then((data) => (data?.state === "ok" ? data.version : null))
         .catch(() => null)
       : null;
@@ -2721,8 +2733,8 @@ export function createPanelRouter({
       result: null,
       workerPid: null,
       targetVersion,
-      commandPath: before?.installations?.[0]?.path ?? null,
-      beforeVersion: before?.installations?.[0]?.version ?? null,
+      commandPath: cliRow?.path ?? null,
+      beforeVersion: cliRow?.version ?? null,
       // 逐形态 before 版本与 beforeVersion 是同一刻快照：worker 不再自己读。
       beforeByForm: Object.fromEntries((before?.installations ?? []).map((i) => [i.kind, i.version ?? null])),
     };
@@ -3920,7 +3932,7 @@ export function createPanelRouter({
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
       const id = path.slice("/panel/api/environment/latest/".length);
-      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "dsh-desktop", "dsh-tui", "zcode", "qoder", "qoder-cli", "grok", "claude-desktop", "kimi-desktop"].includes(id)) {
+      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "dsh-desktop", "dsh-tui", "zcode", "qoder", "qoder-desktop-cn", "qoder-cli", "qoder-cli-cn", "grok", "claude-desktop", "kimi-desktop"].includes(id)) {
         return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
       }
       try {

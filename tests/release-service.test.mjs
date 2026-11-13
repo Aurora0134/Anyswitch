@@ -198,7 +198,12 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
     ["codex", "https://registry.npmjs.org/-/package/%40openai%2Fcodex/dist-tags", { latest: "0.155.0", alpha: "0.157.0-alpha.10", "win32-x64": "0.155.0-win32-x64" }, "0.155.0", "https://github.com/openai/codex/releases", "npm:@openai/codex:latest"],
     ["grok", "https://registry.npmjs.org/-/package/%40xai-official%2Fgrok/dist-tags", { latest: "1.0.41", alpha: "1.0.41" }, "1.0.41", "https://www.npmjs.com/package/@xai-official/grok", "npm:@xai-official/grok:latest"],
     ["zcode", "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1", 'version: "3.12.3"\nfiles:\n  - version: 99.0.0\n', "3.12.3", "https://zcode.z.ai/cn/changelog", "zcode:windows-x86_64:stable"],
-    ["qoder", "https://download.qoder.com.cn/qoder-app/releases/latest.yml", "version: '0.2.5' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.2.5", "https://qoder.com/changelog", "qoder:desktop:latest"],
+    // qoder 桌面端（intl IDE 线）：官方源是 VS Code 式更新 API（零 commit 探针
+    // 回最新版），版本取 productVersion 字段。旧钉指向 download.qoder.com.cn
+    // /qoder-app 是归属错误——那份 feed 实测服务 CN 工作台，见下一条。
+    ["qoder", "https://center.qoder.sh/algo/api/update/win32-x64/stable/0000000000000000000000000000000000000000", { productVersion: "1.39.2", name: "1.39.2", url: "https://example.invalid/setup.exe" }, "1.39.2", "https://qoder.com/changelog", "qoder:desktop:win32-x64:stable"],
+    // qoder CN 桌面端（CN 工作台线）：electron-updater 频道文件，与内置更新器同源。
+    ["qoder-desktop-cn", "https://static.qoder.com.cn/qoder-work-cn/releases/latest.yml", "version: '0.9.18' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.9.18", "https://qoder.com.cn/changelog", "qoder-desktop-cn:win-x64:latest"],
     // Kimi 桌面端与 DSH 桌面端同型：官方最新查它内置 electron-updater 的那份频道文件。
     // endpoint 钉 CDN 最终地址（code.kimi.com 会 302，查询不追跳转）。
     ["kimi-desktop", "https://cdn.kimi.com/kimi-code/desktop/latest.yml", "version: 1.0.4\nfiles:\n  - url: binaries/99.0.0/KimiCode-99.0.0-win-x64.exe\n", "1.0.4", "https://github.com/MoonshotAI/kimi-code-app", "kimi-desktop:win-x64:latest"],
@@ -285,6 +290,8 @@ it("queries npm latest for each fixed CLI package, preserving preview channels",
     ["dsh-tui", "@deepseek-harness-tui/dsh-tui", "0.16.1", "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui"],
     // Qoder CLI 与 Grok Build 同型（原生二进制、官方分发走 npm），官方链接指 npm 包页。
     ["qoder-cli", "@qoder-ai/qodercli", "1.1.64", "https://www.npmjs.com/package/@qoder-ai/qodercli"],
+    // CN 区 CLI 镜像包，与 qoder-cli 同口径。
+    ["qoder-cli-cn", "@qodercn-ai/qoderclicn", "1.1.88", "https://www.npmjs.com/package/@qodercn-ai/qoderclicn"],
   ];
   for (const [id, name, version, page] of fixtures) {
     const service = createReleaseService({ now, fetchFn: async (url, options) => {
