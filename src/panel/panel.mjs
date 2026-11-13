@@ -211,6 +211,13 @@ export function createPromptsPanelService({ base = process.env, homeDir, isEndpo
       }
       return mutateAndSync(data.setOverride(args));
     },
+    // 非变更回填：与 mutateAndSync 同一 syncAll 体，但不碰数据面。「注入文件
+    // 在写入面代码合入之前出生/被外部删掉」时按当前预设集补写（启动回填与
+    // 可见集变更钩子两个非用户主动触发面走这里）。幂等：内容不变不写。
+    resync() {
+      lastSync = injector.syncAll((endpointId) =>
+        (isEndpointVisible(endpointId) ? data.resolveForEndpoint(endpointId) : []));
+    },
   };
 }
 
@@ -2542,6 +2549,8 @@ export function createPanelRouter({
   let endpointVisibility = null;
   let endpointVisibilityRefresh = null; // in-flight 去重：并发请求共享同一次检测
   let endpointVisibilityTimer = null;
+  let endpointVisibilityKey; // 变更检测用：undefined=首算前；之后每轮检测后更新（null→"null"）
+  let promptsPrewarmed = false; // prewarmPromptsBackfill 仅首调做显式回填（见该方法注释）
   async function refreshEndpointVisibility() {
     if (endpointVisibilityRefresh) return endpointVisibilityRefresh;
     endpointVisibilityRefresh = (async () => {
@@ -2554,6 +2563,17 @@ export function createPanelRouter({
       } finally {
         endpointVisibilityRefresh = null;
       }
+      // 可见集变更钩子（注入面非变更回填的运行中触发面）：上一轮 key 在册
+      // （非首算）且新快照非 null 且 key 变了 → 回填一次注入面（fire-and-
+      // forget，失败静默）。首算不触发——启动回填归 prewarmPromptsBackfill
+      // 的显式 resync，避免双计；运行中检测失败翻转（Set→null）不触发——
+      // 非用户主动路径零写盘，不给未装端点造文件；检测恢复（null→Set）照
+      // 触发——补填，无永久漏回填。
+      const key = endpointVisibility === null ? "null" : [...endpointVisibility].sort().join(",");
+      if (endpointVisibilityKey !== undefined && endpointVisibility !== null && key !== endpointVisibilityKey) {
+        try { promptsService?.resync?.(); } catch { /* 钩子失败静默：预设变更路径照旧兜底 */ }
+      }
+      endpointVisibilityKey = key;
     })();
     return endpointVisibilityRefresh;
   }
@@ -5037,6 +5057,27 @@ export function createPanelRouter({
       try {
         sessionsListSnapshotFor(ensureSessionScanService()).refresh().catch(() => {});
       } catch { /* 扫描承载不可用：与懒加载同败法 */ }
+    },
+    // 预设注入面的启动回填（panel-host 启动时调一次）：注入文件唯一的写入
+    // 触发面原本是面板预设变更——写入面代码合入到首次预设变更之间的窗口
+    // 里，已装端点的注入文件不会被补写（预设没进 Agent 上下文症状的 anys
+    // 侧根因）。这里把回填提前到进程启动：先等一次可见性快照，检测正常时
+    // 做一次显式 resync；检测失败（快照 null）跳过落盘，检测恢复后 60s 内
+    // 由 null→Set 翻转的变更钩子自动补上（无永久漏回填）。fire-and-forget、
+    // 失败静默；仅首调做显式回填，后续调用只刷新可见性。直接建路由器的测
+    // 试不调即不触发（与 prewarmColdScans 同测试纪律）。
+    prewarmPromptsBackfill() {
+      return (async () => {
+        await refreshEndpointVisibility();
+        promptsService ??= createPromptsPanelService({ base, isEndpointVisible });
+        ensureEndpointVisibilityFreshness();
+        if (!promptsPrewarmed) {
+          promptsPrewarmed = true;
+          if (endpointVisibility !== null) {
+            try { promptsService.resync(); } catch { /* 静默：预设变更路径照旧兜底 */ }
+          }
+        }
+      })().catch(() => {});
     },
     // 面板宿主退出时调用：把导入预览留在 %TEMP% 的暂存目录、以及票据内存里的
     // 明文密钥副本一并丢掉。没被调用过时，弃用票据靠新建票据时的过期清扫兜底。

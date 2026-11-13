@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { discoverTerminalBackend } from "../src/panel/panel-host.mjs";
+import { createPanelServer, discoverTerminalBackend } from "../src/panel/panel-host.mjs";
 
 function recordingLogger() {
   const warnings = [];
@@ -52,4 +52,25 @@ test("discoverTerminalBackend swallows a throwing probe so panel startup never b
   assert.equal(result.ok, false);
   assert.equal(logger.warnings.length, 1);
   assert.match(logger.warnings[0], /token store locked/);
+});
+
+// 接线兑底用例：createPanelServer 必须在启动时调 prewarmPromptsBackfill——
+// 注入文件唯一写入触发面原本是预设变更，漏掉这行接线则启动回填失效（面板
+// 重启后注入文件仍不落盘）。environmentService/promptsService 都注入 mock，
+// 预热回填不触真检测、不写真家目录；其余预热腿（watchdog/会话扫描）是
+// createPanelServer 既有行为，与本断言无关。
+test("createPanelServer 启动即预热注入回填（漏接线则 resync 计数为 0）", async () => {
+  const env = { getState: async () => ({ clients: [{ id: "claude", installations: [{ status: "found" }] }] }) };
+  let resyncs = 0;
+  const promptsService = { resync: () => { resyncs += 1; } };
+  createPanelServer({
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    environmentService: env,
+    promptsService,
+  });
+  const deadline = Date.now() + 100;
+  while (resyncs === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(resyncs, 1, "启动即一次注入回填");
 });
