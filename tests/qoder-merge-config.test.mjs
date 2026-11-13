@@ -770,4 +770,72 @@ describe("writeQoderConfig 双区域版双根写入", () => {
     // 坏文件原样保留，不被覆盖。
     assert.equal(readFileSync(join(dir, ".qoder-cn", "settings.json"), "utf8"), "{ broken json");
   });
+
+  // 共享 sidecar 的逐根漂移：修前首根写成功即把 sidecar 重写成新集，第二根的
+  // previous 随即等于 current，离开托管集的 id 两边都不在、在第二根永久残留。
+  // 修后批次前快照整批共享，整批成功才统一落账。
+  it("渠道离开托管集→双根同清，sidecar 落新集，再跑幂等", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    mkdirSync(join(dir, ".qoder"), { recursive: true });
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    const settingsPath = join(dir, ".qoder", "settings.json");
+    // sync1：A+B 双根写入
+    writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
+    for (const root of [".qoder", ".qoder-cn"]) {
+      const written = JSON.parse(readFileSync(join(dir, root, "settings.json"), "utf8"));
+      assert.ok(written.providers?.[managedConnectionId("poke-api")], `${root} 首轮含 poke-api`);
+      assert.ok(written.providers?.[managedConnectionId("nvidia-nim")], `${root} 首轮含 nvidia-nim`);
+    }
+    // sync2：渠道集只剩 poke-api（nvidia-nim 离开托管集）
+    const storeWithoutNvidia = { ...STORE, providers: { "poke-api": STORE.providers["poke-api"] } };
+    const second = writeQoderConfig(storeWithoutNvidia, PORT, TOKEN, dir, settingsPath);
+    assert.equal(second.ok, true);
+    for (const root of [".qoder", ".qoder-cn"]) {
+      const written = JSON.parse(readFileSync(join(dir, root, "settings.json"), "utf8"));
+      assert.ok(written.providers?.[managedConnectionId("poke-api")], `${root} 保留在集渠道`);
+      assert.equal(written.providers?.[managedConnectionId("nvidia-nim")], undefined, `${root} 离开托管集的连接被清`);
+    }
+    assert.deepEqual(readSidecar(dir).providers, ["poke-api"]);
+    const third = writeQoderConfig(storeWithoutNvidia, PORT, TOKEN, dir, settingsPath);
+    assert.equal(third.ok, true);
+    assert.equal(third.unchanged, true, "同集再跑整单幂等");
+  });
+
+  it("第二根写失败时 sidecar 不落账（留批次前集，下一轮两侧按旧账重清）", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    mkdirSync(join(dir, ".qoder"), { recursive: true });
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    const settingsPath = join(dir, ".qoder", "settings.json");
+    writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
+    assert.deepEqual(readSidecar(dir).providers.sort(), ["nvidia-nim", "poke-api"]);
+    // sync2：渠道集只剩 poke-api，且 CN 根 JSON 被破坏
+    const storeWithoutNvidia = { ...STORE, providers: { "poke-api": STORE.providers["poke-api"] } };
+    writeFileSync(join(dir, ".qoder-cn", "settings.json"), "{ broken json", "utf8");
+    const result = writeQoderConfig(storeWithoutNvidia, PORT, TOKEN, dir, settingsPath);
+    assert.equal(result.ok, false);
+    // intl 根照常写入，且按批次前旧账清掉离开者
+    const intl = JSON.parse(readFileSync(join(dir, ".qoder", "settings.json"), "utf8"));
+    assert.ok(intl.providers?.[managedConnectionId("poke-api")]);
+    assert.equal(intl.providers?.[managedConnectionId("nvidia-nim")], undefined, "intl 根按批次前旧账清掉离开者");
+    // sidecar 仍为批次前集——不把「首根成功」的半程状态当整批终态落账
+    assert.deepEqual(readSidecar(dir).providers.sort(), ["nvidia-nim", "poke-api"]);
+  });
+
+  // 兑底路径护栏（当前树本就绿）：无根认出时单根直写自读自写，离开者照常被清——
+  // 批次化重构若把兑底路径的落账改丢才红。
+  it("单根兑底路径（根一个都没认出）sidecar 照常自读自写，离开者照常被清", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    const settingsPath = join(dir, ".qoder", "settings.json");
+    const first = writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
+    assert.equal(first.ok, true);
+    assert.equal(first.roots, undefined, "兜底单写不带逐根明细");
+    assert.deepEqual(readSidecar(dir).providers.sort(), ["nvidia-nim", "poke-api"]);
+    const storeWithoutNvidia = { ...STORE, providers: { "poke-api": STORE.providers["poke-api"] } };
+    const second = writeQoderConfig(storeWithoutNvidia, PORT, TOKEN, dir, settingsPath);
+    assert.equal(second.ok, true);
+    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    assert.ok(written.providers?.[managedConnectionId("poke-api")]);
+    assert.equal(written.providers?.[managedConnectionId("nvidia-nim")], undefined, "兑底路径离开者照常被清");
+    assert.deepEqual(readSidecar(dir).providers, ["poke-api"], "兑底路径 sidecar 照常更新");
+  });
 });
