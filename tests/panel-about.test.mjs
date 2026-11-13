@@ -633,12 +633,15 @@ test("Qoder CLI 形态的官方来源链接放行 npm 包页，仿冒域名被�
 // （至多 cli-intl/cli-cn/desktop-intl/desktop-cn 四条，未装的区域版是 not_found
 // 记录）。关于页职责是全量声明支持面：按区域版分行，intl 在前 CN 在后，两条子行
 // 恒在——未装的区域版子行如实报「未找到」（not_found 惯例）；形态徽标行首不变，
-// 区域小注（国际/CN）紧随其后；动作位端点级一颗摆主行（第一行）；详情区逐安装
-// 记录照常。
+// 区域小注（国际/CN）紧随其后；动作位端点级一颗摆主行（第一行）；详情区按区域版
+// 分两列（列头小注标区域，国际在左 CN 在右，列内行结构与其他端点一致），「检测
+// 时间」端点级一行通栏摆在两列之下。
 const qoderEditioned = ({ intl = true, cn = true } = {}) => {
+  // 与生产同构：CN 两条记录的 remoteId 恒为 null（environment-service 显式覆盖），
+  // 面板不为 CN 形态发官方版本查询，详情区 CN 列因此没有官方来源/查询时间行。
   const record = (kind, edition, found) => ({
     kind, edition,
-    remoteId: kind === "cli" ? (edition === "cn" ? "qoder-cli-cn" : "qoder-cli") : (edition === "cn" ? "qoder-cn" : "qoder"),
+    remoteId: edition === "cn" ? null : (kind === "cli" ? "qoder-cli" : "qoder"),
     status: found ? "found" : "not_found",
     path: found ? `C:\\Apps\\qoder-${edition}\\${kind}` : null,
     version: found ? (edition === "cn" ? (kind === "cli" ? "1.0.0-cn" : "2.0.0-cn") : kind === "cli" ? "1.0.0" : "2.0.0") : null,
@@ -654,11 +657,8 @@ const qoderEditioned = ({ intl = true, cn = true } = {}) => {
   ];
   return local;
 };
-// 两个区域版的官方渠道各自查询：先判 CN 后缀，免得被 intl 的 remoteId 前缀吃掉
 const editionRemotes = (local) => (path) => {
   if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
-  if (path.includes("/latest/qoder-cli-cn")) return { ...latest("1.0.0-cn", "current"), url: "https://www.npmjs.com/package/@qoder-ai/qodercli" };
-  if (path.includes("/latest/qoder-cn")) return { ...latest("2.0.0-cn", "current"), url: "https://qoder.com.cn" };
   if (path.includes("/latest/qoder-cli")) return { ...latest("1.1.0", "update_available"), url: "https://www.npmjs.com/package/@qoder-ai/qodercli" };
   if (path.includes("/latest/qoder")) return { ...latest("2.0.0", "current"), url: "https://qoder.com" };
   return normal(path);
@@ -677,17 +677,33 @@ test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，�
   assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 2\.0\.0/, "intl 行官方版本同口径并排");
   assert.match(lines[0].textContent, /有新版本/, "intl 行结论跟本组主形态比对");
   assert.match(lines[1].textContent, /本地 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/, "CN 行只摆 CN 组的版本");
-  assert.match(lines[1].textContent, /官方最新 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/);
-  assert.match(lines[1].textContent, /与官方最新版本一致/, "CN 行结论跟本组主形态比对");
+  assert.match(lines[1].textContent, /官方最新 自带更新/, "CN 记录 remoteId 恒 null：官方位直述自带更新");
+  assert.equal(descendants(lines[1], (node) => node.className === "about-result").length, 0, "无官方源可比 → CN 行不出结论位");
   const actions = descendants(h.row("qoder"), (node) => node.tagName === "button" && node.className.includes("about-client-action"));
   assert.equal(actions.length, 1, "动作位端点级一颗");
   assert.equal(actions[0].textContent, "更新", "intl 组有新版本 → 端点级更新");
   assert.equal(descendants(lines[0], (node) => node.tagName === "button").length, 1, "按钮摆在主行（第一行）");
   assert.equal(descendants(lines[1], (node) => node.tagName === "button").length, 0, "CN 行无动作位");
-  // 详情区逐安装记录照常：双装时 CLI/桌面条目各出两组（intl 组在前）
-  const dts = descendants(h.row("qoder"), (node) => node.tagName === "dt").map((node) => node.textContent);
-  assert.equal(dts.filter((text) => text === "CLI 路径").length, 2);
-  assert.equal(dts.filter((text) => text === "桌面 路径").length, 2);
+  // 详情区按区域版分两列：列头小注标区域（国际在左 CN 在右），列内只摆本版形态行
+  const cols = descendants(h.row("qoder"), (node) => node.className === "about-region-col");
+  assert.equal(cols.length, 2, "详情区两列");
+  assert.deepEqual(
+    cols.map((col) => descendants(col, (node) => node.className === "about-kind about-region-name")[0]?.textContent),
+    ["国际", "CN"], "列头国际在左 CN 在右");
+  const colDts = (col) => descendants(col, (node) => node.tagName === "dt").map((node) => node.textContent);
+  assert.deepEqual(colDts(cols[0]),
+    ["CLI 路径", "CLI 版本来源", "CLI 官方来源", "CLI 查询时间", "桌面 路径", "桌面 版本来源", "桌面 官方来源", "桌面 查询时间"],
+    "intl 列行结构与其他端点一致");
+  assert.deepEqual(colDts(cols[1]),
+    ["CLI 路径", "CLI 版本来源", "桌面 路径", "桌面 版本来源"],
+    "CN 列无官方源可查：只有路径与版本来源两行（无官方来源/查询时间）");
+  assert.ok(cols[0].textContent.includes("C:\\Apps\\qoder-intl") && !cols[0].textContent.includes("qoder-cn"), "intl 列只摆 intl 组");
+  assert.ok(cols[1].textContent.includes("C:\\Apps\\qoder-cn") && !cols[1].textContent.includes("qoder-intl"), "CN 列只摆 CN 组");
+  // 「检测时间」端点级一行，通栏摆在两列之下（不进任何一列）
+  const checkTimes = descendants(h.row("qoder"), (node) => node.tagName === "dt" && node.textContent === "检测时间");
+  assert.equal(checkTimes.length, 1);
+  assert.ok(descendants(cols[0], (node) => node.textContent === "检测时间").length === 0
+    && descendants(cols[1], (node) => node.textContent === "检测时间").length === 0, "检测时间不进区域列");
 });
 
 test("qoder 仅 CN 版在装：国际版子行恒在、如实报未找到", async () => {
@@ -738,6 +754,7 @@ test("安装记录不带 edition 的端点渲染零变化（qoder 旧形记录�
   assert.equal(lines.length, 1, "无 edition → 每端点一行现状不变");
   assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop"], "无区域小注");
   assert.match(lines[0].textContent, /本地 1\.0\.0/);
+  assert.equal(descendants(h.row("qoder"), (node) => node.className === "about-region-cols").length, 0, "无 edition → 详情区不落区域列，单列照旧");
 });
 
 test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", () => {
