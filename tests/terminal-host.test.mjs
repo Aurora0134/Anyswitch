@@ -661,7 +661,7 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
       method: "POST", headers: headers(host), body: JSON.stringify({ cols: 100, rows: 30 }),
     });
     assert.equal(same.status, 200);
-    assert.deepEqual(await same.json(), { ok: true, cols: 100, rows: 30 }, "短路响应与全路径同形");
+    assert.deepEqual(await same.json(), { ok: true, cols: 100, rows: 30 }, "短路响应是不带戳的三字段（全路径带 lastResizeAt 戳）");
     await host.persistNow(); // 没脏即空跳；有脏即冲净——两种结果都算落定
     assert.deepEqual(pty.resizeCalls, [], "同尺寸 resize 不调 pty.resize（ConPTY 重排是多开卡顿源之一）");
     const after = statSync(host.sessionStatePath(created.id));
@@ -695,7 +695,11 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
 test("resize 回声戳：静默 ≥2s 才记 lastResizeAt（出字中不打戳），随快照、记录与响应带出", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-resizeecho-"));
   const { calls, ptyModule } = capturingPtyModule();
-  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  // 受控时钟：2s 静默门由注入的 nowFn 判定，跨门只拨钟、不睡真实墙钟——真实
+  // sleep(2100) 在一次调度停顿面前会假红（静默窗被意外跨过），还白拖 2 秒多。
+  // epoch 取值任意：断言只比较同一只钟上的先后。
+  let clock = 1_000_000;
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} }, nowFn: () => clock });
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   try {
@@ -725,11 +729,13 @@ test("resize 回声戳：静默 ≥2s 才记 lastResizeAt（出字中不打戳�
     assert.equal(streaming.lastResizeAt, undefined, "出字中的 resize 响应不带戳（流式没有回声）");
 
     // 静默 ≥2s 后真变尺寸（切到不同宽度的视口）：打戳，随后的 TUI 重渲染晚于它。
-    await sleep(2100);
-    const resizeAt = Date.now();
+    // 拨受控时钟跨过 2s 静默门（真实墙钟下这里是 sleep(2100) 的竞速赌注）。
+    clock += 2100;
+    const resizeAt = clock;
     const changed = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
       method: "POST", headers: headers(host), body: JSON.stringify({ cols: 120, rows: 40 }),
     }).then((r) => r.json());
+    clock += 10; // 重渲染发生在 resize 之后——同一只钟上的先后
     pty.dataListener?.("redraw frame"); // TUI 适配新尺寸的重渲染
     await sleep(10);
     assert.ok(Number.isFinite(changed.lastResizeAt) && changed.lastResizeAt >= resizeAt,
@@ -3813,6 +3819,12 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
   const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
+  // 在线客户端的 SSE 流是常开的：不掐掉，server.close 会一直等这条连接（整个文件
+  // 挂死）。abort 与读取落定因此放 finally（对齐本文件既有 SSE 用例的收尾纪律）：
+  // try 里任一断言失败时也要先掐流再收服务器，否则本用例要抓的回归一旦出现，单条
+  // 红灯会被放大成整个文件挂死。
+  const streamAbort = new AbortController();
+  let collector = null;
   try {
     const created = await fetch(url("/terminal/sessions"), {
       method: "POST", headers: headers(host),
@@ -3830,13 +3842,14 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
     assert.ok(screenBefore.includes("CLAUDE帧-2"), "前置：旧画面在镜像里");
 
     // 在线客户端：这一拍里它收到的每一帧都要记下来——清屏帧会经同一条流先到。
-    // 流是常开的，收尾必须 abort，否则 server.close 会一直等这条连接（整个文件挂死）。
-    const streamAbort = new AbortController();
     const streamRes = await fetch(url(`/terminal/sessions/${created.id}/stream`), {
       headers: headers(host), signal: streamAbort.signal,
     });
-    const collector = startSseCollector(streamRes);
+    collector = startSseCollector(streamRes);
     assert.equal(await waitForSseFrame(collector, "snapshot"), true, "前置：流已建、快照帧已到");
+    // 回放帧晚于 snapshot 若干轮到达（帧序 snapshot → 回放 → 实时），且内容以清屏
+    // 序列开头——基线必须等它落定后再取，否则下面的清屏过滤会把正常回放当泄漏帧。
+    assert.equal(await waitForSseFrame(collector, "data"), true, "前置：回放帧已到（基线取在它之后）");
     const framesBefore = collector.frames.length;
 
     // 换身份：这一拍本该走 resetSessionScreen（旧顺序下先清屏再 spawn）。
@@ -3853,7 +3866,9 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
     assert.equal(session.screen.toReplay(), screenBefore, "镜像原样（没被换成空镜像）");
     assert.ok(!session.buffer.join("").includes("\u001b[2J"), "字节窗里没有清屏字节");
     const after = collector.frames.slice(framesBefore);
-    const clearedFrames = after.filter((frame) => frame.event === "data" && String(frame.data || "").includes("\u001b[2J"));
+    // data 帧的负载经 JSON.stringify 编码（真实 ESC 变成 \u001b 字面量）：拿帧原文
+    // includes 真实 ESC 序列永远不命中——先解码再匹配，这条观察腿才真的在判。
+    const clearedFrames = after.filter((frame) => frame.event === "data" && JSON.parse(frame.data).includes("\u001b[2J"));
     assert.deepEqual(clearedFrames, [], `在线客户端没收到任何清屏帧（收到 ${clearedFrames.length} 帧）`);
 
     // ② 会话记录里的画面原料完好：下一次重挂/恢复仍然拿得到这一屏。
@@ -3861,9 +3876,9 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
     // 所以这里只钉画面，不钉身份——那个语义有它自己的一组用例。
     assert.equal(session.pty, null, "原地那一代已经 terminate 掉了（这是 /switch 的既有语义）");
     assert.ok(session.screen.toReplay().includes("CLAUDE帧-2"), "镜像仍带着旧画面");
-    streamAbort.abort();
-    await collector.settled;
   } finally {
+    streamAbort.abort();
+    await collector?.settled;
     await host.close();
     rmSync(root, { recursive: true, force: true });
   }
