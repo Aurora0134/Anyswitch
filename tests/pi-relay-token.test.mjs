@@ -109,16 +109,24 @@ describe("checkAndRotateRelayToken", () => {
   it("is a no-op before the interval", () => {
     const dir = mkTestDir("pi-token-test-");
     const first = loadOrGenerateToken(dir);
-    assert.equal(checkAndRotateRelayToken(dir), null);
+    // Age the legacy token to just short of the exported weekly cadence (the
+    // default interval): it must still hold fire — a default decoupled from the
+    // constant, or the boundary itself off by one, rotates here and goes red.
+    const clock = makeClock(Date.now());
+    const justBeforeInterval = new Date(clock.t - (RELAY_TOKEN_ROTATE_INTERVAL_MS - 1000));
+    utimesSync(join(dir, "pi-relay-token"), justBeforeInterval, justBeforeInterval);
+    assert.equal(checkAndRotateRelayToken(dir, { now: clock.now }), null);
     assert.equal(readFileSync(join(dir, "pi-relay-token"), "utf8").trim(), first);
   });
 
   it("fires on legacy installs via the token file's mtime", () => {
     const dir = mkTestDir("pi-token-test-");
     const first = loadOrGenerateToken(dir);
-    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 3600_000);
-    utimesSync(join(dir, "pi-relay-token"), eightDaysAgo, eightDaysAgo);
-    const rotated = checkAndRotateRelayToken(dir);
+    // Just past the exported weekly cadence: the default schedule fires.
+    const clock = makeClock(Date.now());
+    const justPastInterval = new Date(clock.t - (RELAY_TOKEN_ROTATE_INTERVAL_MS + 1000));
+    utimesSync(join(dir, "pi-relay-token"), justPastInterval, justPastInterval);
+    const rotated = checkAndRotateRelayToken(dir, { now: clock.now });
     assert.ok(rotated);
     assert.equal(rotated.previous, first);
   });
@@ -162,10 +170,17 @@ describe("createRelayTokenValidator", () => {
     // the generation's clock — sessions in use never hit the TTL).
     clock.t += 1000;
     assert.ok(validator.isValid(first));
+    // Keep using it up to the end of the birth window, then once more with the
+    // birth age already past the TTL: the refreshed last-used clock (2s ago)
+    // must keep it alive — a retirement keyed on gen.createdAt alone would
+    // already reject it here, so this point tells the two models apart.
+    clock.t += RELAY_TOKEN_IDLE_TTL_MS - 2000;
+    assert.ok(validator.isValid(first));
+    clock.t += 2000;
+    assert.ok(validator.isValid(first));
     // Idle for longer than the TTL with no use: retired. The generation stays
     // dead even though it is still chained.
     clock.t += RELAY_TOKEN_IDLE_TTL_MS + 1;
-    assert.ok(!validator.isValid(first));
     assert.ok(!validator.isValid(first));
     // The current generation is never subject to the TTL.
     assert.ok(validator.isValid(rotated.token));
@@ -203,12 +218,20 @@ describe("createRelayTokenValidator", () => {
     rotateRelayToken(dir, { now: clock.now });
     const v1 = createRelayTokenValidator(dir, { now: clock.now });
     assert.ok(v1.isValid(first));
-    clock.t += 1000;
+    // Use the session deep into its birth window, then persist: the file must
+    // carry the last touch, not the birth time, or a restart has nothing to
+    // restore beyond gen.createdAt.
+    clock.t += RELAY_TOKEN_IDLE_TTL_MS - 1000;
+    assert.ok(v1.isValid(first));
     v1.flush();
-    assert.ok(existsSync(getUsagePath(dir)));
-    // A fresh validator instance (process restart) reads the persisted usage.
+    assert.deepEqual(JSON.parse(readFileSync(getUsagePath(dir), "utf8")), { [first]: clock.t });
+    // Restart with the birth age already past the TTL: only the restored
+    // last-used clock (2s ago) can keep the generation alive — a validator
+    // falling back to gen.createdAt would retire it here.
+    clock.t += 2000;
     const v2 = createRelayTokenValidator(dir, { now: clock.now });
     assert.ok(v2.isValid(first));
+    // Idle past the TTL after the restart: retired again, restored state and all.
     clock.t += RELAY_TOKEN_IDLE_TTL_MS + 1;
     assert.ok(!v2.isValid(first));
     v2.flush();
