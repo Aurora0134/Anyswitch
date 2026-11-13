@@ -3274,10 +3274,11 @@ async function api(method, path, body) {
       "qoder-cli": ["", "@qoder-ai/qodercli"],
       "qoder-cli-cn": ["", "@qodercn-ai/qoderclicn"],
       zcode: [], qoder: [], "qoder-desktop-cn": [],
-      // 桌面副形态的官方来源与主形态不同源：kimi 桌面端是独立仓库（仓库页照 github
-      // 分支放行），claude 桌面端官方入口只有下载页（域名白名单在 safeLink）。
+      // 桌面副形态的官方来源与主形态不同源，都只有厂商自家站点、靠 safeLink 的
+      // 域名白名单放行：kimi 桌面端是官方文档站的变更记录页（没有独立仓库），
+      // claude 桌面端是下载页。两者都不登记仓库与包名。
       "claude-desktop": [],
-      "kimi-desktop": ["MoonshotAI/kimi-code-app", ""],
+      "kimi-desktop": [],
     };
     // 面板可代管「更新」的客户端：npm 全局包按包名重装最新版，Grok Build / Qoder CLI
     // 跑自身的升级命令。服务端 client-lifecycle.mjs 的 CLIENT_PACKAGES / NATIVE_CLIENTS
@@ -3300,7 +3301,8 @@ async function api(method, path, body) {
           : id === "qoder" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn"]
           : id === "qoder-desktop-cn" ? ["qoder.com.cn", "www.qoder.com.cn"]
           : id === "codex-desktop" ? ["apps.microsoft.com", "www.microsoft.com"]
-          : id === "claude-desktop" ? ["claude.ai", "www.claude.ai"] : [];
+          : id === "claude-desktop" ? ["claude.ai", "www.claude.ai"]
+          : id === "kimi-desktop" ? ["www.kimi.com"] : [];
         return hosts.includes(url.hostname) ? url.href : null;
       } catch { return null; }
     }

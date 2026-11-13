@@ -432,7 +432,7 @@ test("DSH 双组件并段：CLI 段摆社区插件版本、最新格前缀「最
       return { ...latest("0.16.1", "update_available"), url: "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui" };
     }
     if (path.includes("/latest/dsh-desktop")) {
-      return { ...latest("0.2.1-rc.2", "current"), url: "https://harness.deepseek.com" };
+      return { ...latest("0.2.1-rc.2", "current"), url: "https://www.deepseek.com/harness/" };
     }
     if (path.includes("/latest/dsh")) {
       return { ...latest("0.1.7-rc.2", "current"), url: "https://github.com/deepseek-ai/deepseek-harness/releases" };
@@ -570,7 +570,7 @@ test("Codex 桌面渠道的官方来源链接放行 Microsoft Store，仿冒域�
 test("Claude 与 Kimi 桌面形态在详情区补行，官方来源各归各源", async () => {
   const h = harness((path) => {
     if (path.includes("/latest/claude-desktop")) return { ...latest(), version: null, comparison: "unknown", url: "https://claude.ai/download" };
-    if (path.includes("/latest/kimi-desktop")) return { ...latest("1.0.5", "update_available"), url: "https://github.com/MoonshotAI/kimi-code-app" };
+    if (path.includes("/latest/kimi-desktop")) return { ...latest("1.0.5", "update_available"), url: "https://www.kimi.com/code/docs/kimi-code-desktop/changelog.html" };
     return normal(path);
   });
   await h.controller.enter();
@@ -582,8 +582,8 @@ test("Claude 与 Kimi 桌面形态在详情区补行，官方来源各归各源"
     "claude 桌面端官方来源指向官方下载页");
   const kimiRow = h.row("kimi");
   assert.match(kimiRow.textContent, /桌面 路径C:\\Apps\\kimi\\desktop/);
-  assert.ok(descendants(kimiRow, (node) => node.tagName === "a").some((node) => node.href === "https://github.com/MoonshotAI/kimi-code-app"),
-    "kimi 桌面端官方来源指向官方仓库");
+  assert.ok(descendants(kimiRow, (node) => node.tagName === "a").some((node) => node.href === "https://www.kimi.com/code/docs/kimi-code-desktop/changelog.html"),
+    "kimi 桌面端官方来源指向官方文档站的变更记录页");
 });
 
 test("Claude 桌面端官方来源只放行官方下载页域名", async () => {

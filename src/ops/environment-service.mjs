@@ -552,9 +552,10 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         // index 0/1 的既有语义（0 是原生 CLI、1 是桌面端，「动作位认哪一条」
         // 不变），CN 两条只追加在后。未安装的区域版照常产出 not_found 记录，
         // 关于页据此声明全支持面。CN 两条的官方版本源＝release-service 的
-        // qoder-cli-cn（npm 镜像包）与 qoder-desktop-cn（CN 工作台 latest.yml），
-        // remoteId 各指各的渠道；CN 桌面记录用 id "qoder-cn" 只是 asar 包名防线
-        // 的钥匙（CN 工作台无版本目录机制，desktopPayloads 落空即回退安装根直读）。
+        // qoder-cli-cn（npm 镜像包）与 qoder-desktop-cn（Qoder CN 桌面版
+        // qoder-app 的 latest.yml），remoteId 各指各的渠道；CN 桌面记录用 id
+        // "qoder-cn" 只是 asar 包名防线的钥匙（Qoder CN 桌面版无版本目录机制，
+        // desktopPayloads 落空即回退安装根直读）。
         ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable, { edition: "intl" }),
           inspect(id, "desktop", resolver, { edition: "intl" }),
           inspect("qoder-cli-cn", "cli", resolveQoderCnCliExecutable, { edition: "cn" }),

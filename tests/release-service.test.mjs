@@ -205,13 +205,16 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
     ["zcode", "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1", 'version: "3.12.3"\nfiles:\n  - version: 99.0.0\n', "3.12.3", "https://zcode.z.ai/cn/changelog", "zcode:windows-x86_64:stable"],
     // qoder 桌面端（intl IDE 线）：官方源是 VS Code 式更新 API（零 commit 探针
     // 回最新版），版本取 productVersion 字段。旧钉指向 download.qoder.com.cn
-    // /qoder-app 是归属错误——那份 feed 实测服务 CN 工作台，见下一条。
+    // /qoder-app 是归属错误——那份 feed 服务的是 Qoder CN 桌面版，见下一条。
     ["qoder", "https://center.qoder.sh/algo/api/update/win32-x64/stable/0000000000000000000000000000000000000000", { productVersion: "1.39.2", name: "1.39.2", url: "https://example.invalid/setup.exe" }, "1.39.2", "https://qoder.com/changelog", "qoder:desktop:win32-x64:stable"],
-    // qoder CN 桌面端（CN 工作台线）：electron-updater 频道文件，与内置更新器同源。
-    ["qoder-desktop-cn", "https://static.qoder.com.cn/qoder-work-cn/releases/latest.yml", "version: '0.9.18' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.9.18", "https://qoder.com.cn/changelog", "qoder-desktop-cn:win-x64:latest"],
+    // qoder CN 桌面版：与已装应用内置 electron-updater 同源的频道文件（app-update.yml
+    // 的 url 是 static.qoder.com.cn/qoder-app/releases）。旧钉的 qoder-work-cn 是
+    // QoderWork CN 的源——另一条产品线，0.9.18 与已装应用不在同一版本线。
+    ["qoder-desktop-cn", "https://static.qoder.com.cn/qoder-app/releases/latest.yml", "version: 0.5.7\nfiles:\n  - url: Qoder-CN-win-x64-user.exe\n", "0.5.7", "https://qoder.com.cn/changelog", "qoder-desktop-cn:win-x64:latest"],
     // Kimi 桌面端与 DSH 桌面端同型：官方最新查它内置 electron-updater 的那份频道文件。
-    // endpoint 钉 CDN 最终地址（code.kimi.com 会 302，查询不追跳转）。
-    ["kimi-desktop", "https://cdn.kimi.com/kimi-code/desktop/latest.yml", "version: 1.0.4\nfiles:\n  - url: binaries/99.0.0/KimiCode-99.0.0-win-x64.exe\n", "1.0.4", "https://github.com/MoonshotAI/kimi-code-app", "kimi-desktop:win-x64:latest"],
+    // endpoint 钉 CDN 最终地址（code.kimi.com 会 302，查询不追跳转）；官方来源链接
+    // 是官方文档站的桌面端变更记录页（桌面端没有独立仓库）。
+    ["kimi-desktop", "https://cdn.kimi.com/kimi-code/desktop/latest.yml", "version: 1.0.4\nfiles:\n  - url: binaries/99.0.0/KimiCode-99.0.0-win-x64.exe\n", "1.0.4", "https://www.kimi.com/code/docs/kimi-code-desktop/changelog.html", "kimi-desktop:win-x64:latest"],
   ];
   for (const [id, endpoint, payload, version, page, source] of fixtures) {
     const service = createReleaseService({ now, fetchFn: async (url, options) => {
@@ -329,7 +332,9 @@ it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改�
   // 关于页 safeLink 只放行 products 里登记的仓库与 npm 包名：CLIENTS 改了包名
   // 或官方链接而 products 没跟上，前端会静默拒掉后端给出的官方链接、测试照绿
   // （products 与 CLIENTS 的注释都自称同源，却是同类配对里唯一漏钉的一对）。
-  // 照上一条白名单的钉法读 panel.js 源码，把 products 逐条取出对值。
+  // 照上一条白名单的钉法读 panel.js 源码，把 products 逐条取出对值。官方来源是
+  // 厂商自家站点、靠 safeLink 域白名单放行的条目（含 kimi 桌面端）不在此表，
+  // 由下一条用例钉住。
   const panelSource = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
   const block = panelSource.match(/const products = \{[\s\S]*?\n    \};/);
   assert.ok(block, "panel.js 里存在 products 表字面量");
@@ -363,6 +368,24 @@ it("pins the panel.js products table to CLIENTS — 包名与官方链接漏改�
       );
     }
   }
+});
+
+it("pins the panel.js safeLink domain whitelists to CLIENTS — 官方来源域名漏改一侧即红", () => {
+  // 不在 products 里登记仓库与包名的条目（zcode / qoder / 各桌面副形态）只有一条
+  // 放行依据：safeLink 的域白名单。它与 CLIENTS 的 url 分居两处手写，CLIENTS 换了
+  // 官方来源域名而白名单没跟上时前端会静默拒链，products 那条用例不会触发。这里
+  // 照同样的读源码钉法取出 id → 域白名单，逐条要求 CLIENTS 该条目的 url 主机在表内。
+  const panelSource = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
+  const whitelists = {};
+  for (const [, id, list] of panelSource.matchAll(/id === "([\w-]+)" \? (\[[^\]]*\])/g)) whitelists[id] = JSON.parse(list);
+  assert.ok(Object.keys(whitelists).length >= 5, "safeLink 的域白名单应逐条取出而不是匹配到空壳");
+  for (const [id, hosts] of Object.entries(whitelists)) {
+    assert.ok(CLIENTS[id], `safeLink 白名单里的 ${id} 在 CLIENTS 已不存在`);
+    assert.ok(hosts.length, `${id} 的域白名单为空`);
+    assert.ok(hosts.includes(new URL(CLIENTS[id].url).hostname), `${id} 的官方来源链接域名与 safeLink 白名单漂移`);
+  }
+  assert.ok(whitelists["kimi-desktop"]?.includes("www.kimi.com"),
+    "kimi 桌面端的官方来源在官方文档站，白名单必须放行该域名");
 });
 
 // 代理回退（net-proxy.mjs）：直连传输层倒下才走代理；服务端已作答的形态

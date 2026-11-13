@@ -36,10 +36,12 @@ export const CLIENTS = {
   // provider/url/channel）——代更新按钮拿它与本地安装比对、再去同一个源取安装
   // 包，两处口径因此完全一致。频道 nightly、平台 win-x64 固定为常量：它们与
   // app-update.yml 是同一份事实，改了要跟着改。
+  // 官方来源链接指官网产品页（与仓库 homepage 同值）：旧值 harness.deepseek.com
+  // 整站 404。关于页当前不渲染这一条（panel.js 的 products 与域白名单都未收录）。
   "dsh-desktop": {
     endpoint: "https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml",
     source: "dsh-desktop:win-x64:nightly", format: "yaml",
-    url: "https://harness.deepseek.com",
+    url: "https://www.deepseek.com/harness/",
   },
   // Kimi Code 桌面端（官方 Electron 包）与 DSH 桌面端同型：发布源就是它内置的
   // electron-updater 去读的那份频道文件（resources/app-update.yml 的 provider/
@@ -47,10 +49,12 @@ export const CLIENTS = {
   // 频道 latest、win-x64 固定为常量：与 app-update.yml 是同一份事实，改了要跟着改。
   // endpoint 钉 CDN 最终地址：code.kimi.com 会 302 到 cdn.kimi.com，而这里的
   // 查询一律 redirect: "error"，不追跳转。
+  // 官方来源链接指官方文档站的桌面端变更记录页：桌面端没有独立仓库，旧值
+  // github.com/MoonshotAI/kimi-code-app 实测 404（该组织下无此仓库）。
   "kimi-desktop": {
     endpoint: "https://cdn.kimi.com/kimi-code/desktop/latest.yml",
     source: "kimi-desktop:win-x64:latest", format: "yaml",
-    url: "https://github.com/MoonshotAI/kimi-code-app",
+    url: "https://www.kimi.com/code/docs/kimi-code-desktop/changelog.html",
   },
   // Claude 桌面端（官方 MSIX 包）没有可匿名访问的版本源：官方更新元数据端点
   // （api.anthropic.com/api/desktop/win32/x64/msix/update，更新腿在用）按出口
@@ -70,19 +74,22 @@ export const CLIENTS = {
   // product.json 的 updateUrl=https://center.qoder.sh/algo）：零 commit 探针即
   // 「给我最新版」，应答 JSON 的 productVersion 是官方语义化版本（实测 1.39.2，
   // 工作台/IDE 两条产品线里 IDE 线的版本段）。旧条目指向的
-  // download.qoder.com.cn/qoder-app 实测服务的是 CN 工作台——归属错误，CN 侧
-  // 改由 "qoder-desktop-cn" 条目承担。
+  // download.qoder.com.cn/qoder-app 实测服务的是 Qoder CN 桌面版（另一条产品
+  // 线，见下一条）——归属错误，CN 侧改由 "qoder-desktop-cn" 条目承担。
   qoder: {
     endpoint: "https://center.qoder.sh/algo/api/update/win32-x64/stable/0000000000000000000000000000000000000000",
     source: "qoder:desktop:win32-x64:stable",
     url: "https://qoder.com/changelog",
     field: "productVersion",
   },
-  // Qoder CN 桌面端（CN 工作台线）的官方更新通道：应用内置 electron-updater 读的
-  // 就是这份 latest.yml（实测 0.9.18；旧 "qoder" 条目的 qoder-app 路径是同一份
-  // 事实的旧位）。官方链接走 CN 站 changelog 入口。
+  // Qoder CN 桌面版（本机装的 "Qoder CN"，与 QoderWork CN 是两条产品线）的官方
+  // 更新通道：应用内置 electron-updater 的 app-update.yml 指向
+  // static.qoder.com.cn/qoder-app/releases，这份 latest.yml 就在它下面（实测
+  // 0.5.7）。旧值 qoder-work-cn 是 QoderWork CN 的源——另一个产品（官方公告
+  // 2027-09-05 停止运营，0.9.18 与已装应用不在同一版本线）。官方链接仍走 CN 站
+  // changelog 入口（落点 changelog.qoder.cn/app，顶部即 0.5.7）。
   "qoder-desktop-cn": {
-    endpoint: "https://static.qoder.com.cn/qoder-work-cn/releases/latest.yml",
+    endpoint: "https://static.qoder.com.cn/qoder-app/releases/latest.yml",
     source: "qoder-desktop-cn:win-x64:latest", format: "yaml",
     url: "https://qoder.com.cn/changelog",
   },
