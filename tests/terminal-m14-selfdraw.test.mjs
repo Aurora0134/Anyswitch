@@ -201,7 +201,12 @@ describe("P-B lastVisibleAt 与快照", () => {
         return pty;
       },
     };
-    let host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+    // 受控时钟（createTerminalHost 的 nowFn 注入，默认不传行为不变）：lastActiveAt
+    // 走这只钟，纯 SGR 帧有没有把它推进到本帧时刻不再靠墙钟竞速判定；lastVisibleAt
+    // 仍走真实墙钟（touchVisibleAt 用 Date.now），可见变化两腿之间保留 sleep(10)
+    // 让墙钟拉开毫秒。
+    let clockNow = 1_700_000_000_000;
+    let host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} }, nowFn: () => clockNow });
     try {
       const port = await listen(host);
       const url = (path) => `http://127.0.0.1:${port}${path}`;
@@ -222,12 +227,15 @@ describe("P-B lastVisibleAt 与快照", () => {
       assert.equal(typeof firstVisibleAt, "number", "可见字符刷新出时间戳");
 
       // 欢迎屏 logo 扫光：只有 SGR 颜色在变，字符一格不动。
+      const sgrAt = clockNow + 5000;
+      clockNow = sgrAt;
       calls[0].dataListener("\u001b[38;2;255;0;0m");
       calls[0].dataListener("\u001b[38;2;0;255;0m");
       await sleep(10);
       listed = await list();
       assert.equal(listed.sessions[0].lastVisibleAt, firstVisibleAt, "纯颜色帧不刷新 lastVisibleAt");
-      assert.ok(listed.sessions[0].lastActiveAt >= firstVisibleAt, "lastActiveAt 语义不动：任何输出块都算活跃");
+      assert.equal(listed.sessions[0].lastActiveAt, sgrAt,
+        "lastActiveAt 语义不动：任何输出块都算活跃——纯 SGR 帧也把活动时刻推进到本帧（退化成只在可见变化时刷新会停在此前的时刻）");
 
       calls[0].dataListener("!");
       await sleep(10);
