@@ -570,7 +570,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
             ...(extraInstallations[id] ? [extraInstallations[id]()] : [])]);
       return { id, name, entryForms: CLIENT_ENTRY_FORMS[id], installations };
     }));
-    const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };
+    const state = { platform: process.platform, nodeVersion: process.version, clients };
     cache = { at, state };
     return state;
   }

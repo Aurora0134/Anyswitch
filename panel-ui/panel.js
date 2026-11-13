@@ -4020,7 +4020,6 @@ async function api(method, path, body) {
       details.open = wasOpen;
       details.appendChild(element("summary", "", "路径与版本来源"));
       const list = element("dl", "");
-      function detail(label, value) { list.append(element("dt", "", label), element("dd", "", value)); }
       // 主行归并为每端点一行：徽标｜本地版本｜最新｜结论｜动作位。
       // 徽标是端点入口形态枚举（服务端 entryForms 数据下发），「/」连写。
       // 例外：安装记录带 edition 的端点（qoder 国际版/CN 版）按区域版分行，见下方。
@@ -4222,7 +4221,7 @@ async function api(method, path, body) {
       // 区域版端点（qoder）详情区按区域版分两列——形态与区域两个正交维度在详情区的
       // 落法：区域＝列（列头小注「国际」「CN」，国际在左 CN 在右），形态＝列内行标签
       // 前缀；列内行结构与其他端点一致、信息零删减，满配视觉高度减半。窄屏时两列塌成
-      // 单列竖排（CSS 媒体查询承担）。「检测时间」是端点级一行，通栏摆在两列之下。
+      // 单列竖排（CSS 媒体查询承担）。
       // dsh 的 CLI 入口是社区插件（kind "tui"）：它按 CLI 组呈现，来源行说「上游来源」、
       // 链接指 npm 包页，后面补一句说明。本体 harness 不单列——官方没有 CLI 入口产品，
       // 它的存在由那句说明交代；桌面组仍按原样跟在 CLI 组之后。
@@ -4260,7 +4259,6 @@ async function api(method, path, body) {
           : client.installations;
         for (const installation of detailed) appendDetail(list, installation);
       }
-      if (local?.checkedAt) detail("检测时间", timeText(local.checkedAt));
       if (list.children.length) details.appendChild(list);
       main.append(name, lines);
       row.replaceChildren(main, details);
@@ -4335,7 +4333,7 @@ async function api(method, path, body) {
           if (refresh) applyConfirmation();
           renderLocal();
           const failed = jobs.some(({ installation }) => remoteCache.get(cacheKey(installation))?.data.state !== "ok");
-          get("aboutEnvironmentStatus").textContent = failed ? "部分官方版本查询失败，可重新检测" : `检测完成 · ${timeText(local.checkedAt)}`;
+          get("aboutEnvironmentStatus").textContent = failed ? "部分官方版本查询失败，可重新检测" : "检测完成";
           get("aboutEnvironmentStatus").dataset.tone = failed ? "warn" : "";
           return refreshed;
         } catch {

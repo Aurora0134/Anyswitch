@@ -60,7 +60,7 @@ const ENTRY_FORMS = {
 };
 function environment() {
   return {
-    platform: "win32", nodeVersion: "v24.13.0", checkedAt: "2026-09-18T08:00:00Z",
+    platform: "win32", nodeVersion: "v24.13.0",
     clients: ids.map((id) => ({
       id, name: id, entryForms: ENTRY_FORMS[id],
       // 与生产同形：qoder / codex / dsh / claude / kimi 一张卡两条以上安装记录。qoder index 0
@@ -634,8 +634,7 @@ test("Qoder CLI 形态的官方来源链接放行 npm 包页，仿冒域名被�
 // 记录）。关于页职责是全量声明支持面：按区域版分行，intl 在前 CN 在后，两条子行
 // 恒在——未装的区域版子行如实报「未找到」（not_found 惯例）；形态徽标行首不变，
 // 区域小注（国际/CN）紧随其后；动作位端点级一颗摆主行（第一行）；详情区按区域版
-// 分两列（列头小注标区域，国际在左 CN 在右，列内行结构与其他端点一致），「检测
-// 时间」端点级一行通栏摆在两列之下。
+// 分两列（列头小注标区域，国际在左 CN 在右，列内行结构与其他端点一致）。
 const qoderEditioned = ({ intl = true, cn = true } = {}) => {
   // 与生产同构：CN 两条记录的 remoteId 各指各的官方渠道（qoder-cli-cn／
   // qoder-desktop-cn，2026-11-13 接线），面板为 CN 形态照常发官方版本查询。
@@ -704,11 +703,11 @@ test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，�
   const qoderLinks = descendants(h.row("qoder"), (node) => node.tagName === "a").map((node) => node.href);
   assert.ok(qoderLinks.includes("https://www.npmjs.com/package/@qodercn-ai/qoderclicn"), "CN CLI 官方来源指 npm 镜像包页");
   assert.ok(qoderLinks.includes("https://qoder.com.cn/changelog"), "CN 桌面官方来源指 CN 站 changelog");
-  // 「检测时间」端点级一行，通栏摆在两列之下（不进任何一列）
+  // 「检测时间」整行已下线（连服务端 checkedAt 字段一起），状态行也只说「检测完成」：
+  // 时间戳不随详情区、也不随状态行上屏。
   const checkTimes = descendants(h.row("qoder"), (node) => node.tagName === "dt" && node.textContent === "检测时间");
-  assert.equal(checkTimes.length, 1);
-  assert.ok(descendants(cols[0], (node) => node.textContent === "检测时间").length === 0
-    && descendants(cols[1], (node) => node.textContent === "检测时间").length === 0, "检测时间不进区域列");
+  assert.equal(checkTimes.length, 0, "详情区不再有检测时间行");
+  assert.equal(h.get("aboutEnvironmentStatus").textContent, "检测完成", "状态行不带时间串");
 });
 
 test("Qoder CN 官方来源只放行各自官方域名，仿冒域名被丢弃", async () => {
