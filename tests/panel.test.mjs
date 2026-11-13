@@ -1210,6 +1210,110 @@ describe("panel.html qoder endpoint card", () => {
   });
 });
 
+describe("qoder 区域版卡名（CN 差分与首帧预画）", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"),
+    "utf8",
+  );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
+    "utf8",
+  );
+  const prepaintSrc = (panelHtml.match(/<script id="panelAgentEditionsPrepaint">([\s\S]*?)<\/script>/) || [])[1];
+
+  it("卡名节点带 id，renderQoder 按 /api/agents 的 edition 改写卡名与空态", () => {
+    assert.ok(panelHtml.includes('<h3 id="qoderCardTitle">Qoder</h3>'), "静态默认卡名维持 Qoder（缺省 intl）");
+    const render = panelJs.match(/function renderQoder\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(render, "renderQoder 在册");
+    assert.ok(render[0].includes('p.edition === "cn"'), "改写依据是 /api/agents 的 edition 字段");
+    assert.ok(render[0].includes('$("qoderCardTitle")'), "卡名按 edition 改写");
+    assert.ok(render[0].includes("Qoder CN"), "CN 主区域版卡名");
+    assert.ok(render[0].includes("未检测到运行中的 Qoder CN 客户端"), "CN 主区域版空态");
+    assert.ok(render[0].includes("未检测到运行中的 Qoder 客户端"), "缺省 intl 空态维持原句");
+  });
+
+  it("主脚本取数后回写 anyswitch.agent-editions 快照：变了才写，非法取值不进档", () => {
+    const fn = (panelJs.match(/function syncAgentEditionsSnapshot\(agents\) \{[\s\S]*?\n  \}/) || [])[0];
+    assert.ok(fn, "syncAgentEditionsSnapshot 在册");
+    assert.ok(panelJs.includes("syncAgentEditionsSnapshot(res.agents)"), "refreshAgents 取数后回写快照");
+    const writes = [];
+    const store = {};
+    const localStorage = {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = v; writes.push([k, v]); },
+    };
+    const sync = new Function("localStorage", "AGENT_EDITIONS_LS_KEY",
+      `let agentEditionsSnapshotJson = null;\n${fn}\nreturn syncAgentEditionsSnapshot;`)(localStorage, "anyswitch.agent-editions");
+    sync([{ id: "qoder", edition: "cn" }]);
+    assert.deepEqual(writes, [["anyswitch.agent-editions", '{"qoder":"cn"}']], "CN 主区域版落档");
+    sync([{ id: "qoder", edition: "cn" }]);
+    assert.equal(writes.length, 1, "同一帧连轮询不重复写");
+    sync([{ id: "qoder", edition: "intl" }]);
+    assert.equal(JSON.parse(writes[1][1]).qoder, "intl", "切回国际版照实落档");
+    sync([{ id: "qoder" }]);
+    assert.equal(writes[2][1], "{}", "旧后端不下发 edition 时写成空对象，首帧回落静态默认卡名");
+    sync([{ id: "qoder", edition: "jp" }]);
+    assert.equal(writes.length, 3, "未登记的取值不进档");
+  });
+
+  // 首帧脚本真跑：与 panelBoardLayoutPrepaint 的取样方式同构（new Function 注入
+  // document / localStorage 桩），卡名是文字不是显隐，故桩里多给一个 MutationObserver。
+  function runEditionsPrepaint(stored, { denied = false, parsed = true } = {}) {
+    assert.ok(prepaintSrc, "panel.html 有 panelAgentEditionsPrepaint");
+    const h3 = { textContent: "Qoder" };
+    let parsedNow = parsed;
+    const listeners = [];
+    const document = {
+      documentElement: {},
+      getElementById: (id) => (parsedNow && id === "qoderCardTitle" ? h3 : null),
+      addEventListener: (type, fn) => listeners.push([type, fn]),
+    };
+    const localStorage = {
+      getItem: (k) => { if (denied) throw new Error("denied"); return k === "anyswitch.agent-editions" ? stored : null; },
+    };
+    const observers = [];
+    class FakeMutationObserver {
+      constructor(callback) { this.callback = callback; this.disconnected = false; observers.push(this); }
+      observe() {}
+      disconnect() { this.disconnected = true; }
+    }
+    new Function("document", "localStorage", "MutationObserver", prepaintSrc)(document, localStorage, FakeMutationObserver);
+    return { h3, observers, listeners, parse: () => { parsedNow = true; } };
+  }
+
+  it("首帧：CN 快照直接改写卡名；intl、缺失与非法快照一律不画", () => {
+    assert.equal(runEditionsPrepaint('{"qoder":"cn"}').h3.textContent, "Qoder CN");
+    assert.equal(runEditionsPrepaint('{"qoder":"intl"}').h3.textContent, "Qoder", "intl 就是静态默认卡名，不介入");
+    assert.equal(runEditionsPrepaint(null).h3.textContent, "Qoder", "无快照不画");
+    for (const bad of ["not-json", '["qoder"]', '{"qoder":"jp"}', '{"nope":"cn"}', '{"qoder":"cn","x":1}']) {
+      assert.equal(runEditionsPrepaint(bad).h3.textContent, "Qoder", `非法快照宁可不画：${bad}`);
+    }
+    assert.doesNotThrow(() => runEditionsPrepaint('{"qoder":"cn"}', { denied: true }));
+    assert.equal(runEditionsPrepaint('{"qoder":"cn"}', { denied: true }).h3.textContent, "Qoder", "存储不可用即放弃接管");
+  });
+
+  it("首帧：元素还没解析出来时由 MutationObserver 守到它进 DOM，改写后即收", () => {
+    const run = runEditionsPrepaint('{"qoder":"cn"}', { parsed: false });
+    assert.equal(run.h3.textContent, "Qoder", "元素未出，暂未改写");
+    assert.equal(run.observers.length, 1, "目标不在册时挂观察器");
+    run.parse();
+    run.observers[0].callback();
+    assert.equal(run.h3.textContent, "Qoder CN", "元素一进 DOM 即改写");
+    assert.equal(run.observers[0].disconnected, true, "改写后即收，不留常驻监听");
+    // 整页解析完都没等到目标（结构变更）：DOMContentLoaded 兜底收掉观察器
+    const stray = runEditionsPrepaint('{"qoder":"cn"}', { parsed: false });
+    const domready = stray.listeners.find(([type]) => type === "DOMContentLoaded");
+    assert.ok(domready, "兜底监听在册");
+    domready[1]();
+    assert.equal(stray.observers[0].disconnected, true);
+  });
+
+  it("空态不预画：pending 段只留顶栏与骨架条，空态可见时主脚本早已接棒", () => {
+    assert.ok(!prepaintSrc.includes("qoderEmpty"), "首帧脚本不碰空态文案");
+    assert.ok(prepaintSrc.includes("qoderCardTitle"), "首帧脚本只改卡名");
+  });
+});
+
 describe("panel.html codex endpoint card", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"),
@@ -1449,9 +1553,9 @@ describe("panel.html workbuddy endpoint card", () => {
     assert.ok(chainMatch && chainMatch[1].includes('"workbuddy"'), "ROUTE_CHAIN_ENDPOINTS contains workbuddy");
     const menuMatch = panelJs.match(/TERMINAL_ADD_MENU_AGENT_IDS\s*=\s*\[([^\]]+)\]/);
     assert.ok(menuMatch && menuMatch[1].includes('"workbuddy"'), "terminal add menu offers workbuddy");
-    // 三处首帧脚本的清单与运行时基准序同尾，否则首帧预画静默失效
+    // 四处首帧脚本的清单与运行时基准序同尾，否则首帧预画静默失效
     const prepaintLists = [...panelHtml.matchAll(/const AGENT_IDS = \[([^\]]+)\];/g)].map((m) => m[1]);
-    assert.equal(prepaintLists.length, 3, "three prepaint scripts carry AGENT_IDS");
+    assert.equal(prepaintLists.length, 4, "four prepaint scripts carry AGENT_IDS");
     for (const list of prepaintLists) {
       assert.ok(list.trim().endsWith('"workbuddy"'), "prepaint AGENT_IDS ends with workbuddy");
     }

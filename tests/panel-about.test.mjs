@@ -628,6 +628,118 @@ test("Qoder CLI 形态的官方来源链接放行 npm 包页，仿冒域名被�
   assert.match(descendants(rejected.row("qoder"), (node) => node.className === "about-version-line")[0].textContent, /官方最新.*1\.1\.64/);
 });
 
+// ── qoder 区域版（国际/CN）子行 ─────────────────────────────
+// 数据契约：qoder 国际版与 CN 版聚合为同一端点，installations 元素带 edition
+// （至多 cli-intl/cli-cn/desktop-intl/desktop-cn 四条，未装的区域版是 not_found
+// 记录）。关于页职责是全量声明支持面：按区域版分行，intl 在前 CN 在后，两条子行
+// 恒在——未装的区域版子行如实报「未找到」（not_found 惯例）；形态徽标行首不变，
+// 区域小注（国际/CN）紧随其后；动作位端点级一颗摆主行（第一行）；详情区逐安装
+// 记录照常。
+const qoderEditioned = ({ intl = true, cn = true } = {}) => {
+  const record = (kind, edition, found) => ({
+    kind, edition,
+    remoteId: kind === "cli" ? (edition === "cn" ? "qoder-cli-cn" : "qoder-cli") : (edition === "cn" ? "qoder-cn" : "qoder"),
+    status: found ? "found" : "not_found",
+    path: found ? `C:\\Apps\\qoder-${edition}\\${kind}` : null,
+    version: found ? (edition === "cn" ? (kind === "cli" ? "1.0.0-cn" : "2.0.0-cn") : kind === "cli" ? "1.0.0" : "2.0.0") : null,
+    versionSource: found ? "package-json" : null,
+    issue: found ? null : "entry_missing",
+  });
+  const local = environment();
+  local.clients.find((client) => client.id === "qoder").installations = [
+    record("cli", "intl", intl),
+    record("cli", "cn", cn),
+    record("desktop", "intl", intl),
+    record("desktop", "cn", cn),
+  ];
+  return local;
+};
+// 两个区域版的官方渠道各自查询：先判 CN 后缀，免得被 intl 的 remoteId 前缀吃掉
+const editionRemotes = (local) => (path) => {
+  if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
+  if (path.includes("/latest/qoder-cli-cn")) return { ...latest("1.0.0-cn", "current"), url: "https://www.npmjs.com/package/@qoder-ai/qodercli" };
+  if (path.includes("/latest/qoder-cn")) return { ...latest("2.0.0-cn", "current"), url: "https://qoder.com.cn" };
+  if (path.includes("/latest/qoder-cli")) return { ...latest("1.1.0", "update_available"), url: "https://www.npmjs.com/package/@qoder-ai/qodercli" };
+  if (path.includes("/latest/qoder")) return { ...latest("2.0.0", "current"), url: "https://qoder.com" };
+  return normal(path);
+};
+const editionLines = (h) => descendants(h.row("qoder"), (node) => node.className === "about-version-line");
+const lineKinds = (line) => descendants(line, (node) => node.className === "about-kind").map((node) => node.textContent);
+
+test("qoder 双区域版分行：intl 在前 CN 在后，徽标行首不变，动作位端点级一颗摆主行", async () => {
+  const h = harness(editionRemotes(qoderEditioned()));
+  await h.controller.enter();
+  const lines = editionLines(h);
+  assert.equal(lines.length, 2, "双装时两行都在");
+  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"], "第一行 intl：形态徽标不变、区域小注随后");
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"]);
+  assert.match(lines[0].textContent, /本地 CLI 1\.0\.0 · Desktop 2\.0\.0/, "intl 行只摆 intl 组的版本");
+  assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 2\.0\.0/, "intl 行官方版本同口径并排");
+  assert.match(lines[0].textContent, /有新版本/, "intl 行结论跟本组主形态比对");
+  assert.match(lines[1].textContent, /本地 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/, "CN 行只摆 CN 组的版本");
+  assert.match(lines[1].textContent, /官方最新 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/);
+  assert.match(lines[1].textContent, /与官方最新版本一致/, "CN 行结论跟本组主形态比对");
+  const actions = descendants(h.row("qoder"), (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1, "动作位端点级一颗");
+  assert.equal(actions[0].textContent, "更新", "intl 组有新版本 → 端点级更新");
+  assert.equal(descendants(lines[0], (node) => node.tagName === "button").length, 1, "按钮摆在主行（第一行）");
+  assert.equal(descendants(lines[1], (node) => node.tagName === "button").length, 0, "CN 行无动作位");
+  // 详情区逐安装记录照常：双装时 CLI/桌面条目各出两组（intl 组在前）
+  const dts = descendants(h.row("qoder"), (node) => node.tagName === "dt").map((node) => node.textContent);
+  assert.equal(dts.filter((text) => text === "CLI 路径").length, 2);
+  assert.equal(dts.filter((text) => text === "桌面 路径").length, 2);
+});
+
+test("qoder 仅 CN 版在装：国际版子行恒在、如实报未找到", async () => {
+  const h = harness(editionRemotes(qoderEditioned({ intl: false, cn: true })));
+  await h.controller.enter();
+  const lines = editionLines(h);
+  assert.equal(lines.length, 2, "未装的区域版子行恒在");
+  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"], "intl 仍在前");
+  assert.match(lines[0].textContent, /本地 未找到/, "未装的区域版按 not_found 惯例呈现");
+  assert.equal((lines[0].textContent.match(/未找到/g) || []).length, 1, "状态词只在「本地」列出现一次");
+  assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 2\.0\.0/, "未装区域版的官方版本照常查询");
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"]);
+  assert.match(lines[1].textContent, /本地 CLI 1\.0\.0-cn · Desktop 2\.0\.0-cn/);
+});
+
+test("qoder 仅国际版在装：CN 子行恒在、如实报未找到", async () => {
+  const h = harness(editionRemotes(qoderEditioned({ intl: true, cn: false })));
+  await h.controller.enter();
+  const lines = editionLines(h);
+  assert.equal(lines.length, 2);
+  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"]);
+  assert.match(lines[0].textContent, /本地 CLI 1\.0\.0 · Desktop 2\.0\.0/);
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"], "CN 仍在后");
+  assert.match(lines[1].textContent, /本地 未找到/);
+  // 动作位仍是端点级一颗摆主行：intl 组有新版本 → 更新
+  const actions = descendants(h.row("qoder"), (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1, "动作位端点级一颗");
+  assert.equal(actions[0].textContent, "更新");
+  assert.equal(descendants(lines[0], (node) => node.tagName === "button").length, 1, "按钮摆在主行（第一行）");
+  assert.equal(descendants(lines[1], (node) => node.tagName === "button").length, 0, "未装的 CN 行无动作位");
+});
+
+test("qoder 两版都未装：双行恒在、各自如实报未找到", async () => {
+  const h = harness(editionRemotes(qoderEditioned({ intl: false, cn: false })));
+  await h.controller.enter();
+  const lines = editionLines(h);
+  assert.equal(lines.length, 2, "支持面全量声明，不回落单行");
+  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop", "国际"]);
+  assert.deepEqual(lineKinds(lines[1]), ["CLI/Desktop", "CN"]);
+  assert.match(lines[0].textContent, /本地 未找到/);
+  assert.match(lines[1].textContent, /本地 未找到/);
+});
+
+test("安装记录不带 edition 的端点渲染零变化（qoder 旧形记录仍归并为一行）", async () => {
+  const h = harness(normal);
+  await h.controller.enter();
+  const lines = editionLines(h);
+  assert.equal(lines.length, 1, "无 edition → 每端点一行现状不变");
+  assert.deepEqual(lineKinds(lines[0]), ["CLI/Desktop"], "无区域小注");
+  assert.match(lines[0].textContent, /本地 1\.0\.0/);
+});
+
 test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", () => {
   assert.match(html, /<img class="about-app-icon" src="\/panel\/assets\/logo\.png" alt="">/);
   assert.match(html, /href="https:\/\/github\.com\/Aurora0134\/Anyswitch"[^>]*>GitHub<\/a>/);
