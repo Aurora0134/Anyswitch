@@ -274,9 +274,18 @@ function isSingleEmptyMapKey(parsed, key) {
 }
 
 async function stripQoder(ctx) {
-  const settingsPath = qoderMerge.qoderSettingsPath(ctx.env.USERPROFILE ?? "");
+  const home = ctx.env.USERPROFILE ?? "";
+  const settingsPath = qoderMerge.qoderSettingsPath(home);
   const steps = [];
-  const existedBefore = existsSync(settingsPath);
+  // 双区域版（2026-11-12 契约）：strip 写入经 writeQoderConfig 按「已识别在装」
+  // 逐根扇出；后半段的托管前缀清扫与空壳回收同样逐根覆盖。目标清单与「写入前
+  // 已在盘」快照都要在写入之前取——扇出会在认得出的根里新建 settings.json。
+  // 认不出在装根（home 不可判或两个根都不在盘）时退回旧单根口径。
+  const editions = qoderMerge.recognizedQoderEditions(home);
+  const targets = editions.length > 0
+    ? editions.map((edition) => qoderMerge.qoderSettingsPath(home, edition))
+    : [settingsPath];
+  const existedBefore = new Map(targets.map((target) => [target, existsSync(target)]));
   try {
     steps.push(syncStep(await qoderMerge.writeQoderConfig({}, STRIP_PORT, STRIP_TOKEN, ctx.sidecarRoot, settingsPath, null, false)));
   } catch (error) {
@@ -287,21 +296,23 @@ async function stripQoder(ctx) {
   // is module-private; derive it from the exported function instead of
   // redeclaring a string that could drift.
   const managedPrefix = qoderMerge.managedConnectionId("anyswitch-uninstall").replace(/[0-9a-f]{16}$/, "");
-  steps.push(sweepJsonResidue({
-    configPath: settingsPath,
-    read: qoderMerge.readQoderSettings,
-    selectManaged: (settings) => {
-      const providers = settings?.providers;
-      if (!providers || typeof providers !== "object" || Array.isArray(providers)) return [];
-      const removed = Object.keys(providers).filter((id) => id.startsWith(managedPrefix));
-      for (const id of removed) delete providers[id];
-      if (Object.keys(providers).length === 0) delete settings.providers;
-      return removed;
-    },
-    validate: null,
-    writeWithBackup: qoderMerge.writeQoderSettingsWithBackup,
-  }));
-  reclaimCreatedHusk(steps, settingsPath, existedBefore, (parsed) => isSingleEmptyMapKey(parsed, "providers"));
+  for (const target of targets) {
+    steps.push(sweepJsonResidue({
+      configPath: target,
+      read: qoderMerge.readQoderSettings,
+      selectManaged: (settings) => {
+        const providers = settings?.providers;
+        if (!providers || typeof providers !== "object" || Array.isArray(providers)) return [];
+        const removed = Object.keys(providers).filter((id) => id.startsWith(managedPrefix));
+        for (const id of removed) delete providers[id];
+        if (Object.keys(providers).length === 0) delete settings.providers;
+        return removed;
+      },
+      validate: null,
+      writeWithBackup: qoderMerge.writeQoderSettingsWithBackup,
+    }));
+    reclaimCreatedHusk(steps, target, existedBefore.get(target), (parsed) => isSingleEmptyMapKey(parsed, "providers"));
+  }
   return steps;
 }
 
