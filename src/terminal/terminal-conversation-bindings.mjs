@@ -19,9 +19,16 @@
 // 原存档，绑定天然不失效；codex 若另起新 rollout，由 revive 成功后的延迟重扫
 // （pickRefreshedMeta）按「复活时刻之后唯一活跃」自愈换绑。workbuddy 的
 // `--resume <sessionId>` 读写同一个 <sessionId>.jsonl，同属续写原存档一类。
+//
+// qoder 双区域版（2026-11-12 契约）：国际版与 CN 版各扫各的数据根，CLI 互不认
+// 对方的存档——同 cwd 两侧各有一条活跃对话时，跨根绑定必然续空。匹配因此在
+// 调用方给得出会话归属（edition）时加一道同根约束；续聊的命令名分流在
+// session-scan 的 RESUME_COMMAND（按存档根选 qodercli/qoderclicn），这里的
+// 参数片段两版一致（--resume <id>），执行体归属由面板复活/内切路径处理。
 
 import { readFileSync } from "node:fs";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
+import { qoderEditionForPath } from "../launchers/qoder-merge-config.mjs";
 
 export const TERMINAL_CONVERSATION_BINDINGS_FILE = "terminal-conversation-bindings.json";
 
@@ -84,12 +91,16 @@ function metaWindow(meta) {
 
 // 候选过滤：同端点、同目录；codex 排除桌面端来源（originator 含 "desktop"）——
 // 与 terminal-attribution.mjs 的 codex 桥同一规则，GUI 会话不能抢 CLI 终端的
-// 匹配。
-function candidateFilter(meta, { agentId, cwd }) {
+// 匹配。qoder 双区域版：调用方给得出会话的区域版归属（edition，从终端 launch
+// 里的执行体路径判）时，只接同一数据根出的存档；给不出则不加这道约束。
+function candidateFilter(meta, { agentId, cwd, edition = null }) {
   if (!meta || meta.endpoint !== agentId) return false;
   const key = cwdKey(cwd);
   if (key === null || cwdKey(meta.project) !== key) return false;
   if (agentId === "codex" && String(meta.originator ?? "").toLowerCase().includes("desktop")) return false;
+  if (agentId === "qoder" && (edition === "intl" || edition === "cn")) {
+    if (qoderEditionForPath(meta.file) !== edition) return false;
+  }
   return true;
 }
 
@@ -104,11 +115,11 @@ function overlaps(window, sessionCreatedAt, sessionLastActiveAt) {
 
 // 绑定捕获与 revive 兜底共用的挑选：生命周期重叠的候选里取最近活跃者；完全
 // 并列（不同 id 同 lastActive）判不出，返回 null。
-export function pickConversationMeta(metas, { agentId, cwd, createdAt = null, lastActiveAt = null }) {
+export function pickConversationMeta(metas, { agentId, cwd, createdAt = null, lastActiveAt = null, edition = null }) {
   let best = null;
   let tied = false;
   for (const meta of Array.isArray(metas) ? metas : []) {
-    if (!candidateFilter(meta, { agentId, cwd })) continue;
+    if (!candidateFilter(meta, { agentId, cwd, edition })) continue;
     if (typeof meta.id !== "string" || meta.id === "") continue;
     const window = metaWindow(meta);
     if (window === null || !overlaps(window, ts(createdAt), ts(lastActiveAt))) continue;
@@ -125,11 +136,11 @@ export function pickConversationMeta(metas, { agentId, cwd, createdAt = null, la
 // revive 后的自愈换绑：复活时刻之后活跃的存档恰好一条时返回它（同 id 即确认
 // 原绑定，不同 id 即 resume 另起了新存档）。零条（agent 还没落笔）或多条
 // （同目录另有对话同期活跃）都判不出，返回 null 维持原绑定。
-export function pickRefreshedMeta(metas, { agentId, cwd, sinceMs }) {
+export function pickRefreshedMeta(metas, { agentId, cwd, sinceMs, edition = null }) {
   if (typeof sinceMs !== "number" || !Number.isFinite(sinceMs)) return null;
   let found = null;
   for (const meta of Array.isArray(metas) ? metas : []) {
-    if (!candidateFilter(meta, { agentId, cwd })) continue;
+    if (!candidateFilter(meta, { agentId, cwd, edition })) continue;
     if (typeof meta.id !== "string" || meta.id === "") continue;
     const window = metaWindow(meta);
     if (window === null || window.last < sinceMs) continue;

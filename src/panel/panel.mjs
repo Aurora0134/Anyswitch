@@ -18,7 +18,7 @@
 // routes. Credentials are never echoed. The relay Bearer token still guards
 // /v1/* and /openai/* and is not pasted into the browser.
 
-import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -74,6 +74,7 @@ import {
   sameCwd,
 } from "../terminal/terminal-conversation-bindings.mjs";
 import { createRailStore, TERMINAL_RAIL_STORE_FILE } from "../terminal/terminal-rail-store.mjs";
+import { qoderCliExecutablePath, qoderEditionForPath } from "../launchers/qoder-merge-config.mjs";
 
 // 面板自身的安装目录：git 身份查询（HEAD）与自更新登记都锚在这里。放在
 // APP_VERSION 之前——panel-environment 的 VM 切片从版本声明起、到面板 HTML
@@ -1573,6 +1574,51 @@ export function createPanelRouter({
     return round;
   }
 
+  // ── qoder 双区域版：会话区域版归属与执行体重定向 ─────────────────────
+  // buildAgentSessionLaunch 的 qoder 执行体解析认的是国际版 CLI 落点
+  // （~/.qoder/bin/qodercli/qodercli.exe，见 agent-discovery）；CN 区域版的
+  // 会话要换到 ~/.qoder-cn/bin/qoderclicn/qoderclicn.exe。归属判据两侧互补：
+  // 跑着的会话看 launch 里的执行体路径，绑定/目标会话看存档文件的根。
+  const QODER_INTL_EXE_RE = /[\\/]\.qoder[\\/]bin[\\/]qodercli[\\/]qodercli\.exe$/i;
+  const QODER_CN_EXE_RE = /[\\/]\.qoder-cn[\\/]bin[\\/]qoderclicn[\\/]qoderclicn\.exe$/i;
+
+  function qoderSessionEdition(session) {
+    const args = session?.launch?.args;
+    if (!Array.isArray(args)) return null;
+    for (const token of args) {
+      if (typeof token !== "string") continue;
+      if (QODER_CN_EXE_RE.test(token)) return "cn";
+      if (QODER_INTL_EXE_RE.test(token)) return "intl";
+    }
+    return null;
+  }
+
+  // 把组装好的 qoder launch 换到目标区域版的 CLI。目标 CLI 不在盘时不换：
+  // 留原解析结果让既有「executable_missing / agent 自身报错」口径兜住，不拼
+  // 必死的命令。intl 就是解析器的原答案，无需处理。
+  function retargetQoderLaunchEdition(launch, edition) {
+    if (edition !== "cn") return launch;
+    const cnExe = qoderCliExecutablePath(base?.USERPROFILE ?? "", "cn");
+    if (!existsSync(cnExe)) return launch;
+    const args = launch?.launch?.args;
+    if (!Array.isArray(args)) return launch;
+    let touched = false;
+    const nextArgs = args.map((token) => {
+      if (typeof token === "string" && QODER_INTL_EXE_RE.test(token)) {
+        touched = true;
+        return cnExe;
+      }
+      return token;
+    });
+    if (!touched) return launch;
+    return { ...launch, launch: { ...launch.launch, args: nextArgs } };
+  }
+
+  // 绑定匹配用的会话 edition：只有 qoder 需要这道约束，其余端点恒 null。
+  function sessionEditionForBinding(session) {
+    return session?.agentId === "qoder" ? qoderSessionEdition(session) : null;
+  }
+
   // 列表路由的异步旁路：给「未绑定且 running 的可续会 agent 会话」补绑定，
   // 顺手清掉会话已消失的孤儿绑定。绝不阻塞、绝不让列表请求失败——全部
   // fire-and-forget，扫描 promise 自己吞错。
@@ -1609,7 +1655,7 @@ export function createPanelRouter({
       const lastAttempt = bindingCaptureLastAttempt.get(session.id) ?? 0;
       if (now - lastAttempt < backoff) continue;
       const generation = terminalBindingGenerations.get(session.id) ?? 0;
-      const captured = { agentId: session.agentId, cwd: session.cwd };
+      const captured = { agentId: session.agentId, cwd: session.cwd, edition: sessionEditionForBinding(session) };
       bindingCaptureLastAttempt.set(session.id, now);
       scanAgentConversationsShared(session.agentId)
         .then((metas) => {
@@ -1621,6 +1667,7 @@ export function createPanelRouter({
             cwd: captured.cwd,
             createdAt: session.spawnedAt ?? session.createdAt ?? null,
             lastActiveAt: null,
+            edition: captured.edition,
           });
           if (!picked) {
             // 判不出＝负结果入表，下一拍按退避窗等（而不是 5s 后重扫一遍全盘）。
@@ -1684,6 +1731,7 @@ export function createPanelRouter({
       ...identity,
       createdAt: session.createdAt ?? null,
       lastActiveAt: session.lastActiveAt ?? null,
+      edition: sessionEditionForBinding(session),
     });
     if (!picked) return null;
     const binding = store.set(session.id, bindingFromMeta(picked, identity, "scanned"));
@@ -1698,7 +1746,7 @@ export function createPanelRouter({
       Promise.resolve()
         .then(() => scanAgentConversationsShared(session.agentId))
         .then((metas) => {
-          const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs });
+          const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs, edition: sessionEditionForBinding(session) });
           if (!picked) return;
           const store = terminalBindings();
           const current = store.get(session.id);
@@ -1842,6 +1890,11 @@ export function createPanelRouter({
       const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
       slog("fail", { id, reason: code || "launch-error" });
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
+    }
+    // qoder 双区域版：内切目标的存档落在 CN 根时，launch 换到 CN CLI 落点
+    // （发现层的 qoder 解析只认国际版，见上面的 retarget 助手）。
+    if (endpoint === "qoder") {
+      launch = retargetQoderLaunchEdition(launch, qoderEditionForPath(resumeFile));
     }
     // 杀前复核（switch-guard）：前端判定门的 working 只覆盖「LLM 请求在途＋输出
     // 活跃窗」，静默执行中的命令（无请求也无输出）两头都够不着，而本路由的落点
@@ -2040,6 +2093,13 @@ export function createPanelRouter({
       const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
     }
+    // qoder 双区域版：续接目标的存档落在 CN 根时，launch 换到 CN CLI 落点
+    // （发现层的 qoder 解析只认国际版，见上面的 retarget 助手）；普通启动与
+    // 判不出归属的续接维持原解析。
+    if (agentId === "qoder") {
+      launch = retargetQoderLaunchEdition(launch, qoderEditionForPath(
+        typeof body?.resume?.file === "string" ? body.resume.file : null));
+    }
     let created = null;
     try {
       created = await createTerminalSession({
@@ -2111,6 +2171,13 @@ export function createPanelRouter({
       // 已确认要续接的对话同时写回宿主身份：进程生日随复活前移后，
       // 兜底行若只看无 resume 会把旧对话误显示成「新会话」。
       const binding = resumeArgs ? terminalBindings().get(session.id) : null;
+      // qoder 双区域版：续接目标落在 CN 根（或这条会话本就是 CN CLI 起的）时，
+      // 把重组装的 launch 换到 CN CLI 落点——拿 qodercli 续 qoderclicn 根下的
+      // 存档只会续空；判不出归属则维持发现层解析的原样。
+      if (session.agentId === "qoder") {
+        const edition = (binding && qoderEditionForPath(binding.file)) || qoderSessionEdition(session);
+        launch = retargetQoderLaunchEdition(launch, edition);
+      }
       const resumeIdentity = binding && binding.agentId === session.agentId && sameCwd(binding.cwd, session.cwd)
         ? { endpoint: session.agentId, id: binding.conversationId } : null;
       body = {
