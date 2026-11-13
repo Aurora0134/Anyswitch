@@ -74,11 +74,11 @@ export const CLIENTS = {
   },
   // Qoder 桌面端（intl IDE 线）的官方更新服务是 VS Code 式查询 API（IDE
   // product.json 的 updateUrl=https://center.qoder.sh/algo）：零 commit 探针即
-  // 「给我最新版」，应答 JSON 的 productVersion 是官方语义化版本（实测 1.39.2，
-  // 工作台/IDE 两条产品线里 IDE 线的版本段）。本条目原来的端点是
-  // download.qoder.com.cn/qoder-app/releases/latest.yml：那个路径下只有这一份可访问
-  // （2026-11-13 实测 version 0.5.7、产物 Qoder-win-x64-user.exe，根路径与 /latest.yml
-  // 均 404），与 IDE 线不在同一版本段。CN 桌面版的源是同路径的 static 主机那份
+  // 「给我最新版」，应答 JSON 的 productVersion 就是 IDE 产品线的官方语义化版本号。
+  // 工作台与 IDE 是两条产品线、各走一条版本线，序号不可直接比较。本条目原来的端点
+  // 是 download.qoder.com.cn/qoder-app/releases/latest.yml：那份 latest.yml 归的是
+  // 桌面 app 产品线（产物 Qoder-win-x64-user.exe，releases 根路径与站点根的
+  // /latest.yml 均 404），与 IDE 线不是同一条版本线。CN 桌面版的源是同路径的 static 主机那份
   // （产物 Qoder-CN-win-x64-user.exe，与已装应用 app-update.yml 同源），由
   // "qoder-desktop-cn" 条目承担。
   qoder: {
@@ -87,12 +87,12 @@ export const CLIENTS = {
     url: "https://qoder.com/changelog",
     field: "productVersion",
   },
-  // Qoder CN 桌面版（本机装的 "Qoder CN"，与 QoderWork CN 是两条产品线）的官方
-  // 更新通道：应用内置 electron-updater 的 app-update.yml 指向
-  // static.qoder.com.cn/qoder-app/releases，这份 latest.yml 就在它下面（实测
-  // 0.5.7）。旧值 qoder-work-cn 是 QoderWork CN 的源——另一个产品（官方公告
-  // 2027-09-05 停止运营，0.9.18 与已装应用不在同一版本线）。官方链接仍走 CN 站
-  // changelog 入口（落点 changelog.qoder.cn/app，顶部即 0.5.7）。
+  // Qoder CN 桌面版（与 QoderWork CN 是两条产品线）的官方更新通道：应用内置
+  // electron-updater 的 app-update.yml 指向 static.qoder.com.cn/qoder-app/releases，
+  // 版本号取自该目录下 latest.yml 的 version 字段（查询时读取，注释不记具体值）。
+  // 旧值 qoder-work-cn 是 QoderWork CN 的源——另一个产品（官方公告 2027-09-05
+  // 停止运营），与已装应用不在同一版本线。官方链接仍走 CN 站 changelog 入口
+  // （落点 changelog.qoder.cn/app）。
   "qoder-desktop-cn": {
     endpoint: "https://static.qoder.com.cn/qoder-app/releases/latest.yml",
     source: "qoder-desktop-cn:win-x64:latest", format: "yaml",
