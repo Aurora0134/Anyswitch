@@ -229,6 +229,22 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
           else process.env.USERPROFILE = saved;
         }
       }
+      // 组装层把 CN 解析到 entry 调度器（qodercn.cmd）的形态同样要认得：续
+      // intl 存档时换成 intl CLI 本体，不认得就会把调度器留在命令行里续空。
+      {
+        const cnEntry = join(process.env.USERPROFILE, ".qoder-cn", "entry", "qodercn.cmd");
+        mkdirSync(dirname(cnEntry), { recursive: true });
+        writeFileSync(cnEntry, "");
+        const { router, calls } = resumeRouter({ root: mkTestDir("anyswitch-resume-qoder-entry-") });
+        const { req, res } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
+          agentId: "qoder", cwd, resume: { endpoint: "qoder", id: SESSION_ID, file: INTL_FILE },
+        });
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 201);
+        const args = calls[0].body.launch.args;
+        assert.ok(args.includes(intlExe), "CN 入口形态也换回 intl 执行体");
+        assert.ok(!args.some((token) => /qodercn\.cmd$/i.test(token)), "CN 调度器不留在命令行");
+      }
     });
   });
 

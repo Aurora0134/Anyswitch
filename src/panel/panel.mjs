@@ -1575,40 +1575,50 @@ export function createPanelRouter({
   }
 
   // ── qoder 双区域版：会话区域版归属与执行体重定向 ─────────────────────
-  // buildAgentSessionLaunch 的 qoder 执行体解析认的是国际版 CLI 落点
-  // （~/.qoder/bin/qodercli/qodercli.exe，见 agent-discovery）；CN 区域版的
-  // 会话要换到 ~/.qoder-cn/bin/qoderclicn/qoderclicn.exe。归属判据两侧互补：
-  // 跑着的会话看 launch 里的执行体路径，绑定/目标会话看存档文件的根。
+  // 组装层（M5 合并后）按「CN 在装拉起 CN 入口」裁决 qoder 执行体
+  // （agent-discovery resolveQoderLaunchEdition）；而续聊的归属判据是会话/存档
+  // 落在哪个数据根，与「哪个在装」正交——双装机器上续 intl 存档仍要换回
+  // qodercli。归属判据两侧互补：跑着的会话看 launch 里的执行体路径（entry
+  // 调度器与 CLI 本体都算），绑定/目标会话看存档文件的根。
   const QODER_INTL_EXE_RE = /[\\/]\.qoder[\\/]bin[\\/]qodercli[\\/]qodercli\.exe$/i;
   const QODER_CN_EXE_RE = /[\\/]\.qoder-cn[\\/]bin[\\/]qoderclicn[\\/]qoderclicn\.exe$/i;
+  const QODER_CN_ENTRY_RE = /[\\/]\.qoder-cn[\\/]entry[\\/]qodercn\.cmd$/i;
+
+  function qoderTokenEdition(token) {
+    if (QODER_CN_EXE_RE.test(token) || QODER_CN_ENTRY_RE.test(token)) return "cn";
+    if (QODER_INTL_EXE_RE.test(token)) return "intl";
+    return null;
+  }
 
   function qoderSessionEdition(session) {
     const args = session?.launch?.args;
     if (!Array.isArray(args)) return null;
     for (const token of args) {
       if (typeof token !== "string") continue;
-      if (QODER_CN_EXE_RE.test(token)) return "cn";
-      if (QODER_INTL_EXE_RE.test(token)) return "intl";
+      const edition = qoderTokenEdition(token);
+      if (edition !== null) return edition;
     }
     return null;
   }
 
-  // 把组装好的 qoder launch 换到目标区域版的 CLI。目标 CLI 不在盘时不换：
-  // 留原解析结果让既有「executable_missing / agent 自身报错」口径兜住，不拼
-  // 必死的命令。intl 就是解析器的原答案，无需处理。
+  // 把组装好的 qoder launch 换到目标区域版的 CLI 本体（bin 下的原生执行体，
+  // 与 RESUME_COMMAND 的 qodercli/qoderclicn 模板同口径）。目标 CLI 不在盘时
+  // 不换：留原解析结果让既有「executable_missing / agent 自身报错」口径兜住，
+  // 不拼必死的命令。只替换认得出归属的异根执行体 token（entry 调度器/CLI
+  // 本体）；认不出的（如 QODER_*_EXECUTABLE 覆盖值）原样保留。
   function retargetQoderLaunchEdition(launch, edition) {
-    if (edition !== "cn") return launch;
-    const cnExe = qoderCliExecutablePath(base?.USERPROFILE ?? "", "cn");
-    if (!existsSync(cnExe)) return launch;
+    if (edition !== "intl" && edition !== "cn") return launch;
+    const targetExe = qoderCliExecutablePath(base?.USERPROFILE ?? "", edition);
+    if (!existsSync(targetExe)) return launch;
     const args = launch?.launch?.args;
     if (!Array.isArray(args)) return launch;
     let touched = false;
     const nextArgs = args.map((token) => {
-      if (typeof token === "string" && QODER_INTL_EXE_RE.test(token)) {
-        touched = true;
-        return cnExe;
-      }
-      return token;
+      if (typeof token !== "string") return token;
+      const tokenEdition = qoderTokenEdition(token);
+      if (tokenEdition === null || tokenEdition === edition) return token;
+      touched = true;
+      return targetExe;
     });
     if (!touched) return launch;
     return { ...launch, launch: { ...launch.launch, args: nextArgs } };
@@ -1891,8 +1901,9 @@ export function createPanelRouter({
       slog("fail", { id, reason: code || "launch-error" });
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
     }
-    // qoder 双区域版：内切目标的存档落在 CN 根时，launch 换到 CN CLI 落点
-    // （发现层的 qoder 解析只认国际版，见上面的 retarget 助手）。
+    // qoder 双区域版：内切目标的存档根决定执行体区域版（见上面的 retarget
+    // 助手）——存档落 CN 根换 qoderclicn，落 intl 根把组装层「CN 在装拉起
+    // CN」的答案换回 qodercli。
     if (endpoint === "qoder") {
       launch = retargetQoderLaunchEdition(launch, qoderEditionForPath(resumeFile));
     }
@@ -2093,9 +2104,8 @@ export function createPanelRouter({
       const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
     }
-    // qoder 双区域版：续接目标的存档落在 CN 根时，launch 换到 CN CLI 落点
-    // （发现层的 qoder 解析只认国际版，见上面的 retarget 助手）；普通启动与
-    // 判不出归属的续接维持原解析。
+    // qoder 双区域版：续接目标的存档根决定执行体区域版（见上面的 retarget
+    // 助手）；普通启动与判不出归属的续接维持组装层原解析。
     if (agentId === "qoder") {
       launch = retargetQoderLaunchEdition(launch, qoderEditionForPath(
         typeof body?.resume?.file === "string" ? body.resume.file : null));
@@ -2171,9 +2181,9 @@ export function createPanelRouter({
       // 已确认要续接的对话同时写回宿主身份：进程生日随复活前移后，
       // 兜底行若只看无 resume 会把旧对话误显示成「新会话」。
       const binding = resumeArgs ? terminalBindings().get(session.id) : null;
-      // qoder 双区域版：续接目标落在 CN 根（或这条会话本就是 CN CLI 起的）时，
-      // 把重组装的 launch 换到 CN CLI 落点——拿 qodercli 续 qoderclicn 根下的
-      // 存档只会续空；判不出归属则维持发现层解析的原样。
+      // qoder 双区域版：续接目标落在哪个根（或这条会话本是哪个区域版 CLI 起
+      // 的）决定重组装的 launch 用哪个执行体——拿 qodercli 续 qoderclicn 根下
+      // 的存档只会续空，反之亦然；判不出归属则维持组装层解析的原样。
       if (session.agentId === "qoder") {
         const edition = (binding && qoderEditionForPath(binding.file)) || qoderSessionEdition(session);
         launch = retargetQoderLaunchEdition(launch, edition);
