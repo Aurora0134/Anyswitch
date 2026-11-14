@@ -373,18 +373,6 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：壳色随 --console-* token 亮暗换肤，圆角对齐整体语言 */
-:scope:scope .log-console {
-  background: var(--console-bg);
-  border-color: var(--console-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-:scope:scope .log-toolbar {
-  background: var(--console-toolbar-bg);
-  border-bottom-color: var(--console-border);
-}
-
 /* 遥测四宫格：微渐变底 + 顶部高光，数字收紧字距 */
 :scope:scope .telemetry-card {
   border-radius: var(--radius-md);

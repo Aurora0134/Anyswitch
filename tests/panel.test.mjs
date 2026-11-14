@@ -8293,6 +8293,7 @@ describe("设置项「运行日志」", () => {
       `const $ = (id) => (id === "liveLogCard" ? card : id === "logBody" ? body : null);
        let es = state.es;
        function connectLogStream() { onConnect(); }
+       function resetLogFeed() { body.innerHTML = ""; }
        let loggingEnabled = null;
        ${source[0]}
        const apply = applyLoggingEnabled;
@@ -8567,6 +8568,7 @@ describe("设置项「运行日志」", () => {
       `const $ = (id) => (id === "liveLogCard" ? card : id === "logBody" ? body : id === "logLevelRows" ? rows : null);
        let es = { close() {} };
        function connectLogStream() { onConnect(); }
+       function resetLogFeed() { body.innerHTML = ""; }
        let loggingEnabled = null;
        ${source[0]}
        return { apply: applyLoggingEnabled, get es() { return es; } };`,
@@ -17733,6 +17735,245 @@ describe("面板脚本资产 ETag：仅脚本换新才在回前台重载", () =>
     const block = addedBlock();
     assert.ok(!block.includes("pid") && !block.includes("startTime") && !block.includes("lastPanelIdentity"),
       "与面板/relay 进程身份无关，单纯重启且文件未变不触发");
+  });
+});
+
+describe("看板实时输出：消息提示式双态流", () => {
+  const panelHtml = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"), "utf8");
+  const panelJs = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"), "utf8");
+  const panelCss = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.css"), "utf8");
+
+  it("卡壳与控件在册：收起堆叠 + 展开视口，沿用既有文案与 id", () => {
+    assert.ok(panelHtml.includes('<div class="panel-card" id="liveLogCard">'));
+    assert.ok(panelHtml.includes('id="liveLogCardHeader"'));
+    assert.ok(panelHtml.includes('id="liveLog" data-state="collapsed"'));
+    assert.ok(panelHtml.includes('id="logStack"'));
+    assert.ok(panelHtml.includes('id="logBody" role="log" tabindex="-1"'));
+    assert.ok(panelHtml.includes('id="logToggle" type="button" aria-expanded="false" aria-controls="logBody" aria-label="实时输出"'));
+    assert.ok(panelHtml.includes('id="logConnBadge">● 在线</span>'));
+    assert.ok(panelHtml.includes('id="logConn">● 实时传输</span>'));
+    assert.ok(panelHtml.includes('id="clearLog" type="button">清空</button>'));
+    assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
+    const toggle = panelHtml.match(/<button class="live-log-toggle"[\s\S]*?<\/button>/)?.[0];
+    assert.ok(toggle && !/>[^<]*[\u4e00-\u9fff]/.test(toggle.replace(/aria-label="实时输出"/, "")), "展开钮只复用既有 aria 文案，不新增可见字串");
+  });
+
+  it("CSS 钉住双态几何与动效组：96→320、堆叠三档、轻快滑入、reduced-motion 兜底", () => {
+    assert.ok(/\.live-log-stage \{[^}]*height: 96px;[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height: 320px; \}/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="0"\] \{ transform: translateY\(0\) scale\(1\); opacity: 1; z-index: 3;/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="1"\] \{ transform: translateY\(-10px\) scale\(0\.985\); opacity: 0\.72; z-index: 2; \}/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="2"\] \{ transform: translateY\(-20px\) scale\(0\.97\); opacity: 0\.45; z-index: 1; \}/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg\.is-entering \{ animation: liveLogMsgIn 180ms var\(--ease-out\); \}/.test(panelCss));
+    assert.ok(/@keyframes liveLogMsgIn \{ from \{ opacity: 0; transform: translateY\(16px\) scale\(1\); \} \}/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*transition-duration: 160ms;/.test(panelCss));
+    assert.ok(/\.live-log-stack, \.live-log-viewport \{[^}]*transition: opacity 160ms var\(--ease-out\); \}/.test(panelCss));
+    assert.ok(/#logConnBadge\.is-reconnecting, #logConn\.is-reconnecting \{ animation: liveLogPulse 1\.2s ease-in-out infinite; \}/.test(panelCss));
+    assert.ok(/\.live-log-viewport::-webkit-scrollbar-thumb \{ background: var\(--border-strong\);/.test(panelCss));
+    assert.ok(/@media \(prefers-reduced-motion: reduce\) \{ \* \{ transition: none !important; animation: none !important; \} \}/.test(panelCss));
+    assert.ok(!/\.log-console/.test(panelCss), "旧控制台样式不再残留");
+  });
+
+  class FakeClassList {
+    constructor(el) { this.el = el; }
+    add(...cs) { for (const c of cs) this.el._classes.add(c); }
+    remove(...cs) { for (const c of cs) this.el._classes.delete(c); }
+    toggle(c, force) {
+      const want = force === undefined ? !this.el._classes.has(c) : !!force;
+      if (want) this.el._classes.add(c); else this.el._classes.delete(c);
+      return want;
+    }
+    contains(c) { return this.el._classes.has(c); }
+  }
+  class FakeElement {
+    constructor(tag) {
+      this.tagName = tag; this._classes = new Set(); this.classList = new FakeClassList(this);
+      this.dataset = {}; this.style = {}; this.children = []; this.parentNode = null;
+      this.attributes = {}; this.innerHTML = ""; this.textContent = "";
+      this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0; this.tabIndex = -1;
+      this.hidden = false; this.onclick = null; this._listeners = {};
+    }
+    get className() { return [...this._classes].join(" "); }
+    set className(v) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
+    appendChild(child) {
+      if (child.parentNode) child.parentNode.removeChild(child);
+      child.parentNode = this; this.children.push(child); return child;
+    }
+    removeChild(child) {
+      const i = this.children.indexOf(child);
+      if (i >= 0) this.children.splice(i, 1);
+      child.parentNode = null; return child;
+    }
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+    setAttribute(k, v) { this.attributes[k] = String(v); }
+    getAttribute(k) { return this.attributes[k] ?? null; }
+    addEventListener(type, fn) { this._listeners[type] = fn; }
+    dispatch(type, ev) { this._listeners[type]?.(ev); }
+  }
+  class FakeEventSource {
+    constructor(url) { this.url = url; this.closed = false; FakeEventSource.instances.push(this); }
+    close() { this.closed = true; }
+  }
+  FakeEventSource.instances = [];
+
+  function makeSandbox() {
+    FakeEventSource.instances = [];
+    const ids = ["liveLogCard", "liveLogCardHeader", "liveLog", "logToggle", "logBody", "logStack", "clearLog", "logConn", "logConnBadge", "logLevelRows", "logLevelSelect"];
+    const els = Object.fromEntries(ids.map((id) => [id, new FakeElement("div")]));
+    els.liveLog.dataset.state = "collapsed";
+    els.logToggle.setAttribute("aria-expanded", "false");
+    els.logBody.tabIndex = -1;
+    els.logLevelSelect.value = "";
+    let timers = []; let nextTimerId = 1;
+    const setTimeoutFake = (fn, ms) => { const id = nextTimerId++; timers.push({ id, fn, ms }); return id; };
+    const clearTimeoutFake = (id) => { timers = timers.filter((t) => t.id !== id); };
+    const flush = (ms) => {
+      const due = timers.filter((t) => t.ms <= ms);
+      timers = timers.filter((t) => t.ms > ms);
+      for (const t of due) t.fn();
+    };
+    const apiCalls = [];
+    const api = async (method, path, body) => {
+      apiCalls.push({ method, path, body });
+      if (path === "/api/settings") return { settings: { loggingEnabled: true, logLevel: "info" } };
+      return { ok: true };
+    };
+    const block = panelJs.match(/\/\/ 实时 SSE 日志流[\s\S]*?\n  \/\/ 开机自启/)[0].replace(/\n  \/\/ 开机自启$/, "");
+    const factory = new Function(
+      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE",
+      `let es = null;
+       ${block}
+       return {
+         appendLog, handleLogEntry, restartLogStream, applyLogLevel, applyLoggingEnabled,
+         startLogStream, connectLogStream, setLogExpanded, resetLogFeed, fadeClearLogFeed,
+         get entries() { return logEntries; }, get expanded() { return logExpanded; },
+         get follow() { return followLogs; }, get es() { return es; }, set es(v) { es = v; },
+       };`,
+    );
+    const sandbox = factory(
+      { createElement: (tag) => new FakeElement(tag) },
+      (id) => els[id] ?? null,
+      (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+      api,
+      (cb) => { cb(); return 0; },
+      setTimeoutFake, clearTimeoutFake, FakeEventSource, "/panel",
+    );
+    return { sandbox, els, flush, apiCalls };
+  }
+
+  it("收起态只显示最新 3 张：最新在下 slot0，旧卡依次 slot1/slot2，淘汰卡淡出后移除", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    for (let i = 1; i <= 4; i++) sandbox.appendLog({ level: "info", message: "m" + i, ts: 0 });
+    flush(160);
+    assert.equal(sandbox.entries.length, 4);
+    assert.equal(els.logStack.children.length, 3, "堆叠只留最新 3 张");
+    const bySlot = Object.fromEntries(els.logStack.children.map((n) => [n.dataset.slot, n]));
+    assert.ok(bySlot["0"].innerHTML.includes("m4"));
+    assert.ok(bySlot["1"].innerHTML.includes("m3"));
+    assert.ok(bySlot["2"].innerHTML.includes("m2"));
+    assert.equal(bySlot["0"].style.zIndex, "3");
+    assert.equal(bySlot["1"].style.zIndex, "2");
+    assert.equal(bySlot["2"].style.zIndex, "1");
+    assert.ok(!els.logStack.children.some((n) => n.innerHTML.includes("m1")), "最旧一张已移出堆叠");
+  });
+
+  it("展开/收起切换 aria 与视口可达性；贴底跟随、上翻暂停、回底恢复", async () => {
+    const { sandbox, els } = makeSandbox();
+    await sandbox.startLogStream();
+    assert.equal(els.liveLog.dataset.state, "collapsed");
+    assert.equal(els.logToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(els.logBody.tabIndex, -1);
+
+    sandbox.setLogExpanded(true);
+    assert.equal(els.liveLog.dataset.state, "expanded");
+    assert.equal(els.logToggle.getAttribute("aria-expanded"), "true");
+    assert.equal(els.logBody.tabIndex, 0);
+    assert.equal(els.logStack.getAttribute("aria-hidden"), "true");
+
+    els.logBody.scrollHeight = 1000; els.logBody.clientHeight = 320;
+    els.logBody.scrollTop = 680; els.logBody.dispatch("scroll");
+    assert.equal(sandbox.follow, true);
+    sandbox.appendLog({ level: "info", message: "tail" });
+    assert.equal(els.logBody.scrollTop, 1000, "贴底时新消息自动跟随");
+
+    els.logBody.scrollTop = 0; els.logBody.dispatch("scroll");
+    assert.equal(sandbox.follow, false);
+    sandbox.appendLog({ level: "info", message: "pause" });
+    assert.equal(els.logBody.scrollTop, 0, "上翻查看时不打断");
+
+    els.logBody.scrollTop = 680; els.logBody.dispatch("scroll");
+    assert.equal(sandbox.follow, true);
+    sandbox.appendLog({ level: "info", message: "resume" });
+    assert.equal(els.logBody.scrollTop, 1000, "回到底部恢复跟随");
+
+    sandbox.setLogExpanded(false);
+    assert.equal(els.liveLog.dataset.state, "collapsed");
+    assert.equal(els.logToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(els.logBody.tabIndex, -1);
+  });
+
+  it("最近批次保持 25 条；清空淡出旧批，淡出期间到达的新消息不被误清", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    for (let i = 0; i < 30; i++) sandbox.appendLog({ level: "info", message: "cap" + i });
+    flush(200);
+    assert.equal(sandbox.entries.length, 25);
+    assert.equal(els.logBody.children.length, 25);
+    assert.ok(els.logBody.children[24].innerHTML.includes("cap29"));
+
+    sandbox.handleLogEntry({ type: "clear" });
+    assert.ok(sandbox.entries.every((e) => e.fading), "旧批整体进入淡出");
+    sandbox.appendLog({ level: "warn", message: "after-clear" });
+    flush(160); flush(160);
+    assert.equal(sandbox.entries.length, 1, "淡出结束后只留下清空之后到达的新消息");
+    assert.equal(els.logBody.children.length, 1);
+    assert.ok(els.logBody.children[0].innerHTML.includes("after-clear"));
+    assert.equal(els.logStack.children.length, 1);
+    assert.equal(els.logStack.children[0].dataset.slot, "0");
+  });
+
+  it("记录开关：关掉断流清场并收起双态，重开才重新建连；换档重连走同一淡出", async () => {
+    const { sandbox, els, flush } = makeSandbox();
+    await sandbox.startLogStream();
+    sandbox.appendLog({ level: "info", message: "before-off" });
+    sandbox.setLogExpanded(true);
+    assert.ok(FakeEventSource.instances.length >= 1);
+
+    sandbox.applyLoggingEnabled(false);
+    assert.equal(els.liveLogCard.hidden, true);
+    assert.equal(els.logLevelRows.hidden, true);
+    assert.equal(sandbox.es, null);
+    assert.equal(sandbox.entries.length, 0);
+    assert.equal(els.logBody.children.length, 0);
+    assert.equal(els.logStack.children.length, 0);
+    assert.equal(sandbox.expanded, false, "重新打开回到默认收起");
+
+    const before = FakeEventSource.instances.length;
+    sandbox.applyLoggingEnabled(true);
+    assert.equal(els.liveLogCard.hidden, false);
+    assert.equal(FakeEventSource.instances.length, before + 1, "重开才建新流");
+
+    sandbox.appendLog({ level: "info", message: "before-level" });
+    sandbox.applyLogLevel("warn");
+    flush(160);
+    assert.ok(sandbox.entries.every((e) => e.fading || e.message !== "before-level"), "换档重连前旧批进入淡出");
+    assert.equal(els.logLevelSelect.value, "warn");
+    assert.equal(els.logLevelSelect.dataset.level, "warn");
+  });
+
+  it("连接态文案沿用旧字串，重连时徽标与状态行挂脉冲、恢复即摘", () => {
+    const { sandbox, els } = makeSandbox();
+    sandbox.connectLogStream();
+    const stream = FakeEventSource.instances.at(-1);
+    stream.onerror();
+    assert.equal(els.logConn.textContent, "○ 正在重连");
+    assert.ok(els.logConn.classList.contains("is-reconnecting"));
+    assert.equal(els.logConnBadge.textContent, "○ 重连");
+    assert.ok(els.logConnBadge.classList.contains("is-reconnecting"));
+    stream.onopen();
+    assert.equal(els.logConn.textContent, "● 实时传输");
+    assert.ok(!els.logConn.classList.contains("is-reconnecting"));
+    assert.equal(els.logConnBadge.textContent, "● 在线");
+    assert.ok(!els.logConnBadge.classList.contains("is-reconnecting"));
   });
 });
 

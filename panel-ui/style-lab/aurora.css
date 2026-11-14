@@ -9,7 +9,7 @@
    1. --radius-sm/md/lg 放大至 10/14/20（基座基准 6/8/12）；
    2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；
-   3. 辉光阴影：--accent-glow、卡片 hover、暗色 .log-console 外发光，
+   3. 辉光阴影：--accent-glow、卡片 hover，
       box-shadow 偏移/扩散大于基座基准（不占布局空间）；
    4. letter-spacing 微调：.badge +0.02em、.telemetry-num -0.03em、
       .telemetry-label +0.05em、footer +0.04em；
@@ -426,24 +426,6 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：壳色随 --console-* token 亮暗换肤，青色描边微光与玻璃圆角保持皮肤语言 */
-:scope:scope .log-console {
-  background: var(--console-bg);
-  border-color: var(--console-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-:scope:scope .log-toolbar {
-  background: var(--console-toolbar-bg);
-  border-bottom-color: var(--console-border);
-}
-:scope:scope .log-clear-btn {
-  transition: all 160ms var(--ease-out);
-}
-:scope:scope .log-clear-btn:hover {
-  background: rgba(103, 232, 249, 0.12);
-}
-
 /* 遥测四宫格：玻璃微渐变 + 顶部高光，数字收紧、标签拉开字距 */
 :scope:scope .telemetry-card {
   border-radius: var(--radius-md);
@@ -578,9 +560,6 @@
 :scope:scope[data-theme="dark"] .brand-icon {
   color: #062431;
 }
-:scope:scope[data-theme="dark"] .log-console {
-  box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
 :scope:scope[data-theme="dark"] .panel-card:hover {
   box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
 }
@@ -592,9 +571,6 @@
   }
   :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
     color: #062431;
-  }
-  :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
-    box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
   :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .panel-card:hover {
     box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);

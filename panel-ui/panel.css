@@ -51,8 +51,8 @@
     --spark-fill: color-mix(in srgb, var(--accent) 12%, transparent);
     --danger-glow: rgba(220, 38, 38, 0.18);
 
-    /* 控制台与虚拟终端屏幕的亮暗 token：实时输出卡（.log-console）与终端屏
-       （.terminal-screen 一族）共用这套口径；三皮肤段按各自色板覆盖。 */
+    /* 控制台与虚拟终端屏幕的亮暗 token：虚拟终端屏（.terminal-screen 一族）与
+       实时输出的级别语义色共用这套口径；三皮肤段按各自色板覆盖。 */
     --console-bg: #ffffff;
     --console-toolbar-bg: #f8fafc;
     --console-border: #e2e8f0;
@@ -1520,35 +1520,79 @@
   .btn-accent:hover:not(:disabled) { filter: brightness(1.05); }
   .btn-mini { font-size: 11.5px; padding: 4px 10px; border-radius: var(--radius-sm, 6px); }
 
-  /* 实时日志控制台：颜色全部走 --console-* token（亮暗与三皮肤各有一套值） */
-  .log-console {
-    background: var(--console-bg); color: var(--console-fg); border-radius: var(--radius-md, 8px);
-    font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6;
-    overflow: hidden; border: 1px solid var(--console-border);
-    display: flex; flex-direction: column; height: 320px;
-  }
-  .log-toolbar {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 6px 10px; background: var(--console-toolbar-bg); border-bottom: 1px solid var(--console-border);
-    font-size: 11px;
-  }
-  .log-status { display: flex; align-items: center; gap: 6px; color: var(--console-muted); }
-  .log-status.live { color: var(--console-live); }
+  /* 实时输出：消息提示式双态流。收起态最新在下堆叠 3 张，展开态原位 320px 可滚视口。
+     消息卡走面板 surface/border/shadow 语言；级别语义色仍取 --console-*（与级别下拉、
+     图例同源）。动效只用 transform/opacity/height，reduced-motion 由文件末尾通配规则停。 */
+  .live-log { display: flex; flex-direction: column; gap: 8px; }
+  #liveLogCardHeader { cursor: pointer; }
+  .live-log-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+  .live-log-actions { display: inline-flex; align-items: center; gap: 2px; }
+  .log-status { display: flex; align-items: center; gap: 6px; color: var(--text-3); }
+  .log-status.live { color: var(--ok); }
   .log-clear-btn {
-    background: none; border: none; color: var(--console-muted); cursor: pointer;
-    font-size: 11px; font-family: inherit; padding: 2px 6px; border-radius: 4px;
+    background: none; border: none; color: var(--text-3); cursor: pointer;
+    font-size: 11px; font-family: inherit; padding: 2px 6px; border-radius: var(--radius-sm, 6px);
+    transition: color 140ms var(--ease-out), background 140ms var(--ease-out);
   }
-  .log-clear-btn:hover { color: var(--console-hover-fg); background: var(--console-hover-bg); }
-  .log-stream {
-    flex: 1; overflow-y: auto; padding: 8px 10px; scroll-behavior: smooth;
-    contain: layout;
+  .log-clear-btn:hover { color: var(--text); background: var(--surface-hover); }
+  .live-log-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; padding: 0; border: none; background: none;
+    color: var(--text-3); border-radius: var(--radius-sm, 6px); cursor: pointer;
+    transition: color 140ms var(--ease-out), background 140ms var(--ease-out);
   }
-  .log-line { margin-bottom: 3px; word-break: break-all; }
-  .log-line .ts { color: var(--console-muted); margin-right: 6px; }
-  .log-line .lvl { font-weight: 600; margin-right: 6px; }
-  .log-line.info .lvl, .log-level-legend .lvl.info { color: var(--console-info); }
-  .log-line.warn .lvl, .log-level-legend .lvl.warn { color: var(--console-warn); }
-  .log-line.error .lvl, .log-level-legend .lvl.error { color: var(--console-error); }
+  .live-log-toggle:hover { color: var(--text); background: var(--surface-hover); }
+  .live-log-toggle svg { transition: transform 220ms var(--ease-out); }
+  .live-log[data-state="expanded"] .live-log-toggle svg { transform: rotate(180deg); }
+  .live-log-stage { position: relative; height: 96px; overflow: hidden; transition: height 220ms var(--ease-out); }
+  .live-log[data-state="expanded"] .live-log-stage { height: 320px; }
+  .live-log-stack, .live-log-viewport { position: absolute; inset: 0; transition: opacity 160ms var(--ease-out); }
+  .live-log-stack { cursor: pointer; padding: 0 2px; }
+  .live-log-viewport {
+    overflow-y: auto; padding: 2px; opacity: 0; pointer-events: none;
+    scroll-behavior: smooth; contain: layout;
+    scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
+  }
+  .live-log[data-state="expanded"] .live-log-stack { opacity: 0; pointer-events: none; }
+  .live-log[data-state="expanded"] .live-log-viewport { opacity: 1; pointer-events: auto; }
+  .live-log-viewport::-webkit-scrollbar { width: 8px; }
+  .live-log-viewport::-webkit-scrollbar-track { background: transparent; }
+  .live-log-viewport::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+  .live-log-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+  .live-log-msg {
+    box-sizing: border-box; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-xs);
+    padding: 7px 10px; overflow: hidden;
+  }
+  .live-log-meta {
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 10.5px; line-height: 1.2;
+    color: var(--text-4); margin-bottom: 3px;
+  }
+  .live-log-meta .lvl { font-weight: 600; }
+  .live-log-msg.info .lvl, .log-level-legend .lvl.info { color: var(--console-info); }
+  .live-log-msg.warn .lvl, .log-level-legend .lvl.warn { color: var(--console-warn); }
+  .live-log-msg.error .lvl, .log-level-legend .lvl.error { color: var(--console-error); }
+  .live-log-text {
+    font-family: var(--font-sans); font-size: 12px; line-height: 1.45;
+    color: var(--text-2); word-break: break-word; white-space: pre-wrap;
+  }
+  .live-log-viewport .live-log-msg { margin-bottom: 6px; transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out); }
+  .live-log-viewport .live-log-msg.is-leaving { opacity: 0; transform: translateY(-4px); }
+  .live-log-stack .live-log-msg {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 72px; margin: 0;
+    transform-origin: 50% 100%;
+    transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out), box-shadow 220ms var(--ease-out);
+  }
+  .live-log-stack .live-log-msg[data-slot="0"] { transform: translateY(0) scale(1); opacity: 1; z-index: 3; box-shadow: var(--shadow-sm); }
+  .live-log-stack .live-log-msg[data-slot="1"] { transform: translateY(-10px) scale(0.985); opacity: 0.72; z-index: 2; }
+  .live-log-stack .live-log-msg[data-slot="2"] { transform: translateY(-20px) scale(0.97); opacity: 0.45; z-index: 1; }
+  .live-log-stack .live-log-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .live-log-stack .live-log-msg.is-entering { animation: liveLogMsgIn 180ms var(--ease-out); }
+  .live-log-stack .live-log-msg.is-leaving { opacity: 0; transform: translateY(-28px) scale(0.96); transition-duration: 160ms; pointer-events: none; }
+  @keyframes liveLogMsgIn { from { opacity: 0; transform: translateY(16px) scale(1); } }
+  @keyframes liveLogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  #logConnBadge.is-reconnecting, #logConn.is-reconnecting { animation: liveLogPulse 1.2s ease-in-out infinite; }
 
   /* ── 「日志级别」下拉（设置 → 通用 → 实时输出卡）────────────────────────────
      与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色
@@ -4396,18 +4440,6 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：壳色随 --console-* token 亮暗换肤，圆角对齐整体语言 */
-:scope:scope .log-console {
-  background: var(--console-bg);
-  border-color: var(--console-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-:scope:scope .log-toolbar {
-  background: var(--console-toolbar-bg);
-  border-bottom-color: var(--console-border);
-}
-
 /* 遥测四宫格：微渐变底 + 顶部高光，数字收紧字距 */
 :scope:scope .telemetry-card {
   border-radius: var(--radius-md);
@@ -4555,7 +4587,6 @@
     inset 0 -1px 0 rgba(255, 255, 255, 0.04);
 }
 }
-
 /* ===== style-lab: aurora ===== */
 /* ==========================================================================
    风格片段：aurora｜极光玻璃
@@ -4568,7 +4599,7 @@
    1. --radius-sm/md/lg 放大至 10/14/20（基座基准 6/8/12）；
    2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；
-   3. 辉光阴影：--accent-glow、卡片 hover、暗色 .log-console 外发光，
+   3. 辉光阴影：--accent-glow、卡片 hover，
       box-shadow 偏移/扩散大于基座基准（不占布局空间）；
    4. letter-spacing 微调：.badge +0.02em、.telemetry-num -0.03em、
       .telemetry-label +0.05em、footer +0.04em；
@@ -4985,24 +5016,6 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：壳色随 --console-* token 亮暗换肤，青色描边微光与玻璃圆角保持皮肤语言 */
-:scope:scope .log-console {
-  background: var(--console-bg);
-  border-color: var(--console-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-:scope:scope .log-toolbar {
-  background: var(--console-toolbar-bg);
-  border-bottom-color: var(--console-border);
-}
-:scope:scope .log-clear-btn {
-  transition: all 160ms var(--ease-out);
-}
-:scope:scope .log-clear-btn:hover {
-  background: rgba(103, 232, 249, 0.12);
-}
-
 /* 遥测四宫格：玻璃微渐变 + 顶部高光，数字收紧、标签拉开字距 */
 :scope:scope .telemetry-card {
   border-radius: var(--radius-md);
@@ -5137,9 +5150,6 @@
 :scope:scope[data-theme="dark"] .brand-icon {
   color: #062431;
 }
-:scope:scope[data-theme="dark"] .log-console {
-  box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
 :scope:scope[data-theme="dark"] .panel-card:hover {
   box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
 }
@@ -5151,9 +5161,6 @@
   }
   :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
     color: #062431;
-  }
-  :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
-    box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   }
   :scope:scope:not([data-theme="light"]):not([data-theme="dark"]) .panel-card:hover {
     box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
@@ -5211,7 +5218,6 @@
   background: var(--bg);
 }
 }
-
   /* ===== style-lab: sepia ===== */
 /* ============================================================
    sepia —— 暖纸（细线质感基座 + 暖调 UI 色）
@@ -5720,7 +5726,6 @@
 /* 徽标：2px 方角 + 细线 */
 :scope:scope .ctx-preset-badge { border-radius: var(--radius-sm); }
 }
-
   #panelStartup { display: none; }
   /* 开屏图标主题色：每个皮肤一组，落点是方块渐变的两个 stop（deep→mid）与中心节点
      的 fill（core），见 #startupSvg 的 <stop> 与 panelStartupPlay 里建节点那段。

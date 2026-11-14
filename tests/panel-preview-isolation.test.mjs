@@ -50,6 +50,30 @@ const RETIRED_BASE_SKIN_RULES = new Map([
     // 上会叠出第二层 alpha，暗色下读成一道黑带）。渐隐不再取栏底色，--rail-bg 的
     // saas/sepia 对调失去用点，随渐隐一并删除。
     ':root[data-ui-version="v2"][data-style="saas"] #v2Rail, :root[data-ui-version="v2"][data-style="sepia"] #v2Rail',
+    // 2026-11-14：实时输出改消息提示式双态流，伪终端壳（.log-console/.log-toolbar）
+    // 退场；消息卡走基座 surface/border/shadow token，皮肤不再单独覆盖。
+    ':root[data-style="saas"] .log-console',
+    ':root[data-style="saas"] .log-toolbar',
+    ':root[data-style="aurora"] .log-console',
+    ':root[data-style="aurora"] .log-toolbar',
+    ':root[data-style="aurora"] .log-clear-btn',
+    ':root[data-style="aurora"] .log-clear-btn:hover',
+    ':root[data-style="aurora"][data-theme="dark"] .log-console',
+    ':root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console',
+  ])],
+  ["panel-ui/style-lab/saas.css", new Set([
+    // 2026-11-14：同 panel.css——实时输出伪终端壳退场，消息卡吃基座 token。
+    ':root[data-style="saas"] .log-console',
+    ':root[data-style="saas"] .log-toolbar',
+  ])],
+  ["panel-ui/style-lab/aurora.css", new Set([
+    // 2026-11-14：同 panel.css——实时输出伪终端壳退场，消息卡吃基座 token。
+    ':root[data-style="aurora"] .log-console',
+    ':root[data-style="aurora"] .log-toolbar',
+    ':root[data-style="aurora"] .log-clear-btn',
+    ':root[data-style="aurora"] .log-clear-btn:hover',
+    ':root[data-style="aurora"][data-theme="dark"] .log-console',
+    ':root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console',
   ])],
 ]);
 function readBaseCss(relPath) {
