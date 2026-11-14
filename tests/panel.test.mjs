@@ -17812,16 +17812,21 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
   });
 
-  it("CSS 钉住双态几何与动效组：96→320、堆叠三档、轻快滑入、reduced-motion 兜底", () => {
+  it("CSS 钉住双态几何与动效组：96→320、顶锚向下错位、推拉摊开、reduced-motion 兜底", () => {
     assert.ok(/\.live-log-stage \{[^}]*height: 96px;[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
     assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height: 320px; \}/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; height: 76px;/.test(panelCss), "卡顶锚，随舞台长高不被拽");
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*transform-origin: 50% 0;/.test(panelCss), "缩放基准在顶边");
     assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="0"\] \{ transform: translateY\(0\) scale\(1\); opacity: 1; z-index: 3;/.test(panelCss));
-    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="1"\] \{ transform: translateY\(-10px\) scale\(0\.985\); opacity: 0\.72; z-index: 2; \}/.test(panelCss));
-    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="2"\] \{ transform: translateY\(-20px\) scale\(0\.97\); opacity: 0\.45; z-index: 1; \}/.test(panelCss));
+    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="1"\] \{ transform: translateY\(var\(--ll-step\)\) scale\(var\(--ll-scale-1\)\); opacity: var\(--ll-opacity-1\); z-index: 2; \}/.test(panelCss), "中层向下错位并按层缩放");
+    assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="2"\] \{ transform: translateY\(calc\(var\(--ll-step\) \* 2\)\) scale\(var\(--ll-scale-2\)\); opacity: var\(--ll-opacity-2\); z-index: 1; \}/.test(panelCss), "后层再向下错位一档");
+    assert.ok(!/\.live-log-stack \.live-log-msg\[data-slot="[12]"\] \{ transform: translateY\(-/.test(panelCss), "不再向上错位");
     assert.ok(/\.live-log-stack \.live-log-msg\.is-entering \{ animation: liveLogMsgIn 180ms var\(--ease-out\); \}/.test(panelCss));
-    assert.ok(/@keyframes liveLogMsgIn \{ from \{ opacity: 0; transform: translateY\(16px\) scale\(1\); \} \}/.test(panelCss));
-    assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*transition-duration: 160ms;/.test(panelCss));
-    assert.ok(/\.live-log-stack, \.live-log-viewport \{[^}]*transition: opacity 160ms var\(--ease-out\); \}/.test(panelCss));
+    assert.ok(/@keyframes liveLogMsgIn \{ from \{ opacity: 0; transform: translateY\(-16px\) scale\(1\); \} \}/.test(panelCss), "新卡从上方落下，与向下展开同向");
+    assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*translateY\(54px\) scale\(0\.9\)[^}]*transition-duration: 160ms;/.test(panelCss), "挤出继续向下淡出");
+    assert.ok(/\.live-log-stack, \.live-log-viewport \{[^}]*transition: opacity 220ms var\(--ease-out\); \}/.test(panelCss), "层淡变与摊开同拍");
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-viewport \{[^}]*transition-delay: 80ms;/.test(panelCss), "展开时视口延后淡入");
+    assert.ok(/\.live-log:not\(\[data-state="expanded"\]\) \.live-log-stack \{ transition-delay: 80ms; \}/.test(panelCss), "收起时叠卡延后淡入");
     assert.ok(!/liveLogPulse/.test(panelCss) && !/#logConn/.test(panelCss), "连接态脉冲与指示退场，不上屏");
     assert.ok(/\.live-log-bar \{[^}]*justify-content: space-between;/.test(panelCss), "无框控制行：标题左、动作右");
     assert.ok(/\.live-log-title \{[^}]*font-weight: 600;/.test(panelCss), "区域标题「运行日志」在册");
@@ -17831,17 +17836,31 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/\.log-console/.test(panelCss), "旧控制台样式不再残留");
   });
 
-  it("CSS 钉住抽搐修复与卡内展开：堆叠钉顶 96、视口去平滑、视口 2 行截断、复用 caret 形", () => {
-    assert.ok(/\.live-log-stack \{ inset: 0 0 auto 0; height: 96px;/.test(panelCss), "堆叠层钉顶固定 96px，不随舞台长高");
+  it("CSS 钉住顶锚防抽搐与卡内展开：两层随舞台长高、视口 2 行截断、20px 热区", () => {
+    assert.ok(/\.live-log-stack, \.live-log-viewport \{ position: absolute; inset: 0;/.test(panelCss), "两层随舞台长高，摊开有空间");
+    assert.ok(!/\.live-log-stack \{ inset: 0 0 auto 0; height: 96px;/.test(panelCss), "不再钉顶固定 96px");
+    assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*bottom: 0;/.test(panelCss), "不再底锚，长高不会拽走卡");
     assert.ok(!/\.live-log-viewport \{[^}]*scroll-behavior/.test(panelCss), "视口去掉平滑滚动，贴底瞬时");
     assert.ok(/\.live-log-viewport \.live-log-text \{[^}]*-webkit-line-clamp: 2;[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss), "视口卡默认 2 行截断＋高度过渡");
     assert.ok(/\.live-log-viewport \.live-log-msg\.is-open \.live-log-text \{ display: block; -webkit-line-clamp: unset; \}/.test(panelCss), "卡内展开解除本卡截断");
-    assert.ok(/\.live-log-msg-fold \{[^}]*color: var\(--text-4\); font-size: 9px;[^}]*transition: transform 160ms var\(--ease-out\)/.test(panelCss), "卡内钮复用 ms-chevron 同构形");
+    assert.ok(/\.live-log-msg-fold \{[^}]*width: 20px; height: 20px;[^}]*color: var\(--text-3\); font-size: 14px;[^}]*transition: transform 160ms var\(--ease-out\)/.test(panelCss), "卡内钮 20px 热区＋14px 醒目 caret");
+    assert.ok(/\.log-clear-btn, \.live-log-toggle \{[^}]*min-height: 20px;[^}]*line-height: 1\.2;/.test(panelCss), "两个文字钮同盒高同基线");
     assert.ok(/\.live-log-msg\.is-open \.live-log-msg-fold \{ transform: rotate\(90deg\); \}/.test(panelCss), "展开 caret 转 90deg");
     assert.ok(/\.live-log-msg\.is-overflowing \.live-log-msg-fold \{ display: inline-flex; \}/.test(panelCss), "仅超行卡显示钮");
     assert.ok(/\.live-log-stack \.live-log-msg-fold \{ display: none; \}/.test(panelCss), "堆叠预览卡恒隐钮");
     assert.ok(panelJs.includes('class="live-log-msg-fold" type="button" aria-expanded="false" aria-label="展开" title="展开"'), "卡内钮初始纯图标＋展开文案");
     assert.ok(panelJs.includes('<span aria-hidden="true">▸</span>'), "卡内钮 caret  glyph 与 ms-chevron 同形");
+  });
+
+  it("CSS 钉住叠卡景深与暗色层界：三档参数、虚化只落文字、两态归位", () => {
+    assert.ok(/\.live-log \{[^}]*--ll-step: 13px; --ll-scale-1: 0\.96; --ll-scale-2: 0\.92;[^}]*--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;[^}]*--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(panelCss), "收起态逐层缩小、虚化、变淡");
+    assert.ok(/\.live-log\[data-state="expanded"\] \{[^}]*--ll-step: 78px; --ll-scale-1: 1; --ll-scale-2: 1;[^}]*--ll-blur-1: 0px; --ll-blur-2: 0px;[^}]*--ll-opacity-1: 1; --ll-opacity-2: 1;/.test(panelCss), "展开态间距放大到行距、景深归位");
+    assert.ok(/\.live-log-stack \.live-log-meta,\s*\.live-log-stack \.live-log-text \{ filter: blur\(0px\); transition: filter 220ms var\(--ease-out\); \}/.test(panelCss), "卡内文字可过渡虚化");
+    assert.ok(/filter: blur\(var\(--ll-blur-1\)\);/.test(panelCss) && /filter: blur\(var\(--ll-blur-2\)\);/.test(panelCss), "两层分别取虚化档");
+    assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*filter: blur/.test(panelCss), "整卡不虚化，保住层界");
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*border-color: var\(--border-strong\);/.test(panelCss), "叠卡描边取强调档");
+    assert.ok(/background: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/.test(panelCss), "暗色提亮卡面、亮色保持原白");
+    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\);/.test(panelCss), "下缘高光线定层数");
   });
 
   class FakeClassList {
