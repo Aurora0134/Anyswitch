@@ -2498,6 +2498,9 @@
   }
   .terminal-screen {
     position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: auto;
+    /* 整屏重建会换掉内部 xterm DOM；滚动锚定在内容变化时自动改写 scrollTop，会把几何
+       错配留下的空白带重新滚入。这个盒子的自然停靠位恒为 0，禁止锚定免得切回时带子复活。 */
+    overflow-anchor: none;
     padding: 22px 24px 16px; color: var(--terminal-fg); background: var(--terminal-bg); font: 13px/1.65 var(--font-mono);
     user-select: text; -webkit-user-select: text;
   }
