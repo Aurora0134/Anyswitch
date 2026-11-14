@@ -2685,19 +2685,157 @@ async function api(method, path, body) {
 
   // 实时 SSE 日志流
   const LOG_LINE_CAP = 25;
+  const LOG_STACK_SIZE = 3;
   let followLogs = true;
   // 运行日志开关的当前值。null = 还没问出来，此时不覆盖界面。
   let loggingEnabled = null;
   // 实时输出级别过滤的当前值。null = 还没问出来，此时不重连已有的流。
   let logLevel = null;
+  let logExpanded = false;
+  let logEntries = [];
+  let logEntrySeq = 0;
+  let logRenderQueued = false;
+  const logViewportNodes = new Map();
+  const logStackNodes = new Map();
+  const logStackLeaving = new Map();
+  let logFadeTimer = null;
+
+  function queueLogRender() {
+    if (logRenderQueued) return;
+    logRenderQueued = true;
+    requestAnimationFrame(() => {
+      logRenderQueued = false;
+      renderLogFeed();
+    });
+  }
+
+  function createLogMessageNode(entry) {
+    const node = document.createElement("div");
+    node.className = "live-log-msg " + entry.level;
+    node.dataset.entryId = String(entry.id);
+    const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
+    node.innerHTML = `<div class="live-log-meta"><span class="ts">${escapeHtml(ts)}</span><span class="lvl">${escapeHtml(entry.level.toUpperCase())}</span></div><div class="live-log-text">${escapeHtml(entry.message)}</div>`;
+    return node;
+  }
+
+  function renderLogViewport() {
+    const body = $("logBody");
+    if (!body) return;
+    const seen = new Set();
+    for (const entry of logEntries) {
+      seen.add(entry.id);
+      let node = logViewportNodes.get(entry.id);
+      if (!node) {
+        node = createLogMessageNode(entry);
+        logViewportNodes.set(entry.id, node);
+        body.appendChild(node);
+      }
+      node.classList.toggle("is-leaving", !!entry.fading);
+    }
+    for (const [id, node] of logViewportNodes) {
+      if (!seen.has(id)) {
+        node.remove();
+        logViewportNodes.delete(id);
+      }
+    }
+    if (logExpanded && followLogs) body.scrollTop = body.scrollHeight;
+  }
+
+  function renderLogStack() {
+    const stack = $("logStack");
+    if (!stack) return;
+    const latest = logEntries.slice(-LOG_STACK_SIZE);
+    const seen = new Set();
+    for (let i = latest.length - 1; i >= 0; i--) {
+      const entry = latest[i];
+      const slot = latest.length - 1 - i;
+      seen.add(entry.id);
+      let node = logStackNodes.get(entry.id);
+      const isNew = !node;
+      if (isNew) {
+        node = createLogMessageNode(entry);
+        logStackNodes.set(entry.id, node);
+        stack.appendChild(node);
+      }
+      const leaving = logStackLeaving.get(entry.id);
+      if (leaving) {
+        clearTimeout(leaving);
+        logStackLeaving.delete(entry.id);
+        node.classList.remove("is-leaving");
+      }
+      node.dataset.slot = String(slot);
+      node.style.zIndex = String(LOG_STACK_SIZE - slot);
+      node.classList.toggle("is-leaving", !!entry.fading);
+      if (isNew && !entry.fading) {
+        node.classList.add("is-entering");
+        setTimeout(() => node.classList.remove("is-entering"), 200);
+      }
+    }
+    for (const [id, node] of logStackNodes) {
+      if (seen.has(id) || logStackLeaving.has(id)) continue;
+      node.classList.add("is-leaving");
+      const timer = setTimeout(() => {
+        logStackLeaving.delete(id);
+        node.remove();
+        if (logStackNodes.get(id) === node) logStackNodes.delete(id);
+      }, 160);
+      logStackLeaving.set(id, timer);
+    }
+  }
+
+  function renderLogFeed() {
+    renderLogViewport();
+    renderLogStack();
+  }
+
+  function setLogExpanded(expanded) {
+    logExpanded = expanded;
+    const root = $("liveLog");
+    if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
+    const toggle = $("logToggle");
+    if (toggle) toggle.setAttribute("aria-expanded", String(expanded));
+    const body = $("logBody");
+    if (body) body.tabIndex = expanded ? 0 : -1;
+    const stack = $("logStack");
+    if (stack) stack.setAttribute("aria-hidden", String(expanded));
+    if (expanded && followLogs) {
+      requestAnimationFrame(() => {
+        const viewport = $("logBody");
+        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+      });
+    }
+  }
+
+  function resetLogFeed() {
+    logEntries = [];
+    followLogs = true;
+    if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
+    for (const timer of logStackLeaving.values()) clearTimeout(timer);
+    logStackLeaving.clear();
+    for (const node of logViewportNodes.values()) node.remove();
+    logViewportNodes.clear();
+    for (const node of logStackNodes.values()) node.remove();
+    logStackNodes.clear();
+    setLogExpanded(false);
+  }
+
+  function fadeClearLogFeed() {
+    for (const entry of logEntries) entry.fading = true;
+    queueLogRender();
+    if (logFadeTimer) clearTimeout(logFadeTimer);
+    logFadeTimer = setTimeout(() => {
+      logFadeTimer = null;
+      logEntries = logEntries.filter((entry) => !entry.fading);
+      queueLogRender();
+    }, 160);
+  }
 
   // 换级别后重连一次：服务端按新门槛重放缓冲里最近 500 条，屏幕立刻换成筛过的结果，
   // 而不是等下一条新日志来证明这一项生效了。记录停着时没有流可重连，跳过。
   function restartLogStream() {
     if (loggingEnabled === false) return;
     if (es) { es.close(); es = null; }
-    const body = $("logBody");
-    if (body) body.innerHTML = "";
+    fadeClearLogFeed();
     connectLogStream();
   }
 
@@ -2726,8 +2864,7 @@ async function api(method, path, body) {
       return;
     }
     if (es) { es.close(); es = null; }
-    const body = $("logBody");
-    if (body) body.innerHTML = "";
+    resetLogFeed();
   }
 
   // 页面加载时的入口：先问开关，再决定连不连流。这一问发生在开屏层还盖着的时候，
@@ -2740,9 +2877,16 @@ async function api(method, path, body) {
     body.addEventListener("scroll", () => {
       followLogs = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
     });
+    const toggle = $("logToggle");
+    if (toggle) toggle.onclick = (e) => { e.stopPropagation(); setLogExpanded(!logExpanded); };
+    const stack = $("logStack");
+    if (stack) stack.onclick = () => { if (!logExpanded) setLogExpanded(true); };
+    const header = $("liveLogCardHeader");
+    if (header) header.onclick = () => setLogExpanded(!logExpanded);
     // 真清空：服务端缓冲一并清掉，刷新不再复活旧日志，其它打开的面板窗口同步清空。
-    $("clearLog").onclick = async () => {
-      body.innerHTML = "";
+    $("clearLog").onclick = async (e) => {
+      e.stopPropagation();
+      fadeClearLogFeed();
       try { await api("POST", "/api/logs/clear"); } catch {}
     };
     let enabled = true;
@@ -2772,30 +2916,32 @@ async function api(method, path, body) {
     };
     es.onerror = () => {
       $("logConn").textContent = "○ 正在重连";
-      $("logConn").className = "log-status";
+      $("logConn").className = "log-status is-reconnecting";
       $("logConnBadge").textContent = "○ 重连";
-      $("logConnBadge").className = "badge badge-warn";
+      $("logConnBadge").className = "badge badge-warn is-reconnecting";
     };
   }
 
   function handleLogEntry(entry) {
     if (entry && entry.type === "clear") {
-      $("logBody").innerHTML = "";
+      fadeClearLogFeed();
       return;
     }
     appendLog(entry);
   }
 
   function appendLog(entry) {
-    const body = $("logBody");
-    const div = document.createElement("div");
-    div.className = "log-line " + (entry.level || "info");
-    const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
-    div.innerHTML = `<span class="ts">${ts}</span><span class="lvl">${(entry.level || "info").toUpperCase()}</span> ${escapeHtml(entry.message || "")}`;
-    body.appendChild(div);
-    // 行数上限：只保留最新 LOG_LINE_CAP 行，页面长开也不会无限堆积 DOM。
-    while (body.childElementCount > LOG_LINE_CAP) body.removeChild(body.firstChild);
-    if (followLogs) body.scrollTop = body.scrollHeight;
+    const level = entry && entry.level ? String(entry.level) : "info";
+    logEntries.push({
+      id: ++logEntrySeq,
+      level,
+      ts: entry && entry.ts,
+      message: entry && entry.message != null ? String(entry.message) : "",
+      fading: false,
+    });
+    // 条数上限：只保留最新 LOG_LINE_CAP 条，页面长开也不会无限堆积 DOM。
+    while (logEntries.length > LOG_LINE_CAP) logEntries.shift();
+    queueLogRender();
   }
 
   // 开机自启
