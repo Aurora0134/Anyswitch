@@ -2123,7 +2123,8 @@
   /* 终端屏不透明：曾为壁纸主题开过半透明底（屏下透出垫底图），因 xterm 透明渲染
      路径两缺陷收回——底色在画布上逐帧叠成实色、四周 CSS 单层读浅，白芯蓝环；
      dim 字走 alpha 栅格化被洗到近底色（2026-11-13 裁决，实测在专区 DECISIONS）。
-     取值与基座段静态皮肤同源，亮暗上报链同取此 token。 */
+     无图态/首帧未注入时兜底取与基座段同源的实色；有图时由取色引擎按种子色生成
+     不透明六位 hex（--terminal-bg）注入 <html> 覆盖，亮暗上报链同取此 token。 */
   :root[data-style="wallpaper"] {
     --terminal-bg: #f8fafc;
   }
@@ -2203,7 +2204,6 @@
     --console-warn: #b45309;
     --console-error: #dc2626;
 
-    --terminal-bg: #f8fafc;
     --terminal-fg: #1e293b;
     --terminal-cursor: #334155;
     --terminal-selection: #bfdbfe;
@@ -2225,7 +2225,7 @@
     font: 400 13.5px/1.55 var(--font-sans);
     color: var(--text);
   }
-  /* 暗色：只列与亮色不同的项（口径同基座段 --theme=dark 与壁纸主题的 --terminal-bg） */
+  /* 暗色：只列与亮色不同的项（口径同基座段 --theme=dark） */
   :root[data-theme="dark"] .wallpaper-preview {
     --console-bg: #090d16;
     --console-toolbar-bg: #0f172a;
@@ -2237,7 +2237,6 @@
     --console-info: #38bdf8;
     --console-warn: #fbbf24;
     --console-error: #f87171;
-    --terminal-bg: #0b1220;
     --terminal-fg: #d5e2f4;
     --terminal-cursor: #dbeafe;
     --terminal-selection: #29486d;
@@ -2255,7 +2254,6 @@
       --console-info: #38bdf8;
       --console-warn: #fbbf24;
       --console-error: #f87171;
-      --terminal-bg: #0b1220;
       --terminal-fg: #d5e2f4;
       --terminal-cursor: #dbeafe;
       --terminal-selection: #29486d;
