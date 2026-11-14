@@ -2886,7 +2886,16 @@
     position: absolute; left: 0; top: 0; bottom: 0; width: 0; z-index: 0;
     border-radius: 999px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
     transition: width 400ms var(--ease-out), background 200ms var(--ease-out);
+    /* 生长动效走 transform（横向拉伸），与 over 档斜纹的 background-position 动画
+       属性正交、互不覆盖；基态即 scaleX(1)，生长时由 .ctx-grow-from 归零再补间上来 */
+    transform: scaleX(1); transform-origin: left center;
   }
+  /* 生长两态：.ctx-grow-from 是「瞬时归零」的复位帧（过渡全关，不产生抽帧），
+     换成 .ctx-grow 后只留 transform 一条过渡，浏览器即从 0 补间到 1。
+     生长期间 width 过渡关闭——占比此刻瞬时到位，横向拉伸独自演完这一段，
+     两段动画叠乘会走成二次曲线，看着像先慢后急 */
+  .ctx-bar.ctx-grow-from .ctx-fill { transition: none; transform: scaleX(0); }
+  .ctx-bar.ctx-grow .ctx-fill { transition: transform 400ms var(--ease-out); }
   /* 100% 预算上限线：贴在条右端，仅作提示锚点 */
   .ctx-bar .ctx-tick { position: absolute; right: 0; top: 0; bottom: 0; width: 1.5px; z-index: 2; background: var(--text-3); opacity: 0.55; }
   .ctx-meter[data-tier="empty"] .ctx-fill { background: transparent; box-shadow: none; }
