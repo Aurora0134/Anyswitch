@@ -2569,6 +2569,29 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
+      <!-- 号池分流逻辑：关=粘性路由（最后成功成员优先，失败才降级）；开=智能分流
+           （按成员负载与优质率主动分摊，同一会话优先留在同一成员）。即改即生效。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+            号池分流逻辑
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">智能分流</div>
+              <div class="modal-item-desc">开启后，号池内的请求将智能分流给多个成员承接，同一会话的请求优先留在同一成员</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="poolLoadBalancingToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">

@@ -40,6 +40,8 @@ import {
   DEFAULT_AUTO_DOWNLOAD_UPDATES,
   parseBleedingEdgeMode,
   DEFAULT_BLEEDING_EDGE_MODE,
+  parsePoolLoadBalancing,
+  DEFAULT_POOL_LOAD_BALANCING,
   loadSettings,
   saveSettings,
 } from "../src/relay/relay-settings.mjs";
@@ -1053,6 +1055,34 @@ describe("bleedingEdgeMode", () => {
       assert.equal(other.settings.bleedingEdgeMode, true, "改别的设置项不会把它挤掉");
       const off = saveSettings(path, { bleedingEdgeMode: false }, {});
       assert.equal(off.settings.bleedingEdgeMode, false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("poolLoadBalancing", () => {
+  it("defaults to off: only an explicit true turns it on", () => {
+    assert.equal(DEFAULT_POOL_LOAD_BALANCING, false);
+    assert.equal(parsePoolLoadBalancing(undefined), false);
+    assert.equal(parsePoolLoadBalancing("true"), false);
+    assert.equal(parsePoolLoadBalancing(1), false);
+    assert.equal(parsePoolLoadBalancing(false), false);
+    assert.equal(parsePoolLoadBalancing(true), true);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-pool-lb-");
+    const path = join(tmp, "settings.json");
+    try {
+      assert.equal(loadSettings(path, {}).settings.poolLoadBalancing, false, "先于该键存在的安装保持关闭（粘性路由）");
+      const on = saveSettings(path, { poolLoadBalancing: true }, {});
+      assert.equal(on.settings.poolLoadBalancing, true);
+      assert.equal(loadSettings(path, {}).settings.poolLoadBalancing, true);
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.poolLoadBalancing, true, "改别的设置项不会把它挤掉");
+      const off = saveSettings(path, { poolLoadBalancing: false }, {});
+      assert.equal(off.settings.poolLoadBalancing, false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

@@ -40,9 +40,10 @@ import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffort
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "../catalog/effort-injection.mjs";
 import { requestModelIsTextOnly, looksLikeTextOnlyRejection } from "../catalog/text-models.mjs";
 import { requestHasImages, stripImages, noteImageFallback } from "./media-strip.mjs";
-import { imageFallbackEnabled, imageHeuristicEnabled } from "./relay-settings.mjs";
+import { imageFallbackEnabled, imageHeuristicEnabled, poolLoadBalancingEnabled } from "./relay-settings.mjs";
 import { validateStore } from "../store/store-schema.mjs";
 import { resolvePool, poolMembersWithModel, createStickyTable } from "../channels/pool-routing.mjs";
+import { createLoadBalancer } from "../channels/pool-load-routing.mjs";
 import {
   AUTO_MODEL,
   AUTO_MODEL_ANTHROPIC_ID,
@@ -154,6 +155,7 @@ export function createHandler(deps) {
     // 一致）；未注入时走 relay-settings 的磁盘现读默认，测试注入定值。
     imageFallbackGate = imageFallbackEnabled,
     imageHeuristicGate = imageHeuristicEnabled,
+    poolLoadBalancingGate = poolLoadBalancingEnabled,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
@@ -161,6 +163,32 @@ export function createHandler(deps) {
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
   const stickyTable = createStickyTable();
+
+  // 智能分流（poolLoadBalancing）：开启后号池改用加权最小负载分流，关闭时
+  // 沿用上面的粘性表。与 stickyTable 同一闭包生命周期（进程内存，重启清零）。
+  const loadBalancer = createLoadBalancer();
+
+  // 号池路由门面：按当前开关在粘性表与负载均衡器之间二选一，规划时一次性定模式。
+  // 关闭时返回值与旧粘性路径逐字节一致：noteSuccess 忽略多余的 ttft 参数，
+  // begin/end 为 undefined。
+  function poolRouting(poolId, modelId, candidates, sessionKey) {
+    if (poolLoadBalancingGate()) {
+      return {
+        useLb: true,
+        ordered: loadBalancer.order(poolId, modelId, candidates, sessionKey),
+        noteSuccess: (memberId, ttftMs) => loadBalancer.noteSuccess(poolId, modelId, memberId, ttftMs, sessionKey),
+        noteFailure: (memberId) => loadBalancer.noteFailure(poolId, modelId, memberId, sessionKey),
+        begin: (memberId) => loadBalancer.begin(memberId),
+        end: (memberId) => loadBalancer.end(memberId),
+      };
+    }
+    return {
+      useLb: false,
+      ordered: stickyTable.order(poolId, modelId, candidates),
+      noteSuccess: (memberId) => stickyTable.noteSuccess(poolId, modelId, memberId),
+      noteFailure: (memberId) => stickyTable.noteFailure(poolId, modelId, memberId),
+    };
+  }
 
   // Chain routing (自动路由): endpointId -> last successful chain node. Same
   // process-memory lifetime as the sticky table. 降级锁定时经 logger 落一条
@@ -704,7 +732,7 @@ export function createHandler(deps) {
   // The generation gate needs no pool special-casing: the catalog digest
   // covers providers (including every member's endpoint) but not pool
   // membership, so editing pool composition alone cannot false-trigger a 409.
-  async function planPoolMessages(headers, body) {
+  async function planPoolMessages(headers, body, sessionKey = null) {
     const auth = authorize(headers);
     if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
 
@@ -736,20 +764,23 @@ export function createHandler(deps) {
       };
     }
 
-    const ordered = stickyTable.order(unpacked.poolId, unpacked.modelId, candidates);
+    const routing = poolRouting(unpacked.poolId, unpacked.modelId, candidates, sessionKey);
     return {
       ok: true,
       poolId: unpacked.poolId,
       modelId: unpacked.modelId,
-      members: ordered.map(({ memberId, provider }) => ({
+      members: routing.ordered.map(({ memberId, provider }) => ({
         memberId,
         call: (options = {}) => attemptMessages(memberId, provider, body, unpacked.modelId, options),
       })),
-      noteSuccess: (memberId) => stickyTable.noteSuccess(unpacked.poolId, unpacked.modelId, memberId),
+      noteSuccess: (memberId, ttftMs) => routing.noteSuccess(memberId, ttftMs),
       // 成员级请求失败计数（该成员本次请求彻底失败时由 server 侧回调，
       // 末位成员同样计入）——号池粘性位降级门控（失败才降级）的计数来源。
       // 一个成员在一次请求里至多失败一次，无需去重。
-      noteFailure: (memberId) => stickyTable.noteFailure(unpacked.poolId, unpacked.modelId, memberId),
+      noteFailure: (memberId) => routing.noteFailure(memberId),
+      // 智能分流开启时的在途计数钩子（关闭时为 undefined，server 侧 ?. 空操作）。
+      beginMember: routing.begin,
+      endMember: routing.end,
     };
   }
 
@@ -773,7 +804,7 @@ export function createHandler(deps) {
   // carries the tracker key fields: providerId (channel id, or pool id for
   // pool members — the pool member itself rides memberId) and model (the
   // node's bound model, which is what the upstream is actually asked for).
-  async function planChainMessages(headers, body, agentId) {
+  async function planChainMessages(headers, body, agentId, sessionKey = null) {
     const auth = authorize(headers);
     if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
 
@@ -839,6 +870,8 @@ export function createHandler(deps) {
     const byMemberId = new Map();
     // 本请求已计失败的节点（node+model 复合键）：noteFailure 的去重集。
     const failedNodes = new Set();
+    // 链里任一池节点走了智能分流，整条链就暴露在途计数钩子。
+    let poolLbActive = false;
     for (const entry of planned) {
       const expanded = expandChainNode(loaded.store, entry);
       if (!expanded) continue;
@@ -864,13 +897,16 @@ export function createHandler(deps) {
         memberId: poolMemberId,
         provider: loaded.store.providers[poolMemberId],
       }));
-      for (const { memberId: poolMemberId, provider } of stickyTable.order(expanded.poolId, expanded.model, candidates)) {
+      const routing = poolRouting(expanded.poolId, expanded.model, candidates, sessionKey);
+      poolLbActive = poolLbActive || routing.useLb;
+      for (const { memberId: poolMemberId, provider } of routing.ordered) {
         const memberId = uniqueMemberId(byMemberId, `${expanded.poolId}/${poolMemberId}`, expanded.model);
         byMemberId.set(memberId, {
           nodeId: expanded.poolId,
           poolId: expanded.poolId,
           poolMemberId,
           model: expanded.model,
+          routing,
         });
         members.push({
           memberId,
@@ -910,12 +946,12 @@ export function createHandler(deps) {
       },
       // A member answered: stick the chain to its node, and when the member
       // is a pool member also feed the pool's own sticky table.
-      noteSuccess: (memberId) => {
+      noteSuccess: (memberId, ttftMs) => {
         const record = byMemberId.get(memberId);
         if (record === undefined) return;
         noteChainSuccess(chainState, routeKey, record.nodeId, record.model, Date.now());
         if (record.poolId !== undefined) {
-          stickyTable.noteSuccess(record.poolId, record.model, record.poolMemberId);
+          record.routing.noteSuccess(record.poolMemberId, ttftMs);
         }
       },
       // 一次请求级节点失败（该节点本次请求彻底失败时由 server 侧回调，
@@ -923,16 +959,21 @@ export function createHandler(deps) {
       noteFailure: (memberId) => {
         const record = byMemberId.get(memberId);
         if (record === undefined) return;
-        // 池成员还要进池内粘性表的成员级计数（失败才降级，与链同一规则）；
+        // 池成员还要进池内路由的成员级计数（失败才降级，与链同一规则）；
         // 成员一次请求至多 failover 一次，不需要 per-request 去重。
         if (record.poolId !== undefined) {
-          stickyTable.noteFailure(record.poolId, record.model, record.poolMemberId);
+          record.routing.noteFailure(record.poolMemberId);
         }
         const key = chainNodeKey(record.nodeId, record.model);
         if (failedNodes.has(key)) return;
         failedNodes.add(key);
         noteChainFailure(chainState, routeKey, record.nodeId, record.model);
       },
+      // 智能分流开启时（链含池节点）暴露在途计数钩子；纯渠道链或关闭时为
+      // undefined，server 侧 ?. 空操作。链成员的 memberId 是扁平 id
+      // （pool/member），在途计数须翻回池成员 id 才能与 order 的负载键对齐。
+      beginMember: poolLbActive ? (memberId) => loadBalancer.begin(byMemberId.get(memberId)?.poolMemberId ?? memberId) : undefined,
+      endMember: poolLbActive ? (memberId) => loadBalancer.end(byMemberId.get(memberId)?.poolMemberId ?? memberId) : undefined,
     };
   }
 

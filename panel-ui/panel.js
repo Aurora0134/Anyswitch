@@ -4602,6 +4602,7 @@ async function api(method, path, body) {
     const credentialCacheToggle = $("credentialCacheToggle");
     const autoDownloadUpdatesToggle = $("autoDownloadUpdatesToggle");
     const bleedingEdgeToggle = $("bleedingEdgeToggle");
+    const poolLoadBalancingToggle = $("poolLoadBalancingToggle");
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
@@ -4625,7 +4626,7 @@ async function api(method, path, body) {
       on: { title: "抗截断", desc: KEEP_ALIVE_DESC, toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false, poolLoadBalancing: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -4895,6 +4896,10 @@ async function api(method, path, body) {
         // 先行版开关：保存中（含确认弹层挂着的那段时间）不被轮询回灌盖回。
         if (!settingsSaving.bleedingEdge && bleedingEdgeToggle && d.settings && typeof d.settings.bleedingEdgeMode === "boolean") {
           bleedingEdgeToggle.checked = d.settings.bleedingEdgeMode;
+        }
+        // 号池智能分流开关：保存中不被轮询回灌盖回。
+        if (!settingsSaving.poolLoadBalancing && poolLoadBalancingToggle && d.settings && typeof d.settings.poolLoadBalancing === "boolean") {
+          poolLoadBalancingToggle.checked = d.settings.poolLoadBalancing;
         }
         // 运行日志开关：回灌时把左侧那张实时输出卡的显隐一并跟上，免得设置页与看板
         // 各说各话。
@@ -5495,6 +5500,37 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.bleedingEdge = false;
           bleedingEdgeToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 号池智能分流：即改即存的布尔开关，中继每请求现读，改完下一请求即生效。
+    if (poolLoadBalancingToggle) {
+      poolLoadBalancingToggle.onchange = async () => {
+        if (settingsSaving.poolLoadBalancing) {
+          poolLoadBalancingToggle.checked = !poolLoadBalancingToggle.checked;
+          return;
+        }
+        const next = poolLoadBalancingToggle.checked;
+        settingsSaving.poolLoadBalancing = true;
+        settingsLoadGen += 1;
+        poolLoadBalancingToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { poolLoadBalancing: next });
+          if (!d.ok) {
+            poolLoadBalancingToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.poolLoadBalancing;
+            if (typeof saved === "boolean") poolLoadBalancingToggle.checked = saved;
+            toast(next ? "已开启智能分流" : "已关闭智能分流");
+          }
+        } catch (e) {
+          poolLoadBalancingToggle.checked = !next;
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.poolLoadBalancing = false;
+          poolLoadBalancingToggle.removeAttribute("aria-busy");
         }
       };
     }

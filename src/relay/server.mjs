@@ -138,14 +138,14 @@ export function createRelayServer(deps) {
           // fans out across the pool's candidate members (sticky member first,
           // then pool order). planPoolMessages returns null for plain provider
           // wire ids — those take the classic path below untouched.
-          const poolPlan = await handler.planPoolMessages(req.headers, body);
+          const poolPlan = await handler.planPoolMessages(req.headers, body, agentId);
 
           // Chain routing (自动路由): a body.model of "auto" walks this
           // endpoint's route chain (per-launch relay = the agentId endpoint).
           // planChainMessages returns null for anything else — pool and plain
           // provider wire ids take their paths above/below untouched.
           const chainPlan = poolPlan === null
-            ? await handler.planChainMessages(req.headers, body, agentId)
+            ? await handler.planChainMessages(req.headers, body, agentId, agentId)
             : null;
           const memberPlan = poolPlan ?? chainPlan;
           // Failover semantics differ by plan kind: chain plans treat an
@@ -221,8 +221,10 @@ export function createRelayServer(deps) {
                     call: (options) => member.call({ signal: abortController.signal, ...options }),
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
-                  onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
+                  onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId, reqTracker?.ttftMs?.()),
                   onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
+                  onMemberBegin: (member) => memberPlan.beginMember?.(member.memberId),
+                  onMemberEnd: (member) => memberPlan.endMember?.(member.memberId),
                 }
               : {
                   callUpstream: (options = {}) => handler.handleMessages(req.headers, body, {

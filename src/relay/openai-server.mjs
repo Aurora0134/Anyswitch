@@ -974,7 +974,7 @@ export function createOpenAIRelayServer(deps) {
           // routing because "auto" is a virtual model no real channel (and
           // therefore no pool member catalog) carries. Returns null when the
           // model is not "auto" or the agent has no chain.
-          const chainPlan = await handler.planChainChatCompletions(routePath, req.headers, body, openaiAgentId);
+          const chainPlan = await handler.planChainChatCompletions(routePath, req.headers, body, openaiAgentId, requestInstanceId);
           if (chainPlan !== null && !chainPlan.ok) {
             tracker?.recordEnd({ status: chainPlan.status, error: { status: chainPlan.status, message: chainPlan.body?.error?.message || "Error" } });
             sendJson(res, chainPlan.status, chainPlan.body);
@@ -987,7 +987,7 @@ export function createOpenAIRelayServer(deps) {
           // null for plain provider ids — those take the classic path below
           // untouched.
           const poolPlan = chainPlan === null
-            ? await handler.planPoolChatCompletions(routePath, req.headers, body)
+            ? await handler.planPoolChatCompletions(routePath, req.headers, body, requestInstanceId)
             : null;
           if (poolPlan !== null && !poolPlan.ok) {
             tracker?.recordEnd({ status: poolPlan.status, error: { status: poolPlan.status, message: poolPlan.body?.error?.message || "Error" } });
@@ -1032,10 +1032,12 @@ export function createOpenAIRelayServer(deps) {
                       call: (options) => member.call({ signal: abortController.signal, ...options }),
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
-                    onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
+                    onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId, tracker?.ttftMs?.()),
                     // 成员一次请求彻底失败就计一次（降级门控的计数来源），
                     // 与是否被越过无关——末位成员此前从不计数。
                     onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
+                    onMemberBegin: (member) => memberPlan.beginMember?.(member.memberId),
+                    onMemberEnd: (member) => memberPlan.endMember?.(member.memberId),
                   }
                 : {
                     callUpstream: (options = {}) => handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal, ...options }),
@@ -1056,19 +1058,24 @@ export function createOpenAIRelayServer(deps) {
               const member = memberPlan.members[index];
               tracker?.setCurrentMember?.(member.memberId);
               attemptedMembers += 1;
-              result = await member.call({ signal: abortController.signal });
-              if (result.status < 400) {
-                memberPlan.noteSuccess(member.memberId);
-                break;
+              memberPlan.beginMember?.(member.memberId);
+              try {
+                result = await member.call({ signal: abortController.signal });
+                if (result.status < 400) {
+                  memberPlan.noteSuccess(member.memberId, tracker?.ttftMs?.());
+                  break;
+                }
+                const isLastMember = index === memberPlan.members.length - 1;
+                if (!isFailoverStatus(result.status)) break;
+                // 渠道级故障：这一家本次请求彻底失败，计入降级门控——哪怕它
+                // 就是最后一员（此前末位直接 break，永远不计数）。
+                memberPlan.noteFailure?.(member.memberId);
+                if (isLastMember) break;
+                tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
+                deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
+              } finally {
+                memberPlan.endMember?.(member.memberId);
               }
-              const isLastMember = index === memberPlan.members.length - 1;
-              if (!isFailoverStatus(result.status)) break;
-              // 渠道级故障：这一家本次请求彻底失败，计入降级门控——哪怕它
-              // 就是最后一员（此前末位直接 break，永远不计数）。
-              memberPlan.noteFailure?.(member.memberId);
-              if (isLastMember) break;
-              tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
-              deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
             }
           } else {
             result = await handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal });
@@ -1175,7 +1182,7 @@ export function createOpenAIRelayServer(deps) {
         res.on("close", onResAborted);
 
         try {
-          const chainPlan = await handler.planChainChatCompletions(routePath, req.headers, chatBody, openaiAgentId);
+          const chainPlan = await handler.planChainChatCompletions(routePath, req.headers, chatBody, openaiAgentId, requestInstanceId);
           if (chainPlan !== null && !chainPlan.ok) {
             tracker?.recordEnd({ status: chainPlan.status, error: { status: chainPlan.status, message: chainPlan.body?.error?.message || "Error" } });
             sendJson(res, chainPlan.status, chainPlan.body);
@@ -1183,7 +1190,7 @@ export function createOpenAIRelayServer(deps) {
           }
 
           const poolPlan = chainPlan === null
-            ? await handler.planPoolChatCompletions(routePath, req.headers, chatBody)
+            ? await handler.planPoolChatCompletions(routePath, req.headers, chatBody, requestInstanceId)
             : null;
           if (poolPlan !== null && !poolPlan.ok) {
             tracker?.recordEnd({ status: poolPlan.status, error: { status: poolPlan.status, message: poolPlan.body?.error?.message || "Error" } });
@@ -1219,8 +1226,10 @@ export function createOpenAIRelayServer(deps) {
                     call: (options) => member.call({ signal: abortController.signal, ...options }),
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
-                  onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
+                  onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId, tracker?.ttftMs?.()),
                   onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
+                  onMemberBegin: (member) => memberPlan.beginMember?.(member.memberId),
+                  onMemberEnd: (member) => memberPlan.endMember?.(member.memberId),
                 }
               : {
                   callUpstream: (options = {}) => handler.handleChatCompletions(routePath, req.headers, chatBody, { signal: abortController.signal, ...options }),
@@ -1277,17 +1286,21 @@ export function createOpenAIRelayServer(deps) {
         await anthropicHandler.normalizeInboundModel(req.headers, body);
         await anthropicHandler.planTierEntryMessages(req.headers, body, agentId);
 
+        // 同 openai 路由：无归属即无实例身份。会话键供智能分流的会话亲和使用，
+        // 须在号池/链规划之前算好（只依赖 agentId 与后台标记，与规划无涉）。
+        const requestInstanceId = agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps);
+
         // Chain routing (自动路由): body.model === "auto" walks the
         // requesting agent's route chain and takes priority over pool
         // routing (a virtual model no pool member catalog carries).
-        const chainPlan = await anthropicHandler.planChainMessages(req.headers, body, agentId);
+        const chainPlan = await anthropicHandler.planChainMessages(req.headers, body, agentId, requestInstanceId);
 
         // Pool routing: a body.model of anthropic/<pool-id>/<model>
         // fans out across the pool's candidate members (sticky member first,
         // then pool order). planPoolMessages returns null for plain provider
         // wire ids — those take the classic path below untouched.
         const poolPlan = chainPlan === null
-          ? await anthropicHandler.planPoolMessages(req.headers, body)
+          ? await anthropicHandler.planPoolMessages(req.headers, body, requestInstanceId)
           : null;
 
         // Chains and pools share the flat per-member call plan shape
@@ -1299,8 +1312,6 @@ export function createOpenAIRelayServer(deps) {
         // bound model), pool plans keep 404 request-shaped (passthrough).
         const isFailoverStatus = chainPlan ? isChainFailoverStatus : isPoolFailoverStatus;
 
-        // 同 openai 路由：无归属即无实例身份。
-        const requestInstanceId = agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps);
         const tracker = deps.metricsCollector?.startRequest({
           // The tracker's main key is the pool id for pool requests; member
           // attribution rides failure/retry entries as memberId. Plain
@@ -1374,8 +1385,10 @@ export function createOpenAIRelayServer(deps) {
                       call: (options) => member.call({ signal: abortController.signal, ...options }),
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
-                    onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
+                    onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId, tracker?.ttftMs?.()),
                     onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
+                    onMemberBegin: (member) => memberPlan.beginMember?.(member.memberId),
+                    onMemberEnd: (member) => memberPlan.endMember?.(member.memberId),
                   }
                 : {
                     callUpstream: (options = {}) => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId, ...options }),
@@ -1398,19 +1411,24 @@ export function createOpenAIRelayServer(deps) {
               const member = memberPlan.members[index];
               tracker?.setCurrentMember?.(member.memberId);
               attemptedMembers += 1;
-              result = await member.call({ signal: abortController.signal });
-              if (result.status < 400) {
-                memberPlan.noteSuccess(member.memberId);
-                break;
+              memberPlan.beginMember?.(member.memberId);
+              try {
+                result = await member.call({ signal: abortController.signal });
+                if (result.status < 400) {
+                  memberPlan.noteSuccess(member.memberId, tracker?.ttftMs?.());
+                  break;
+                }
+                const isLastMember = index === memberPlan.members.length - 1;
+                if (!isFailoverStatus(result.status)) break;
+                // 渠道级故障：这一家本次请求彻底失败，计入降级门控——哪怕它
+                // 就是最后一员（此前末位直接 break，永远不计数）。
+                memberPlan.noteFailure?.(member.memberId);
+                if (isLastMember) break;
+                tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
+                deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
+              } finally {
+                memberPlan.endMember?.(member.memberId);
               }
-              const isLastMember = index === memberPlan.members.length - 1;
-              if (!isFailoverStatus(result.status)) break;
-              // 渠道级故障：这一家本次请求彻底失败，计入降级门控——哪怕它
-              // 就是最后一员（此前末位直接 break，永远不计数）。
-              memberPlan.noteFailure?.(member.memberId);
-              if (isLastMember) break;
-              tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
-              deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
             }
           } else {
             result = await anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId });
