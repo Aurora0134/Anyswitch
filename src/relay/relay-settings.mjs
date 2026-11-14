@@ -184,6 +184,15 @@ export function parseBleedingEdgeMode(raw) {
   return raw === true ? true : DEFAULT_BLEEDING_EDGE_MODE;
 }
 
+// 号池智能分流开关：关闭（默认）＝号池沿用粘性路由（最后成功成员优先，失败才
+// 降级）；开启后改用加权最小负载分流（并发＋优质率），同一会话优先留在同一成员。
+// 默认关保证升级安装与旧行为逐字节一致；畸形值保持关闭。每请求现读，即改即生效。
+export const DEFAULT_POOL_LOAD_BALANCING = false;
+
+export function parsePoolLoadBalancing(raw) {
+  return raw === true ? true : DEFAULT_POOL_LOAD_BALANCING;
+}
+
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -325,6 +334,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const credentialCacheEnabled = parseCredentialCacheEnabled(raw.credentialCacheEnabled);
   const autoDownloadUpdates = parseAutoDownloadUpdates(raw.autoDownloadUpdates);
   const bleedingEdgeMode = parseBleedingEdgeMode(raw.bleedingEdgeMode);
+  const poolLoadBalancing = parsePoolLoadBalancing(raw.poolLoadBalancing);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -350,6 +360,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       credentialCacheEnabled,
       autoDownloadUpdates,
       bleedingEdgeMode,
+      poolLoadBalancing,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -368,6 +379,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     credentialCacheEnabled,
     autoDownloadUpdates,
     bleedingEdgeMode,
+    poolLoadBalancing,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -496,6 +508,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     updated.bleedingEdgeMode = parseBleedingEdgeMode(patch.bleedingEdgeMode);
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, "poolLoadBalancing")) {
+    updated.poolLoadBalancing = parsePoolLoadBalancing(patch.poolLoadBalancing);
+  }
+
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启
   // 即恢复，所以这里不触碰 claudeTierMappings。
   if (Object.prototype.hasOwnProperty.call(patch, "claudeTierMappingsEnabled")) {
@@ -542,6 +558,12 @@ export function imageFallbackEnabled(base = process.env) {
 
 export function imageHeuristicEnabled(base = process.env) {
   return loadSettings(defaultSettingsPath(base), base).imageHeuristic;
+}
+
+// 号池智能分流开关的运行时读取：每次调用现读磁盘（与 imageFallbackEnabled 同一
+// 契约），面板保存后下一请求即生效、无需重启 relay。关闭时号池走粘性路由。
+export function poolLoadBalancingEnabled(base = process.env) {
+  return loadSettings(defaultSettingsPath(base), base).poolLoadBalancing;
 }
 
 // One live read of a single setting, for long-lived processes that must honour a

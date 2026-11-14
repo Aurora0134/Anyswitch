@@ -7212,6 +7212,12 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         recordRetry: (info) => recordRetryCtx(ctx, info),
         setCurrentMember: (memberId) => bindMember(ctx, memberId),
         setAttributeResolver: (fn) => { ctx.resolver = typeof fn === "function" ? fn : null; },
+        // First-token latency for the load balancer's quality sample: the
+        // measured first chunk once it lands, else the elapsed request time
+        // (the non-streaming proxy). Read-only; mirrors recordEndCtx's rule.
+        ttftMs: () => (ctx.firstChunk !== null
+          ? Math.max(1, ctx.firstChunk - ctx.startTime)
+          : Math.max(1, nowFn() - ctx.startTime)),
       };
     },
 

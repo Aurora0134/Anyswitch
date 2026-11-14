@@ -497,3 +497,60 @@ test("生命周期：控制器真的接进了设置页子 tab 机制，不留「
   assert.ok(source.includes("leave() { away = true; if (awaitReturn) return; resetResults(); }"), "leave 按等切回决定清不清");
   assert.ok(!source.includes("dataBundle.reset"), "旧的死钩子不该留着");
 });
+
+// 号池分流逻辑卡：智能分流开关。文案为对稿定稿（仅描述开启态、中性、不披露机制），
+// 开关即改即存，中继每请求现读。这里钉住 markup 文案 ↔ 开关 id ↔ onchange 接线三者一致。
+test("号池分流逻辑卡：定稿文案逐字落盘，开关 id 稳定，不披露机制", () => {
+  assert.ok(html.includes("号池分流逻辑"), "卡头");
+  const title = html.indexOf('<div class="modal-item-title">智能分流</div>');
+  assert.ok(title > 0, "开关项标题存在");
+  const item = html.slice(
+    html.lastIndexOf('<div class="modal-item">', title),
+    html.indexOf("</label>", title) + "</label>".length,
+  );
+  assert.ok(item.includes('<label class="toggle">'), "沿用全局开关控件");
+  assert.ok(item.includes('id="poolLoadBalancingToggle"'), "开关有稳定 id 供读写");
+  assert.ok(item.includes("开启后，号池内的请求将智能分流给多个成员承接，同一会话的请求优先留在同一成员"), "定稿说明句");
+  // 说明只摆开启态效果，不暴露并发/优质率/权重/熔断等机制本体。
+  assert.ok(!/并发|优质率|权重|熔断|滑动窗|TTFT|首字|负载|粘性/.test(item), "不向用户暴露实现细节");
+});
+
+test("智能分流开关：切换 POST 该设置，以服务端回读值为准，toast 用定稿文案", async () => {
+  const match = source.match(/poolLoadBalancingToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
+  assert.ok(match, "onchange 处理器在 panel.js 里");
+  const makeToggle = (checked) => ({ checked, setAttribute() {}, removeAttribute() {} });
+  const run = (toggle, api, toasts, settingsSaving) => new Function(
+    "poolLoadBalancingToggle", "settingsSaving", "api", "toast", "panelError",
+    `let settingsLoadGen = 0; ${match[0]} return poolLoadBalancingToggle.onchange();`,
+  )(toggle, settingsSaving, api, (m) => toasts.push(m), (e, fallback) => fallback);
+
+  // 开启
+  const onCalls = [];
+  const onToasts = [];
+  const onSaving = { poolLoadBalancing: false };
+  await run(makeToggle(true), async (method, path, body) => {
+    onCalls.push({ method, path, body });
+    return { ok: true, settings: { poolLoadBalancing: true } };
+  }, onToasts, onSaving);
+  assert.deepEqual(onCalls, [{ method: "POST", path: "/api/settings", body: { poolLoadBalancing: true } }]);
+  assert.deepEqual(onToasts, ["已开启智能分流"]);
+  assert.equal(onSaving.poolLoadBalancing, false, "保存标记必须复位");
+
+  // 关闭
+  const offToasts = [];
+  await run(makeToggle(false), async () => ({ ok: true, settings: { poolLoadBalancing: false } }), offToasts, { poolLoadBalancing: false });
+  assert.deepEqual(offToasts, ["已关闭智能分流"]);
+
+  // 保存失败：回滚开关态并报失败 toast
+  const failToggle = makeToggle(true);
+  const failToasts = [];
+  await run(failToggle, async () => ({ ok: false }), failToasts, { poolLoadBalancing: false });
+  assert.equal(failToggle.checked, false, "失败回滚到切换前");
+  assert.deepEqual(failToasts, ["设置保存失败"]);
+});
+
+test("智能分流开关：回显接线存在，保存中不被轮询盖回", () => {
+  assert.ok(source.includes('const poolLoadBalancingToggle = $("poolLoadBalancingToggle");'), "声明取 id");
+  assert.ok(source.includes("settingsSaving.poolLoadBalancing"), "纳入保存忙标记");
+  assert.ok(source.includes('!settingsSaving.poolLoadBalancing && poolLoadBalancingToggle && d.settings && typeof d.settings.poolLoadBalancing === "boolean"'), "回显守忙标记");
+});

@@ -615,160 +615,167 @@ export async function runStreamWithKeepAlive(res, channel) {
 
   for (let memberIndex = 0; memberIndex < callUpstreams.length; memberIndex += 1) {
     const member = callUpstreams[memberIndex];
-    // Auto-route attribution: pipe-internal terminal ends carry no memberId,
-    // so the tracker learns which member is being attempted. Single-provider
-    // channels carry memberId null, which clears any stale value.
-    tracker?.setCurrentMember?.(member.memberId ?? null);
-    const isLastMember = memberIndex === callUpstreams.length - 1;
-    let advanceToNextMember = false;
+    // 智能分流的在途计数：成员开始承接本请求时 +1，无论成功/失败/中止/切换
+    // 哪条出口都在 finally 里 -1。关闭智能分流时钩子为 undefined，空操作。
+    channel.onMemberBegin?.(member);
+    try {
+      // Auto-route attribution: pipe-internal terminal ends carry no memberId,
+      // so the tracker learns which member is being attempted. Single-provider
+      // channels carry memberId null, which clears any stale value.
+      tracker?.setCurrentMember?.(member.memberId ?? null);
+      const isLastMember = memberIndex === callUpstreams.length - 1;
+      let advanceToNextMember = false;
 
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      attemptsUsed = attempt + 1;
-      if (abortController.signal.aborted || res.writableEnded) {
-        // Race guard: the abort can land between backoff sleep resolving and
-        // this check. With the fault latch deferred, this return must still
-        // close the tracker request or it leaks an in-flight entry.
-        tracker?.recordEnd?.({ aborted: true });
-        return;
-      }
-
-      let result;
-      try {
-        // Resume: the previous attempt's shadow is re-appended to the
-        // original request, so the upstream continues from the partial
-        // output instead of starting over.
-        const callOptions = resumeShadow !== null ? { overrideBody: buildResumeBody(channel.originalBody, resumeShadow) } : {};
-        result = await member.call(callOptions);
-      } catch (err) {
-        if (abortController.signal.aborted) {
-          tracker?.recordEnd({ aborted: true });
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        attemptsUsed = attempt + 1;
+        if (abortController.signal.aborted || res.writableEnded) {
+          // Race guard: the abort can land between backoff sleep resolving and
+          // this check. With the fault latch deferred, this return must still
+          // close the tracker request or it leaks an in-flight entry.
+          tracker?.recordEnd?.({ aborted: true });
           return;
         }
-        channel.onCallError(err);
-        return;
-      }
 
-      if (result.status >= 400 || !result.stream) {
-        if (result.status >= 500 && attempt < maxRetries && !res.writableEnded && !res.destroyed && !abortController.signal.aborted) {
-          // Transient upstream fault (e.g. a Cloudflare 522 when the provider's
-          // origin hiccups). Nothing has been committed to the client response
-          // on this attempt yet, so retry silently — a one-shot 5xx is exactly
-          // the kind of blip a single retry absorbs.
-          tracker?.recordRetry?.({ reason: `upstream_${result.status}`, attempt: attempt + 1, usage: result.body?.usage, memberId: member.memberId ?? undefined });
-          logger?.warn?.(`keep-alive: retrying ${logLabel} (upstream status ${result.status}, attempt ${attempt + 1}/${maxRetries})`);
-          try {
-            await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
-          } catch {
+        let result;
+        try {
+          // Resume: the previous attempt's shadow is re-appended to the
+          // original request, so the upstream continues from the partial
+          // output instead of starting over.
+          const callOptions = resumeShadow !== null ? { overrideBody: buildResumeBody(channel.originalBody, resumeShadow) } : {};
+          result = await member.call(callOptions);
+        } catch (err) {
+          if (abortController.signal.aborted) {
             tracker?.recordEnd({ aborted: true });
             return;
           }
-          continue;
+          channel.onCallError(err);
+          return;
         }
-        if (!isLastMember && result.status >= 400 && shouldFailover(result)) {
-          // Pool routing: channel-level fault (5xx past the member's own
-          // budget, or a failover-class 4xx) — back off to the next member.
-          // What counts as failover-class is plan-kind: chain plans treat
-          // every upstream 4xx as node-level, pool plans keep the other 4xx
-          // request-shaped (terminal passthrough below even with members
-          // left).
-          noteMemberFailover(member, `upstream_${result.status}`, result.body?.usage);
-          advanceToNextMember = true;
-          break;
+
+        if (result.status >= 400 || !result.stream) {
+          if (result.status >= 500 && attempt < maxRetries && !res.writableEnded && !res.destroyed && !abortController.signal.aborted) {
+            // Transient upstream fault (e.g. a Cloudflare 522 when the provider's
+            // origin hiccups). Nothing has been committed to the client response
+            // on this attempt yet, so retry silently — a one-shot 5xx is exactly
+            // the kind of blip a single retry absorbs.
+            tracker?.recordRetry?.({ reason: `upstream_${result.status}`, attempt: attempt + 1, usage: result.body?.usage, memberId: member.memberId ?? undefined });
+            logger?.warn?.(`keep-alive: retrying ${logLabel} (upstream status ${result.status}, attempt ${attempt + 1}/${maxRetries})`);
+            try {
+              await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
+            } catch {
+              tracker?.recordEnd({ aborted: true });
+              return;
+            }
+            continue;
+          }
+          if (!isLastMember && result.status >= 400 && shouldFailover(result)) {
+            // Pool routing: channel-level fault (5xx past the member's own
+            // budget, or a failover-class 4xx) — back off to the next member.
+            // What counts as failover-class is plan-kind: chain plans treat
+            // every upstream 4xx as node-level, pool plans keep the other 4xx
+            // request-shaped (terminal passthrough below even with members
+            // left).
+            noteMemberFailover(member, `upstream_${result.status}`, result.body?.usage);
+            advanceToNextMember = true;
+            break;
+          }
+          // Non-stream or non-2xx status is terminal for the stream handler. A
+          // non-stream success (per-launch Anthropic drives those through this
+          // loop too) counts for pool stickiness, same as a piped ok stream.
+          if (result.status < 400) {
+            channel.onMemberSuccess?.(member);
+          } else if (shouldFailover(result)) {
+            // The last callable's channel-level fault: no member is crossed, but
+            // this member did fail the request, so it counts the same way.
+            channel.onMemberFault?.(member, `upstream_${result.status}`);
+          }
+          channel.onTerminalResult(appendFailoverContext(result, memberIndex + 1), member);
+          return;
         }
-        // Non-stream or non-2xx status is terminal for the stream handler. A
-        // non-stream success (per-launch Anthropic drives those through this
-        // loop too) counts for pool stickiness, same as a piped ok stream.
-        if (result.status < 400) {
-          channel.onMemberSuccess?.(member);
-        } else if (shouldFailover(result)) {
-          // The last callable's channel-level fault: no member is crossed, but
-          // this member did fail the request, so it counts the same way.
-          channel.onMemberFault?.(member, `upstream_${result.status}`);
+
+        // Stream received; attempt to forward via the channel's pipe
+        const outcome = await pipe(result, keepAliveConfig, resumeState);
+        if (outcome.outcome !== "retryable" || outcome.reason !== "empty_stream" || attempt === 0) {
+          lastOutcome = outcome;
         }
-        channel.onTerminalResult(appendFailoverContext(result, memberIndex + 1), member);
-        return;
-      }
 
-      // Stream received; attempt to forward via the channel's pipe
-      const outcome = await pipe(result, keepAliveConfig, resumeState);
-      if (outcome.outcome !== "retryable" || outcome.reason !== "empty_stream" || attempt === 0) {
-        lastOutcome = outcome;
-      }
+        if (outcome.outcome !== "retryable" && outcome.outcome !== "resume") {
+          // Success or already committed/aborted/terminal. A committed stream
+          // (real content bytes written) never fails over to another member.
+          if (outcome.outcome === "ok") channel.onMemberSuccess?.(member);
+          channel.onSettled(outcome, attempt);
+          return;
+        }
 
-      if (outcome.outcome !== "retryable" && outcome.outcome !== "resume") {
-        // Success or already committed/aborted/terminal. A committed stream
-        // (real content bytes written) never fails over to another member.
-        if (outcome.outcome === "ok") channel.onMemberSuccess?.(member);
-        channel.onSettled(outcome, attempt);
-        return;
-      }
+        // Resume: the client has already seen some content, but the stream was
+        // cut. The loop re-issues the same upstream with the partial output
+        // appended — the client never learns the stream was cut. The budget is
+        // shared with the empty-stream retry above.
+        if (outcome.outcome === "resume") {
+          // The shadow is the client's view so far. A null shadow means the
+          // client saw nothing, so this is a clean retry, not a resume.
+          resumeShadow = mergeResumeShadow(resumeShadow, outcome.shadow ?? null);
+          resumeState = {
+            ...(outcome.resumeState ?? {}),
+            priorCalls: resumeShadow?.calls ?? [],
+          };
+          if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
+            tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
+            logger?.warn?.(`keep-alive: resuming ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
+            try {
+              await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
+            } catch {
+              tracker?.recordEnd({ aborted: true });
+              return;
+            }
+            continue;
+          }
+          // Budget spent: fall through to the exhaustion path below.
+        }
 
-      // Resume: the client has already seen some content, but the stream was
-      // cut. The loop re-issues the same upstream with the partial output
-      // appended — the client never learns the stream was cut. The budget is
-      // shared with the empty-stream retry above.
-      if (outcome.outcome === "resume") {
-        // The shadow is the client's view so far. A null shadow means the
-        // client saw nothing, so this is a clean retry, not a resume.
-        resumeShadow = mergeResumeShadow(resumeShadow, outcome.shadow ?? null);
-        resumeState = {
-          ...(outcome.resumeState ?? {}),
-          priorCalls: resumeShadow?.calls ?? [],
-        };
+        // Retryable failure detected before any content was delivered — unless the
+        // client is already gone. Coding agents routinely drop the connection the
+        // moment they have what they need (e.g. entering an ask-user confirmation
+        // pause); that is not an upstream fault and must not latch a panel 502.
+        if (res.destroyed || abortController.signal.aborted) {
+          tracker?.recordEnd?.({ aborted: true, usage: outcome.usage });
+          return;
+        }
+
+        // The fault is deliberately NOT latched at verdict time: a tracker
+        // request records exactly one end, so an early 502 would make the
+        // definitive outcome (client walking away during backoff, or a retry
+        // recovering) invisible to the panel. Latch once, at exhaustion below.
         if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
           tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
-          logger?.warn?.(`keep-alive: resuming ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
+          logger?.warn?.(`keep-alive: retrying ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
           try {
             await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
           } catch {
+            // Aborted during backoff sleep
             tracker?.recordEnd({ aborted: true });
             return;
           }
           continue;
         }
-        // Budget spent: fall through to the exhaustion path below.
-      }
 
-      // Retryable failure detected before any content was delivered — unless the
-      // client is already gone. Coding agents routinely drop the connection the
-      // moment they have what they need (e.g. entering an ask-user confirmation
-      // pause); that is not an upstream fault and must not latch a panel 502.
-      if (res.destroyed || abortController.signal.aborted) {
-        tracker?.recordEnd?.({ aborted: true, usage: outcome.usage });
-        return;
-      }
-
-      // The fault is deliberately NOT latched at verdict time: a tracker
-      // request records exactly one end, so an early 502 would make the
-      // definitive outcome (client walking away during backoff, or a retry
-      // recovering) invisible to the panel. Latch once, at exhaustion below.
-      if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
-        tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
-        logger?.warn?.(`keep-alive: retrying ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
-        try {
-          await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
-        } catch {
-          // Aborted during backoff sleep
-          tracker?.recordEnd({ aborted: true });
-          return;
+        // The member's keep-alive budget is spent on a retryable pre-content
+        // fault. Pool routing: back off to the next member; the last member
+        // falls out to the exhaustion path below, still counting as this
+        // member's failed request (nothing crossed it, but it did fail).
+        if (!isLastMember) {
+          noteMemberFailover(member, outcome.reason, outcome.usage);
+          advanceToNextMember = true;
+        } else {
+          channel.onMemberFault?.(member, outcome.reason);
         }
-        continue;
+        break;
       }
 
-      // The member's keep-alive budget is spent on a retryable pre-content
-      // fault. Pool routing: back off to the next member; the last member
-      // falls out to the exhaustion path below, still counting as this
-      // member's failed request (nothing crossed it, but it did fail).
-      if (!isLastMember) {
-        noteMemberFailover(member, outcome.reason, outcome.usage);
-        advanceToNextMember = true;
-      } else {
-        channel.onMemberFault?.(member, outcome.reason);
-      }
-      break;
+      if (!advanceToNextMember) break;
+    } finally {
+      channel.onMemberEnd?.(member);
     }
-
-    if (!advanceToNextMember) break;
   }
 
   // All keep-alive retries exhausted — the definitive terminal outcome for
@@ -832,7 +839,7 @@ export async function runStreamWithKeepAlive(res, channel) {
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, fillChunkEnvelope = null, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
+export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, fillChunkEnvelope = null, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, onMemberBegin, onMemberEnd }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -847,6 +854,8 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
     shouldFailover,
     onMemberSuccess,
     onMemberFault,
+    onMemberBegin,
+    onMemberEnd,
     logLabel: "request",
     pipe: (result, keepAliveConfig, resumeState = null) => {
       const onTier = keepAliveConfig?.mode === "on";
@@ -960,7 +969,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
 // longer carry.
 // Pool routing (phase 2): same callUpstreams / shouldFailover /
 // onMemberSuccess contract as the other channels.
-export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
+export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, onMemberBegin, onMemberEnd }) {
   const logger = deps?.logger;
   const writeFailedFrame = (message, type, code = null) => {
     try {
@@ -983,6 +992,8 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
     shouldFailover,
     onMemberSuccess,
     onMemberFault,
+    onMemberBegin,
+    onMemberEnd,
     logLabel: "responses request",
     pipe: (result, keepAliveConfig, resumeState = null) => {
       const onTier = keepAliveConfig?.mode === "on";
@@ -1080,7 +1091,7 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, name, logLabel }) {
+export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, originalBody = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, onMemberBegin, onMemberEnd, name, logLabel }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -1095,6 +1106,8 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ag
     shouldFailover,
     onMemberSuccess,
     onMemberFault,
+    onMemberBegin,
+    onMemberEnd,
     logLabel,
     pipe: (result, keepAliveConfig, resumeState = null) => {
       const onTier = keepAliveConfig?.mode === "on";

@@ -4,12 +4,13 @@ import { providerRoutingShapes, findStaleTargets } from "../catalog/catalog-gene
 import { extractPresentedToken } from "./handler.mjs";
 import { validateStore } from "../store/store-schema.mjs";
 import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable } from "../channels/pool-routing.mjs";
+import { createLoadBalancer } from "../channels/pool-load-routing.mjs";
 import { AUTO_MODEL, resolveChain, resolveVirtualModelEntry, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "../channels/chain-routing.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "../catalog/effort-injection.mjs";
 import { buildChannelModelSlugCatalog } from "../channels/channel-model-slug.mjs";
 import { requestModelIsTextOnly, looksLikeTextOnlyRejection } from "../catalog/text-models.mjs";
 import { requestHasImages, stripImages, noteImageFallback } from "./media-strip.mjs";
-import { imageFallbackEnabled, imageHeuristicEnabled } from "./relay-settings.mjs";
+import { imageFallbackEnabled, imageHeuristicEnabled, poolLoadBalancingEnabled } from "./relay-settings.mjs";
 
 // The optional `code` rides inside the error object. OpenAI's own error
 // schema types `code` as a string, but the numeric form (e.g. 429, 502) is
@@ -206,6 +207,7 @@ export function createOpenAIHandler(deps) {
     // 一致）；未注入时走 relay-settings 的磁盘现读默认，测试注入定值。
     imageFallbackGate = imageFallbackEnabled,
     imageHeuristicGate = imageHeuristicEnabled,
+    poolLoadBalancingGate = poolLoadBalancingEnabled,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
@@ -213,6 +215,32 @@ export function createOpenAIHandler(deps) {
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
   const stickyTable = createStickyTable();
+
+  // 智能分流（poolLoadBalancing）：开启后号池改用加权最小负载分流，关闭时
+  // 沿用上面的粘性表。与 stickyTable 同一闭包生命周期（进程内存，重启清零）。
+  const loadBalancer = createLoadBalancer();
+
+  // 号池路由门面：按当前开关在粘性表与负载均衡器之间二选一，规划时一次性定模式
+  // （避免请求中途翻开关导致 order 与记账走不同机制）。关闭时返回值与旧粘性
+  // 路径逐字节一致：noteSuccess 忽略多余的 ttft 参数，begin/end 为 undefined。
+  function poolRouting(poolId, modelId, candidates, sessionKey) {
+    if (poolLoadBalancingGate()) {
+      return {
+        useLb: true,
+        ordered: loadBalancer.order(poolId, modelId, candidates, sessionKey),
+        noteSuccess: (memberId, ttftMs) => loadBalancer.noteSuccess(poolId, modelId, memberId, ttftMs, sessionKey),
+        noteFailure: (memberId) => loadBalancer.noteFailure(poolId, modelId, memberId, sessionKey),
+        begin: (memberId) => loadBalancer.begin(memberId),
+        end: (memberId) => loadBalancer.end(memberId),
+      };
+    }
+    return {
+      useLb: false,
+      ordered: stickyTable.order(poolId, modelId, candidates),
+      noteSuccess: (memberId) => stickyTable.noteSuccess(poolId, modelId, memberId),
+      noteFailure: (memberId) => stickyTable.noteFailure(poolId, modelId, memberId),
+    };
+  }
 
   // Chain routing (自动路由): endpointId (the requesting agent's id) -> the
   // chain node that answered last. Same closure lifetime as stickyTable.
@@ -552,7 +580,7 @@ export function createOpenAIHandler(deps) {
   // The generation gate needs no pool special-casing: the catalog digest
   // covers providers (including every member's endpoint) but not pool
   // membership, so editing pool composition alone cannot false-trigger a 409.
-  async function planPoolChatCompletions(path, headers, body) {
+  async function planPoolChatCompletions(path, headers, body, sessionKey = null) {
     const auth = authorize(headers);
     if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
 
@@ -588,20 +616,23 @@ export function createOpenAIHandler(deps) {
       };
     }
 
-    const ordered = stickyTable.order(parsed.providerId, modelId, candidates);
+    const routing = poolRouting(parsed.providerId, modelId, candidates, sessionKey);
     return {
       ok: true,
       poolId: parsed.providerId,
       modelId,
-      members: ordered.map(({ memberId, provider }) => ({
+      members: routing.ordered.map(({ memberId, provider }) => ({
         memberId,
         call: (options = {}) => attemptChatCompletion(memberId, provider, body, options),
       })),
-      noteSuccess: (memberId) => stickyTable.noteSuccess(parsed.providerId, modelId, memberId),
+      noteSuccess: (memberId, ttftMs) => routing.noteSuccess(memberId, ttftMs),
       // 成员级请求失败计数（该成员本次请求彻底失败时由 server 侧回调，
       // 末位成员同样计入）——号池粘性位降级门控（失败才降级）的计数来源。
       // 一个成员在一次请求里至多失败一次（keep-alive 重试在成员内部吸收），无需去重。
-      noteFailure: (memberId) => stickyTable.noteFailure(parsed.providerId, modelId, memberId),
+      noteFailure: (memberId) => routing.noteFailure(memberId),
+      // 智能分流开启时的在途计数钩子（关闭时为 undefined，server 侧 ?. 空操作）。
+      beginMember: routing.begin,
+      endMember: routing.end,
     };
   }
 
@@ -626,7 +657,7 @@ export function createOpenAIHandler(deps) {
   // when fully exhausted. memberId is `nodeId` for channels and
   // `nodeId/poolMemberId` for pool members (provider/pool ids never contain
   // '/', so the split is unambiguous).
-  async function planChainChatCompletions(path, headers, body, agentId) {
+  async function planChainChatCompletions(path, headers, body, agentId, sessionKey = null) {
     const auth = authorize(headers);
     if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
 
@@ -674,9 +705,11 @@ export function createOpenAIHandler(deps) {
 
     const plan = chainState.plan(loaded.store, routeKey, chainEntry.chain, Date.now());
     const members = [];
-    const memberMeta = new Map(); // memberId -> { nodeId, model, poolMemberId? }
+    const memberMeta = new Map(); // memberId -> { nodeId, model, poolMemberId?, routing? }
     // 本请求已计失败的节点（node+model 复合键）：noteFailure 的去重集。
     const failedNodes = new Set();
+    // 链里任一池节点走了智能分流，整条链就暴露在途计数钩子。
+    let poolLbActive = false;
     for (const entry of plan) {
       const expanded = expandChainNode(loaded.store, entry);
       if (!expanded) continue;
@@ -694,8 +727,9 @@ export function createOpenAIHandler(deps) {
       } else {
         const pool = resolvePool(loaded.store, expanded.poolId);
         const candidates = poolMembersWithModel(loaded.store, pool, entry.model);
-        const ordered = stickyTable.order(expanded.poolId, entry.model, candidates);
-        for (const { memberId: poolMemberId, provider } of ordered) {
+        const routing = poolRouting(expanded.poolId, entry.model, candidates, sessionKey);
+        poolLbActive = poolLbActive || routing.useLb;
+        for (const { memberId: poolMemberId, provider } of routing.ordered) {
           const flatId = uniqueMemberId(memberMeta, `${expanded.poolId}/${poolMemberId}`, entry.model);
           members.push({
             memberId: flatId,
@@ -704,7 +738,7 @@ export function createOpenAIHandler(deps) {
               poolMemberId, provider, { ...body, model: entry.model }, options,
             ),
           });
-          memberMeta.set(flatId, { nodeId: expanded.poolId, model: entry.model, poolMemberId });
+          memberMeta.set(flatId, { nodeId: expanded.poolId, model: entry.model, poolMemberId, routing });
         }
       }
     }
@@ -734,7 +768,7 @@ export function createOpenAIHandler(deps) {
         const meta = memberMeta.get(memberId);
         return meta ? { providerId: meta.nodeId, model: meta.model, chainKey: routeKey } : null;
       },
-      noteSuccess: (memberId) => {
+      noteSuccess: (memberId, ttftMs) => {
         const meta = memberMeta.get(memberId);
         const slash = memberId.indexOf("/");
         const nodeId = meta?.nodeId ?? (slash === -1 ? memberId : memberId.slice(0, slash));
@@ -745,7 +779,7 @@ export function createOpenAIHandler(deps) {
         if (!model) return;
         noteChainSuccess(chainState, routeKey, nodeId, model, Date.now());
         if (meta?.poolMemberId) {
-          stickyTable.noteSuccess(nodeId, meta.model, meta.poolMemberId);
+          meta.routing.noteSuccess(meta.poolMemberId, ttftMs);
         }
       },
       // 一次请求级节点失败（成员切换真正越过该节点时由 server 侧回调）。
@@ -757,16 +791,21 @@ export function createOpenAIHandler(deps) {
         const nodeId = meta?.nodeId ?? (slash === -1 ? memberId : memberId.slice(0, slash));
         const model = meta?.model ?? chainEntry.chain.find((entry) => entry?.node === nodeId)?.model;
         if (!model) return;
-        // 池成员还要进池内粘性表的成员级计数（失败才降级，与链同一规则）；
+        // 池成员还要进池内路由的成员级计数（失败才降级，与链同一规则）；
         // 成员一次请求至多 failover 一次，不需要 per-request 去重。
         if (meta?.poolMemberId) {
-          stickyTable.noteFailure(nodeId, model, meta.poolMemberId);
+          meta.routing.noteFailure(meta.poolMemberId);
         }
         const key = chainNodeKey(nodeId, model);
         if (failedNodes.has(key)) return;
         failedNodes.add(key);
         noteChainFailure(chainState, routeKey, nodeId, model);
       },
+      // 智能分流开启时（链含池节点）暴露在途计数钩子；纯渠道链或关闭时为
+      // undefined，server 侧 ?. 空操作。链成员的 memberId 是扁平 id
+      // （pool/member），在途计数须翻回池成员 id 才能与 order 的负载键对齐。
+      beginMember: poolLbActive ? (memberId) => loadBalancer.begin(memberMeta.get(memberId)?.poolMemberId ?? memberId) : undefined,
+      endMember: poolLbActive ? (memberId) => loadBalancer.end(memberMeta.get(memberId)?.poolMemberId ?? memberId) : undefined,
     };
   }
 
