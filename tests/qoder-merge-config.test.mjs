@@ -312,7 +312,7 @@ describe("mergeQoderSettings", () => {
     assert.ok(config.providers[managedConnectionId("poke-api")]);
   });
 
-  it("deletes previously-managed connections listed in previousManagedIds", () => {
+  it("deletes stale managed connections left by a previous sync", () => {
     const staleId = managedConnectionId("old-provider");
     const existing = {
       providers: {
@@ -330,24 +330,55 @@ describe("mergeQoderSettings", () => {
       },
     };
     const managedProviders = extractManagedProviders(STORE);
-    const { config } = mergeQoderSettings(existing, managedProviders, PORT, TOKEN, [staleId]);
+    const { config } = mergeQoderSettings(existing, managedProviders, PORT, TOKEN);
     assert.equal(config.providers[staleId], undefined, "stale managed connection removed");
     assert.ok(config.providers["qoder-custom-user-built"], "user entry survives stale cleanup");
     assert.ok(config.providers[managedConnectionId("poke-api")], "current managed set injected");
   });
 
-  it("replaces the current managed set even without previousManagedIds (idempotent re-sync)", () => {
+  it("sweeps namespace orphans that drifted out of sidecar bookkeeping", () => {
+    // 2026-11-14 实机 scnet-2 案的形态：条目带托管前缀，但渠道已删、账本
+    // （sidecar）也已前移——既不在账本在册集也不在当前渠道集。删除白名单若
+    // 只认这两个来源，这种条目没有任何代码路径会再碰它，永久残留。前缀＝
+    // anys 托管命名空间（stripQoder 卸载侧同款所有权口径），同步按前缀收敛，
+    // 自愈不依赖账本完整（账本丢/坏按设计 fail-open 成空集）。
+    const orphanId = managedConnectionId("scnet-2");
+    const existing = {
+      enabledPlugins: { "qoder-context@qoderapp-bundler": true },
+      providers: {
+        [orphanId]: {
+          baseUrl: "http://127.0.0.1:47821/openai/qoder~scnet-2/v1",
+          apiKey: "stale",
+          type: "openai-compatible",
+          protocol: "openai",
+          authType: "bearer",
+          displayName: "scnet-2",
+          model: "SCNet-Max",
+          models: [{ model: "SCNet-Max", displayName: "SCNet-Max", contextWindow: 128000, capabilities: { vision: false, thinking: { modes: [] } } }],
+        },
+        "qoder-custom-user-built": { displayName: "My Own", apiKey: "user-key", models: [{ model: "x" }] },
+      },
+    };
+    const managedProviders = extractManagedProviders(STORE);
+    const { config } = mergeQoderSettings(existing, managedProviders, PORT, TOKEN);
+    assert.equal(config.providers[orphanId], undefined, "脱离账本的命名空间孤儿被清");
+    assert.ok(config.providers["qoder-custom-user-built"], "用户 BYOK 原样保留");
+    assert.deepEqual(config.enabledPlugins, { "qoder-context@qoderapp-bundler": true }, "其他字段分毫不动");
+    assert.ok(config.providers[managedConnectionId("poke-api")], "在册渠道照常写入");
+  });
+
+  it("replaces the current managed set wholesale on an idempotent re-sync", () => {
     const managedProviders = extractManagedProviders(STORE);
     const first = mergeQoderSettings({}, managedProviders, PORT, TOKEN);
-    // Second merge over the first result with no previousManagedIds: what comes
+    // Second merge over the first result: what comes
     // out must be EXACTLY the current pool's connections — none dropped, none
     // stale, values rebuilt fresh. The expectation is anchored to an
     // independent build from the same pool instead of comparing the two merge
     // runs against each other: object keys are unique and a same-pool
     // overwrite reproduces identical keys even if the managed write were
     // removed entirely, so that comparison could never fail. Stale-id removal
-    // itself is covered by the previousManagedIds case above and the sidecar
-    // end-to-end case below.
+    // itself is covered by the stale-cleanup and namespace-orphan cases above
+    // and the sidecar end-to-end case below.
     const second = mergeQoderSettings(first.config, managedProviders, PORT, TOKEN);
     assert.deepEqual(second.config.providers, buildQoderProviders(managedProviders, PORT, TOKEN));
   });
@@ -464,7 +495,6 @@ describe("auto routing channel (auto)", () => {
       extractManagedProviders(CHAIN_STORE),
       PORT,
       TOKEN,
-      [],
       auto,
     );
     const autoConn = config.providers[managedConnectionId("auto")];
@@ -483,7 +513,6 @@ describe("auto routing channel (auto)", () => {
       extractManagedProviders(STORE),
       PORT,
       TOKEN,
-      [],
       deriveAutoRouteChannel(STORE, "qoder"),
     );
     assert.equal(config.providers[managedConnectionId("auto")], undefined);
@@ -496,7 +525,6 @@ describe("auto routing channel (auto)", () => {
       extractManagedProviders(CHAIN_STORE),
       PORT,
       TOKEN,
-      [],
       deriveAutoRouteChannel(CHAIN_STORE, "qoder"),
     );
     assert.ok(first.config.providers[managedConnectionId("auto")]);
@@ -505,7 +533,6 @@ describe("auto routing channel (auto)", () => {
       extractManagedProviders(STORE),
       PORT,
       TOKEN,
-      first.managed.map(managedConnectionId),
       deriveAutoRouteChannel(STORE, "qoder"),
     );
     assert.equal(second.config.providers[managedConnectionId("auto")], undefined, "stale auto removed once the chain is gone");
@@ -799,6 +826,39 @@ describe("writeQoderConfig 双区域版双根写入", () => {
     const third = writeQoderConfig(storeWithoutNvidia, PORT, TOKEN, dir, settingsPath);
     assert.equal(third.ok, true);
     assert.equal(third.unchanged, true, "同集再跑整单幂等");
+  });
+
+  // 命名空间自愈的实机形态复刻（scnet-2）：漂移时代在第二根留下的孤儿不在
+  // 账本、也不在渠道集，账本驱动的删除永远管不到；下一轮双根同步按前缀收敛。
+  it("单根残留的命名空间孤儿在下一轮同步中自愈", () => {
+    const dir = mkTestDir("qoder-write-test-");
+    mkdirSync(join(dir, ".qoder"), { recursive: true });
+    mkdirSync(join(dir, ".qoder-cn"), { recursive: true });
+    const settingsPath = join(dir, ".qoder", "settings.json");
+    writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
+    // 复刻历史漂移残留：往 CN 根塞一条不在账本、不在渠道集的前缀孤儿
+    const orphanId = managedConnectionId("scnet-2");
+    const cnPath = join(dir, ".qoder-cn", "settings.json");
+    const cn = JSON.parse(readFileSync(cnPath, "utf8"));
+    cn.providers[orphanId] = {
+      baseUrl: "http://127.0.0.1:47821/openai/qoder~scnet-2/v1",
+      apiKey: "stale",
+      type: "openai-compatible",
+      protocol: "openai",
+      authType: "bearer",
+      displayName: "scnet-2",
+      model: "SCNet-Max",
+      models: [{ model: "SCNet-Max", displayName: "SCNet-Max", contextWindow: 128000, capabilities: { vision: false, thinking: { modes: [] } } }],
+    };
+    writeFileSync(cnPath, JSON.stringify(cn, null, 2), "utf8");
+    // 下一轮同步：两根按命名空间收敛
+    const second = writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
+    assert.equal(second.ok, true);
+    const healed = JSON.parse(readFileSync(cnPath, "utf8"));
+    assert.equal(healed.providers[orphanId], undefined, "CN 根的孤儿被清");
+    assert.ok(healed.providers[managedConnectionId("poke-api")], "在册渠道不受影响");
+    assert.ok(healed.providers[managedConnectionId("nvidia-nim")], "在册渠道不受影响");
+    assert.deepEqual(readSidecar(dir).providers.sort(), ["nvidia-nim", "poke-api"], "账本不受影响");
   });
 
   it("第二根写失败时 sidecar 不落账（留批次前集，下一轮两侧按旧账重清）", () => {

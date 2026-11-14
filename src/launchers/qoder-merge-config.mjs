@@ -14,8 +14,9 @@
 // the local Anyswitch relay; apiKey is the relay token. Injection is
 // idempotent: managed connection ids carry a deterministic
 // "qoder-custom-anyswitch-<hash>" suffix derived from the Anyswitch provider
-// id, and a sync deletes the previously-managed set before writing the current
-// one, so removed providers/chains drop out on the next sync.
+// id, and a sync replaces the whole prefix namespace (see mergeQoderSettings),
+// so removed providers/chains — and any entry that drifted out of the sidecar
+// bookkeeping — drop out on the next sync.
 //
 // 双区域版（2026-11-12 契约，结构同构）：Qoder 国际版与 CN 版是同一端点
 // "qoder" 的两枚指纹——数据根 ~/.qoder ↔ ~/.qoder-cn，CLI qodercli.exe ↔
@@ -246,25 +247,32 @@ export function buildQoderProviders(managedProviders, port, token, catalog = nul
 }
 
 // Merge managed providers into the settings.json object.
-// Replaces the managed subset of `providers` (tracked by sidecar) and removes
-// the dead `modelConfigs.customModels` array. All other settings.json fields
-// are preserved untouched, including user-created `providers` entries.
-export function mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds = [], autoChannel = null, catalog = null) {
+// Replaces every connection inside the Anyswitch-owned `qoder-custom-anyswitch-`
+// namespace (the same ownership stripQoder sweeps at uninstall) and removes the
+// dead `modelConfigs.customModels` array. All other settings.json fields are
+// preserved untouched, including user-created `providers` entries.
+export function mergeQoderSettings(existing, managedProviders, port, token, autoChannel = null, catalog = null) {
   const settings = typeof existing === "object" && existing !== null ? { ...existing } : {};
   // Append the virtual auto-routing channel outside the entry-builder system:
   // it flows through the same cleanup/inject loops as any real channel, so
   // deleting the endpoint's chain makes the next sync drop it via the ordinary
-  // previousManaged path.
+  // namespace cleanup.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
   const managedMap = buildQoderProviders(providers, port, token, catalog);
-  const currentManagedIds = Object.keys(providers).map(managedConnectionId);
 
-  // Start from the user's own providers, drop previously-managed connections,
-  // then layer the current managed set on top.
+  // Start from the user's own providers, drop every connection inside the
+  // managed namespace, then layer the current managed set on top. The prefix is
+  // Anyswitch-owned (stripQoder sweeps it whole at uninstall), so a prefixed key
+  // this sync is not writing is residue from bookkeeping divergence — the
+  // pre-2026-11 shared-sidecar drift left exactly such orphans in the second
+  // root: in neither the sidecar list nor the current set, unreachable for
+  // every later sync. Converging by prefix also survives a lost or corrupt
+  // sidecar, which fails open to an empty list by design.
   const existingProviders = { ...(settings.providers ?? {}) };
-  for (const id of previousManagedIds) delete existingProviders[id];
-  for (const id of currentManagedIds) delete existingProviders[id];
+  for (const id of Object.keys(existingProviders)) {
+    if (id.startsWith(MANAGED_PREFIX) && !Object.hasOwn(managedMap, id)) delete existingProviders[id];
+  }
   settings.providers = { ...existingProviders, ...managedMap };
 
   // Drop customModels so an older layout cannot shadow `providers`.
@@ -351,12 +359,11 @@ function writeQoderConfigFile(store, port, token, sidecarRoot, settingsPath, cat
     }
     throw error;
   }
-  const previousManagedIds = previousManaged.map(managedConnectionId);
   // Switch off → no library answer, so each model falls back to the store's
   // own isReasoning flag. The whole managed provider set is rebuilt every
   // sync, so nothing library-sourced survives the switch being turned off.
   const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot)) ? catalog : null;
-  const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds, autoChannel, effectiveCatalog);
+  const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, autoChannel, effectiveCatalog);
 
   const writeResult = writeQoderSettingsWithBackup(settingsPath, config);
   if (writeResult.ok && preSyncManaged === null) {
