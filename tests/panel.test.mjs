@@ -3717,7 +3717,7 @@ describe("panel.html 设置全页视图", () => {
     assert.doesNotMatch(desc, /ZCode.*Claude Code.*Qoder/, "不再枚举端点名（枚举式必然再漂移）");
   });
 
-  it("「通用」子 tab 分六张卡：启动/显示/抗截断/Claude Code/实时输出 带图标卡头，其余未归类平卡", () => {
+  it("「通用」子 tab 分六张卡：启动/显示/抗截断/Claude Code/运行日志 带图标卡头，其余未归类平卡", () => {
     const general = panelHtml.slice(
       panelHtml.indexOf('id="settingsPanelGeneral"'),
       panelHtml.indexOf('id="settingsPanelRoute"'),
@@ -3734,8 +3734,8 @@ describe("panel.html 设置全页视图", () => {
       "「抗截断」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*Claude Code\s*<\/h2>/.test(general),
       "「Claude Code」卡带品牌图标卡头（档位映射四行都在卡内）");
-    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*实时输出\s*<\/h2>/.test(general),
-      "「实时输出」卡带 stroke 图标卡头");
+    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*运行日志\s*<\/h2>/.test(general),
+      "「运行日志」卡带 stroke 图标卡头");
     assert.ok(general.includes('id="loggingEnabledToggle"'), "运行日志开关在卡内");
     // 卡头图标 = 厂商品牌字形，字形不另抄一份：从看板那张卡的 .agent-avatar 里取，两边必须是
     // 同一 path（改一边漏另一边就红）。官方只发品牌橙那一版，而卡头要跟同行文字同色，故 fill
@@ -8269,16 +8269,16 @@ describe("设置项「运行日志」", () => {
     "utf8",
   );
 
-  it("挂在「通用」子页的「实时输出」卡里，沿用既有 .toggle 控件", () => {
+  it("挂在「通用」子页的「运行日志」卡里，沿用既有 .toggle 控件", () => {
     const item = panelHtml.match(/<div class="modal-item">[\s\S]*?记录运行日志[\s\S]*?<\/label>\s*<\/div>/);
     assert.ok(item, "条目挂在设置页内");
     assert.ok(item[0].includes('<label class="toggle">'), "沿用全局开关控件与各主题皮肤");
     assert.ok(item[0].includes('id="loggingEnabledToggle"'), "开关有稳定 id 供读写");
-    assert.ok(item[0].includes("关闭后停止记录，左侧的实时输出一并隐藏"), "说明写清关闭后的后果");
+    assert.ok(item[0].includes("关闭后停止记录，左侧的运行日志一并隐藏"), "说明写清关闭后的后果");
   });
 
-  it("左侧实时输出卡有稳定 id，供开关驱动整卡显隐", () => {
-    assert.ok(panelHtml.includes('<div class="panel-card" id="liveLogCard">'), "实时输出卡可被定位");
+  it("左侧运行日志区有稳定 id，供开关驱动整区显隐", () => {
+    assert.ok(panelHtml.includes('<div class="live-log-region" id="liveLogCard">'), "运行日志区可被定位（无框）");
   });
 
   it("关掉时断流、清空并隐去整卡；重新打开才重新建连", () => {
@@ -8507,7 +8507,7 @@ describe("设置项「运行日志」", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("从属行在「实时输出」卡内、随总开关收起，控件有稳定 id", () => {
+  it("从属行在「运行日志」卡内、随总开关收起，控件有稳定 id", () => {
     const toggleAt = panelHtml.indexOf('id="loggingEnabledToggle"');
     const rowsAt = panelHtml.indexOf('<div id="logLevelRows" hidden>');
     const selectAt = panelHtml.indexOf('id="logLevelSelect"');
@@ -8524,7 +8524,7 @@ describe("设置项「运行日志」", () => {
     }
   });
 
-  it("选项文案与实时输出行打出来的级别标签同形，不再各说一套词", () => {
+  it("选项文案与运行日志行打出来的级别标签同形，不再各说一套词", () => {
     // 左侧窗里每行是 appendLog 写的 <span class="lvl">LEVEL.toUpperCase()</span>；
     // 下拉里若仍写中文，同一件事就成两套词——这条把两边钉在同一份 token 上。
     const selectBlock = panelHtml.match(/<select class="logs-sel" id="logLevelSelect">([\s\S]*?)<\/select>/);
@@ -8550,9 +8550,9 @@ describe("设置项「运行日志」", () => {
   });
 
   it("从属段说明只讲用户看得懂的行为，不出现字段名", () => {
-    const desc = panelHtml.match(/<div class="modal-item-desc">(实时输出只显示[^<]*)<\/div>/);
+    const desc = panelHtml.match(/<div class="modal-item-desc">(运行日志只显示[^<]*)<\/div>/);
     assert.ok(desc, "说明文案存在");
-    assert.equal(desc[1], "实时输出只显示所选级别及其更高级别的日志行。", "文案逐字定稿");
+    assert.equal(desc[1], "运行日志只显示所选级别及其更高级别的日志行。", "文案逐字定稿");
     assert.doesNotMatch(desc[1], /logLevel|loggingEnabled|logger|SSE|level/, "正文不出现标识符与机制词");
     assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase");
   });
@@ -17483,12 +17483,13 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
       "徽标/折叠钮/实例计数是数据位，pending 期藏而不删，标题不换位");
   });
 
-  it("pending 同帧盖住左列数据位：徽标与连接态藏而不删，监听地址值位立骨架", () => {
-    // 左列静态默认写的是「运行正常」「127.0.0.1:47821」「● 在线 / ● 实时传输」——
-    // 与右列「没取到不许画」同帧矛盾。徽标与状态行藏而不删（visibility，同
-    // .agent-actions 口径：占位不跳），监听地址的值位立一条复用 .sessions-skel 的骨架。
-    assert.ok(/html\[data-board="pending"\] #sbStateBadge,\s*html\[data-board="pending"\] #logConnBadge,\s*html\[data-board="pending"\] #logConn \{ visibility: hidden; \}/.test(panelCss),
-      "服务状态徽标 / 日志连接徽标 / 实时传输行在 pending 期藏而不删");
+  it("pending 同帧盖住左列数据位：服务状态徽标藏而不删，监听地址值位立骨架", () => {
+    // 左列静态默认写的是「运行正常」「127.0.0.1:47821」——与右列「没取到不许画」同帧
+    // 矛盾。徽标藏而不删（visibility，占位不跳），监听地址值位立一条复用 .sessions-skel
+    // 的骨架。运行日志区无连接指示，pending 期无假在线可藏。
+    assert.ok(/html\[data-board="pending"\] #sbStateBadge \{ visibility: hidden; \}/.test(panelCss),
+      "服务状态徽标在 pending 期藏而不删");
+    assert.ok(!/#logConn/.test(panelCss), "日志连接指示已退场，无 pending 隐藏规则");
     assert.ok(panelCss.includes('html[data-board="pending"] #sbHost { display: none; }'),
       "监听地址的写死默认值 pending 期不出现");
     assert.ok(/\.board-side-skel \{ display: none; \}/.test(panelCss),
@@ -17787,24 +17788,28 @@ describe("面板脚本资产 ETag：仅脚本换新才在回前台重载", () =>
   });
 });
 
-describe("看板实时输出：消息提示式双态流", () => {
+describe("看板运行日志：无框消息提示式双态流", () => {
   const panelHtml = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"), "utf8");
   const panelJs = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"), "utf8");
   const panelCss = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.css"), "utf8");
 
-  it("卡壳与控件在册：收起堆叠 + 展开视口，沿用既有文案与 id", () => {
-    assert.ok(panelHtml.includes('<div class="panel-card" id="liveLogCard">'));
-    assert.ok(panelHtml.includes('id="liveLogCardHeader"'));
+  it("无框区域与控件在册：标题「运行日志」+ 清空左/展开收起右文字钮，连接指示退场", () => {
+    assert.ok(panelHtml.includes('<div class="live-log-region" id="liveLogCard">'), "无框区域可被定位");
+    assert.ok(!panelHtml.includes('class="panel-card" id="liveLogCard"'), "外面不再套 panel-card");
+    assert.ok(!panelHtml.includes('id="liveLogCardHeader"'), "终端卡头退场");
+    assert.ok(panelHtml.includes('id="liveLogTitle">运行日志</h2>'), "区域标题「运行日志」");
     assert.ok(panelHtml.includes('id="liveLog" data-state="collapsed"'));
     assert.ok(panelHtml.includes('id="logStack"'));
     assert.ok(panelHtml.includes('id="logBody" role="log" tabindex="-1"'));
-    assert.ok(panelHtml.includes('id="logToggle" type="button" aria-expanded="false" aria-controls="logBody" aria-label="实时输出"'));
-    assert.ok(panelHtml.includes('id="logConnBadge">● 在线</span>'));
-    assert.ok(panelHtml.includes('id="logConn">● 实时传输</span>'));
+    assert.ok(panelHtml.includes('id="logToggle" type="button" aria-expanded="false" aria-controls="logBody"'));
+    assert.ok(panelHtml.includes('class="live-log-toggle-text">展开</span>'), "折叠钮带可见文字，不纯图标");
     assert.ok(panelHtml.includes('id="clearLog" type="button">清空</button>'));
+    const clearAt = panelHtml.indexOf('id="clearLog"');
+    const toggleAt = panelHtml.indexOf('id="logToggle"');
+    assert.ok(clearAt > 0 && clearAt < toggleAt, "清空在展开/收起左侧");
+    assert.ok(!panelHtml.includes('id="logConnBadge"') && !panelHtml.includes('id="logConn"'), "连接徽标/状态行退场");
+    assert.ok(!panelHtml.includes("● 在线") && !panelHtml.includes("● 实时传输"), "常驻连接文案退场");
     assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
-    const toggle = panelHtml.match(/<button class="live-log-toggle"[\s\S]*?<\/button>/)?.[0];
-    assert.ok(toggle && !/>[^<]*[\u4e00-\u9fff]/.test(toggle.replace(/aria-label="实时输出"/, "")), "展开钮只复用既有 aria 文案，不新增可见字串");
   });
 
   it("CSS 钉住双态几何与动效组：96→320、堆叠三档、轻快滑入、reduced-motion 兜底", () => {
@@ -17817,7 +17822,10 @@ describe("看板实时输出：消息提示式双态流", () => {
     assert.ok(/@keyframes liveLogMsgIn \{ from \{ opacity: 0; transform: translateY\(16px\) scale\(1\); \} \}/.test(panelCss));
     assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*transition-duration: 160ms;/.test(panelCss));
     assert.ok(/\.live-log-stack, \.live-log-viewport \{[^}]*transition: opacity 160ms var\(--ease-out\); \}/.test(panelCss));
-    assert.ok(/#logConnBadge\.is-reconnecting, #logConn\.is-reconnecting \{ animation: liveLogPulse 1\.2s ease-in-out infinite; \}/.test(panelCss));
+    assert.ok(!/liveLogPulse/.test(panelCss) && !/#logConn/.test(panelCss), "连接态脉冲与指示退场，不上屏");
+    assert.ok(/\.live-log-bar \{[^}]*justify-content: space-between;/.test(panelCss), "无框控制行：标题左、动作右");
+    assert.ok(/\.live-log-title \{[^}]*font-weight: 600;/.test(panelCss), "区域标题「运行日志」在册");
+    assert.ok(/\.live-log-actions \{ display: inline-flex; align-items: center; gap: 10px; \}/.test(panelCss), "清空与展开/收起拉开间距");
     assert.ok(/\.live-log-viewport::-webkit-scrollbar-thumb \{ background: var\(--border-strong\);/.test(panelCss));
     assert.ok(/@media \(prefers-reduced-motion: reduce\) \{ \* \{ transition: none !important; animation: none !important; \} \}/.test(panelCss));
     assert.ok(!/\.log-console/.test(panelCss), "旧控制台样式不再残留");
@@ -17858,6 +17866,7 @@ describe("看板实时输出：消息提示式双态流", () => {
     getAttribute(k) { return this.attributes[k] ?? null; }
     addEventListener(type, fn) { this._listeners[type] = fn; }
     dispatch(type, ev) { this._listeners[type]?.(ev); }
+    querySelector(sel) { this._qs ??= {}; return this._qs[sel] ??= new FakeElement("span"); }
   }
   class FakeEventSource {
     constructor(url) { this.url = url; this.closed = false; FakeEventSource.instances.push(this); }
@@ -17867,7 +17876,7 @@ describe("看板实时输出：消息提示式双态流", () => {
 
   function makeSandbox() {
     FakeEventSource.instances = [];
-    const ids = ["liveLogCard", "liveLogCardHeader", "liveLog", "logToggle", "logBody", "logStack", "clearLog", "logConn", "logConnBadge", "logLevelRows", "logLevelSelect"];
+    const ids = ["liveLogCard", "liveLog", "liveLogTitle", "logToggle", "logBody", "logStack", "clearLog", "logLevelRows", "logLevelSelect"];
     const els = Object.fromEntries(ids.map((id) => [id, new FakeElement("div")]));
     els.liveLog.dataset.state = "collapsed";
     els.logToggle.setAttribute("aria-expanded", "false");
@@ -17936,6 +17945,7 @@ describe("看板实时输出：消息提示式双态流", () => {
     sandbox.setLogExpanded(true);
     assert.equal(els.liveLog.dataset.state, "expanded");
     assert.equal(els.logToggle.getAttribute("aria-expanded"), "true");
+    assert.equal(els.logToggle.querySelector(".live-log-toggle-text").textContent, "收起", "展开态钮文字切「收起」");
     assert.equal(els.logBody.tabIndex, 0);
     assert.equal(els.logStack.getAttribute("aria-hidden"), "true");
 
@@ -17958,6 +17968,7 @@ describe("看板实时输出：消息提示式双态流", () => {
     sandbox.setLogExpanded(false);
     assert.equal(els.liveLog.dataset.state, "collapsed");
     assert.equal(els.logToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(els.logToggle.querySelector(".live-log-toggle-text").textContent, "展开", "收起态钮文字切「展开」");
     assert.equal(els.logBody.tabIndex, -1);
   });
 
@@ -18009,20 +18020,15 @@ describe("看板实时输出：消息提示式双态流", () => {
     assert.equal(els.logLevelSelect.dataset.level, "warn");
   });
 
-  it("连接态文案沿用旧字串，重连时徽标与状态行挂脉冲、恢复即摘", () => {
-    const { sandbox, els } = makeSandbox();
+  it("连接状态不上屏：建流只挂 onmessage，不写任何连接指示", () => {
+    const { sandbox } = makeSandbox();
     sandbox.connectLogStream();
     const stream = FakeEventSource.instances.at(-1);
-    stream.onerror();
-    assert.equal(els.logConn.textContent, "○ 正在重连");
-    assert.ok(els.logConn.classList.contains("is-reconnecting"));
-    assert.equal(els.logConnBadge.textContent, "○ 重连");
-    assert.ok(els.logConnBadge.classList.contains("is-reconnecting"));
-    stream.onopen();
-    assert.equal(els.logConn.textContent, "● 实时传输");
-    assert.ok(!els.logConn.classList.contains("is-reconnecting"));
-    assert.equal(els.logConnBadge.textContent, "● 在线");
-    assert.ok(!els.logConnBadge.classList.contains("is-reconnecting"));
+    assert.equal(typeof stream.onmessage, "function", "只接消息");
+    assert.equal(stream.onopen, undefined, "不再挂 onopen 写在线态");
+    assert.equal(stream.onerror, undefined, "不再挂 onerror 写重连态");
+    const source = panelJs.match(/function connectLogStream\(\) \{[\s\S]*?\n  \}/)[0];
+    assert.ok(!/logConn|textContent|className/.test(source), "建流不写任何连接指示 DOM");
   });
 });
 
