@@ -368,8 +368,11 @@
     overflow-y: auto; overflow-x: hidden;
   }
   /* 栏顶品牌：与头行那份共用 .brand-icon / .brand-text（同一 logo、同一套皮肤变量），
-     只是换了承载容器。 */
-  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 0 6px; flex-shrink: 0; }
+     只是换了承载容器。min-height 是收起两态的居中托底：徽标与文字整颗摘掉后，行高只剩
+     24px 收起钮自身、行顶钉在栏顶 8px 处，相对 48px 头行高度带变成上 8 下 16——托到
+     32px 后 align-items:center 把钮送到 y=12，钮上下各 12 恰好填满头行带；展态行高
+     37.7 高于托底，本条无感。 */
+  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 0 6px; flex-shrink: 0; min-height: 32px; }
   /* 主 tab 组贴栏底：free space 全落在这条 auto 上边距里，栏顶到 tab 组之间留白 */
   .rail-tabs { display: flex; flex-direction: column; gap: 2px; margin-top: auto; }
   .rail-tab {

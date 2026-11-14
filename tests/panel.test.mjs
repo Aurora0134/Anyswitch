@@ -7784,6 +7784,10 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     assert.ok(/\.rail-brand \{[^}]*flex-shrink: 0;/.test(panelCss)
       && /\.rail-foot \{[^}]*(flex-shrink: 0|flex: none)/.test(panelCss),
       "栏顶品牌与底行不收缩，矮窗下滚动而非压扁");
+    // 收起两态把品牌徽标与文字整颗摘掉后，行高只剩 24px 收起钮自身、顶在栏顶 8px 处，
+    // 相对 48px 头行高度带上下不对称（上 8 下 16）——min-height 托底让钮居中落带正中。
+    assert.ok(/\.rail-brand \{[^}]*min-height: 32px;/.test(panelCss),
+      "品牌行 min-height 托底：收起态 24px 收起钮居中于 48px 头行高度带");
     // 窄栏基座：品牌文字、tab 标签、底行「设置」文字收起只留图标（规则无媒体查询）
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }'), "品牌文字收起（基座）");
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] .rail-tab-label { display: none; }'), "tab 标签与「设置」文字收起只留图标（基座）");
