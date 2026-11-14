@@ -412,6 +412,7 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     ${extractFn("scheduleTerminalGeometryRealign")}
     ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
+    ${extractFn("writeTerminalReplayFrame")}
     return {
       connectTerminalStream,
       parkTerminalScreen,

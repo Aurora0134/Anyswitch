@@ -125,6 +125,7 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     ${extractFn("scheduleTerminalGeometryRealign")}
     ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
+    ${extractFn("writeTerminalReplayFrame")}
     return {
       connect: connectTerminalStream,
       term: () => terminalXterm,
@@ -168,12 +169,13 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
         cols: state.client.cols,
         rows: state.client.rows,
         disposed: false,
+        options: { disableStdin: false },
         focus() {},
         // reset 落记录：「弃帧即清屏」那半边行为（dropTerminalReplayFrame 的
         // term?.reset?.()）由此可断言，空实现会把清屏腿变成不可观测。
         reset() { state.resets.push(1); },
         onData() { return { dispose() {} }; },
-        write(text) { state.writes.push(text); },
+        write(text, cb) { state.writes.push(text); if (typeof cb === "function") cb(); },
         resize(cols, rows) { state.resizes.push({ cols, rows }); term.cols = cols; term.rows = rows; },
         dispose() { term.disposed = true; state.disposed += 1; },
       };

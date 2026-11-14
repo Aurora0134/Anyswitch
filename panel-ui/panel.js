@@ -9520,6 +9520,25 @@ async function api(method, path, body) {
     return revive || state.deathUnobserved === true;
   }
 
+  // 首帧回放带应用态模式，其中 ?1004h 会让 xterm 5.5 在解析时同步触发
+  // _onRequestSendFocus → _reportFocus → triggerDataEvent("\u001b[I")，这一字节经
+  // onData 原样送进 PTY，TUI 收到就整屏重绘一次（Claude Code 的品牌头随之再进历史）。
+  // 写帧期掐掉 stdin：triggerDataEvent 在 disableStdin 为真时直接早退（同
+  // parkTerminalScreen 的第二道），回调里恢复；模式序列照原样回放，此后的真实焦点
+  // 事件不受影响。
+  function writeTerminalReplayFrame(term, text) {
+    const options = term.options;
+    const previous = options.disableStdin;
+    options.disableStdin = true;
+    const restore = () => { options.disableStdin = previous; };
+    try {
+      term.write(text, restore);
+    } catch (error) {
+      restore();
+      throw error;
+    }
+  }
+
   async function connectTerminalStream(session, { revive = true } = {}) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
@@ -9777,7 +9796,7 @@ async function api(method, path, body) {
           // 擦除那一刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸
           // 护只切本函数真跑的单测桩环境（那些沙箱不声明模块级变量）。
           if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
-          term.write(text);
+          writeTerminalReplayFrame(term, text);
           return;
         }
         // 其后的帧走突发合并器（见 queueTerminalChunk）：小帧经合帧层零延迟直通，

@@ -377,6 +377,8 @@ const isBlankRow = (row) => row.chars.every((ch, index) => {
 // 应用实际使用的那只 API；滚动区 DECSTBM 也见 toReplay 末尾，必须排在帧绘制之后、
 // 光标停放之前——r 会改写回放自身的推史与光标定位）；③在 setMode 的注释里写明不回
 // 放的理由（2026 是同帧批处理标记，回放只有单帧画面）。不得只追踪不回放。
+// 1004 回放会让客户端同步回一只焦点应答，由前端写帧期抑制（见 panel.js
+// writeTerminalReplayFrame）；不得靠摘掉 1004 规避，否则重建后应用收不到焦点事件。
 const REPLAYED_MODES = [1, 7, 4, 20, 1000, 1002, 1003, 1004, 1006, 1015, 2004];
 // 上表里哪些属于私有模式（回放时要发 ? 形态）：4/20 是非私有模式（IRM/convertEol），
 // 必须发裸的 ESC[4h/ESC[20l——客户端 xterm 对 ?4h/?20l 不做任何动作，发私有形态会让
@@ -1114,12 +1116,21 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       case "d": row = arg(0, 1) - 1; break;
       case "H": case "f": row = arg(0, 1) - 1; col = arg(1, 1) - 1; break;
       case "J": {
-        // 3J/?3J 一律 no-op（回滚历史归页签）：xterm 5.5 的 eraseInDisplay case 3
-        // 只裁活动缓冲超出屏行的头部、备屏恒等于屏行数——kimi 备屏里发 3J 客户端
-        // 天然免疫，镜像曾在这里无条件清 history（「当场没感觉、重挂才丢」的病灶）；
-        // ?3J 旧路径误派 erase-below（擦掉光标下半屏）一并收口。
         const mode = param(0) || 0;
-        if (mode === 3) break;
+        if (mode === 3) {
+          // 对齐 xterm 5.5 的 ED 3：trimStart 掉活动缓冲超出屏行的全部行，当前屏不动。
+          // 备屏恒等于屏行数（lines.length - rows === 0），客户端天然 no-op，镜像也
+          // 不动（kimi 备屏案例）；?3J 维持 no-op，旧路径误派 erase-below 不复发。
+          // 2026-11-14 裁决：应用显式请求清滚动区时以应用为准，不再一律归页签——
+          // 客户端清了而镜像留着，下一次回放会把应用已收起的细节重新灌回历史。
+          if (!priv && !inAlt && history.length > 0) {
+            const dropped = history.length;
+            history.length = 0;
+            historyTotal = 0;
+            saved.abs = Math.max(0, saved.abs - dropped);
+          }
+          break;
+        }
         eraseDisplay(priv ? 0 : mode);
         break;
       }

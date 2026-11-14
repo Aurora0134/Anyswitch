@@ -10532,7 +10532,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
   function syncSandbox() {
     const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme", "terminalBackgroundHasAlpha",
-      "connectTerminalStream", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
+      "connectTerminalStream", "writeTerminalReplayFrame", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
       "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput",
       "dropTerminalReplayFrame", "deferTerminalStream", "remountDeferredTerminalStream",
@@ -10621,7 +10621,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
         open(hostEl) { this.hostEl = hostEl; }
         onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
         fire(data) { this._fire?.(data); }
-        write(text) { this.writes.push(text); }
+        write(text, cb) { this.writes.push(text); if (typeof cb === "function") cb(); }
         reset() { this.resetCount += 1; }
         dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
         attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
@@ -10909,8 +10909,8 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
     assert.ok(connect, "connectTerminalStream found in panel.js");
     assert.ok(/terminalEventSource\.addEventListener\("data"[\s\S]*?queueTerminalChunk\(term, text\)/.test(connect),
       "data 帧交给合并器，不再直接 term.write");
-    assert.ok(/terminalReplayFramePending\) \{[\s\S]*?term\.write\(text\)[\s\S]*?queueTerminalChunk/.test(connect),
-      "建连后宿主的自足整屏重绘直写，不进合并窗口");
+    assert.ok(/terminalReplayFramePending\) \{[\s\S]*?writeTerminalReplayFrame\(term, text\)[\s\S]*?queueTerminalChunk/.test(connect),
+      "建连后宿主的自足整屏重绘经写帧器落地，不进合并窗口");
     const inputHandler = connect.match(/terminalInputDisposable = term\.onData\([\s\S]*?\n    \}\);/)?.[0];
     assert.ok(inputHandler && /flushTerminalBurst\(\)/.test(inputHandler), "键入前先落屏攒着的历史");
     const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
@@ -10934,6 +10934,55 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
   });
 });
 
+// 首帧回放里的 ?1004h 会让 xterm 5.5 同步回一只焦点应答，这字节经 onData 原样进
+// PTY，Claude Code 收到就整屏重绘一次（品牌头随之再进历史）。台架用真 xterm 与宿主
+// 镜像搭：每轮＝一次刷新（附着 → 整屏回放 → 客户端自动应答 → 应用重绘）。
+describe("虚拟终端首帧回放：自动应答不进 PTY，刷新不再复制品牌段", () => {
+  const REPLAY_MODES = "\u001b[0m\u001b[2J\u001b[H\u001b[?7h\u001b[?1004h\u001b[?2004h";
+  const BRAND = "Claude Code v2.1.325";
+  const REFRESHES = 5;
+  const writeFrame = new Function(`${extractFn("writeTerminalReplayFrame")}; return writeTerminalReplayFrame;`)();
+
+  async function countBrandAfterRefreshes(suppress) {
+    const { createScreenMirror } = await import("../src/terminal/terminal-screen.mjs");
+    const { Terminal } = (await import("@xterm/xterm")).default;
+    const mirror = createScreenMirror({ cols: 80, rows: 4 });
+    mirror.write(`\u001b[?1004h${BRAND}\r\n`);
+    for (let i = 0; i < REFRESHES; i += 1) {
+      const term = new Terminal({ cols: 80, rows: 4 });
+      const inbound = [];
+      term.onData((data) => inbound.push(data));
+      const frame = mirror.toReplay();
+      if (suppress) writeFrame(term, frame);
+      else term.write(frame);
+      await new Promise((resolve) => term.write("\u001b[0m", resolve));
+      // 焦点应答被原样写回 PTY 时，应用整屏重绘一次，品牌头随之多一份。
+      if (inbound.join("").includes("\u001b[O") || inbound.join("").includes("\u001b[I")) {
+        mirror.write(`${BRAND}\r\n其他输出\r\n其他输出\r\n其他输出\r\n其他输出\r\n`);
+      }
+    }
+    return (mirror.toReplay().match(/Claude Code v2\.1\.325/g) || []).length;
+  }
+
+  it("台架自证：不抑制时每刷新一次品牌段多一份", async () => {
+    assert.equal(await countBrandAfterRefreshes(false), 1 + REFRESHES, "裸写回放帧必须复现病灶，否则台架无效");
+  });
+
+  it("写帧期抑制：连续刷新品牌段恒为 1，回调把输入面还给真实键入", async () => {
+    assert.equal(await countBrandAfterRefreshes(true), 1, "回放不再触发应用重绘，品牌段不复制");
+    const { Terminal } = (await import("@xterm/xterm")).default;
+    const term = new Terminal({ cols: 80, rows: 4 });
+    const got = [];
+    term.onData((data) => got.push(data));
+    writeFrame(term, REPLAY_MODES);
+    await new Promise((resolve) => term.write("\u001b[0m", resolve));
+    assert.deepEqual(got, [], "写帧期的焦点应答不进 onData");
+    assert.equal(term.options.disableStdin, false, "写入回调把输入面还给真实键入");
+    await new Promise((resolve) => term.write("\u001b[?1004l\u001b[?1004h", resolve));
+    assert.ok(got.includes("\u001b[O"), "抑制只覆盖写帧期：此后的真实焦点事件照常回给应用");
+  });
+});
+
 // 应答定投（C 案）：每连接独占一个 xterm 实例，onData 闭包绑定建连时固化的
 // 会话 id，不再读 activeTerminalPreviewId；旧连接关闭时实例随流销毁，WriteBuffer
 // 里排队未解析的旧字节（大回放跨事件循环切片、续跑定时器不可取消）解析时只能
@@ -10941,7 +10990,7 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme", "terminalBackgroundHasAlpha", "connectTerminalStream", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme", "terminalBackgroundHasAlpha", "connectTerminalStream", "writeTerminalReplayFrame", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -11016,7 +11065,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
         open(hostEl) { this.hostEl = hostEl; }
         onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
         fire(data) { this._fire?.(data); }
-        write(text) { this.writes.push(text); }
+        write(text, cb) { this.writes.push(text); if (typeof cb === "function") cb(); }
         reset() { this.resetCount += 1; }
         dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
         attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
@@ -13086,7 +13135,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "terminalBackgroundHasAlpha", "connectTerminalStream", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "terminalBackgroundHasAlpha", "connectTerminalStream", "writeTerminalReplayFrame", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -13145,7 +13194,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         open(hostEl) { this.openedHost = hostEl; }
         onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
         fire(data) { this._fire?.(data); }
-        write(text) { this.writes.push(text); }
+        write(text, cb) { this.writes.push(text); if (typeof cb === "function") cb(); }
         reset() { this.resetCount += 1; }
         dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
         attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
