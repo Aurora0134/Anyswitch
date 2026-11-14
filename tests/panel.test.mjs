@@ -6345,6 +6345,74 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
     assert.ok(detail.includes("restoreStoreManualDraft(draft, storeDetailRenderedId)"), "渲染后按渠道恢复");
     assert.ok(panelJs.includes("if (!draft || draft.providerId !== renderedId) return;"), "换渠道不搬草稿");
   });
+
+  it("详情卡模型列表滚动位跨同渠道重渲保留，换渠道归顶", () => {
+    const src = sliceBetween(panelJs, "function renderStoreDetail()", "function renderPoolDetail(");
+    // 假 DOM：整卡 innerHTML 重建即销毁旧滚动容器，子渲染器新建容器 scrollTop 恒 0。
+    // 池路径的 rebuild 一并模拟「外层先重建」——捕获若晚于重建，旧容器已毁只能抓到 0。
+    function makeSandbox() {
+      let list = null;
+      const body = {
+        querySelector: (sel) => (sel === ".store-model-list" ? list : null),
+        set innerHTML(v) { list = null; },
+        get innerHTML() { return ""; },
+      };
+      const state = { focusRow: null, providerId: null };
+      const rebuild = () => { list = { scrollTop: 0 }; };
+      const deps = {
+        $: (id) => (id === "storeDetailBody" ? body : { textContent: "" }),
+        captureStoreManualDraft: () => null,
+        restoreStoreManualDraft: () => {},
+        storeFocusRow: () => state.focusRow,
+        renderProviderDetail: rebuild,
+        renderPoolDetail: rebuild,
+        storeDetailProvider: () => (state.providerId ? { id: state.providerId } : null),
+      };
+      const render = new Function("deps", `
+        let storeDetailRenderedId = null;
+        const { $, captureStoreManualDraft, restoreStoreManualDraft, storeFocusRow,
+                renderProviderDetail, renderPoolDetail, storeDetailProvider } = deps;
+        ${src}
+        return renderStoreDetail;
+      `)(deps);
+      return {
+        render,
+        list: () => list,
+        focus(kind, providerId) {
+          state.focusRow = kind === "pool" ? { kind: "pool" } : { kind: "provider", p: { id: providerId } };
+          state.providerId = providerId;
+        },
+        unfocus() { state.focusRow = null; state.providerId = null; },
+      };
+    }
+    const sb = makeSandbox();
+    sb.focus("provider", "a");
+    sb.render();
+    sb.list().scrollTop = 240;
+    sb.render();
+    assert.equal(sb.list().scrollTop, 240, "同渠道重渲（逐渠道刷新上屏）滚动位原地保留");
+    sb.focus("provider", "b");
+    sb.render();
+    assert.equal(sb.list().scrollTop, 0, "换渠道新详情从顶部开始");
+    const pool = makeSandbox();
+    pool.focus("pool", "m1");
+    pool.render();
+    pool.list().scrollTop = 180;
+    pool.render();
+    assert.equal(pool.list().scrollTop, 180, "池成员详情同渠道重渲同样保留（捕获先于外层重建）");
+    pool.focus("pool", "m2");
+    pool.render();
+    assert.equal(pool.list().scrollTop, 0, "换池 tab 归顶");
+    const back = makeSandbox();
+    back.focus("provider", "a");
+    back.render();
+    back.list().scrollTop = 120;
+    back.unfocus();
+    back.render();
+    back.focus("provider", "a");
+    back.render();
+    assert.equal(back.list().scrollTop, 0, "焦点清空后重新聚焦不搬旧滚动位");
+  });
 });
 
 describe("设置项「注入推理强度」", () => {

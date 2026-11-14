@@ -18615,6 +18615,12 @@ async function api(method, path, body) {
   function renderStoreDetail() {
     const draft = captureStoreManualDraft();
     const body = $("storeDetailBody");
+    // 整卡 innerHTML 重建会销毁模型列表滚动容器：同渠道重渲先记滚动位、渲染后
+    // 原地恢复（逐渠道刷新上屏不把正在看的列表拉回顶部）；须在池详情重建外层前抓。
+    // 换渠道不恢复，新详情从顶部开始。
+    const prevRenderedId = storeDetailRenderedId;
+    const prevList = body.querySelector(".store-model-list");
+    const prevScroll = prevList ? prevList.scrollTop : 0;
     const row = storeFocusRow();
     $("storeDetailTitle").textContent = row && row.kind === "pool" ? "号池详情" : "渠道详情";
     if (!row) {
@@ -18630,6 +18636,10 @@ async function api(method, path, body) {
     const cur = storeDetailProvider();
     storeDetailRenderedId = cur ? cur.id : null;
     restoreStoreManualDraft(draft, storeDetailRenderedId);
+    if (storeDetailRenderedId && storeDetailRenderedId === prevRenderedId) {
+      const list = body.querySelector(".store-model-list");
+      if (list) list.scrollTop = prevScroll;
+    }
   }
 
   // 池详情：摘要行 + 成员 tab；tab 下方即该成员渠道的完整详情
