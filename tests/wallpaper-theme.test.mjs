@@ -11,6 +11,7 @@ const { extractTheme } = WallpaperTheme;
 const TOKEN_KEYS = [
   "--font-sans", "--font-mono", "--ease-out",
   "--bg", "--bg-page", "--surface", "--surface-sunken", "--surface-hover", "--surface-glass",
+  "--terminal-bg",
   "--text", "--text-2", "--text-3", "--text-4",
   "--border", "--border-strong", "--divider",
   "--accent", "--accent-soft", "--accent-border",
@@ -147,6 +148,31 @@ test("surface 系为玻璃化 rgba：默认透明度小于 1，且可按 options
   // 覆盖不污染默认值：同输入再跑一次应回到默认
   const again = extractTheme(BLUE);
   assert.deepEqual(again, theme, "options 覆盖泄漏到了默认输出");
+});
+
+test("--terminal-bg 随壁纸主色生成不透明六位 hex，不受 surfaceAlpha 滑杆影响且对比度达标", () => {
+  // 亮/暗终端前景基准（来自 panel.css 基座段，壁纸主题沿用）
+  const lightFg = parseColor("#1e293b").rgb;
+  const darkFg = parseColor("#d5e2f4").rgb;
+  for (const fixture of [BLUE, GREEN, RED, PURPLE, TWO_TONE, WHITE_DOMINANT, NEAR_BLACK, GRAY, EMPTY]) {
+    const theme = extractTheme(fixture);
+    const overridden = extractTheme(fixture, {
+      surfaceAlpha: { light: { "--surface": 0.4, "--terminal-bg": 0.2 }, dark: { "--surface": 0.4, "--terminal-bg": 0.2 } },
+    });
+    for (const mode of ["light", "dark"]) {
+      const bgHex = theme[mode]["--terminal-bg"];
+      assert.match(bgHex, /^#[0-9a-f]{6}$/, `${mode} --terminal-bg 必须是不透明六位 hex，实得 ${bgHex}`);
+      assert.equal(overridden[mode]["--terminal-bg"], bgHex, `${mode} --terminal-bg 不得受 surfaceAlpha 滑杆影响而带 alpha`);
+      const fg = mode === "light" ? lightFg : darkFg;
+      assert.ok(contrast(fg, parseColor(bgHex).rgb) >= 7.0, `${mode} --terminal-bg (${bgHex}) 对终端前景对比度过低`);
+    }
+  }
+  const [br, bg, bb] = parseColor(extractTheme(BLUE).light["--terminal-bg"]).rgb;
+  assert.ok(bb > br && bb > bg, `蓝色壁纸亮色 --terminal-bg 应呈蓝色调（非中性白），实得 rgb(${br},${bg},${bb})`);
+  const [gr, gg, gb] = parseColor(extractTheme(GREEN).light["--terminal-bg"]).rgb;
+  assert.ok(gg > gr && gg > gb, `绿色壁纸亮色 --terminal-bg 应呈绿色调，实得 rgb(${gr},${gg},${gb})`);
+  const [rr, rg, rb] = parseColor(extractTheme(RED).light["--terminal-bg"]).rgb;
+  assert.ok(rr > rg && rr > rb, `红色壁纸亮色 --terminal-bg 应呈红色调，实得 rgb(${rr},${rg},${rb})`);
 });
 
 test("确定性：同输入同输出（含零像素边界输入）", () => {

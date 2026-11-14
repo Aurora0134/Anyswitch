@@ -446,8 +446,11 @@ describe("壁纸控制器：暂存与确认闸门", () => {
       "滑杆值记本机");
     const cache = JSON.parse(h.storage.getItem("panel-wallpaper-tokens"));
     assert.ok(cache?.light?.["--accent"] && cache?.dark?.["--accent"], "亮暗双套写入首帧缓存");
+    assert.match(cache.light["--terminal-bg"], /^#[0-9a-f]{6}$/, "亮套 --terminal-bg 为不透明六位 hex");
+    assert.match(cache.dark["--terminal-bg"], /^#[0-9a-f]{6}$/, "暗套 --terminal-bg 为不透明六位 hex");
     assert.ok(/0\.4\)$/.test(cache.light["--surface"]), "表面 alpha 按暂存值 0.4");
     assert.equal(h.rootEl._attrs.get("data-wallpaper"), "active", "全局垫底激活");
+    assert.equal(h.rootEl._props.get("--terminal-bg"), cache.light["--terminal-bg"], "全局 --terminal-bg 由引擎随壁纸注入");
     assert.ok(/0\.4\)$/.test(h.rootEl._props.get("--surface")), "全局 token 按暂存值注入");
     assert.equal(h.doc.els.get("wallpaperBackdropImage").style.backgroundImage, 'url("blob:mock")');
     assert.equal(h.doc.els.get("wallpaperBackdropImage").style.filter, "blur(12px)", "全局模糊生效");

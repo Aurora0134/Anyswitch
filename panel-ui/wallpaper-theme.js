@@ -83,6 +83,12 @@
     },
   };
 
+  // —— 终端屏底色：必须输出不透明六位 hex，不进 SURFACE_SPEC ——
+  // xterm 5.5.0 透明路径（allowTransparency）在亮底上有 WebGL 叠色白芯蓝环与
+  // dim 字形 alpha 栅格化洗白缺陷；取与界面同源的种子色混白/混黑实色，既随壁纸
+  // 染色又不触发透明路径（不跟 surfaceAlpha 滑杆走）。
+  const TERMINAL_BG_MIX_RATIO = { light: 0.9, dark: 0.91 };
+
   // —— 文字四档基准色（过对比度推拉前的起点） ——
   const TEXT_BASE = {
     light: { "--text": "#20201f", "--text-2": "#5e5e5a", "--text-3": "#777772", "--text-4": "#9c9c96" },
@@ -588,9 +594,13 @@
       ? { xs: [0.04], sm: [0.06, 0.04], md: [0.06, 0.04], lg: [0.08, 0.04] }
       : { xs: [0.35], sm: [0.45, 0.35], md: [0.55, 0.4], lg: [0.65, 0.45] };
 
+    // 终端屏底色：高比例混白（亮）/混黑（暗）得到柔和实色 hex，与表面家族同源且不带 alpha
+    const terminalBg = rgbToHex(mixRgb(seedRgb, targetRgb, TERMINAL_BG_MIX_RATIO[mode]));
+
     return {
       ...STATIC_TOKENS,
       ...surfaceTokens,
+      "--terminal-bg": terminalBg,
       ...textTokens,
       "--border": rgba(borderRgb, light ? 0.32 : 0.3),
       "--border-strong": rgba(borderRgb, light ? 0.5 : 0.48),
