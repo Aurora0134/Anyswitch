@@ -17831,6 +17831,19 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/\.log-console/.test(panelCss), "旧控制台样式不再残留");
   });
 
+  it("CSS 钉住抽搐修复与卡内展开：堆叠钉顶 96、视口去平滑、视口 2 行截断、复用 caret 形", () => {
+    assert.ok(/\.live-log-stack \{ inset: 0 0 auto 0; height: 96px;/.test(panelCss), "堆叠层钉顶固定 96px，不随舞台长高");
+    assert.ok(!/\.live-log-viewport \{[^}]*scroll-behavior/.test(panelCss), "视口去掉平滑滚动，贴底瞬时");
+    assert.ok(/\.live-log-viewport \.live-log-text \{[^}]*-webkit-line-clamp: 2;[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss), "视口卡默认 2 行截断＋高度过渡");
+    assert.ok(/\.live-log-viewport \.live-log-msg\.is-open \.live-log-text \{ display: block; -webkit-line-clamp: unset; \}/.test(panelCss), "卡内展开解除本卡截断");
+    assert.ok(/\.live-log-msg-fold \{[^}]*color: var\(--text-4\); font-size: 9px;[^}]*transition: transform 160ms var\(--ease-out\)/.test(panelCss), "卡内钮复用 ms-chevron 同构形");
+    assert.ok(/\.live-log-msg\.is-open \.live-log-msg-fold \{ transform: rotate\(90deg\); \}/.test(panelCss), "展开 caret 转 90deg");
+    assert.ok(/\.live-log-msg\.is-overflowing \.live-log-msg-fold \{ display: inline-flex; \}/.test(panelCss), "仅超行卡显示钮");
+    assert.ok(/\.live-log-stack \.live-log-msg-fold \{ display: none; \}/.test(panelCss), "堆叠预览卡恒隐钮");
+    assert.ok(panelJs.includes('class="live-log-msg-fold" type="button" aria-expanded="false" aria-label="展开" title="展开"'), "卡内钮初始纯图标＋展开文案");
+    assert.ok(panelJs.includes('<span aria-hidden="true">▸</span>'), "卡内钮 caret  glyph 与 ms-chevron 同形");
+  });
+
   class FakeClassList {
     constructor(el) { this.el = el; }
     add(...cs) { for (const c of cs) this.el._classes.add(c); }
@@ -18029,6 +18042,56 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(stream.onerror, undefined, "不再挂 onerror 写重连态");
     const source = panelJs.match(/function connectLogStream\(\) \{[\s\S]*?\n  \}/)[0];
     assert.ok(!/logConn|textContent|className/.test(source), "建流不写任何连接指示 DOM");
+  });
+
+  it("卡内展开钮仅超行卡出现；开合独立于区域开关，aria 与文案随之切换", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    sandbox.appendLog({ level: "info", message: "long" });
+    const card = els.logBody.children[0];
+    const text = card.querySelector(".live-log-text");
+    const fold = card.querySelector(".live-log-msg-fold");
+    assert.ok(!card.classList.contains("is-overflowing"), "短消息卡不出现展开钮");
+    assert.ok(!card.classList.contains("is-open"));
+    text.scrollHeight = 100; text.clientHeight = 35;
+    sandbox.appendLog({ level: "info", message: "next" });
+    assert.ok(card.classList.contains("is-overflowing"), "超行卡出现展开钮");
+
+    fold.onclick({ stopPropagation() {} });
+    assert.ok(card.classList.contains("is-open"), "点钮展开本卡");
+    assert.equal(fold.getAttribute("aria-expanded"), "true");
+    assert.equal(fold.title, "收起");
+    assert.equal(fold.getAttribute("aria-label"), "收起");
+    flush(240);
+
+    sandbox.setLogExpanded(true);
+    sandbox.setLogExpanded(false);
+    assert.ok(card.classList.contains("is-open"), "区域收起/展开不重置卡内展开");
+
+    fold.onclick({ stopPropagation() {} });
+    flush(240);
+    assert.ok(!card.classList.contains("is-open"), "再点收起本卡");
+    assert.equal(fold.getAttribute("aria-expanded"), "false");
+    assert.equal(fold.title, "展开");
+  });
+
+  it("展开态的卡重渲染时保留展开钮；堆叠卡结构含钮但由 CSS 恒隐", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    sandbox.appendLog({ level: "warn", message: "long" });
+    const card = els.logBody.children[0];
+    const text = card.querySelector(".live-log-text");
+    text.scrollHeight = 120; text.clientHeight = 35;
+    sandbox.appendLog({ level: "info", message: "next" });
+    const fold = card.querySelector(".live-log-msg-fold");
+    fold.onclick({ stopPropagation() {} });
+    assert.ok(card.classList.contains("is-open"));
+
+    sandbox.appendLog({ level: "error", message: "more" });
+    assert.ok(card.classList.contains("is-overflowing"), "展开卡重渲染后仍保留钮");
+    assert.ok(card.classList.contains("is-open"));
+    flush(240);
+
+    const stackCard = els.logStack.children[0];
+    assert.ok(stackCard.innerHTML.includes("live-log-msg-fold"), "堆叠卡结构含钮（CSS 恒隐）");
   });
 });
 
