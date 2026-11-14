@@ -828,31 +828,24 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
         </div>
 
-        <!-- 实时输出消息流。整卡显隐由设置→通用的「记录运行日志」开关驱动
-             （panel.js#applyLoggingEnabled）：记录停掉后这张卡一并隐藏。 -->
-        <div class="panel-card" id="liveLogCard">
-          <div class="card-header" id="liveLogCardHeader">
-            <h2 class="card-title">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-              实时输出
-            </h2>
-            <span class="badge badge-ok" id="logConnBadge">● 在线</span>
-          </div>
-          <div class="card-body" style="padding:12px;">
-            <div class="live-log" id="liveLog" data-state="collapsed">
-              <div class="live-log-toolbar">
-                <span class="log-status live" id="logConn">● 实时传输</span>
-                <span class="live-log-actions">
-                  <button class="live-log-toggle" id="logToggle" type="button" aria-expanded="false" aria-controls="logBody" aria-label="实时输出">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                  </button>
-                  <button class="log-clear-btn" id="clearLog" type="button">清空</button>
-                </span>
-              </div>
-              <div class="live-log-stage" id="liveLogStage">
-                <div class="live-log-stack" id="logStack"></div>
-                <div class="live-log-viewport" id="logBody" role="log" tabindex="-1"></div>
-              </div>
+        <!-- 运行日志消息流（无框）。整区显隐由设置→通用的「记录运行日志」开关驱动
+             （panel.js#applyLoggingEnabled）：记录停掉后这块一并隐藏。消息卡自身即框，
+             外面不再套 panel-card；连接状态不上屏，活着由新消息到达证明。 -->
+        <div class="live-log-region" id="liveLogCard">
+          <div class="live-log" id="liveLog" data-state="collapsed" aria-labelledby="liveLogTitle">
+            <div class="live-log-bar">
+              <h2 class="live-log-title" id="liveLogTitle">运行日志</h2>
+              <span class="live-log-actions">
+                <button class="log-clear-btn" id="clearLog" type="button">清空</button>
+                <button class="live-log-toggle" id="logToggle" type="button" aria-expanded="false" aria-controls="logBody">
+                  <span class="live-log-toggle-text">展开</span>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+              </span>
+            </div>
+            <div class="live-log-stage" id="liveLogStage">
+              <div class="live-log-stack" id="logStack"></div>
+              <div class="live-log-viewport" id="logBody" role="log" tabindex="-1"></div>
             </div>
           </div>
         </div>
@@ -2136,7 +2129,7 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
     </nav>
 
-    <!-- 「通用」：按语义分六张卡——「启动」「显示」「抗截断」「Claude Code」「实时输出」带卡头（复用各
+    <!-- 「通用」：按语义分六张卡——「启动」「显示」「抗截断」「Claude Code」「运行日志」带卡头（复用各
          视图通用的 card-header/card-title 标准件），其余几项暂不归类、平卡放置；
          控件 id、逐项独立保存/失败回滚语义不变。「开屏动画」「UI版本」是本机浏览器偏好，不占
          /api/settings：开屏必须在绘制前就能被读到，等服务端存档就晚了（同主题/样式/终端字号） -->
@@ -2388,21 +2381,21 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
-      <!-- 「实时输出」卡：主开关「记录运行日志」+ 从属项「日志级别」。关掉后左侧那张
-           实时输出卡整卡隐去——记录已经停了，留一张永远空着的窗只是噪声。默认开，
+      <!-- 「运行日志」卡：主开关「记录运行日志」+ 从属项「日志级别」。关掉后左侧那块
+           运行日志整区隐去——记录已经停了，留一块永远空着的窗只是噪声。默认开，
            升级上来的安装行为不变。级别只挑「窗里显示哪些行」，日志文件照旧全量。 -->
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-            实时输出
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+            运行日志
           </h2>
         </div>
         <div class="card-body">
           <div class="modal-item">
             <div>
               <div class="modal-item-title">记录运行日志</div>
-              <div class="modal-item-desc">记录 Anyswitch 自身与各端点的运行日志，显示在左侧的实时输出中。关闭后停止记录，左侧的实时输出一并隐藏。</div>
+              <div class="modal-item-desc">记录 Anyswitch 自身与各端点的运行日志，显示在左侧的运行日志中。关闭后停止记录，左侧的运行日志一并隐藏。</div>
             </div>
             <label class="toggle">
               <input type="checkbox" id="loggingEnabledToggle">
@@ -2415,7 +2408,7 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="modal-item">
               <div>
                 <div class="modal-item-title">日志级别</div>
-                <div class="modal-item-desc">实时输出只显示所选级别及其更高级别的日志行。</div>
+                <div class="modal-item-desc">运行日志只显示所选级别及其更高级别的日志行。</div>
               </div>
               <select class="logs-sel" id="logLevelSelect">
                 <option value="info">INFO</option>

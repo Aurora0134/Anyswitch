@@ -1520,15 +1520,15 @@
   .btn-accent:hover:not(:disabled) { filter: brightness(1.05); }
   .btn-mini { font-size: 11.5px; padding: 4px 10px; border-radius: var(--radius-sm, 6px); }
 
-  /* 实时输出：消息提示式双态流。收起态最新在下堆叠 3 张，展开态原位 320px 可滚视口。
-     消息卡走面板 surface/border/shadow 语言；级别语义色仍取 --console-*（与级别下拉、
-     图例同源）。动效只用 transform/opacity/height，reduced-motion 由文件末尾通配规则停。 */
+  /* 运行日志：无框消息提示式双态流。消息卡自身即框（surface/border/shadow），外面不再
+     套 panel-card；收起态最新在下堆叠 3 张，展开态原位 320px 可滚视口。级别语义色取
+     --console-*（与级别下拉、图例同源）。连接状态不上屏。动效只用 transform/opacity/
+     height，reduced-motion 由文件末尾通配规则停。 */
+  .live-log-region { display: block; }
   .live-log { display: flex; flex-direction: column; gap: 8px; }
-  #liveLogCardHeader { cursor: pointer; }
-  .live-log-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
-  .live-log-actions { display: inline-flex; align-items: center; gap: 2px; }
-  .log-status { display: flex; align-items: center; gap: 6px; color: var(--text-3); }
-  .log-status.live { color: var(--ok); }
+  .live-log-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px; }
+  .live-log-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.01em; }
+  .live-log-actions { display: inline-flex; align-items: center; gap: 10px; }
   .log-clear-btn {
     background: none; border: none; color: var(--text-3); cursor: pointer;
     font-size: 11px; font-family: inherit; padding: 2px 6px; border-radius: var(--radius-sm, 6px);
@@ -1536,9 +1536,10 @@
   }
   .log-clear-btn:hover { color: var(--text); background: var(--surface-hover); }
   .live-log-toggle {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 22px; height: 22px; padding: 0; border: none; background: none;
-    color: var(--text-3); border-radius: var(--radius-sm, 6px); cursor: pointer;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 6px; border: none; background: none;
+    color: var(--text-3); font-size: 11px; font-family: inherit; line-height: 1.2;
+    border-radius: var(--radius-sm, 6px); cursor: pointer;
     transition: color 140ms var(--ease-out), background 140ms var(--ease-out);
   }
   .live-log-toggle:hover { color: var(--text); background: var(--surface-hover); }
@@ -1591,10 +1592,8 @@
   .live-log-stack .live-log-msg.is-entering { animation: liveLogMsgIn 180ms var(--ease-out); }
   .live-log-stack .live-log-msg.is-leaving { opacity: 0; transform: translateY(-28px) scale(0.96); transition-duration: 160ms; pointer-events: none; }
   @keyframes liveLogMsgIn { from { opacity: 0; transform: translateY(16px) scale(1); } }
-  @keyframes liveLogPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-  #logConnBadge.is-reconnecting, #logConn.is-reconnecting { animation: liveLogPulse 1.2s ease-in-out infinite; }
 
-  /* ── 「日志级别」下拉（设置 → 通用 → 实时输出卡）────────────────────────────
+  /* ── 「日志级别」下拉（设置 → 通用 → 运行日志卡）────────────────────────────
      与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色
      也取自同一组 --console-*（亮暗两套皮肤各自取值）。收起态显示的是当前值，颜色
      跟着档位变，由 panel.js#applyLogLevel 落的 data-level 驱动——展开态认不认
@@ -1645,12 +1644,10 @@
   /* 卡头留品牌与端点名，但徽标、折叠钮、实例计数都是数据位：visibility 而非 display，
      加载完不会因为标题换行而整屏跳一次。 */
   html[data-board="pending"] .agent-cards-container .agent-actions { visibility: hidden; }
-  /* 左列同帧同口径：服务状态徽标 / 日志连接徽标 / 「● 实时传输」行的静态默认都是数据位
-     谎话（「运行正常」「● 在线」），与右列「没取到不许画」同帧矛盾。藏而不删（同上面
-     .agent-actions 的 visibility 口径：占位不跳）。 */
-  html[data-board="pending"] #sbStateBadge,
-  html[data-board="pending"] #logConnBadge,
-  html[data-board="pending"] #logConn { visibility: hidden; }
+  /* 左列同帧同口径：服务状态徽标的静态默认是数据位谎话（「运行正常」），与右列
+     「没取到不许画」同帧矛盾。藏而不删（visibility 占位不跳）。运行日志区无连接
+     指示，pending 期无假在线可藏。 */
+  html[data-board="pending"] #sbStateBadge { visibility: hidden; }
   /* 监听地址的写死默认值（127.0.0.1:47821）同理：pending 期压掉，值位立一条骨架——
      复用 .sessions-skel 的 shimmer，行高由同行的 .prop-name 撑着，flip 不跳。 */
   html[data-board="pending"] #sbHost { display: none; }
@@ -1965,7 +1962,7 @@
   .settings-head-left { display: flex; align-items: center; gap: 12px; }
   .settings-head-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
   .settings-subtabs { margin-bottom: 16px; align-self: flex-start; }
-  /* 「通用」分组：按语义分六张卡（启动 / 显示 / 抗截断 / Claude Code / 实时输出 / 未归类平卡），卡间距对齐
+  /* 「通用」分组：按语义分六张卡（启动 / 显示 / 抗截断 / Claude Code / 运行日志 / 未归类平卡），卡间距对齐
      侧栏列的 20px；设置行悬停整行淡底（--surface-hover 既有悬停 token，与主题列表
      项同手感），行块左右外扩 10px 让底色有呼吸感，文本与原位置对齐。 */
   #settingsPanelGeneral { display: flex; flex-direction: column; gap: 20px; }

@@ -2793,7 +2793,11 @@ async function api(method, path, body) {
     const root = $("liveLog");
     if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
     const toggle = $("logToggle");
-    if (toggle) toggle.setAttribute("aria-expanded", String(expanded));
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", String(expanded));
+      const label = toggle.querySelector(".live-log-toggle-text");
+      if (label) label.textContent = expanded ? "收起" : "展开";
+    }
     const body = $("logBody");
     if (body) body.tabIndex = expanded ? 0 : -1;
     const stack = $("logStack");
@@ -2881,8 +2885,6 @@ async function api(method, path, body) {
     if (toggle) toggle.onclick = (e) => { e.stopPropagation(); setLogExpanded(!logExpanded); };
     const stack = $("logStack");
     if (stack) stack.onclick = () => { if (!logExpanded) setLogExpanded(true); };
-    const header = $("liveLogCardHeader");
-    if (header) header.onclick = () => setLogExpanded(!logExpanded);
     // 真清空：服务端缓冲一并清掉，刷新不再复活旧日志，其它打开的面板窗口同步清空。
     $("clearLog").onclick = async (e) => {
       e.stopPropagation();
@@ -2905,20 +2907,9 @@ async function api(method, path, body) {
   function connectLogStream() {
     if (es) return;
     es = new EventSource(API_BASE + "/api/logs");
-    es.onopen = () => {
-      $("logConn").textContent = "● 实时传输";
-      $("logConn").className = "log-status live";
-      $("logConnBadge").textContent = "● 在线";
-      $("logConnBadge").className = "badge badge-ok";
-    };
+    // 连接状态不上屏：活着由新消息到达证明，断线交给 EventSource 原生自动重连。
     es.onmessage = (e) => {
       try { handleLogEntry(JSON.parse(e.data)); } catch { appendLog({ level: "info", message: e.data }); }
-    };
-    es.onerror = () => {
-      $("logConn").textContent = "○ 正在重连";
-      $("logConn").className = "log-status is-reconnecting";
-      $("logConnBadge").textContent = "○ 重连";
-      $("logConnBadge").className = "badge badge-warn is-reconnecting";
     };
   }
 
@@ -5047,7 +5038,7 @@ async function api(method, path, body) {
         if (!settingsSaving.poolLoadBalancing && poolLoadBalancingToggle && d.settings && typeof d.settings.poolLoadBalancing === "boolean") {
           poolLoadBalancingToggle.checked = d.settings.poolLoadBalancing;
         }
-        // 运行日志开关：回灌时把左侧那张实时输出卡的显隐一并跟上，免得设置页与看板
+        // 运行日志开关：回灌时把左侧那块运行日志的显隐一并跟上，免得设置页与看板
         // 各说各话。
         if (!settingsSaving.loggingEnabled && loggingEnabledToggle && d.settings && typeof d.settings.loggingEnabled === "boolean") {
           loggingEnabledToggle.checked = d.settings.loggingEnabled;
@@ -5681,7 +5672,7 @@ async function api(method, path, body) {
       };
     }
 
-    // 运行日志：与其它项同构的即改即存，但保存成功后要立刻把左侧那张实时输出卡显隐
+    // 运行日志：与其它项同构的即改即存，但保存成功后要立刻把左侧那块运行日志显隐
     // 掉——这个开关的意义就是「不再记录」，界面不跟着动就看不出它生效了。
     if (loggingEnabledToggle) {
       loggingEnabledToggle.onchange = async () => {
@@ -11622,7 +11613,7 @@ async function api(method, path, body) {
       // 停止 = 只动数据面、控制台保活（拆分架构的承诺）；重启 = 两个都换，页面
       // 会短暂断开并由本页自动刷新恢复。
       summary += isRestart
-        ? `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：控制面板服务一并重启，本页面会短暂断开、几秒后自动刷新；实时输出窗口的历史会随之清空。</p>`
+        ? `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：控制面板服务一并重启，本页面会短暂断开、几秒后自动刷新；运行日志的历史会随之清空。</p>`
         : `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：仅影响中继转发，当前控制面板保持在线。</p>`;
       if (stopBody) stopBody.innerHTML = summary;
       stopModal.classList.add("show");
