@@ -2698,6 +2698,7 @@ async function api(method, path, body) {
   const logViewportNodes = new Map();
   const logStackNodes = new Map();
   const logStackLeaving = new Map();
+  const logTextAnim = new WeakMap();
   let logFadeTimer = null;
 
   function queueLogRender() {
@@ -2714,8 +2715,51 @@ async function api(method, path, body) {
     node.className = "live-log-msg " + entry.level;
     node.dataset.entryId = String(entry.id);
     const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
-    node.innerHTML = `<div class="live-log-meta"><span class="ts">${escapeHtml(ts)}</span><span class="lvl">${escapeHtml(entry.level.toUpperCase())}</span></div><div class="live-log-text">${escapeHtml(entry.message)}</div>`;
+    node.innerHTML = `<div class="live-log-meta"><span class="ts">${escapeHtml(ts)}</span><span class="lvl">${escapeHtml(entry.level.toUpperCase())}</span><button class="live-log-msg-fold" type="button" aria-expanded="false" aria-label="展开" title="展开"><span aria-hidden="true">▸</span></button></div><div class="live-log-text">${escapeHtml(entry.message)}</div>`;
+    const fold = node.querySelector(".live-log-msg-fold");
+    if (fold) fold.onclick = (e) => { e.stopPropagation(); setLogCardOpen(node, !node.classList.contains("is-open")); };
     return node;
+  }
+
+  // 卡内展开/收起：只解除本卡 2 行截断，与区域开关、其它卡互不影响。line-clamp 不可
+  // 过渡，故量出截断高与全文高后动画 height；结束落回 auto 以随宽度重排。展开态保持
+  // is-open 直到收起动画走完再恢复截断，避免全文在收缩前提前消失。reduced-motion 由
+  // CSS 通配停过渡，定时兜底清 inline 高度。
+  function setLogCardOpen(node, open) {
+    const text = node.querySelector(".live-log-text");
+    const btn = node.querySelector(".live-log-msg-fold");
+    if (btn) {
+      btn.setAttribute("aria-expanded", String(open));
+      btn.setAttribute("aria-label", open ? "收起" : "展开");
+      btn.title = open ? "收起" : "展开";
+    }
+    if (!text) { node.classList.toggle("is-open", open); return; }
+    if (open) {
+      const fullH = text.scrollHeight, clampH = text.clientHeight;
+      node.classList.add("is-open");
+      animateLogTextHeight(text, clampH, fullH);
+    } else {
+      const fullH = text.clientHeight;
+      node.classList.remove("is-open");
+      text.style.height = "";
+      const clampH = text.clientHeight;
+      node.classList.add("is-open");
+      animateLogTextHeight(text, fullH, clampH, () => node.classList.remove("is-open"));
+    }
+  }
+
+  function animateLogTextHeight(text, fromH, toH, onDone) {
+    const token = {};
+    logTextAnim.set(text, token);
+    text.style.height = fromH + "px";
+    void text.offsetHeight;
+    text.style.height = toH + "px";
+    setTimeout(() => {
+      if (logTextAnim.get(text) !== token) return;
+      text.style.height = "";
+      logTextAnim.delete(text);
+      if (onDone) onDone();
+    }, 240);
   }
 
   function renderLogViewport() {
@@ -2731,6 +2775,11 @@ async function api(method, path, body) {
         body.appendChild(node);
       }
       node.classList.toggle("is-leaving", !!entry.fading);
+      // 超行检测只针对截断态：已展开的卡保留钮（供收起），不重测以免把全文高当截断高。
+      if (!node.classList.contains("is-open")) {
+        const text = node.querySelector(".live-log-text");
+        node.classList.toggle("is-overflowing", !!text && text.scrollHeight > text.clientHeight + 1);
+      }
     }
     for (const [id, node] of logViewportNodes) {
       if (!seen.has(id)) {

@@ -1547,11 +1547,14 @@
   .live-log[data-state="expanded"] .live-log-toggle svg { transform: rotate(180deg); }
   .live-log-stage { position: relative; height: 96px; overflow: hidden; transition: height 220ms var(--ease-out); }
   .live-log[data-state="expanded"] .live-log-stage { height: 320px; }
-  .live-log-stack, .live-log-viewport { position: absolute; inset: 0; transition: opacity 160ms var(--ease-out); }
-  .live-log-stack { cursor: pointer; padding: 0 2px; }
+  .live-log-stack, .live-log-viewport { position: absolute; transition: opacity 160ms var(--ease-out); }
+  /* 堆叠层钉顶固定 96px，不随舞台 96↔320 长高：底锚的卡只原地淡出/淡入，不被高度
+     过渡拽着上下滑（展开/收起抽搐根因）。收起态舞台本就 96px，稳态视觉不变。 */
+  .live-log-stack { inset: 0 0 auto 0; height: 96px; cursor: pointer; padding: 0 2px; }
+  /* 视口贴底用瞬时快照：平滑滚动会在展开时追一个随高度变化的目标，再抖一下。 */
   .live-log-viewport {
-    overflow-y: auto; padding: 2px; opacity: 0; pointer-events: none;
-    scroll-behavior: smooth; contain: layout;
+    inset: 0; overflow-y: auto; padding: 2px; opacity: 0; pointer-events: none;
+    contain: layout;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
   .live-log[data-state="expanded"] .live-log-stack { opacity: 0; pointer-events: none; }
@@ -1580,6 +1583,26 @@
   }
   .live-log-viewport .live-log-msg { margin-bottom: 6px; transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out); }
   .live-log-viewport .live-log-msg.is-leaving { opacity: 0; transform: translateY(-4px); }
+  /* 视口卡默认也截 2 行（与堆叠一致），一屏看更多条；超行卡才出现卡内展开钮。卡内
+     展开与区域开关解耦：is-open 只解除本卡截断，实测高度过渡露全文（line-clamp 不可
+     过渡，height 由 panel.js#setLogCardOpen 量值驱动）。 */
+  .live-log-viewport .live-log-text {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    transition: height 220ms var(--ease-out);
+  }
+  .live-log-viewport .live-log-msg.is-open .live-log-text { display: block; -webkit-line-clamp: unset; }
+  /* 卡内展开钮复用 Top5 列表 .ms-chevron 同构形：纯图标「▸」caret、caption 灰、展开
+     转 90deg、160ms。仅超行卡（is-overflowing）显示；堆叠预览卡恒隐（点卡是展开区域）。 */
+  .live-log-msg-fold {
+    display: none; margin-left: auto; flex: none; padding: 0 2px;
+    border: none; background: none; cursor: pointer;
+    color: var(--text-4); font-size: 9px; line-height: 1;
+    transition: transform 160ms var(--ease-out), color 140ms var(--ease-out);
+  }
+  .live-log-msg-fold:hover { color: var(--text-2); }
+  .live-log-msg.is-overflowing .live-log-msg-fold { display: inline-flex; }
+  .live-log-msg.is-open .live-log-msg-fold { transform: rotate(90deg); }
+  .live-log-stack .live-log-msg-fold { display: none; }
   .live-log-stack .live-log-msg {
     position: absolute; left: 0; right: 0; bottom: 0; height: 72px; margin: 0;
     transform-origin: 50% 100%;
