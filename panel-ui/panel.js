@@ -15367,44 +15367,11 @@ async function api(method, path, body) {
     sessions: "sessionsView",
   };
 
-  // 占用条生长动效：预设列表卡片头的上下文占用条在开门与手动刷新时从零横向长到
-  // 当前占比。走 transform（scaleX）而非 width——width 过渡会被 over 档的斜纹动画
-  // 抢同一条 animation 声明，且 width 动画逐帧逼布局；transform 由合成器执行，
-  // 与斜纹的 background-position 动画属性正交，两段动效能同时跑。
-  // 两态切换：先挂 .ctx-grow-from（过渡关闭、瞬时归零），冲一次样式，再换成
-  // .ctx-grow（只留 transform 过渡），浏览器即从 0 补间到 1。动画结束后清两态，
-  // 条回到基态 scaleX(1)、过渡恢复基线的 width/background 两条。
-  const CTX_GROW_MS = 400;
-  let ctxGrowTimer = null;
-  function replayCtxMeterGrow() {
-    const bar = $("ctxBar");
-    const meter = $("ctxMeter");
-    const fill = $("ctxFill");
-    if (!bar || !meter || !fill) return;
-    // 空占用档不播：条内本就没有填充，生长无从谈起
-    if (meter.getAttribute("data-tier") === "empty") return;
-    if (ctxGrowTimer) { window.clearTimeout(ctxGrowTimer); ctxGrowTimer = null; }
-    // 先摘上一轮的 .ctx-grow 再挂复位帧：两条规则同权重、后者覆盖前者，两态同挂时
-    // .ctx-grow 的 transition 会盖掉复位帧的 transition:none，归零就变成「补间到 0」，
-    // 看上去是条原地不动
-    bar.classList.remove("ctx-grow");
-    // 冲样式用填充件自身：过渡挂在它身上，冲条体只到条体的样式，够不到子件的过渡态
-    bar.classList.add("ctx-grow-from");
-    void getComputedStyle(fill).transform;
-    bar.classList.remove("ctx-grow-from");
-    bar.classList.add("ctx-grow");
-    ctxGrowTimer = window.setTimeout(() => {
-      ctxGrowTimer = null;
-      bar.classList.remove("ctx-grow");
-    }, CTX_GROW_MS);
-  }
-
   function playViewEnter(name) {
     if (name === "board") {
       playBoardEnter(document.querySelector(".telemetry-view"));
       return;
     }
-    if (name === "presets") replayCtxMeterGrow();
     const id = VIEW_ENTER_TARGETS[name];
     if (id) replayViewEnter($(id));
   }
@@ -17534,8 +17501,6 @@ async function api(method, path, body) {
       renderPresetsMaster();
       renderPresetsList();
       renderPresetDetail();
-      // 首载进入预设页时补发生长动画（开门时若尚未加载数据 ctxMeter 为 empty，数据到达后在此起跑）
-      if (firstLoad && currentView === "presets") replayCtxMeterGrow();
     } catch (e) {
       toast(panelError(e, "预设状态加载失败"), true);
     }
@@ -17804,11 +17769,7 @@ async function api(method, path, body) {
         <div class="skills-list-desc">${escapeHtml(firstLine)}</div>
       </div>`;
     }).join("");
-    if (cascade) {
-      listEl.scrollTop = prevScrollTop;
-      playSkillsListCascade(listEl, prevScrollTop);
-      replayCtxMeterGrow();
-    }
+    if (cascade) { listEl.scrollTop = prevScrollTop; playSkillsListCascade(listEl, prevScrollTop); }
   }
 
   // ── 预设列表拖拽重排（与渠道列表同款：HTML5 DnD + 槽位指示线 + drop 一次性 FLIP） ──

@@ -1998,8 +1998,7 @@ describe("panel.html sessions tab", () => {
     const dispatch = panelJs.match(/function playViewEnter\(name\) \{([\s\S]*?)\n  \}/)?.[0];
     const board = panelJs.match(/function playBoardEnter\(view\) \{[\s\S]*?\n  \}/)?.[0];
     const replay = panelJs.match(/function replayViewEnter\(el\) \{([\s\S]*?)\n  \}/)?.[0];
-    const ctxGrow = panelJs.match(/function replayCtxMeterGrow\(\) \{([\s\S]*?)\n  \}/)?.[0];
-    assert.ok(targets && dispatch && board && replay && ctxGrow, "派发与两个播放实现都在册");
+    assert.ok(targets && dispatch && board && replay, "派发与两个播放实现都在册");
     const played = [];
     const el = (id) => {
       const classes = new Set();
@@ -2025,7 +2024,7 @@ describe("panel.html sessions tab", () => {
       documentElement: { getAttribute: () => null },
     };
     new Function("document", "getComputedStyle", "$",
-      `${targets}\n${replay}\n${board}\n${ctxGrow}\n${dispatch}\n
+      `${targets}\n${replay}\n${board}\n${dispatch}\n
        for (const n of ["terminal", "board", "skills", "presets", "store", "stats", "settings", "sessions", "nope"]) playViewEnter(n);
       `)(doc, () => ({ animationName: "none" }), (id) => doc.getElementById(id));
     assert.deepEqual(played, [
@@ -5856,33 +5855,6 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(body.includes("ctx-preset-badge"), "per-preset length badge rendered");
     assert.ok(body.includes("presetBadgeClass"), "length badge tier coloring (green/yellow/red) wired");
     assert.ok(body.includes("paintCtxMeter(presets)"), "header occupancy meter painted from injected presets");
-    assert.ok(panelCss.includes(".ctx-bar.ctx-grow-from .ctx-fill"), "生长复位帧（归零、过渡全关）在 panel.css");
-    assert.ok(panelCss.includes(".ctx-bar.ctx-grow .ctx-fill"), "生长帧（transform 过渡）在 panel.css");
-    assert.ok(/ctx-grow-from[^{]*\.ctx-fill\s*\{[^}]*transform:\s*scaleX\(0\)/.test(panelCss), "复位帧把填充件瞬时归零");
-    assert.ok(/ctx-grow[^{]*\.ctx-fill\s*\{[^}]*transition:\s*transform/.test(panelCss), "生长帧走 transform 过渡（不吃 over 档斜纹动画的 animation 声明）");
-    assert.ok(panelJs.includes("function replayCtxMeterGrow()"), "replayCtxMeterGrow helper defined in panel.js");
-  });
-
-  it("占用条生长动效：入场与手动刷新都起跑，空档不播，动画走 transform 不抢斜纹", () => {
-    const helper = panelJs.match(/function replayCtxMeterGrow\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(helper, "replayCtxMeterGrow found in panel.js");
-    const body = helper[1];
-    // 空档不播：条内本就没有填充
-    assert.ok(body.includes('getAttribute("data-tier") === "empty"'), "空占用档不生长");
-    // 两态切换：复位帧（归零、过渡全关）→ 冲样式 → 生长帧（transform 过渡）
-    assert.ok(body.includes('classList.add("ctx-grow-from")'), "先挂复位帧");
-    assert.ok(body.includes('classList.remove("ctx-grow-from")'), "再摘复位帧");
-    assert.ok(body.includes('classList.add("ctx-grow")'), "换上生长帧");
-    assert.ok(body.includes("getComputedStyle(fill)"), "冲样式读填充件自身（过渡挂在它身上）");
-    // 收尾有定时兜底：动画结束清两态，条回到基态
-    assert.ok(body.includes("setTimeout") && body.includes('classList.remove("ctx-grow")'), "生长结束后清生长帧");
-    // 触发点：入场（视图派发）、首载数据到达、手动刷新（cascade 渲染）
-    const dispatch = panelJs.match(/function playViewEnter\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(dispatch && dispatch[1].includes("replayCtxMeterGrow()"), "进预设页时起跑");
-    const refresh = panelJs.match(/async function doRefreshPresetsState\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(refresh && refresh[1].includes("replayCtxMeterGrow()"), "首载数据到达后起跑");
-    const render = panelJs.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(render && render[1].includes("replayCtxMeterGrow()"), "手动刷新（cascade）时起跑");
   });
 
   it("detail card renders per-endpoint rows with toggle, status badge and sync-error warning", () => {
