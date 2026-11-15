@@ -1527,7 +1527,8 @@
   .live-log-region { display: block; }
   .live-log {
     display: flex; flex-direction: column; gap: 8px;
-    --ll-step: 13px; --ll-step-expanded: 55px;
+    --ll-step: 22px; --ll-step-expanded: 55px;
+    --ll-card-h: 49px;
     --ll-scale-1: 0.96; --ll-scale-2: 0.92;
     --ll-blur-1: 0.4px; --ll-blur-2: 0.8px;
     --ll-opacity-1: 0.86; --ll-opacity-2: 0.72;
@@ -1555,7 +1556,14 @@
   .log-clear-btn:hover, .live-log-toggle:hover { color: var(--text); background: var(--surface-hover); }
   .live-log-toggle svg { width: 14px; height: 14px; flex: none; transition: transform 220ms var(--ease-out); }
   .live-log[data-state="expanded"] .live-log-toggle svg { transform: rotate(180deg); }
-  .live-log-stage { position: relative; height: 96px; overflow: hidden; transition: height 220ms var(--ease-out); }
+  /* 舞台高度＝卡高＋两个步长：卡高内容驱动，窄窗卡变高时三层仍各露一个完整步长，
+     第三层不会只剩一条卡底边。--ll-card-h 由 renderLogStack 量非离场卡的最大布局
+     高写入，49px 是无卡时兜底；展开态仍钉 320px 视口。 */
+  .live-log-stage {
+    position: relative; overflow: hidden;
+    height: calc(var(--ll-card-h) + var(--ll-step) * 2);
+    transition: height 220ms var(--ease-out);
+  }
   .live-log[data-state="expanded"] .live-log-stage { height: 320px; }
   /* 两层都随舞台长高：卡顶锚于 top:0，不再随高度过渡被拽（早期抽搐来自底锚＋层随
      舞台长高）。舞台长出的空间正好承接叠卡向下摊开。 */
@@ -1671,22 +1679,24 @@
   /* 新卡顶部浮现：起始态由 JS 挂 is-appearing、下一帧移除，与退层共用同一组
      transition。不用 keyframes animation——它优先级高于 transition，连发消息时
      正在入场的卡退层会被吞掉，位移与虚化拆成两条时间轴。 */
-  .live-log-stack .live-log-msg.is-appearing { opacity: 0; transform: translateY(-8px) scale(1.02); transition: none; }
-  /* 最末一张沿景深再退一层后淡出：位移到第三步、继续缩小、文字虚化加深，不再
-     硬跳 54px、也不让虚化回落成反弹。transition 三项逐项写全：若某张卡同时挂着
-     is-appearing（其 transition:none 会重置整组 shorthand），仍由本规则逐项取回
-     属性/时长/曲线，离场过渡不会被吃掉。JS 侧另用 markLogLeaving 保证两态互斥。 */
+  .live-log-stack .live-log-msg.is-appearing { opacity: 0.55; transform: translateY(-6px) scale(1.01); transition: none; }
+  /* 最末一张停在第三层原位淡出：不再沿 step×3 滑出舞台，否则每次新消息的 140ms
+     里第三层都是空的、用户只能数到两张。位移落在 step×2（补位卡的新第三层），
+     略缩＋淡出，旧卡被补位卡盖住，视觉上第三层一直有卡。z-index 保留原档，不
+     人为沉底。transition 逐项写全：若某张卡同时挂着 is-appearing（其
+     transition:none 会重置整组 shorthand），仍由本规则逐项取回属性/时长/曲线，
+     离场过渡不会被吃掉。JS 侧另用 markLogLeaving 保证两态互斥。 */
   .live-log-stack .live-log-msg.is-leaving {
-    transform: translateY(calc(var(--ll-step) * 3)) scale(0.88);
-    opacity: 0; z-index: 0;
+    transform: translateY(calc(var(--ll-step) * 2)) scale(0.9);
+    opacity: 0;
     transition-property: transform, opacity, background-color, border-color, box-shadow;
-    transition-duration: 160ms; transition-delay: 0ms;
+    transition-duration: 140ms; transition-delay: 0ms;
     transition-timing-function: var(--ease-out);
     pointer-events: none;
   }
   .live-log-stack .live-log-msg.is-leaving .live-log-meta,
   .live-log-stack .live-log-msg.is-leaving .live-log-text {
-    filter: blur(1.2px); transition-duration: 160ms; transition-delay: 0ms;
+    filter: blur(1.2px); transition-duration: 140ms; transition-delay: 0ms;
   }
   /* 清空是整批同时淡出，比单张挤出更短促；两层同取 120ms，与脚本的清场计时对齐，
      不再出现叠卡还在淡出、视口已先清空的错位。 */
