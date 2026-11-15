@@ -179,12 +179,20 @@ export function parsePortOwnerPid(out, port) {
 // per-launch launcher instance). Safety stays intact: we only ever resolve
 // and target the single PID bound to the relay's own port — never a global
 // `taskkill /IM node.exe`.
-export function findPortOwnerPid(port) {
+//
+// deps.spawn / deps.timeoutMs are pure test seams (same optional-injection
+// shape as getProcessCommandLine's spawnSync): the timeout, overflow and
+// non-zero-exit branches of the hand-built spawnSync semantics are otherwise
+// unreachable without a real netstat. Defaults are the real spawn and the
+// real timeout — production behavior unchanged.
+export function findPortOwnerPid(port, deps = {}) {
   if (!port) return Promise.resolve(null);
+  const spawnFn = deps.spawn ?? spawn;
+  const timeoutMs = deps.timeoutMs ?? NETSTAT_TIMEOUT_MS;
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn("netstat", ["-ano", "-p", "tcp"], { windowsHide: true });
+      child = spawnFn("netstat", ["-ano", "-p", "tcp"], { windowsHide: true });
     } catch {
       resolve(null);
       return;
@@ -203,7 +211,7 @@ export function findPortOwnerPid(port) {
         /* already gone */
       }
       finish(null);
-    }, NETSTAT_TIMEOUT_MS);
+    }, timeoutMs);
     let out = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -460,13 +468,19 @@ export async function stopRelay(root, deps = {}) {
   };
   // Kill path: UNCACHED port-owner lookup — the kill gate must see the fresh
   // owner PID, never a cached one, and must not share the display cache's
-  // in-flight slot.
-  const findOwner = deps.findPortOwnerPid ?? findPortOwnerPid.uncached;
+  // in-flight slot. When the caller does not replace the whole lookup, the
+  // deps-passthrough wrappers keep the PRODUCTION default functions in the
+  // tested path (tests prove the default wiring itself, not just injected
+  // stand-ins) while still letting a fake netstat/powershell child be injected
+  // underneath — same convention as isPidAlive's deps passthrough.
+  const findOwner = deps.findPortOwnerPid
+    ?? ((port) => findPortOwnerPid.uncached(port, { spawn: deps.netstatSpawn, timeoutMs: deps.netstatTimeoutMs }));
   const isAlive = deps.isPidAlive ?? isPidAlive;
   // Async by default so a fallback query never blocks the panel event loop.
   // Injected test doubles are plain sync mappers; awaiting a non-promise is a
   // no-op, so existing injections keep working unchanged.
-  const getCommandLine = deps.getProcessCommandLine ?? getProcessCommandLineAsync;
+  const getCommandLine = deps.getProcessCommandLine
+    ?? ((pid) => getProcessCommandLineAsync(pid, { spawn: deps.powershellSpawn }));
   const kill = deps.terminatePid ?? terminatePid;
   const delay = deps.delay ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const pollMs = deps.stopPollMs ?? STOP_POLL_MS;

@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createAgentMetricsCollector } from "../src/agents/agent-metrics.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const TOKEN = "test-token-pool";
 
@@ -96,6 +97,7 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig, metricsCollector })
     // nothing here touches disk.
     effortInjector: createEffortInjector({ isEnabled: () => false }),
     getKeepAliveConfig,
+    poolLoadBalancingGate: () => false,
     metricsCollector,
   };
 }
@@ -263,6 +265,37 @@ describe("pool routing: streaming", () => {
       assert.ok(text.includes("recovered on B"));
       assert.deepEqual(calls, ["member-a", "member-a", "member-b"],
         "member-a gets its full keep-alive budget (1 retry) before the failover");
+    });
+  });
+
+  it("(committed, resume mode) exhausts the same member instead of splicing another upstream", async () => {
+    const { upstreamFetch, calls } = memberRouter({
+      "member-a": () => ({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          yield new TextEncoder().encode('data: {"id":"1","choices":[{"delta":{"content":"partial from A"},"index":0}]}\n\n');
+          throw new Error("upstream socket died");
+        })(),
+      }),
+      "member-b": () => healthyStream("must never be sent"),
+    });
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 1 }),
+    });
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("partial from A"));
+      assert.equal(text.includes("must never be sent"), false);
+      const errorLine = text.split("\n").find((line) => line.startsWith("data: ") && line.includes('"error"'));
+      assert.ok(errorLine, "the exhausted resume emits an error event");
+      const body = JSON.parse(errorLine.slice("data: ".length));
+      assert.equal(body.error.code, 502);
+      assert.match(body.error.message, /续接 1 次仍未完成/);
+      assert.deepEqual(calls, ["member-a", "member-a"]);
     });
   });
 

@@ -235,6 +235,56 @@ describe("chain state (sticky backoff per endpoint)", () => {
     assert.deepEqual(state.get("ep-auto"), { nodeId: "prov-b", model: "gpt-shared", since: T0 + 2000 });
   });
 
+  it("upstream recovers to an earlier-but-not-head node: fresh retry window anchored at the recovery", () => {
+    // 上游中途恢复（探测或请求内回走）：链从更早、但非链首的节点继续服务，而
+    // 被跳过的链首还锁死红灯——重试窗口必须以恢复时刻为锚重新起算（否则下一
+    // 次请求立刻再探链首），且回走是恢复不是降级，onDemote 不得再触发。
+    const store = makeStore();
+    const events = [];
+    const state = createChainState({
+      onDemote: (endpointId, hopIndex) => events.push({ endpointId, hopIndex }),
+    });
+    const chain = resolveChain(store, "ep-auto").chain;
+    state.plan(store, "ep-auto", chain, T0);
+
+    // 退到链尾：pool-x 与 prov-a 各自连续失败两次。
+    noteChainFailure(state, "ep-auto", "pool-x", "gpt-shared");
+    noteChainFailure(state, "ep-auto", "pool-x", "gpt-shared");
+    noteChainSuccess(state, "ep-auto", "prov-a", "gpt-a-only", T0 + 1000);
+    noteChainFailure(state, "ep-auto", "prov-a", "gpt-a-only");
+    noteChainFailure(state, "ep-auto", "prov-a", "gpt-a-only");
+    noteChainSuccess(state, "ep-auto", "prov-b", "gpt-shared", T0 + 2000);
+    assert.deepEqual(state.get("ep-auto"), { nodeId: "prov-b", model: "gpt-shared", since: T0 + 2000 });
+    assert.deepEqual(events, [
+      { endpointId: "ep-auto", hopIndex: 1 },
+      { endpointId: "ep-auto", hopIndex: 2 },
+    ]);
+
+    // 窗口内 prov-a（第 2 跳）恢复了：粘回它的位置，窗口以恢复时刻重锚——
+    // 既不是原降级时刻，也不是归位（链首恢复才会 since 清空）。
+    const tRecover = T0 + 2000 + 60_000;
+    noteChainSuccess(state, "ep-auto", "prov-a", "gpt-a-only", tRecover);
+    assert.deepEqual(events, [
+      { endpointId: "ep-auto", hopIndex: 1 },
+      { endpointId: "ep-auto", hopIndex: 2 },
+    ], "回走恢复不是一次降级（onDemote 不再触发）");
+    assert.deepEqual(
+      state.get("ep-auto"),
+      { nodeId: "prov-a", model: "gpt-a-only", since: tRecover },
+      "重锚到恢复时刻",
+    );
+
+    // 新窗口内链首不早探：计划从恢复的节点开始。
+    assert.deepEqual(state.plan(store, "ep-auto", chain, tRecover + 1000), [
+      { node: "prov-a", model: "gpt-a-only" },
+      { node: "prov-b", model: "gpt-shared" },
+    ]);
+
+    // 恢复后满一个窗口才重新从链首探测（探测计划本身重锚窗口）。
+    assert.deepEqual(state.plan(store, "ep-auto", chain, tRecover + RETRY_UPSTREAM_MS), chain);
+    assert.deepEqual(state.get("ep-auto"), { nodeId: "prov-a", model: "gpt-a-only", since: tRecover + RETRY_UPSTREAM_MS });
+  });
+
   it("onDemote fires once per demotion (同一退避周期只推一条)，恢复后再次降级算新周期", () => {
     const store = makeStore();
     const events = [];

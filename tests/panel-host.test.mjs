@@ -54,25 +54,50 @@ test("discoverTerminalBackend swallows a throwing probe so panel startup never b
   assert.match(logger.warnings[0], /token store locked/);
 });
 
-// 接线兑底用例：createPanelServer 必须在启动时调 prewarmPromptsBackfill——
+// 接线兜底用例：createPanelServer 必须在启动时调 prewarmPromptsBackfill——
 // 注入文件唯一写入触发面原本是预设变更，漏掉这行接线则启动回填失效（面板
-// 重启后注入文件仍不落盘）。environmentService/promptsService 都注入 mock，
-// 预热回填不触真检测、不写真家目录；其余预热腿（watchdog/会话扫描）是
-// createPanelServer 既有行为，与本断言无关。
-test("createPanelServer 启动即预热注入回填（漏接线则 resync 计数为 0）", async () => {
-  const env = { getState: async () => ({ clients: [{ id: "claude", installations: [{ status: "found" }] }] }) };
+// 重启后注入文件仍不落盘）。三条预热腿的全部依赖来源都注入 mock：注入回填
+// （environmentService/promptsService）、冷扫（environmentService/sessionScanService）
+// 与 watchdog 快照（isWatchdogAutostartEnabledFn/probeWatchdogFn）。后两条腿不注入
+// 时直建 server 的测试会真的起 worker 扫全机会话存档、真的跑 reg.exe/PowerShell
+// 探针（panel-host.mjs 的透传缝是为此开的）；断言打到注入桩上＝预热确实走注入面，
+// 没有偷跑真探测。
+test("createPanelServer 启动即预热三条腿：注入回填 resync 一次、冷扫扫一次、watchdog 探一轮，全部走注入桩", async () => {
+  let getStateCalls = 0;
+  const env = {
+    getState: async () => {
+      getStateCalls += 1;
+      return { clients: [{ id: "claude", installations: [{ status: "found" }] }] };
+    },
+  };
   let resyncs = 0;
   const promptsService = { resync: () => { resyncs += 1; } };
+  let scanAlls = 0;
+  const sessionScanService = { scanAll: async () => { scanAlls += 1; return []; } };
+  let autostartProbes = 0, watchdogProbes = 0;
   createPanelServer({
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     environmentService: env,
     promptsService,
+    sessionScanService,
+    isWatchdogAutostartEnabledFn: async () => { autostartProbes += 1; return false; },
+    probeWatchdogFn: async () => { watchdogProbes += 1; return false; },
   });
-  const deadline = Date.now() + 100;
-  while (resyncs === 0 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+  const waitFor = async (value) => {
+    const deadline = Date.now() + 100;
+    while (value() === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  await waitFor(() => resyncs);
+  await waitFor(() => getStateCalls);
+  await waitFor(() => scanAlls);
+  await waitFor(() => autostartProbes);
   assert.equal(resyncs, 1, "启动即一次注入回填");
+  assert.ok(getStateCalls >= 1, "冷扫预热消费注入的环境检测（不触真检测）");
+  assert.equal(scanAlls, 1, "冷扫预热把会话首扫提前一拍：走注入的扫描服务");
+  assert.equal(autostartProbes, 1, "watchdog 预热探一轮自启状态：走注入桩，不跑真 reg.exe");
+  assert.equal(watchdogProbes, 1, "watchdog 预热探一轮存活：走注入桩，不跑真探测");
 });
 
 // 技能面同一接线纪律：junction 唯一的写入触发面是面板部署，漏掉这行接线则

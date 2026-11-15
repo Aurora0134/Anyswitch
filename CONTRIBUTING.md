@@ -21,7 +21,7 @@
   e.g. `node --test tests/autostart.test.mjs`.
 
 - Environment notes:
-  - `dpapi.test.mjs` exercises real Windows DPAPI (CurrentUser scope, via `dpapi.ps1`) and must run in a Windows interactive logon session; in non-interactive/service sessions without a user context the DPAPI probe fails and the affected cases report as skipped instead of failing.
+  - `dpapi.test.mjs` exercises real Windows DPAPI (CurrentUser scope, via `dpapi.ps1`) and must run in a Windows interactive logon session. The independent probe calls `dpapi.ps1` directly with synthetic plaintext, never the production bridge or a redirected user profile. If that probe works, any production bridge failure is a test failure; unsupported platforms or a genuinely unavailable CurrentUser scope may skip. Set `ANYSWITCH_REQUIRE_DPAPI=1` for release checks to turn that skip into a failure.
   - dsh/reasoning-related cases (`dsh-launcher.test.mjs`, `dsh-merge-config.test.mjs`, `reasoning-fallback.test.mjs`) depend on a local dsh installation (`@deepseek-ai/dsh` under the roaming npm root), and so do the dsh endpoint's cases in `uninstall-agent.test.mjs` (the dsh cases themselves, plus the two `uninstallAll` cases whose endpoint loop strips dsh too). When dsh is not installed, the `loadPiAiReasoningIndex` cases skip automatically (short-circuit on an empty index) and the uninstall driver's dsh-touching cases skip on an unresolvable js-yaml; all other cases are unaffected.
 
 ### Code style
@@ -69,7 +69,7 @@ Release notes are the changelog a user reaches from the About page, so their aud
   如 `node --test tests/autostart.test.mjs`。
 
 - 环境依赖说明：
-  - `dpapi.test.mjs` 走真实 Windows DPAPI（CurrentUser 作用域，经 `dpapi.ps1`），需要在 Windows 交互登录会话下运行；非交互/无用户上下文的服务会话中 DPAPI 探测不可用，相关用例报告为 skipped 而非失败。
+  - `dpapi.test.mjs` 走真实 Windows DPAPI（CurrentUser 作用域，经 `dpapi.ps1`），需要在 Windows 交互登录会话下运行。独立探测直接以合成明文调用 `dpapi.ps1`，不经过生产桥，也不重定向用户 profile。探测成功后，生产桥的失败一律判红；不支持的平台或确实不可用的 CurrentUser 作用域可跳过。发布检查须设置 `ANYSWITCH_REQUIRE_DPAPI=1`，把上述跳过改为失败。
   - dsh / reasoning 相关用例（`dsh-launcher.test.mjs`、`dsh-merge-config.test.mjs`、`reasoning-fallback.test.mjs`）依赖本机已安装 dsh（roaming npm 根下的 `@deepseek-ai/dsh`）；未安装时 `loadPiAiReasoningIndex` 相关用例自动跳过（按空索引短路），其余用例不受影响。
 
 ### 代码风格

@@ -12,6 +12,7 @@ import {
   writeZcodeCliConfig,
   zcodeCliDataDir,
   RELAY_PORT,
+  main,
 } from "../src/launchers/zcode-cli-launcher.mjs";
 import { readSidecar } from "../src/launchers/merge-common.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
@@ -337,6 +338,38 @@ describe("runZcodeCliLauncher", () => {
     await assert.rejects(runZcodeCliLauncher(doors({ loadToken: undefined })), /requires loadToken/);
     await assert.rejects(runZcodeCliLauncher(doors({ spawnZcodeCli: undefined })), /requires spawnZcodeCli/);
     await assert.rejects(runZcodeCliLauncher(doors({ startRelay: undefined })), /requires startRelay/);
+  });
+
+  it("main() passes argv through to the CLI child and closes the per-launch relay", async () => {
+    // main 的依赖注入缝只服务测试：zcodeArgs 被静默吞掉时这里翻红。全程零真实
+    // relay、零真实进程、零真实落盘（writeConfig 是桩）。
+    const spawned = [];
+    const calls = [];
+    let closed = false;
+    const code = await main(["-p", "hi"], {
+      startRelay: async () => ({ port: RELAY_PORT, token: "launch-tok", close: async () => { closed = true; } }),
+      writeConfig: async () => {
+        calls.push("writeConfig");
+        return { ok: true, unchanged: true };
+      },
+      loadStore: () => ({ ok: true, store: { version: 2, providers: {} } }),
+      loadToken: () => "resident-tok",
+      spawnZcodeCli: async ({ args }) => {
+        calls.push("spawnZcodeCli");
+        spawned.push(args);
+        return 2;
+      },
+      // 常驻探测绝不落到真实端口：测的是 main 的接线，不是宿主机 47821 上
+      // 碰巧在跑的 resident relay。
+      probeRelay: async () => false,
+      resolveExecutable: () => ENTRY,
+      resolveBuiltinConfig: () => BUNDLED_BUILTIN,
+      base: {},
+    });
+    assert.equal(code, 2, "child exit code passes through main");
+    assert.deepEqual(spawned[0], ["-p", "hi"], "argv must reach the CLI child verbatim");
+    assert.deepEqual(calls, ["writeConfig", "spawnZcodeCli"], "sync runs before the spawn");
+    assert.equal(closed, true, "the per-launch relay is torn down after the CLI exits");
   });
 });
 

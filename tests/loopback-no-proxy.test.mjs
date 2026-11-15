@@ -41,6 +41,29 @@ test("每个 launcher 环境的 NO_PROXY/no_proxy 都钉住共享的回环字面
   }
 });
 
+// 真实入口（launcher.mjs runLauncher / kimi-launcher.mjs runKimiLauncher）把
+// base = process.env 原样交给 builder：继承到冲突的 NO_PROXY 时若改成「只在缺
+// 失时补」的写法，中继流量会经继承代理离开本机。空 base 的断言抓不住这种回归，
+// 所以 claude / kimi 两条真实入口的 builder 必须用带冲突代理的 base 再钉一次。
+test("继承到冲突 NO_PROXY 的 base 也必须被回环值覆盖（claude 与 kimi 的真实入口）", () => {
+  const base = {
+    NO_PROXY: "proxy.corp.example:8080",
+    no_proxy: "proxy.corp.example:8080",
+    HTTP_PROXY: "http://proxy.corp.example:8080",
+    HTTPS_PROXY: "http://proxy.corp.example:8080",
+    ANTHROPIC_API_KEY: "inherited-key",
+  };
+  for (const [endpoint, build] of [
+    ["claude", () => buildLauncherEnv({ port: 47821, token: "t", base })],
+    ["kimi", () => buildKimiLauncherEnv({ port: 47821, token: "t", base, instanceId: "x" })],
+  ]) {
+    const env = build();
+    assert.equal(env.NO_PROXY, LOOPBACK_NO_PROXY, `${endpoint}: 继承的 NO_PROXY 必须被覆盖，不是只在缺失时补`);
+    assert.equal(env.no_proxy, LOOPBACK_NO_PROXY, `${endpoint}: 继承的 no_proxy 必须被覆盖，不是只在缺失时补`);
+    assert.equal(env.ANTHROPIC_API_KEY, undefined, `${endpoint}: 继承的真 key 必须剥掉`);
+  }
+});
+
 function listMjsFiles(dir) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {

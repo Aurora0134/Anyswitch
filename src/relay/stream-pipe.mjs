@@ -586,6 +586,10 @@ export async function runStreamWithKeepAlive(res, channel) {
   const agentId = "agentId" in channel ? (channel.agentId ?? null) : (deps?.agentId ?? null);
   const maxRetries = resolveKeepAliveEnabled(keepAliveConfig, agentId) ? (keepAliveConfig.maxRetries ?? 1) : 0;
   const backoffMs = keepAliveConfig.backoffMs ?? 500;
+  // 退避来源注入缝：测试经 deps.computeRetryDelay 记录每次退避的实际入参（调用
+  // 点的 1-based 次数契约由此可断言），生产缺省落回共享纯函数，行为与副作用顺
+  // 序不变。
+  const computeDelay = deps?.computeRetryDelay ?? computeRetryDelay;
   const logger = deps?.logger;
 
   // Single-provider channels carry one callUpstream; normalize both shapes to
@@ -604,6 +608,8 @@ export async function runStreamWithKeepAlive(res, channel) {
   // Translator + chunk envelope carried across resume attempts, so the
   // continued generation lands inside the response the client already sees.
   let resumeState = null;
+  let lastAttemptedMember = null;
+  let attemptedMembers = 0;
 
   // A member's definitive failure before the last member: count the failed
   // attempt against the actual member and log the failover, then advance.
@@ -615,6 +621,8 @@ export async function runStreamWithKeepAlive(res, channel) {
 
   for (let memberIndex = 0; memberIndex < callUpstreams.length; memberIndex += 1) {
     const member = callUpstreams[memberIndex];
+    lastAttemptedMember = member;
+    attemptedMembers += 1;
     // 智能分流的在途计数：成员开始承接本请求时 +1，无论成功/失败/中止/切换
     // 哪条出口都在 finally 里 -1。关闭智能分流时钩子为 undefined，空操作。
     channel.onMemberBegin?.(member);
@@ -625,6 +633,7 @@ export async function runStreamWithKeepAlive(res, channel) {
       tracker?.setCurrentMember?.(member.memberId ?? null);
       const isLastMember = memberIndex === callUpstreams.length - 1;
       let advanceToNextMember = false;
+      attemptsUsed = 0;
 
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         attemptsUsed = attempt + 1;
@@ -661,7 +670,7 @@ export async function runStreamWithKeepAlive(res, channel) {
             tracker?.recordRetry?.({ reason: `upstream_${result.status}`, attempt: attempt + 1, usage: result.body?.usage, memberId: member.memberId ?? undefined });
             logger?.warn?.(`keep-alive: retrying ${logLabel} (upstream status ${result.status}, attempt ${attempt + 1}/${maxRetries})`);
             try {
-              await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
+              await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
             } catch {
               tracker?.recordEnd({ aborted: true });
               return;
@@ -723,14 +732,17 @@ export async function runStreamWithKeepAlive(res, channel) {
             tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
             logger?.warn?.(`keep-alive: resuming ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
             try {
-              await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
+              await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
             } catch {
               tracker?.recordEnd({ aborted: true });
               return;
             }
             continue;
           }
-          // Budget spent: fall through to the exhaustion path below.
+          // Budget spent after content was committed: keep the member identity.
+          // Only a pre-content fault is eligible to fail over to another member.
+          channel.onMemberFault?.(member, outcome.reason);
+          break;
         }
 
         // Retryable failure detected before any content was delivered — unless the
@@ -750,7 +762,7 @@ export async function runStreamWithKeepAlive(res, channel) {
           tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
           logger?.warn?.(`keep-alive: retrying ${logLabel} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
           try {
-            await sleepWithAbort(computeRetryDelay(backoffMs, attempt + 1), abortController.signal);
+            await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
           } catch {
             // Aborted during backoff sleep
             tracker?.recordEnd({ aborted: true });
@@ -786,7 +798,7 @@ export async function runStreamWithKeepAlive(res, channel) {
     tracker?.recordEnd?.({ aborted: true, usage: lastOutcome?.usage });
     return;
   }
-  const lastMember = callUpstreams[callUpstreams.length - 1];
+  const lastMember = lastAttemptedMember;
   const retryCtx = { mode: keepAliveConfig?.mode ?? "on", maxRetries, attemptsUsed };
   // A resume that exhausted its budget ends the turn with the same 502 a
   // never-resumed cut would have carried — the client saw the partial output,
@@ -812,7 +824,6 @@ export async function runStreamWithKeepAlive(res, channel) {
   // 游不加」守卫都复用 appendFailoverContext，不另持一份。出口有两个，都要带：
   // message（三通道错误帧/tracker/日志文案）与 lastOutcome.error（sendExhausted
   // 的 JSON 分支发的是原体）。
-  const attemptedMembers = callUpstreams.length;
   message = appendFailoverContext({ status: 502, body: { error: { message } } }, attemptedMembers).body.error.message;
   if (lastOutcome?.error) {
     lastOutcome = { ...lastOutcome, error: appendFailoverContext({ status: 502, body: lastOutcome.error }, attemptedMembers).body };

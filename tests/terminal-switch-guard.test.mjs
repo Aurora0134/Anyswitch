@@ -265,17 +265,22 @@ describe("probeTerminalCommandTree：按需探测", () => {
 
   // 复探形态：观察点由子进程自己睡出来，好让两个探测的启动税重叠。
   it("delayMs：脚本先 Start-Sleep，睡的那段不占查询预算", async () => {
+    // 启动余量的值是独立定案的（源码 terminal-switch-guard.mjs 的注释：0/8/12/16 核
+    // 实测启动中位 270/450/719/2264ms，取 700 覆盖到 12 核跑满那档），不是推导值。
+    // 这里先钉字面值：常量被误改小（比如并进查询预算「简化」掉）时这里先红——
+    // 下面的 timeout 断言若继续用被测常量生成期望，改小后期望跟着缩，照样绿。
+    assert.equal(SWITCH_GUARD_STARTUP_ALLOWANCE_MS, 700, "冷启动余量＝700ms：16 核全跑满本来就超预算，按 fail-safe 拒换，不靠抬这个值凑");
     let captured = null;
     const exec = async (file, args, opts, cb) => { captured = { file, args, opts }; cb(null, "10\t1\tcmd.exe\tcmd /c claude\n"); };
     await probeTerminalCommandTree(10, { execFileFn: exec, delayMs: 700, timeoutMs: 1200 });
     assert.match(captured.args[3], /^Start-Sleep -Milliseconds 700; Get-CimInstance /, "查询前先睡这一拍");
-    assert.equal(captured.opts.timeout, 700 + SWITCH_GUARD_STARTUP_ALLOWANCE_MS + 1200,
-      "execFile 的超时＝睡 + 冷启动余量 + 查询预算：标称的 timeoutMs 必须整段留给查询");
+    assert.equal(captured.opts.timeout, 700 + 700 + 1200,
+      "execFile 的超时＝睡(700) + 冷启动余量(700) + 查询预算(1200)：标称的 timeoutMs 必须整段留给查询");
     // 不给 delayMs 时脚本原样（首探形态），超时＝启动余量 + 预算。
     await probeTerminalCommandTree(10, { execFileFn: exec, timeoutMs: 1500 });
     assert.match(captured.args[3], /^Get-CimInstance /);
-    assert.equal(captured.opts.timeout, SWITCH_GUARD_STARTUP_ALLOWANCE_MS + 1500);
-    // 上面两条 timeout 断言已钉住「两探实得查询窗＝各自标称 timeoutMs」：
+    assert.equal(captured.opts.timeout, 700 + 1500);
+    // 上面两条 timeout 断言（独立字面期望）已钉住「两探实得查询窗＝各自标称 timeoutMs」：
     // 睡段与启动余量被整段补回（源码 terminal-switch-guard.mjs:204），复探的
     // 查询窗不会比首探窄。
   });

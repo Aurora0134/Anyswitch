@@ -75,6 +75,13 @@ export function createPanelServer(options = {}) {
     environmentService: options.environmentService,
     promptsService: options.promptsService,
     skillsService: options.skillsService,
+    // 测试注入缝（默认 undefined＝路由器真实现，生产行为不变）：prewarmColdScans
+    // 的会话扫描腿与 prewarmWatchdogProbes 的探测腿。直建 server 的单测若不注入，
+    // 启动预热就会真的起 worker 扫全机存档、真的跑 reg.exe/PowerShell 探针——
+    // 与 environmentService/promptsService 透传是同一条纪律，见 panel.mjs 注入语义。
+    sessionScanService: options.sessionScanService,
+    isWatchdogAutostartEnabledFn: options.isWatchdogAutostartEnabledFn,
+    probeWatchdogFn: options.probeWatchdogFn,
   });
   // Warm the watchdog drift snapshot at startup: the panel frontend fetches
   // /api/settings on every page load to hydrate the 抗截断 toggle, and an

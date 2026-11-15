@@ -3,7 +3,10 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback, anthropicUsageToOpenAI, probeRelay, probeRelayHealth, isCodexBackgroundRequest } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer, listenLoopback as listenLoopbackProd, anthropicUsageToOpenAI, probeRelay, probeRelayHealth, isCodexBackgroundRequest } from "../src/relay/openai-server.mjs";
+// 临时口夹具与生产 listenLoopback 同名不同物：临时口一律走共享夹具（命中
+// fetch「bad port」即关掉换口重试）；带显式端口的归属判定用例才用生产本体。
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 import { createServiceHealth } from "../src/shared/service-health.mjs";
 import { INSTANCE_ID_MAX_LEN } from "../src/agents/agent-metrics.mjs";
 
@@ -98,30 +101,13 @@ function deps(upstreamBody) {
 
 async function withServer(deps, fn) {
   const server = createOpenAIRelayServer(deps);
-  // Explicit port 0: listenLoopback's default is the production relay port
-  // (47821); a test must never bind or probe the real relay.
-  const { port, close } = await listenTestPort(server);
+  // 共享夹具只绑临时口：fetch（undici）拒连的「bad port」命中即关掉换口重试，
+  // 用例不随端口抽签假红；生产常驻中继端口（47821）永远不会被绑上或探测。
+  const { port, close } = await listenLoopback(server, 0);
   try {
     return await fn(port);
   } finally {
     await close();
-  }
-}
-
-// 本机（Windows）动态端口范围是 1024-15000，覆盖了 fetch 规范的屏蔽端口表
-// （1719/2049/5060/6000/6566/6665-6669/6697/10080）。listenLoopback(server, 0)
-// 抽中这类端口时监听本身完全正常，但测试的 undici fetch 客户端拒绝向其发请求，
-// 整条用例以 "Error: bad port" 假红。绑定时换到非屏蔽端口，与断言无关。
-const FETCH_BLOCKED_PORTS = new Set([
-  1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566,
-  6665, 6666, 6667, 6668, 6669, 6697, 10080,
-]);
-
-async function listenTestPort(server) {
-  for (;;) {
-    const bound = await listenLoopback(server, 0);
-    if (!FETCH_BLOCKED_PORTS.has(bound.port)) return bound;
-    await bound.close();
   }
 }
 
@@ -288,7 +274,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await postChat(port);
       assert.equal(res.status, 200);
@@ -322,7 +308,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -371,7 +357,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -415,7 +401,7 @@ describe("openai relay transport", () => {
         // 夹具会让 socket pid 兜底静默失效，测出的是夹具自身的残缺而非产品行为。
         socketOwner: { lookup: () => 4242, onRefresh: () => () => {} },
       });
-      const { port, close } = await listenTestPort(server);
+      const { port, close } = await listenLoopback(server, 0);
       try {
         const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
           method: "POST",
@@ -499,7 +485,7 @@ describe("openai relay transport", () => {
         // 夹具残缺而非产品行为。
         socketOwner: { lookup: () => 4242, onRefresh: () => () => {} },
       });
-      const { port, close } = await listenTestPort(server);
+      const { port, close } = await listenLoopback(server, 0);
       try {
         const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
           method: "POST",
@@ -584,7 +570,7 @@ describe("openai relay transport", () => {
           ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
           metricsCollector: fakeCollector,
         });
-        const { port, close } = await listenTestPort(server);
+        const { port, close } = await listenLoopback(server, 0);
         try {
           const res = await fetch(`http://127.0.0.1:${port}/api/internal/detected-processes`, {
             headers: { authorization: TOKEN },
@@ -684,7 +670,7 @@ describe("openai relay transport", () => {
       logger: { warn: (line) => warns.push(line), info: () => {} },
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await postChat(port);
       assert.equal(res.status, 200);
@@ -722,7 +708,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -771,7 +757,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     const chat = (segment, headers = {}) =>
       fetch(`http://127.0.0.1:${port}/openai/${segment}/v1/chat/completions`, {
         method: "POST",
@@ -829,7 +815,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -874,7 +860,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -919,7 +905,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -968,7 +954,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -1094,7 +1080,7 @@ describe("openai relay transport", () => {
       effortInjector: NO_OP_EFFORT_INJECTOR,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -1158,7 +1144,7 @@ describe("openai relay transport", () => {
       effortInjector: NO_OP_EFFORT_INJECTOR,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -1213,7 +1199,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -1261,7 +1247,7 @@ describe("openai relay transport", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
         method: "POST",
@@ -1352,7 +1338,7 @@ describe("openai relay transport", () => {
     logger.info("relay-entry-1");
 
     const server = createOpenAIRelayServer({ ...deps(null), logger });
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       // No token: 401.
       const unauth = await fetch(`http://127.0.0.1:${port}/api/internal/logs`);
@@ -1401,7 +1387,7 @@ describe("openai relay transport", () => {
     logger.info("already-bridged-entry");
 
     const server = createOpenAIRelayServer({ ...deps(null), logger });
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/api/internal/logs?live=1`, {
         headers: { authorization: `Bearer ${TOKEN}` },
@@ -1663,7 +1649,7 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
         method: "POST",
@@ -1732,7 +1718,7 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
       metricsCollector: fakeCollector,
     });
 
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       // 引擎噪声形状：非流式 + claude 身份（桌面端 UA）。
       const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
@@ -1772,7 +1758,7 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
         metricsCollector: fakeCollector,
       });
       // 新的 startedMeta 会覆盖上一条——对照请求再经同一桩跑一遍。
-      const { port: port2, close: close2 } = await listenTestPort(streamServer);
+      const { port: port2, close: close2 } = await listenLoopback(streamServer, 0);
       try {
         const streamRes = await fetch(`http://127.0.0.1:${port2}/v1/messages`, {
           method: "POST",
@@ -1879,6 +1865,39 @@ describe("probeRelay (root-endpoint identity check)", () => {
     }, async (port) => {
       assert.equal(await probeRelay(port), false);
     });
+  });
+
+  it("resolves not-serving when the listener accepts but never answers (timeout branch)", async () => {
+    // 监听方挂起（连接进了 backlog 却不给响应字节）：探针必须吃自己的 2s 超时，
+    // 以 notServing 收尾——绝不能把端口误判成「自家中继还活着」。截止线 race
+    // 保证超时分支缺位时这条以失败收场，而不是把整个套件挂死。
+    const { createServer } = await import("node:http");
+    const server = createServer(() => { /* 永不应答 */ });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const verdict = await Promise.race([
+        probeRelayHealth(server.address().port),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("probe did not settle — the 2s timeout branch is missing")), 10000)),
+      ]);
+      assert.deepEqual(verdict, { serving: false, degraded: false, consecutiveFailures: 0, lastFailureKind: null },
+        "挂起的监听方既不在服务也不算降级");
+    } finally {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it("resolves not-serving when nothing is listening (connection-refused branch)", async () => {
+    // 端口上没有任何监听方：连接错误必须以 notServing 如实收尾——端口所有权
+    // 判定与 relay 复用逻辑靠这条分支区分「自己挂了」和「端口换了主人」。
+    const { createServer } = await import("node:http");
+    const server = createServer(() => {});
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    await new Promise((resolve) => server.close(resolve));
+    const health = await probeRelayHealth(port);
+    assert.deepEqual(health, { serving: false, degraded: false, consecutiveFailures: 0, lastFailureKind: null });
+    assert.equal(await probeRelay(port), false, "布尔视图同样不得把空端口读成在服务");
   });
 });
 
@@ -2036,7 +2055,7 @@ describe("openai relay /responses routes (codex)", () => {
       ...responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)),
       metricsCollector: fakeCollector,
     });
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await postResponses(port, "/v1/responses", headers);
       assert.equal(res.status, 200);
@@ -2078,7 +2097,7 @@ describe("openai relay /responses routes (codex)", () => {
       ...responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)),
       metricsCollector: fakeCollector,
     });
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       const res = await postResponses(port, tail, { "x-agent-id": "codex", ...headers }, body);
       assert.equal(res.status, 200);
@@ -2330,7 +2349,7 @@ describe("openai relay /responses routes (codex)", () => {
         onRefresh: () => { counters.subscriptions += 1; return () => {}; },
       },
     });
-    const { port, close } = await listenTestPort(server);
+    const { port, close } = await listenLoopback(server, 0);
     try {
       // 对照组先行：无标记用户流量照常走 socket pid 兜底，证明桩本身是通的。
       const userRes = await postResponses(port, "/v1/responses", { "x-agent-id": "codex" }, responsesBody());
@@ -2505,6 +2524,109 @@ describe("channel-qualified model slugs (<channel>~<model>)", () => {
       assert.equal(captured.body.model, "deepseek-chat");
       assert.equal(captured.meta.providerId, "nim");
       assert.equal(captured.meta.agentId, null, "无前缀 / 无 x-agent-id / 无 UA 时不伪造归属");
+    });
+  });
+});
+
+// ── 面板拉取式遥测路由 ──────────────────────────────────────────────────────
+// /api/internal/agents 与 /api/internal/model-stability 是控制面板跨进程拉取
+// 中继权威数据的两条路：guard rail 与数据转发形态都必须被钉住——面板依赖的
+// 载荷形状（agents 原样、稳定性快照顶层摊平）一变，面板就得跟着瞎。
+
+describe("internal telemetry routes (/api/internal/agents, /api/internal/model-stability)", () => {
+  const AGENTS_FIXTURE = [{ id: "kimi", sessions: [{ activeRequests: 1 }] }];
+  const STABILITY_FIXTURE = {
+    window: "8h",
+    buckets: 48,
+    models: [{ provider: "poke-api", model: "claude-opus-5", total: 2, successRate: 0.5 }],
+  };
+  function telemetryCollector({ throwOnGetAgents = false, throwOnStability = false } = {}) {
+    return {
+      getAgentsStatus: async () => {
+        if (throwOnGetAgents) throw new Error("collector exploded");
+        return AGENTS_FIXTURE;
+      },
+      getModelStability: () => {
+        if (throwOnStability) throw new Error("stability exploded");
+        return STABILITY_FIXTURE;
+      },
+    };
+  }
+  async function getRoute(port, path, token = TOKEN) {
+    return fetch(`http://127.0.0.1:${port}${path}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    });
+  }
+
+  it("/api/internal/agents rejects callers without a valid relay token", async () => {
+    await withServer({ ...deps(null), metricsCollector: telemetryCollector() }, async (port) => {
+      assert.equal((await getRoute(port, "/api/internal/agents", null)).status, 401);
+      assert.equal((await getRoute(port, "/api/internal/agents", "wrong-token")).status, 401);
+    });
+  });
+
+  it("/api/internal/agents serves the collector's agent rows verbatim", async () => {
+    await withServer({ ...deps(null), metricsCollector: telemetryCollector() }, async (port) => {
+      const res = await getRoute(port, "/api/internal/agents");
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.agents, AGENTS_FIXTURE, "面板拿到的就是采集器的行，路由不改写");
+    });
+  });
+
+  it("/api/internal/agents answers an empty roster when no collector is wired", async () => {
+    await withServer(deps(null), async (port) => {
+      const res = await getRoute(port, "/api/internal/agents");
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true, agents: [] });
+    });
+  });
+
+  it("/api/internal/agents reports a 500 when the collector fails", async () => {
+    await withServer({ ...deps(null), metricsCollector: telemetryCollector({ throwOnGetAgents: true }) }, async (port) => {
+      const res = await getRoute(port, "/api/internal/agents");
+      assert.equal(res.status, 500);
+      const body = await res.json();
+      assert.equal(body.error.type, "api_error");
+      assert.match(body.error.message, /agent metrics/);
+    });
+  });
+
+  it("/api/internal/model-stability rejects callers without a valid relay token", async () => {
+    await withServer({ ...deps(null), metricsCollector: telemetryCollector() }, async (port) => {
+      assert.equal((await getRoute(port, "/api/internal/model-stability", null)).status, 401);
+      assert.equal((await getRoute(port, "/api/internal/model-stability", "wrong-token")).status, 401);
+    });
+  });
+
+  it("/api/internal/model-stability spreads the collector's snapshot at the top level", async () => {
+    await withServer({ ...deps(null), metricsCollector: telemetryCollector() }, async (port) => {
+      const res = await getRoute(port, "/api/internal/model-stability");
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.window, "8h", "快照顶层摊平：window 直接可读");
+      assert.equal(body.buckets, 48);
+      assert.deepEqual(body.models, STABILITY_FIXTURE.models, "模型行原样下发，面板按行渲染");
+    });
+  });
+
+  it("/api/internal/model-stability answers the documented empty shape without a collector", async () => {
+    await withServer(deps(null), async (port) => {
+      const res = await getRoute(port, "/api/internal/model-stability");
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true, window: "8h", buckets: 48, models: [] });
+    });
+  });
+
+  it("/api/internal/model-stability reports a 500 when the collector fails", async () => {
+    await withServer({ ...deps(null), metricsCollector: telemetryCollector({ throwOnStability: true }) }, async (port) => {
+      const res = await getRoute(port, "/api/internal/model-stability");
+      assert.equal(res.status, 500);
+      const body = await res.json();
+      assert.equal(body.error.type, "api_error");
+      assert.match(body.error.message, /model stability/);
     });
   });
 });
@@ -2707,7 +2829,7 @@ describe("listenLoopback port-ownership retry", () => {
       const server = createServer();
       let calls = 0;
       const probe = async () => { calls += 1; return calls >= 3; };
-      const result = await listenLoopback(server, port, {
+      const result = await listenLoopbackProd(server, port, {
         probe, attempts: 4, delayMs: 0, sleep: async () => {},
       });
       assert.equal(result.reused, true, "瞬时没答上不该判死");
@@ -2721,7 +2843,7 @@ describe("listenLoopback port-ownership retry", () => {
       const { createServer } = await import("node:http");
       const server = createServer();
       await assert.rejects(
-        () => listenLoopback(server, port, {
+        () => listenLoopbackProd(server, port, {
           probe: async () => false, attempts: 3, delayMs: 0, sleep: async () => {},
         }),
         (err) => {

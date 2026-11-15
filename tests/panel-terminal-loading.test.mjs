@@ -213,7 +213,14 @@ describe("T2 进终端页不再把历史列表排在首帧之前", () => {
     });
     env.enterTerminalRail();
     assert.deepEqual(env.seen.api, [], "进页这一拍只渲不拉");
-    assert.equal(env.clock.pendingFrames() + env.clock.pendingTimers(), 1, "只排了一次补拉");
+    // 两级让位逐级断言（2026-11-15 测试审计）：此前只断「队列里恰好一件」——
+    // 两级让位退化成一级 setTimeout、或去掉二级 setTimeout 直接在 rAF 里发请求，
+    // 两种跳变都照样全绿。逐级钉住：先一帧、帧跑完才见定时器、定时器跑完才发请求。
+    assert.equal(env.clock.pendingFrames(), 1, "第一级：只排了一帧（单级 setTimeout 退化本断言红）");
+    assert.equal(env.clock.pendingTimers(), 0, "请求此刻还没进任务队列");
+    env.clock.flushFrames();
+    assert.deepEqual(env.seen.api, [], "帧让位完成仍不发请求——第二级还没跑（去掉二级 setTimeout 本断言红）");
+    assert.equal(env.clock.pendingTimers(), 1, "第二级：请求排在 rAF 之后的任务里");
     env.clock.flushAll();
     await Promise.resolve();
     assert.deepEqual(env.seen.api, ["GET /api/sessions/list"], "首帧之后补拉一次");
@@ -413,11 +420,17 @@ function makeTerminalWorld({ hiddenView = false, fitImpl = null } = {}) {
     ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
     ${extractFn("writeTerminalReplayFrame")}
+    ${extractFn("pauseTerminalStaleScreenCap")}
+    ${extractFn("resumeTerminalStaleScreenCap")}
     return {
       connectTerminalStream,
       parkTerminalScreen,
       closeTerminalStream,
       dropTerminalStaleScreen,
+      // visibilitychange 两拍调的产线包装（读 terminalStaleScreen 再转发）：
+      // 此前用例直接调垫片句柄上的 pauseCap/resumeCap，包装本体从未被执行。
+      pauseStaleCap: pauseTerminalStaleScreenCap,
+      resumeStaleCap: resumeTerminalStaleScreenCap,
       stale: () => terminalStaleScreen,
       instance: () => terminalXterm,
       bound: () => terminalBoundSessionId,
@@ -1045,6 +1058,66 @@ describe("T13 后台切回：兜底只在前台计时，旧帧挂到重建出字
     assert.equal(w.world.stale(), null, "新画面出字后揭幕");
     assert.equal(termA.disposed, true, "旧实例随之销毁");
   });
+
+  it("真跑：visibilitychange 两拍调的产线包装函数停表/重起窗（2026-11-15 测试审计）", async () => {
+    // 此前用例直接调垫片句柄上的 pauseCap/resumeCap（parkTerminalScreen 挂出去的
+    // 闭包），包装本体 pauseTerminalStaleScreenCap / resumeTerminalStaleScreenCap
+    // 从未被执行——包装读错变量、漏转发都绿。真身直跑包装。
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    const stale = w.world.parkTerminalScreen();
+    assert.deepEqual(w.clock.timerDelays(), [plainMax()], "前置：停放即登记一窗");
+    w.world.pauseStaleCap();
+    assert.equal(w.clock.pendingTimers(), 0, "包装停表：在册窗被撤（包装空转本断言红）");
+    assert.notEqual(w.world.stale(), null, "停表不是撤图：垫片仍在屏上");
+    w.world.resumeStaleCap();
+    assert.deepEqual(w.clock.timerDelays(), [plainMax()], "包装重起窗：从切回时刻起算");
+    assert.notEqual(w.world.stale(), null, "垫片仍是同一只");
+    // 重起的窗照常到点续窗（等待重建分支）、新画面出字后揭幕——包装转发的是
+    // 同一套闭包，不是断线的副本
+    w.clock.fireOldestTimer();
+    assert.notEqual(w.world.stale(), null, "等待重建期间到点不撤");
+    assert.ok(w.clock.pendingTimers() >= 1, "只续窗");
+    await w.world.connectTerminalStream(terminalSession("B"));
+    w.sources[w.sources.length - 1].emit("snapshot", JSON.stringify({ pid: 2, cols: 120, rows: 34 }));
+    w.sources[w.sources.length - 1].emit("data", JSON.stringify("B-screen\n"));
+    w.clock.flushAll();
+    assert.equal(w.world.stale(), null, "新画面出字后揭幕");
+    assert.equal(stale.done, true, "句柄侧同步收场（同一只垫片）");
+    assert.equal(termA.disposed, true);
+  });
+
+  it("真跑：阅读位没落定时兜底到点只续窗（restorePending 分支真跑），落定后到点撤（2026-11-15 测试审计）", async () => {
+    // 「restorePending → 只续窗」此前只有一条源码正则，没有用例真跑到这个分支；
+    // 删掉续窗分支，垫片会在阅读位落定前被兜底撤走。restorePending 的置位与清零
+    // 都在产线（beginTerminalForegroundRestore 置位、落位路径清零，行为由
+    // panel-terminal-foreground-restore 的真跑钉住），这里按同一形状供给分支输入，
+    // 钉的是 parkTerminalScreen 兜底窗对它的消费。
+    const renewalsMax = Number(/TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS = (\d+)/.exec(panelJs)[1]);
+    const w = makeTerminalWorld();
+    const { term: termA } = await primeSession(w, terminalSession("A"));
+    const stale = w.world.parkTerminalScreen();
+    stale.restorePending = true;
+    for (let i = 0; i < renewalsMax; i += 1) {
+      w.clock.fireOldestTimer();
+      assert.notEqual(w.world.stale(), null, `第 ${i + 1} 窗到点：阅读位没落定不撤垫片（删掉 restorePending 续窗分支本断言红）`);
+      assert.equal(termA.disposed, false, "旧帧整屏盖着");
+      assert.ok(w.clock.pendingTimers() >= 1, "到点只续窗");
+    }
+    // 落位完成（restorePending 清零）后：到点不再续，按原判据撤
+    stale.restorePending = false;
+    w.clock.fireOldestTimer();
+    assert.equal(w.world.stale(), null, "落位完成后到点撤");
+    assert.equal(termA.disposed, true, "旧实例随之销毁");
+    // 续窗有上限：restorePending 一直挂着也不能把旧帧永久留屏
+    const w2 = makeTerminalWorld();
+    const { term: termB } = await primeSession(w2, terminalSession("A"));
+    const stale2 = w2.world.parkTerminalScreen();
+    stale2.restorePending = true;
+    for (let i = 0; i < renewalsMax + 1; i += 1) w2.clock.fireOldestTimer();
+    assert.equal(w2.world.stale(), null, "续窗用尽后强制撤");
+    assert.equal(termB.disposed, true);
+  });
 });
 
 /* ============================================================
@@ -1435,6 +1508,17 @@ describe("T8 列宽变化：残行靠镜像整屏自绘抹掉", () => {
     assert.equal(w.api.pending(), null, "拆流撤销待办");
     w.clock.flushAll();
     assert.equal(w.calls.length, 0, "撤销后不再重建");
+    // 基准归零的可观测面（2026-11-15 测试审计）：拆流后新流的首连 fit 与拆流前
+    // 最后一次基准不同列宽也不算「列宽变化」——不归零（回归）会把 135 判成相对
+    // 残留基准 120 的变化，给刚建好的新流挂一次多余重建。此前只钉了定时器撤销，
+    // 这半边没断言。
+    w.api.noteTerminalFittedCols(135);
+    assert.equal(w.api.pending(), null, "拆流后的首连 fit 不是变化（基准已归零；没归零本断言红）");
+    w.clock.flushAll();
+    assert.equal(w.calls.length, 0, "不给新流挂重建");
+    // 归零后照常建立新基准：下一次变化仍触发重建（归零不是把判据废掉）
+    w.api.noteTerminalFittedCols(120);
+    assert.ok(w.api.pending() !== null, "新基准 135 上的 120 变化照常触发");
   });
 });
 
@@ -1484,6 +1568,45 @@ describe("T10 建连：fit 的 resize POST 落定后再开流", () => {
     assert.equal(w.world.instance(), null, "半成品 xterm 当场收掉，不留悬空实例");
     assert.equal(w.world.deferred(), true, "挂起等 fit 在几何可信那一拍补挂");
   });
+
+  it("真跑：fit 的返回值契约——三道闸 undefined、无目标 undefined、同值 null、要 POST 给 promise（2026-11-15 测试审计）", () => {
+    // 消费侧（connectTerminalStream 以 undefined 判挂起、以 null 判直开）被上面的
+    // 用例钉住，但那些用例的 fit 都是夹具替身——生产侧 fitTerminalXterm 自己的
+    // 返回值从未被断言过：某道闸改成 return null，建连路径的挂起判定就整个失效。
+    // 真身直跑，把返回值契约本身钉死。
+    const makeFit = ({ hidden = false, measurable = true, imeHold = null, term = { cols: 120, rows: 34 }, session = null, post } = {}) => {
+      const posts = [];
+      const fn = new Function("$", "terminalHostMeasurable", "postTerminalResize", "term", "session", "hidden", "imeHold", `
+        let terminalXterm = term;
+        let terminalImeHold = imeHold;
+        let terminalFitAddon = { fit() {} };
+        let terminalBoundSessionId = session ? "s1" : null;
+        function terminalSessionFor() { return session; }
+        function remountDeferredTerminalStream() {}
+        function noteTerminalFittedCols() {}
+        ${extractFn("fitTerminalXterm")}
+        return fitTerminalXterm;
+      `)(
+        (id) => (id === "terminalView" ? { hidden } : null),
+        () => measurable,
+        post || ((id, cols, rows) => { posts.push({ id, cols, rows }); return Promise.resolve(); }),
+        term, session, hidden, imeHold,
+      );
+      return { fit: fn, posts };
+    };
+    assert.equal(makeFit({ hidden: true }).fit(), undefined, "视图隐藏闸返回 undefined");
+    assert.equal(makeFit({ measurable: false }).fit(), undefined, "宿主不可测闸返回 undefined");
+    assert.equal(makeFit({ imeHold: { hold: 1 } }).fit(), undefined, "组字期闸返回 undefined");
+    assert.equal(makeFit({ session: null }).fit(), undefined, "没有可对齐目标（deferred 补挂闸）返回 undefined");
+    const same = makeFit({ session: { id: "s1", backend: true, backendState: { cols: 120, rows: 34 } } });
+    assert.equal(same.fit(), null, "尺寸已对齐（同值闸）返回 null——消费侧据此当拍直开不等待");
+    assert.deepEqual(same.posts, [], "同值闸不发 POST");
+    const changed = makeFit({ session: { id: "s1", backend: true, backendState: { cols: 100, rows: 30 } } });
+    const result = changed.fit();
+    assert.ok(result instanceof Promise, "尺寸不一致返回 POST 落定 promise——消费侧据此等 resize 再开流");
+    assert.deepEqual(changed.posts.map((p) => ({ cols: p.cols, rows: p.rows })), [{ cols: 120, rows: 34 }],
+      "POST 带上 fit 后的实测尺寸");
+  });
 });
 
 /* ============================================================
@@ -1510,12 +1633,19 @@ describe("T11 「正在加载」占位：只在旧屏已擦、新屏未出字那
         return node;
       },
     };
+    // 两个档位常量从真身取原句嵌进沙箱（2026-11-15 测试审计，同 makeSwitchLoadingWorld
+    // 与 railTtl 的纪律）：此前这两个数抄在沙箱里，产线改 10 分钟或 0ms 全组照绿。
+    const bootingMaxDecl = panelJs.match(/const TERMINAL_BOOTING_MAX_MS = [^;]+;/)?.[0];
+    const bootingArmDecl = panelJs.match(/const TERMINAL_BOOTING_ARM_TTL_MS = [^;]+;/)?.[0];
+    assert.ok(bootingMaxDecl && bootingArmDecl, "占位层两个档位常量在 panel.js 里");
+    const bootingMaxMs = new Function(`${bootingMaxDecl}\nreturn TERMINAL_BOOTING_MAX_MS;`)();
+    const bootingArmMs = new Function(`${bootingArmDecl}\nreturn TERMINAL_BOOTING_ARM_TTL_MS;`)();
     const factory = new Function(
       "$", "document", "requestAnimationFrame", "cancelAnimationFrame", "setTimeout", "clearTimeout", "Date",
       `
       let terminalXterm = null;
-      const TERMINAL_BOOTING_MAX_MS = 3000;
-      const TERMINAL_BOOTING_ARM_TTL_MS = 10000;
+      ${bootingMaxDecl}
+      ${bootingArmDecl}
       let terminalBooting = null;
       ${extractFn("terminalScreenHasContent")}
       ${extractFn("armTerminalBootingOverlay")}
@@ -1538,7 +1668,7 @@ describe("T11 「正在加载」占位：只在旧屏已擦、新屏未出字那
       clock.requestAnimationFrame, clock.cancelAnimationFrame, clock.setTimeout, clock.clearTimeout,
       { now: () => now },
     );
-    return { world, clock, screen, advance: (ms) => { now += ms; } };
+    return { world, clock, screen, advance: (ms) => { now += ms; }, bootingMaxMs, bootingArmMs };
   }
 
   // 内容判据的输入：只有第一行有字，其余行空（与真 xterm 一开屏就有 rows 行空行
@@ -1598,6 +1728,10 @@ describe("T11 「正在加载」占位：只在旧屏已擦、新屏未出字那
     w.world.setTerm(termWith(""));
     for (let i = 0; i < 5; i += 1) w.clock.flushFrames();
     assert.equal(w.screen.children.length, 1, "帧推进不会撤（判据没成立）");
+    // 兜底窗的登记值取产线常量（2026-11-15 测试审计）：此前常数抄在沙箱里且
+    // flushAll 无差别冲定时器——产线改成 10 分钟或 0ms 这条照样绿。
+    assert.deepEqual(w.clock.timerDelays(), [w.bootingMaxMs], "兜底一窗按产线常量登记");
+    assert.equal(w.bootingMaxMs, 3000, "「3 秒上限」的产品值由真身常量保证，改值当场红");
     w.clock.flushAll();
     assert.equal(w.screen.children.length, 0, "兜底计时器到点撤层");
     assert.equal(w.world.booting(), null);
@@ -1606,10 +1740,11 @@ describe("T11 「正在加载」占位：只在旧屏已擦、新屏未出字那
   it("陈旧武装不挂到后来的重建上：超 10 秒的 sync 直接作废", () => {
     const w = makeOverlayWorld();
     w.world.arm("t-x");
-    w.advance(10001);
+    w.advance(w.bootingArmMs + 1);
     w.world.sync("t-x");
     assert.equal(w.screen.children.length, 0, "过期武装不挂层");
     assert.equal(w.world.booting(), null, "过期即清");
+    assert.equal(w.bootingArmMs, 10000, "「10 秒过期」的产品值由真身常量保证，改值当场红");
   });
 
   it("源码/CSS：占位压在垫片之下（旧帧还在时不露脸），且不参与布局、不吞指针", () => {

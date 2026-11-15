@@ -1,5 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { EventEmitter } from "node:events";
 import { createDesktopShortcut, shortcutPayload } from "../src/ops/desktop-shortcut.mjs";
 
@@ -38,6 +40,19 @@ describe("desktop-shortcut", () => {
     assert.ok(p.arguments.includes("panel-app.vbs"), "arguments point at panel-app.vbs");
     assert.match(p.icon, /anyswitch\.ico,0$/);
     assert.ok(p.workingDirectory.length > 0);
+  });
+
+  it("payload 指向的 panel-app.vbs 与 anyswitch.ico 真实随仓分发（.lnk 链与图标有落点）", () => {
+    // 字符串形态对还不算数：链的每一跳文件必须真在盘上。快捷方式写死这两个
+    // 仓根文件的绝对路径，挪名/漏打包时 .lnk 第一跳就断（wscript 找不到脚本）、
+    // 图标丢失，而只看字符串的旧断言照样全绿。
+    const p = shortcutPayload();
+    const vbs = p.arguments.replace(/^"/, "").replace(/"$/, "");
+    const ico = p.icon.replace(/,0$/, "");
+    assert.equal(existsSync(vbs), true, "panel-app.vbs 不在仓根：Anyswitch.lnk → wscript → panel-app.vbs 第一跳就断");
+    assert.equal(existsSync(ico), true, "anyswitch.ico 不在仓根：快捷方式图标丢失");
+    assert.equal(dirname(vbs), p.workingDirectory, "脚本与工作目录同根：自更新原地换装时 .lnk 永远指向活代码");
+    assert.equal(dirname(ico), p.workingDirectory, "图标与工作目录同根");
   });
 
   it("create spawns windowless powershell and feeds the payload over stdin", async () => {

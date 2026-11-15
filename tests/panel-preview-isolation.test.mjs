@@ -27,6 +27,7 @@ import WallpaperTheme from "../panel-ui/wallpaper-theme.js";
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const panelCss = readFileSync(join(rootDir, "panel-ui", "panel.css"), "utf8").replace(/\r\n/g, "\n");
 const panelHtml = readFileSync(join(rootDir, "panel-ui", "panel.html"), "utf8");
+const panelJs = readFileSync(join(rootDir, "panel-ui", "panel.js"), "utf8");
 const SLUGS = ["saas", "aurora", "sepia"];
 const PREVIEW = ".wallpaper-preview";
 // 改写前的基准版本：@scope 收边已存在但选择器仍是「:root + 皮肤键」前缀的最后一版。
@@ -394,6 +395,42 @@ describe("皮肤规则的 @scope 收边", () => {
   // 块内选择器不再带皮肤键，「前缀归一化后与 base 逐条相等」只保证选择器本身没改样，
   // 挡不住把规则挪进别的皮肤块（挪动后顺序、特异性、声明都可以照旧）——起点覆盖由
   // auditScopedCss 的皮肤键闸与防挪用例承担。
+
+  it("@scope 终点与 DOM 锚点同源：宿主元素在册、镜像视口嵌在其子树内、主脚本克隆进它", () => {
+    // 本文件的隔离断言只解析 CSS 侧的终点字符串（PREVIEW 常量）；panel.html 里
+    // 那个真实宿主的类名或镜像视口的嵌套若被改掉，隔离用例照样全绿——@scope
+    // to (…) 挡的已经是别的东西。这里三点互钉：
+    // ① panel.html 必须有携带 wallpaper-preview 类的宿主元素（DOM 侧锚点）；
+    // ② 镜像视口（captureMirrorInto 的注入点）必须嵌在宿主子树内——「终点子树
+    //    除外」的收边才罩得住克隆体，挪出去即失守；
+    // ③ 主脚本确实把看板镜像注入该视口（预览失真面的来源）。
+    let host = null;
+    for (const m of panelHtml.matchAll(/<div\b[^>]*>/g)) {
+      const cls = ((m[0].match(/class="([^"]*)"/) || [])[1] ?? "").split(/\s+/).filter(Boolean);
+      if (cls.includes("wallpaper-preview")) { host = m; break; }
+    }
+    assert.ok(host, "panel.html 必须存在携带 .wallpaper-preview 类的预览宿主元素（@scope 终点的 DOM 侧锚点）");
+    const viewportId = "wallpaperPreviewViewport";
+    assert.ok(panelHtml.includes(`id="${viewportId}"`), "预览镜像视口在册（本测试的嵌套判定对象）");
+    assert.ok(
+      panelJs.includes(`captureMirrorInto($("${viewportId}")`),
+      "主脚本把看板镜像注入预览视口——克隆体的落点必须还是这个视口",
+    );
+    const hostOpen = host.index;
+    const viewportAt = panelHtml.indexOf(`id="${viewportId}"`, hostOpen);
+    assert.ok(viewportAt > hostOpen, "镜像视口出现在宿主开标签之后");
+    const tagRe = /<\/?div\b[^>]*>/g;
+    tagRe.lastIndex = hostOpen + host[0].length;
+    let depth = 1;
+    let nested = false;
+    let tag;
+    while ((tag = tagRe.exec(panelHtml))) {
+      if (tag.index >= viewportAt) { nested = depth > 0; break; }
+      depth += tag[0].startsWith("</") ? -1 : 1;
+      if (depth === 0) break;
+    }
+    assert.ok(nested, "镜像视口必须嵌在 .wallpaper-preview 子树内——挪出去 @scope 终点就挡不住克隆体");
+  });
 
   it("预览视口不再被皮肤换底规则命中（.wallpaper-preview-viewport 保持透明底）", () => {
     assert.ok(panelHtml.includes('class="settings-mirror-viewport wallpaper-preview-viewport"'),

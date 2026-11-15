@@ -2834,6 +2834,13 @@ async function api(method, path, body) {
     const root = $("liveLog");
     const motion = !!root?.getAttribute?.("data-motion");
     const reduced = logReducedMotion();
+    const preserveReadingPosition = logExpanded && !followLogs;
+    const previousScrollTop = body.scrollTop;
+    const previousScrollHeight = body.scrollHeight;
+    const readingAnchor = preserveReadingPosition
+      ? [...body.children].find((node) => node.offsetTop + node.offsetHeight > previousScrollTop)
+      : null;
+    const readingAnchorTop = readingAnchor?.offsetTop;
     const seen = new Set();
     const ordered = [];
     const fresh = [];
@@ -2872,6 +2879,15 @@ async function api(method, path, body) {
     }
     // 合批多条、两态交接期与 reduced-motion 都不逐条补播入场，避免层层追赶或残影。
     if (logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
+    // 最新日志插在顶部；暂停跟随时按实际新增高度补偿，正在读的内容不位移。
+    // 满容量时插入与淘汰同批发生，净高差可能是零；以仍在阅读的首个可见节点
+    // 为参照，测它真实的前移量，而不是把底部淘汰误算进补偿。
+    if (preserveReadingPosition) {
+      const insertedHeight = readingAnchor?.parentNode === body
+        ? readingAnchor.offsetTop - readingAnchorTop
+        : body.scrollHeight - previousScrollHeight;
+      body.scrollTop = Math.max(0, previousScrollTop + insertedHeight);
+    }
     if (logExpanded && followLogs) body.scrollTop = 0;
   }
 

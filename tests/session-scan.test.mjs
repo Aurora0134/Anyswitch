@@ -173,6 +173,36 @@ test("claude: head/tail local read handles files larger than 16KB", async () => 
   assert.equal(sessions[0].title, "tail title");
   assert.equal(sessions[0].summary, "final answer");
   assert.equal(sessions[0].lastActive, Date.parse("2026-09-01T11:00:00.000Z"));
+  // 头窗产物逐项钉住：title/summary/lastActive 全是尾窗产物，头窗坏掉（行被
+  // 截断、headN 读空）时它们照旧——createdAt 与 project 只能来自头窗首行，
+  // 这两条缺位即红。
+  assert.equal(sessions[0].createdAt, Date.parse("2026-09-01T10:00:00.000Z"), "createdAt 来自头窗首行时间戳");
+  assert.equal(sessions[0].project, "C:\\work\\myproj", "project 来自头窗首行 cwd");
+});
+
+test("claude: 大文件没有 custom-title 时，标题来自头窗的第一条真用户消息", async () => {
+  // 头窗的 title 候选（首条真用户消息）在带 custom-title 的会话上永远轮不到，
+  // 上面的尾窗断言抓不到头窗解析退化。这里摆一个 >16KB、无 custom-title 的
+  // 会话：头窗读坏时整会话会被当成「无真用户消息」剔除（len 0），或标题落到
+  // 目录基名——两条路都在这里红。
+  const root = makeTmp();
+  const filler = JSON.stringify({
+    type: "assistant",
+    message: { role: "assistant", content: "x".repeat(2000) },
+    timestamp: "2026-09-01T10:00:30.000Z",
+  });
+  writeClaudeSession(root, "C--work-myproj", "sess-big-notitle.jsonl", [
+    claudeLine({ message: { role: "user", content: "first question" } }),
+    ...Array.from({ length: 20 }, () => filler),
+    JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", content: "final answer" },
+      timestamp: "2026-09-01T11:00:00.000Z",
+    }),
+  ]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.equal(sessions.length, 1, "头窗认出真用户消息的会话不得被剔除");
+  assert.equal(sessions[0].title, "first question", "标题来自头窗的首条真用户消息");
 });
 
 test("claude: loadMessages reclassifies all-tool_result user rows as tool", async () => {
@@ -2060,6 +2090,42 @@ test("scan offload: worker 起不来时退回本进程扫，不丢结果", async
     const agentMetas = await offload.scanAgent("claude");
     assert.equal(agentMetas.length, 1, "单端点扫描同样降级可用");
     assert.equal(warns.length, 1, "降级只记一条 warn，不每拍刷日志");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: 沉默 worker 超时后请求落定并退回本进程，不重复退休", async () => {
+  const workerFile = join(makeTmp(), "silent-worker.mjs");
+  writeFileSync(workerFile, `
+import { parentPort } from "node:worker_threads";
+parentPort.on("message", () => {});
+`, "utf8");
+  let fallbackCalls = 0;
+  const warns = [];
+  const offload = createSessionScanOffload({
+    workerFile,
+    timeoutMs: 50,
+    logger: { warn: (line) => warns.push(line) },
+    fallback: {
+      scanAll: () => {
+        fallbackCalls += 1;
+        return { sessions: [{ id: `fallback-${fallbackCalls}` }], endpointErrors: [] };
+      },
+      scanAgent: () => [],
+      loadMessagesResponse: () => "{}",
+    },
+  });
+  try {
+    const results = await Promise.race([
+      Promise.all([offload.scanAll(), offload.scanAll()]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout requests never settled")), 3000)),
+    ]);
+    assert.deepEqual(results.map((result) => result.sessions[0].id), ["fallback-1", "fallback-2"]);
+    assert.equal(fallbackCalls, 2, "每个被超时中断的请求各走一次兜底");
+    assert.equal(offload.stats().failures, 1, "同一次 worker 故障只退休一次");
+    assert.equal(offload.stats().degraded, true);
+    assert.equal(warns.length, 1);
   } finally {
     offload.close();
   }

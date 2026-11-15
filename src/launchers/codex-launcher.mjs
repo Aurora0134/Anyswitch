@@ -199,17 +199,21 @@ export function realSpawnCodex({ env, args }) {
   });
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
+// ——缺省路径的行为与注入前逐字节相同。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   // codex-merge-config.mjs is a separate module; imported lazily so
   // this launcher stays loadable in checkouts where the writer has not landed.
-  const { writeCodexConfig } = await import("./codex-merge-config.mjs");
+  const { writeCodexConfig } = deps.writeCodexConfig
+    ? { writeCodexConfig: deps.writeCodexConfig }
+    : await import("./codex-merge-config.mjs");
   const code = await runCodexLauncher({
-    startRelay: () => startOpenAIRelay(),
-    writeConfig: (store, port, token, sidecarRoot, configPath) =>
-      writeCodexConfig(store, port, token, sidecarRoot, configPath),
-    loadStore,
-    spawnCodex: realSpawnCodex,
-    log: (line) => process.stderr.write(`${line}\n`),
+    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    writeConfig: deps.writeConfig ?? ((store, port, token, sidecarRoot, configPath) =>
+      writeCodexConfig(store, port, token, sidecarRoot, configPath)),
+    loadStore: deps.loadStore ?? loadStore,
+    spawnCodex: deps.spawnCodex ?? realSpawnCodex,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     codexArgs: argv,
   });
   return code;

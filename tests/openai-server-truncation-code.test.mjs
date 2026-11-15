@@ -18,9 +18,10 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const envRoot = mkTestDir("anys-truncation-code-env-");
 process.env.LOCALAPPDATA = envRoot;

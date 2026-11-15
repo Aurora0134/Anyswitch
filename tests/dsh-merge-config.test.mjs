@@ -201,6 +201,56 @@ test("buildDshProviderEntry knowledge tier never overrides store-declared levels
   assert.ok(!entry._p.models[0].compat, "store-declared levels carry no per-model format");
 });
 
+test("buildDshProviderEntry exempts a model the store marks supportsReasoning:false", () => {
+  // 显式非推理模型是豁免链的第一级：渠道声明了 reasoningVariants、知识库与档位
+  // 库都有行，model.supportsReasoning === false 仍必须盖过它们——豁免分支缺失
+  // 时这个模型会被照常写出档位（每次请求多带一个非推理模型拒绝的参数）。
+  const knowledge = new Map([
+    ["no-think-chat", {
+      hasMap: true,
+      levels: ["low", "high"],
+      wireValues: { low: "low", high: "high" },
+      thinkingFormat: "deepseek",
+    }],
+  ]);
+  const catalog = {
+    models: new Map([
+      ["no-think-chat", { kind: "reasoning", levels: ["low", "high"], default: "high", wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const provider = {
+    reasoningVariants: ["low", "high"],
+    models: {
+      "no-think-chat": { displayName: "No Think", supportsReasoning: false },
+      "yes-think-chat": { displayName: "Yes Think" },
+    },
+  };
+  const entry = buildDshProviderEntry("p", provider, 47821, TOKEN, knowledge, catalog);
+  const models = Object.fromEntries(entry._p.models.map((m) => [m.id, m]));
+  assert.equal(models["no-think-chat"].reasoningEfforts, undefined, "豁免模型不得写出档位");
+  assert.equal(models["no-think-chat"].compat, undefined, "豁免模型也不得带自己的思考格式");
+  // 对照组：同渠道去掉豁免标记的模型照常拿到档位——证明豁免来自这个标记本身。
+  assert.deepEqual(models["yes-think-chat"].reasoningEfforts, {
+    off: null,
+    low: "low",
+    high: "high",
+  });
+  assert.equal(entry._p.compat.supportsReasoningEffort, true, "同渠道的会思考模型照常声明路由级支持");
+
+  // 渠道里只有豁免模型时，路由级 compat 必须整体缺席——supportsReasoning:false
+  // 不是「会思考」，整条渠道都不能声明思考格式。
+  const solo = buildDshProviderEntry(
+    "solo",
+    { reasoningVariants: ["low", "high"], models: { "no-think-chat": { supportsReasoning: false } } },
+    47821,
+    TOKEN,
+    knowledge,
+    catalog,
+  );
+  assert.equal(solo._solo.compat, undefined);
+  assert.equal(solo._solo.models[0].reasoningEfforts, undefined);
+});
+
 test("writeDshProfilePatches manages the channel lifecycle and preserves user rows", async (t) => {
   const yaml = await requireYamlModule(t);
   if (yaml === null) return;
@@ -469,6 +519,34 @@ test("patch 能解析但不是条目数组时只跳过这一个 profile，其它
     assert.equal(readFileSync(brokenPath, "utf8"), broken, "被跳过的文件一个字节都不许动");
     const web = yaml.load(readFileSync(join(profiles, "web", "cordis.patch.yml"), "utf8"));
     assert.equal(web.find((entry) => entry.id === "llm-pi-ai").config.providers._poke.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 失联不得伪装成功的另一半：一个界面坏掉是「跳过＋照常写」，全部界面坏掉就是
+// 「一个渠道都没写进去」——必须报 ok:false 交给 failed 名单接管，而不是顶着一
+// 个「成功跳过」把同步计成完成。
+test("所有 profile patch 都不可解析时必须报 ok:false，且一个文件都不动", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-all-broken-");
+  try {
+    const profiles = join(dir, "profiles");
+    for (const name of ["dsh-tui", "web"]) mkdirSync(join(profiles, name), { recursive: true });
+    const broken = "just a scalar, not a loader patch array\n";
+    const tuiPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const webPath = join(profiles, "web", "cordis.patch.yml");
+    writeFileSync(tuiPath, broken, "utf8");
+    writeFileSync(webPath, "another: scalar\n", "utf8");
+
+    const result = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, false, "全部界面都写不进去时不得伪装成功");
+    assert.equal(result.unchanged, true, "失败路径没有写任何东西");
+    assert.match(result.reason, /every dsh profile patch is unparseable/i, `原因要可读：${result.reason}`);
+    assert.equal(readFileSync(tuiPath, "utf8"), broken, "失败路径下原文件一字节不动");
+    assert.equal(readFileSync(webPath, "utf8"), "another: scalar\n");
+    assert.equal(existsSync(join(dir, "dsh-sidecar.json")), false, "失败路径不得落账托管记录");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+// 夹具对账的生产契约（纯数据表，无副作用）：端点集合与入口形态取
+// environment-service 的 CLIENT_ENTRY_FORMS（服务端逐端点数据下发的同一份冻结表），
+// 可代管更新集合取 client-lifecycle 的权威清单（panel.js 注释指认的权威源）。
+// 没有这两条对账，关于页夹具的行数/查询数/批量数就是夹具自证——生产新增
+// workbuddy（第 10 个端点）后夹具停在 9 个，谁也不会发现。
+import { CLIENT_ENTRY_FORMS } from "../src/ops/environment-service.mjs";
+import { CLIENT_PACKAGES, NATIVE_CLIENTS } from "../src/agents/client-lifecycle.mjs";
 
 const source = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../panel-ui/panel.html", import.meta.url), "utf8");
@@ -52,24 +59,30 @@ function deferred() {
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const appInfo = { version: "0.5.0-preview", prerelease: true, platform: "win32", nodeVersion: "v24.13.0" };
-const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"];
-// 与生产 CLIENT_ENTRY_FORMS 同形的端点入口形态枚举（数据下发，徽标按它「/」连写）
-const ENTRY_FORMS = {
-  claude: ["CLI", "Desktop"], codex: ["CLI", "Desktop"], opencode: ["CLI"], pi: ["CLI"],
-  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Desktop"], zcode: ["Desktop", "CLI"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
-};
+// 端点清单与生产 CLIENT_ENTRY_FORMS 的键集合对账（独立预期在下方专用用例里钉）：
+// workbuddy 是生产第 10 个端点，夹具必须跟齐。行序保持既有用例的索引习惯
+// （clients[0]=claude … clients[8]=grok），workbuddy 追加在尾，不重排。
+const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok", "workbuddy"];
+// 入口形态枚举就是生产那份冻结表（数据下发，徽标按它「/」连写）——不再另抄一份。
+const ENTRY_FORMS = CLIENT_ENTRY_FORMS;
+// 可代管更新的权威清单：npm 全局包 + 原生自更新客户端（client-lifecycle 的
+// CLIENT_PACKAGES / NATIVE_CLIENTS）。zcode / workbuddy 不在册：桌面应用走官方渠道，
+// 面板不给更新按钮。夹具据此推导批量计数，不再手抄「8」。
+const PANEL_UPDATABLE = new Set([...Object.keys(CLIENT_PACKAGES), ...Object.keys(NATIVE_CLIENTS)]);
 function environment() {
   return {
     platform: "win32", nodeVersion: "v24.13.0",
     clients: ids.map((id) => ({
       id, name: id, entryForms: ENTRY_FORMS[id],
-      // 与生产同形：qoder / codex / dsh / claude / kimi 一张卡两条以上安装记录。qoder index 0
-      // 是 qodercli.exe 原生 CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；
-      // codex index 0 是 npm CLI、index 1 是 Store 桌面端、remoteId codex-desktop；dsh
-      // index 0 是 npm 全局 CLI（本体 harness）、index 1 是官方桌面端、remoteId
-      // dsh-desktop、index 2 是社区插件 dsh-tui（remoteId dsh-tui）；claude 与
-      // kimi 同 dsh 前两条顺序，桌面端各走 claude-desktop / kimi-desktop 远端。
-      // 九个客户端都有官方版本源，逐安装记录发起查询，主行只呈现每端点一行。
+      // 与生产同形：qoder / codex / dsh / claude / kimi / workbuddy 一张卡两条以上安装
+      // 记录。qoder index 0 是 qodercli.exe 原生 CLI、remoteId qoder-cli，index 1 是桌面
+      // IDE、remoteId qoder；codex index 0 是 npm CLI、index 1 是 Store 桌面端、remoteId
+      // codex-desktop；dsh index 0 是 npm 全局 CLI（本体 harness）、index 1 是官方桌面端、
+      // remoteId dsh-desktop、index 2 是社区插件 dsh-tui（remoteId dsh-tui）；claude 与
+      // kimi 同 dsh 前两条顺序，桌面端各走 claude-desktop / kimi-desktop 远端；workbuddy
+      // 是 CLI 内核（index 0）+ 桌面壳（index 1），两条 remoteId 恒为 null——没有可核验
+      // 的官方版本源，关于页不为他发查询（与 zcode CLI 同一条纪律）。
+      // 除 workbuddy 外的九个客户端都有官方版本源，逐安装记录发起查询，主行只呈现每端点一行。
       installations: id === "qoder"
         ? [
           { kind: "cli", remoteId: "qoder-cli", status: "found", path: "C:\\Apps\\qoder\\qodercli.exe", version: "1.0.0", versionSource: "cli --version", issue: null },
@@ -103,15 +116,44 @@ function environment() {
             { kind: "desktop", remoteId: "zcode", status: "found", path: "C:\\Apps\\zcode\\desktop", version: "2.0.0", versionSource: "package-json", issue: null },
             { kind: "cli", remoteId: null, status: "found", path: "C:\\Apps\\zcode\\cli", version: "1.0.0", versionSource: "package-json", issue: null },
           ]
-          : ["cli"].map((kind) => ({
-            kind, remoteId: id,
-            status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
-            versionSource: "package-json", issue: null,
-          })),
+          : id === "workbuddy"
+            ? [
+              // 与生产同形：workbuddy CLI 内核守 index 0（入口在 app.asar.unpacked，不在
+              // PATH），桌面壳第二条；两条 remoteId 恒为 null——无官方版本源，不发查询、
+              // 不给动作位（「自带更新」）。
+              { kind: "cli", remoteId: null, status: "found", path: "C:\\Apps\\workbuddy\\resources\\app.asar.unpacked\\cli\\workbuddy-cli.cmd", version: "1.2.0", versionSource: "package.json", issue: null },
+              { kind: "desktop", remoteId: null, status: "found", path: "C:\\Apps\\workbuddy\\WorkBuddy.exe", version: "3.4.0", versionSource: "app.asar/package.json", issue: null },
+            ]
+            : ["cli"].map((kind) => ({
+              kind, remoteId: id,
+              status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
+              versionSource: "package-json", issue: null,
+            })),
     })),
   };
 }
 const latest = (version = "1.1.0", comparison = "update_available") => ({ state: "ok", version, comparison, source: "npm", url: "https://www.npmjs.com/package/@anthropic-ai/claude-code" });
+
+// ── 夹具的独立预期（从夹具与生产契约推导，不再手抄数字）────────────────
+// 官方版本查询数：按「带 remoteId 的安装记录」一条一次（workbuddy 两条记录都无
+// 官方源，不发查询）。全量场景批量数：可代管集合 ∩ 有官方版本源的端点——夹具里
+// 每条官方源的远端都是 1.1.0、本地 1.0.0，即整端点「有新版本」。
+const OFFICIAL_QUERY_COUNT = environment().clients
+  .reduce((sum, client) => sum + client.installations.filter((installation) => installation.remoteId).length, 0);
+const BATCH_COUNT_FULL = environment().clients
+  .filter((client) => PANEL_UPDATABLE.has(client.id))
+  .filter((client) => client.installations.some((installation) => installation.remoteId)).length;
+// 「全部更新 (N)」文案断言用纯字符串包含：带括号的字面量不过 RegExp，免转义歧义。
+const batchLabel = (count) => `全部更新 (${count})`;
+
+// 夹具对账：端点集合与生产 CLIENT_ENTRY_FORMS 的键一致、可代管集合与 client-lifecycle
+// 的权威清单一致。生产新增/摘除端点或代管腿的那一刻，这里就地失败——夹具不再能
+// 停留在过期的 9 客户端世界里自证。
+test("关于页夹具与生产契约对账：端点集合＝CLIENT_ENTRY_FORMS，可代管集合＝client-lifecycle 权威清单", () => {
+  assert.deepEqual([...ids].sort(), [...Object.keys(CLIENT_ENTRY_FORMS)].sort(), "端点清单必须跟齐生产（缺 workbuddy 即失败）");
+  assert.deepEqual([...PANEL_UPDATABLE].sort(), [...Object.keys(CLIENT_PACKAGES), ...Object.keys(NATIVE_CLIENTS)].sort(), "可代管更新集合与 client-lifecycle 的权威清单一致");
+  assert.equal(BATCH_COUNT_FULL, PANEL_UPDATABLE.size, "全量场景下每个可代管端点都有官方新版可升");
+});
 
 function harness(respond = () => latest(), options = {}) {
   const nodes = new Map();
@@ -161,14 +203,17 @@ function harness(respond = () => latest(), options = {}) {
     setItem: (key, value) => { storage.set(String(key), String(value)); },
     removeItem: (key) => { storage.delete(String(key)); },
   };
+  // 换装产物页（panelStartupRestart）用例把标记摆进沙箱 window：默认空对象，
+  // 既有用例的「本页是否换装产物」判定不受影响。
+  const sandboxWindow = options.sandboxWindow ?? {};
   const factory = vm.runInNewContext(`${toneMatch[0]}\n;(${match[0]})`, {
     URL, URLSearchParams, setTimeout, clearTimeout, localStorage,
     // 自更新流程会触到换装事件与「本页是否换装产物」判定：给最小桩。
-    window: {},
+    window: sandboxWindow,
     CustomEvent: class { constructor(type) { this.type = type; } },
   });
   const controller = factory({ request, doc, notify: options.notify ?? ((message, isErr) => { toasts.push({ message, isErr }); }), schedule, cancelSchedule });
-  return { nodes, doc, calls, mutations, toasts, swaps, flushJobs, controller, storage, get: (id) => nodes.get(id), row: (id) => nodes.get("aboutClients").children.find((node) => node.dataset.clientId === id) };
+  return { nodes, doc, calls, mutations, toasts, swaps, flushJobs, controller, storage, window: sandboxWindow, get: (id) => nodes.get(id), row: (id) => nodes.get("aboutClients").children.find((node) => node.dataset.clientId === id) };
 }
 
 function normal(path) {
@@ -188,7 +233,7 @@ test("enter renders local data before official replies; remote concurrency is bo
   assert.match(h.get("aboutAppVersion").textContent, /0\.5\.0-preview/);
   assert.equal(h.get("aboutPreviewBadge").hidden, false);
   assert.match(h.get("aboutSystem").textContent, /Windows.*Node.*v24\.13\.0/);
-  assert.equal(h.get("aboutClients").children.length, 9);
+  assert.equal(h.get("aboutClients").children.length, ids.length, "端点行数跟齐生产契约（含 workbuddy）");
   assert.match(h.row("claude").textContent, /本地.*1\.0\.0/);
   assert.match(h.row("claude").textContent, /查询中/);
   assert.equal(pending.length, 3);
@@ -285,7 +330,7 @@ test("local failure can retry from button; refresh passes explicit bypass to loc
   failed = false;
   await h.get("aboutEnvironmentRefresh").click();
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 15, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / claude / kimi 各两条渠道，dsh 三条）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, OFFICIAL_QUERY_COUNT, "逐条带 remoteId 的安装记录各查一次（qoder / codex / claude / kimi 各两条渠道，dsh 三条；workbuddy 无官方源不发查询）");
   assert.ok(h.calls.filter((path) => path.includes("/latest/")).every((path) => new URL(path, "http://local").searchParams.get("refresh") === "1"));
 });
 
@@ -358,9 +403,9 @@ test("leaving ignores late local and update responses; returning reuses pending 
   update.resolve({ state: "current", checkedAt: "2026-09-18T09:00:00Z" });
   await Promise.all([first, second]);
   await tick(); await tick();
-  assert.equal(h.get("aboutClients").children.length, 9);
+  assert.equal(h.get("aboutClients").children.length, ids.length, "端点行数跟齐生产契约（含 workbuddy）");
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 15, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / claude / kimi 各两条渠道，dsh 三条）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, OFFICIAL_QUERY_COUNT, "逐条带 remoteId 的安装记录各查一次（qoder / codex / claude / kimi 各两条渠道，dsh 三条；workbuddy 无官方源不发查询）");
 });
 
 test("refresh and navigation isolate late remote comparisons and preserve visible cached values", async () => {
@@ -506,7 +551,7 @@ test("DSH 只有社区插件过期时端点级按钮也要出现", async () => {
   assert.equal(actions.length, 1, "端点级一颗");
   assert.equal(actions[0].textContent, "更新");
   // 计数要带数字断言：count 归零时文案同样是无计数的「全部更新」，裸 /全部更新/ 不随计数变化
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/, "批量入口照常计数：插件渠道让 dsh 计入端点数，与全量场景同为 8");
+  assert.ok(h.get("aboutUpdateAll").textContent.includes(batchLabel(BATCH_COUNT_FULL)), "批量入口照常计数：插件渠道让 dsh 计入端点数，与全量场景同为可代管集合数");
 });
 
 test("DSH 社区插件未装且本体未装时不代装插件", async () => {
@@ -529,7 +574,7 @@ test("Codex 双形态归并为一行：徽标 CLI/Desktop、本地与官方格�
   });
   await h.controller.enter();
   const row = h.row("codex");
-  assert.equal(h.get("aboutClients").children.length, 9, "桌面安装项不额外开卡");
+  assert.equal(h.get("aboutClients").children.length, ids.length, "桌面安装项不额外开卡");
   const lines = descendants(row, (node) => node.className === "about-version-line");
   assert.equal(lines.length, 1, "codex 两形态归并为每端点一行");
   assert.equal(descendants(lines[0], (node) => node.className === "about-kind")[0].textContent, "CLI/Desktop");
@@ -540,7 +585,7 @@ test("Codex 双形态归并为一行：徽标 CLI/Desktop、本地与官方格�
   assert.equal(actions[0].textContent, "更新");
   assert.ok(h.calls.includes("/api/environment/latest/codex-desktop?localVersion=26.915.4065"), "桌面渠道的官方版本照常按 codex-desktop 远端 id 查询");
   assert.match(row.textContent, /桌面 路径C:\\Apps\\codex\\desktop/, "桌面形态的路径在详情区逐形态补行");
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/, "批量更新按端点计一次，qoder 同此");
+  assert.ok(h.get("aboutUpdateAll").textContent.includes(batchLabel(BATCH_COUNT_FULL)), "批量更新按端点计一次，qoder 同此");
 });
 
 test("Codex 桌面渠道的官方来源链接放行 Microsoft Store，仿冒域名被丢弃", async () => {
@@ -924,7 +969,7 @@ test("本地环境卡为可更新客户端出更新按钮，桌面应用只留�
   assert.equal(actionButtons(qoderLines[0])[0].textContent, "更新", "Qoder CLI 走自身升级命令，按钮与 grok 同位");
   assert.ok(h.calls.includes("/api/environment/latest/qoder-cli?localVersion=1.0.0"), "主更新形态用 qoder-cli 渠道查官方版本");
   assert.equal(h.get("aboutUpdateAll").disabled, false);
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/);
+  assert.ok(h.get("aboutUpdateAll").textContent.includes(batchLabel(BATCH_COUNT_FULL)), "批量计数由可代管集合推导（workbuddy / zcode 不计入）");
 });
 
 // 「本地与官方一致 → 不出动作位」不在本用例断言：它由更新确认收尾用例行为性覆盖
@@ -1668,4 +1713,263 @@ test("刷新后 /last 补显：待重启生效仍是警示档，与关于页、�
   const done = h.toasts.find((toast) => /重启面板后生效/.test(toast.message));
   assert.ok(done, "/last 补显要弹一次");
   assert.equal(done.isErr, "warn", "补显通道与关于页同一份色档");
+});
+
+// ── Desktop 在前的端点：徽标顺序与「自带更新」呈现（workbuddy / zcode）─────
+test("zcode 与 workbuddy 的 Desktop/CLI 徽标按 entryForms 原样连写（Desktop 在前）；workbuddy 无官方源不查版本、不给动作位", async () => {
+  const h = harness(normal);
+  await h.controller.enter();
+  // 徽标是端点入口形态枚举的「/」连写：服务端下发什么顺序就什么顺序，不排序不
+  // 反转。zcode / workbuddy 的主形态 Desktop 必须在前——此前只在 CLI 在前的端点
+  // （qoder/kimi/pi/codex/dsh）上有断言，把 forms 反转或按字母排序的变异体抓不到。
+  for (const id of ["zcode", "workbuddy"]) {
+    const badgeLine = descendants(h.row(id), (node) => node.className === "about-version-line")[0];
+    assert.equal(descendants(badgeLine, (node) => node.className === "about-kind")[0].textContent, "Desktop/CLI", `${id} 徽标 Desktop 在前`);
+  }
+  // workbuddy 两条安装记录 remoteId 均为 null（与生产 inspectWorkbuddyCli/Desktop 同形）：
+  // 不发官方版本查询，官方最新格直述「自带更新」，无比对结论位、无动作位。
+  assert.equal(h.calls.some((path) => path.includes("/latest/workbuddy")), false, "无官方版本源不发查询");
+  const line = descendants(h.row("workbuddy"), (node) => node.className === "about-version-line")[0];
+  assert.match(line.textContent, /本地 1\.2\.0/, "主行摆主安装记录（CLI 内核）的版本");
+  assert.match(line.textContent, /官方最新 自带更新/);
+  assert.equal(descendants(line, (node) => node.className === "about-result").length, 0, "无官方源，无比对结论");
+  assert.equal(descendants(line, (node) => node.tagName === "button").length, 0, "workbuddy 不给动作位");
+  assert.equal(actionButtons(h.row("zcode")).length, 0, "zcode 桌面应用同样无动作位");
+  assert.ok(h.get("aboutUpdateAll").textContent.includes(batchLabel(BATCH_COUNT_FULL)), "批量计数仍是可代管集合数（workbuddy / zcode 不计入）");
+});
+
+// ── 稳定轨「立即更新」按钮的可见性（一键入口的出现条件）─────────────────
+test("稳定轨「立即更新」：检查在途/未接回/无更新/检查失败都收起，只有确认有新版本才出现", async () => {
+  let update = deferred();
+  const h = harness((path) => path.startsWith("/api/updates") ? update.promise : normal(path));
+  const entering = h.controller.enter();
+  await tick();
+  assert.equal(h.get("aboutSelfUpdate").hidden, true, "检查更新在途时不出现");
+  update.resolve({ ...appUpdateAvailable() });
+  await entering;
+  await flush();
+  assert.equal(h.get("aboutSelfUpdate").hidden, false, "稳定轨确认有新版本：按钮出现");
+  assert.equal(h.get("aboutSelfUpdate").textContent, "立即更新");
+  // 强制检查在途：收起
+  update = deferred();
+  h.get("aboutCheckUpdates").click();
+  await tick();
+  assert.equal(h.get("aboutSelfUpdate").hidden, true);
+  update.resolve({ ...appUpdateAvailable() });
+  await flush();
+  assert.equal(h.get("aboutSelfUpdate").hidden, false, "检查完仍是有新版本：按钮保持");
+  // 已是最新：收起
+  update = deferred();
+  h.get("aboutCheckUpdates").click();
+  update.resolve({ state: "current", track: "stable", checkedAt: "2026-09-18T08:03:00Z", drift: null, release: null });
+  await flush();
+  assert.equal(h.get("aboutSelfUpdate").hidden, true, "已是最新不出一键入口");
+  // 检查失败：收起
+  update = deferred();
+  h.get("aboutCheckUpdates").click();
+  update.reject(new Error("offline"));
+  await flush();
+  assert.equal(h.get("aboutSelfUpdate").hidden, true, "检查失败不出一键入口");
+});
+
+// ── 自动下载停在 staged 的「应用更新」入口（整条此前未测）────────────────
+// 自动下载（设置项）不带 autoApply：worker 下载核验通过后停在「已下载待应用」，
+// 关于页经 /api/self-update/active 接回 staged，按钮转「应用更新」，应用这一步
+// 由用户确认后 POST /api/self-update/apply 发起并接续轮询（panel.js 的
+// renderSelfUpdateStaged / startSelfUpdateApply / applySelfUpdateRun 三段）。
+const stagedPayload = () => ({
+  ok: true, runId: "r1", clientId: "anyswitch", action: "update", step: "download", state: "done",
+  startedAt: "2026-10-23T00:00:00.000Z", finishedAt: "2026-10-23T00:05:00.000Z",
+  outcome: "downloaded", message: "已下载 0.7.0，应用后生效", beforeVersion: "0.6.1", latestVersion: "0.7.0",
+  workerPid: 424242, phase: "staged", track: "stable", targetVersion: "0.7.0", targetTag: "v0.7.0", targetSha: null,
+});
+
+function stagedHarness({ applyFrames = [], applyError = null } = {}) {
+  let staged = stagedPayload();
+  let frameIndex = 0;
+  const h = harness((path) => {
+    if (path.startsWith("/api/self-update/r1")) {
+      const frame = applyFrames[Math.min(frameIndex, applyFrames.length - 1)];
+      frameIndex += 1;
+      if (!frame) throw new Error("poll transient failure");
+      return frame;
+    }
+    if (path === "/api/self-update/active") return { ok: true, runs: [], staged };
+    if (path === "/api/self-update/last") return null;
+    if (path === "/api/updates") return appUpdateAvailable();
+    return normal(path);
+  }, {
+    respondPost: ({ path }) => {
+      if (path === "/api/self-update/apply") {
+        if (applyError) {
+          staged = null; // 服务端判定 staged 已失效：拒绝即不可再应用，/active 不再回它
+          throw Object.assign(new Error(`HTTP 409：${applyError.code}`), applyError);
+        }
+        return { ok: true, runId: "r1", targetVersion: "0.7.0" };
+      }
+      throw new Error(`unexpected POST ${path}`);
+    },
+  });
+  return { h };
+}
+
+test("自动下载停在 staged：进页接回「应用更新」，检查更新不把按钮画回「立即更新」", async () => {
+  const { h } = stagedHarness({ applyFrames: [] });
+  await h.controller.enter();
+  await flush();
+  assert.match(h.get("aboutUpdateStatus").textContent, /已下载 0\.7\.0/, "状态行摆 staged 记录自报的结论");
+  assert.equal(h.get("aboutSelfUpdate").hidden, false);
+  assert.equal(h.get("aboutSelfUpdate").textContent, "应用更新", "按钮转「应用更新」，不是一键入口的「立即更新」");
+  // 检查更新仍报 update_available（当前版本确实还是旧的）：不能把按钮画回「立即更新」
+  await h.controller.checkUpdates(true);
+  await flush();
+  assert.match(h.get("aboutUpdateStatus").textContent, /已下载 0\.7\.0/, "staged 停留态继续占有状态行");
+  assert.equal(h.get("aboutSelfUpdate").textContent, "应用更新", "renderUpdate 不越过 staged 分支");
+});
+
+test("「应用更新」经确认弹层发 apply 并钉住 runId，轮询接续到换装信号", async () => {
+  const { h } = stagedHarness({
+    applyFrames: [
+      { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+      null, // 应用期落空轮询（面板已退场）：换装信号
+      {
+        ok: true, runId: "r1", state: "done", step: "apply", phase: "waiting-panel", track: "stable",
+        targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: "2026-10-23T00:06:00.000Z",
+        outcome: "updated", message: "已更新到 0.7.0", beforeVersion: "0.6.1", afterVersion: "0.7.0", latestVersion: "0.7.0",
+      },
+    ],
+  });
+  await h.controller.enter();
+  await flush();
+  h.get("aboutSelfUpdate").onclick();
+  await flush();
+  assert.ok(h.get("clientUpdateModal").className.includes("show"), "应用前先过确认弹层");
+  assert.match(h.get("clientUpdateModalTitle").textContent, /应用更新 0\.7\.0/, "稳定轨按版本号点名");
+  assert.equal(h.get("clientUpdateModalConfirm").textContent, "立即应用");
+  assert.deepEqual(h.mutations, [], "未确认前不发 apply");
+  h.get("clientUpdateModalConfirm").click();
+  await flush();
+  assert.deepEqual(h.mutations.map((m) => ({ path: m.path, runId: m.body?.runId })), [{ path: "/api/self-update/apply", runId: "r1" }], "apply 钉住 staged 的 runId");
+  assert.match(h.get("aboutUpdateStatus").textContent, /正在应用更新/, "进度横幅接管状态行");
+  assert.equal(h.get("aboutSelfUpdate").hidden, true, "应用进行中动作键收起");
+  for (let index = 0; index < 4; index += 1) { h.flushJobs(); await tick(); }
+  assert.equal(h.swaps.length, 1, "应用阶段（isApply 已武装）落空轮询即换装信号");
+  assert.match(h.get("aboutUpdateStatus").textContent, /即将刷新/, "旧页面只交代即将刷新");
+  assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), undefined, "旧页面不落已读：结论归换装后的新页面");
+  assert.ok(h.toasts.some((toast) => /已更新到 0\.7\.0/.test(toast.message)), "结论 toast 照常交代");
+});
+
+test("「应用更新」报 no_staged：有面向用户的提示，staged 清掉后按钮回落一键入口", async () => {
+  const { h } = stagedHarness({ applyFrames: [], applyError: { code: "no_staged" } });
+  await h.controller.enter();
+  await flush();
+  assert.equal(h.get("aboutSelfUpdate").textContent, "应用更新");
+  h.get("aboutSelfUpdate").onclick();
+  await flush();
+  h.get("clientUpdateModalConfirm").click();
+  await flush();
+  assert.match(h.toasts.map((toast) => toast.message).join("\n"), /没有已下载待应用的更新/, "no_staged 不静默");
+  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/self-update/apply"], "只发了一次 apply");
+  // 失败后 applySelfUpdateRun 重走接回：/active 已无 staged → 「应用更新」消失，
+  // 检查结果（update_available）重新占有状态行与一键入口。
+  assert.equal(h.get("aboutSelfUpdate").textContent, "立即更新", "staged 失效后回到一键入口（不再有应用入口）");
+  assert.match(h.get("aboutUpdateStatus").textContent, /发现新版本/, "状态行回落检查结果");
+});
+
+// ── 换装产物页（bootstrap 置 panelStartupRestart）的最终结论分支 ─────────
+test("换装后的新页面：updated 终态直接显示最终结论并落已读，不派换装、/last 补显不再重弹", async () => {
+  const doneRecord = {
+    ok: true, runId: "r1", state: "done", step: "apply", phase: "waiting-panel", track: "stable",
+    targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: new Date().toISOString(),
+    outcome: "updated", message: "已更新到 0.7.0", beforeVersion: "0.6.1", afterVersion: "0.7.0", latestVersion: "0.7.0",
+  };
+  let lastOutcome = null;
+  let frameIndex = 0;
+  const frames = [
+    { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+    doneRecord,
+  ];
+  const h = harness((path) => {
+    if (path.startsWith("/api/self-update/r1")) {
+      const frame = frames[Math.min(frameIndex, frames.length - 1)];
+      frameIndex += 1;
+      if (!frame) throw new Error("poll transient failure");
+      return frame;
+    }
+    if (path === "/api/updates" || path.startsWith("/api/updates?")) return appUpdateAvailable();
+    if (path === "/api/self-update/active") return { ok: true, runs: [], staged: null };
+    if (path === "/api/self-update/last") return lastOutcome;
+    return normal(path);
+  }, {
+    respondPost: ({ path }) => {
+      if (path === "/api/self-update") return { ok: true, runId: "r1", targetVersion: "0.7.0" };
+      throw new Error(`unexpected POST ${path}`);
+    },
+  });
+  // 本页就是换装的产物：bootstrap 在刷新后置位（window.panelStartupRestart）
+  h.window.panelStartupRestart = true;
+  await startOneClick(h);
+  for (let index = 0; index < 4; index += 1) { h.flushJobs(); await tick(); }
+  assert.equal(h.swaps.length, 0, "恢复页不派换装事件：顶栏监视空等一次身份变化只会谎报重启失败");
+  assert.equal(h.get("aboutUpdateStatus").textContent, "已更新到 0.7.0", "直接显示最终结论，不存在「即将刷新」");
+  assert.equal(h.get("aboutUpdateStatus").dataset.tone, "ok");
+  assert.equal(h.get("aboutSelfUpdate").hidden, true);
+  assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), "1", "就地落已读标记");
+  const done = h.toasts.find((toast) => /已更新到 0\.7\.0/.test(toast.message));
+  assert.ok(done, "结论 toast 要交代");
+  assert.equal(done.isErr, "ok");
+  // 落了已读：再进页时 /last 补显通道不再为它重弹（把同一条结论发布到 /last 才是有效对照）
+  const toastsBefore = h.toasts.length;
+  lastOutcome = doneRecord;
+  h.controller.leave();
+  await h.controller.enter();
+  await flush();
+  assert.equal(h.toasts.length, toastsBefore, "已读标记压制 /last 补显");
+});
+
+// ── 页面级观察者的真实接线（非注入布尔）─────────────────────────────────
+test("观察者归属让位走真实接线：探针就是关于页控制器的 selfUpdateTracking，随任务起落翻转", async () => {
+  const watcherMatch = source.match(/  function createSelfUpdateFrameWatcher\([\s\S]*?\n  \}/);
+  const toneMatch = source.match(/  function selfUpdateTone\([\s\S]*?\n  \}/);
+  assert.ok(watcherMatch && toneMatch, "观察者与色档映射都在 panel.js");
+  assert.match(source, /setAboutProbe\(about\.selfUpdateTracking\)/, "生产接线存在：探针就是 about.selfUpdateTracking");
+  const storage = new Map();
+  const localStorageMock = {
+    getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
+    setItem: (key, value) => { storage.set(String(key), String(value)); },
+  };
+  const factory = vm.runInNewContext(`${toneMatch[0]}\n;(${watcherMatch[0]})`, { localStorage: localStorageMock });
+  const toasts = [];
+  const watcher = factory({
+    toast: (message, level) => toasts.push({ message, level }),
+    dispatchSwap: () => {},
+    isPanelRestarting: () => false,
+    isStartupRestartPage: () => false,
+    storage: localStorageMock,
+  });
+  // 与 initSettingsView 相同的一行接线：接真实控制器的探针，不接测试手搓的布尔
+  const { h } = selfUpdateHarness({
+    frames: [
+      { ok: true, runId: "r1", state: "running", phase: "staging", step: "download", track: "stable", targetVersion: "0.7.0" },
+      { ok: true, runId: "r1", state: "running", phase: "staging", step: "download", track: "stable", targetVersion: "0.7.0" },
+    ],
+  });
+  watcher.setAboutProbe(h.controller.selfUpdateTracking);
+  const doneFrame = {
+    runId: "r1", state: "done", step: "apply", phase: "waiting-panel",
+    outcome: "failed", message: "应用新版本失败，请稍后重试",
+    finishedAt: "2026-10-23T00:00:00.000Z", targetVersion: "0.7.0",
+  };
+  await startOneClick(h);
+  assert.equal(typeof h.controller.selfUpdateTracking, "function");
+  assert.equal(h.controller.selfUpdateTracking(), true, "一键任务进行中：真实探针报跟踪中");
+  watcher.frame(doneFrame);
+  assert.equal(toasts.length, 0, "关于页跟踪时观察者让位（真实探针在拦）");
+  assert.equal(storage.get("anyswitch:self-update-shown:r1"), undefined, "让位不落已读");
+  // 关于页离开：任务交还服务端，selfUpdateRun 复位 → 真实探针翻转 → 观察者接管
+  h.controller.leave();
+  assert.equal(h.controller.selfUpdateTracking(), false, "离开关于页：探针不再报跟踪中");
+  watcher.frame(doneFrame);
+  assert.equal(toasts.length, 1, "探针翻转后观察者接管提示");
+  assert.equal(storage.get("anyswitch:self-update-shown:r1"), "1", "接管后落已读");
 });

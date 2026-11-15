@@ -240,7 +240,11 @@ export async function startWatchdogHost(options = {}) {
   // CIM 行 dump。代价是「发现 agent 起来了 → 拉起 relay」的延迟从 ≤3s 变成 ≤本值，
   // 只影响 relay 已经不在的那个分支；换来的是常驻并发少一路，即探针超时那条链
   // 少一份燃料（判罚与代价见 agent-metrics.mjs 的 createPersistentPsProbe 上方）。
-  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({
+  // createMetricsCollector 只为测试存在：用例借它捕获真实入参、验证上面这个
+  // 常量确实接进自建收集器，且 watcher 的 scanProcesses 喂的就是这个收集器。
+  // 生产路径不传它，走 createAgentMetricsCollector，行为与副作用顺序不变。
+  const createCollector = options.createMetricsCollector ?? createAgentMetricsCollector;
+  const metricsCollector = options.metricsCollector ?? createCollector({
     processScanTtlMs: WATCHDOG_PROCESS_SCAN_TTL_MS,
   });
   // watcherDeps exists so tests can observe the follow-agent path without real

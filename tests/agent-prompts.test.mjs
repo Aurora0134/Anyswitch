@@ -6,7 +6,6 @@ import {
   createPromptsService,
   promptsPath,
   UnparseablePromptsError,
-  MAX_CONTENT_BYTES,
 } from "../src/agents/agent-prompts.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -62,37 +61,54 @@ describe("agent-prompts data plane", () => {
 
   it("enforces title/tag/content limits with 400 errors", () => {
     const { svc } = makeService();
+    // 内容上限的期望值硬编码 32768：上限本身就是产品承诺（面板提示与注入块
+    // 大小都按它算），期望值从生产常量生成等于常量漂移时测试跟着漂。
     for (const fields of [
       { title: "", content: "x" },
       { title: "  ", content: "x" },
       { title: "t".repeat(201), content: "x" },
       { title: "ok", tag: "t".repeat(51), content: "x" },
-      { title: "ok", content: Buffer.alloc(MAX_CONTENT_BYTES + 1, 0x61).toString("utf8") },
+      { title: "ok", content: Buffer.alloc(32768 + 1, 0x61).toString("utf8") },
       { title: "ok" },
     ]) {
       assert.throws(() => svc.createPreset(fields), (err) => err.statusCode === 400, JSON.stringify(fields).slice(0, 60));
     }
+    // 超限报错把字节数带给人看，上限值必须在场。
+    assert.throws(
+      () => svc.createPreset({ title: "ok", content: "a".repeat(32769) }),
+      (err) => err.statusCode === 400 && err.message.includes("32768"),
+    );
     // Exactly 32KB is accepted.
-    const ok = svc.createPreset({ title: "上限内", content: "a".repeat(MAX_CONTENT_BYTES) });
-    assert.equal(ok.preset.content.length, MAX_CONTENT_BYTES);
+    const ok = svc.createPreset({ title: "上限内", content: "a".repeat(32768) });
+    assert.equal(ok.preset.content.length, 32768);
     assert.equal(svc.getState().presets.length, 1);
   });
 
   it("updates a preset, bumping updatedAt while keeping id/createdAt", () => {
-    const { svc } = makeService();
+    const { svc, file, base } = makeService();
     const { preset } = svc.createPreset({ title: "旧", tag: "a", content: "v1" });
+    // 把 updatedAt 钉死在过去：这样「更新必须刷新 updatedAt」只有唯一方向可过
+    // ——实现若忘了刷新（updatedAt 原值带回），>= 的宽容会把假绿放过去。
+    const stale = JSON.parse(readFileSync(file, "utf8"));
+    stale.presets[0].updatedAt = "2020-01-01T00:00:00.000Z";
+    writeFileSync(file, JSON.stringify(stale), "utf8");
     const { preset: updated } = svc.updatePreset({ id: preset.id, title: "新", tag: "b", content: "v2" });
     assert.equal(updated.id, preset.id);
     assert.equal(updated.title, "新");
     assert.equal(updated.tag, "b");
     assert.equal(updated.content, "v2");
     assert.equal(updated.createdAt, preset.createdAt);
-    assert.ok(updated.updatedAt >= preset.updatedAt);
+    assert.equal(updated.updatedAt > "2020-01-01T00:00:00.000Z", true, "updatedAt 必须刷新到夹具时间之后");
+    // 刷新值要落到盘上：重开服务读回来的就是新值，不是只在返回值里好看。
+    assert.equal(
+      createPromptsService({ base }).getState().presets[0].updatedAt,
+      updated.updatedAt,
+    );
     assert.throws(() => svc.updatePreset({ id: "missing-id", title: "x", content: "y" }), (err) => err.statusCode === 404);
   });
 
   it("deletes a preset and prunes it from every endpoint off list", () => {
-    const { svc } = makeService();
+    const { svc, file } = makeService();
     const { preset } = svc.createPreset({ title: "A", content: "a" });
     svc.setOverride({ endpointId: "claude", presetId: preset.id, off: true });
     svc.setOverride({ endpointId: "kimi", presetId: preset.id, off: true });
@@ -100,6 +116,10 @@ describe("agent-prompts data plane", () => {
     const state = svc.getState();
     assert.equal(state.presets.length, 0);
     assert.deepEqual(state.endpointOverrides, {});
+    // 读路径 normalizeState 也会把死 id 的 off 项剔掉，内存口径兜得住；落盘
+    // 字节才是写路径清理唯一的观察面——写路径剪枝删掉时这里必须变红。
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(raw.endpointOverrides, {}, "删除预设时写路径必须清掉各端点 off 列表");
     assert.throws(() => svc.deletePreset(preset.id), (err) => err.statusCode === 404);
   });
 
@@ -118,7 +138,7 @@ describe("agent-prompts data plane", () => {
   });
 
   it("normalizes overrides: dedupe, empty off list drops the endpoint key", () => {
-    const { svc } = makeService();
+    const { svc, file } = makeService();
     const { preset } = svc.createPreset({ title: "A", content: "a" });
     svc.setOverride({ endpointId: "claude", presetId: preset.id, off: true });
     svc.setOverride({ endpointId: "claude", presetId: preset.id, off: true });
@@ -126,6 +146,10 @@ describe("agent-prompts data plane", () => {
 
     svc.setOverride({ endpointId: "claude", presetId: preset.id, off: false });
     assert.deepEqual(svc.getState().endpointOverrides, {});
+    // 空 off 列表摘键是写路径职责（setOverride 里 delete），读路径 normalizeState
+    // 只是兜底：落盘文件里不得残留空键。
+    const rawAfterClear = JSON.parse(readFileSync(file, "utf8"));
+    assert.deepEqual(rawAfterClear.endpointOverrides, {}, "空 off 列表在写路径就摘键，不靠读路径兜底");
 
     assert.throws(() => svc.setOverride({ endpointId: "claude", presetId: "missing", off: true }), (err) => err.statusCode === 404);
     assert.throws(() => svc.setOverride({ endpointId: "claude", presetId: preset.id, off: "true" }), (err) => err.statusCode === 400);

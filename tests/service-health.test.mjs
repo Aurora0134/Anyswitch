@@ -32,12 +32,19 @@ describe("createServiceHealth", () => {
   });
 
   it("reports the last failure kind and time for the log line", () => {
-    const health = createServiceHealth({ threshold: 2, now: () => 4242 });
+    // now 是可推进的时钟：失败时刻与快照时刻必须可区分。lastFailureAt 的语义是
+    // 「失败发生的时刻」，不是「读快照的时刻」——夹具曾恒为 4242，两种语义回
+    // 归（打点挪进 snapshot 里现取）都不红；时钟推进后冒充者立刻现形。
+    let t = 1000;
+    const health = createServiceHealth({ threshold: 2, now: () => t });
     health.recordFailure("store");
-    const snap = health.snapshot();
-    assert.equal(snap.lastFailureKind, "store");
-    assert.equal(snap.lastFailureAt, 4242);
-    assert.equal(snap.threshold, 2);
+    assert.equal(health.snapshot().lastFailureKind, "store");
+    assert.equal(health.snapshot().lastFailureAt, 1000, "lastFailureAt 记录的是失败发生时刻");
+    t = 9999;
+    assert.equal(health.snapshot().lastFailureAt, 1000, "快照时刻推进后，已记失败的时刻不被改写");
+    assert.equal(health.snapshot().threshold, 2);
+    health.recordFailure("credential");
+    assert.equal(health.snapshot().lastFailureAt, 9999, "第二次失败以当时的时钟落点覆盖");
   });
 
   it("defaults to the documented threshold: 5", () => {

@@ -394,3 +394,45 @@ test("看门狗的扫描缓存窗口宽于自己的巡检节拍", () => {
   assert.ok(WATCHDOG_PROCESS_SCAN_TTL_MS <= 10_000,
     "窗口再大就开始拖慢「agent 起来了要拉起 relay」的反应");
 });
+
+test("窗口常量真的接进 startWatchdogHost 自建的收集器，watcher 扫的也是这个收集器", async () => {
+  // 上一条只证明两个常量的数值关系，不证明接线：startWatchdogHost 里那行
+  // processScanTtlMs 被改成硬编码、或 scanProcesses 不再喂收集器，常量关系测试
+  // 照样全绿。这里借 options.createMetricsCollector 测试缝捕获真实入参，并让
+  // stub 收集器的扫描直接驱动 followAgent 判定——两处接线都可观察。
+  const localAppData = mkTestDir("anyswitch-watchdog-ttl-");
+  mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
+  writeFileSync(join(localAppData, "Anyswitch", "settings.json"), JSON.stringify({ followAgent: true }));
+  const calls = { scanProcesses: 0, startRelay: 0 };
+  let collectorOptions = null;
+  const stubCollector = {
+    scanProcesses: async () => {
+      calls.scanProcesses += 1;
+      return { workbuddy: 1 };
+    },
+  };
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0, // ephemeral marker port — no collision with a live watchdog
+    logger: { info() {}, error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    createMetricsCollector: (opts) => {
+      collectorOptions = opts;
+      return stubCollector;
+    },
+    // 不注入 scanProcesses：watcher 必须落到默认分支（收集器.scanProcesses）。
+    watcherDeps: {
+      getRelayStatus: async () => ({ status: "stopped" }),
+      startRelay: async () => { calls.startRelay += 1; },
+    },
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(collectorOptions?.processScanTtlMs, WATCHDOG_PROCESS_SCAN_TTL_MS,
+      "自建收集器的扫描缓存窗口必须是出口常量本身");
+    assert.ok(calls.scanProcesses >= 1, "watcher 的 scanProcesses 接在这个收集器上");
+    assert.equal(calls.startRelay, 1, "收集器报 agent 在跑 → relay 被自动拉起");
+  } finally {
+    await host.close();
+  }
+});

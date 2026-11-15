@@ -33,6 +33,7 @@ import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname, basename, isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
+import { modalitiesFromStoreModel } from "../catalog/modalities-fallback.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
 // Re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -177,7 +178,7 @@ function buildModelEntry(modelId, model, catalog = null, provider = null, channe
   // to no levels and so overrules a stale store flag, which is the point.
   // Switch off (catalog null): nothing was resolved, so the store's own flag
   // is the whole answer, exactly as it was before the library existed.
-  const isReasoning = catalog ? levels.length > 0 : model.isReasoning === true;
+  const isReasoning = catalog ? levels.length > 0 : model.supportsReasoning === true;
   const modelLabel = model.displayName ?? modelId;
   return {
     model: modelId,
@@ -189,7 +190,7 @@ function buildModelEntry(modelId, model, catalog = null, provider = null, channe
     displayName: channelLabel ? `${modelLabel} · ${channelLabel}` : modelLabel,
     contextWindow: context,
     capabilities: {
-      vision: model.isVision === true,
+      vision: modalitiesFromStoreModel(model, modelId).input.includes("image"),
       thinking: isReasoning
         ? {
             modes: ["enabled"],

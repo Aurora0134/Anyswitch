@@ -241,12 +241,14 @@ function realSpawnPi({ env, args }) {
   });
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
+// ——缺省路径的行为与注入前逐字节相同。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runPiLauncher({
-    startRelay: () => startOpenAIRelay(),
-    writeModels: (store, port, sidecarRoot) => writePiModels(store, port, sidecarRoot),
-    spawnPi: realSpawnPi,
-    log: (line) => process.stderr.write(`${line}\n`),
+    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    writeModels: deps.writeModels ?? ((store, port, sidecarRoot) => writePiModels(store, port, sidecarRoot)),
+    spawnPi: deps.spawnPi ?? realSpawnPi,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     piArgs: argv,
     modelsPath: PI_MODELS_PATH,
   });

@@ -43,7 +43,9 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // 仓根（本文件在 src/relay/）。git anchor 维护的是安装树的 .git；传 __dirname
 // 会让它在 src/relay 下另写一个 gitfile（2026-11-01 分域重构漏改）。
 const APP_DIR = fileURLToPath(new URL("../..", import.meta.url));
-const RELAY_PORT = 47821;
+// 导出给 port 一致性护栏：绑定常量本身必须能被直接断言，不能只经由报错文案
+// 间接可见（文案与绑定各自漂移时护栏会假绿）。
+export const RELAY_PORT = 47821;
 // The terminal host lives in src/terminal — a bare name here would resolve
 // against src/relay and spawn a path that does not exist (2026-11-01 分域重构).
 const TERMINAL_HOST_SCRIPT = fileURLToPath(new URL("../terminal/terminal-host.mjs", import.meta.url));
@@ -551,9 +553,13 @@ export function mountTerminalHostRoutes(server, handleTerminalHostRoute) {
 
 // Mirror of zcode-launcher.mjs createOpenAIProductionDeps, but injecting the
 // panel router and logger so the same server serves both relay and panel.
+// options.createProductionDeps 是依赖来源注入缝：装配测试用真实工厂包一层、只
+// 覆写出网两键（upstreamFetch/loadCredential），其余 loadStore/getKeepAliveConfig/
+// getClaudeTierMapping/effortInjector 等仍由真实工厂产出并经下方透传接线——
+// 默认行为与副作用顺序不变。
 function createResidentDeps(options = {}) {
   const paths = options.paths ?? storePaths();
-  const claudeDeps = createProductionDeps({ paths });
+  const claudeDeps = (options.createProductionDeps ?? createProductionDeps)({ paths });
   const root = relayDataRoot(options.base ?? process.env);
   const logger = options.logger ?? createLogger();
   // Per-request usage journal lives next to the stability file under the
@@ -677,7 +683,9 @@ export function describeRelayStartupFailure(error, pid = process.pid) {
 }
 
 export async function startResidentRelay(options = {}) {
-  const logPath = join(__dirname, "../../logs", "relay-host.log");
+  // logPath 是纯测试注入口：装配测试把 stderr tee 与崩溃记录引进临时沙箱，
+  // 默认仍是本模块旁的 logs/relay-host.log（生产路径不变）。
+  const logPath = options.logPath ?? join(__dirname, "../../logs", "relay-host.log");
   rotateLogIfNeeded(logPath);
   const setFatalHook = redirectStderrToFile(logPath);
   // 运行日志开关的活闸门：中继拥有唯一持久化的日志文件，开关必须当场生效，否则
@@ -694,6 +702,9 @@ export async function startResidentRelay(options = {}) {
   }
 
   const deps = createResidentDeps({ ...options, logger });
+  // 纯测试注入口：装配测试注入替身避免真实子进程；默认仍是真实 spawn，
+  // 三处调用（启动同步 / store 变更同步 / 轮换后重同步）共用这一个口。
+  const spawnAgentSyncFn = options.spawnAgentSync ?? spawnAgentSync;
   // Crash-path flush for the display-metric snapshot (see agent-metrics'
   // METRICS_SNAPSHOT_* block): wired after the collector exists, before any
   // request can be served.
@@ -714,7 +725,10 @@ export async function startResidentRelay(options = {}) {
   const startTime = Date.now();
   let listened;
   try {
-    listened = await listenLoopback(server, RELAY_PORT);
+    // options.relayPort 是纯测试注入口（装配测试绑 0 拿临时端口），默认仍绑定
+    // RELAY_PORT 常量——该表达式本身被 tests/relay-port-consistency.test.mjs
+    // 钉住：绑定不得漂离共享常量。
+    listened = await listenLoopback(server, options.relayPort ?? RELAY_PORT);
   } catch (error) {
     // 启动失败必须落一条带时间戳、带自身进程号的记录，且不受运行日志开关影响：
     // 关掉记录的人正是事后要问「为什么起不来」的人。
@@ -784,7 +798,7 @@ export async function startResidentRelay(options = {}) {
   // catalog-writer fixes take effect on the next sync without restarting
   // this resident host.
   try {
-    const syncResult = await spawnAgentSync({ port, logger });
+    const syncResult = await spawnAgentSyncFn({ port, logger });
     // 失败上屏的落盘点：结果写进 sync-status.json（与 store.json 同级），面板
     // 轮询它渲染「上次同步未成功」——运行日志被用户关掉时 logger.error 那行会
     // 被活闸门整条丢弃，这份文件是失败最后剩下的可见面。落盘失败不得反过来
@@ -803,12 +817,14 @@ export async function startResidentRelay(options = {}) {
 
   // Real-time store.json change watcher for downstream coding agents.
   const paths = options.paths ?? storePaths(root);
-  const storeWatcher = createStoreWatcher({
+  // options.storeWatcher 是纯测试注入口：fs.watch 的句柄会钉住事件循环，
+  // 装配测试注入无句柄替身，让测试进程能正常退出；默认仍是真实 watcher。
+  const storeWatcher = options.storeWatcher ?? createStoreWatcher({
     storeFile: paths.storeFile,
     logger,
     onStoreChange: async () => {
       logger.info("store.json changed; re-syncing agent configurations");
-      const syncResult = await spawnAgentSync({ port, logger });
+      const syncResult = await spawnAgentSyncFn({ port, logger });
       // 同启动同步：结果落 sync-status.json 供面板上屏（详见上方注释）。
       try {
         writeSyncStatus(root, syncStatusFromResult(syncResult, "store-change"));
@@ -838,7 +854,7 @@ export async function startResidentRelay(options = {}) {
     if (!rotated) return;
     logger.info("relay token rotated automatically; resyncing agent configurations");
     try {
-      const syncResult = await spawnAgentSync({ port, logger });
+      const syncResult = await spawnAgentSyncFn({ port, logger });
       try {
         writeSyncStatus(root, syncStatusFromResult(syncResult, "token-rotation"));
       } catch (err) {

@@ -431,6 +431,47 @@ describe("validatePersonalProviderConfig", () => {
     assert.equal(validatePersonalProviderConfig(withRule({ enabled: "yes" })).valid, false);
     assert.equal(validatePersonalProviderConfig(withRule({ bogus: 1 })).valid, false);
   });
+
+  it("config.providerId 在场时跳过未知键白名单与 enabled 类型检查", () => {
+    // 客户端自写的规则 config 里带 providerId 时整份放行——白名单追不上客户端
+    // 的键位扩张，这个跳过分支放它走。跳过是双向的：未知键与 enabled 非
+    // 布尔在这条分支里都不再拒写。
+    const withRule = (config) => ({
+      schemaVersion: 1,
+      config: {
+        providerConfigRules: { providerRules: [] },
+        modelConfigRules: {
+          providerModelRules: [{ providerId: "account:bigmodel-start-plan", modelId: "glm-5.3-flash", config }],
+        },
+      },
+    });
+    assert.equal(
+      validatePersonalProviderConfig(withRule({ providerId: "account:bigmodel-start-plan", whatever: { nested: true } })).valid,
+      true,
+      "未知键随 config.providerId 一起放行",
+    );
+    assert.equal(
+      validatePersonalProviderConfig(withRule({ providerId: "account:bigmodel-start-plan", enabled: "yes", bogus: 1 })).valid,
+      true,
+      "enabled 类型检查同被跳过",
+    );
+  });
+
+  it("providerId 不是非空字符串时白名单照常生效（跳过分支不误开）", () => {
+    const withRule = (config) => ({
+      schemaVersion: 1,
+      config: {
+        providerConfigRules: { providerRules: [] },
+        modelConfigRules: {
+          providerModelRules: [{ providerId: "account:bigmodel-start-plan", modelId: "glm-5.3-flash", config }],
+        },
+      },
+    });
+    // 空串与非字符串都触发不了跳过：白名单与 enabled 类型检查照常拒写。
+    assert.equal(validatePersonalProviderConfig(withRule({ providerId: "", bogus: 1 })).valid, false);
+    assert.equal(validatePersonalProviderConfig(withRule({ providerId: 42, bogus: 1 })).valid, false);
+    assert.equal(validatePersonalProviderConfig(withRule({ providerId: "", enabled: "yes" })).valid, false);
+  });
 });
 
 describe("which client-side rules Anyswitch owns", () => {

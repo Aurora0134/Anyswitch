@@ -315,6 +315,53 @@ test("codex: sidecar-lost sweep also removes the pointer and the catalog file", 
 });
 
 // ─────────────────────────────────────────────────────────────
+// 逐步失败分支（fail-closed）：配置不可读/不可解析 → 该步 ok:false、
+// endpoint ok:false、原文件一字节不动。TOML 家族（strip 抛 UNPARSEABLE）与
+// JSON 家族（reader 抛 Unparseable）各钉一个端点，两条清扫路径都覆盖。
+// ─────────────────────────────────────────────────────────────
+
+test("codex: 托管块残缺（不可解析）时逐步失败，原文件一字节不动", async () => {
+  const home = mkTestDir("uninstall-codex-broken-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const configPath = join(home, ".codex", "config.toml");
+  mkdirSync(dirname(configPath), { recursive: true });
+  const broken = `${codexMerge.MANAGED_BEGIN}\n[model_providers."anyswitch-x"]\n`;
+  writeFileSync(configPath, broken, "utf8");
+  seedSidecar(sidecarRoot, "codex-sidecar.json", ["chan1"]);
+
+  const result = await driver.uninstallEndpoint("codex");
+  assert.equal(result.ok, false, "写不进去也扫不了就不得报成功");
+  const sync = stepsByName(result)["config-sync"];
+  assert.equal(sync.ok, false, "sync 侧 refuse-to-overwrite 必须显式失败");
+  assert.match(sync.error, /truncated/);
+  const sweep = stepsByName(result)["marker-sweep"];
+  assert.equal(sweep.ok, false, "sweep 侧同一条不可解析约束必须显式失败");
+  assert.match(sweep.error, /truncated/);
+  assert.equal(readFileSync(configPath, "utf8"), broken, "失败路径不得改动原文件");
+  // sidecar 清理与配置成败互不相干，照常执行。
+  assert.ok(!existsSync(join(sidecarRoot, "codex-sidecar.json")));
+});
+
+test("pi: models.json 不可解析时逐步失败，原文件一字节不动", async () => {
+  const home = mkTestDir("uninstall-pi-broken-");
+  const { driver, sidecarRoot } = testDriver(home);
+  const modelsPath = join(home, ".pi", "agent", "models.json");
+  mkdirSync(dirname(modelsPath), { recursive: true });
+  writeFileSync(modelsPath, "{ not json", "utf8");
+  seedSidecar(sidecarRoot, "pi-sidecar.json", ["chan1"]);
+
+  const result = await driver.uninstallEndpoint("pi");
+  assert.equal(result.ok, false);
+  const sync = stepsByName(result)["config-sync"];
+  assert.equal(sync.ok, false, "fail-closed reader 不得把不可解析当成空配置重写");
+  const sweep = stepsByName(result)["marker-sweep"];
+  assert.equal(sweep.ok, false);
+  assert.match(sweep.error, /unparseable/i);
+  assert.equal(readFileSync(modelsPath, "utf8"), "{ not json", "失败路径不得改动原文件");
+  assert.ok(!existsSync(join(sidecarRoot, "pi-sidecar.json")));
+});
+
+// ─────────────────────────────────────────────────────────────
 // qoder
 // ─────────────────────────────────────────────────────────────
 

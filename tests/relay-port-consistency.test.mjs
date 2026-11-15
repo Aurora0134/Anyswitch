@@ -5,16 +5,17 @@
 //      stays 47821. Renumbering it must be a conscious, coordinated change —
 //      every guard below is phrased against this constant, so a renumber turns
 //      them all red until each copy moves in the same change.
-//   2. Every launcher's exported RELAY_PORT (8 launchers) equals
+//   2. Every launcher's exported RELAY_PORT (9 launchers) equals
 //      DEFAULT_RELAY_PORT. A value assertion cannot tell "imports the shared
 //      constant" from "repeats the same literal"; what it does catch is any
 //      launcher drifting onto a port other than the one the resident relay owns.
 //   3. The copies of the number that still live outside openai-server.mjs:
 //      agent-session-env.mjs exports AGENT_RELAY_PORT (asserted directly);
 //      relay-process-manager.mjs re-exports the shared constant (panel.mjs
-//      builds from it); relay-host.mjs keeps its constant module-private —
-//      surfaced at runtime through an exported function (getRelayStatus's
-//      injectable probe, describeRelayStartupFailure's foreign-port detail);
+//      builds from it); relay-host.mjs exports its bind constant directly
+//      (asserted against the shared value) and has its bind call site pinned
+//      by source text — the foreign-port error message is no longer the pin,
+//      because message text and bind constant can drift independently;
 //      agent-sync-run.mjs exports nothing at all, so its DEFAULT_PORT is
 //      pinned by source text.
 //   4. The converged surfaces carry no bare literal at all: panel.mjs,
@@ -39,9 +40,10 @@ import { RELAY_PORT as OPENCODE_RELAY_PORT } from "../src/launchers/opencode-lau
 import { RELAY_PORT as QODER_RELAY_PORT } from "../src/launchers/qoder-launcher.mjs";
 import { RELAY_PORT as CODEX_RELAY_PORT } from "../src/launchers/codex-launcher.mjs";
 import { RELAY_PORT as GROK_RELAY_PORT } from "../src/launchers/grok-launcher.mjs";
+import { RELAY_PORT as WORKBUDDY_RELAY_PORT } from "../src/launchers/workbuddy-launcher.mjs";
 import { AGENT_RELAY_PORT } from "../src/agents/agent-session-env.mjs";
 import { getRelayStatus, RELAY_PORT } from "../src/relay/relay-process-manager.mjs";
-import { describeRelayStartupFailure } from "../src/relay/relay-host.mjs";
+import { RELAY_PORT as RESIDENT_RELAY_PORT } from "../src/relay/relay-host.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 describe("relay port consistency", () => {
@@ -58,6 +60,7 @@ describe("relay port consistency", () => {
     assert.equal(QODER_RELAY_PORT, DEFAULT_RELAY_PORT, "qoder-launcher.mjs drifted off the shared relay port");
     assert.equal(CODEX_RELAY_PORT, DEFAULT_RELAY_PORT, "codex-launcher.mjs drifted off the shared relay port");
     assert.equal(GROK_RELAY_PORT, DEFAULT_RELAY_PORT, "grok-launcher.mjs drifted off the shared relay port");
+    assert.equal(WORKBUDDY_RELAY_PORT, DEFAULT_RELAY_PORT, "workbuddy-launcher.mjs drifted off the shared relay port");
   });
 
   it("agent-session-env rides the shared relay port", () => {
@@ -78,12 +81,17 @@ describe("relay port consistency", () => {
   });
 
   it("relay-host's resident bind port matches the shared constant", () => {
-    // relay-host.mjs's RELAY_PORT is module-private and is the port the resident
-    // relay actually binds (startResidentRelay). describeRelayStartupFailure is
-    // the exported pure path that surfaces that constant's value.
-    const { detail } = describeRelayStartupFailure({ code: "RELAY_PORT_FOREIGN" }, 123);
-    const reported = detail.match(/port (\d+) is held/)?.[1];
-    assert.equal(reported, String(DEFAULT_RELAY_PORT), "relay-host.mjs drifted off the shared relay port");
+    // 绑定常量本身现在导出了，直接断言其值——不再经由报错文案间接可见（文案与
+    // 绑定各自漂移时，文案断言会假绿）。
+    assert.equal(RESIDENT_RELAY_PORT, DEFAULT_RELAY_PORT, "relay-host.mjs drifted off the shared relay port");
+    // 再钉住真正的 bind 调用点：常量必须就是 listen 的实参（options.relayPort
+    // 只是装配测试的注入口，默认仍是常量）。改成裸字面量或别的端口时这里变红。
+    const source = readFileSync(new URL("../src/relay/relay-host.mjs", import.meta.url), "utf8");
+    assert.match(
+      source,
+      /await listenLoopback\(server, options\.relayPort \?\? RELAY_PORT\);/,
+      "relay-host.mjs 的常驻绑定必须用 RELAY_PORT 常量，不得漂成裸字面量或别的来源",
+    );
   });
 
   it("agent-sync-run's fallback port matches the shared constant", () => {

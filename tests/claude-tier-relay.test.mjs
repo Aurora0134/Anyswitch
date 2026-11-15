@@ -13,11 +13,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { createHandler } from "../src/relay/handler.mjs";
-import { createRelayServer, listenLoopback as listenPerLaunch } from "../src/relay/server.mjs";
-import { createOpenAIRelayServer, listenLoopback as listenResident, DEFAULT_RELAY_PORT } from "../src/relay/openai-server.mjs";
+import { createRelayServer } from "../src/relay/server.mjs";
+import { createOpenAIRelayServer, DEFAULT_RELAY_PORT } from "../src/relay/openai-server.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "../src/relay/wire-id.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { listenLoopback as listenPerLaunch, listenLoopback as listenResident } from "../test-helpers/loopback.mjs";
 
 // 最后一条通向真实用户目录的路：mid-system 改写开关在 anthropicToOpenAI 里现读
 // settings.json 而 handler 没有给它注入面（handler.mjs 调它时不传 options），图片
@@ -510,10 +511,9 @@ describe("resident relay", () => {
         relayDeps({ upstreamFetch: recordingUpstream(calls), metricsCollector: null }),
       );
       const { port, close } = await listenResident(server, 0);
-      // 0 是必须的：listenResident 的默认端口就是生产常驻中继的 DEFAULT_RELAY_PORT，
-      // 而端口被自家中继占用时它会「复用」并返回那个端口——漏传 0 的测试会把请求
-      // 直接打进正在服务的中继，且负分支在真中继上同样 400 + 零上游调用，其余断
-      // 言抓不住。对照量用导出常量而不是硬编码端口：默认端口漂移时这条绊线跟着走。
+      // listenResident 已换成共享夹具：只收临时口（0），命中 fetch「bad port」
+      // 即关掉换口重试，永远不会落在生产常驻中继上。对照量用导出常量而不是
+      // 硬编码端口：默认端口漂移时这条绊线跟着走。
       assert.notEqual(port, DEFAULT_RELAY_PORT, "a test must never land on the live resident relay");
       try {
         const res = await post(port, "opus", headers);
@@ -524,6 +524,76 @@ describe("resident relay", () => {
           assert.equal(res.status, 400, `${JSON.stringify(headers)} must not be taken over`);
           assert.equal(calls.length, 0);
         }
+      } finally {
+        await close();
+      }
+    }
+  });
+
+  it("档位改投号池：接管先于池规划，池成员应答（常驻前端与 per-launch 同序）", async () => {
+    // 常驻 /v1/messages 的规划顺序是链在前、池在后，但两者都必须看到接管改写
+    // 之后的模型名：接管若排在规划之后，池规划读到的是档位名 sonnet（无成员
+    // 携带），只会 404。这里上游被池首成员应答即证明排序正确。
+    const calls = [];
+    const server = createOpenAIRelayServer(
+      relayDeps({
+        mappings: { sonnet: "anthropic/tier-pool/kimi-k3" },
+        upstreamFetch: recordingUpstream(calls),
+        metricsCollector: null,
+      }),
+    );
+    const { port, close } = await listenResident(server, 0);
+    try {
+      const res = await post(port, "sonnet", { "x-agent-id": "claude" });
+      assert.equal(res.status, 200);
+      assert.equal(calls[0].host, "host-a", "池的首成员应答");
+      assert.equal(calls[0].model, "kimi-k3", "上游拿到的是池内模型，不是档位名");
+    } finally {
+      await close();
+    }
+  });
+
+  it("档位改投虚拟模型：走该虚拟模型自己的链（常驻前端），上游拿到链节点绑定模型", async () => {
+    const calls = [];
+    const server = createOpenAIRelayServer(
+      relayDeps({
+        store: storeWithVirtualModel("my-vm", [{ node: "host-a", model: "kimi-k3" }]),
+        mappings: { sonnet: "anthropic/my-vm" },
+        upstreamFetch: recordingUpstream(calls),
+        metricsCollector: null,
+      }),
+    );
+    const { port, close } = await listenResident(server, 0);
+    try {
+      const res = await post(port, "sonnet", { "x-agent-id": "claude" });
+      assert.equal(res.status, 200);
+      assert.equal(calls[0].model, "kimi-k3", "上游拿到的是链节点绑定的模型，不是虚拟模型名");
+      assert.equal(calls[0].host, "host-a", "由虚拟模型链的第一个节点应答");
+    } finally {
+      await close();
+    }
+  });
+
+  it("常驻前端里目标虚拟模型被停用或不存在时仍是坏行：400 指向那一行", async () => {
+    for (const [label, store] of [
+      ["已停用", storeWithVirtualModel("my-vm", [{ node: "host-a", model: "kimi-k3" }], { enabled: false })],
+      ["不存在", syntheticStore()],
+    ]) {
+      const calls = [];
+      const server = createOpenAIRelayServer(
+        relayDeps({
+          store,
+          mappings: { sonnet: "anthropic/my-vm" },
+          upstreamFetch: recordingUpstream(calls),
+          metricsCollector: null,
+        }),
+      );
+      const { port, close } = await listenResident(server, 0);
+      try {
+        const res = await post(port, "sonnet", { "x-agent-id": "claude" });
+        assert.equal(res.status, 400, `${label}的虚拟模型必须被拒`);
+        assert.equal(calls.length, 0, `${label}的虚拟模型不得触达上游`);
+        assert.match((await res.json()).error.message, /mapping target/);
       } finally {
         await close();
       }

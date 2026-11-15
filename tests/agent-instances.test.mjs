@@ -22,6 +22,7 @@ import {
   sanitizeInstanceId,
 } from "../src/agents/agent-metrics.mjs";
 import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { filterTerminalRequestRows } from "../src/terminal/terminal-attribution.mjs";
 
 const silentExec = (cmd, opts, cb) => cb(null, "");
 
@@ -324,6 +325,25 @@ describe("usage journal instanceId", () => {
     assert.equal(journal.lines.length, 2, "the mirror tracker must not double-journal");
     assert.equal(journal.lines[0].instanceId, "ws-a");
     assert.equal("instanceId" in journal.lines[1], false);
+  });
+
+  it("makes a late-attached request visible in the terminal's recent requests", async () => {
+    const journal = fakeJournal();
+    const collector = testCollector({ nowFn: () => 1000, journal });
+    const req = collector.startRequest({ agentId: "kimi", providerId: "p1", model: "m1", stream: true });
+    req.attachInstance("kimi-4321");
+    req.recordFirstChunk();
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 4 } });
+
+    assert.equal(journal.lines.length, 1);
+    assert.deepEqual(filterTerminalRequestRows(journal.lines, {
+      agentId: "kimi",
+      instanceId: "kimi-4321",
+    }), [journal.lines[0]]);
+    assert.deepEqual(filterTerminalRequestRows(journal.lines, {
+      agentId: "kimi",
+      instanceId: "kimi-9999",
+    }), [], "a different terminal must not inherit this request");
   });
 });
 

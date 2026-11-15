@@ -21,6 +21,7 @@ import {
   runGrokLauncher,
   realSpawnGrok,
   RELAY_PORT,
+  main,
 } from "../src/launchers/grok-launcher.mjs";
 import { sanitizeInstanceId } from "../src/agents/agent-metrics.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
@@ -434,12 +435,43 @@ test("main() wires every machine-touching dep to its real implementation", async
   const at = source.indexOf("export async function main");
   assert.notEqual(at, -1, "main() must stay in grok-launcher.mjs");
   const body = source.slice(at);
-  assert.match(body, /writeConfig: \([\s\S]{0,160}writeGrokConfig\(/);
-  assert.match(body, /loadToken: \([\s\S]{0,80}loadOrGenerateToken\(/);
-  assert.match(body, /createTracker: \([\s\S]{0,400}createSessionReporter\(/);
+  assert.match(body, /writeConfig: deps\.writeConfig \?\? \([\s\S]{0,160}writeGrokConfig\(/);
+  assert.match(body, /loadToken: deps\.loadToken \?\? \([\s\S]{0,80}loadOrGenerateToken\(/);
+  assert.match(body, /createTracker: deps\.createTracker \?\? \([\s\S]{0,400}createSessionReporter\(/);
   assert.match(body, /agentId: "grok"/);
-  assert.match(body, /spawnGrok: realSpawnGrok/);
-  assert.match(body, /probeRelay: probeRelay/);
+  assert.match(body, /spawnGrok: deps\.spawnGrok \?\? realSpawnGrok/);
+  assert.match(body, /probeRelay: deps\.probeRelay \?\? probeRelay/);
+});
+
+test("main() forwards argv verbatim and reports the session end", async () => {
+  // main 的依赖注入缝只服务测试：grokArgs 被静默吞掉时静态接线检查看不出来，
+  // 这里用真实 main 调用把 argv 跟队与上报顺序钉住。全程零真实 relay、零真实
+  // spawn，落盘路径全部钉在夹具 base 上。
+  const deps = recordingDeps();
+  const code = await main(["exec"], {
+    startRelay: async () => ({
+      port: RELAY_PORT,
+      token: "per-launch-token",
+      close: async () => deps.calls.push("closeRelay"),
+    }),
+    writeConfig: deps.writeConfig,
+    loadStore: deps.loadStore,
+    loadToken: deps.loadToken,
+    createTracker: deps.createTracker,
+    spawnGrok: async ({ args, onPid }) => {
+      deps.calls.push("spawnGrok");
+      deps.spawned = { args };
+      onPid?.(4321);
+      return 0;
+    },
+    probeRelay: deps.probeRelay,
+    log: deps.log,
+    base: FAKE_BASE,
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(deps.spawned.args, ["exec"], "argv must reach the child verbatim");
+  assert.deepEqual(deps.calls, ["createTracker", "writeConfig", "spawnGrok", "reportEnd", "closeRelay"]);
+  assert.deepEqual(deps.tracker.pids, [4321], "the fake child pid is bound to the tracker");
 });
 
 test("realSpawnGrok passes the caller's args through and reports the child pid", async () => {

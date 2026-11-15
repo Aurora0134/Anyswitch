@@ -25,6 +25,7 @@ import {
   realGetClaudeVersion,
   withClaudeBypassPermissions,
   CLAUDE_BYPASS_PERMISSIONS_ARG,
+  main,
 } from "../src/launchers/launcher.mjs";
 
 // A fake relay handle that records whether it was closed.
@@ -299,6 +300,78 @@ test("the session token never appears in any log line", async () => {
   }
 });
 
+test("the session token never appears in a log line on ANY branch, not just the mismatch warning", async () => {
+  // token 泄漏面是所有 log() 调用点的并集：happy path、未知版本警告、原生回落。
+  // 只盯 mismatch 分支时，往另外两条日志里插 token 照样全绿。
+  const branches = [
+    ["happy path (verified version)", { getClaudeVersion: async () => EXPECTED_CLAUDE_VERSION }],
+    ["unknown version warning", { getClaudeVersion: async () => null }],
+    ["mismatch warning", { getClaudeVersion: async () => "9.9.9" }],
+  ];
+  for (const [name, override] of branches) {
+    const logs = [];
+    const { deps } = baseDeps({ ...override, log: (line) => logs.push(line) });
+    await runLauncher(deps);
+    for (const line of logs) {
+      assert.ok(!line.includes("relay-session-token"), `token leaked on the ${name} branch: ${line}`);
+    }
+  }
+
+  // 原生回落分支：relay 起不来，日志里只有启动失败原因，没有会话令牌可言。
+  const fallbackLogs = [];
+  await runLauncher({
+    ...baseDeps({ log: (line) => fallbackLogs.push(line) }).deps,
+    startRelay: async () => {
+      throw new Error("the Anyswitch global store is not usable; refusing to start the relay");
+    },
+  });
+  assert.ok(fallbackLogs.length > 0, "the fallback branch must actually log for this check to mean anything");
+  for (const line of fallbackLogs) {
+    assert.ok(!line.includes("relay-session-token"), `token leaked on the native-fallback branch: ${line}`);
+  }
+});
+
+test("runLauncher binds the child PID on the session tracker and reports the session end before teardown", async () => {
+  // 生产侧的 tracker 绑定（onPid → setClaudePid）与 reportEnd 从前没有任何
+  // 用例：绑定接错对象、顺序倒置（先拆 relay 再发 ended）都全绿。kimi 侧
+  // 已钉住同一条时间线，这里把 claude 侧也钉上。
+  const events = [];
+  const calls = { pids: [], endCount: 0 };
+  const tracker = {
+    setClaudePid: (pid) => calls.pids.push(pid),
+    reportEnd: () => {
+      calls.endCount += 1;
+      events.push("reportEnd");
+    },
+  };
+  const { deps, state } = baseDeps({
+    spawnClaude: async ({ onPid }) => {
+      onPid(4321);
+      return 0;
+    },
+  });
+  deps.startRelay = async () => ({
+    port: 54321,
+    token: "relay-session-token",
+    sessionTracker: tracker,
+    close: async () => {
+      state.closed = true;
+      events.push("relay-close");
+    },
+  });
+
+  const code = await runLauncher(deps);
+  assert.equal(code, 0);
+  assert.deepEqual(calls.pids, [4321], "子进程 PID 必须绑到 session tracker 上");
+  assert.equal(calls.endCount, 1);
+  assert.deepEqual(
+    events,
+    ["reportEnd", "relay-close"],
+    "面板先收到 ended 再失去 relay：先拆 relay 再上报的顺序回归在这里翻红",
+  );
+  assert.equal(state.closed, true);
+});
+
 test("claude args are forwarded to the spawned child", async () => {
   const { deps, spawned } = baseDeps({});
   await runLauncher({ ...deps, claudeArgs: ["--resume", "session-1"] });
@@ -459,4 +532,66 @@ test("realGetClaudeVersion kills a hung child at the deadline and resolves null"
     assert.equal(version, null, "timeout must downgrade to the unknown-version path, never throw");
     assert.equal(child.killed, true, "the hung child is killed at the deadline");
   });
+});
+
+// --- main() argv/settings wiring -------------------------------------------
+//
+// main 的依赖注入缝只服务测试：这里的 fake 全程零真实 relay、零真实 spawn、
+// 零真实设置文件。argv 被静默吞掉、bypassPermissions 开关接错设置键时，这里
+// 翻红——纯靠 runLauncher 单测看不到 main 这一层的接线。
+function mainDeps(overrides = {}) {
+  const spawned = [];
+  const state = { closed: false };
+  return {
+    spawned,
+    state,
+    deps: {
+      startRelay: async () => ({
+        port: 54321,
+        token: "relay-session-token",
+        close: async () => {
+          state.closed = true;
+        },
+      }),
+      getClaudeVersion: async () => EXPECTED_CLAUDE_VERSION,
+      spawnClaude: async ({ env, args }) => {
+        spawned.push({ env, args });
+        return 0;
+      },
+      base: { PATH: "/usr/bin" },
+      ...overrides,
+    },
+  };
+}
+
+test("main() forwards argv verbatim and adds no bypass flag when the setting is unset", async () => {
+  const { deps, spawned } = mainDeps({
+    loadSettings: () => ({ settings: {} }),
+  });
+  const code = await main(["--model", "anthropic/a/m"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(spawned[0].args, ["--model", "anthropic/a/m"]);
+  assert.equal(spawned[0].args.includes(CLAUDE_BYPASS_PERMISSIONS_ARG), false);
+  assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:54321", "relay env injection still rides main's wiring");
+});
+
+test("main() prepends the bypass flag exactly once when claudeBypassPermissions is on", async () => {
+  const { deps, spawned } = mainDeps({
+    loadSettings: () => ({ settings: { claudeBypassPermissions: true } }),
+  });
+  const code = await main(["--model", "anthropic/a/m"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(spawned[0].args, [CLAUDE_BYPASS_PERMISSIONS_ARG, "--model", "anthropic/a/m"]);
+});
+
+test("main() degrades a throwing settings reader to bypass off and still forwards argv", async () => {
+  const { deps, spawned } = mainDeps({
+    loadSettings: () => {
+      throw new Error("settings file unreadable");
+    },
+  });
+  const code = await main(["--resume", "session-1"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(spawned[0].args, ["--resume", "session-1"]);
+  assert.equal(spawned[0].args.includes(CLAUDE_BYPASS_PERMISSIONS_ARG), false, "降级口径是关，不是崩溃");
 });

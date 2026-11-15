@@ -742,6 +742,84 @@ test("apply deleteLocal false: removeFn is never called", async () => {
   assert.deepEqual(applied.removeFailed, []);
 });
 
+// removeFn 抛错（而非返回 failed）走的是另一条降级路：导入成功已落盘的事实
+// 不能被本地删除失败掀翻，整单仍 ok:true，错误逐条进 removeFailed。
+test("apply deleteLocal: removeFn 抛错时降级为逐条 removeFailed，导入成果保留", async () => {
+  const fixture = makeFixture();
+  writeJson(join(fixture.homeDir, ".qoder", "settings.json"), {
+    providers: {
+      one: { baseUrl: "https://one.example.com/v1", apiKey: "s1", models: [] },
+      two: { baseUrl: "https://two.example.com/v1", apiKey: "s2", models: [] },
+    },
+  });
+  let removeCalls = 0;
+  const removeFn = () => {
+    removeCalls += 1;
+    throw new Error("backup disk full");
+  };
+  const service = makeService(fixture, { removeFn });
+  const scan = await service.scanLocalConfigs();
+  const applied = await service.applyImport({
+    ticket: scan.ticket,
+    keys: ["qoder::one", "qoder::two"],
+    deleteLocal: true,
+  });
+
+  assert.equal(removeCalls, 1, "removeFn 恰好被调一次");
+  assert.equal(applied.ok, true, "导入成功不因本地删除抛错而整单报失败");
+  assert.equal(applied.imported, 2, "两个渠道都已入库");
+  assert.deepEqual(applied.failed, []);
+  assert.deepEqual(applied.removed, [], "抛错时没有任何条目算已删除");
+  assert.deepEqual(applied.backupDir, null, "没有可信的备份目录可报");
+  assert.deepEqual(applied.removeFailed, [
+    { key: "qoder::one", error: "backup disk full" },
+    { key: "qoder::two", error: "backup disk full" },
+  ]);
+
+  // 导入侧的可观察副作用原样保留：store 两个渠道、两份凭据都在。
+  const store = JSON.parse(readFileSync(join(fixture.storeRoot, "store.json"), "utf8"));
+  assert.deepEqual(Object.keys(store.providers).sort(), ["one", "two"]);
+  assert.equal(existsSync(join(fixture.storeRoot, "credentials", "one.dpapi")), true);
+  assert.equal(existsSync(join(fixture.storeRoot, "credentials", "two.dpapi")), true);
+});
+
+test("scan: 单个端点配置读坏不拖垮整次扫描（损坏夹具）", async () => {
+  const fixture = makeFixture();
+  // pi 的 models.json 是损坏 JSON：readModelsJson 走 fail-closed 抛
+  // UnparseableModelsError，scanLocalConfigs 必须吞掉这一组，其余端点照常列出。
+  writeText(join(fixture.homeDir, ".pi", "agent", "models.json"), "{ not json");
+  // zcode 的 config.json 同样损坏：readZcodeConfig 抛 UnparseableConfigError。
+  writeText(join(fixture.homeDir, ".zcode", "v2", "config.json"), "{ not json");
+  // opencode 配置完好，带一个可导入的用户渠道。
+  writeJson(join(fixture.homeDir, ".config", "opencode", "opencode.json"), {
+    provider: {
+      mine: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Mine",
+        options: { baseURL: "https://oc.example.com/v1", apiKey: "oc-secret" },
+        models: { m1: { name: "M1" } },
+      },
+    },
+  });
+
+  const service = makeService(fixture);
+  const scan = await service.scanLocalConfigs();
+
+  assert.equal(scan.ok, true, "扫描本身不抛不拒");
+  assert.deepEqual(scan.groups.map((g) => g.agentId), ["opencode"], "坏掉的 pi/zcode 整组缺席，opencode 完好");
+  const entry = findEntry(scan, "opencode", "mine");
+  assert.ok(entry, "opencode 渠道照常给出");
+  assert.equal(entry.suggestedId, "mine");
+  assert.equal(entry.status, "ok");
+
+  // 扫描给出的票据对完好端点的条目仍然可用：导入照常成功。
+  const applied = await service.applyImport({ ticket: scan.ticket, keys: ["opencode::mine"], deleteLocal: false });
+  assert.equal(applied.ok, true, applied.error);
+  assert.equal(applied.imported, 1);
+  const store = JSON.parse(readFileSync(join(fixture.storeRoot, "store.json"), "utf8"));
+  assert.equal(store.providers.mine.baseURL, "https://oc.example.com/v1");
+});
+
 test("apply: ticket is single-use after apply", async () => {
   const fixture = makeFixture();
   qoderFixture(fixture);

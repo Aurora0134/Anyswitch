@@ -93,7 +93,7 @@ style-lab/*.css 是源文件，改动必须同步嵌入 panel.css 对应横幅�
 - 钉住：usage-stats.test.mjs merge/防双计两用例
 
 ### R-16 渠道名读取时解析（键=不可变 id，label=displayName）
-journal/统计按渠道或号池 id 分键（wire 身份，永不随改名变）；统计接口在**读取时**经注入的 channelLabel 解析器把 id 翻成 displayName（改名 30s 轮询内生效、删渠道回退裸 id、空 key 恒为「未知渠道」）。键一律保持裸 id（图例显隐按 key 持久化），只有 label 被解析。池 id 可复用成员渠道 id（wire 语义 pools-before-providers 同款），同名时**池的显示名赢**；映射快照 15s TTL，store 不可读时沿用旧表。趋势渠道口径下空 key 的图例显示为「未知渠道」，不出空白 chip。
+journal/统计按渠道或号池 id 分键（wire 身份，永不随改名变）；统计接口在**读取时**经注入的 channelLabel 解析器把 id 翻成 displayName（改名 30s 轮询内生效、删渠道回退裸 id、空 key 恒为「未知渠道」）。键一律保持裸 id（图例显隐按 key 持久化），只有 label 被解析。池 id 可复用成员渠道 id（wire 语义 pools-before-providers 同款），同名时**池的显示名赢**；映射快照属于整个 panel 路由器，15s TTL 内复用，到期随下一次统计读取刷新，store 不可读或 `storeOk:false` 时沿用旧表，首次失败不阻止后续恢复。趋势渠道口径下空 key 的图例显示为「未知渠道」，不出空白 chip。
 - 锚点：usage-stats.mjs `labelChannel`（channelLabel 注入）+ panel.mjs `refreshStatsChannelLabels`（getBoardState 供名，poolNames 覆盖 providerNames）
 - 钉住：usage-stats.test.mjs「channel display-name resolution」组；panel-stats.test.mjs「stats channel label wiring」组
 - 关联约束：`/v1/messages` 的 startRequest meta 必须携带 `wireIdToTargetId(body?.model)` 解出的真实渠道 id，否则 claude per-launch 行的 providerId 为空串、统计侧出「未知渠道」柱。

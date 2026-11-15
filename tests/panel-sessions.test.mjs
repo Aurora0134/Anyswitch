@@ -154,6 +154,39 @@ parentPort.on("message", (message) => {
     assert.equal(svc.calls.scanAll, 1, "TTL 窗口内三次列表请求只该触发一次扫描");
   });
 
+  // 回归钉（上面那条的并发版）：串行用例只走到「TTL 内复用快照」，refresh 的
+  // 在飞去重分支（第二拍搭第一拍的车）从未被走到。这里两拍真并发、扫描挂在闸上，
+  // 没有在飞去重时第二拍会再起一次扫描。两个请求都等同一拍落地并拿到同一份结果。
+  it("并发两拍只扫一次（在飞去重）：扫描在飞时第二拍搭车，两个请求拿同一份结果", async () => {
+    let release = null;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let scans = 0;
+    const row = { endpoint: "claude", id: "abc", file: "C:/s/abc.jsonl" };
+    const svc = {
+      scanAll: async () => {
+        scans += 1;
+        await gate;
+        return { sessions: [row], endpointErrors: [] };
+      },
+      deleteSessions: async () => ({ ok: [], fail: [] }),
+    };
+    const router = sessionsRouter(svc);
+    const a = fakeReqRes("/panel/api/sessions/list", "GET");
+    const b = fakeReqRes("/panel/api/sessions/list", "GET");
+    const pa = router.handle(a.req, a.res);
+    const pb = router.handle(b.req, b.res);
+    // 第一拍已进扫描（挂在闸上）后第二拍才进：去重分支此刻必须让它搭车。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(scans, 1, `并发第二拍必须搭第一拍的车，实起 ${scans} 次扫描`);
+    release();
+    await Promise.all([pa, pb]);
+    assert.equal(a.res.statusCode, 200);
+    assert.equal(b.res.statusCode, 200);
+    assert.deepEqual(a.json().sessions, [row]);
+    assert.deepEqual(b.json().sessions, [row], "两个并发请求拿到同一份扫描结果");
+    assert.equal(scans, 1, "落地后也没有补扫");
+  });
+
   // 回归钉（评审 F2）：会话管理 tab 的刷新按钮不许变成假动作。TTL 内
   // 普通 GET 拿旧快照是对的，但用户显式点刷新（?refresh=1）必须等一次真扫描
   // 再回新值——否则前端照旧 toast「已刷新」，屏幕上还是旧列表。
@@ -243,6 +276,32 @@ parentPort.on("message", (message) => {
     await router.handle(after.req, after.res);
     assert.deepEqual(after.json().sessions.map((row) => row.id).sort(), ["c-1", "k-1"], "空表没抹掉快照里的既有行");
     assert.equal(svc.calls.scanAll, 1);
+  });
+
+  // mergeEndpoint 的 endpoint＋id 去重不变量：单家追赶不经 scanAll 的去重，
+  // 行集里同一会话出现两份（同 id 新旧两条，盘面滞后的形状）时不去重就会双行
+  // 进快照。按 lastActive 倒序后取首个＝保留最近活跃那份。
+  it("追赶行集内同一会话重复出现：快照按 endpoint+id 去重，保留最近活跃那份", async () => {
+    const svc = mockSessionScan({
+      scanResult: { sessions: [{ endpoint: "claude", id: "full-1", file: "C:/s/full.jsonl" }], endpointErrors: [] },
+      scanAgentResult: [
+        { endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 900 },
+        { endpoint: "kimi", id: "k-1", file: "C:/k/k-1", lastActive: 100 },
+      ],
+    });
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 3_600_000 });
+    const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(warm.req, warm.res);
+    const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
+    await router.handle(hit.req, hit.res);
+    assert.equal(hit.res.statusCode, 200);
+    // 响应契约仍是单家结果原样透传；去重不变量管的是并进快照的那份。
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    const rows = after.json().sessions.filter((row) => row.id === "k-1");
+    assert.equal(rows.length, 1, `同一 endpoint+id 在快照里只能有一行，实得 ${rows.length} 行`);
+    assert.equal(rows[0]?.lastActive, 900, "去重保留最近活跃那份");
+    assert.deepEqual(after.json().sessions.map((row) => row.id).sort(), ["full-1", "k-1"]);
   });
 
   // mergeEndpoint 的删除墓碑：用户刚删的行，随后追赶的单端点扫描又把它带回来

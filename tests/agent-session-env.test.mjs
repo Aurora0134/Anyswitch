@@ -11,6 +11,9 @@ import {
   buildAgentSessionLaunch,
   buildAgentResumeArgs,
 } from "../src/agents/agent-session-env.mjs";
+// 续接身份上限与 terminal-host 的 argv 上限互钉：夹具边界直接取宿主的真值，
+// 不再手抄 4096——任何一侧漂移都在「续接：身份值有长度上限」里爆红。
+import { MAX_LAUNCH_ARG_BYTES } from "../src/terminal/terminal-host.mjs";
 
 const TOKEN = "relay-session-token-abc123";
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
@@ -346,11 +349,24 @@ test("可执行文件按 agent-discovery 解析，缺失即报错不静默", () 
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
-    const launch = buildAgentSessionLaunch({ agentId: "codex", cwd: root, token: TOKEN, base });
-    assert.equal(launch.launch.args[6], join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"));
-
-    const kimi = buildAgentSessionLaunch({ agentId: "kimi", cwd: root, token: TOKEN, base });
-    assert.equal(kimi.launch.args[6], base.KIMI_EXECUTABLE);
+    // 每家的期望执行体独立给出（来自 fakeBase 的覆盖变量与安装位形状），不从
+    // 产物 args[6] 反取：resolver 换错对象（读了别家的覆盖变量、认了别的安装位）
+    // 在这里逐家爆红，而不是被同义反复掩盖。claude 的覆盖值经 resolver 的
+    // 正斜杠归一（与 defaultClaudeExecutable 同一口径），期望值随之归一。
+    const EXPECTED_EXECUTABLE = {
+      claude: base.CLAUDE_EXECUTABLE.replace(/\\/g, "/"),
+      codex: join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"),
+      kimi: base.KIMI_EXECUTABLE,
+      pi: base.PI_EXECUTABLE,
+      dsh: base.DSH_EXECUTABLE,
+      opencode: base.OPENCODE_EXECUTABLE,
+      grok: base.GROK_EXECUTABLE,
+      qoder: join(base.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"),
+    };
+    for (const [agentId, expected] of Object.entries(EXPECTED_EXECUTABLE)) {
+      const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
+      assert.equal(launch.launch.args[6], expected, `${agentId} 的执行体按 agent-discovery 解析`);
+    }
 
     const broken = { ...base, GROK_EXECUTABLE: join(root, "bin", "gone.exe") };
     assert.throws(() => buildAgentSessionLaunch({ agentId: "grok", cwd: root, token: TOKEN, base: broken }), (error) => {
@@ -750,17 +766,20 @@ test("续接：存档路径必须是绝对路径，相对路径判 resume-invali
 });
 
 test("续接：身份值有长度上限，与 terminal-host 的 argv 上限同口径", () => {
-  // terminal-host 对单个 launch 参数的上限是 MAX_LAUNCH_ARG_BYTES（4096，
-  // 按 .length 计）。超限值若放过去，会在宿主那一层被拦成裸 invalid_launch，
-  // 用户看到的是「启动失败」而不是「会话信息不完整」——契约在这里就得挡住。
-  const LIMIT = 4096;
+  // terminal-host 对单个 launch 参数的上限是 MAX_LAUNCH_ARG_BYTES（按 .length
+  // 计），这里直接 import 那个真值做夹具边界——「同口径」由共用同一个常量强制，
+  // 不再是注释：宿主一侧上调或下调，边界用例跟着真值走，续接契约仍停在
+  // RESUME_ARG_MAX_LENGTH 时上限值与超限一格的两条断言必然有一侧爆红。
+  // 超限值若放过去，会在宿主那一层被拦成裸 invalid_launch，用户看到的是
+  // 「启动失败」而不是「会话信息不完整」——契约在这里就得挡住。
+  const LIMIT = MAX_LAUNCH_ARG_BYTES;
   const atLimit = "a".repeat(LIMIT);
   const overLimit = "a".repeat(LIMIT + 1);
 
   assert.deepEqual(
     buildAgentResumeArgs({ endpoint: "kimi", id: atLimit }).args,
     ["--session", atLimit],
-    "上限整好 4096 字符的 id 通过",
+    `上限整好 ${LIMIT} 字符的 id 通过`,
   );
   assert.throws(
     () => buildAgentResumeArgs({ endpoint: "kimi", id: overLimit }),
@@ -774,7 +793,7 @@ test("续接：身份值有长度上限，与 terminal-host 的 argv 上限同�
   assert.deepEqual(
     buildAgentResumeArgs({ endpoint: "pi", id: RESUME_SESSION_ID, file: fileAtLimit }).args,
     ["--session", fileAtLimit],
-    "上限整好 4096 字符的存档路径通过",
+    `上限整好 ${LIMIT} 字符的存档路径通过`,
   );
   assert.throws(
     () => buildAgentResumeArgs({ endpoint: "pi", id: RESUME_SESSION_ID, file: `${fileAtLimit}a` }),
@@ -852,14 +871,28 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
   try {
     const base = fakeBase(root);
     assert.deepEqual(Object.keys(FROZEN), Object.keys(AGENT_TERMINAL_TARGETS), "冻结表覆盖全部端点");
+    // 执行体来源逐端点独立给出期望值（来自 fakeBase 的覆盖变量与安装位形状、
+    // launcher 端点是 process.execPath + 模块静态 launcher 路径）。不 args[6]
+    // 反取：resolver 换错对象时冻结的 argv 断言仍要红。claude 的覆盖值经
+    // resolver 的正斜杠归一。
+    const EXPECTED_EXECUTABLE = {
+      claude: base.CLAUDE_EXECUTABLE.replace(/\\/g, "/"),
+      codex: join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"),
+      kimi: base.KIMI_EXECUTABLE,
+      pi: base.PI_EXECUTABLE,
+      dsh: base.DSH_EXECUTABLE,
+      opencode: base.OPENCODE_EXECUTABLE,
+      grok: base.GROK_EXECUTABLE,
+      qoder: join(base.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"),
+      zcode: process.execPath,
+      workbuddy: process.execPath,
+    };
+    const EXPECTED_LAUNCHER_ARG = { zcode: ZCODE_CLI_LAUNCHER_PATH, workbuddy: WORKBUDDY_LAUNCHER_PATH };
     for (const [agentId, frozen] of Object.entries(FROZEN)) {
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, instanceId: "pinned" });
-      // 执行体按端点各自的解析结果落位：launcher 端点（zcode/workbuddy）是
-      // node.exe + launcher 路径。
-      const launcherForm = agentId === "zcode" || agentId === "workbuddy";
-      const executable = launcherForm ? process.execPath : launch.launch.args[6];
-      const expected = ["/d", "/c", "chcp", "65001", ">nul", "&", executable, ...frozen.tail];
-      if (launcherForm) expected.push(launch.launch.args[7]);
+      const expected = ["/d", "/c", "chcp", "65001", ">nul", "&", EXPECTED_EXECUTABLE[agentId], ...frozen.tail];
+      if (EXPECTED_LAUNCHER_ARG[agentId]) expected.push(EXPECTED_LAUNCHER_ARG[agentId]);
+      assert.equal(launch.launch.args[6], EXPECTED_EXECUTABLE[agentId], `${agentId} 的执行体来源与解析契约一致`);
       assert.deepEqual(launch.launch.args, expected, `${agentId} 的 argv 与改造前逐位一致`);
       assert.equal(launch.label, frozen.label, `${agentId} 的页签名不变`);
       assert.equal(launch.shell, "cmd");

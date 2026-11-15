@@ -3,10 +3,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRelayServer, listenLoopback } from "../src/relay/server.mjs";
+import { createRelayServer } from "../src/relay/server.mjs";
 import { providerRoutingShapes } from "../src/catalog/catalog-generation.mjs";
 import { createSessionReporter } from "../src/agents/agent-metrics.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+// listen(0) 会抽中 fetch（undici）拒连的「bad port」，用例随端口抽签随机假红；
+// 共享夹具命中即关掉换口重试（test-helpers/loopback.mjs 有完整说明）。
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 // 数据根隔离：/v1/messages 的请求路径每次现读 settings.json（会话缓存优化开关）
 // 与 thinking-efforts 档位库，这些读全部经 relay-settings 的 base=process.env 默认

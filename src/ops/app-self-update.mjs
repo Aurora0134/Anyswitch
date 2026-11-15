@@ -90,7 +90,9 @@ async function runGit({ args, cwd, spawnFn, env, timeoutMs = GIT_TIMEOUT_MS, raw
 // 面板复活探测：app-info 是最轻的带版本端点。null = 没人应答（端口安静）。
 // commit 是新面板自报的 HEAD 短哈希——先行轨的复活验证只认它（先行期版本号
 // 可以原地不动，唯 SHA 唯一）。
-async function probePanelAppInfo(port = 47820, fetchFn = fetch) {
+// export 仅作测试观察缝：默认行为与调用方（runSelfUpdate 的 probePanelFn 默认
+// 参数）完全不变。
+export async function probePanelAppInfo(port = 47820, fetchFn = fetch) {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1500);
@@ -108,8 +110,9 @@ async function probePanelAppInfo(port = 47820, fetchFn = fetch) {
 }
 
 // 回滚/接管的兜底拉起：与 helper spawn panel-host 同一形态（脱离、隐藏、丢管道）。
-function defaultSpawnPanelHost({ appDir, execPath = process.execPath }) {
-  const child = spawnDefault(execPath, [join(appDir, "src", "panel", "panel-host.mjs")], {
+// spawnFn 仅作测试注入缝（默认仍用真实 spawn）：不传时默认行为与副作用顺序逐字不变。
+export function defaultSpawnPanelHost({ appDir, execPath = process.execPath, spawnFn = spawnDefault }) {
+  const child = spawnFn(execPath, [join(appDir, "src", "panel", "panel-host.mjs")], {
     cwd: appDir,
     detached: true,
     windowsHide: true,

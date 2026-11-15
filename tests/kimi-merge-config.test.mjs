@@ -460,6 +460,27 @@ describe("kimi thinking effort levels", () => {
   });
 });
 
+describe("merge 集成：[thinking] 全局开关接管挂在合并输出上", () => {
+  // 接管的对象是「合并后的整份文本」——用户的 [thinking] 表与托管块同文件
+  // 共存。只在纯函数上断言时，merge 里接错对象（剥托管块前/后的文本、丢掉
+  // 返回值）全部静默。这里用真实合并入口钉住接线与产物。
+  const existing = '[thinking]\nenabled = false\n\n[[hooks]]\nevent = "Stop"\n';
+
+  it("takeOverThinking 开时翻转合并输出里的用户开关", () => {
+    const { text, thinking } = mergeKimiConfigToml(existing, extractManagedProviders(STORE), 47821, "tok", null, { takeOverThinking: true });
+    assert.equal(thinking.status, "updated");
+    assert.match(text, /^\[thinking\]\nenabled = true$/m, "合并产物里 enabled 必须是 true");
+    assert.match(text, /\[\[hooks\]\]\nevent = "Stop"/, "用户自己的表逐字保留");
+    assert.match(text, /\[providers\."_poke-api"\]/, "托管块照常合并");
+  });
+
+  it("takeOverThinking 缺席时 [thinking] 原样保留，thinking 结果不产生", () => {
+    const { text, thinking } = mergeKimiConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal(thinking, undefined);
+    assert.match(text, /^enabled = false$/m, "没接管的合并不得动用户的开关");
+  });
+});
+
 describe("takeOverKimiThinkingTable", () => {
   it("flips an existing switch in place and keeps the rest of the file", () => {
     const source = [

@@ -14,55 +14,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { dpapiTestOptions, probeDpapi } from "../test-helpers/dpapi-probe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { protect, unprotect, assertProviderId, DPAPI_CODES } from "../src/ops/dpapi.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const powershell = join(
-  process.env.SystemRoot ?? "C:\\Windows",
-  "System32",
-  "WindowsPowerShell",
-  "v1.0",
-  "powershell.exe",
-);
-
-// The DPAPI tests below spawn the real powershell.exe bridge; where the helper
-// or the CurrentUser scope is unavailable (non-Windows, service accounts,
-// runners without a user profile) the runner must report them as skipped
-// rather than fail. The existence of powershell.exe alone says nothing about
-// whether DPAPI actually works, so the first DPAPI test to run also probes one
-// synthetic protect/unprotect round trip and caches the verdict for the file.
-const dpapiPresent = process.platform === "win32" && existsSync(powershell);
-const needsDpapi = dpapiPresent ? {} : { skip: "requires Windows DPAPI (powershell.exe)" };
+const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+const needsDpapi = dpapiTestOptions(await probeDpapi());
 
 const SYNTHETIC = "SYNTHETIC-PLAINTEXT-not-a-real-key-8c1f2e";
-const SKIP_REASON = "requires a working Windows DPAPI CurrentUser scope";
-
-let dpapiUsablePromise = null;
-function dpapiUsable() {
-  dpapiUsablePromise ??= (async () => {
-    try {
-      const ciphertext = await protect(Buffer.from(SYNTHETIC, "utf8"), "dpapi-selftest-probe");
-      const recovered = await unprotect(ciphertext, "dpapi-selftest-probe");
-      return recovered.toString("utf8") === SYNTHETIC;
-    } catch {
-      return false;
-    }
-  })();
-  return dpapiUsablePromise;
-}
-
-// Inline guard for tests that need a working DPAPI scope, not merely an
-// existing powershell.exe.
-async function skipUnlessDpapiWorks(t) {
-  if (!(await dpapiUsable())) {
-    t.skip(SKIP_REASON);
-    return true;
-  }
-  return false;
-}
 
 test("assertProviderId mirrors the ps1 ValidatePattern", () => {
   assert.equal(assertProviderId("deepseek"), "deepseek");
@@ -76,7 +37,6 @@ test("assertProviderId mirrors the ps1 ValidatePattern", () => {
 });
 
 test("v2 protect/unprotect round trips a synthetic plaintext", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   const plaintext = Buffer.from(SYNTHETIC, "utf8");
   const ciphertext = await protect(plaintext, "roundtrip-provider");
 
@@ -89,7 +49,6 @@ test("v2 protect/unprotect round trips a synthetic plaintext", needsDpapi, async
 });
 
 test("entropy is bound to the provider id: a different id cannot decrypt", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   const ciphertext = await protect(Buffer.from(SYNTHETIC, "utf8"), "owner-provider");
   await assert.rejects(
     () => unprotect(ciphertext, "other-provider"),
@@ -102,7 +61,6 @@ test("entropy is bound to the provider id: a different id cannot decrypt", needs
 });
 
 test("v1 and v2 generations are not interchangeable", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   // A v2 ciphertext must not decrypt under the v1 entropy, and vice versa.
   const v2Cipher = await protect(Buffer.from(SYNTHETIC, "utf8"), "gen-provider", { generation: "v2" });
   await assert.rejects(
@@ -130,7 +88,6 @@ test("v1 and v2 generations are not interchangeable", needsDpapi, async (t) => {
 });
 
 test("garbage ciphertext fails closed without leaking detail", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   const garbage = Buffer.from("this is not dpapi ciphertext at all", "utf8");
   await assert.rejects(
     () => unprotect(garbage, "some-provider"),
@@ -154,7 +111,6 @@ test("an invalid provider id is rejected before a process is spawned", async () 
 });
 
 test("binary plaintext survives a round trip byte for byte", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   const bytes = Buffer.from([0x00, 0x01, 0xff, 0xfe, 0x7f, 0x80, 0x0a, 0x0d]);
   const ciphertext = await protect(Buffer.from(bytes), "binary-provider");
   const recovered = await unprotect(ciphertext, "binary-provider");
@@ -162,14 +118,12 @@ test("binary plaintext survives a round trip byte for byte", needsDpapi, async (
 });
 
 test("empty plaintext is handled without throwing an unexpected error", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   const ciphertext = await protect(Buffer.alloc(0), "empty-provider");
   const recovered = await unprotect(ciphertext, "empty-provider");
   assert.equal(recovered.length, 0);
 });
 
 test("a short timeout fails closed with the generic timeout classification", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   // A 1ms deadline expires before PowerShell can emit any response, so this
   // pins the failure contract of the timeout path itself: the call must reject
   // with the TIMEOUT classification, never resolve and never echo payload.
@@ -230,7 +184,6 @@ function sealOversizedWithoutBridgeCap(plaintext, providerId) {
 }
 
 test("helper output past the size cap fails closed without leaking the payload", needsDpapi, async (t) => {
-  if (await skipUnlessDpapiWorks(t)) return;
   // A plaintext whose base64 response must exceed the bridge's output cap: the
   // bridge abandons the response mid-stream and kills the helper, so the bytes
   // the helper already pushed into the pipe arrive on the stdout listener

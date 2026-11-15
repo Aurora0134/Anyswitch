@@ -121,7 +121,7 @@ describe("buildQoderProviders", () => {
     const providers = {
       "test-p": {
         models: {
-          "test-model": { displayName: "Test", contextWindow: 999000, isVision: true, isReasoning: true },
+          "test-model": { displayName: "Test", contextWindow: 999000, inputModalities: ["text", "image"], supportsReasoning: true },
         },
       },
     };
@@ -139,6 +139,17 @@ describe("buildQoderProviders", () => {
       vision: true,
       thinking: { modes: ["enabled"], requiresBudgetForEnabled: false, supportedEffortLevels: [] },
     });
+  });
+
+  it("maps the shared store modality contract without treating omitted declarations as text-only", () => {
+    const models = {
+      images: { inputModalities: ["text", "image"] },
+      text: { inputModalities: ["text"] },
+      undeclared: {},
+    };
+    const conn = buildQoderProviders({ p: { models } }, PORT, TOKEN)[managedConnectionId("p")];
+    const vision = Object.fromEntries(conn.models.map((model) => [model.model, model.capabilities.vision]));
+    assert.deepEqual(vision, { images: true, text: false, undeclared: true });
   });
 
   it("clips effort levels to the five Qoder accepts, which can empty the list", () => {
@@ -178,7 +189,7 @@ describe("buildQoderProviders", () => {
     const providers = {
       "test-p": {
         models: {
-          "agnes-chat-2.0-flash": { displayName: "Agnes", isReasoning: true },
+          "agnes-chat-2.0-flash": { displayName: "Agnes", supportsReasoning: true },
           "glm-5.3": { displayName: "GLM" },
         },
       },

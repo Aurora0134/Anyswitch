@@ -503,6 +503,88 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(bySlug.get("alpha~claude-sonnet-5").context_window, 1_000_000);
   });
 
+  it("maps the effort library's per-model levels onto supported_reasoning_levels and default_reasoning_level", () => {
+    // codex 的档位选择器直接读这两个字段（buildCodexModelCatalog 头注）。没有
+    // 这条断言时，映射整段删掉，每个模型继承模板的 GPT 冻结集照样全绿。
+    assert.ok(CATALOG_TEMPLATE, "template asset codex-model-catalog-template.json loads");
+    const catalog = {
+      models: new Map([
+        ["probe-9-thinker", { kind: "reasoning", levels: ["off", "low", "high", "max"], default: "max", wire: {}, thinkingFormat: null }],
+      ]),
+    };
+    const providers = { alpha: { models: { "probe-9-thinker": {} } } };
+    const entry = buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE, catalog).models[0];
+    // codex 的档位词表没有 off（codex 拼零档为 none），写入前必须裁掉；
+    // low/high/max 全部落表。
+    assert.deepEqual(
+      entry.supported_reasoning_levels.map((level) => level.effort),
+      ["low", "high", "max"],
+    );
+    // 模板已为认识的档位写好描述：沿用；库独有的档位给通用描述。
+    assert.deepEqual(
+      entry.supported_reasoning_levels.map((level) => level.description),
+      ["Fast responses with lighter reasoning", "Greater reasoning depth for complex problems", "max reasoning effort"],
+    );
+    assert.equal(entry.default_reasoning_level, "max", "库指名的默认档在词表内时原样写入");
+  });
+
+  it("carries the store's input_modalities through to the catalog entry verbatim", () => {
+    const providers = {
+      alpha: {
+        models: {
+          "vision-voice": { inputModalities: ["text", "image", "audio"] },
+          "plain-text": {},
+        },
+      },
+    };
+    const bySlug = new Map(
+      buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE).models
+        .map((entry) => [entry.slug, entry]),
+    );
+    assert.deepEqual(
+      bySlug.get("alpha~vision-voice").input_modalities,
+      ["text", "image", "audio"],
+      "store 声明的模态逐字透传（顺序与拼写都不改）",
+    );
+    assert.deepEqual(
+      bySlug.get("alpha~plain-text").input_modalities,
+      CATALOG_TEMPLATE.input_modalities,
+      "未声明的模型沿用模板默认，不得清空（清空会让 codex 拒收请求）",
+    );
+  });
+
+  it("writeCodexConfig stamps the per-model levels into the generated catalog when the switch is on", () => {
+    // 生产接线（agent-sync 传 catalogForRoot + 开关位）走的就是这条路径：开关
+    // 开 → 目录文件里的每个条目带自己的档位；开关关 → 条目保持模板冻结集
+    // （整文件重写本身就是上一轮档位的清理）。
+    const catalog = {
+      models: new Map([
+        ["gpt-6-astra", { kind: "reasoning", levels: ["low", "high"], default: "high", wire: {}, thinkingFormat: null }],
+      ]),
+    };
+    const onDir = mkTestDir("codex-catalog-efforts-on-");
+    const onPath = join(onDir, ".codex", "config.toml");
+    const result = writeCodexConfig(CHAIN_STORE, 47821, "tok", onDir, onPath, catalog, true);
+    assert.equal(result.ok, true);
+    const onDisk = JSON.parse(readFileSync(join(onDir, ".codex", "model-catalogs", "anyswitch-models.json"), "utf8"));
+    const astra = onDisk.models.find((m) => m.slug === "poke-api~gpt-6-astra");
+    assert.deepEqual(astra.supported_reasoning_levels.map((level) => level.effort), ["low", "high"]);
+    assert.equal(astra.default_reasoning_level, "high");
+    // 伪渠道的 auto 模型在库里没有行：走乐观兜底，档位照旧可达。
+    const auto = onDisk.models.find((m) => m.slug === "auto");
+    assert.deepEqual(auto.supported_reasoning_levels.map((level) => level.effort), ["high", "xhigh", "max"]);
+    assert.equal(auto.default_reasoning_level, "high");
+
+    const offDir = mkTestDir("codex-catalog-efforts-off-");
+    const offPath = join(offDir, ".codex", "config.toml");
+    const off = writeCodexConfig(CHAIN_STORE, 47821, "tok", offDir, offPath, catalog, false);
+    assert.equal(off.ok, true);
+    const offDisk = JSON.parse(readFileSync(join(offDir, ".codex", "model-catalogs", "anyswitch-models.json"), "utf8"));
+    const frozen = offDisk.models.find((m) => m.slug === "poke-api~gpt-6-astra");
+    assert.deepEqual(frozen.supported_reasoning_levels, CATALOG_TEMPLATE.supported_reasoning_levels);
+    assert.equal(frozen.default_reasoning_level, CATALOG_TEMPLATE.default_reasoning_level);
+  });
+
   it("writes the catalog file and anchors the pointer in the top-level key region", () => {
     const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");

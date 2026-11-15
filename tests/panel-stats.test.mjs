@@ -134,6 +134,81 @@ describe("panel router stats routes", () => {
   });
 });
 
+describe("stats channel label wiring", () => {
+  function labelHarness() {
+    let now = 1000;
+    let board = { ok: true, storeOk: true, providerNames: { chan: "旧名" }, poolNames: {} };
+    let reads = 0;
+    const storeService = {
+      getBoardState: async () => {
+        reads += 1;
+        return board;
+      },
+    };
+    const usageJournal = {
+      readRequestsLog: () => ({
+        rows: [{ providerId: "chan", model: "m" }],
+        facets: { agents: [], providers: ["chan"], models: ["m"] },
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      }),
+    };
+    const router = statsRouter({ storeService, usageJournal, statsNowFn: () => now, statsChannelLabelsTtlMs: 100 });
+    const getLabel = async () => {
+      const { req, res, json } = fakeReqRes("/panel/api/stats/logs", "GET");
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      return json().rows[0].providerLabel;
+    };
+    return {
+      getLabel,
+      reads: () => reads,
+      tick: (value) => { now = value; },
+      rename: (name) => { board = { ok: true, storeOk: true, providerNames: { chan: name }, poolNames: {} }; },
+      fail: () => { board = { ok: true, storeOk: false, providerNames: {}, poolNames: {} }; },
+      throwRead: () => { storeService.getBoardState = async () => { throw new Error("store unreadable"); }; },
+      recover: () => { storeService.getBoardState = async () => { reads += 1; return board; }; },
+    };
+  }
+
+  it("shares a TTL snapshot across requests, refreshes on expiry, and survives a failed read", async () => {
+    const h = labelHarness();
+    assert.equal(await h.getLabel(), "旧名");
+    assert.equal(await h.getLabel(), "旧名");
+    assert.equal(h.reads(), 1, "TTL 内的连续请求共用同一份名称快照");
+    h.rename("新名");
+    assert.equal(await h.getLabel(), "旧名");
+    h.tick(1100);
+    assert.equal(await h.getLabel(), "新名", "到期后的下一次请求看到改名");
+    h.tick(1200);
+    h.throwRead();
+    assert.equal(await h.getLabel(), "新名", "刷新异常保留旧映射");
+    h.tick(1300);
+    h.fail();
+    assert.equal(await h.getLabel(), "新名", "显式 storeOk:false 也是失败，不能清空旧映射");
+  });
+
+  it("recovers the initial empty mapping after a failed store read", async () => {
+    const h = labelHarness();
+    h.fail();
+    assert.equal(await h.getLabel(), "chan");
+    h.rename("恢复名");
+    h.tick(1100);
+    assert.equal(await h.getLabel(), "恢复名");
+  });
+
+  it("retries an initial thrown read immediately rather than caching the empty mapping", async () => {
+    const h = labelHarness();
+    h.throwRead();
+    assert.equal(await h.getLabel(), "chan");
+    h.rename("恢复名");
+    h.recover();
+    assert.equal(await h.getLabel(), "恢复名");
+    assert.equal(h.reads(), 1, "only the recovered read reached the store");
+  });
+});
+
 describe("claude session-end journaling", () => {
   const endedReport = {
     pid: 4321,

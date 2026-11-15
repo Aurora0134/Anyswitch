@@ -1,9 +1,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSelfUpdate, spawnSelfUpdateWorker, SELF_UPDATE_CLIENT_ID } from "../src/ops/app-self-update.mjs";
+import { runSelfUpdate, spawnSelfUpdateWorker, probePanelAppInfo, defaultSpawnPanelHost, SELF_UPDATE_CLIENT_ID } from "../src/ops/app-self-update.mjs";
 import { readClientUpdateRun, writeClientUpdateRun } from "../src/agents/client-update-journal.mjs";
 
 const RUN_ID = "00000000-0000-4000-8000-000000000000";
@@ -229,6 +229,74 @@ describe("runSelfUpdate · download 阶段", () => {
       assert.match(result.message, /下载 v0.7.0/);
       assert.equal(result.detail, "fatal: could not read");
       assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("runSelfUpdate · Git 候选回退（PATH 缺失时落到标准安装位）", () => {
+  // runGit 的候选顺序是可观察的公共行为：快捷方式拉起的进程 PATH 可能很窄，
+  // PATH 里的 git 缺失必须落到 %ProgramFiles%\Git\cmd\git.exe；只有 ENOENT
+  // 换下一个候选，其余错误当场定夺。
+  test("PATH 里的 git ENOENT：回退到 %ProgramFiles%\\Git\\cmd\\git.exe，下载照常完成", async () => {
+    const FALLBACK = "D:/PF/Git/cmd/git.exe";
+    // 不用 withTagVersion 包（它会抢在 file 检查之前应答 show）：PATH 候选一律
+    // ENOENT，让每一条 git 命令都真实走到回退候选，包括 tag 的核验那一条。
+    const git = fakeSpawn(({ file, args }) => {
+      if (file === "git") return { error: { code: "ENOENT" } };
+      if (gitShowPackage(args)) return { stdout: JSON.stringify({ version: "0.7.0" }) };
+      return { stdout: "" };
+    });
+    const { deps, journalDir, cleanup } = baseDeps({ env: { ProgramFiles: "D:/PF" }, spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "downloaded", "回退候选命中后更新照常完成");
+      assert.equal(git.calls[0]?.file, "git", "先试 PATH 里的 git");
+      assert.ok(
+        git.calls.some((call) => call.file.replaceAll("\\", "/") === FALLBACK),
+        "PATH 缺失后必须落到 %ProgramFiles%\\Git\\cmd\\git.exe",
+      );
+      assert.ok(
+        git.calls.some((call) => call.file.replaceAll("\\", "/") === FALLBACK && gitShowPackage(call.args)),
+        "tag 里 package.json 的核验也经回退候选完成",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("两个候选都缺失：如实报「未检测到 Git」，每次调用都先 PATH 后安装位", async () => {
+    const git = fakeSpawn(() => ({ error: { code: "ENOENT" } }));
+    const { deps, events, journalDir, cleanup } = baseDeps({ env: { ProgramFiles: "D:/PF" }, spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /未检测到 Git，请先安装 Git 后重试/);
+      assert.deepEqual(
+        git.calls.map((call) => call.file.replaceAll("\\", "/")),
+        ["git", "D:/PF/Git/cmd/git.exe", "git", "D:/PF/Git/cmd/git.exe"],
+        "get-url 与 fetch 各自把两个候选都试完（ENOENT 才换下一个）",
+      );
+      assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false);
+      assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("PATH 里的 git 报普通错误（非 ENOENT）：当场定夺，不试安装位", async () => {
+    const git = fakeSpawn(({ file }) => (file === "git" ? { error: { code: 128 }, stderr: "fatal: could not read" } : { stdout: "" }));
+    const { deps, journalDir, cleanup } = baseDeps({ env: { ProgramFiles: "D:/PF" }, spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载 v0\.7\.0失败/);
+      assert.doesNotMatch(result.message, /未检测到 Git/, "非 ENOENT 不是「没装 Git」");
+      assert.ok(git.calls.every((call) => call.file === "git"), "其余错误当场定夺，不落到安装位候选");
     } finally {
       cleanup();
     }
@@ -628,7 +696,9 @@ describe("runSelfUpdate · 先行轨（bleeding）", () => {
   });
 
   test("应用：换装后按 HEAD SHA 复核、复活验证比 commit，结论带提交标识", async () => {
-    const probe = scriptedProbe([{ version: "0.6.6", commit: "abc1234" }, null, { version: "0.6.7", commit: "fedcba0" }]);
+    // 复活探测的版本号故意与目标版本（0.6.7）错开：夹具只满足 commit 匹配——
+    // 先行轨的复活验证若被改坏成比版本号（先行期版本可以原地不动），这里立刻红。
+    const probe = scriptedProbe([{ version: "0.6.6", commit: "abc1234" }, null, { version: "0.6.8", commit: "fedcba0" }]);
     const git = fakeSpawn(({ args }) => {
       if (args0("rev-parse", "HEAD")(args)) return { stdout: `${TARGET_SHA}\n` };
       return { stdout: "" };
@@ -745,19 +815,6 @@ describe("runSelfUpdate · 回退轨（rollback）", () => {
     }
   });
 
-  test("旧记录没有 track 字段：一律按稳定轨走（journal 兼容）", async () => {
-    const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, { version: "0.7.0" }]);
-    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
-    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
-    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
-    try {
-      const result = await runSelfUpdate({ ...deps });
-      assert.equal(result.outcome, "updated");
-      assert.match(result.message, /已更新到 0\.7\.0/);
-    } finally {
-      cleanup();
-    }
-  });
 });
 
 describe("runSelfUpdate · 通用闸门", () => {
@@ -771,6 +828,129 @@ describe("runSelfUpdate · 通用闸门", () => {
       assert.equal(events.relayRestarts, 0);
     } finally {
       cleanup();
+    }
+  });
+});
+
+describe("probePanelAppInfo（默认面板探测实现）", () => {
+  test("命中：GET 127.0.0.1:<port>/panel/api/app-info，只取 version 与 commit 两个身份字段", async () => {
+    const seen = [];
+    const identity = await probePanelAppInfo(12345, async (url) => {
+      seen.push(url);
+      return { ok: true, status: 200, json: async () => ({ version: "0.7.0", commit: "abc1234", payload: "noisy" }) };
+    });
+    assert.deepEqual(identity, { version: "0.7.0", commit: "abc1234" }, "多出来的字段不进身份");
+    assert.deepEqual(seen, ["http://127.0.0.1:12345/panel/api/app-info"], "探测端点与端口可观察");
+  });
+
+  test("端口缺省 47820", async () => {
+    const seen = [];
+    await probePanelAppInfo(undefined, async (url) => {
+      seen.push(url);
+      return { ok: false, status: 503 };
+    });
+    assert.deepEqual(seen, ["http://127.0.0.1:47820/panel/api/app-info"]);
+  });
+
+  test("非 2xx、断网、坏 JSON、非字符串字段：一律如实按「没人应答」落到 null", async () => {
+    const answering = (reply) => probePanelAppInfo(47820, async () => reply);
+    assert.equal(await answering({ ok: false, status: 503 }), null, "HTTP 错误不算复活");
+    assert.equal(await answering(Promise.reject(new Error("ECONNREFUSED"))), null, "断网不算复活");
+    assert.equal(
+      await answering({ ok: true, json: async () => { throw new Error("invalid json"); } }),
+      null,
+      "坏 JSON 不算复活",
+    );
+    assert.deepEqual(
+      await answering({ ok: true, json: async () => ({ version: 42, commit: null }) }),
+      { version: null, commit: null },
+      "非字符串字段按缺失处理，不外泄原始值",
+    );
+  });
+
+  test("1.5s 无应答即中止探测，abort 信号真的送达请求方", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const seen = [];
+    const pending = probePanelAppInfo(47820, (url, init) => new Promise((resolve, reject) => {
+      seen.push({ url, signal: init.signal });
+      init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }));
+    t.mock.timers.tick(1500);
+    assert.equal(await pending, null, "超时按没人应答处理");
+    assert.deepEqual(seen[0].url, "http://127.0.0.1:47820/panel/api/app-info");
+    assert.equal(seen[0].signal.aborted, true, "探测中止必须把 abort 信号发给在途请求");
+  });
+});
+
+describe("defaultSpawnPanelHost（默认面板拉起实现）", () => {
+  test("脱离拉起 node panel-host.mjs：detached、隐藏、丢管道、unref，返回 pid", () => {
+    const recorded = [];
+    const child = { pid: 4242, unref() { recorded.push("unref"); } };
+    const pid = defaultSpawnPanelHost({
+      appDir: "C:/app",
+      execPath: "/node/node.exe",
+      spawnFn: (file, args, options) => {
+        recorded.push({ file, args, options });
+        return child;
+      },
+    });
+    assert.equal(pid, 4242);
+    assert.equal(recorded[1], "unref");
+    const call = recorded[0];
+    assert.equal(call.file, "/node/node.exe");
+    assert.deepEqual(call.args, [call.args[0]]);
+    assert.equal(call.args[0].replaceAll("\\", "/"), "C:/app/src/panel/panel-host.mjs");
+    assert.equal(call.options.cwd, "C:/app");
+    assert.equal(call.options.detached, true, "脱离：面板退出不连带收走安装进程");
+    assert.equal(call.options.windowsHide, true);
+    assert.deepEqual(call.options.stdio, "ignore");
+    assert.equal(call.options.shell, false);
+  });
+});
+
+describe("runSelfUpdate · 默认接线（不注入 probePanelFn / spawnPanelHostFn）", () => {
+  test("默认面板探测打 47820 的 app-info，默认面板拉起真的以 node 执行 panel-host.mjs", async () => {
+    // 探测走 probePanelFn = (port) => probePanelAppInfo(port, fetchFn) 默认参数
+    // （fetchFn 注入，不碰真端口）；拉起走 defaultSpawnPanelHost 真身——appDir
+    // 指向临时目录，panel-host.mjs 是本测试预置的无害脚本（写标记文件即退），
+    // 全程不拉起任何真实面板、不碰任何真实端口。
+    const appDir = mkdtempSync(join(tmpdir(), "anys-self-e2e-"));
+    const marker = join(appDir, "panel-host-ran.marker");
+    mkdirSync(join(appDir, "src", "panel"), { recursive: true });
+    writeFileSync(
+      join(appDir, "src", "panel", "panel-host.mjs"),
+      `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "spawned");\n`,
+    );
+    const probeUrls = [];
+    const fetchFn = async (url) => {
+      probeUrls.push(url);
+      if (probeUrls.length === 1) return { ok: true, status: 200, json: async () => ({ version: "0.6.1-preview" }) };
+      throw new Error("panel down (scripted)");
+    };
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
+    const { deps, journalDir, cleanup } = baseDeps({
+      io: fakeIo({ version: "0.7.0" }),
+      spawnFn: git.spawnFn,
+      fetchFn,
+      execPath: process.execPath,
+    });
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing", appDir }));
+    try {
+      const result = await runSelfUpdate({ ...deps, probePanelFn: undefined, spawnPanelHostFn: undefined });
+      assert.equal(result.outcome, "rolled_back", "新面板迟迟不接管：退回旧版并经默认拉起兜底");
+      assert.match(result.message, /已恢复到更新前版本，但面板未能自动启动/);
+      assert.ok(probeUrls.length >= 2, "默认面板探测确实被走到");
+      assert.ok(
+        probeUrls.every((url) => url === "http://127.0.0.1:47820/panel/api/app-info"),
+        "默认探测打的是 47820 的 app-info 端点",
+      );
+      for (let i = 0; i < 100 && !existsSync(marker); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(existsSync(marker), true, "defaultSpawnPanelHost 真的以 node 执行了 panel-host.mjs（写标记即退的无害脚本）");
+    } finally {
+      cleanup();
+      rmSync(appDir, { recursive: true, force: true });
     }
   });
 });

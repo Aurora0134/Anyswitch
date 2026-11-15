@@ -1220,6 +1220,9 @@ describe("qoder 区域版卡名（CN 差分与首帧预画）", () => {
     "utf8",
   );
   const prepaintSrc = (panelHtml.match(/<script id="panelAgentEditionsPrepaint">([\s\S]*?)<\/script>/) || [])[1];
+  // 快照存档键从生产源派生（不手抄）：主脚本写入的键与首帧脚本读的键必须同一枚，
+  // 任一侧漂移＝首帧快照失联，下方同源用例红。
+  const editionsKey = panelJs.match(/const AGENT_EDITIONS_LS_KEY = "([^"]+)"/)?.[1] ?? "";
 
   it("卡名节点带 id，renderQoder 按 /api/agents 的 edition 改写卡名与空态", () => {
     assert.ok(panelHtml.includes('<h3 id="qoderCardTitle">Qoder</h3>'), "静态默认卡名维持 Qoder（缺省 intl）");
@@ -1232,7 +1235,8 @@ describe("qoder 区域版卡名（CN 差分与首帧预画）", () => {
     assert.ok(render[0].includes("未检测到运行中的 Qoder 客户端"), "缺省 intl 空态维持原句");
   });
 
-  it("主脚本取数后回写 anyswitch.agent-editions 快照：变了才写，非法取值不进档", () => {
+  it("主脚本取数后回写区域版快照：变了才写，非法取值不进档", () => {
+    assert.ok(editionsKey, "panel.js 含 AGENT_EDITIONS_LS_KEY 常量（存档键从生产源派生）");
     const fn = (panelJs.match(/function syncAgentEditionsSnapshot\(agents\) \{[\s\S]*?\n  \}/) || [])[0];
     assert.ok(fn, "syncAgentEditionsSnapshot 在册");
     assert.ok(panelJs.includes("syncAgentEditionsSnapshot(res.agents)"), "refreshAgents 取数后回写快照");
@@ -1243,9 +1247,9 @@ describe("qoder 区域版卡名（CN 差分与首帧预画）", () => {
       setItem: (k, v) => { store[k] = v; writes.push([k, v]); },
     };
     const sync = new Function("localStorage", "AGENT_EDITIONS_LS_KEY",
-      `let agentEditionsSnapshotJson = null;\n${fn}\nreturn syncAgentEditionsSnapshot;`)(localStorage, "anyswitch.agent-editions");
+      `let agentEditionsSnapshotJson = null;\n${fn}\nreturn syncAgentEditionsSnapshot;`)(localStorage, editionsKey);
     sync([{ id: "qoder", edition: "cn" }]);
-    assert.deepEqual(writes, [["anyswitch.agent-editions", '{"qoder":"cn"}']], "CN 主区域版落档");
+    assert.deepEqual(writes, [[editionsKey, '{"qoder":"cn"}']], "CN 主区域版落档");
     sync([{ id: "qoder", edition: "cn" }]);
     assert.equal(writes.length, 1, "同一帧连轮询不重复写");
     sync([{ id: "qoder", edition: "intl" }]);
@@ -1254,6 +1258,12 @@ describe("qoder 区域版卡名（CN 差分与首帧预画）", () => {
     assert.equal(writes[2][1], "{}", "旧后端不下发 edition 时写成空对象，首帧回落静态默认卡名");
     sync([{ id: "qoder", edition: "jp" }]);
     assert.equal(writes.length, 3, "未登记的取值不进档");
+  });
+
+  it("首帧脚本读的快照键与主脚本写入的键同源（键漂移即首帧快照失联）", () => {
+    assert.ok(editionsKey, "panel.js 含 AGENT_EDITIONS_LS_KEY 常量");
+    assert.ok(prepaintSrc.includes(editionsKey),
+      "panelAgentEditionsPrepaint 必须读写主脚本同一枚存档键");
   });
 
   // 首帧脚本真跑：与 panelBoardLayoutPrepaint 的取样方式同构（new Function 注入
@@ -1269,7 +1279,7 @@ describe("qoder 区域版卡名（CN 差分与首帧预画）", () => {
       addEventListener: (type, fn) => listeners.push([type, fn]),
     };
     const localStorage = {
-      getItem: (k) => { if (denied) throw new Error("denied"); return k === "anyswitch.agent-editions" ? stored : null; },
+      getItem: (k) => { if (denied) throw new Error("denied"); return k === editionsKey ? stored : null; },
     };
     const observers = [];
     class FakeMutationObserver {
@@ -1767,7 +1777,28 @@ describe("panel.html stats tab", () => {
     const m = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "enterStatsView found in panel.js");
     assert.ok(m[1].includes("document.hidden"), "polling pauses while page hidden");
-    assert.ok(m[1].includes("30000"), "30s polling interval");
+  });
+
+  it("统计页轮询真跑：进页挂恰一拍 30000ms 的间隔（写成 300000/3000 都算漂移）", () => {
+    // includes("30000") 连 300000（5 分钟）都放行：真跑 enterStatsView，capture
+    // setInterval 的实参——间隔漂移在这里红，页面隐藏拍照常跳过取数。
+    const m = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "enterStatsView found in panel.js");
+    const intervals = [];
+    new Function("intervals", `
+      let statsTrendPrev = null, statsUsageRevealed = false, statsTimer = null, statsSubTab = "overview";
+      const document = { hidden: true };
+      function loadStatsPrefs() {}
+      function activateStatsSubTab() { return Promise.resolve(); }
+      function refreshStatsState() { return Promise.resolve(); }
+      const setInterval = (fn, ms) => { intervals.push(ms); return 7; };
+      const localStorage = { getItem: () => null, setItem: () => {} };
+      function enterStatsView() {
+      ${m[1]}
+      }
+      enterStatsView();
+    `)(intervals);
+    assert.deepEqual(intervals, [30000], "进页只挂一拍，且间隔必须恰为 30000ms");
   });
 
   it("clamps smooth-path control points so spike-adjacent segments never dip below the baseline", () => {
@@ -2673,31 +2704,49 @@ describe("panel router xterm assets", () => {
   for (const pin of assetPins) {
     const installed = existsSync(new URL(pin.pkg, import.meta.url));
 
-    it(`GET ${pin.route} serves the packaged bundle, including query params`, { skip: !installed }, async () => {
-      const expected = readFileSync(new URL(pin.pkg + pin.file, import.meta.url), "utf8");
+    it(`GET ${pin.route} serves the packaged bundle, including query params`, async () => {
       const router = routerWith();
       for (const path of [pin.route, `${pin.route}?startup=1&v=2`]) {
         const { req, res } = fakeReqRes(path, "GET", null, { host: "127.0.0.1:47820" });
         await router.handle(req, res);
-        assert.equal(res.statusCode, 200);
-        assert.equal(res.headers["content-type"], pin.type);
-        assert.equal(res.headers["cache-control"], "no-cache");
-        assert.ok(res.headers.etag, "响应带 ETag（size-mtimeMs 派生）");
-        assert.equal(res.headers.location, undefined);
-        assert.equal(res.body, expected);
-        if (pin.marker) {
-          assert.ok(res.body.includes(pin.marker), pin.markerNote);
+        if (installed) {
+          // 依赖在装：逐字节钉实物（既有口径原样）。
+          const expected = readFileSync(new URL(pin.pkg + pin.file, import.meta.url), "utf8");
+          assert.equal(res.statusCode, 200);
+          assert.equal(res.headers["content-type"], pin.type);
+          assert.equal(res.headers["cache-control"], "no-cache");
+          assert.ok(res.headers.etag, "响应带 ETag（size-mtimeMs 派生）");
+          assert.equal(res.headers.location, undefined);
+          assert.equal(res.body, expected);
+          if (pin.marker) {
+            assert.ok(res.body.includes(pin.marker), pin.markerNote);
+          }
+        } else {
+          // 依赖缺装的环境不再静默 skip：路由必须在册——404 走「资产缺失出声」
+          // 那条专属形状（带缺失实物路径的 JSON），而不是路由未注册的兜底 404。
+          assert.equal(res.statusCode, 404);
+          assert.equal(res.headers["content-type"], "application/json");
+          assert.equal(res.headers.location, undefined);
+          const body = JSON.parse(res.body || "{}");
+          // path 由 join 产生：Windows 下是反斜杠，统一成正斜杠再对 pin.file。
+          const missingPath = typeof body.path === "string" ? body.path.replace(/\\/g, "/") : "";
+          assert.ok(missingPath.includes(pin.file),
+            `404 的 path 必须指向 ${pin.pkg}${pin.file}（路由在册而实物缺失才算对），实得 ${res.body}`);
         }
       }
     });
 
-    it(`HEAD ${pin.route} returns headers without redirect`, { skip: !installed }, async () => {
+    it(`HEAD ${pin.route} returns headers without redirect`, async () => {
       const router = routerWith();
       const { req, res } = fakeReqRes(pin.route, "HEAD", null, { host: "127.0.0.1:47820" });
       await router.handle(req, res);
-      assert.equal(res.statusCode, 200);
-      assert.equal(res.headers["content-type"], pin.type);
-      assert.equal(res.headers["cache-control"], "no-cache");
+      if (installed) {
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.headers["content-type"], pin.type);
+        assert.equal(res.headers["cache-control"], "no-cache");
+      } else {
+        assert.equal(res.statusCode, 404, "缺装环境路由仍在册（缺失 404，不静默跳过）");
+      }
       assert.equal(res.headers.location, undefined);
     });
   }
@@ -4604,7 +4653,7 @@ describe("panel.html 设置全页视图", () => {
   function restoreOutcome(store, win = {}, broken = false) {
     const calls = [];
     return new Function("store", "win", "calls", "broken", `
-      let suppressViewEnter = false, settingsReturnView = "board", settingsSubTabToRestore = null,
+      let suppressViewEnter = false, settingsSubTabToRestore = null,
           restartEnterView = null, currentView = "board";
       const window = win;
       const localStorage = {
@@ -4618,6 +4667,33 @@ describe("panel.html 设置全页视图", () => {
       restoreView();
       return { calls, currentView, settingsSubTabToRestore };
     `)(store, win, calls, broken);
+  }
+
+  // 统计页落定侧的子 tab 不再由测试按 fixture 自己重算：把 panel.js 的
+  // enterStatsView 抽出来真跑一遍（restoreView 的落定链最终就是它读
+  // panel-stats-subtab 决定激活哪一侧），落定值 = activateStatsSubTab 收到的档位。
+  // enterStatsView 读档/回落行为改变时，这里与首帧侧（或预期表）立刻不一致。
+  function statsRestoreSubTab(store) {
+    const enterSrc = (panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/) || [])[1];
+    assert.ok(enterSrc, "enterStatsView found in panel.js");
+    return new Function("store", `
+      let statsTrendPrev = null, statsUsageRevealed = false, statsTimer = null, statsSubTab = "overview";
+      const document = { hidden: false };
+      const activated = [];
+      function loadStatsPrefs() {}
+      function activateStatsSubTab(name) { activated.push(name); return Promise.resolve(); }
+      function refreshStatsState() { return Promise.resolve(); }
+      const setInterval = () => 0;
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: () => {},
+      };
+      function enterStatsView() {
+      ${enterSrc}
+      }
+      enterStatsView();
+      return activated[0] ?? null;
+    `)(store);
   }
 
   const PREPAINT_CASES = [
@@ -4674,11 +4750,12 @@ describe("panel.html 设置全页视图", () => {
         `${c.name}：首帧那一屏与落定那一屏不一致`);
       // 首帧没有子 tab 属性时，HTML 默认露出的就是「通用」——与 enterSettingsView
       // 拿不到有效存档时的回落同一格。统计页同理：默认露出「总览」（overview），
-      // 落定侧是 enterStatsView 读 panel-stats-subtab（仅 "logs" 切日志页）。
+      // 落定侧真跑 enterStatsView（读 panel-stats-subtab，仅 "logs" 切日志页）——
+      // 不再用 fixture 重算，读档行为改变即红。
       const jsSub = out.currentView === "settings"
         ? (PREPAINT_SUB_TABS.includes(out.settingsSubTabToRestore) ? out.settingsSubTabToRestore : "general")
         : out.currentView === "stats"
-          ? (c.store["panel-stats-subtab"] === "logs" ? "logs" : "overview")
+          ? statsRestoreSubTab(c.store)
           : null;
       const paintSub = attrs["data-prepaint-subtab"]
         ?? (out.currentView === "settings" ? "general" : out.currentView === "stats" ? "overview" : null);
@@ -5615,6 +5692,10 @@ describe("panel.html stats 三态：加载 / 空 / 失败（加载态不再落�
 
   it("五态真值表：只有 ready 才落「暂无数据」", () => {
     const { loadingCopy, failedCopy, make } = statsHintFn();
+    // 文案常量钉独立字面量：期望不再由生产常量自身生成——加载/失败态改回
+    //「暂无数据」或改写文案时这条先红（三态分家口径见本 describe 头注释）。
+    assert.equal(loadingCopy, "正在加载…", "加载态文案常量钉住产品口径");
+    assert.equal(failedCopy, "加载失败", "失败态文案常量钉住产品口径");
     assert.equal(make("idle", loadingCopy, failedCopy)("暂无数据"), null, "idle 不画空态");
     assert.equal(make("pending", loadingCopy, failedCopy)("暂无数据"), null, "pending 不画空态");
     assert.equal(make("loading", loadingCopy, failedCopy)("暂无数据"), loadingCopy, "加载态说正在加载");
@@ -5639,6 +5720,90 @@ describe("panel.html stats 三态：加载 / 空 / 失败（加载态不再落�
     }
   });
 
+  it("四张卡渲染体真跑：空态落笔与数据面渲染都执行到（不是只钉调用串）", () => {
+    // 上面那条只做字符串命中：渲染体从未执行，渲染函数整体坏掉（早退、写错节点、
+    // 行组装坏掉）都不会红。这里把 statsHintText/writeStatsHint 与四个渲染体抽出，
+    // 配 DOM 桩真跑：空数据拍四卡各自写下三态空文案；有数据拍端点表与 TPS/TTFT
+    // 条行的组装产出可观察 DOM。
+    const pick = (re, label) => {
+      const src = panelJs.match(re)?.[1];
+      assert.ok(src, label + " found in panel.js");
+      return src;
+    };
+    const hintSrc = pick(/function statsHintText\(emptyText\) \{([\s\S]*?)\n  \}/, "statsHintText");
+    const writeSrc = pick(/function writeStatsHint\(el, emptyText\) \{([\s\S]*?)\n  \}/, "writeStatsHint");
+    const heatSrc = pick(/function renderStatsHeatmap\(\) \{([\s\S]*?)\n  \}/, "renderStatsHeatmap");
+    const tpsSrc = pick(/function renderStatsTps\(\) \{([\s\S]*?)\n  \}/, "renderStatsTps");
+    const ttftSrc = pick(/function renderStatsTtft\(\) \{([\s\S]*?)\n  \}/, "renderStatsTtft");
+    const epSrc = pick(/function renderStatsEndpoints\(\) \{([\s\S]*?)\n  \}/, "renderStatsEndpoints");
+
+    const factory = new Function(
+      "$", "statsData", "statsPhase", "statsEndpointLabel", "statsFmtInt", "formatTokensCn", "statsFmtHours",
+      "statsTpsRankedAll", "STATS_TPS_TOP_N", "statsRenderBars",
+      "statsTtftRankedAll", "STATS_TTFT_TOP_N", "statsFmtTtft", "statsFmtBucketLabel", "renderStatsLineChart",
+      `const STATS_LOADING_COPY = "正在加载…";\nconst STATS_LOAD_FAILED_COPY = "加载失败";\n`
+        + `function statsHintText(emptyText) {${hintSrc}\n  }\n`
+        + `function writeStatsHint(el, emptyText) {${writeSrc}\n  }\n`
+        + `function renderStatsHeatmap() {${heatSrc}\n  }\n`
+        + `function renderStatsTps() {${tpsSrc}\n  }\n`
+        + `function renderStatsTtft() {${ttftSrc}\n  }\n`
+        + `function renderStatsEndpoints() {${epSrc}\n  }\n`
+        + "return { renderStatsHeatmap, renderStatsTps, renderStatsTtft, renderStatsEndpoints };",
+    );
+    const els = {
+      statsHeatmap: { innerHTML: "" },
+      statsTpsBars: { innerHTML: "", bars: null, barOpts: null },
+      statsTtftChart: { innerHTML: "", chart: null },
+      statsTtftBars: { innerHTML: "", textContent: "", bars: null, barOpts: null },
+      statsEndpoints: { innerHTML: "" },
+    };
+    const barsRecorder = (el, rows, opts) => { el.bars = rows; el.barOpts = opts; };
+    const deps = [
+      (id) => els[id] ?? null,
+      null, "ready",
+      (id) => id, (n) => String(n), (n) => `${n} tok`, (ms) => `${ms}h`,
+      () => [], 5, barsRecorder,
+      () => [], 5, (v) => `${v}ms`, (t) => String(t),
+      (el, spec) => { el.chart = spec; },
+    ];
+
+    // 空数据拍：四张卡各自经三态文案落笔写空态。
+    factory(...deps).renderStatsHeatmap();
+    factory(...deps).renderStatsTps();
+    factory(...deps).renderStatsTtft();
+    factory(...deps).renderStatsEndpoints();
+    const hint = '<div class="empty-hint">暂无数据</div>';
+    assert.equal(els.statsHeatmap.innerHTML, hint, "热力卡空态经三态文案");
+    assert.equal(els.statsTpsBars.innerHTML, hint, "TPS 卡空态经三态文案");
+    assert.equal(els.statsTtftChart.innerHTML, hint, "TTFT 图空态经三态文案");
+    assert.equal(els.statsEndpoints.innerHTML, hint, "端点表空态经三态文案");
+    assert.equal(els.statsTtftBars.textContent, "", "TTFT 条行空数据清空");
+
+    // 有数据拍：渲染体真的组装卡面（表格、条行、折线规格）。
+    const dataDeps = [...deps];
+    dataDeps[1] = {
+      endpoints: [{ agentId: "claude", requests: 42, prompt: 1000, completion: 2000, sessions: 3, workMs: 3600000 }],
+      ttft: { daily: [{ start: 1700000000000, avg: 1.5, p95: 2 }] },
+    };
+    dataDeps[7] = () => [{ key: "gpt", avgTps: 12.34, samples: 7 }];
+    dataDeps[10] = () => [{ key: "m", avg: 1, p95: 2, samples: 3 }];
+    els.statsHeatmap.innerHTML = "";
+    els.statsEndpoints.innerHTML = "";
+    factory(...dataDeps).renderStatsTps();
+    factory(...dataDeps).renderStatsTtft();
+    factory(...dataDeps).renderStatsEndpoints();
+    assert.deepEqual(els.statsTpsBars.bars,
+      [{ rank: 1, label: "gpt", value: 12.34, valText: "12.3 tok/s · 7 样本" }],
+      "TPS 条行按渲染体映射产出");
+    assert.deepEqual(els.statsTtftBars.bars,
+      [{ rank: 1, label: "m", value: 1, valText: "1ms · p95 2ms · 3 次" }],
+      "TTFT 条行按渲染体映射产出");
+    assert.equal(els.statsTtftChart.chart.ariaLabel, "首字响应 TTFT 趋势图", "TTFT 折线规格带可访问名");
+    assert.deepEqual(els.statsTtftChart.chart.series.map((s) => s.key), ["avg", "p95"]);
+    assert.ok(els.statsEndpoints.innerHTML.includes('<table class="stats-table">'), "端点表渲染体产出表格");
+    assert.ok(els.statsEndpoints.innerHTML.includes("42"), "端点行数据进表");
+  });
+
   it("refreshStatsState：仅无缓存时挂加载态，成功置 ready，首次失败才落 error", () => {
     const m = panelJs.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "refreshStatsState found in panel.js");
@@ -5649,7 +5814,8 @@ describe("panel.html stats 三态：加载 / 空 / 失败（加载态不再落�
     assert.ok(body.indexOf('statsPhase = "ready"') < body.indexOf("renderStatsAll()"), "成功先置 ready 再渲染");
     assert.ok(body.includes('if (!statsData) { statsPhase = "error"; renderStatsAll(); }'),
       "首次失败且无旧数据才落失败态");
-    assert.match(panelJs, /STATS_LOADING_HINT_DELAY_MS = 200/);
+    // 锚到分号：裸「= 200」连 2000（2 秒）都放行。
+    assert.match(panelJs, /const STATS_LOADING_HINT_DELAY_MS = 200;/);
   });
 
   it("展示闸：200ms 内落地不画、旧请求不得掀新状态、离开统计页即清", () => {
@@ -6625,11 +6791,23 @@ describe("设置项「开屏动画」", () => {
 });
 
 describe("设置项「看板排布」", () => {
-  const KEY = "panel-board-layout";
-  const LIST_KEY = "anyswitch.board-live-agents";
+  // 存档键从生产源派生（不手抄）：注入段与首帧脚本共用同一枚键——主脚本改键而
+  // 首帧脚本没跟上（或反之）时首帧快照失联，键漂移在下方同源用例里红。
+  const KEY = panelJs.match(/const BOARD_LAYOUT_LS_KEY = "([^"]+)"/)?.[1] ?? "";
+  const LIST_KEY = panelJs.match(/const BOARD_LIVE_AGENTS_LS_KEY = "([^"]+)"/)?.[1] ?? "";
   const GATE = "data-prepaint-board-layout";
   const STYLE_ID = "panelBoardLayoutPrepaintCss";
   const prepaintSrc = (panelHtml.match(/<script id="panelBoardLayoutPrepaint">([\s\S]*?)<\/script>/) || [])[1];
+
+  it("两枚存档键在 panel.js 在册，且首帧脚本读的就是同一枚（键漂移即快照失联）", () => {
+    assert.ok(KEY, "panel.js 含 BOARD_LAYOUT_LS_KEY 常量");
+    assert.ok(LIST_KEY, "panel.js 含 BOARD_LIVE_AGENTS_LS_KEY 常量");
+    assert.ok(prepaintSrc, "panelBoardLayoutPrepaint 在册");
+    assert.ok(prepaintSrc.includes(`localStorage.getItem("${KEY}")`),
+      "首帧脚本读的排布键与主脚本写入的键同源");
+    assert.ok(prepaintSrc.includes(`localStorage.getItem("${LIST_KEY}")`),
+      "首帧脚本读的运行中集合键与主脚本写入的键同源");
+  });
 
   it("行落在「显示」卡内，排在开屏动画与折线视窗节点数之间，沿用 .seg-switch 三档分段", () => {
     const atStartup = panelHtml.indexOf('id="startupAnimationToggle"');
@@ -8976,23 +9154,35 @@ describe("页脚品牌行（品牌名＋版本号，版本取自 app-info）", (
       },
     );
     await initBrandVersion();
-    return tag;
+    return { tag, parent };
   }
 
   it("版本号与徽标同源：一次取值写进页脚，格式为「· v+版本」", async () => {
     assert.ok(body.includes('api("GET", "/api/app-info")'), "版本取自 app-info 唯一来源");
     assert.ok(body.includes('footer.textContent = " · v" + version'), "页脚写法为「· v+版本」");
-    const tag = await run({ version: " 0.7.1 " });
+    const { tag } = await run({ version: " 0.7.1 " });
     assert.equal(tag.textContent, " · v0.7.1");
   });
 
-  it("随机改写命中：版本 tag 的写法与未命中结局一致，仍为「· v+版本」", async () => {
-    const tag = await run({ version: "0.7.4" }, { random: 0 });
+  it("随机改写命中：父行整段被换血（分支真的触发），版本写入落在游离 tag 上", async () => {
+    // 原先这条只断言 tag.textContent——两种结局下值一致，删掉彩蛋分支照样绿。
+    // 这里断言改写确实发生：父行 textContent 被整段换掉（页脚 span 随之游离），
+    // 而版本写入照常落到已游离的 tag 上（两种结局一致的那半句保留）。
+    const { tag, parent } = await run({ version: "0.7.4" }, { random: 0 });
+    assert.notEqual(parent.textContent, "Anyswitch", "命中档父行被整段改写（1/25 分支真的触发，删掉分支这条就红）");
+    assert.ok(parent.textContent.length > 0, "改写是换血不是清空");
+    assert.equal(tag.textContent, " · v0.7.4", "版本写入照常落在（已游离的）tag 上，与未命中结局一致");
+  });
+
+  it("随机改写未命中：父行原样保留，版本照常上屏", async () => {
+    // 反向闸：彩蛋分支若被改成每次都触发，未命中路径的父行就不该再被动过。
+    const { tag, parent } = await run({ version: "0.7.4" }, { random: 0.99 });
+    assert.equal(parent.textContent, "Anyswitch", "未命中档父行原样（分支改成必触发这条就红）");
     assert.equal(tag.textContent, " · v0.7.4");
   });
 
   it("版本取不到：页脚后半段留空，不留悬空分隔点", async () => {
-    const tag = await run(null, { fail: true });
+    const { tag } = await run(null, { fail: true });
     assert.equal(tag.textContent, null);
   });
 });
@@ -14744,20 +14934,27 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
     assert.equal(agents[2].metrics.activeRequests, 2, "端点级键没点到 → 原样不动（不擅自归零）");
   });
 
-  it("snapshot 帧按 at 取时效：过期行不改数不命中（合并计数身份的桥缓存旧值）", async () => {
+  it("snapshot 帧按 at 取时效：窗沿两侧取样，窗内取信、窗外交回轮询（合并计数身份的桥缓存旧值不放大）", async () => {
     const agents = mkBoardAgents();
     const now = Date.now();
+    // 窗沿两侧都落点：2.5s（窗内）与 4s（窗外、但远小于「调大 10 倍」的 30s）各一行，
+    // 取信窗被拉大或缩小都会翻转其中一侧的判定；60s 行保留「几十秒没帧」的合并身份场景。
     const hit = await vmFn("boardActivityApplyFrame",
       [{ type: "snapshot", instances: [
-        { endpointId: "kimi", instanceId: null, activeRequests: 0, at: now - 60000 },
+        { endpointId: "kimi", instanceId: null, activeRequests: 5, at: now - 2500 },
+        { endpointId: "claude", instanceId: "claude-9001", activeRequests: 0, at: now },
+        { endpointId: "dsh", instanceId: null, activeRequests: 9, at: now - 4000 },
+        { endpointId: "dsh", instanceId: "dsh-26304", activeRequests: 9, at: now - 4000 },
         { endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: now - 60000 },
-        { endpointId: "dsh", instanceId: null, activeRequests: 2, at: now - 100 },
       ] }, agents],
       ["terminalActivityKey"]);
-    assert.deepEqual(hit, ["dsh"], "只有 at 新鲜的行算真值触达");
-    assert.equal(agents[0].metrics.activeRequests, 0, "过期行不改写 kimi 端点计数");
-    assert.equal(agents[0].instances[0].activeRequests, 0, "过期行不改写 kimi 实例计数");
-    assert.equal(agents[2].metrics.activeRequests, 2, "新鲜行照常按真值写");
+    assert.deepEqual(hit.sort(), ["claude", "kimi"], "只有窗沿内的行算真值触达");
+    assert.equal(agents[0].metrics.activeRequests, 5, "窗内(2.5s)端点级行按真值写");
+    assert.equal(agents[0].instances[0].activeRequests, 0, "窗外(60s)行不改写 kimi 实例计数");
+    assert.equal(agents[2].metrics.activeRequests, 2, "窗外(4s)端点级不改写（不把桥缓存旧值当真值）");
+    assert.equal(agents[2].instances[0].activeRequests, 2, "窗外(4s)实例行不改写");
+    assert.equal(agents[2].instances[0].status, "active", "窗外实例行 status 原样");
+    assert.equal(agents[1].sessions[0].status, "idle", "新鲜行照常按真值写并镜像 status");
   });
 
   it("未知帧型与空帧忽略", async () => {
@@ -15105,8 +15302,9 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c), toggle: (c, on) => (on ? els.terminalWorkspace.classes.add(c) : els.terminalWorkspace.classes.delete(c)) }, classes: new Set() },
       terminalTabs: { innerHTML: "" },
     };
-    const state = { data: 0, enriched: 0, requested: 0, renderedData: 0, renderedTabs: 0 };
-    const sandbox = new Function("els", "state", `
+    const state = { data: 0, enriched: 0, requested: 0, renderedData: 0, renderedTabs: 0, enrichedWith: undefined };
+    const agentsPayload = [{ id: "claude", endpointId: "claude", name: "Claude" }];
+    const sandbox = new Function("els", "state", "agentsPayload", `
       const $ = (id) => els[id] ?? null;
       const document = { querySelector: () => null };
       const terminalBackendReady = true;
@@ -15114,20 +15312,25 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const terminalBackendSessions = {};
       // 页签＝视口。零视口才落空态（后台保活会话不算页签）。
       let terminalViewports = [];
-      async function api() { state.data += 1; return { sessions: [] }; }
+      async function api() { state.data += 1; return { sessions: [], agents: agentsPayload }; }
       function rebuildTerminalBackendSessions() {}
       // 自动复活的轮询触发（本用例只验零会话空态）：桩成空操作，触发面另有专项用例。
       function rearmTerminalAutoRevive() {}
       function maybeAutoReviveTerminalSession() {}
       async function refreshRouteRuntimeCache() {}
       async function refreshActiveTerminalRequests() { state.requested += 1; }
-      function enrichTerminalSessions() { state.enriched += 1; }
+      function enrichTerminalSessions(agents) { state.enriched += 1; state.enrichedWith = agents; }
       function renderTerminalSessionData() { state.renderedData += 1; }
       function renderTerminalPreviewTabs() { state.renderedTabs += 1; }
       ${bodies}
       return { poll: pollTerminalSessions };
-    `)(els, state);
+    `)(els, state, agentsPayload);
     return sandbox.poll().then(() => {
+      // 归属轮询的两个调用点原来零断言（删掉调用这组用例仍全绿）：enrich 必须吃
+      // 到本拍 agents 取数结果，最近请求必须每拍刷新。
+      assert.equal(state.enriched, 1, "轮询每拍把 agents 负载喂给归属 enrich（删掉调用这条就红）");
+      assert.deepEqual(state.enrichedWith, agentsPayload, "enrich 的入参就是本拍 /api/agents 的结果");
+      assert.equal(state.requested, 1, "轮询每拍刷新活动页签的最近请求（删掉调用这条就红）");
       assert.equal(state.renderedTabs, 1, "轮询照常重渲页签");
       assert.equal(state.renderedData, 0, "零会话不渲会话数据（无会话可渲）");
       assert.equal(els.terminalEmpty.hidden, false, "别处关光会话也落空态");
@@ -17194,13 +17397,30 @@ describe("自动同步失败上屏（sync-status 落盘 + 轮询 + 文案锚点�
     const start = panelJs.indexOf("function startSyncStatusPolling()");
     const body = panelJs.slice(start, panelJs.indexOf("\n  }", start));
     assert.ok(body.includes("if (document.hidden) return;"), "隐藏页不取数");
-    assert.ok(body.includes("3000"), "3 秒间隔");
     // init() 在文件前部、函数定义在后部：钉调用点与 startStatusPolling 同处，
     // 不能用「调用出现在定义之后」这种位置判据。
     const initAnchor = panelJs.indexOf("const firstStatus = startStatusPolling();");
     assert.ok(initAnchor >= 0, "init() 轮询起点锚点");
     assert.ok(panelJs.slice(initAnchor, initAnchor + 300).includes("startSyncStatusPolling();"),
       "init() 里接上了调用点");
+  });
+
+  it("3s 轮询真跑：入口先取一拍、再挂恰一拍 3000ms 的间隔（写成 30000/300 都算漂移）", () => {
+    // includes("3000") 连 30000（30 秒）都放行：真跑 startSyncStatusPolling，
+    // capture setInterval 的实参。setInterval 必须桩掉——真定时器会把测试进程挂住。
+    const src = panelJs.match(/function startSyncStatusPolling\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "startSyncStatusPolling found in panel.js");
+    const polls = [];
+    const intervals = [];
+    new Function("polls", "intervals", `
+      const document = { hidden: true };
+      const setInterval = (fn, ms) => { intervals.push(ms); return 7; };
+      async function pollSyncStatus() { polls.push(1); }
+      ${src}
+      startSyncStatusPolling();
+    `)(polls, intervals);
+    assert.deepEqual(polls, [1], "入口先取一拍");
+    assert.deepEqual(intervals, [3000], "轮询间隔必须恰为 3000ms");
   });
 
   it("边缘触发 toast：at 变化才弹、首帧历史失败不弹", () => {
@@ -17823,7 +18043,8 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/--ll-step: 78px/.test(panelCss), "旧硬编码行距已撤");
     assert.ok(/\.live-log-viewport \{[^}]*overflow-anchor: none;/.test(panelCss), "新消息从顶部插入不吃滚动锚定");
     assert.ok(/\.live-log\[data-motion="expanding"\] \{ --ll-step: var\(--ll-step-expanded\); \}/.test(panelCss));
-    assert.ok(panelCss.includes(".live-log[data-motion=\"expanding\"] .live-log-stack,") && panelCss.includes("opacity: 1; pointer-events: auto; }"), "摊开/收回期叠卡保持可见");
+    assert.ok(/\.live-log\[data-motion="expanding"\] \.live-log-stack,\s*\.live-log\[data-motion="collapsing"\] \.live-log-stack \{ opacity: 1; pointer-events: auto; \}/.test(panelCss), "摊开/收回期叠卡规则本体保持可见（叠卡自己写 opacity:1，不是被视口规则顶替）");
+    assert.ok(/\.live-log\[data-motion="expanding"\] \.live-log-viewport,\s*\.live-log\[data-motion="collapsing"\] \.live-log-viewport \{ opacity: 0; pointer-events: none; \}/.test(panelCss), "摊开/收回期视口让位不抢热区，到位后才交给 handoff 交叉淡化");
     assert.ok(panelCss.includes('.live-log[data-motion="handoff"] .live-log-stack,\n  .live-log[data-motion="handoff"] .live-log-viewport { transition: opacity 60ms var(--ease-out); }'), "到位后只做 60ms 交叉淡化");
     assert.ok(!/transition-delay: 80ms/.test(panelCss), "旧的 80ms 错位淡入已撤");
     assert.ok(panelCss.includes(".live-log[data-motion] .live-log-stack .live-log-msg,") && /transition-delay: 0ms; \}/.test(panelCss), "交接期禁用退层 stagger");
@@ -17910,6 +18131,14 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     get className() { return [...this._classes].join(" "); }
     set className(v) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
     get firstChild() { return this.children[0] ?? null; }
+    get offsetTop() {
+      if (!this.parentNode) return 0;
+      const siblings = this.parentNode.children;
+      const index = siblings.indexOf(this);
+      let top = 0;
+      for (let i = 0; i < index; i++) top += siblings[i].offsetHeight;
+      return top;
+    }
     get nextSibling() {
       if (!this.parentNode) return null;
       const i = this.parentNode.children.indexOf(this);
@@ -17933,7 +18162,12 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     removeAttribute(k) { delete this.attributes[k]; }
     getAttribute(k) { return this.attributes[k] ?? null; }
     addEventListener(type, fn) { this._listeners[type] = fn; }
-    dispatch(type, ev) { this._listeners[type]?.(ev); }
+    // 真实 DOM 里 onclick 与挂载监听都会被 click 触发；面板日志接线走 onclick 属性，
+    // 派发 click 时一并呼出，前端接线测试才能从公共入口打进真实 handler。
+    dispatch(type, ev) {
+      if (type === "click" && typeof this.onclick === "function") this.onclick(ev);
+      this._listeners[type]?.(ev);
+    }
     querySelector(sel) { this._qs ??= {}; return this._qs[sel] ??= new FakeElement("span"); }
   }
   class FakeEventSource {
@@ -17981,7 +18215,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     };
     const block = panelJs.match(/\/\/ 实时 SSE 日志流[\s\S]*?\n  \/\/ 开机自启/)[0].replace(/\n  \/\/ 开机自启$/, "");
     const factory = new Function(
-      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE", "matchMedia",
+      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE", "matchMedia", "getComputedStyle",
       `let es = null;
        ${block}
        return {
@@ -18000,6 +18234,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
       rafFake,
       setTimeoutFake, clearTimeoutFake, FakeEventSource, "/panel",
       () => ({ matches: reduced }),
+      // 注缝：真实布局里视口卡带 panel.css 的 margin-bottom: 6px（叠卡卡 margin:0）。
+      // 不注这个缝，「展开行距量自首卡」永远测成 h+0，删掉 +mb 求和也照样绿。
+      (node) => ({ marginBottom: node && node.parentNode === els.logBody ? "6px" : "0px" }),
     );
     return {
       sandbox, els, flush, apiCalls, flushFrames,
@@ -18063,6 +18300,99 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(els.logBody.tabIndex, -1);
   });
 
+  it("前端接线：展开/收起钮、叠卡点击、清空钮都从真实 DOM 入口打到同一状态机", async () => {
+    const { sandbox, els, apiCalls, flush } = makeSandbox();
+    await sandbox.startLogStream();
+    // 收起态点叠卡＝展开区域的第二入口（点卡看最新日志，不必瞄准小字钮）。
+    els.logStack.dispatch("click", { stopPropagation() {} });
+    assert.equal(els.liveLog.dataset.state, "expanded", "收起态点叠卡摊开");
+    assert.equal(els.logToggle.getAttribute("aria-expanded"), "true");
+    // 展开态叠卡已让位视口，再点不得收回。
+    els.logStack.dispatch("click", {});
+    assert.equal(els.liveLog.dataset.state, "expanded", "展开态点叠卡不改变状态");
+    // 展开钮双向翻转。
+    els.logToggle.dispatch("click", { stopPropagation() {} });
+    assert.equal(els.liveLog.dataset.state, "collapsed", "点钮收起");
+    els.logToggle.dispatch("click", { stopPropagation() {} });
+    assert.equal(els.liveLog.dataset.state, "expanded", "再点摊开");
+    // 清空钮：真清空打到服务端，两层同拍进淡出档后落空稳态。
+    sandbox.appendLog({ level: "info", message: "via-button" });
+    flush(160);
+    els.clearLog.dispatch("click", { stopPropagation() {} });
+    assert.ok(apiCalls.some((c) => c.method === "POST" && c.path === "/api/logs/clear"), "清空钮打到 POST /api/logs/clear");
+    assert.equal(els.liveLog.getAttribute("data-clearing"), "1", "两层同拍进入淡出档");
+    flush(120);
+    assert.equal(els.logBody.children.length, 0, "淡出后视口清空");
+    assert.equal(els.logStack.children.length, 0, "淡出后叠卡清空");
+  });
+
+  it("暂停阅读时顶部插入按实际高度补偿；跟随与收起态仍归最新", async () => {
+    const { sandbox, els, setFrameMode, flushFrames, flush } = makeSandbox();
+    await sandbox.startLogStream();
+    setFrameMode("queued");
+    sandbox.setLogExpanded(true);
+    flushFrames();
+    flush(280);
+    const body = els.logBody;
+    body.scrollHeight = 1000;
+    body.clientHeight = 320;
+    const insertBefore = body.insertBefore.bind(body);
+    body.insertBefore = (node, ref) => {
+      const wasAttached = node.parentNode === body;
+      const result = insertBefore(node, ref);
+      if (!wasAttached) body.scrollHeight += 40;
+      return result;
+    };
+    body.scrollTop = 400;
+    body.dispatch("scroll");
+    sandbox.appendLog({ level: "info", message: "new while reading" });
+    flushFrames();
+    assert.equal(body.scrollTop, 440, "暂停时旧内容保持原视口位置");
+    body.scrollTop = 0;
+    body.dispatch("scroll");
+    sandbox.appendLog({ level: "info", message: "new while following" });
+    flushFrames();
+    assert.equal(body.scrollTop, 0, "恢复跟随后仍回到最新");
+    sandbox.setLogExpanded(false);
+    body.scrollTop = 200;
+    sandbox.appendLog({ level: "info", message: "collapsed" });
+    assert.equal(body.scrollTop, 200, "折叠态不补写滚动位");
+  });
+
+  it("容量满时顶部插入与底部淘汰同批发生，阅读位仍按新插入高度补偿", async () => {
+    const { sandbox, els, setFrameMode, flushFrames, flush } = makeSandbox();
+    await sandbox.startLogStream();
+    setFrameMode("queued");
+    sandbox.setLogExpanded(true);
+    flushFrames();
+    flush(280);
+    const body = els.logBody;
+    const inserted = body.insertBefore.bind(body);
+    const removed = body.removeChild.bind(body);
+    body.scrollHeight = 1000;
+    body.clientHeight = 320;
+    body.insertBefore = (node, ref) => {
+      const wasAttached = node.parentNode === body;
+      const result = inserted(node, ref);
+      if (!wasAttached) node.offsetHeight = 40;
+      return result;
+    };
+    for (let i = 0; i < 25; i++) sandbox.appendLog({ level: "info", message: `old-${i}` });
+    flushFrames();
+    body.scrollTop = 400;
+    body.dispatch("scroll");
+    const reading = body.children[10];
+    assert.equal(reading.offsetTop, 400);
+    assert.equal(sandbox.entries.length, 25);
+    sandbox.appendLog({ level: "info", message: "new-at-cap" });
+    flushFrames();
+    assert.equal(sandbox.entries.length, 25);
+    assert.equal(body.scrollHeight, 1000, "inserted and removed rows have equal heights");
+    assert.ok(body.children.includes(reading), "the row being read was not the evicted oldest row");
+    assert.equal(reading.offsetTop, 440, "the old reading row is pushed down by the insertion");
+    assert.equal(body.scrollTop, 440, "the old reading row keeps its viewport position");
+  });
+
   it("最近批次保持 25 条；清空淡出旧批，淡出期间到达的新消息不被误清", () => {
     const { sandbox, els, flush } = makeSandbox();
     for (let i = 0; i < 30; i++) sandbox.appendLog({ level: "info", message: "cap" + i });
@@ -18098,15 +18428,21 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     sandbox.setLogExpanded(true);
     assert.equal(els.liveLog.dataset.state, "expanded");
     assert.equal(els.liveLog.getAttribute("data-motion"), "expanding", "摊开期叠卡留在可见层");
-    assert.equal(els.liveLog.style["--ll-step-expanded"], "49px", "展开行距量自视口首卡");
+    assert.equal(els.liveLog.style["--ll-step-expanded"], "55px", "展开行距量自视口首卡：高 49 + 视口卡下边距 6（夹具注缝与 panel.css 的 6px 同源）");
+    flush(219);
+    assert.equal(els.liveLog.getAttribute("data-motion"), "expanding", "摊开窗内（≤219ms）不提前交接：计时窗缩短即红");
     flush(220);
     assert.equal(els.liveLog.getAttribute("data-motion"), "handoff", "摊开到位后才交接");
+    flush(59);
+    assert.equal(els.liveLog.getAttribute("data-motion"), "handoff", "交接窗内（≤59ms）不提前落定：交接窗缩短即红");
     flush(60);
     assert.equal(els.liveLog.getAttribute("data-motion"), null, "交接落定进稳态展开");
 
     sandbox.setLogExpanded(false);
     assert.equal(els.liveLog.dataset.state, "collapsed");
     assert.equal(els.liveLog.getAttribute("data-motion"), "collapsing", "收回期叠卡留在可见层");
+    flush(219);
+    assert.equal(els.liveLog.getAttribute("data-motion"), "collapsing", "收回窗内（≤219ms）不提前落定：计时窗缩短即红");
     flush(220);
     assert.equal(els.liveLog.getAttribute("data-motion"), null, "收回落定进稳态收起");
   });
@@ -18188,6 +18524,23 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!card.classList.contains("is-appearing"), "兜底计时器已摘类");
     flushFrames();
     assert.ok(!card.classList.contains("is-appearing"), "迟到的 rAF 不再装回起始态");
+  });
+
+  it("正常出帧时下一帧就摘起始态：不等兜底计时器，过渡从第二帧起跑", () => {
+    const { sandbox, els, flushFrames, setFrameMode, flush, timerCount } = makeSandbox();
+    setFrameMode("queued");
+    sandbox.appendLog({ level: "info", message: "next-frame" });
+    flushFrames(1); // render 帧：起始态挂上，双重 rAF 的外跳入队，兜底计时器在册
+    const card = els.logStack.children[0];
+    assert.ok(card.classList.contains("is-appearing"), "起始态在册");
+    assert.equal(timerCount(), 1, "兜底计时器随入场挂上");
+    flushFrames(1); // 外跳：只入队内跳，不动起始态
+    assert.ok(card.classList.contains("is-appearing"), "单帧后仍在起始态（等待下一帧才有过渡起点）");
+    flushFrames(1); // 内跳：帧路径摘类
+    assert.ok(!card.classList.contains("is-appearing"), "下一帧（rAF 链）摘掉起始态");
+    assert.equal(timerCount(), 0, "帧路径接管后兜底计时器已取消，不再等 200ms");
+    flush(400);
+    assert.ok(!card.classList.contains("is-appearing"), "之后保持摘除");
   });
 
   it("reduced-motion：不写入场 class、不起交接计时器，中途切换清掉半程残影", () => {
