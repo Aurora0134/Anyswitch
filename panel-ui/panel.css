@@ -1520,20 +1520,23 @@
   .btn-accent:hover:not(:disabled) { filter: brightness(1.05); }
   .btn-mini { font-size: 11.5px; padding: 4px 10px; border-radius: var(--radius-sm, 6px); }
 
-  /* 运行日志：无框消息提示式双态流。消息卡自身即框，外层不套 panel-card；收起态最新
-     在上、旧卡依次向下错位并逐层退远，展开态原位 320px 可滚视口。级别语义色取
-     --console-*；连接状态不上屏。动效走 transform/opacity/height/filter，
-     reduced-motion 由文件末尾通配规则停。 */
+  /* 运行日志：无框消息提示式双态流。消息卡自身即框，外层不套 panel-card。最新消息
+     恒在顶部（收起叠卡与展开视口同一基准），旧卡依次向下错位并逐层退远；展开态
+     原位 320px 可滚视口、贴顶跟随。级别语义色取 --console-*；连接状态不上屏。
+     动效走 transform/opacity/height/filter，reduced-motion 由文件末尾通配规则停。 */
   .live-log-region { display: block; }
   .live-log {
     display: flex; flex-direction: column; gap: 8px;
-    --ll-step: 13px; --ll-scale-1: 0.96; --ll-scale-2: 0.92;
+    --ll-step: 13px; --ll-step-expanded: 55px;
+    --ll-scale-1: 0.96; --ll-scale-2: 0.92;
     --ll-blur-1: 0.4px; --ll-blur-2: 0.8px;
     --ll-opacity-1: 0.86; --ll-opacity-2: 0.72;
+    --ll-retreat-delay: 45ms;
   }
-  /* 展开＝错位间距放大到行距、缩放/虚化/透明度归位，与舞台长高同拍；收起反向。 */
+  /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与舞台长高同拍。
+     --ll-step-expanded 由 setLogExpanded 量视口首卡行距写入，55px 是无卡时兜底。 */
   .live-log[data-state="expanded"] {
-    --ll-step: 78px; --ll-scale-1: 1; --ll-scale-2: 1;
+    --ll-step: var(--ll-step-expanded); --ll-scale-1: 1; --ll-scale-2: 1;
     --ll-blur-1: 0px; --ll-blur-2: 0px;
     --ll-opacity-1: 1; --ll-opacity-2: 1;
   }
@@ -1558,16 +1561,39 @@
      舞台长高）。舞台长出的空间正好承接叠卡向下摊开。 */
   .live-log-stack, .live-log-viewport { position: absolute; inset: 0; transition: opacity 220ms var(--ease-out); }
   .live-log-stack { cursor: pointer; padding: 0 2px; }
-  /* 视口贴底用瞬时快照：平滑滚动会在展开时追一个随高度变化的目标，再抖一下。 */
+  /* 视口贴顶用瞬时快照：平滑滚动会在展开时追一个随高度变化的目标，再抖一下；
+     overflow-anchor:none 防新消息从顶部插入时滚动锚定把阅读位推走。 */
   .live-log-viewport {
-    overflow-y: auto; padding: 2px; opacity: 0; pointer-events: none;
-    contain: layout;
+    overflow-y: auto; padding: 0 2px; opacity: 0; pointer-events: none;
+    contain: layout; overflow-anchor: none;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
-  /* 两层错开 80ms 淡入，避免摊开途中两套内容同时全显成重影。 */
+  /* 稳态可见性：收起只显叠卡，展开只显视口。 */
   .live-log[data-state="expanded"] .live-log-stack { opacity: 0; pointer-events: none; }
-  .live-log[data-state="expanded"] .live-log-viewport { opacity: 1; pointer-events: auto; transition-delay: 80ms; }
-  .live-log:not([data-state="expanded"]) .live-log-stack { transition-delay: 80ms; }
+  .live-log[data-state="expanded"] .live-log-viewport { opacity: 1; pointer-events: auto; }
+  /* 摊开/收回期由叠卡在不透明状态下完成位移，视口不参与；到位后的 handoff 只做
+     60ms 交叉淡化。此前「叠卡一边淡出一边摊开」让摊开动作几乎不可见。 */
+  .live-log[data-motion="expanding"] { --ll-step: var(--ll-step-expanded); }
+  .live-log[data-motion="expanding"] .live-log-stack,
+  .live-log[data-motion="collapsing"] .live-log-stack { opacity: 1; pointer-events: auto; }
+  .live-log[data-motion="expanding"] .live-log-viewport,
+  .live-log[data-motion="collapsing"] .live-log-viewport { opacity: 0; pointer-events: none; }
+  .live-log[data-motion="collapsing"] .live-log-stack,
+  .live-log[data-motion="collapsing"] .live-log-viewport { transition: none; }
+  .live-log[data-motion="handoff"] .live-log-stack,
+  .live-log[data-motion="handoff"] .live-log-viewport { transition: opacity 60ms var(--ease-out); }
+  .live-log[data-motion="handoff"] .live-log-stack { opacity: 0; pointer-events: none; }
+  .live-log[data-motion="handoff"] .live-log-viewport { opacity: 1; pointer-events: auto; }
+  /* 两态交接期禁用退层 stagger，免得摊开被逐层延迟拖乱。 */
+  .live-log[data-motion] .live-log-stack .live-log-msg,
+  .live-log[data-motion] .live-log-stack .live-log-meta,
+  .live-log[data-motion] .live-log-stack .live-log-text { transition-delay: 0ms; }
+  /* 摊开期把叠卡专补的暗色层界过渡回普通卡样式，交接时与视口卡外观一致。 */
+  .live-log[data-state="expanded"] .live-log-stack .live-log-msg,
+  .live-log[data-motion="expanding"] .live-log-stack .live-log-msg,
+  .live-log[data-motion="handoff"] .live-log-stack .live-log-msg {
+    background-color: var(--surface); border-color: var(--border); box-shadow: var(--shadow-xs);
+  }
   .live-log-viewport::-webkit-scrollbar { width: 8px; }
   .live-log-viewport::-webkit-scrollbar-track { background: transparent; }
   .live-log-viewport::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
@@ -1590,8 +1616,9 @@
     font-family: var(--font-sans); font-size: 12px; line-height: 1.45;
     color: var(--text-2); word-break: break-word; white-space: pre-wrap;
   }
-  .live-log-viewport .live-log-msg { margin-bottom: 6px; transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out); }
-  .live-log-viewport .live-log-msg.is-leaving { opacity: 0; transform: translateY(-4px); }
+  .live-log-viewport .live-log-msg { margin-bottom: 6px; transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out); }
+  .live-log-viewport .live-log-msg.is-appearing { opacity: 0; transform: translateY(-8px); }
+  .live-log-viewport .live-log-msg.is-leaving { opacity: 0; transform: translateY(8px); }
   /* 视口卡默认也截 2 行（与堆叠一致），一屏看更多条；超行卡才出现卡内展开钮。卡内
      展开与区域开关解耦：is-open 只解除本卡截断，实测高度过渡露全文（line-clamp 不可
      过渡，height 由 panel.js#setLogCardOpen 量值驱动）。 */
@@ -1616,31 +1643,49 @@
   .live-log-stack .live-log-msg-fold { display: none; }
   /* 叠卡态单独补回层界：全局暗色刻意压低卡面与描边的对比，单张可读、叠起来会糊成
      一片，方角弱影的皮肤尤甚。描边取 --border-strong，卡面混入少量白（暗色提亮、
-     亮色保持原白），下缘加一条随亮暗自适应的高光线；视口卡与全局 token 不动。 */
+     亮色保持原白），下缘加一条随亮暗自适应的高光线；视口卡与全局 token 不动。
+     卡高内容驱动、与视口卡同为截 2 行，摊开终态才与视口前三条重合。 */
   .live-log-stack .live-log-msg {
-    position: absolute; left: 0; right: 0; top: 0; height: 76px; margin: 0;
-    background: color-mix(in srgb, var(--surface) 94%, white 6%);
+    position: absolute; left: 0; right: 0; top: 0; margin: 0;
+    background-color: color-mix(in srgb, var(--surface) 94%, white 6%);
     border-color: var(--border-strong);
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent);
     transform-origin: 50% 0;
-    transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out);
+    transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out),
+                background-color 220ms var(--ease-out), border-color 220ms var(--ease-out),
+                box-shadow 220ms var(--ease-out);
   }
-  /* 错位量按缩放补偿：卡缩小后底边上移，13/26px 才让三层各露约 10px 下缘，最下层
-     卡底正好齐 96px 舞台底。缩放基准在顶边，横向收窄读得出「往后退」。 */
+  /* 退一层＝下移、缩小、变淡、文字虚化、降层级五件事同拍；后层再晚 45ms，读得出
+     「新卡浮出→旧卡依次退远」的推进，而非四张卡同时各自过渡。 */
   .live-log-stack .live-log-msg[data-slot="0"] { transform: translateY(0) scale(1); opacity: 1; z-index: 3; }
   .live-log-stack .live-log-msg[data-slot="1"] { transform: translateY(var(--ll-step)) scale(var(--ll-scale-1)); opacity: var(--ll-opacity-1); z-index: 2; }
-  .live-log-stack .live-log-msg[data-slot="2"] { transform: translateY(calc(var(--ll-step) * 2)) scale(var(--ll-scale-2)); opacity: var(--ll-opacity-2); z-index: 1; }
+  .live-log-stack .live-log-msg[data-slot="2"] { transform: translateY(calc(var(--ll-step) * 2)) scale(var(--ll-scale-2)); opacity: var(--ll-opacity-2); z-index: 1; transition-delay: var(--ll-retreat-delay); }
   /* 虚化只落在卡内文字：卡框、描边与下缘高光保持锐利，否则补回来的层界又会被糊掉。 */
   .live-log-stack .live-log-meta,
   .live-log-stack .live-log-text { filter: blur(0px); transition: filter 220ms var(--ease-out); }
   .live-log-stack .live-log-msg[data-slot="1"] .live-log-meta,
   .live-log-stack .live-log-msg[data-slot="1"] .live-log-text { filter: blur(var(--ll-blur-1)); }
   .live-log-stack .live-log-msg[data-slot="2"] .live-log-meta,
-  .live-log-stack .live-log-msg[data-slot="2"] .live-log-text { filter: blur(var(--ll-blur-2)); }
+  .live-log-stack .live-log-msg[data-slot="2"] .live-log-text { filter: blur(var(--ll-blur-2)); transition-delay: var(--ll-retreat-delay); }
   .live-log-stack .live-log-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .live-log-stack .live-log-msg.is-entering { animation: liveLogMsgIn 180ms var(--ease-out); }
-  .live-log-stack .live-log-msg.is-leaving { opacity: 0; transform: translateY(54px) scale(0.9); transition-duration: 160ms; pointer-events: none; }
-  @keyframes liveLogMsgIn { from { opacity: 0; transform: translateY(-16px) scale(1); } }
+  /* 新卡顶部浮现：起始态由 JS 挂 is-appearing、下一帧移除，与退层共用同一组
+     transition。不用 keyframes animation——它优先级高于 transition，连发消息时
+     正在入场的卡退层会被吞掉，位移与虚化拆成两条时间轴。 */
+  .live-log-stack .live-log-msg.is-appearing { opacity: 0; transform: translateY(-8px) scale(1.02); transition: none; }
+  /* 最末一张沿景深再退一层后淡出：位移到第三步、继续缩小、文字虚化加深，不再
+     硬跳 54px、也不让虚化回落成反弹。 */
+  .live-log-stack .live-log-msg.is-leaving {
+    transform: translateY(calc(var(--ll-step) * 3)) scale(0.88);
+    opacity: 0; z-index: 0;
+    transition-duration: 160ms; transition-delay: 0ms;
+    pointer-events: none;
+  }
+  .live-log-stack .live-log-msg.is-leaving .live-log-meta,
+  .live-log-stack .live-log-msg.is-leaving .live-log-text {
+    filter: blur(1.2px); transition-duration: 160ms; transition-delay: 0ms;
+  }
+  /* 清空是整批同时淡出，比单张挤出更短促；与单条挤出共用同一档景深。 */
+  .live-log[data-clearing] .live-log-stack .live-log-msg.is-leaving { transition-duration: 120ms; }
 
   /* ── 「日志级别」下拉（设置 → 通用 → 运行日志卡）────────────────────────────
      与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色
