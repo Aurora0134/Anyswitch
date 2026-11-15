@@ -528,6 +528,9 @@ async function api(method, path, body) {
   document.addEventListener("visibilitychange", () => {
     // 先记账再动手：这条转折由本处处理完了，兜底那一拍就不必再补一次。
     terminalVisibilityWasHidden = document.hidden;
+    // 进后台先把屏面状态记进交接单：紧随其后的 parkTerminalScreen 会拆流、把旧实例
+    // 从模块级引用上摘掉，之后再读就读不到切走前的阅读位与外层滚动位了。
+    if (document.hidden && typeof captureTerminalForegroundFrame === "function") captureTerminalForegroundFrame();
     // 进后台第一件事是拆掉会话字节流（理由见 syncTerminalDataStream）；回前台由下面
     // 各视图分支重建。这条转折漏发也不要紧：1s 轮询拍里同一个函数再核一次。
     //
@@ -543,6 +546,9 @@ async function api(method, path, body) {
     if (document.hidden) return;
     if (typeof resumeTerminalStaleScreenCap === "function") resumeTerminalStaleScreenCap();
     if (typeof checkPanelAssetOnForeground === "function") checkPanelAssetOnForeground();
+    // 回前台核交接单：不在终端页就作废，在终端页则排给紧随其后的整屏重建；顺手把
+    // 切走前滚入的外层空白带收掉（这条带挂在 #terminalScreen 上，重建不会重写它）。
+    if (typeof resumeTerminalForegroundFrame === "function") resumeTerminalForegroundFrame();
     refreshStatus();
     if (currentView === "stats") {
       refreshStatsState({ silent: true });
@@ -2698,7 +2704,59 @@ async function api(method, path, body) {
   const logViewportNodes = new Map();
   const logStackNodes = new Map();
   const logStackLeaving = new Map();
+  const logTextAnim = new WeakMap();
   let logFadeTimer = null;
+  // 两态交接单飞计时器：摊开/收回期由 data-motion 把叠卡留在可见层，到位后才交给
+  // 视口；反向切换先清掉上一轮，避免两个 motion 叠在一起。
+  let logMotionTimer = null;
+  let logMotionTail = null;
+  // 一条链上只留一组时长：单张挤出 160ms、整批清空 120ms、摊开/收回 220ms、交接 60ms，
+  // CSS 与这里的计时器同取这些值，不再各自写死数字。
+  const LOG_ANIM_MS = 160;
+  const LOG_CLEAR_MS = 120;
+  const LOG_MOTION_MS = 220;
+  const LOG_HANDOFF_MS = 60;
+  // 入场的帧无关兜底：后台页签 rAF 会被节流甚至冻结，只靠双重 rAF 摘类会让新卡
+  // 永远停在起始态。Map 同时充当 token，供离场/清场时取消尚未执行的入场回调。
+  const logAppearing = new Map();
+
+  function logReducedMotion() {
+    return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function clearLogAppearing(node) {
+    const timer = logAppearing.get(node);
+    if (timer != null) clearTimeout(timer);
+    logAppearing.delete(node);
+    node.classList.remove("is-appearing");
+  }
+
+  // 顶部浮现：起始态挂类、下一帧摘掉走同族 transition，另排定时器兜底摘类。
+  // 已经在离场的卡不补播，避免两条动效抢同一组 transform。
+  function playLogAppearing(node) {
+    if (node.classList.contains("is-leaving")) return;
+    clearLogAppearing(node);
+    node.classList.add("is-appearing");
+    const timer = setTimeout(() => {
+      if (logAppearing.get(node) !== timer) return;
+      node.classList.remove("is-appearing");
+      logAppearing.delete(node);
+    }, LOG_ANIM_MS + 40);
+    logAppearing.set(node, timer);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (logAppearing.get(node) !== timer) return;
+      node.classList.remove("is-appearing");
+      clearTimeout(timer);
+      logAppearing.delete(node);
+    }));
+  }
+
+  // 进入离场前先摘入场态：is-appearing 的 transition:none 会吃掉整支离场过渡，
+  // 清空期间连续来消息最容易撞上这两个 class 共存。
+  function markLogLeaving(node) {
+    clearLogAppearing(node);
+    node.classList.add("is-leaving");
+  }
 
   function queueLogRender() {
     if (logRenderQueued) return;
@@ -2714,73 +2772,159 @@ async function api(method, path, body) {
     node.className = "live-log-msg " + entry.level;
     node.dataset.entryId = String(entry.id);
     const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
-    node.innerHTML = `<div class="live-log-meta"><span class="ts">${escapeHtml(ts)}</span><span class="lvl">${escapeHtml(entry.level.toUpperCase())}</span></div><div class="live-log-text">${escapeHtml(entry.message)}</div>`;
+    node.innerHTML = `<div class="live-log-meta"><span class="ts">${escapeHtml(ts)}</span><span class="lvl">${escapeHtml(entry.level.toUpperCase())}</span><button class="live-log-msg-fold" type="button" aria-expanded="false" aria-label="展开" title="展开"><span aria-hidden="true">▸</span></button></div><div class="live-log-text">${escapeHtml(entry.message)}</div>`;
+    const fold = node.querySelector(".live-log-msg-fold");
+    if (fold) fold.onclick = (e) => { e.stopPropagation(); setLogCardOpen(node, !node.classList.contains("is-open")); };
     return node;
+  }
+
+  // 卡内展开/收起：只解除本卡 2 行截断，与区域开关、其它卡互不影响。line-clamp 不可
+  // 过渡，故量出截断高与全文高后动画 height；结束落回 auto 以随宽度重排。展开态保持
+  // is-open 直到收起动画走完再恢复截断，避免全文在收缩前提前消失。reduced-motion 直接
+  // 落终态，不写 inline 高度、不起计时器。
+  function setLogCardOpen(node, open) {
+    const text = node.querySelector(".live-log-text");
+    const btn = node.querySelector(".live-log-msg-fold");
+    if (btn) {
+      btn.setAttribute("aria-expanded", String(open));
+      btn.setAttribute("aria-label", open ? "收起" : "展开");
+      btn.title = open ? "收起" : "展开";
+    }
+    if (logReducedMotion()) {
+      // 中途切到 reduce：让在途的 height 动画作废，否则它的收尾回调会把刚展开的卡收回。
+      if (text) { logTextAnim.delete(text); text.style.height = ""; }
+      node.classList.toggle("is-open", open);
+      return;
+    }
+    if (!text) { node.classList.toggle("is-open", open); return; }
+    if (open) {
+      const fullH = text.scrollHeight, clampH = text.clientHeight;
+      node.classList.add("is-open");
+      animateLogTextHeight(text, clampH, fullH);
+    } else {
+      const fullH = text.clientHeight;
+      node.classList.remove("is-open");
+      text.style.height = "";
+      const clampH = text.clientHeight;
+      node.classList.add("is-open");
+      animateLogTextHeight(text, fullH, clampH, () => node.classList.remove("is-open"));
+    }
+  }
+
+  function animateLogTextHeight(text, fromH, toH, onDone) {
+    const token = {};
+    logTextAnim.set(text, token);
+    text.style.height = fromH + "px";
+    void text.offsetHeight;
+    text.style.height = toH + "px";
+    setTimeout(() => {
+      if (logTextAnim.get(text) !== token) return;
+      text.style.height = "";
+      logTextAnim.delete(text);
+      if (onDone) onDone();
+    }, 240);
   }
 
   function renderLogViewport() {
     const body = $("logBody");
     if (!body) return;
+    const root = $("liveLog");
+    const motion = !!root?.getAttribute?.("data-motion");
+    const reduced = logReducedMotion();
     const seen = new Set();
-    for (const entry of logEntries) {
+    const ordered = [];
+    const fresh = [];
+    // 最新在顶：与收起叠卡同一基准。节点按 id 复用，只把真正错位的节点插回原位；
+    // 全列 appendChild 会连在途的入场/离场过渡一起取消，且每次新消息都要搬整列。
+    for (let i = logEntries.length - 1; i >= 0; i--) {
+      const entry = logEntries[i];
       seen.add(entry.id);
       let node = logViewportNodes.get(entry.id);
       if (!node) {
         node = createLogMessageNode(entry);
         logViewportNodes.set(entry.id, node);
-        body.appendChild(node);
+        fresh.push(node);
       }
-      node.classList.toggle("is-leaving", !!entry.fading);
+      ordered.push(node);
+      // 清空批次的卡只维持离场态，移除由清场计时器一次排完。
+      if (entry.fading) { markLogLeaving(node); continue; }
+      node.classList.remove("is-leaving");
+      // 超行检测只针对截断态：已展开的卡保留钮（供收起），不重测以免把全文高当截断高。
+      if (!node.classList.contains("is-open")) {
+        const text = node.querySelector(".live-log-text");
+        node.classList.toggle("is-overflowing", !!text && text.scrollHeight > text.clientHeight + 1);
+      }
+    }
+    let ref = body.firstChild;
+    for (const node of ordered) {
+      if (node === ref) { ref = ref?.nextSibling ?? null; continue; }
+      body.insertBefore(node, ref);
     }
     for (const [id, node] of logViewportNodes) {
       if (!seen.has(id)) {
+        clearLogAppearing(node);
         node.remove();
         logViewportNodes.delete(id);
       }
     }
-    if (logExpanded && followLogs) body.scrollTop = body.scrollHeight;
+    // 合批多条、两态交接期与 reduced-motion 都不逐条补播入场，避免层层追赶或残影。
+    if (logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
+    if (logExpanded && followLogs) body.scrollTop = 0;
   }
 
   function renderLogStack() {
     const stack = $("logStack");
     if (!stack) return;
+    const root = $("liveLog");
+    const motion = !!root?.getAttribute?.("data-motion");
+    const reduced = logReducedMotion();
     const latest = logEntries.slice(-LOG_STACK_SIZE);
     const seen = new Set();
+    const fresh = [];
     for (let i = latest.length - 1; i >= 0; i--) {
       const entry = latest[i];
       const slot = latest.length - 1 - i;
       seen.add(entry.id);
       let node = logStackNodes.get(entry.id);
-      const isNew = !node;
-      if (isNew) {
+      if (!node) {
         node = createLogMessageNode(entry);
         logStackNodes.set(entry.id, node);
         stack.appendChild(node);
+        fresh.push(node);
       }
+      // 清空批次的卡保留原 slot 与景深档，只维持离场态；移除由清场计时器一次排完。
+      if (entry.fading) { markLogLeaving(node); continue; }
       const leaving = logStackLeaving.get(entry.id);
       if (leaving) {
         clearTimeout(leaving);
         logStackLeaving.delete(entry.id);
-        node.classList.remove("is-leaving");
       }
       node.dataset.slot = String(slot);
       node.style.zIndex = String(LOG_STACK_SIZE - slot);
-      node.classList.toggle("is-leaving", !!entry.fading);
-      if (isNew && !entry.fading) {
-        node.classList.add("is-entering");
-        setTimeout(() => node.classList.remove("is-entering"), 200);
-      }
+      node.classList.remove("is-leaving");
     }
     for (const [id, node] of logStackNodes) {
       if (seen.has(id) || logStackLeaving.has(id)) continue;
-      node.classList.add("is-leaving");
+      if (reduced) {
+        // 减少动效时单张淘汰也直接移除，不挂离场 class、不排 160ms 计时器。
+        clearLogAppearing(node);
+        node.remove();
+        logStackNodes.delete(id);
+        continue;
+      }
+      // 越界卡保留原 slot，由 .is-leaving 的第 4 档接管景深，景深规则不失配。
+      markLogLeaving(node);
       const timer = setTimeout(() => {
         logStackLeaving.delete(id);
+        clearLogAppearing(node);
         node.remove();
         if (logStackNodes.get(id) === node) logStackNodes.delete(id);
-      }, 160);
+      }, LOG_ANIM_MS);
       logStackLeaving.set(id, timer);
     }
+    // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条、两态
+    // 交接进行中、或 reduced-motion，都直接按终态落位，不逐条补播。
+    if (!logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
   }
 
   function renderLogFeed() {
@@ -2789,8 +2933,32 @@ async function api(method, path, body) {
   }
 
   function setLogExpanded(expanded) {
-    logExpanded = expanded;
     const root = $("liveLog");
+    const body = $("logBody");
+    const stack = $("logStack");
+    if (logMotionTimer) { clearTimeout(logMotionTimer); logMotionTimer = null; }
+    if (logMotionTail) { clearTimeout(logMotionTail); logMotionTail = null; }
+    const reduced = logReducedMotion();
+    logExpanded = expanded;
+    // 入口无条件清交接态：中途切到 reduced-motion 或连点展收，都不留半程残影。
+    if (root) root.removeAttribute("data-motion");
+    // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
+    if (expanded && root && body) {
+      const first = body.children[0];
+      const h = first?.offsetHeight || 0;
+      const mb = first && typeof getComputedStyle === "function"
+        ? parseFloat(getComputedStyle(first).marginBottom) || 0 : 0;
+      if (h > 0) root.style.setProperty("--ll-step-expanded", (h + mb) + "px");
+    }
+    // 重新展开一律回到最新并恢复跟随：第一屏就是最新消息，接着上次的阅读位
+    // 会让人以为日志没在更新。
+    if (expanded) {
+      followLogs = true;
+      if (body) body.scrollTop = 0;
+    }
+    // 两阶段：data-motion 期间叠卡保持不透明并完成摊开/收回，到位后才与视口交接；
+    // 摊开不再被自身淡出吃掉。reduced-motion 直接落稳态，不等动画计时。
+    if (root && !reduced) root.setAttribute("data-motion", expanded ? "expanding" : "collapsing");
     if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
     const toggle = $("logToggle");
     if (toggle) {
@@ -2798,24 +2966,42 @@ async function api(method, path, body) {
       const label = toggle.querySelector(".live-log-toggle-text");
       if (label) label.textContent = expanded ? "收起" : "展开";
     }
-    const body = $("logBody");
     if (body) body.tabIndex = expanded ? 0 : -1;
-    const stack = $("logStack");
     if (stack) stack.setAttribute("aria-hidden", String(expanded));
-    if (expanded && followLogs) {
+    if (expanded) {
       requestAnimationFrame(() => {
         const viewport = $("logBody");
-        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+        if (viewport) viewport.scrollTop = 0;
       });
+    }
+    if (root && !reduced) {
+      if (expanded) {
+        logMotionTimer = setTimeout(() => {
+          root.setAttribute("data-motion", "handoff");
+          logMotionTail = setTimeout(() => {
+            root.removeAttribute("data-motion");
+            logMotionTimer = null; logMotionTail = null;
+          }, LOG_HANDOFF_MS);
+        }, LOG_MOTION_MS);
+      } else {
+        logMotionTimer = setTimeout(() => {
+          root.removeAttribute("data-motion");
+          logMotionTimer = null;
+        }, LOG_MOTION_MS);
+      }
     }
   }
 
   function resetLogFeed() {
     logEntries = [];
     followLogs = true;
+    const root = $("liveLog");
+    if (root) { root.removeAttribute("data-clearing"); root.removeAttribute("data-motion"); }
     if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
     for (const timer of logStackLeaving.values()) clearTimeout(timer);
     logStackLeaving.clear();
+    for (const [node, timer] of logAppearing) { clearTimeout(timer); node.classList.remove("is-appearing"); }
+    logAppearing.clear();
     for (const node of logViewportNodes.values()) node.remove();
     logViewportNodes.clear();
     for (const node of logStackNodes.values()) node.remove();
@@ -2824,14 +3010,47 @@ async function api(method, path, body) {
   }
 
   function fadeClearLogFeed() {
+    const root = $("liveLog");
+    const reduced = logReducedMotion();
     for (const entry of logEntries) entry.fading = true;
-    queueLogRender();
-    if (logFadeTimer) clearTimeout(logFadeTimer);
-    logFadeTimer = setTimeout(() => {
-      logFadeTimer = null;
+    if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
+    for (const timer of logStackLeaving.values()) clearTimeout(timer);
+    logStackLeaving.clear();
+    if (reduced) {
+      // 减少动效时直接落清场后的稳态：不写动效 class、不起计时器、不留残影。
+      if (root) root.removeAttribute("data-clearing");
+      for (const node of logViewportNodes.values()) { clearLogAppearing(node); node.remove(); }
+      logViewportNodes.clear();
+      for (const node of logStackNodes.values()) { clearLogAppearing(node); node.remove(); }
+      logStackNodes.clear();
       logEntries = logEntries.filter((entry) => !entry.fading);
       queueLogRender();
-    }, 160);
+      return;
+    }
+    if (root) root.setAttribute("data-clearing", "1");
+    // 整批清空只排一次移除：这一批节点在下一帧 render 里只维持离场态，不再各自
+    // 等一轮越界判定又排 160ms 的单张淘汰；两层与 CSS 清空档同为 120ms。
+    const fadingStack = [...logStackNodes.entries()];
+    const fadingViewport = [...logViewportNodes.entries()];
+    for (const [, node] of fadingStack) markLogLeaving(node);
+    for (const [, node] of fadingViewport) markLogLeaving(node);
+    queueLogRender();
+    logFadeTimer = setTimeout(() => {
+      logFadeTimer = null;
+      for (const [id, node] of fadingStack) {
+        if (logStackNodes.get(id) === node) logStackNodes.delete(id);
+        clearLogAppearing(node);
+        node.remove();
+      }
+      for (const [id, node] of fadingViewport) {
+        if (logViewportNodes.get(id) === node) logViewportNodes.delete(id);
+        clearLogAppearing(node);
+        node.remove();
+      }
+      if (root) root.removeAttribute("data-clearing");
+      logEntries = logEntries.filter((entry) => !entry.fading);
+      queueLogRender();
+    }, LOG_CLEAR_MS);
   }
 
   // 换级别后重连一次：服务端按新门槛重放缓冲里最近 500 条，屏幕立刻换成筛过的结果，
@@ -2875,11 +3094,11 @@ async function api(method, path, body) {
   // 所以不影响首屏；读不到就按默认开——日志是排障时唯一的凭据，一次读失败不该把它
   // 静默关掉。问的途中用户已经在设置页切过开关，就以那次为准，不被这次结果盖回。
   async function startLogStream() {
-    // 滚动跟随只挂一次：贴底时自动跟随新日志，上翻查看旧日志即暂停，回到底部自动
+    // 滚动跟随只挂一次：贴顶时自动跟随新日志，下翻查看旧日志即暂停，回到顶部自动
     // 恢复。挂在开与关之外，反复切开关不会越积越多份监听。
     const body = $("logBody");
     body.addEventListener("scroll", () => {
-      followLogs = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
+      followLogs = body.scrollTop <= 24;
     });
     const toggle = $("logToggle");
     if (toggle) toggle.onclick = (e) => { e.stopPropagation(); setLogExpanded(!logExpanded); };
@@ -6771,6 +6990,16 @@ async function api(method, path, body) {
 
   // 上一次看到的窗口可见性，只为"漏掉的转折"服务（见轮询兜底拍与 syncTerminalDataStream）。
   let terminalVisibilityWasHidden = false;
+  // 后台切回屏面交接（见「后台切回屏面交接」小节）：整屏重建只重放宿主镜像的内容，
+  // 不携带任何屏面状态，隐藏那拍把阅读位/跟随态/地板/外层滚动位抄进交接单，回放
+  // 静默后交给新实例落回。交接单只在「一次隐藏 → 一次回前台重建」内有效；pending
+  // 给回放闩认出本条重建，timer 是重建没起来时的收摊上限。
+  let terminalForegroundFrame = null;
+  let terminalForegroundFrameTimer = null;
+  let terminalForegroundRestorePending = false;
+  // 护栏桥：installTerminalFollowBottomGuard 装配时覆盖（读/落两枚钩子），拆流时清空。
+  // 跟随态与地板是护栏闭包内的量，会随旧实例一起消失，只能靠它过岸。
+  let terminalFrameHandoff = null;
   // 活跃真值流：panel 转发的 relay 工作/空闲绝对态 SSE。轮询（1s）仍是校准
   // 与指标数据源；这个流只负责把工作/空闲与在途请求数即时落到标签与实况行。
   let terminalActivitySource = null;
@@ -7730,6 +7959,8 @@ async function api(method, path, body) {
     terminalReplayRestoreCancel = null;
     terminalReplayRestoreArm = null;
     terminalReplayRestoring = false;
+    // 屏面交接的护栏桥属于刚拆掉的这只实例：清掉，免得迟到的落位调用碰死实例。
+    if (typeof terminalFrameHandoff !== "undefined") terminalFrameHandoff = null;
     // 同步输出合帧的挂起块同理：撤销兜底定时器并丢弃未闭合的字节。
     terminalStreamSyncCancel?.();
     terminalStreamSyncCancel = null;
@@ -7979,6 +8210,14 @@ async function api(method, path, body) {
           armCap();
           return;
         }
+        // 后台切回屏面交接（见 beginTerminalForegroundRestore）：阅读位还没落定就撤
+        // 垫片，用户看到的是未落位的新帧。只续窗等落位，次数沿用既有上限；落定后
+        // restorePending 归零，下一窗按原判据撤图。
+        if (stale.restorePending && capRenewals < TERMINAL_SWITCH_STALE_SCREEN_MAX_RENEWALS) {
+          capRenewals += 1;
+          armCap();
+          return;
+        }
         // /switch 还在飞：POST 自己要 6~12s（探针＋terminate＋spawn），而「正在加载」
         // 占位是 POST **落地之后**才武装的。此刻撤垫片会露出一块既没有旧帧、也没有
         // 占位的纯底色——正是这次要消灭的那块空白。续一窗等落地：落地后由占位层
@@ -8026,6 +8265,146 @@ async function api(method, path, body) {
   function resumeTerminalStaleScreenCap() {
     const stale = terminalStaleScreen;
     if (stale && typeof stale.resumeCap === "function") stale.resumeCap();
+  }
+
+  // ---- 后台切回屏面交接 ----
+  //
+  // 病灶：进后台那一拍 parkTerminalScreen + syncTerminalDataStream 把旧实例与字节流
+  // 一起拆净；切回时 renderTerminalPreviewSession 新建实例、term.reset()、按宿主镜像
+  // 整屏重放。整条事务只搬「内容」，不搬「屏面状态」：新实例视口从出厂真尾起步，
+  // 跟随态与地板是护栏闭包内的量、随旧实例消失，回放闩清后 anchorToBottom 把视口
+  // 重锚——用户看到画面突然上跳。外层 #terminalScreen 又没被重建，切走前因几何错配
+  // 滚入的空白带（scrollTop>0）原样留着；收带动作只挂在用户上滚意图上，切回这一拍
+  // 没有任何用户交互，带子于是悬在下方，看起来就是一大块空屏。
+  //
+  // 交接单补两件事：隐藏那拍记下状态，回放静默后由新实例护栏落回同一行；揭幕判据
+  // 用既有的 stale.restorePending 扣住到落位完成，用户看到的新帧直接就在原位。外层
+  // 带在回前台与揭幕两拍各收一次，不看开关、不等用户意图——它不是用户滚动，是几何
+  // 错配留下的残留。
+  const TERMINAL_FOREGROUND_RESTORE_SETTLE_MS = 150;
+  const TERMINAL_FOREGROUND_RESTORE_MAX_MS = 2500;
+
+  // 外层空白带唯一合法停靠位是 0：这个盒子的滚动能力只用于接住渲染层旧高度溢出，
+  // 终端自己的历史滚动在内层 .xterm-viewport。带开关闸的用户意图版见
+  // installTerminalBottomAlign；这里是回前台事务的强制版，两者不共用判据。
+  function trimTerminalOuterBand() {
+    const screen = $("terminalScreen");
+    if (!screen) return;
+    const gap = screen.scrollHeight - screen.clientHeight;
+    if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX) return; // 无带 / 行高取整残余
+    if (screen.scrollTop <= 0) return;                    // 幂等闸：已在停靠位零写
+    screen.dataset.bottomAlignTrim = String(gap);
+    screen.scrollTop = 0;
+  }
+
+  // 进后台：拆流前把屏面状态抄进交接单。parkTerminalScreen 会把旧实例从模块级引用上
+  // 摘掉，之后再读就读不到切走前的阅读位；备屏（TUI 整屏应用）没有滚动历史，不参与。
+  function captureTerminalForegroundFrame() {
+    if (currentView !== "terminal" || $("terminalView")?.hidden) {
+      terminalForegroundFrame = null;
+      return;
+    }
+    const term = terminalXterm;
+    const buffer = term?.buffer?.active;
+    // 隐藏转折重复到达（后台期又来一次 visibilitychange，或事件与轮询兜底撞在同一拍）
+    // 时，旧实例已被拆走、这一拍读不到屏面。保留上一份有效交接单，别用空帧覆盖它。
+    if (!buffer && terminalForegroundFrame?.buffer) return;
+    const bridge = typeof terminalFrameHandoff !== "undefined" && terminalFrameHandoff?.term === term
+      ? terminalFrameHandoff.read() : null;
+    const frame = {
+      sessionId: typeof terminalBoundSessionId === "string" ? terminalBoundSessionId : null,
+      at: Date.now(),
+      userActionAt: typeof terminalUserActionAt === "number" ? terminalUserActionAt : 0,
+      buffer: null,
+    };
+    if (buffer && buffer.type !== "alternate") {
+      frame.buffer = {
+        viewportY: buffer.viewportY,
+        length: buffer.length,
+        followBottom: bridge ? bridge.followBottom : buffer.viewportY >= buffer.baseY - 1,
+        floor: bridge ? bridge.floor : null,
+      };
+    }
+    terminalForegroundFrame = frame;
+    if (terminalForegroundFrameTimer !== null) clearTimeout(terminalForegroundFrameTimer);
+    terminalForegroundFrameTimer = null;
+  }
+
+  // 回前台：交接单只服务「回终端页的这次重建」，别处重建（切签/换绑/闲剪）不许拿它
+  // 改视口。外层带在重建前先收一次，重建期若再滚出带子由揭幕那一拍补收。
+  function resumeTerminalForegroundFrame() {
+    if (typeof trimTerminalOuterBand === "function") trimTerminalOuterBand();
+    if (currentView !== "terminal" || $("terminalView")?.hidden || !terminalForegroundFrame) {
+      terminalForegroundFrame = null;
+      terminalForegroundRestorePending = false;
+      if (terminalForegroundFrameTimer !== null) clearTimeout(terminalForegroundFrameTimer);
+      terminalForegroundFrameTimer = null;
+      return;
+    }
+    terminalForegroundRestorePending = true;
+    // 没等到重建（轮询早退、连接仍健在、会话没变）时交接单不许外溢到下一次无关的
+    // 重建：到点整组作废，行为退回改前的整屏重放。
+    if (terminalForegroundFrameTimer !== null) clearTimeout(terminalForegroundFrameTimer);
+    terminalForegroundFrameTimer = setTimeout(() => {
+      terminalForegroundFrameTimer = null;
+      terminalForegroundFrame = null;
+      terminalForegroundRestorePending = false;
+    }, TERMINAL_FOREGROUND_RESTORE_MAX_MS * 2);
+  }
+
+  // 整屏重建已经起来：把交接单挂到这一拍的垫片上，回放写入静默后落位再放行揭幕。
+  // 落位时机与闲剪重建同源（镜像回放是单帧大写入，静默即完整）；安全上限兜住连接
+  // 失败没有写入的情形。垫片已被兜底撤走时不再 scrollToLine，避免可见跳变。
+  function beginTerminalForegroundRestore() {
+    if (!terminalForegroundRestorePending || !terminalForegroundFrame) return;
+    const frame = terminalForegroundFrame;
+    const stale = typeof terminalStaleScreen !== "undefined" ? terminalStaleScreen : null;
+    const term = terminalXterm;
+    const clearFrame = () => {
+      terminalForegroundFrame = null;
+      terminalForegroundRestorePending = false;
+      if (terminalForegroundFrameTimer !== null) clearTimeout(terminalForegroundFrameTimer);
+      terminalForegroundFrameTimer = null;
+    };
+    if (!stale || stale.done || !term || !frame.buffer) { clearFrame(); return; }
+    if (terminalForegroundFrameTimer !== null) clearTimeout(terminalForegroundFrameTimer);
+    let finished = false;
+    let writeDisposable = null;
+    let pollTimer = null;
+    let sawWrite = false;
+    let lastWriteAt = 0;
+    stale.restorePending = true;
+    stale.foregroundFrame = true;
+    const settle = () => {
+      if (finished) return;
+      finished = true;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      if (terminalForegroundFrameTimer !== null) clearTimeout(terminalForegroundFrameTimer);
+      terminalForegroundFrameTimer = null;
+      writeDisposable?.dispose?.();
+      // 垫片还在自己手里、实例没被顶替、会话没变、交接窗内用户没动过，才落位。
+      // 没有回放写入（连接失败 / 被闸拦下）时新实例还是空屏，落位既无意义又会
+      // 造成可见跳变：只收摊放行揭幕，交回改前的整屏重放行为。
+      const shimMine = !stale.done && terminalStaleScreen === stale;
+      const userMoved = typeof terminalUserActionAt === "number" && terminalUserActionAt > frame.at;
+      if (shimMine && sawWrite && term === terminalXterm && !userMoved
+          && frame.sessionId === terminalBoundSessionId
+          && typeof terminalFrameHandoff !== "undefined" && terminalFrameHandoff?.term === term
+          && typeof terminalFrameHandoff.restore === "function") {
+        terminalFrameHandoff.restore(frame.buffer);
+      }
+      stale.restorePending = false;
+      clearFrame();
+    };
+    terminalForegroundFrameTimer = setTimeout(settle, TERMINAL_FOREGROUND_RESTORE_MAX_MS);
+    writeDisposable = term.onWriteParsed?.(() => { sawWrite = true; lastWriteAt = Date.now(); });
+    const poll = () => {
+      if (finished) return;
+      if (stale.done || terminalStaleScreen !== stale || term !== terminalXterm) { settle(); return; }
+      if (sawWrite && Date.now() - lastWriteAt >= TERMINAL_FOREGROUND_RESTORE_SETTLE_MS) { settle(); return; }
+      pollTimer = setTimeout(poll, 50);
+    };
+    pollTimer = setTimeout(poll, 50);
   }
 
   // 就绪判据（唯一一条）：新实例的缓冲区里真的**有字**——首帧回放的字节被解析了。
@@ -8106,6 +8485,12 @@ async function api(method, path, body) {
       stale.frame = null;
       if (stale.done || terminalStaleScreen !== stale) return;
       dropTerminalStaleScreen();
+      // 后台切回的交接事务：揭幕这一拍再收一次外层带（重建期几何错配可能又滚出
+      // 一条带），保证用户看到的新帧贴在自然停靠位。typeof 闸护单测桩环境。
+      if (stale.foregroundFrame && typeof trimTerminalOuterBand === "function") {
+        stale.foregroundFrame = false;
+        trimTerminalOuterBand();
+      }
       const term = terminalXterm;
       if (term && Number.isFinite(term.rows) && term.rows > 0 && typeof term.refresh === "function") {
         try { term.refresh(0, term.rows - 1); } catch {}
@@ -8586,6 +8971,10 @@ async function api(method, path, body) {
         // 态（用户可能正在读历史）——落位由触发方负责，闩清后不锚底；真实跟随态由
         // 落点经滚动监听重新推导（到地板即复随）。typeof 闸护单测桩环境。
         if (typeof terminalIdleTrimRebuild === "boolean" && terminalIdleTrimRebuild) armedFollow = false;
+        // 后台切回屏面交接（见 beginTerminalForegroundRestore）：fresh 实例的出厂跟随
+        // 态同样不代表切走前状态，落位由交接单负责；闩清后不先锚底，免得垫片底下
+        // 白跳一次，用户看到的新帧直接就在原阅读位。
+        if (typeof terminalForegroundRestorePending === "boolean" && terminalForegroundRestorePending) armedFollow = false;
       }
       if (replayTimer !== null) clearTimeout(replayTimer);
       replayTimer = setTimeout(() => {
@@ -8633,6 +9022,42 @@ async function api(method, path, body) {
       if (bottom < buffer.baseY) term.scrollToLine(bottom);
       else term.scrollToBottom();
     });
+    // 后台切回屏面交接（见 captureTerminalForegroundFrame）：跟随态与地板是闭包内的
+    // 量，拆流后随旧实例一起消失。读/落两枚钩子挂到模块级通道，新实例装配时覆盖。
+    terminalFrameHandoff = {
+      term,
+      read: () => ({
+        viewportY: term.buffer.active.viewportY,
+        baseY: term.buffer.active.baseY,
+        length: term.buffer.active.length,
+        followBottom, floor, lastEffBottom,
+      }),
+      restore: (saved) => {
+        const buffer = term.buffer.active;
+        // 只挡备屏：本版 xterm 普通缓冲区的 hasScrollback 可能是 null，拿它当布尔闸
+        // 会把每次落位都判成不可滚，用户看到的就是 fresh 实例的真尾加一屏空白。
+        if (buffer.type === "alternate") return false;
+        if (!saved || !Number.isFinite(saved.viewportY)) return false;
+        // 宿主镜像的历史有 5000 行上限：回放后的缓冲可能比切走前短，行数差要从阅读
+        // 位与地板上一起扣掉，否则落点整体偏下（与闲剪重建同一套折算）。
+        const trimmed = Number.isFinite(saved.length) ? Math.max(0, saved.length - buffer.length) : 0;
+        const maxLine = Math.max(0, buffer.length - term.rows);
+        const line = Math.max(0, Math.min(saved.viewportY - trimmed, maxLine));
+        // fresh 实例的出厂跟随态会把正在读历史的视口拽回底：跟随态随交接单过岸。
+        followBottom = !!saved.followBottom;
+        lastScrollIntentAt = 0;
+        if (intentRetryTimer !== null) { clearTimeout(intentRetryTimer); intentRetryTimer = null; }
+        trackFloor();
+        if (terminalBottomAlignEnabled() && Number.isFinite(saved.floor)) {
+          const eff = terminalEffectiveBottomBase(term);
+          const lo = Math.min(eff, buffer.baseY);
+          floor = Math.max(lo, Math.min(saved.floor - trimmed, buffer.baseY));
+          lastEffBottom = eff;
+        }
+        if (buffer.viewportY !== line) term.scrollToLine(line);
+        return true;
+      },
+    };
   }
 
   // 底部自动对齐（设置 terminalBottomAutoAlign，缺省关）：窗口收放等尺寸错配期，xterm
@@ -11094,6 +11519,8 @@ async function api(method, path, body) {
         if (terminalScreenSeq !== screenSeq) return;
         if (typeof parkTerminalScreen === "function") parkTerminalScreen(session);
         connectTerminalStream(session, { revive });
+        // 同上：后台切回的交接单也跟到延后的这一拍，别让快路径绕过落位。
+        if (typeof beginTerminalForegroundRestore === "function") beginTerminalForegroundRestore();
         // 「正在加载」占位只在这一拍挂（见 syncTerminalBootingOverlay 前的时序注释）：
         // 停放之后新实例已重置成空屏，旧帧还盖着的话占位在垫片之下不露脸。
         if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(session.id);
@@ -11114,6 +11541,8 @@ async function api(method, path, body) {
     // 不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
     if (typeof parkTerminalScreen === "function") parkTerminalScreen(session);
     connectTerminalStream(session, { revive });
+    // 后台切回的整屏重建：把交接单挂到这一拍的垫片上，回放静默后落回阅读位再揭幕。
+    if (typeof beginTerminalForegroundRestore === "function") beginTerminalForegroundRestore();
     // 同上：挂层排在建流之后，点当拍不挂——内切的 /switch 在飞期间屏上还是上一屏。
     if (typeof syncTerminalBootingOverlay === "function") syncTerminalBootingOverlay(session.id);
     if (currentView === "terminal") scheduleTerminalFit();
