@@ -1673,19 +1673,25 @@
      正在入场的卡退层会被吞掉，位移与虚化拆成两条时间轴。 */
   .live-log-stack .live-log-msg.is-appearing { opacity: 0; transform: translateY(-8px) scale(1.02); transition: none; }
   /* 最末一张沿景深再退一层后淡出：位移到第三步、继续缩小、文字虚化加深，不再
-     硬跳 54px、也不让虚化回落成反弹。 */
+     硬跳 54px、也不让虚化回落成反弹。transition 三项逐项写全：若某张卡同时挂着
+     is-appearing（其 transition:none 会重置整组 shorthand），仍由本规则逐项取回
+     属性/时长/曲线，离场过渡不会被吃掉。JS 侧另用 markLogLeaving 保证两态互斥。 */
   .live-log-stack .live-log-msg.is-leaving {
     transform: translateY(calc(var(--ll-step) * 3)) scale(0.88);
     opacity: 0; z-index: 0;
+    transition-property: transform, opacity, background-color, border-color, box-shadow;
     transition-duration: 160ms; transition-delay: 0ms;
+    transition-timing-function: var(--ease-out);
     pointer-events: none;
   }
   .live-log-stack .live-log-msg.is-leaving .live-log-meta,
   .live-log-stack .live-log-msg.is-leaving .live-log-text {
     filter: blur(1.2px); transition-duration: 160ms; transition-delay: 0ms;
   }
-  /* 清空是整批同时淡出，比单张挤出更短促；与单条挤出共用同一档景深。 */
-  .live-log[data-clearing] .live-log-stack .live-log-msg.is-leaving { transition-duration: 120ms; }
+  /* 清空是整批同时淡出，比单张挤出更短促；两层同取 120ms，与脚本的清场计时对齐，
+     不再出现叠卡还在淡出、视口已先清空的错位。 */
+  .live-log[data-clearing] .live-log-stack .live-log-msg.is-leaving,
+  .live-log[data-clearing] .live-log-viewport .live-log-msg.is-leaving { transition-duration: 120ms; }
 
   /* ── 「日志级别」下拉（设置 → 通用 → 运行日志卡）────────────────────────────
      与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色

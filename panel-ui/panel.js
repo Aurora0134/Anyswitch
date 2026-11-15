@@ -2710,6 +2710,53 @@ async function api(method, path, body) {
   // 视口；反向切换先清掉上一轮，避免两个 motion 叠在一起。
   let logMotionTimer = null;
   let logMotionTail = null;
+  // 一条链上只留一组时长：单张挤出 160ms、整批清空 120ms、摊开/收回 220ms、交接 60ms，
+  // CSS 与这里的计时器同取这些值，不再各自写死数字。
+  const LOG_ANIM_MS = 160;
+  const LOG_CLEAR_MS = 120;
+  const LOG_MOTION_MS = 220;
+  const LOG_HANDOFF_MS = 60;
+  // 入场的帧无关兜底：后台页签 rAF 会被节流甚至冻结，只靠双重 rAF 摘类会让新卡
+  // 永远停在起始态。Map 同时充当 token，供离场/清场时取消尚未执行的入场回调。
+  const logAppearing = new Map();
+
+  function logReducedMotion() {
+    return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function clearLogAppearing(node) {
+    const timer = logAppearing.get(node);
+    if (timer != null) clearTimeout(timer);
+    logAppearing.delete(node);
+    node.classList.remove("is-appearing");
+  }
+
+  // 顶部浮现：起始态挂类、下一帧摘掉走同族 transition，另排定时器兜底摘类。
+  // 已经在离场的卡不补播，避免两条动效抢同一组 transform。
+  function playLogAppearing(node) {
+    if (node.classList.contains("is-leaving")) return;
+    clearLogAppearing(node);
+    node.classList.add("is-appearing");
+    const timer = setTimeout(() => {
+      if (logAppearing.get(node) !== timer) return;
+      node.classList.remove("is-appearing");
+      logAppearing.delete(node);
+    }, LOG_ANIM_MS + 40);
+    logAppearing.set(node, timer);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (logAppearing.get(node) !== timer) return;
+      node.classList.remove("is-appearing");
+      clearTimeout(timer);
+      logAppearing.delete(node);
+    }));
+  }
+
+  // 进入离场前先摘入场态：is-appearing 的 transition:none 会吃掉整支离场过渡，
+  // 清空期间连续来消息最容易撞上这两个 class 共存。
+  function markLogLeaving(node) {
+    clearLogAppearing(node);
+    node.classList.add("is-leaving");
+  }
 
   function queueLogRender() {
     if (logRenderQueued) return;
@@ -2733,8 +2780,8 @@ async function api(method, path, body) {
 
   // 卡内展开/收起：只解除本卡 2 行截断，与区域开关、其它卡互不影响。line-clamp 不可
   // 过渡，故量出截断高与全文高后动画 height；结束落回 auto 以随宽度重排。展开态保持
-  // is-open 直到收起动画走完再恢复截断，避免全文在收缩前提前消失。reduced-motion 由
-  // CSS 通配停过渡，定时兜底清 inline 高度。
+  // is-open 直到收起动画走完再恢复截断，避免全文在收缩前提前消失。reduced-motion 直接
+  // 落终态，不写 inline 高度、不起计时器。
   function setLogCardOpen(node, open) {
     const text = node.querySelector(".live-log-text");
     const btn = node.querySelector(".live-log-msg-fold");
@@ -2742,6 +2789,12 @@ async function api(method, path, body) {
       btn.setAttribute("aria-expanded", String(open));
       btn.setAttribute("aria-label", open ? "收起" : "展开");
       btn.title = open ? "收起" : "展开";
+    }
+    if (logReducedMotion()) {
+      // 中途切到 reduce：让在途的 height 动画作废，否则它的收尾回调会把刚展开的卡收回。
+      if (text) { logTextAnim.delete(text); text.style.height = ""; }
+      node.classList.toggle("is-open", open);
+      return;
     }
     if (!text) { node.classList.toggle("is-open", open); return; }
     if (open) {
@@ -2777,11 +2830,12 @@ async function api(method, path, body) {
     if (!body) return;
     const root = $("liveLog");
     const motion = !!root?.getAttribute?.("data-motion");
+    const reduced = logReducedMotion();
     const seen = new Set();
     const ordered = [];
     const fresh = [];
-    // 最新在顶：与收起叠卡同一基准。键控复用节点，只在顺序不符时重排，避免每帧
-    // 搬动整列 DOM；新消息从顶部插入，贴顶跟随由下方 scrollTop=0 兑现。
+    // 最新在顶：与收起叠卡同一基准。节点按 id 复用，只把真正错位的节点插回原位；
+    // 全列 appendChild 会连在途的入场/离场过渡一起取消，且每次新消息都要搬整列。
     for (let i = logEntries.length - 1; i >= 0; i--) {
       const entry = logEntries[i];
       seen.add(entry.id);
@@ -2792,33 +2846,29 @@ async function api(method, path, body) {
         fresh.push(node);
       }
       ordered.push(node);
-      node.classList.toggle("is-leaving", !!entry.fading);
+      // 清空批次的卡只维持离场态，移除由清场计时器一次排完。
+      if (entry.fading) { markLogLeaving(node); continue; }
+      node.classList.remove("is-leaving");
       // 超行检测只针对截断态：已展开的卡保留钮（供收起），不重测以免把全文高当截断高。
       if (!node.classList.contains("is-open")) {
         const text = node.querySelector(".live-log-text");
         node.classList.toggle("is-overflowing", !!text && text.scrollHeight > text.clientHeight + 1);
       }
     }
-    const current = body.children;
-    let needReorder = current.length !== ordered.length;
-    if (!needReorder) {
-      for (let i = 0; i < ordered.length; i++) {
-        if (current[i] !== ordered[i]) { needReorder = true; break; }
-      }
+    let ref = body.firstChild;
+    for (const node of ordered) {
+      if (node === ref) { ref = ref?.nextSibling ?? null; continue; }
+      body.insertBefore(node, ref);
     }
-    if (needReorder) for (const node of ordered) body.appendChild(node);
     for (const [id, node] of logViewportNodes) {
       if (!seen.has(id)) {
+        clearLogAppearing(node);
         node.remove();
         logViewportNodes.delete(id);
       }
     }
-    // 合批多条与两态交接期不逐条补播入场，避免层层追赶或与摊开叠加。
-    if (logExpanded && fresh.length === 1 && !motion) {
-      const node = fresh[0];
-      node.classList.add("is-appearing");
-      requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("is-appearing")));
-    }
+    // 合批多条、两态交接期与 reduced-motion 都不逐条补播入场，避免层层追赶或残影。
+    if (logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
     if (logExpanded && followLogs) body.scrollTop = 0;
   }
 
@@ -2827,6 +2877,7 @@ async function api(method, path, body) {
     if (!stack) return;
     const root = $("liveLog");
     const motion = !!root?.getAttribute?.("data-motion");
+    const reduced = logReducedMotion();
     const latest = logEntries.slice(-LOG_STACK_SIZE);
     const seen = new Set();
     const fresh = [];
@@ -2841,34 +2892,39 @@ async function api(method, path, body) {
         stack.appendChild(node);
         fresh.push(node);
       }
+      // 清空批次的卡保留原 slot 与景深档，只维持离场态；移除由清场计时器一次排完。
+      if (entry.fading) { markLogLeaving(node); continue; }
       const leaving = logStackLeaving.get(entry.id);
       if (leaving) {
         clearTimeout(leaving);
         logStackLeaving.delete(entry.id);
-        node.classList.remove("is-leaving");
       }
       node.dataset.slot = String(slot);
       node.style.zIndex = String(LOG_STACK_SIZE - slot);
-      node.classList.toggle("is-leaving", !!entry.fading);
+      node.classList.remove("is-leaving");
     }
     for (const [id, node] of logStackNodes) {
       if (seen.has(id) || logStackLeaving.has(id)) continue;
+      if (reduced) {
+        // 减少动效时单张淘汰也直接移除，不挂离场 class、不排 160ms 计时器。
+        clearLogAppearing(node);
+        node.remove();
+        logStackNodes.delete(id);
+        continue;
+      }
       // 越界卡保留原 slot，由 .is-leaving 的第 4 档接管景深，景深规则不失配。
-      node.classList.add("is-leaving");
+      markLogLeaving(node);
       const timer = setTimeout(() => {
         logStackLeaving.delete(id);
+        clearLogAppearing(node);
         node.remove();
         if (logStackNodes.get(id) === node) logStackNodes.delete(id);
-      }, 160);
+      }, LOG_ANIM_MS);
       logStackLeaving.set(id, timer);
     }
-    // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条，或两态
-    // 交接进行中，都直接按终态落位，不逐条补播。
-    if (!logExpanded && fresh.length === 1 && !motion && !fresh[0].classList.contains("is-leaving")) {
-      const node = fresh[0];
-      node.classList.add("is-appearing");
-      requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("is-appearing")));
-    }
+    // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条、两态
+    // 交接进行中、或 reduced-motion，都直接按终态落位，不逐条补播。
+    if (!logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
   }
 
   function renderLogFeed() {
@@ -2882,8 +2938,10 @@ async function api(method, path, body) {
     const stack = $("logStack");
     if (logMotionTimer) { clearTimeout(logMotionTimer); logMotionTimer = null; }
     if (logMotionTail) { clearTimeout(logMotionTail); logMotionTail = null; }
-    const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced = logReducedMotion();
     logExpanded = expanded;
+    // 入口无条件清交接态：中途切到 reduced-motion 或连点展收，都不留半程残影。
+    if (root) root.removeAttribute("data-motion");
     // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
     if (expanded && root && body) {
       const first = body.children[0];
@@ -2891,6 +2949,12 @@ async function api(method, path, body) {
       const mb = first && typeof getComputedStyle === "function"
         ? parseFloat(getComputedStyle(first).marginBottom) || 0 : 0;
       if (h > 0) root.style.setProperty("--ll-step-expanded", (h + mb) + "px");
+    }
+    // 重新展开一律回到最新并恢复跟随：第一屏就是最新消息，接着上次的阅读位
+    // 会让人以为日志没在更新。
+    if (expanded) {
+      followLogs = true;
+      if (body) body.scrollTop = 0;
     }
     // 两阶段：data-motion 期间叠卡保持不透明并完成摊开/收回，到位后才与视口交接；
     // 摊开不再被自身淡出吃掉。reduced-motion 直接落稳态，不等动画计时。
@@ -2904,7 +2968,7 @@ async function api(method, path, body) {
     }
     if (body) body.tabIndex = expanded ? 0 : -1;
     if (stack) stack.setAttribute("aria-hidden", String(expanded));
-    if (expanded && followLogs) {
+    if (expanded) {
       requestAnimationFrame(() => {
         const viewport = $("logBody");
         if (viewport) viewport.scrollTop = 0;
@@ -2917,13 +2981,13 @@ async function api(method, path, body) {
           logMotionTail = setTimeout(() => {
             root.removeAttribute("data-motion");
             logMotionTimer = null; logMotionTail = null;
-          }, 60);
-        }, 220);
+          }, LOG_HANDOFF_MS);
+        }, LOG_MOTION_MS);
       } else {
         logMotionTimer = setTimeout(() => {
           root.removeAttribute("data-motion");
           logMotionTimer = null;
-        }, 220);
+        }, LOG_MOTION_MS);
       }
     }
   }
@@ -2932,10 +2996,12 @@ async function api(method, path, body) {
     logEntries = [];
     followLogs = true;
     const root = $("liveLog");
-    if (root) root.removeAttribute("data-clearing");
+    if (root) { root.removeAttribute("data-clearing"); root.removeAttribute("data-motion"); }
     if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
     for (const timer of logStackLeaving.values()) clearTimeout(timer);
     logStackLeaving.clear();
+    for (const [node, timer] of logAppearing) { clearTimeout(timer); node.classList.remove("is-appearing"); }
+    logAppearing.clear();
     for (const node of logViewportNodes.values()) node.remove();
     logViewportNodes.clear();
     for (const node of logStackNodes.values()) node.remove();
@@ -2945,16 +3011,46 @@ async function api(method, path, body) {
 
   function fadeClearLogFeed() {
     const root = $("liveLog");
-    if (root) root.setAttribute("data-clearing", "1");
+    const reduced = logReducedMotion();
     for (const entry of logEntries) entry.fading = true;
+    if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
+    for (const timer of logStackLeaving.values()) clearTimeout(timer);
+    logStackLeaving.clear();
+    if (reduced) {
+      // 减少动效时直接落清场后的稳态：不写动效 class、不起计时器、不留残影。
+      if (root) root.removeAttribute("data-clearing");
+      for (const node of logViewportNodes.values()) { clearLogAppearing(node); node.remove(); }
+      logViewportNodes.clear();
+      for (const node of logStackNodes.values()) { clearLogAppearing(node); node.remove(); }
+      logStackNodes.clear();
+      logEntries = logEntries.filter((entry) => !entry.fading);
+      queueLogRender();
+      return;
+    }
+    if (root) root.setAttribute("data-clearing", "1");
+    // 整批清空只排一次移除：这一批节点在下一帧 render 里只维持离场态，不再各自
+    // 等一轮越界判定又排 160ms 的单张淘汰；两层与 CSS 清空档同为 120ms。
+    const fadingStack = [...logStackNodes.entries()];
+    const fadingViewport = [...logViewportNodes.entries()];
+    for (const [, node] of fadingStack) markLogLeaving(node);
+    for (const [, node] of fadingViewport) markLogLeaving(node);
     queueLogRender();
-    if (logFadeTimer) clearTimeout(logFadeTimer);
     logFadeTimer = setTimeout(() => {
       logFadeTimer = null;
+      for (const [id, node] of fadingStack) {
+        if (logStackNodes.get(id) === node) logStackNodes.delete(id);
+        clearLogAppearing(node);
+        node.remove();
+      }
+      for (const [id, node] of fadingViewport) {
+        if (logViewportNodes.get(id) === node) logViewportNodes.delete(id);
+        clearLogAppearing(node);
+        node.remove();
+      }
       if (root) root.removeAttribute("data-clearing");
       logEntries = logEntries.filter((entry) => !entry.fading);
       queueLogRender();
-    }, 160);
+    }, LOG_CLEAR_MS);
   }
 
   // 换级别后重连一次：服务端按新门槛重放缓冲里最近 500 条，屏幕立刻换成筛过的结果，
