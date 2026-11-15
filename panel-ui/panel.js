@@ -882,14 +882,11 @@ async function api(method, path, body) {
         // syncBoardIconStrip 每次都清空整行重铺：playBoardEnter 取样时拿到的 .board-icon-slot
         // 已成弃子，新格子一个入场类都没有——揭示第一拍后 44–94ms 的这次重建会把逐枚淡入
         // 整段丢掉（行原本隐藏时连行上浮也一起丢，整行硬出现）。揭示仍在播就按同一套参数
-        // 补一拍。卡数必须取 .telemetry-view 下的可见 .panel-card（含侧栏卡），与
-        // playBoardEnter 的 cards.length 同口径；改用容器里的端点卡会少算侧栏卡、早起拍。
+        // 补一拍。卡数取同一套取样（含侧栏卡与运行日志区），与 playBoardEnter 的
+        // cards.length 同口径；改用容器里的端点卡会少算侧栏卡、早起拍。
         if (!strip.hidden && boardEnterInFlight()) {
           const view = document.querySelector(".telemetry-view");
-          const cardCount = view
-            ? [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden).length
-            : 0;
-          armBoardIconStrip(strip, cardCount);
+          armBoardIconStrip(strip, view ? boardEnterItems(view).length : 0);
         }
       } else {
         strip.hidden = true;
@@ -906,25 +903,31 @@ async function api(method, path, body) {
       document.documentElement.removeAttribute("data-prepaint-board-layout");
     }
   }
-  // 揭示是否仍在进行：阶梯里的可见卡还挂着 entry 类，这些类各自在 animationend 才摘，
+  // 入场阶梯的取样口径：可见的 .panel-card 与运行日志区。运行日志无框化后不再是
+  // .panel-card，缺席取样会让它在揭幕第一拍孤立地亮着；复合选择器按文档序返回，
+  // 这块自然占左栏那一格，后续卡与图标行整体顺延一格。记录开关关掉时整块 hidden，
+  // 与隐藏卡一样不占位。四处取样共用它，序位才不会各算各的。
+  function boardEnterItems(view) {
+    return [...view.querySelectorAll(".panel-card, .live-log-region")].filter((el) => !el.hidden);
+  }
+  // 揭示是否仍在进行：阶梯里的可见项还挂着 entry 类，这些类各自在 animationend 才摘，
   // 天然覆盖整段阶梯（约 700ms）。补挂只在这个窗口内生效——判定挂在「现役动画」上、不靠
   // 跨调用的标记，就不会出现揭示早已结束而标记仍挂着、随后任意一张卡被放出来都凭空补一段
   // 淡入（首拍取数失败、pending 补播、开屏这些路径也因此不需要额外的清标记动作）。
-  // 只认未隐藏的卡：隐藏节点上的残留类不算「还在播」，否则一次中途藏卡就能把闸门焊死。
+  // 只认未隐藏的项：隐藏节点上的残留类不算「还在播」，否则一次中途藏卡就能把闸门焊死。
   function boardEnterInFlight() {
     if (!boardVisible()) return false;
     const view = document.querySelector(".telemetry-view");
     if (!view) return false;
-    return [...view.querySelectorAll(".panel-card")].some((el) => !el.hidden
-      && (el.classList.contains("board-card-enter") || el.classList.contains("board-card-enter-scale")));
+    return boardEnterItems(view).some((el) =>
+      el.classList.contains("board-card-enter") || el.classList.contains("board-card-enter-scale"));
   }
-  // 补挂台阶：序位口径与 playBoardEnter 一致——.telemetry-view 下 !hidden 的 .panel-card
-  // 逐张数下去（不能只看容器内的卡，侧栏卡也占延迟位）。只在揭示现役期间、看板可见
-  // 时调用，此时重排已落地，取的即是最终卡序。
+  // 补挂台阶：序位口径与 playBoardEnter 一致（boardEnterItems 的文档序，含侧栏卡与
+  // 运行日志区）。只在揭示现役期间、看板可见时调用，此时重排已落地，取的即是最终卡序。
   function armReleasedBoardCards(released) {
     const view = document.querySelector(".telemetry-view");
     if (!view) return;
-    const cards = [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden);
+    const cards = boardEnterItems(view);
     for (const card of released) {
       const index = cards.indexOf(card);
       if (index >= 0) armBoardCardEnter(card, index);
@@ -2725,6 +2728,18 @@ async function api(method, path, body) {
     return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
 
+  // 开屏层还盖着、或运行日志区自己正随看板阶梯浮入时，日志流不逐条补播入场：整块
+  // 区域还没落位，底下先演完一套逐条动效再揭幕，就会与页面不同拍。消息照常入列、
+  // 顺序不变、不丢；区域浮入结束（它自己的 animationend 摘类）或开屏退场后自动恢复。
+  // 判据只认这块区域自己的入场态：拿整列「还有卡挂着 entry 类」当闸门会被无关卡的
+  // 残留类长期焊死（终端入口卡在 1s 轮询下会反复补挂），平稳期的逐条浮现从此不再播。
+  function logBoardEnterQuiet() {
+    if (document.documentElement?.hasAttribute?.("data-startup")) return true;
+    const region = $("liveLogCard");
+    return !!region && !region.hidden
+      && (region.classList.contains("board-card-enter") || region.classList.contains("board-card-enter-scale"));
+  }
+
   function clearLogAppearing(node) {
     const timer = logAppearing.get(node);
     if (timer != null) clearTimeout(timer);
@@ -2877,8 +2892,9 @@ async function api(method, path, body) {
         logViewportNodes.delete(id);
       }
     }
-    // 合批多条、两态交接期与 reduced-motion 都不逐条补播入场，避免层层追赶或残影。
-    if (logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
+    // 合批多条、两态交接期、reduced-motion 与看板入场阶梯期都不逐条补播入场，
+    // 避免层层追赶或残影（阶梯期整块运行日志区正随卡一起浮入）。
+    if (logExpanded && fresh.length === 1 && !motion && !reduced && !logBoardEnterQuiet()) playLogAppearing(fresh[0]);
     // 最新日志插在顶部；暂停跟随时按实际新增高度补偿，正在读的内容不位移。
     // 满容量时插入与淘汰同批发生，净高差可能是零；以仍在阅读的首个可见节点
     // 为参照，测它真实的前移量，而不是把底部淘汰误算进补偿。
@@ -2942,8 +2958,8 @@ async function api(method, path, body) {
       logStackLeaving.set(id, timer);
     }
     // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条、两态
-    // 交接进行中、或 reduced-motion，都直接按终态落位，不逐条补播。
-    if (!logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
+    // 交接进行中、reduced-motion 或看板入场阶梯期，都直接按终态落位，不逐条补播。
+    if (!logExpanded && fresh.length === 1 && !motion && !reduced && !logBoardEnterQuiet()) playLogAppearing(fresh[0]);
     // 舞台高度跟卡高走：卡高内容驱动，窄窗下卡变高时三层仍各露一个完整步长。
     // 取非离场卡的最大布局高，避免某一条只有一行时舞台被压矮；只在量值变化时写
     // 变量，避免每帧都触发一次样式重算。
@@ -3127,7 +3143,12 @@ async function api(method, path, body) {
   function applyLoggingEnabled(enabled) {
     loggingEnabled = enabled;
     const card = $("liveLogCard");
-    if (card) card.hidden = !enabled;
+    if (card) {
+      card.hidden = !enabled;
+      // 隐藏会取消入场动画、animationend 不会到达；摘干净入场类，重新打开时不会
+      // 让「揭示仍在进行」的闸门焊死。
+      card.classList.remove("board-card-enter", "board-card-enter-scale");
+    }
     const levelRows = $("logLevelRows");
     if (levelRows) levelRows.hidden = !enabled;
     if (enabled) {
@@ -16167,7 +16188,14 @@ async function api(method, path, body) {
     card.classList.remove("board-card-enter", "board-card-enter-scale");
     void getComputedStyle(card).animationName; // 同上：只冲样式，卡片不逐张重排
     card.classList.add(hero ? "board-card-enter-scale" : "board-card-enter");
-    card.addEventListener("animationend", () => card.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
+    // 运行日志区是容器，内部日志卡的动画结束会冒泡上来；只认自己那一次，否则整块
+    // 还没浮完就被摘掉入场类，boardEnterInFlight() 也会提前判成收场。
+    const onEnd = (e) => {
+      if (e?.target && e.target !== card) return;
+      card.removeEventListener("animationend", onEnd);
+      card.classList.remove("board-card-enter", "board-card-enter-scale");
+    };
+    card.addEventListener("animationend", onEnd);
   }
 
   // 图标行装配：整行接在最后一张可见卡之后 40ms（与卡间距同一格）上浮，行内逐枚图标
@@ -16210,7 +16238,7 @@ async function api(method, path, body) {
     void getComputedStyle(view).animationName;
     view.classList.add("board-enter");
     view.addEventListener("animationend", () => view.classList.remove("board-enter"), { once: true });
-    const cards = [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden);
+    const cards = boardEnterItems(view);
     // 首帧卡序接管（panel.html 的 data-prepaint-card-order）生效期间，端点卡的视觉序是
     // 存档序而非 DOM 序——CSS order 只改绘制不改文档。可信首帧落地前（reorderAgentCards
     // 尚未摘属性重排）播这段阶梯，按 DOM 序发延迟会把浮入次序画乱（2026-10-08 报障：
