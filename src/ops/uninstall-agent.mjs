@@ -42,6 +42,7 @@ import { relayDataRoot } from "../relay/relay-settings.mjs";
 import { DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
 import { createPromptsInjector, applyManagedBlock } from "../agents/agent-prompts-inject.mjs";
+import { listEndpoints } from "../agents/agent-skills.mjs";
 import { createShimManager, SHIM_SPECS } from "../agents/shim-manager.mjs";
 
 import { writeKimiConfig, kimiConfigPath } from "../launchers/kimi-launcher.mjs";
@@ -322,6 +323,16 @@ async function stripQoder(ctx) {
     steps.push({ step: "prompt-block", ok: result.ok !== false, changed: result.changed === true });
   } catch (error) {
     steps.push(stepFail("prompt-block", error));
+  }
+  // 技能联接：清理面覆盖 qoder 的全部数据根（含已卸载区域版的残留根），与提示词
+  // 块一样不做「在装」过滤。根清单取自部署侧注册表（listEndpoints），新增区域版
+  // 只改那张表——两边各抄一份正是链接面长期没人清的原因。
+  try {
+    const qoderDirs = listEndpoints(ctx.homeDir).find((ep) => ep.id === "qoder")?.skillsDirs ?? [];
+    const removed = qoderDirs.flatMap((skillsDir) => removeSkillJunctions(skillsDir).removed ?? []);
+    steps.push({ step: "skill-junctions", ok: true, changed: removed.length > 0, ...(removed.length > 0 ? { removed } : {}) });
+  } catch (error) {
+    steps.push(stepFail("skill-junctions", error));
   }
   return steps;
 }
@@ -628,8 +639,8 @@ function stripWorkbuddyPromptBlock(configRoot) {
   return { step: "prompt-block", ok: true, changed, ...(removed ? { removed: true } : {}) };
 }
 
-// claude / workbuddy 的 skills 目录联接清理：rmdir 只摘链接，绝不碰目标目录
-// （agent-skills.mjs 的既有语义）；普通目录原样保留。
+// claude / workbuddy / qoder 的 skills 目录联接清理：rmdir 只摘链接，绝不碰目标
+// 目录（agent-skills.mjs 的既有语义）；普通目录原样保留。
 function removeSkillJunctions(skillsDir, step = "skill-junctions") {
   if (!existsSync(skillsDir)) return { step, ok: true, changed: false };
   const removed = [];

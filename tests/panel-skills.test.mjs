@@ -41,7 +41,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   return { req, res, json };
 }
 
-function skillsRouter(skillsService) {
+function skillsRouter(skillsService, environmentService = null) {
   return createPanelRouter({
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
@@ -50,6 +50,7 @@ function skillsRouter(skillsService) {
     aliasPath: null,
     fetchRelayAgents: async () => null,
     skillsService,
+    ...(environmentService ? { environmentService } : {}),
   });
 }
 
@@ -71,6 +72,7 @@ function mockService(overrides = {}) {
     diffSkillContent: async () => ({ ok: true, files: [] }),
     readSkillBody: (relPath) => ({ name: relPath, dirName: relPath, relPath, content: "---\n---\n", body: "", hash: "h1", editable: true }),
     writeSkillBody: async () => ({ ok: true, hash: "h2", content: "", body: "" }),
+    catchUp: async () => ({ ok: true, created: [], skipped: [] }),
     ...overrides,
   };
 }
@@ -463,6 +465,70 @@ describe("panel router skills routes", () => {
 // 沿用 panel.test.mjs 的 new Function 提取范式：把差分函数从主脚本里抠出来单测——
 // 它是纯状态对比，不碰 DOM 也不碰后端。函数实现已拆到 panel.js，
 // cascade/入场动画的 CSS 契约在 panel.css，按钮 DOM 在 panel.html。
+// 技能面自动补齐的两个非用户主动触发面（prewarmSkillsBackfill / 可见集变更钩子）：
+// junction 唯一的写入触发面原本是面板部署，这里钉住启动补齐与运行中补填各自的
+// fire 条件，与提示词面（panel-prompts.test.mjs）同一套口径。
+describe("panel router skills deployment backfill", () => {
+  const clients = (...ids) => ids.map((id) => ({ id, installations: [{ status: "found" }] }));
+
+  it("检测正常：启动预热恰一次补齐，注入的 mock 服务原样保留", async () => {
+    const env = { getState: async () => ({ clients: clients("claude") }) };
+    let catchUps = 0;
+    const svc = mockService({ catchUp: async () => { catchUps += 1; return { ok: true, created: [], skipped: [] }; } });
+    const router = skillsRouter(svc, env);
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 1, "首调显式补齐恰一次");
+
+    const { req, res, json } = fakeReqRes("/panel/api/skills/state", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().repoPath, "C:/repo/skills", "GET state 仍由注入 mock 服务应答（未被懒建真服务顶掉）");
+  });
+
+  it("检测失败首算跳过；恢复后经 null→Set 钩子补恰一次；同集不再触发", async () => {
+    const env = { getState: async () => { throw new Error("detection broken"); } };
+    let catchUps = 0;
+    const svc = mockService({ catchUp: async () => { catchUps += 1; return { ok: true, created: [], skipped: [] }; } });
+    const router = skillsRouter(svc, env);
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 0, "快照 null 首算：整次跳过（不给未确认在装的端点造目录）");
+
+    env.getState = async () => ({ clients: clients("claude") });
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 1, "恢复后的下一轮经变更钩子补恰一次（显式名额已在首调消费）");
+
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 1, "同集不触发");
+  });
+
+  it("可见集变化触发补齐；运行中检测失败翻转零写盘", async () => {
+    const env = { getState: async () => ({ clients: clients("claude") }) };
+    let catchUps = 0;
+    const svc = mockService({ catchUp: async () => { catchUps += 1; return { ok: true, created: [], skipped: [] }; } });
+    const router = skillsRouter(svc, env);
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 1, "首调显式补齐");
+
+    env.getState = async () => ({ clients: clients("claude", "qoder") });
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 2, "新 Agent 出现经钩子补恰一次");
+
+    env.getState = async () => { throw new Error("detection broken again"); };
+    await router.prewarmSkillsBackfill();
+    assert.equal(catchUps, 2, "Set→null 翻转不触发");
+  });
+
+  it("补齐抛错不影响面板其余请求（fire-and-forget 静默）", async () => {
+    const env = { getState: async () => ({ clients: clients("claude") }) };
+    const svc = mockService({ catchUp: () => { throw new Error("mklink failed"); } });
+    const router = skillsRouter(svc, env);
+    await router.prewarmSkillsBackfill();
+    const { req, res } = fakeReqRes("/panel/api/skills/state", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+  });
+});
+
 describe("panel.html skills change diff highlighting", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.html"),

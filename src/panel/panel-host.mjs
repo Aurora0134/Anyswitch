@@ -69,11 +69,12 @@ export function createPanelServer(options = {}) {
       interval.unref?.();
       return { first, interval };
     }),
-    // 预设注入回填预热与冷扫预热同一接线纪律：直接建 server 的测试注入 mock
-    // 兜住（environmentService/promptsService 透传，见 panel.mjs 注入语义），
-    // 生产不传即走真懒加载。
+    // 预设注入回填 / 技能补齐预热与冷扫预热同一接线纪律：直接建 server 的测试
+    // 注入 mock 兜住（environmentService / promptsService / skillsService 透传，
+    // 见 panel.mjs 注入语义），生产不传即走真懒加载。
     environmentService: options.environmentService,
     promptsService: options.promptsService,
+    skillsService: options.skillsService,
   });
   // Warm the watchdog drift snapshot at startup: the panel frontend fetches
   // /api/settings on every page load to hydrate the 抗截断 toggle, and an
@@ -91,6 +92,12 @@ export function createPanelServer(options = {}) {
   // Same fire-and-forget deal; missing this wiring means no startup backfill —
   // the panel-host level test covers it.
   router.prewarmPromptsBackfill();
+  // Skills deployment backfill prewarm, same shape one face over: a junction is
+  // only ever written by an explicit deploy, so a skills root that appeared
+  // after the last deploy batch (a second region's data root, a freshly
+  // installed agent) stays empty until the user clicks. Startup catch-up
+  // closes that window; the panel-host level test covers the wiring.
+  router.prewarmSkillsBackfill();
   const server = createServer(async (req, res) => {
     if (!isLoopback(req.socket.remoteAddress)) {
       res.writeHead(403, { "content-type": "application/json" });

@@ -2,10 +2,11 @@ import test, { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
+  catchUp,
   createJunction,
   createSkillsService,
   deleteLocalSkill,
@@ -480,6 +481,157 @@ describe("qoder 双区域版 skills", () => {
       assert.equal(r.ok, true);
       assert.equal(existsSync(join(qoderDir(home), "skill-a")), false);
       assert.equal(existsSync(join(qoderCnDir(home), "skill-a")), false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// 自动补齐面（catchUp）：非用户主动触发面只补链接、不碰实体、不越权造根。
+describe("catchUp（技能面自动补齐）", () => {
+  function setup(prefix = "anyswitch-skills-catchup-") {
+    const { dir, cleanup } = tempRoot(prefix);
+    const home = join(dir, "home");
+    const repo = join(dir, "repo");
+    mkdirSync(home, { recursive: true });
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    writeSkill(join(repo, "skill-b"), { name: "skill-b" });
+    return { dir, home, repo, cleanup };
+  }
+  const link = (dir, name) => lstatSync(join(dir, name)).isSymbolicLink();
+
+  it("镜像趟：一个根已挂、另一个在装根缺失时只补缺失的一份", async () => {
+    const { home, repo, cleanup } = setup();
+    const onlyQoder = { isEndpointVisible: (id) => id === "qoder" };
+    try {
+      mkdirSync(join(home, ".qoder"), { recursive: true });
+      const r = await catchUp({ repoPath: repo, ...onlyQoder }, { homeDir: home });
+      assert.equal(r.ok, true);
+      assert.equal(r.created.length, 0, "一根都没部署过就不补齐，不替用户主动部署");
+
+      await deploy({ endpointId: "qoder", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      assert.equal(existsSync(join(home, ".qoder-cn", "skills", "skill-a")), false);
+
+      mkdirSync(join(home, ".qoder-cn"), { recursive: true }); // 后装的 CN 数据根
+      const r2 = await catchUp({ repoPath: repo, ...onlyQoder }, { homeDir: home });
+      assert.deepEqual(r2.created, [{ endpointId: "qoder", skillName: "skill-a" }]);
+      assert.equal(existsSync(join(home, ".qoder-cn", "skills", "skill-a", "SKILL.md")), true, "缺失的根补上链接");
+      assert.equal(existsSync(join(home, ".qoder-cn", "skills", "skill-b")), false, "没部署过的技能不补");
+
+      const r3 = await catchUp({ repoPath: repo, ...onlyQoder }, { homeDir: home });
+      assert.deepEqual(r3.created, [], "已补齐后重复调用无动作");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("新端点趟：全根都不在盘的可见端点接收其他端点已部署的全部技能", async () => {
+    const { home, repo, cleanup } = setup();
+    try {
+      await deploy({ endpointId: "claude", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      const r = await catchUp({ repoPath: repo }, { homeDir: home });
+      const kimi = r.created.filter((one) => one.endpointId === "kimi");
+      assert.deepEqual(kimi.map((one) => one.skillName), ["skill-a"], "新端点只接收已部署集，不接收仓库全集");
+      assert.equal(link(join(home, ".kimi-code", "skills"), "skill-a"), true);
+      assert.equal(existsSync(join(home, ".kimi-code", "skills", "skill-b")), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("新端点趟不认领全局目录；不可见端点与未启用端点都不落盘", async () => {
+    const { home, repo, cleanup } = setup();
+    try {
+      await deploy({ endpointId: "claude", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      const r = await catchUp(
+        { repoPath: repo, isEndpointVisible: (id) => id === "claude" || id === "zcode" },
+        { homeDir: home },
+      );
+      assert.deepEqual(
+        [...new Set(r.created.map((one) => one.endpointId))].sort(),
+        ["zcode"],
+        "只有可见的 zcode 被补；全局 ~/.agents/skills 不在补齐面",
+      );
+      assert.equal(existsSync(join(home, ".agents", "skills")), false, "全局目录不是部署目标");
+      assert.equal(existsSync(join(home, ".kimi-code")), false, "不可见端点不造目录");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("用户解除部署过的端点不会被自动填回（任一数据根在盘即不参与新端点趟）", async () => {
+    const { home, repo, cleanup } = setup();
+    try {
+      await deploy({ endpointId: "claude", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      await deploy({ endpointId: "kimi", skillName: "skill-a", repoPath: repo }, { homeDir: home, recycleDirFn: mockRecycle([]) });
+      await undeploy({ endpointId: "kimi", skillName: "skill-a", repoPath: repo }, { homeDir: home });
+      assert.equal(existsSync(join(home, ".kimi-code", "skills")), true, "解除只摘链接，目录留着");
+
+      const r = await catchUp({ repoPath: repo }, { homeDir: home });
+      assert.equal(r.created.some((one) => one.endpointId === "kimi"), false, "目录在盘 = 用户已表态，不再补齐");
+      assert.equal(existsSync(join(home, ".kimi-code", "skills", "skill-a")), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("镜像趟遇到占位路径一概不碰：同名实体目录与异向 junction 原样保留并如实上报", async () => {
+    const { home, repo, cleanup } = setup();
+    const onlyQoder = { isEndpointVisible: (id) => id === "qoder" };
+    const other = join(home, "elsewhere", "skill-a");
+    try {
+      writeSkill(other, { name: "skill-a" });
+      mkdirSync(join(home, ".qoder"), { recursive: true });
+      mkdirSync(join(home, ".qoder-cn"), { recursive: true });
+      mkdirSync(join(home, ".qoder", "skills"), { recursive: true });
+      createJunction(join(home, ".qoder", "skills", "skill-a"), join(repo, "skill-a"));
+      writeSkill(join(home, ".qoder-cn", "skills", "skill-a"), { name: "skill-a", description: "local copy" });
+      writeSkill(join(home, ".qoder-cn", "skills", "skill-b"), { name: "skill-b" });
+
+      const r = await catchUp({ repoPath: repo, ...onlyQoder }, { homeDir: home });
+      assert.equal(link(join(home, ".qoder-cn", "skills"), "skill-a"), false, "实体目录不动");
+      assert.equal(
+        readFileSync(join(home, ".qoder-cn", "skills", "skill-a", "SKILL.md"), "utf8").includes("local copy"),
+        true,
+        "实体目录内容原样保留",
+      );
+      assert.deepEqual(
+        r.skipped.map((one) => `${one.endpointId}/${one.skillName}/${one.reason}`),
+        ["qoder/skill-a/occupied"],
+        "占位如实上报，且不产生 created",
+      );
+
+      // 异向 junction 同样不碰：镜像趟把它认作「非本仓库链接」，既不覆盖也不摘
+      const third = setup("anyswitch-skills-catchup-foreigndir-");
+      try {
+        mkdirSync(join(third.home, ".qoder", "skills"), { recursive: true });
+        mkdirSync(join(third.home, ".qoder-cn", "skills"), { recursive: true });
+        createJunction(join(third.home, ".qoder", "skills", "skill-a"), join(third.repo, "skill-a"));
+        const foreign = join(third.home, "foreign", "skill-a");
+        writeSkill(foreign, { name: "skill-a" });
+        createJunction(join(third.home, ".qoder-cn", "skills", "skill-a"), foreign);
+        const r2 = await catchUp({ repoPath: third.repo, ...onlyQoder }, { homeDir: third.home });
+        assert.equal(readlinkSync(join(third.home, ".qoder-cn", "skills", "skill-a")), foreign, "异向链接不动");
+        assert.equal(r2.skipped.filter((one) => one.reason === "occupied").length, 1);
+        assert.equal(r2.created.length, 0);
+      } finally {
+        third.cleanup();
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("主仓库为空或路径不存在时整体无动作（自动路径不报错）", async () => {
+    const { home, repo, cleanup } = setup();
+    try {
+      const emptyRepo = join(home, "empty-repo");
+      mkdirSync(emptyRepo, { recursive: true });
+      const r1 = await catchUp({ repoPath: emptyRepo }, { homeDir: home });
+      assert.deepEqual(r1, { ok: true, created: [], skipped: [] });
+      const r2 = await catchUp({ repoPath: join(home, "ghost") }, { homeDir: home });
+      assert.deepEqual(r2, { ok: true, created: [], skipped: [] });
+      assert.equal(existsSync(join(home, ".claude")), false, "无技能可补时不建任何目录");
     } finally {
       cleanup();
     }
@@ -1668,6 +1820,36 @@ describe("createSkillsService 端点可见性（未安装的 Agent 不进清单�
       await setup.deploy({ endpointId: "kimi", skillName: "skill-a" });
       const d = await svc.deleteRepoSkill("skill-a");
       assert.deepEqual(d.unlinked, ["kimi"]);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("createSkillsService.catchUp（自动补齐面）", () => {
+  it("未配置主仓库时静默无动作；配置后按可见性补齐", async () => {
+    const { dir, cleanup } = tempRoot("anyswitch-skills-service-catchup-");
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+    try {
+      const svc = createSkillsService({
+        homeDir: home,
+        base,
+        recycleDirFn: mockRecycle([]),
+        isEndpointVisible: (id) => id === "claude",
+      });
+      assert.deepEqual(await svc.catchUp(), { ok: true, created: [], skipped: [] }, "未配置仓库时不报错也不落盘");
+      assert.equal(existsSync(join(home, ".claude")), false);
+
+      const setup = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
+      setup.setRepoPath(repo);
+      await setup.deploy({ endpointId: "claude", skillName: "skill-a" });
+      const r = await svc.catchUp();
+      assert.deepEqual(r.created, [], "可见端点只有 claude，已部署完即无动作");
+      assert.equal(existsSync(join(home, ".kimi-code")), false, "不可见端点不落盘");
     } finally {
       cleanup();
     }

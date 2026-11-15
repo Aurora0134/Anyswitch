@@ -987,6 +987,104 @@ export async function undeploy(
   return removedAny ? { ok: true } : { ok: true, idempotent: true };
 }
 
+// 补齐面用的轻扫：只取「指向本仓库」的 junction 对应的仓库目录名，不哈希实体
+// 目录、不列本地技能——补齐只补链接，实体目录一律不碰。以仓库目录名为键（部署
+// 面恒以 dirName 命名链接），链接名与目标不一致的历史畸形状态不会被复制扩散。
+// 目录本身是 junction（整目录被指去别处）时视为无内容，与 scanSkillsDir 同口径。
+function linkedDirNamesInDir(skillsDir, repoAbs) {
+  const dirNames = new Set();
+  if (!skillsDir || !existsSync(skillsDir) || isJunction(skillsDir)) return dirNames;
+  let entries;
+  try {
+    entries = readdirSync(skillsDir, { withFileTypes: true });
+  } catch {
+    return dirNames;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || !entry.isSymbolicLink()) continue;
+    const dirName = repoAbs.get(normalizePath(junctionTarget(join(skillsDir, entry.name))));
+    if (dirName) dirNames.add(dirName);
+  }
+  return dirNames;
+}
+
+/**
+ * 技能面补齐：非用户主动触发面（进程启动 / Agent 可见集变化）把「该有而没有」
+ * 的 junction 补上。只增不改——实体目录、异向 junction、已占用的路径一概不动，
+ * 也不回收任何磁盘内容，所以失败静默的自动路径不会替用户做破坏性动作。两趟：
+ * - 镜像趟：某数据根挂着指向主仓库的 junction、同端点另一个已识别在装的根没挂
+ *   → 补挂缺失的一份（区域版数据根后出现时，先部署的版本看不到技能即此形态）。
+ * - 新端点趟：端点全部数据根都不在盘（装在本机但从没被部署过）→ 把「至少在其
+ *   他可见端点部署过」的技能全部补上。任一数据根在盘即不再参与这一趟——用户在
+ *   面板上解除部署过的端点不会被自动填回（解除只摘链接、目录留着）。
+ * 全局目录端点（~/.agents/skills）不是 Agent、不是部署目标，两趟都不参与。
+ * 可见性判定与部署同一口径（fail-open）；检测整体失败（快照 null）时调用方跳过
+ * 整次调用——自动路径不给未确认在装的端点造目录。
+ * 返回 { ok, created: [{endpointId, skillName}], skipped: [{endpointId, skillName, reason}] }。
+ */
+export async function catchUp(
+  { repoPath, isEndpointVisible = () => true },
+  { homeDir = homedir() } = {},
+) {
+  const result = { ok: true, created: [], skipped: [] };
+  const skills = scanRepo(repoPath);
+  if (!repoPath || skills.length === 0) return result;
+  const repoAbs = new Map(skills.map((s) => [normalizePath(s.absPath), s.dirName]));
+  const byDirName = new Map(skills.map((s) => [s.dirName, s]));
+
+  // 端点范围：可见、已启用、非全局目录、技能目录不与主仓库重叠（重叠端点以主
+  // 仓库身份在场，往里面挂链接等于挂到仓库自己身上）。
+  const endpoints = listEndpoints(homeDir).filter(
+    (ep) =>
+      ep.id !== GLOBAL_ENDPOINT_ID &&
+      ep.enabled &&
+      isEndpointVisible(ep.id) &&
+      !ep.skillsDirs.some((dir) => pathsOverlap(dir, repoPath)),
+  );
+
+  // 第一趟：逐根读已挂链接，跨可见端点并集 = 用户实际部署过的技能集（新端点趟
+  // 的补全基准）。全部根一起读（含区域版残留根）：链接在那，部署意图就在那。
+  const linked = new Map();
+  const union = new Set();
+  for (const endpoint of endpoints) {
+    const byRoot = new Map(endpoint.skillsDirs.map((dir) => [dir, linkedDirNamesInDir(dir, repoAbs)]));
+    linked.set(endpoint.id, byRoot);
+    for (const dirNames of byRoot.values()) for (const dirName of dirNames) union.add(dirName);
+  }
+
+  // 第二趟：逐端点补挂。写面仍走 activeSkillsDirs（只往已识别在装的数据根写）。
+  // mklink 是同步子进程：批量补齐时逐条让出事件循环，启动预热期间面板照常应答。
+  for (const endpoint of endpoints) {
+    const wanted = new Set();
+    const dirs = activeSkillsDirs(endpoint);
+    if (!endpoint.skillsDirs.some((dir) => existsSync(dir))) for (const dirName of union) wanted.add(dirName);
+    for (const dirNames of linked.get(endpoint.id).values()) for (const dirName of dirNames) wanted.add(dirName);
+    for (const skillsDir of dirs) {
+      if (isJunction(skillsDir)) continue;
+      for (const dirName of wanted) {
+        const linkPath = join(skillsDir, dirName);
+        if (lexists(linkPath)) {
+          // 已挂且指向本仓库 = 本趟无动作；其余占用（异向链接、实体目录）一律不碰
+          const already = isJunction(linkPath)
+            ? repoAbs.get(normalizePath(junctionTarget(linkPath)))
+            : null;
+          if (!already) result.skipped.push({ endpointId: endpoint.id, skillName: dirName, reason: "occupied" });
+          continue;
+        }
+        try {
+          mkdirSync(skillsDir, { recursive: true });
+          await new Promise((resolveTick) => setImmediate(resolveTick));
+          createJunction(linkPath, byDirName.get(dirName).absPath);
+          result.created.push({ endpointId: endpoint.id, skillName: dirName });
+        } catch (error) {
+          result.skipped.push({ endpointId: endpoint.id, skillName: dirName, reason: error.message });
+        }
+      }
+    }
+  }
+  return result;
+}
+
 /**
  * Import an external skill into the repo root. The source is either a
  * directory containing SKILL.md, or a .zip archive holding such a directory
@@ -1649,6 +1747,14 @@ export function createSkillsService({
       if (!endpointUsable(endpointId)) throw notInstalledEndpointError();
       const repoPath = requireExistingRepo();
       return deploy({ endpointId, skillName, repoPath, force: Boolean(force) }, deps);
+    },
+
+    // 自动补齐面（启动/可见集变化触发，非用户主动）：未配置仓库或仓库目录
+    // 不见了就静默跳过——自动路径不能把「还没设置主仓库」变成错误弹窗。
+    async catchUp() {
+      const repoPath = configuredRepo();
+      if (!repoPath || !existsSync(repoPath)) return { ok: true, created: [], skipped: [] };
+      return catchUp({ repoPath, isEndpointVisible }, { homeDir });
     },
 
     // undeploy（移除失效链接）只删链接不碰仓库，维持只查非空的旧守卫：
