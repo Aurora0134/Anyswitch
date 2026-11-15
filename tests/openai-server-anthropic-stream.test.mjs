@@ -6,9 +6,10 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 // Isolation fixture: redirect the per-user data root to a temp directory for
 // this whole test process. Deps below inject every injectable default-path

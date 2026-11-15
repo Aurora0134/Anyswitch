@@ -1,14 +1,15 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { once } from "node:events";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { createPanelRouter } from "../src/panel/panel.mjs";
-import { readClientUpdateRun, writeClientUpdateRun } from "../src/agents/client-update-journal.mjs";
+import { listClientUpdateRuns, readClientUpdateRun, writeClientUpdateRun } from "../src/agents/client-update-journal.mjs";
+// listen(0) 会抽中 fetch（undici）拒连的「bad port」，共享夹具命中即关掉换口重试。
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const RUN_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -93,9 +94,8 @@ async function withPanel(options, run) {
       res.end("unhandled route error");
     });
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const root = `http://127.0.0.1:${server.address().port}`;
+  const { port } = await listenLoopback(server);
+  const root = `http://127.0.0.1:${port}`;
   try {
     await run(
       async (path) => {
@@ -576,7 +576,32 @@ describe("staged 有效性判定", () => {
     });
   });
 
-  test("稳定轨目标高于当前版本：staged 照常给出（正常停留态不受影响）", async () => {
+    test("稳定轨目标版本严格低于当前版本：staged 失效（不只是相等才失效）", async () => {
+    const spawned = [];
+    await withPanel({
+      appInfo: { version: "0.7.0", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+    }, async (get, post, ctx) => {
+      // 目标 0.6.5 < 当前 0.7.0：下载后本地已经升到过它——把工作树换回去就是降级。
+      // 有效性判定必须按「目标不比当前新即失效」，不能只认相等：把 >= 0 收窄成
+      // === 0 的变异体会放过这条防线，staged 横幅会留着一条降级应用入口。
+      writeClientUpdateRun(ctx.journalDir, stagedRun({
+        targetVersion: "0.6.5", targetTag: "v0.6.5",
+        result: { outcome: "downloaded", message: "已下载 0.6.5，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.6.5" },
+      }));
+      const active = (await get("/panel/api/self-update/active")).body;
+      assert.equal(active.staged, null, "目标低于当前：不呈现");
+      const apply = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(apply.status, 409);
+      assert.equal(apply.body.error, "no_staged");
+      assert.equal(spawned.length, 0);
+      const marked = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      assert.equal(marked.stale, true, "记录被标记 stale");
+      assert.equal(marked.staleReason, "target_not_newer", "失效原因如实落盘");
+    });
+  });
+
+test("稳定轨目标高于当前版本：staged 照常给出（正常停留态不受影响）", async () => {
     await withPanel({}, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, stagedRun());
       const active = (await get("/panel/api/self-update/active")).body;
@@ -597,6 +622,53 @@ describe("staged 有效性判定", () => {
       const active = (await get("/panel/api/self-update/active")).body;
       assert.equal(active.staged, null, "目标提交已在本地：不呈现");
       assert.equal(readClientUpdateRun(ctx.journalDir, RUN_ID).staleReason, "already_at_target");
+    });
+  });
+});
+
+// ── worker 拉起失败（spawn_failed 守卫）────────────────────────────────
+describe("自更新 worker 拉起失败", () => {
+  test("下载段拉起失败（spawn 抛错）：500 spawn_failed，登记如实落 failed，单飞锁没有卡死", async () => {
+    await withPanel({
+      releaseService: selfUpdateReleaseService(),
+      spawnSelfUpdateWorkerFn: () => { throw new Error("spawn broken"); },
+    }, async (get, post, ctx) => {
+      const result = await post("/panel/api/self-update", {});
+      assert.equal(result.status, 500);
+      assert.equal(result.body.error, "spawn_failed");
+      assert.equal(result.body.message, "更新未能启动，请稍后重试");
+      const runs = listClientUpdateRuns(ctx.journalDir);
+      assert.equal(runs.length, 1, "登记已落盘");
+      assert.equal(runs[0].state, "done", "拉起失败不能留下 running 锁");
+      assert.equal(runs[0].result.outcome, "failed");
+      assert.equal(runs[0].result.message, "更新未能启动，请稍后重试");
+      assert.equal(runs[0].workerPid, null);
+      const active = (await get("/panel/api/self-update/active")).body;
+      assert.equal(active.runs.length, 0, "无 running：单飞锁没有卡死");
+      assert.equal(active.staged, null);
+    });
+  });
+
+  test("应用段拉起失败（workerPid 非正数）：500 spawn_failed，staged 记录翻回原样，监听器不布", async () => {
+    const watch = { scheduled: 0 };
+    await withPanel({
+      spawnSelfUpdateWorkerFn: () => 0,
+      selfUpdateWatchScheduleFn: () => { watch.scheduled += 1; return 42; },
+      selfUpdateWatchCancelFn: () => {},
+    }, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const result = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(result.status, 500);
+      assert.equal(result.body.error, "spawn_failed");
+      assert.equal(watch.scheduled, 0, "拉起失败不布换装监听器");
+      const restored = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      assert.equal(restored.state, "done");
+      assert.equal(restored.step, "download", "记录翻回「已下载待应用」");
+      assert.equal(restored.result.outcome, "downloaded", "已下载的成果不被吞掉");
+      assert.equal(restored.phase, "staged");
+      const active = (await get("/panel/api/self-update/active")).body;
+      assert.equal(active.staged?.runId, RUN_ID, "staged 仍可再次应用");
+      assert.equal(active.runs.length, 0);
     });
   });
 });
@@ -912,6 +984,40 @@ describe("稳定轨不一致判定（drift）", () => {
     });
   });
 
+  test("稳定轨干净安装（HEAD 恰在官方 tag 上 / 无本地 git 身份）：不产生 drift", async () => {
+    // 干净安装的守卫：ahead 与 offTag 都不成立时 buildStableDrift 必须原地返回
+    // null。删掉 `if (!ahead && !offTag) return null;` 会落一个双 false 的 drift
+    // 对象，关于页随之给干净安装错画「当前安装不是官方发布的版本」提示行——
+    // 现有套件只覆盖 ahead / offTag 至少一立的形态，守卫本身零保护。
+    const release = { getAppUpdate: async () => ({
+      currentVersion: "0.6.6", state: "current", checkedAt: "2026-10-15T00:00:00.000Z",
+      release: { version: "0.6.6", tag: "v0.6.6", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.6.6" },
+      errorCode: null,
+    }) };
+    // HEAD 恰是官方发布的 tag：offTag=false、ahead=false
+    await withPanel({
+      appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
+      releaseService: release,
+      readLocalHeadFn: async () => ({ sha: "cccccccccccccccccccccccccccccccccccccccc", short: "ccccccc" }),
+      readRemoteRefsFn: async () => ({ headSha: "fedcba0987654321fedcba0987654321fedcba09", tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
+    }, async (get) => {
+      const body = (await get("/panel/api/updates?refresh=1")).body;
+      assert.equal(body.state, "current");
+      assert.equal(body.track, "stable");
+      assert.equal(body.drift, null, "HEAD 在官方 tag 上：无不一致，drift 必须是 null");
+    });
+    // 镜像安装没有 .git：HEAD 维度跳过（offTag=null）、ahead=false
+    await withPanel({
+      appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
+      releaseService: release,
+      readLocalHeadFn: async () => null,
+    }, async (get) => {
+      const body = (await get("/panel/api/updates?refresh=1")).body;
+      assert.equal(body.state, "current");
+      assert.equal(body.drift, null, "无本地身份且版本一致：无不一致，drift 必须是 null");
+    });
+  });
+
   test("有可用更新时不判 drift；无 git 身份只判 ahead（跳过 HEAD 维度）", async () => {
     await withPanel({
       appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
@@ -1086,6 +1192,14 @@ describe("自更新页面级观察者（panel.js createSelfUpdateFrameWatcher）
     assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), undefined, "已读不落：换装后的新页面要经 /last 补显一次");
     h.frame(h.doneFrame("updated", "已更新到 0.7.0"));
     assert.equal(h.swaps.length, 1, "同一 run 只派一次，恢复失败也不反复重派");
+  });
+
+  test("接线钉：观察者的归属探针就是关于页控制器的 selfUpdateTracking", () => {
+    // 动态行为（真实探针随任务起落翻转、观察者据此让位/接管）由
+    // tests/panel-about.test.mjs 的「观察者归属让位走真实接线」用例覆盖；
+    // 这里钉住接线表达式本身，防止接线行被改回注入桩或断开。
+    assert.match(panelJs, /selfUpdateWatcher\.setAboutProbe\(about\.selfUpdateTracking\)/, "initSettingsView 的接线行");
+    assert.match(panelJs, /selfUpdateTracking: \(\) => Boolean\(selfUpdateRun\)/, "控制器暴露的探针读 selfUpdateRun");
   });
 
   test("归属让位：关于页跟踪、恢复在途、重启恢复页都不抢提示", () => {

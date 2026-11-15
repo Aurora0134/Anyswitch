@@ -134,7 +134,7 @@ export function createSessionScanOffload({
       }
       const id = (seq += 1);
       const timer = setTimeout(() => {
-        if (pending.delete(id)) retire(new Error("session_scan_timeout"));
+        if (pending.has(id)) retire(new Error("session_scan_timeout"));
       }, timeoutMs);
       timer.unref?.();
       pending.set(id, { resolve, reject, timer });

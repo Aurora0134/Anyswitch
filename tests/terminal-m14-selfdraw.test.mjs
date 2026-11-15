@@ -9,6 +9,8 @@ import { createScreenMirror } from "../src/terminal/terminal-screen.mjs";
 import { createTerminalHost } from "../src/terminal/terminal-host.mjs";
 import { createPanelRouter } from "../src/panel/panel.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+// listen(0) 会抽中 fetch（undici）拒连的「bad port」，共享夹具命中即关掉换口重试。
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 // M14 C 线后端地基的回归夹具：① 插件宿主行豁免；② 两处 detected-processes feed
 // 都带 zcodeSessions；③ zcode 精确绑定；④ 可见文本指纹与 lastVisibleAt；⑤ 快照
@@ -179,11 +181,8 @@ class FakePty {
 }
 
 async function listen(host) {
-  await new Promise((resolve, reject) => {
-    host.server.once("error", reject);
-    host.server.listen(0, "127.0.0.1", resolve);
-  });
-  return host.server.address().port;
+  const { port } = await listenLoopback(host.server);
+  return port;
 }
 
 function headers(host) {

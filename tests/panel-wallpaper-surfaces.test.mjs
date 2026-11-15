@@ -17,8 +17,21 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const panelCss = readFileSync(join(rootDir, "panel-ui", "panel.css"), "utf8");
 const panelJs = readFileSync(join(rootDir, "panel-ui", "panel.js"), "utf8");
 
-// 引擎 SURFACE_SPEC 的键集（壁纸主题下六个表面 token 的定义面）
-const ENGINE_SURFACE_KEYS = ["--bg", "--bg-page", "--surface", "--surface-sunken", "--surface-hover", "--surface-glass"];
+// 引擎 SURFACE_SPEC 的键集（壁纸主题下表面 token 的定义面）：从引擎源码派生，
+// 不手抄——引擎新增/下线表面 token 时这里跟着变，下面的「档位表恰好覆盖」对账
+// 才能在面板档位表没跟上时变红。亮暗两版的键集必须一致（档位表不分版）。
+const ENGINE_SURFACE_KEYS = (() => {
+  const engineSrc = readFileSync(join(rootDir, "panel-ui", "wallpaper-theme.js"), "utf8");
+  const spec = engineSrc.match(/const SURFACE_SPEC = \{[\s\S]*?\n  \};/);
+  assert.ok(spec, "wallpaper-theme.js 含 SURFACE_SPEC（表面 token 定义面）");
+  const byMode = {};
+  for (const m of spec[0].matchAll(/(light|dark): \{([\s\S]*?)\n    \}/g)) {
+    byMode[m[1]] = [...m[2].matchAll(/"(--[a-z0-9-]+)":/g)].map((k) => k[1]);
+  }
+  assert.ok(byMode.light?.length > 0 && byMode.dark?.length > 0, "SURFACE_SPEC 解析出亮暗两版键集");
+  assert.deepEqual([...byMode.light].sort(), [...byMode.dark].sort(), "SURFACE_SPEC 亮暗两版键集必须一致（档位表不分版）");
+  return byMode.light;
+})();
 
 // 档位表在 panel.js 里是纯数据：原样抽出来求值
 function surfaceTierTable() {

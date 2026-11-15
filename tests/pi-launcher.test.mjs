@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildInstanceId, buildPiLauncherEnv, runPiLauncher, writePiModels, resolvePiExecutable } from "../src/launchers/pi-launcher.mjs";
+import { buildInstanceId, buildPiLauncherEnv, runPiLauncher, writePiModels, resolvePiExecutable, main } from "../src/launchers/pi-launcher.mjs";
 import { readSidecar } from "../src/launchers/pi-merge-models.mjs";
 import { loadOrGenerateToken } from "../src/launchers/pi-relay-token.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
@@ -160,9 +160,12 @@ describe("runPiLauncher", () => {
         base: {},
       });
       assert.match(spawnedEnv.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
-      // The shared scheme is "<cwd basename>-<launcher pid>"; this process IS
-      // the launcher here, so the id ends with our own pid.
-      assert.ok(spawnedEnv.ANYSWITCH_INSTANCE_ID.endsWith(`-${process.pid}`));
+      // The shared scheme is "<cwd basename>-<launcher pid>" and this process IS
+      // the launcher here, so the id must be exactly what buildInstanceId()
+      // computes for this process. Equality rather than a pid-suffix check: the
+      // 64-char cap can truncate the pid tail when the run directory's basename
+      // is long, and that must not depend on where the suite happens to run.
+      assert.equal(spawnedEnv.ANYSWITCH_INSTANCE_ID, buildInstanceId());
     });
   });
 
@@ -416,5 +419,43 @@ describe("writePiModels", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+describe("main", () => {
+  // main 的依赖注入缝只服务测试：argv→piArgs、夹具 store→writeModels、退出码
+  // 透传，全在 main 这一层的接线上。runPiLauncher 单测看不到它，参数被静默
+  // 吞掉时这里翻红。模块级 loadStore 读 process.env.LOCALAPPDATA——套在
+  // withFakeLocalAppData 里，读的是夹具而非宿主机真实数据。
+  it("wires argv to the child, syncs from the fixture store and closes the relay", async () => {
+    await withFakeLocalAppData(async (storeRoot) => {
+      writeFakeStore(storeRoot);
+      const spawned = [];
+      const written = [];
+      let closed = false;
+      const code = await main(["-p", "hello"], {
+        startRelay: async () => ({ port: 7100, token: "tok", close: async () => { closed = true; } }),
+        writeModels: async (store, port, sidecarRoot) => {
+          written.push({ store, port, sidecarRoot });
+          return { ok: true, unchanged: true };
+        },
+        spawnPi: async ({ env, args }) => {
+          spawned.push({ env, args });
+          return 3;
+        },
+        log: () => {},
+        base: { LOCALAPPDATA: storeRoot },
+      });
+      assert.equal(code, 3, "child exit code passes through main");
+      assert.deepEqual(spawned[0].args, ["-p", "hello"], "argv must reach the child verbatim");
+      assert.equal(spawned[0].env.ANYSWITCH_RELAY_TOKEN, "tok");
+      assert.deepEqual(written, [
+        {
+          store: VALID_STORE,
+          port: 7100,
+          sidecarRoot: join(storeRoot, "Anyswitch"),
+        },
+      ], "the sync runs against the fixture store and fixture data root");
+      assert.equal(closed, true);
+    });
   });
 });

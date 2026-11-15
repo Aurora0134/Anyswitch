@@ -325,7 +325,7 @@ test("铺满一行的色块和字后面的色块，重画后还在", () => {
   assert.equal(rows[1].slice(6).every((cell) => cell.bg === "48;5;236"), true, "字后面的色块必须画到行尾");
 });
 
-test("resize 保留画面与历史，畸形/未知序列吞掉且不影响后续", () => {
+test("resize 保留画面与历史，畸形/未知序列吞掉且不影响后续（锚点按 CUP 精确落屏）", () => {
   const mirror = createScreenMirror({ cols: 40, rows: 10 });
   for (let i = 1; i <= 25; i += 1) mirror.write(`行 ${i}\r\n`);
   mirror.resize(60, 14);
@@ -336,7 +336,19 @@ test("resize 保留画面与历史，畸形/未知序列吞掉且不影响后续
     mirror.write("\u001b[\u001b\u001b]0;标题\u0007\u001bP?q\u001b\\\u001b[?9;9;9h\u001b[>1u\u001b[<x\u001b[1;2$}");
     mirror.write("\u001b[3;3H锚点\r\n");
   });
-  assert.equal(mirror.toReplay().length > 0, true, "吐完垃圾仍要能出回放");
+  // 「不影响后续」的可观察面是落屏位置：CUP 3;3 把锚点送进第 3 行第 3 列（0 起算
+  // index 2）。该行原有的「行 15」里占 1-2 列的是宽字「行」，锚点从第 3 列覆写起，
+  // 旧内容只有被锚点盖住的格子才许变——垃圾序列吞掉之后不得把锚点挤去别处、
+  // 也不得让它落两次。旧断言只看「不抛 + 回放非空」，锚点画歪了照样绿。
+  const lines = mirror.screenLines();
+  assert.equal(lines[2], "行锚点", "锚点必须精确落在 CUP 指定的第 3 行第 3 列");
+  assert.equal(lines.filter((line) => line.includes("锚点")).length, 1, "锚点只落一次，没有被垃圾序列复制或挪位");
+  // 回放自足：吞掉垃圾后吐出的回放，喂回干净镜像必须还原同一张画面（锚点位含在内）。
+  const replay = mirror.toReplay();
+  assert.ok(replay.length > 0, "吐完垃圾仍要能出回放");
+  assert.ok(replay.includes("锚点"), "回放必须带得上锚点");
+  const again = repaint(replay, 60, 14);
+  assert.deepEqual(again.screenLines(), lines, "回放重建的画面与垃圾后的实屏逐行一致");
 });
 
 // G1：rebuild() 的历史行文本缓存（_text，回放与跨重启快照的唯一来源）必须按**新**
@@ -975,6 +987,29 @@ describe("回放缓存", () => {
     const first = mirror.writeSliced("A".repeat(4096) + "\r\nBBB", 0.0001);
     assert.equal(first.done, false, "夹具前置：4096 字符必须真的停在半路，否则本用例退化为恒真");
     assert.ok(mirror.toReplay().includes("BBB"), "回放必须先排空待解析字节");
+  });
+
+  test("缓存命中的重复回放不再重算整屏序列化：有缓存与无缓存必须判得出", () => {
+    // 旧用例的值断言（两次相同 / 失效后不同）在无缓存的实现上同样全绿——重算两次值
+    // 本来就相同，缓存被删测试根本不知道。缓存的承诺是「重复 attach 不再重算」
+    // （terminal-screen.mjs 的 replayCache 注释：一次整屏重绘 15–20ms，而每次 attach
+    // 都会调一次）；删掉缓存读那一行，每次 toReplay 都是一次整屏重算，这里当场红。
+    // 大画面 + 长滚动区把冷构造拉到毫秒级、命中缓存是查表返回；门槛与重试纪律取
+    // 本文件 writeSliced 预算门槛同款（多次取最小，全超限才判红）。
+    const mirror = createScreenMirror({ cols: 200, rows: 120 });
+    for (let i = 0; i < 3000; i += 1) mirror.write(`hist ${i} ${"x".repeat(170)}\r\n`);
+    for (let r = 0; r < 120; r += 1) mirror.write(`row ${r} ${"y".repeat(190)}`);
+    const replay = mirror.toReplay(); // 冷构造：把整屏回放拼出来并存进缓存
+    assert.ok(replay.length > 500_000, `前置：夹具必须大到冷构造有可测成本（实得 ${replay.length} 字节）`);
+
+    let best = Number.POSITIVE_INFINITY;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const started = performance.now();
+      mirror.toReplay();
+      best = Math.min(best, performance.now() - started);
+    }
+    assert.ok(best < 1,
+      `缓存命中的重复回放最快 ${best.toFixed(2)}ms 必须 < 1ms——无缓存的实现每次都是一次整屏重算（毫秒级）`);
   });
 });
 

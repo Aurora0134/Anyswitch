@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createAgentMetricsCollector } from "../src/agents/agent-metrics.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
-import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID, resolveVirtualModelEntry } from "../src/channels/chain-routing.mjs";
+import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "../src/channels/chain-routing.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const TOKEN = "test-token-chain";
 
@@ -116,6 +117,7 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig, store = STORE }) {
     recordGeneration: () => {},
     readGeneration: () => null,
     getKeepAliveConfig,
+    poolLoadBalancingGate: () => false,
     effortInjector: OFF_EFFORT_INJECTOR,
     // 两门是 thunk（每请求现读）；测试注入定值正是源码预留的注入面。
     imageFallbackGate: () => false,
@@ -123,33 +125,13 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig, store = STORE }) {
   };
 }
 
-// Node 内置 fetch（undici）在建连之前就拒绝向受限端口发请求（"bad port"，
-// Chromium net/base/port_util.cc 的端口表）。Windows 默认动态端口区间
-// 1024-15000 与这张表相交，listen(0) 撞上时用例会与被测行为无关地随机挂掉。
-// 本机 Node v24.18.0 对 1-15000 全量探针实测，受限端口恰为下表 82 个（表内
-// 最大 10080），无论本机动态区间怎么配置，listen(0) 的结果必落在此表内外——
-// 命中就关掉换一个重来：约 1.4 万个候选端口里受限的是极少数，重试几乎总是
-// 立即成功。
-const UNDICI_BLOCKED_PORTS = new Set([
-  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
-  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
-  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
-  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995,
-  1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566,
-  6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
-]);
-
+// 端口假红与重试边界由共享夹具统一负责（test-helpers/loopback.mjs）。
 async function withServer(deps, fn) {
-  for (;;) {
-    const server = createOpenAIRelayServer(deps);
-    const { port, close } = await listenLoopback(server, 0);
-    if (!UNDICI_BLOCKED_PORTS.has(port)) {
-      try {
-        return await fn(port);
-      } finally {
-        await close();
-      }
-    }
+  const server = createOpenAIRelayServer(deps);
+  const { port, close } = await listenLoopback(server, 0);
+  try {
+    return await fn(port);
+  } finally {
     await close();
   }
 }
@@ -606,19 +588,24 @@ describe("chain routing: models and pre-flight", () => {
     });
   });
 
-  it("(models) 目录露出与请求路径准入同源：每个虚拟模型在目录里 ⇔ resolveVirtualModelEntry 认得它", async () => {
-    // 与 anthropic 通道的同名钉同一件事：openai 目录侧与查链入口必须对同一批
-    // 虚拟模型给出同一判定（启用、停用逐一比对）。中继准入收紧时目录自动跟随；
-    // 哪一侧另立口径，这条就红。空链形态进不了这条路径：loadValidStore 按
-    // schema 整店拒绝（存储层守卫），空链判定由 chain-routing 单元钉覆盖。
+  it("(models) 目录露出与请求路径准入同源：期望取自夹具声明（启用 ⇔ 出目录 ⇔ 准入放行）", async () => {
+    // 与 anthropic 通道的同名钉同一件事：目录侧与请求侧都必须对同一批虚拟模型
+    // 给出同一判定（启用、显式启用、停用三种形态逐一比对）。期望独立取自夹具
+    // 数据（enabled !== false），不用被测算子自己生成期望——此前期望由
+    // resolveVirtualModelEntry 生成，而目录侧正是它算出来的，两侧同变时这条
+    // 永远绿。空链形态进不了这条路径：loadValidStore 按 schema 整店拒绝
+    // （存储层守卫），空链判定由 chain-routing 单元钉覆盖。
     const vmStore = {
       ...STORE,
       virtualModels: [
         { name: "my-vm", chain: [{ node: "chan-a", model: "model-a" }] },
+        { name: "on-vm", enabled: true, chain: [{ node: "chan-a", model: "model-a" }] },
         { name: "off-vm", enabled: false, chain: [{ node: "chan-a", model: "model-a" }] },
       ],
     };
-    const { upstreamFetch, calls } = memberRouter({});
+    const { upstreamFetch, calls } = memberRouter({
+      "chan-a": () => healthyStream("vm answers"),
+    });
     const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY, store: vmStore });
 
     await withServer(deps, async (port) => {
@@ -629,13 +616,23 @@ describe("chain routing: models and pre-flight", () => {
       const body = await res.json();
       assert.deepEqual(calls, [], "model listing must not call any upstream");
       for (const vm of vmStore.virtualModels) {
-        const inCatalog = body.data.some((entry) => entry.id === vm.name);
+        const shouldServe = vm.enabled !== false;
         assert.equal(
-          inCatalog,
-          resolveVirtualModelEntry(vmStore, vm.name) !== null,
-          `${vm.name}: 目录露出必须与请求路径准入一致`,
+          body.data.some((entry) => entry.id === vm.name),
+          shouldServe,
+          `${vm.name}: 目录露出必须与夹具的启用声明一致`,
+        );
+        // 请求路径准入走真实 HTTP 入口：启用的虚拟模型名放行到上游，停用的
+        // 名字经典 404 且不碰上游。
+        const chat = await postChat(port, { model: vm.name });
+        await chat.text();
+        assert.equal(
+          chat.status,
+          shouldServe ? 200 : 404,
+          `${vm.name}: 请求路径准入必须与目录露出同一判定`,
         );
       }
+      assert.deepEqual(calls, ["chan-a", "chan-a"], "停用的虚拟模型不发起任何上游调用");
     });
   });
 
@@ -793,6 +790,41 @@ describe("chain runtime introspection endpoint (/api/internal/route-chain-runtim
       const body = await (await getRuntime(port)).json();
       assert.deepEqual(body.endpoints.zcode.lamps, ["red", "red"],
         "空流退无可退时，接手的那一跳同样是一次失败的请求");
+    });
+  });
+
+  it("(retry budget) 链成员按自己的 keep-alive 预算重试，预算内失败按请求数口径只计一次", async () => {
+    // 其余链路集成用例全部钉住 maxRetries:0，链节点的重试预算从未上过场：预算
+    // 在链节点上失守（首试即换员）或预算内多试被逐次计入链失败，都没有任何旧
+    // 用例会红。这条用例给链首渠道节点与池节点各挂 maxRetries:1——每个成员两次
+    // 尝试才退避下一员；同一请求内的多次尝试（重试 + 池内换员）按请求数口径
+    // 去重，单次失败不足以亮红。
+    const { upstreamFetch, calls } = memberRouter({
+      "chan-a": () => statusError(503),
+      "pool-m1": () => statusError(503),
+      "pool-m2": () => statusError(503),
+      "chan-c": () => healthyStream("recovered on C after budgets"),
+    });
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 5 }),
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port, { agentId: "kimi" });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("recovered on C after budgets"));
+      assert.deepEqual(calls, [
+        "chan-a", "chan-a",      // 链首渠道节点：先耗尽自己的重试预算
+        "pool-m1", "pool-m1",    // 池成员 1：同样两次尝试
+        "pool-m2", "pool-m2",    // 池成员 2：同样两次尝试
+        "chan-c",                // 末位节点应答
+      ], "每个链成员先消耗自己的 keep-alive 预算，再轮到下一员");
+
+      const body = await (await getRuntime(port)).json();
+      assert.deepEqual(body.endpoints.kimi.lamps, ["green", "green", "green"],
+        "一次请求内的多次尝试按请求数口径去重：单次失败不足以亮红（去重失守时 chan-a/pool-x 会亮红）");
     });
   });
 });

@@ -5,12 +5,30 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
-import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes, describeRelayStartupFailure } from "../src/relay/relay-host.mjs";
+import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes, describeRelayStartupFailure, startResidentRelay } from "../src/relay/relay-host.mjs";
+import { createProductionDeps } from "../src/launchers/launch.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { storePaths } from "../src/store/store-io.mjs";
+// listen(0) 会抽中 fetch（undici）拒连的「bad port」，用例随端口抽签随机假红；
+// 共享夹具命中即关掉换口重试（test-helpers/loopback.mjs 有完整说明）。
+import { listenLoopback } from "../test-helpers/loopback.mjs";
+
+// ---- 环境隔离（先于任何用例执行）----
+// startResidentRelay 的装配链（createProductionDeps 的凭据缓存门、effort 注入
+// 器默认路径、面板路由的 relay 控制默认值……）都按函数默认参数现读
+// process.env；导入链里没有 import 期捕获（逐一核对过）。这里把用户根整体重
+// 定向进本进程的临时根，装配测试读不到真实机器的 Anyswitch 配置。
+const ISOLATED_ENV_ROOT = mkTestDir("anyswitch-rh-env-");
+for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
+  process.env[key] = ISOLATED_ENV_ROOT;
+}
+// git anchor 是显式 opt-in（ANYSWITCH_GIT_ANCHOR=1 才动手），装配路径里的
+// ensureGitAnchor 在测试进程必须保持 no-op：防环境里带了真开关。
+delete process.env.ANYSWITCH_GIT_ANCHOR;
 
 function makeLogPath() {
   return join(mkTestDir("anyswitch-rh-"), "relay-host.log");
@@ -615,7 +633,7 @@ test("createTerminalHostSupervisor tees child output into logPath, rotating an o
 // /terminal-host/* routes: spliced in front of the relay server's own listener
 // by mountTerminalHostRoutes, guarded by loopback + the pi-relay-token, driving
 // the supervisor and persisting the manual-stop flag through settings.json.
-function routeHarness({ manualStop = false, fetchFn, spawnFn, startReadyTimeoutMs, startReadyIntervalMs } = {}) {
+function routeHarness({ manualStop = false, fetchFn, spawnFn, startReadyTimeoutMs, startReadyIntervalMs, token = "test-token", tokenValidator } = {}) {
   const root = mkTestDir("anyswitch-th-routes-");
   const settingsPath = join(root, "settings.json");
   let child = fakeChild();
@@ -634,7 +652,8 @@ function routeHarness({ manualStop = false, fetchFn, spawnFn, startReadyTimeoutM
   });
   const handler = createTerminalHostRoutes({
     supervisor,
-    token: "test-token",
+    token,
+    tokenValidator,
     settingsPath,
     root,
     logger,
@@ -654,11 +673,8 @@ function routeHarness({ manualStop = false, fetchFn, spawnFn, startReadyTimeoutM
     logger,
     server,
     spawns: () => spawns,
-    auth: { authorization: "Bearer test-token", "content-type": "application/json" },
-    listen: () => new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => resolve(server.address().port));
-    }),
+    auth: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    listen: async () => (await listenLoopback(server)).port,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
@@ -905,6 +921,211 @@ test("POST /terminal-host/stop without clearSessions leaves the state file alone
   }
 });
 
+// 轮换感知的 token 校验（relay-host.mjs 的 currentToken / relayTokenAccepted
+// 委托）：面板桥按 use-time 现读 token 文件，轮换发生后启动时拷贝的旧代际已经
+// 过期——按启动时 token 做静态比较会把面板锁在自己的 terminal host 门外。
+test("/terminal-host/* 的入站校验走轮换感知的 validator：旧代际 401、新代际放行", async () => {
+  const BOOT = "boot-gen-1";
+  const ROTATED = "rotated-gen-2";
+  const validator = {
+    isValid: (presented) => presented === ROTATED,
+    getCurrent: () => ROTATED,
+  };
+  const h = routeHarness({ token: BOOT, tokenValidator: validator });
+  const port = await h.listen();
+  try {
+    // 启动时的旧代际：静态比较（token === BOOT）在这里会放行——这条是反事实
+    // 变异的牙齿；轮换感知校验必须拒绝。
+    const stale = await fetch(`http://127.0.0.1:${port}/terminal-host/status`, { headers: { authorization: `Bearer ${BOOT}` } });
+    assert.equal(stale.status, 401, "启动时代际过期后必须拒绝 —— 静态比较在这里会假绿");
+    assert.equal((await stale.json()).error, "unauthorized");
+
+    const rotated = await fetch(`http://127.0.0.1:${port}/terminal-host/status`, { headers: { authorization: `Bearer ${ROTATED}` } });
+    assert.equal(rotated.status, 200, "validator 接受的当前代际放行");
+
+    // 裸值（无 Bearer 前缀）同样走 validator：面板桥两种形态都会发。
+    const bare = await fetch(`http://127.0.0.1:${port}/terminal-host/status`, { headers: { authorization: ROTATED } });
+    assert.equal(bare.status, 200);
+
+    // validator 拒绝的值（哪怕长度与旧代际不同）也不放行。
+    const stranger = await fetch(`http://127.0.0.1:${port}/terminal-host/status`, { headers: { authorization: "Bearer stranger" } });
+    assert.equal(stranger.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test("挂载路由的出站调用带当前代际：就绪探针与清场请求都拼 validator 的 getCurrent", async () => {
+  const BOOT = "boot-gen-1";
+  const ROTATED = "rotated-gen-2";
+  const probes = [];
+  const h = routeHarness({
+    token: BOOT,
+    tokenValidator: { isValid: (p) => p === ROTATED, getCurrent: () => ROTATED },
+    startReadyIntervalMs: 5,
+    fetchFn: async (url, options) => {
+      probes.push({ url, authorization: options.headers.authorization });
+      return { ok: true, status: 200, json: async () => ({ ok: true, cleared: 2 }) };
+    },
+  });
+  const port = await h.listen();
+  try {
+    const start = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: { authorization: `Bearer ${ROTATED}` } });
+    assert.equal(start.status, 200);
+    const stop = await fetch(`http://127.0.0.1:${port}/terminal-host/stop`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${ROTATED}`, "content-type": "application/json" },
+      body: JSON.stringify({ clearSessions: true }),
+    });
+    assert.equal(stop.status, 200);
+
+    // 就绪探针（GET /terminal/sessions）与清场（POST .../clear-all）都必须带
+    // validator 的当前代际——启动时拷贝的旧代际会让轮换后的 host 拒绝自家面板。
+    assert.ok(probes.some((p) => p.url.endsWith("/terminal/sessions") && p.authorization === `Bearer ${ROTATED}`), "就绪探针带当前代际");
+    assert.ok(probes.some((p) => p.url.endsWith("/terminal/sessions/clear-all") && p.authorization === `Bearer ${ROTATED}`), "清场请求带当前代际");
+    assert.ok(!probes.some((p) => p.authorization === `Bearer ${BOOT}`), "出站调用绝不能带启动时的旧代际（currentToken 缝被静态 token 替换时这里红）");
+  } finally {
+    await h.close();
+  }
+});
+
+// 常驻宿主入口 startResidentRelay 的装配：手动关停分支、/terminal-host 路由
+// 挂载、路由与 supervisor 的同一实例接线。supervisor / sync / watcher /
+// token 轮换全部注入替身，绑定端口经 options.relayPort 缝落在临时端口上——
+// 绝不碰真机 47821，也不 spawn 真实子进程。
+//
+// store 参数换掉预检用的最小 store.json（依赖装配验收需要可路由的渠道/池）。
+// createProductionDeps 参数走 src/relay/relay-host.mjs 的依赖来源注入缝：测试用
+// 真实工厂包一层、只覆写出网两键（upstreamFetch/loadCredential），装配透传的
+// loadStore/getKeepAliveConfig/getClaudeTierMapping/effortInjector 仍是真实工厂
+// 的产物。tokenRotationScheduleFn 默认换成捕获版：轮换检查回调交由用例驱动。
+function assemblyHarness({ settings, relayPort = 0, store, createProductionDeps: depsFactory, seed } = {}) {
+  const tmp = mkTestDir("anyswitch-rh-resident-");
+  const base = { LOCALAPPDATA: tmp };
+  const root = join(tmp, "Anyswitch");
+  mkdirSync(root, { recursive: true });
+  // store 预检要求一个可用的 store.json：最小合法 schema（version 2 + providers）。
+  writeFileSync(join(root, "store.json"), JSON.stringify(store ?? { version: 2, providers: {} }), "utf8");
+  const settingsPath = join(root, "settings.json");
+  if (settings !== undefined) {
+    writeFileSync(settingsPath, JSON.stringify(settings), "utf8");
+  }
+  // seed：启动前写进数据根的文件（token 代际、轮换链……）——装配必须读到
+  // 它们作为启动状态，晚写一步就只是普通文件。
+  for (const [name, content] of Object.entries(seed ?? {})) {
+    writeFileSync(join(root, name), content, "utf8");
+  }
+  const logPath = join(tmp, "relay-host.log");
+
+  const supervisorCalls = { start: 0, stop: 0 };
+  const supervisor = {
+    running: false,
+    manualStop: settings?.terminalHostManualStop === true,
+    async start() {
+      supervisorCalls.start += 1;
+      this.running = true;
+      return { ok: true, pid: 5150 };
+    },
+    async stop() {
+      supervisorCalls.stop += 1;
+      this.running = false;
+    },
+    status() {
+      const state = this.running ? "running" : (this.manualStop ? "stopped-manual" : "stopped");
+      return { state, pid: this.running ? 5150 : null, lastExit: null };
+    },
+    setManualStop(value) { this.manualStop = value === true; },
+    isManualStop() { return this.manualStop; },
+  };
+  const syncSpawns = [];
+  let rotationCheck = null;
+
+  const ready = startResidentRelay({
+    base,
+    paths: storePaths(root),
+    logPath,
+    relayPort,
+    terminalSupervisor: supervisor,
+    spawnAgentSync: async ({ port }) => {
+      syncSpawns.push(port);
+      return { ok: true };
+    },
+    storeWatcher: { close() {} },
+    tokenRotationScheduleFn: (check) => {
+      rotationCheck = check;
+      return () => {};
+    },
+    createProductionDeps: depsFactory,
+    metricsCollector: { startRequest: () => null, noteZcodeSessionRequest() {}, persistMetricsSnapshot() {}, getAgentsStatus: async () => [], onActivity: () => () => {} },
+    socketOwner: { lookup: () => null, onRefresh: () => () => {} },
+    serviceHealth: { snapshot: () => ({ degraded: false, consecutiveFailures: 0 }), recordFailure() {}, recordSuccess() {} },
+  });
+
+  return {
+    root,
+    settingsPath,
+    logPath,
+    supervisor,
+    supervisorCalls,
+    syncSpawns,
+    runRotationCheck: async () => {
+      assert.ok(rotationCheck, "轮换检查回调必须在装配时交给调度器");
+      await rotationCheck();
+    },
+    ready,
+  };
+}
+
+test("startResidentRelay 持久化了手动关停标记时不拉起 terminal host，/terminal-host 路由已挂载", async () => {
+  const h = assemblyHarness({ settings: { terminalHostManualStop: true, sparkWindowPoints: 24 } });
+  const result = await h.ready;
+  try {
+    assert.equal(result.reused, undefined, "临时端口上没有可复用的 relay，正常独占绑定");
+    assert.ok(result.port > 0 && result.port !== 47821, "绑定在注入的临时端口上，绝不碰真机 47821");
+    assert.equal(h.supervisorCalls.start, 0, "手动关停标记必须让常驻 relay 不拉起 terminal host");
+    assert.deepEqual(h.syncSpawns, [result.port], "启动同步仍然发生，且带实际绑定端口");
+
+    // 路由挂载的真实证明：经真实 HTTP 打进挂载的 supervisor 同一实例。
+    const denied = await fetch(`http://127.0.0.1:${result.port}/terminal-host/status`);
+    assert.equal(denied.status, 401, "挂载的路由同样受 pi-relay-token 保护");
+
+    const res = await fetch(`http://127.0.0.1:${result.port}/terminal-host/status`, { headers: { authorization: `Bearer ${result.token}` } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, host: { state: "stopped-manual", pid: null, lastExit: null } });
+
+    // 非 /terminal-host 路径仍落到 relay 自己的路由：挂载包装不吞请求。
+    const hello = await fetch(`http://127.0.0.1:${result.port}/api/hello`);
+    assert.equal(hello.status, 200);
+  } finally {
+    await result.close();
+  }
+});
+
+test("startResidentRelay 无标记时启动 terminal host，挂载的 stop 路由驱动同一个 supervisor 并落盘标记", async () => {
+  const h = assemblyHarness({});
+  const result = await h.ready;
+  try {
+    assert.equal(h.supervisorCalls.start, 1, "无手动关停标记时启动 terminal host");
+    assert.equal(typeof result.token, "string", "装配产出了会话 token");
+    assert.ok(result.token.length > 0, "会话 token 非空");
+
+    const res = await fetch(`http://127.0.0.1:${result.port}/terminal-host/stop`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${result.token}`, "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.host.state, "stopped-manual");
+    assert.equal(h.supervisorCalls.stop, 1, "挂载的路由驱动的是装配用的同一个 supervisor 实例");
+    const onDisk = JSON.parse(readFileSync(h.settingsPath, "utf8"));
+    assert.equal(onDisk.terminalHostManualStop, true, "stop 落盘手动关停标记到装配的 settings.json");
+  } finally {
+    await result.close();
+  }
+});
+
 // 启动失败的归因（2026-10-05）。
 //
 // 失败行以前是子进程直写的裸文本：没有时间、没有 PID，而多个实例共写同一个文件，
@@ -925,4 +1146,258 @@ test("describeRelayStartupFailure separates a foreign port from an unexpected fa
   assert.match(crash.detail, /the Anyswitch global store is not usable/, "意外故障保留原始信息");
   assert.match(crash.detail, /pid 777/);
   assert.notEqual(blocked.detail, crash.detail);
+});
+
+// ---- 常驻装配的依赖接线（createResidentDeps / startResidentRelay）----------
+//
+// 依赖装配此前只有 supervisor/路由挂载的验收，装配出的 deps 本身无人守：档位
+// 映射透传、keep-alive 配置透传、token 轮换接线、运行日志活闸门——任何一环在
+// 装配层断掉，常驻前端的对应能力就静默失效。以下用例全部经真实入口
+// startResidentRelay 驱动：createProductionDeps 注入缝只覆写出网两键，其余
+// deps 由真实工厂产出并经装配透传；设置热读读的是真实
+// loadSettings(defaultSettingsPath()) 链（env 根在文件顶部已整体重定向）。
+const RESIDENT_STORE = {
+  version: 2,
+  providers: {
+    "res-host": {
+      displayName: "Resident Host",
+      baseURL: "http://res-host.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "res-host.dpapi",
+      models: { "kimi-hosted": { displayName: "Kimi Hosted" } },
+    },
+    "res-p1": {
+      displayName: "Resident Pool 1",
+      baseURL: "http://res-p1.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "res-p1.dpapi",
+      models: { "shared-model": { displayName: "Shared from 1" } },
+    },
+    "res-p2": {
+      displayName: "Resident Pool 2",
+      baseURL: "http://res-p2.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "res-p2.dpapi",
+      models: { "shared-model": { displayName: "Shared from 2" } },
+    },
+  },
+  pools: {
+    "res-pool": { displayName: "Resident Pool", members: ["res-p1", "res-p2"] },
+  },
+};
+
+// 出网 mock：按 baseURL 主机段路由，非流式调用返回 chat-completions 形状的
+// 200 JSON（attemptMessages 会翻译回 Anthropic 形态）。behaviors[host] 收到
+// 本次的出网请求体，可按内容区分阶段；缺席的成员一律成功——「谁被调用」
+// 本身就是断言。
+function residentUpstream(recorder, behaviors = {}) {
+  return async (urls, init) => {
+    const url = Array.isArray(urls) ? urls[0] : urls;
+    const host = new URL(url).host.split(".")[0];
+    recorder.calls.push(host);
+    const body = init?.body ? JSON.parse(init.body) : null;
+    if (body) recorder.bodies.push(body);
+    const behavior = behaviors[host];
+    if (behavior) return behavior(body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: `${host} answers` }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 3, completion_tokens: 1 },
+      }),
+    };
+  };
+}
+
+// 装配级夹具：createProductionDeps 注入缝包真实工厂，只覆写 upstreamFetch 与
+// loadCredential（后者绕开真实 DPAPI 解密——测试不读任何真实凭据）。
+function residentAssemblyHarness({ settings, store = RESIDENT_STORE, behaviors } = {}) {
+  const recorder = { calls: [], bodies: [] };
+  const h = assemblyHarness({
+    settings,
+    store,
+    createProductionDeps: (opts) => ({
+      ...createProductionDeps(opts),
+      upstreamFetch: residentUpstream(recorder, behaviors),
+      loadCredential: async () => ({ ok: true, value: "TEST_SECRET" }),
+    }),
+  });
+  return { ...h, recorder };
+}
+
+// 装配链上的设置现读走 env 根的 defaultSettingsPath()（createProductionDeps
+// 不吃 base 注入）。防外围环境泄漏：轮换相关的 env 覆盖一律先摘掉。
+function envSettingsPath() {
+  const p = join(process.env.LOCALAPPDATA, "Anyswitch", "settings.json");
+  mkdirSync(dirname(p), { recursive: true });
+  return p;
+}
+for (const key of ["ANYSWITCH_KEEPALIVE_MODE", "ANYSWITCH_KEEPALIVE_ENABLED", "ANYSWITCH_KEEPALIVE_RETRIES"]) {
+  delete process.env[key];
+}
+
+test("常驻装配透传档位映射：接管改投经真实入口生效，映射行删除后热读回落为严格拒绝", async () => {
+  const h = residentAssemblyHarness();
+  const result = await h.ready;
+  const settingsFile = envSettingsPath();
+  try {
+    writeFileSync(settingsFile, JSON.stringify({ claudeTierMappings: { sonnet: "anthropic/res-host/kimi-hosted" } }));
+
+    const post = () => fetch(`http://127.0.0.1:${result.port}/v1/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${result.token}`, "content-type": "application/json", "x-agent-id": "claude" },
+      body: JSON.stringify({ model: "sonnet", max_tokens: 16, stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    const served = await post();
+    assert.equal(served.status, 200);
+    assert.deepEqual(h.recorder.calls, ["res-host"], "接管后由映射目标渠道应答");
+    assert.equal(h.recorder.bodies[0].model, "kimi-hosted", "上游拿到托管模型，档位名绝不出网");
+
+    // 热读：删掉映射行（不重启），同一条请求从「接管应答」翻转为「档位未映射」
+    // 拒绝——透传的 getter 是每请求现读 settings.json 的真实链。
+    writeFileSync(settingsFile, JSON.stringify({}));
+    h.recorder.calls.length = 0;
+    h.recorder.bodies.length = 0;
+    const refused = await post();
+    assert.equal(refused.status, 400);
+    assert.match((await refused.json()).error.message, /not mapped to any Anyswitch model yet/, "无映射行的档位名拒绝并指向未映射");
+    assert.deepEqual(h.recorder.calls, [], "拒绝路径不触达上游");
+  } finally {
+    await result.close();
+  }
+});
+
+test("常驻装配透传 keep-alive 配置并热读：端点开关关掉不重试，删掉开关立即恢复重试", async () => {
+  // 上游恒给空转流，两个阶段用不同的用户内容区分：「重试了几次」只由调用次数
+  // 区分——关断时 1 次，继承主开关时首空流 + 一次重试共 3 次。同一进程内改
+  // settings.json，改完的下一条请求立即按新配置解析。
+  const counters = { phase1: 0, phase2: 0 };
+  const h = residentAssemblyHarness({
+    behaviors: {
+      "res-host": (body) => {
+        const phase = body?.messages?.[0]?.content === "phase-2" ? "phase2" : "phase1";
+        counters[phase] += 1;
+        return {
+          ok: true,
+          status: 200,
+          body: (async function* () {
+            const enc = new TextEncoder();
+            yield enc.encode('data: {"id":"1","choices":[{"delta":{}}]}\n\n');
+            yield enc.encode("data: [DONE]\n\n");
+          })(),
+        };
+      },
+    },
+  });
+  const result = await h.ready;
+  const settingsFile = envSettingsPath();
+  try {
+    writeFileSync(settingsFile, JSON.stringify({
+      keepAlive: { enabled: true, mode: "on", maxRetries: 1, backoffMs: 10, endpoints: { dsh: { enabled: false } } },
+    }));
+
+    const post = (content) => fetch(`http://127.0.0.1:${result.port}/openai/res-host/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${result.token}`, "content-type": "application/json", "x-agent-id": "dsh" },
+      body: JSON.stringify({ model: "kimi-hosted", stream: true, messages: [{ role: "user", content }] }),
+    }).then(async (res) => {
+      await res.text();
+      return res.status;
+    });
+
+    assert.equal(await post("phase-1"), 502);
+    assert.equal(counters.phase1, 1, "dsh 被单独关断：空流不重试（装配透传的 getKeepAliveConfig 生效）");
+
+    // 热读：删掉 dsh 的开关位（不重启），下一条请求继承主开关重试。
+    writeFileSync(settingsFile, JSON.stringify({
+      keepAlive: { enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 },
+    }));
+    assert.equal(await post("phase-2"), 502);
+    assert.equal(counters.phase2, 2, "开关位删除后继承主开关：首空流 + 一次重试");
+  } finally {
+    await result.close();
+  }
+});
+
+test("常驻装配的 token 轮换接线：到期轮换换发代际、重同步代理端配置、validator 热采纳新代际", async () => {
+  // 预置 8 天前的代际（token 文件 + 链文件 + 最近使用记录，经 seed 缝在装配前
+  // 落盘），装配读到它为启动代际；链头 createdAt 让轮换检查立刻到期。使用记录
+  // 是 1 小时前——活跃会话的宽限语义（旧代际轮换后仍有效）依赖它，8 天前的
+  // createdAt 只驱动轮换，不代表最近用过。轮换检查回调经 tokenRotationScheduleFn
+  // 缝捕获，由用例手动驱动——不等待真实定时器。
+  const BOOT = "seeded-boot-token-gen-1";
+  const h = assemblyHarness({
+    store: RESIDENT_STORE,
+    seed: {
+      "pi-relay-token": BOOT,
+      "pi-relay-token-chain.json": JSON.stringify([
+        { token: BOOT, createdAt: Date.now() - 8 * 24 * 3600_000 },
+      ]),
+      "pi-relay-token-usage.json": JSON.stringify({ [BOOT]: Date.now() - 3600_000 }),
+    },
+  });
+  const tokenPath = join(h.root, "pi-relay-token");
+
+  const result = await h.ready;
+  try {
+    assert.equal(result.token, BOOT, "装配的会话 token 来自预置代际");
+    assert.deepEqual(h.syncSpawns, [result.port], "轮换前只有启动同步");
+
+    await h.runRotationCheck();
+
+    const rotated = readFileSync(tokenPath, "utf8").trim();
+    assert.notEqual(rotated, BOOT, "到期检查换发了新代际");
+    assert.match(rotated, /^[0-9a-f]{64}$/, "新代际仍是 64 位十六进制");
+    assert.equal(h.syncSpawns.length, 2, "轮换后重同步代理端配置");
+    assert.equal(JSON.parse(readFileSync(join(h.root, "sync-status.json"), "utf8")).source, "token-rotation", "重同步以轮换为落盘来源");
+
+    // validator 热采纳：不重启的进程立即认新代际（拒绝旧代际静态比较），
+    // 旧代际经链宽限仍然有效。
+    const denied = await fetch(`http://127.0.0.1:${result.port}/terminal-host/status`);
+    assert.equal(denied.status, 401);
+    const fresh = await fetch(`http://127.0.0.1:${result.port}/terminal-host/status`, { headers: { authorization: `Bearer ${rotated}` } });
+    assert.equal(fresh.status, 200, "新代际立即生效——validator 热采纳断在这里");
+    const grace = await fetch(`http://127.0.0.1:${result.port}/terminal-host/status`, { headers: { authorization: `Bearer ${BOOT}` } });
+    assert.equal(grace.status, 200, "旧代际经链宽限继续有效");
+  } finally {
+    await result.close();
+  }
+});
+
+test("常驻装配的运行日志活闸门热读：开关关掉逐行丢弃，改回立即恢复落盘", async () => {
+  const h = residentAssemblyHarness({
+    settings: { loggingEnabled: false },
+    // 池首成员 503：非流式扇出的 failover warn 是可按需触发的日志行。
+    behaviors: {
+      "res-p1": () => ({ ok: false, status: 503, body: { error: { message: "upstream 503" } } }),
+    },
+  });
+  const result = await h.ready;
+  try {
+    const post = () => fetch(`http://127.0.0.1:${result.port}/openai/res-pool/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${result.token}`, "content-type": "application/json", "x-agent-id": "zcode" },
+      body: JSON.stringify({ model: "shared-model", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+
+    const warnNeedsGateOn = () => post().then(async (res) => {
+      assert.equal(res.status, 200);
+      await res.json();
+    });
+
+    await warnNeedsGateOn();
+    assert.ok(existsSync(h.logPath), "日志文件随装配创建（tee 流）");
+    assert.equal(readFileSync(h.logPath, "utf8").includes("failing over to the next member"), false,
+      "开关关掉时 failover warn 被活闸门整条丢弃");
+
+    // 热读：settings.json 改回开启（不重启），下一条 failover warn 落盘。
+    writeFileSync(h.settingsPath, JSON.stringify({ loggingEnabled: true }));
+    await warnNeedsGateOn();
+    assert.ok(readFileSync(h.logPath, "utf8").includes("failing over to the next member"),
+      "开关改回后同一条日志路径立即恢复落盘");
+  } finally {
+    await result.close();
+  }
 });

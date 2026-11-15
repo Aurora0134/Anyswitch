@@ -114,7 +114,10 @@ export function fetchViaProxy({ url, proxyUrl, headers = {}, signal, bodyCapByte
         path: `${target.pathname}${target.search}`,
         method: "GET",
         headers: requestHeaders,
-        agent: false,
+        // 不能写 agent:false：该取值会让 Node 起一次性 Agent、忽略请求级
+        // createConnection，隧道 socket 被闲置、内层请求直连出站。保持
+        // agent 未设置时 Node 直接采用下方 createConnection，TLS 才真正
+        // 跑在 CONNECT 隧道之上。
         createConnection: () => {
           const tunneled = tls.connect({ socket, servername: target.hostname });
           activeSocket = tunneled;

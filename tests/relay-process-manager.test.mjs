@@ -31,6 +31,7 @@ import {
   stopRelay,
   restartRelay,
   findPortOwnerPid,
+  parsePortOwnerPid,
   createCachedPortOwnerFinder,
   PORT_OWNER_CACHE_TTL_MS,
   probePidLiveness,
@@ -97,6 +98,43 @@ function fakePowerShellChild({ code = 0, stdout = "" } = {}) {
   });
   return child;
 }
+
+// Same stand-in shape for the netstat child findPortOwnerPid wires up
+// (identical surface: stdout data, error/close, kill). autoClose=false keeps
+// the child silent so a test can drive the timeout/overflow branch instead.
+function fakeNetstatChild({ code = 0, stdout = "", error = null, autoClose = true } = {}) {
+  const handlers = {};
+  const child = {
+    stdout: {
+      setEncoding() {},
+      on(_event, fn) { handlers.data = fn; },
+    },
+    on(event, fn) { handlers[event] = fn; },
+    killCalls: 0,
+    kill() { this.killCalls += 1; },
+  };
+  queueMicrotask(() => {
+    if (stdout) handlers.data?.(stdout);
+    if (error) handlers.error?.(error);
+    if (autoClose) handlers.close?.(code);
+  });
+  return child;
+}
+
+// A representative slice of `netstat -ano -p tcp` output (CRLF line endings,
+// aligned columns, one foreign-address row that mentions the port without
+// LISTENING on it).
+const NETSTAT_SAMPLE = [
+  "",
+  "Active Connections",
+  "",
+  "  Proto  Local Address          Foreign Address        State           PID",
+  "  TCP    127.0.0.1:47821        0.0.0.0:0              LISTENING       4242",
+  "  TCP    127.0.0.1:51344        127.0.0.1:47821        ESTABLISHED     999",
+  "  TCP    [::]:47821             [::]:0                 LISTENING       31337",
+  "  TCP    127.0.0.1:139          0.0.0.0:0              LISTENING       4",
+  "",
+].join("\r\n");
 
 test("isOwnProcess accepts a relay-host command line inside the app dir", () => {
   assert.equal(isOwnProcess(OWN_RELAY_CMD, APP_DIR), true);
@@ -550,4 +588,163 @@ test("stopRelay treats an object probe reporting not-serving as down", async () 
 
   assert.equal(result.ok, true);
   assert.equal(result.relay.status, "stopped");
+});
+
+// --- 端口属主解析：parsePortOwnerPid 纯函数 + findPortOwnerPid 的
+// 超时/溢出/非零退出分支（经注入的 spawn 缝驱动，绝不 spawn 真 netstat）------
+
+test("parsePortOwnerPid 从 netstat 输出解析出 LISTENING 的属主 PID", () => {
+  // 第一条 LISTENING 的 47821 行即属主；ESTABLISHED 行虽含 :47821（远端地址）
+  // 但不是 LISTENING，必须被状态过滤丢掉。
+  assert.equal(parsePortOwnerPid(NETSTAT_SAMPLE, 47821), 4242);
+});
+
+test("parsePortOwnerPid 丢弃没有属主的形态：非 LISTENING、坏 PID、PID 0、别的端口、空输出", () => {
+  // 坏 PID 行不中断解析：跳过去找下一行合法属主。
+  assert.equal(
+    parsePortOwnerPid(
+      "TCP    127.0.0.1:47821        0.0.0.0:0              LISTENING       not-a-pid\r\n"
+      + "TCP    127.0.0.1:47821        0.0.0.0:0              LISTENING       5150",
+      47821,
+    ),
+    5150,
+    "坏 PID 行跳过，继续找下一行",
+  );
+  assert.equal(parsePortOwnerPid("TCP 127.0.0.1:47821 0.0.0.0:0 LISTENING 0", 47821), null, "PID 0 不是属主");
+  assert.equal(parsePortOwnerPid("TCP 127.0.0.1:47821 0.0.0.0:0 TIME_WAIT 4242", 47821), null, "非 LISTENING 状态不算");
+  assert.equal(parsePortOwnerPid("TCP 127.0.0.1:139 0.0.0.0:0 LISTENING 4", 47821), null, "别的端口的行不算");
+  assert.equal(parsePortOwnerPid("", 47821), null);
+  assert.equal(parsePortOwnerPid(NETSTAT_SAMPLE, 49999), null, "没有该端口的行返回 null");
+});
+
+test("findPortOwnerPid 经注入的 spawn 解析属主；非零退出、spawn 抛出、error 事件都返回 null", async () => {
+  let spawnCalls = 0;
+  let seen = null;
+  const spawnFn = (file, args) => {
+    spawnCalls += 1;
+    seen = { file, args };
+    return fakeNetstatChild({ stdout: NETSTAT_SAMPLE, code: 0 });
+  };
+  assert.equal(await findPortOwnerPid(47821, { spawn: spawnFn }), 4242);
+  assert.equal(spawnCalls, 1);
+  assert.equal(seen.file, "netstat");
+  assert.deepEqual(seen.args, ["-ano", "-p", "tcp"]);
+
+  // 非零退出：输出再合法也不算数（unreadable output proves nothing）。
+  assert.equal(await findPortOwnerPid(47821, { spawn: () => fakeNetstatChild({ stdout: NETSTAT_SAMPLE, code: 1 }) }), null);
+  // spawn 同步抛出。
+  assert.equal(await findPortOwnerPid(47821, { spawn: () => { throw new Error("netstat ENOENT"); } }), null);
+  // error 事件（真 netstat 缺失时 libuv 直接报错）。
+  assert.equal(
+    await findPortOwnerPid(47821, { spawn: () => fakeNetstatChild({ error: new Error("spawn netstat ENOENT"), autoClose: false }) }),
+    null,
+  );
+
+  // 端口为假：根本不 spawn。
+  assert.equal(await findPortOwnerPid(0, { spawn: spawnFn }), null);
+  assert.equal(spawnCalls, 1, "falsy 端口必须短路在 spawn 之前");
+});
+
+test("findPortOwnerPid 超时杀掉 netstat 并返回 null", async () => {
+  const child = fakeNetstatChild({ autoClose: false }); // never closes
+  const result = await findPortOwnerPid(47821, { spawn: () => child, timeoutMs: 20 });
+  assert.equal(result, null);
+  assert.equal(child.killCalls, 1, "超时必须 kill 子进程，不能让 netstat 挂着");
+});
+
+test("findPortOwnerPid 输出超过 maxBuffer 时杀掉子进程并返回 null", async () => {
+  const child = fakeNetstatChild({ stdout: "x".repeat(4 * 1024 * 1024 + 1), autoClose: false });
+  const result = await findPortOwnerPid(47821, { spawn: () => child, timeoutMs: 5000 });
+  assert.equal(result, null);
+  assert.equal(child.killCalls, 1, "溢出必须 kill 子进程（ENOBUFS 等价行为）");
+});
+
+// --- stopRelay 的生产默认链 -------------------------------------------------
+//
+// 此前的 stopRelay 用例全部注入 findPortOwnerPid / getProcessCommandLine 替身，
+// 生产默认（uncached 属主查询 + async 命令行查询）被整体绕过——换回旧的
+// cached / sync 实现这些用例照样全绿。下面两条不注入这两个键：默认函数本身
+// 留在被测路径上，netstat / powershell 子进程经 deps-passthrough 缝注入替身。
+
+test("stopRelay 生产默认链：uncached 属主查询 + async 命令行查询把两个属主都杀掉", async () => {
+  const root = makeRoot();
+  writeRelayPid(111, getRelayPidPath(root));
+
+  let netstatSpawns = 0;
+  let powershellSpawns = 0;
+  const netstatSpawn = (file, args) => {
+    netstatSpawns += 1;
+    assert.equal(file, "netstat");
+    assert.deepEqual(args, ["-ano", "-p", "tcp"]);
+    return fakeNetstatChild({
+      stdout: `TCP    127.0.0.1:47821        0.0.0.0:0              LISTENING       222\r\n`,
+      code: 0,
+    });
+  };
+  const powershellSpawn = (file, args) => {
+    powershellSpawns += 1;
+    assert.equal(file, "powershell.exe");
+    const pid = Number.parseInt(/ProcessId = (\d+)/.exec(args[3])?.[1] ?? "0", 10);
+    return fakePowerShellChild({ stdout: pid === 111 ? OWN_RELAY_CMD : OWN_LAUNCHER_CMD, code: 0 });
+  };
+
+  const killed = [];
+  const first = await stopRelay(root, {
+    netstatSpawn,
+    powershellSpawn,
+    isPidAlive: (pid) => pid === 111 || pid === 222,
+    terminatePid: (pid) => killed.push(pid),
+    probe: async () => false,
+    delay: async () => {},
+    stopPollMs: 1,
+    stopTimeoutMs: 10,
+  });
+  assert.equal(first.ok, true);
+  assert.deepEqual(killed.sort(), [111, 222], "filePid 与端口属主都走真实默认链到达 kill");
+  assert.equal(powershellSpawns, 2, "两个候选 PID 都经 async 默认查询验明正身");
+
+  // uncached 的正字：第二次停用必须重新查询属主。若默认被换回 cached 包装，
+  // 这里的查询会绕过注入的 netstat（直连真机）——netstatSpawns 停在 1，断言变红。
+  const killedAgain = [];
+  const second = await stopRelay(root, {
+    netstatSpawn,
+    powershellSpawn,
+    isPidAlive: () => true,
+    terminatePid: (pid) => killedAgain.push(pid),
+    probe: async () => false,
+    delay: async () => {},
+    stopPollMs: 1,
+    stopTimeoutMs: 10,
+  });
+  assert.equal(second.ok, true);
+  assert.deepEqual(killedAgain, [222], "pid 文件已清，只剩端口属主可杀");
+  assert.equal(netstatSpawns, 2, "kill 决策不吃缓存：第二次停用重新查询属主");
+});
+
+test("stopRelay 生产默认链对查不到命令线的 PID 拒杀（fail-safe 经真实默认函数生效）", async () => {
+  const root = makeRoot();
+  writeRelayPid(1234, getRelayPidPath(root));
+
+  const killed = [];
+  let powershellSpawns = 0;
+  const result = await stopRelay(root, {
+    // netstat 查无属主（空输出、exit 0）→ 只有 pid 文件里的 1234 是候选。
+    netstatSpawn: () => fakeNetstatChild({ stdout: "\r\n", code: 0 }),
+    // powershell 回了 exit 0 但输出为空 → 命令线 null → 必须拒杀。
+    powershellSpawn: () => {
+      powershellSpawns += 1;
+      return fakePowerShellChild({ stdout: "   ", code: 0 });
+    },
+    isPidAlive: (pid) => pid === 1234,
+    terminatePid: (pid) => killed.push(pid),
+    probe: async () => false,
+    delay: async () => {},
+    stopPollMs: 1,
+    stopTimeoutMs: 10,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /1234/);
+  assert.deepEqual(killed, [], "fail-safe 默认链同样不许杀验明不了的 PID");
+  assert.equal(powershellSpawns, 1, "async 命令行查询确实跑了一次");
 });

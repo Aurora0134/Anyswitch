@@ -1164,3 +1164,74 @@ test("通用: 全失败调用不建备份目录，也不触碰既有备份", asy
   assert.ok(result.failed[0].error.startsWith("identity-mismatch"), result.failed[0].error);
   assert.deepEqual(readdirSync(backupRoot).sort(), before, "无文件改动时不收敛用户历史备份：6 个历史目录一个都不能少");
 });
+
+// 托管前缀拒删的删除侧兜底此前只钉了 zcode/kimi/pi/dsh/workbuddy：codex/grok/
+// qoder 的保留前缀（anyswitch- / anyswitch- / qoder-custom-anyswitch-）在票据
+// 被伪造时没有用例拦住。伪造票据携带的 baseURL 特意不走本机 relay 指纹——
+// 那样会由另一道指纹兜底拦下，钉不住「前缀本身」这道闸；托管 id 不论 URL
+// 长什么样都不得删。
+test("codex/grok/qoder: 托管保留前缀 id 伪造票据也一律拒删", async () => {
+  const { dir, backupRoot } = setup();
+
+  const codexPath = writeFixture(
+    dir,
+    "codex/config.toml",
+    [
+      "[model_providers.foo]",
+      'name = "Foo"',
+      'base_url = "https://foo.example/v1"',
+      "",
+      "[model_providers.anyswitch-relay]",
+      'name = "Relay"',
+      'base_url = "https://mirror.example/v1"',
+      "",
+    ].join("\r\n"),
+  );
+  const grokPath = writeFixture(
+    dir,
+    "grok/config.toml",
+    [
+      '[model."anyswitch-relay"]',
+      'model = "m1"',
+      'base_url = "https://mirror.example/v1"',
+      "",
+    ].join("\n"),
+  );
+  const qoderPath = writeFixture(
+    dir,
+    "qoder/settings.json",
+    JSON.stringify(
+      {
+        providers: {
+          "qoder-custom-anyswitch-0123456789abcdef": {
+            baseUrl: "https://mirror.example/v1",
+            apiKey: "tok",
+            models: [],
+          },
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  const codexBefore = readFileSync(codexPath, "utf8");
+  const grokBefore = readFileSync(grokPath, "utf8");
+  const qoderBefore = readFileSync(qoderPath, "utf8");
+
+  const result = await removeImportedEntries(
+    [
+      entryOf("codex", codexPath, "anyswitch-relay", "https://mirror.example/v1"),
+      entryOf("grok", grokPath, "anyswitch-relay", "https://mirror.example/v1"),
+      entryOf("qoder", qoderPath, "qoder-custom-anyswitch-0123456789abcdef", "https://mirror.example/v1"),
+    ],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.removed, [], "三个托管前缀条目一个都不许删");
+  assert.equal(result.failed.length, 3);
+  assert.ok(result.failed.every((f) => f.error.startsWith("managed-entry")), JSON.stringify(result.failed));
+  assert.equal(readFileSync(codexPath, "utf8"), codexBefore, "codex 托管前缀表逐字节不动");
+  assert.equal(readFileSync(grokPath, "utf8"), grokBefore, "grok 托管前缀表逐字节不动");
+  assert.equal(readFileSync(qoderPath, "utf8"), qoderBefore, "qoder 托管前缀连接逐字节不动");
+  assert.equal(result.backupDir, null, "全失败调用不建备份目录");
+});

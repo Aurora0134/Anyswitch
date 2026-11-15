@@ -1,7 +1,7 @@
 // Cross-surface catalog consistency guardrail.
 //
 // The endpoint-facing model list reaches agents through several surfaces: the
-// Anthropic wire catalog (/v1/models), the eight agent-sync endpoint configs,
+// Anthropic wire catalog (/v1/models), the nine agent-sync endpoint configs,
 // and the OpenAI runtime path. They are only correct if they all express ONE
 // set of catalog semantics — the visible-channel derivation in
 // pool-providers.mjs. These tests pin that invariant so any future drift
@@ -19,9 +19,11 @@ import {
 } from "../src/channels/pool-providers.mjs";
 import { poolModelsUnion, resolvePool } from "../src/channels/pool-routing.mjs";
 import { validateStore } from "../src/store/store-schema.mjs";
-// The eight agent-sync endpoint config surfaces. Imported only to pin that
+// The nine agent-sync endpoint config surfaces. Imported only to pin that
 // each one re-exports the ONE shared derivation — a reference-identity check,
-// the only form a behavior-equal copy cannot pass.
+// the only form a behavior-equal copy cannot pass. WorkBuddy 写的是 models.json
+// 而非 TOML/JSON 配置，但它的托管渠道同样来自这份派生：缺席一枚端点，池/成员
+// 吸收回归就只在该端点的模型表里发作，钉不住。
 import * as dshMergeConfig from "../src/launchers/dsh-merge-config.mjs";
 import * as codexMergeConfig from "../src/launchers/codex-merge-config.mjs";
 import * as kimiMergeConfig from "../src/launchers/kimi-merge-config.mjs";
@@ -30,6 +32,7 @@ import * as opencodeMergeConfig from "../src/launchers/opencode-merge-config.mjs
 import * as piMergeModels from "../src/launchers/pi-merge-models.mjs";
 import * as qoderMergeConfig from "../src/launchers/qoder-merge-config.mjs";
 import * as zcodeMergeConfig from "../src/launchers/zcode-merge-config.mjs";
+import * as workbuddyMergeModels from "../src/launchers/workbuddy-merge-models.mjs";
 
 const SYNC_SURFACES = {
   "dsh-merge-config.mjs": dshMergeConfig,
@@ -40,6 +43,7 @@ const SYNC_SURFACES = {
   "pi-merge-models.mjs": piMergeModels,
   "qoder-merge-config.mjs": qoderMergeConfig,
   "zcode-merge-config.mjs": zcodeMergeConfig,
+  "workbuddy-merge-models.mjs": workbuddyMergeModels,
 };
 
 function makeStore() {

@@ -459,6 +459,44 @@ describe("panel router skills routes", () => {
       assert.equal(json().ok, false);
     }
   });
+
+  // 回归钉（懒建缝）：不注入 skillsService 时，首个请求走懒建——工厂收到的
+  // isEndpointVisible 必须来自环境检测（未安装端点不可见）。真 skills 服务会扫
+  // 真实 home 目录，这里借工厂注入缝捕获参数，不碰盘面。去掉懒建处的该参数，
+  // 这条就红。
+  it("懒建 skills 服务：isEndpointVisible 来自环境检测（未安装端点不可见）", async () => {
+    const clients = [
+      { id: "claude", installations: [{ status: "found" }] },
+      { id: "grok", installations: [{ status: "not_found" }, { status: "not_found" }] },
+    ];
+    const env = { getState: async () => ({ clients }) };
+    const base = { LOCALAPPDATA: "C:/fake/local", APPDATA: "C:/fake/roaming" };
+    const factories = [];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null,
+      metricsCollector: null,
+      aliasResolver: null,
+      aliasPath: null,
+      fetchRelayAgents: async () => null,
+      environmentService: env,
+      base,
+      skillsServiceFactory: (args) => {
+        factories.push(args);
+        return { getState: () => ({ repoPath: null, repoConfigured: false, repoValid: false, skills: [], endpoints: [{ id: "lazy-built" }], candidates: [] }) };
+      },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/skills/state", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(factories.length, 1, "首个请求懒建恰一次");
+    assert.equal(factories[0].base, base, "懒建把路由的 base 原样交给工厂");
+    const visible = factories[0].isEndpointVisible;
+    assert.equal(typeof visible, "function", "懒建必须把 isEndpointVisible 注入工厂");
+    assert.equal(visible("claude"), true, "已安装端点可见");
+    assert.equal(visible("grok"), false, "全部形态都未找到的端点不可见");
+    assert.deepEqual(json().endpoints, [{ id: "lazy-built" }], "响应由懒建的服务答出");
+  });
 });
 
 // ── panel.html 变动差分高亮（diffSkillsState）──
@@ -644,6 +682,53 @@ describe("panel.html skills change diff highlighting", () => {
     // 常驻中性：标题图标不随失效 / 分叉切换，告警语义只由计数徽标与行内徽标承担
     assert.doesNotMatch(panelJs, /skillsAnomalyTitle(Icon|Ico)|anomalyIcon/);
     assert.match(extractFn("renderSkillsAnomalies", ""), /badge\.className = "badge " \+ \(broken\.length \+ diverged\.length \? "badge-warn" : "badge-neutral"\);/);
+  });
+
+  // 真跑刷新反馈包装（presets/skills 同一套桩）：入口变暗与重入闸原先只有 finally
+  // 恢复面的字符串断言，删掉 `btn.disabled = true` 与 `if (btn.disabled) return`
+  // 两条用例仍全绿。这里把函数体抽出来在桩环境里执行：在飞窗口断言按钮已变暗、
+  // 第二次点击被闸住（不叠加第二轮刷新）、收尾恢复可点。
+  function refreshFeedbackHarness(kind) {
+    const btn = { disabled: false };
+    const list = { classes: new Set() };
+    list.classList = {
+      add: (c) => list.classes.add(c),
+      remove: (c) => list.classes.delete(c),
+      contains: (c) => list.classes.has(c),
+    };
+    const calls = { refresh: 0 };
+    const waits = [];
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const pendingKey = kind === "skills" ? "skillsCascadePending" : "presetsCascadePending";
+    const refreshName = kind === "skills" ? "refreshSkillsState" : "refreshPresetsState";
+    const fnName = kind === "skills" ? "runSkillsRefreshWithFeedback" : "runPresetsRefreshWithFeedback";
+    const api = new Function(
+      "$", refreshName, "SKILLS_CASCADE_TOTAL_MS", "setTimeout",
+      `let ${pendingKey} = null;\n${extractFn(fnName, "")}\nreturn { run: ${fnName}, pending: () => ${pendingKey} };`,
+    )(
+      (id) => (id.endsWith("Btn") ? btn : list),
+      async () => { calls.refresh += 1; await gate; },
+      320,
+      (fn, ms) => { waits.push(ms); fn(); },
+    );
+    return { ...api, btn, list, calls, waits, release };
+  }
+
+  it("manual refresh 真跑：点击瞬间变暗＋隐列，在飞重入被闸，收尾恢复", async () => {
+    const h = refreshFeedbackHarness("skills");
+    const first = h.run();
+    assert.equal(h.btn.disabled, true, "点击瞬间变暗（入口 disabled=true，先于任何 await）");
+    assert.ok(h.list.classes.has("is-blank"), "点击瞬间隐列");
+    assert.equal(h.pending(), true, "cascade 标记在入口置位");
+    await h.run();
+    assert.equal(h.calls.refresh, 1, "在飞重入被闸住（重入闸 return，不叠加第二轮刷新）");
+    h.release();
+    await first;
+    assert.equal(h.btn.disabled, false, "收尾恢复可点");
+    assert.ok(!h.list.classes.has("is-blank"), "收尾撤隐列");
+    assert.equal(h.pending(), false, "收尾消费 cascade 标记");
+    assert.deepEqual(h.waits, [320], "数据落地后等一拍 320ms 收尾（串行 cascade 契约）");
   });
 
   it("manual refresh dims the button until the cascade finishes, not for a fixed floor", () => {
@@ -849,6 +934,22 @@ describe("panel.html skills change diff highlighting", () => {
       fn,
       /finally \{[\s\S]*?presetsCascadePending = false;[\s\S]*?\$\("presetsList"\)\.classList\.remove\("is-blank"\);[\s\S]*?btn\.disabled = false;/
     );
+  });
+
+  it("presets refresh 真跑：点击瞬间变暗＋隐列，在飞重入被闸，收尾恢复", async () => {
+    const h = refreshFeedbackHarness("presets");
+    const first = h.run();
+    assert.equal(h.btn.disabled, true, "点击瞬间变暗（入口 disabled=true，先于任何 await）");
+    assert.ok(h.list.classes.has("is-blank"), "点击瞬间隐列");
+    assert.equal(h.pending(), true, "cascade 标记在入口置位");
+    await h.run();
+    assert.equal(h.calls.refresh, 1, "在飞重入被闸住（重入闸 return，不叠加第二轮刷新）");
+    h.release();
+    await first;
+    assert.equal(h.btn.disabled, false, "收尾恢复可点");
+    assert.ok(!h.list.classes.has("is-blank"), "收尾撤隐列");
+    assert.equal(h.pending(), false, "收尾消费 cascade 标记");
+    assert.deepEqual(h.waits, [320], "数据落地后等一拍 320ms 收尾（串行 cascade 契约）");
   });
 
   it("renderPresetsList consumes the cascade mark, emits --i, and restores scroll on cascade", () => {

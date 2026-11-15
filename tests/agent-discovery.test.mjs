@@ -25,6 +25,57 @@ test("同步闸门形态表覆盖 AGENT_ENDPOINTS 全部端点，未登记的端
     assert.ok(AGENT_INSTALL_FORMS[name], `${name} 必须登记在盘判定形态`);
   }
   assert.equal(agentInstallState("never-registered", {}), "uncertain");
+  // 形态清单逐端点钉住（以解析器名单为准）。只钉「键存在」时，表里的桌面端
+  // 形态被删掉不会红——桌面-only 机器会从「installed」退成「absent」，同步闸门
+  // 随即跳过写配置，而环境页另一侧仍显示已装，两侧口径就此分叉。
+  const EXPECTED_FORMS = {
+    zcode: ["resolveZcodeExecutable", "resolveZcodeCliExecutable"],
+    dsh: ["resolveDshExecutable", "resolveDshDesktopExecutable"],
+    pi: ["resolvePiExecutable"],
+    kimi: ["resolveKimiExecutable", "resolveKimiDesktopExecutable"],
+    qoder: ["resolveQoderCliExecutable", "resolveQoderDesktopExecutable", "resolveQoderCnCliExecutable", "resolveQoderCnDesktopExecutable"],
+    codex: ["resolveCodexExecutable"],
+    opencode: ["resolveOpencodeExecutable"],
+    grok: ["resolveGrokExecutable"],
+    workbuddy: ["resolveWorkbuddyExecutable", "resolveWorkbuddyDesktopExecutable"],
+  };
+  assert.deepEqual(Object.keys(AGENT_INSTALL_FORMS), Object.keys(EXPECTED_FORMS), "形态表的端点集合与清单一致");
+  for (const [endpoint, names] of Object.entries(EXPECTED_FORMS)) {
+    assert.deepEqual(
+      AGENT_INSTALL_FORMS[endpoint].map((resolve) => resolve.name),
+      names,
+      `${endpoint} 的在盘判定形态清单`,
+    );
+  }
+});
+
+test("agentInstallState 多形态端点：桌面端单独在盘也判 installed，全空如实报 absent", () => {
+  // 形态清单之外还要钉判定语义本身：任一形态解析出存在的文件即在装。桌面端
+  // 是很多机器的唯一形态（CLI 没装、只装了桌面客户端），这里逐端点摆出
+  // 「只有桌面端在盘」的夹具。
+  const dir = mkTestDir("install-forms-");
+  try {
+    const desktopOnly = (endpoint, relative) => {
+      const base = { USERPROFILE: join(dir, endpoint), LOCALAPPDATA: join(dir, endpoint, "local"), APPDATA: join(dir, endpoint, "roaming") };
+      const exe = join(base.LOCALAPPDATA, relative);
+      mkdirSync(dirname(exe), { recursive: true });
+      writeFileSync(exe, "MZ");
+      assert.equal(agentInstallState(endpoint, base), "installed", `${endpoint} 只有桌面端在盘也判在装`);
+    };
+    desktopOnly("dsh", join("Programs", "DeepSeek Harness", "DeepSeek Harness.exe"));
+    desktopOnly("kimi", join("Programs", "Kimi Code", "Kimi Code.exe"));
+    desktopOnly("workbuddy", join("Programs", "WorkBuddy", "WorkBuddy.exe"));
+    desktopOnly("zcode", join("Programs", "zcode", "ZCode.exe"));
+    desktopOnly("qoder", join("Programs", "Qoder IDE", "Qoder IDE.exe"));
+
+    // 全空形态：所有解析器如实落空 → absent（不是 uncertain）。
+    const empty = { USERPROFILE: join(dir, "empty"), LOCALAPPDATA: join(dir, "empty-local"), APPDATA: join(dir, "empty-roaming") };
+    for (const endpoint of Object.keys(AGENT_INSTALL_FORMS)) {
+      assert.equal(agentInstallState(endpoint, empty), "absent", `${endpoint} 两形态全空如实报 absent`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("standalone discovery preserves all ten launcher installation choices", () => {
@@ -264,15 +315,34 @@ test("opencode 认 npm 把平台包提到全局 node_modules 顶层的落盘形�
 test("opencode 上游再改名时按 bin 声明认包，不再依赖写死的包名", () => {
   // 候选包名只是快路径：本机装了 opencode 命令（npm 落下的 shim 在）而两个已知
   // 包名都不存在时，扫一遍全局 node_modules，认 bin 里提供 opencode 的那个包。
+  // 夹具里放一个排在真包之前、bin 只提供 filler 的诱饵包：认「bin 提供 opencode」
+  // 之外的任何退化实现（目录序取第一个、扫到带 manifest 的包就要）都会解析到
+  // 诱饵的执行体，这里逐位比较立刻红。
   const dir = mkTestDir("opencode-rename-");
   try {
     const roaming = join(dir, "roaming");
     mkdirSync(join(roaming, "npm"), { recursive: true });
     writeFileSync(join(roaming, "npm", "opencode.cmd"), "@echo off\r\n");
+
+    // 诱饵：@aaa-tools/filler（目录序在 @anomalyco 之前），bin 不含 opencode。
+    const decoyDir = join(roaming, "npm", "node_modules", "@aaa-tools", "filler");
+    mkdirSync(join(decoyDir, "bin"), { recursive: true });
+    writeFileSync(join(decoyDir, "package.json"), JSON.stringify({
+      name: "@aaa-tools/filler", version: "1.0.0", bin: { filler: "./bin/filler.exe" },
+      optionalDependencies: { "@aaa-tools/filler-windows-x64": "1.0.0" },
+    }));
+    const decoyExe = join(decoyDir, "node_modules", "@aaa-tools", "filler-windows-x64", "bin", "filler.exe");
+    mkdirSync(dirname(decoyExe), { recursive: true });
+    writeFileSync(decoyExe, "MZ");
+
     const { exeOf } = installOpencode(roaming, {
       name: "@anomalyco/opencode", variants: ["@anomalyco/opencode-windows-x64"],
     });
-    assert.equal(resolveOpencodeExecutable({ APPDATA: roaming }), exeOf("@anomalyco/opencode-windows-x64"));
+    assert.equal(
+      resolveOpencodeExecutable({ APPDATA: roaming }),
+      exeOf("@anomalyco/opencode-windows-x64"),
+      "诱饵包不拦路：解析到 bin 里提供 opencode 的那个包",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -554,6 +624,14 @@ test("agentInstallState qoder：只装 CN 区域版也判在装（双指纹聚�
     mkdirSync(join(dir, ".qoder-cn", "bin", "qoderclicn"), { recursive: true });
     writeFileSync(join(dir, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"), "MZ");
     assert.equal(agentInstallState("qoder", base), "installed", "CN CLI 在盘即端点在装");
+    // 四形态逐个独立成票：CN 桌面工作台单独在盘的机器同样判在装——形态清单里
+    // 少了这一票时，桌面-only 的 CN 机器会从 installed 退成 absent（见上面的
+    // 形态清单互钉，这里钉的是判定语义本身）。
+    const desktopOnly = { USERPROFILE: join(dir, "desktop"), LOCALAPPDATA: join(dir, "desktop", "local") };
+    const cnIde = join(desktopOnly.LOCALAPPDATA, "Programs", "Qoder CN", "Qoder CN.exe");
+    mkdirSync(dirname(cnIde), { recursive: true });
+    writeFileSync(cnIde, "MZ");
+    assert.equal(agentInstallState("qoder", desktopOnly), "installed", "CN 桌面工作台在盘即端点在装");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

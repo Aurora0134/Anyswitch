@@ -159,7 +159,10 @@ const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_ENV_ENTRIES = 512;
 const MAX_ENV_VALUE_BYTES = 32_000;
 const MAX_ENV_TOTAL_BYTES = 256 * 1024;
-const MAX_LAUNCH_ARG_BYTES = 4096;
+// 导出只为测试互钉：续接身份上限（agent-session-env 的 RESUME_ARG_MAX_LENGTH）
+// 承诺与这里的 argv 上限同口径，agent-session-env.test.mjs 直接 import 本值做
+// 夹具边界，谁漂移都在那里爆红。运行时行为不变。
+export const MAX_LAUNCH_ARG_BYTES = 4096;
 const MAX_LAUNCH_ARGS = 64;
 
 function badRequest(error) {
@@ -1680,6 +1683,10 @@ export function createTerminalHost({
         // 杀失败保留登记：下一轮重启/关闭还要再试一次，丢了登记就等于放弃
         // 那棵树（pid 可被复用，之后想杀也不敢动手了）。
         logger.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
+        // pty.kill 可能同步发退出通知并摘掉 pid；但独立树杀明确失败时，
+        // 控制台解耦的后代仍可能存活，必须恢复这一代登记供重试。
+        session.livePids?.add(pid);
+        throw Object.assign(new Error("terminal process tree termination failed"), { cause: error });
       }
     }
   }
@@ -2032,10 +2039,18 @@ export function createTerminalHost({
       // 会被当成会话 id 走到 404。
       if (url.pathname === "/terminal/sessions/clear-all" && req.method === "POST") {
         let cleared = 0;
+        let terminationError = null;
         for (const session of [...sessions.values()]) {
-          // 清场同样走树杀：relay 收到 200 就杀宿主子进程，任何一个会话的控制台
-          // 解耦进程漏网，relay 重启后它就成了一代新幽灵。
-          await terminateSessionTree(session);
+          // 先终结全部旧树；任何一棵仍存活就整体拒绝清场，绝不删掉其它
+          // 会话的记录造成半清场。下一轮只重试仍登记的 pid。
+          try {
+            await terminateSessionTree(session);
+          } catch (error) {
+            terminationError ??= error;
+          }
+        }
+        if (terminationError) throw terminationError;
+        for (const session of [...sessions.values()]) {
           for (const listener of session.listeners) listener(null);
           session.listeners.clear();
           sessions.delete(session.id);
@@ -2317,25 +2332,41 @@ export function watchParentProcess({
   return timer;
 }
 
-const isMain = process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === process.argv[1].toLowerCase();
-if (isMain) {
-  installTerminalHostFaultHandlers({ logPath: join(APP_DIR, "logs", "terminal-host.log") });
-  startTerminalHost().then((host) => {
+// 入口接线（isMain 块的本体，2026-11-15 从内联块抽出）。抽出只为把接线交给测试注入：
+// 四根线——故障处理器先装、SIGINT/SIGTERM 各走 close→exit(0)、env 里的父 pid 接到
+// 死亡契约、启动失败写 stderr 并 exit(1)——任何一根被删都该有红证。默认参数就是
+// 真实依赖，isMain 仍以无选项调用本函数：生产行为与副作用顺序与抽出前逐字节一致。
+export function runTerminalHostEntry({
+  proc = process,
+  env = process.env,
+  startHost = startTerminalHost,
+  installFaultHandlers = installTerminalHostFaultHandlers,
+  watchParent = watchParentProcess,
+  logPath = join(APP_DIR, "logs", "terminal-host.log"),
+} = {}) {
+  installFaultHandlers({ logPath });
+  return startHost().then((host) => {
     // Startup anchor for the tee'd log: every crash line after this one belongs
     // to this process incarnation.
-    process.stderr.write(`[${formatLogStamp(Date.now())}] [info] terminal host listening on 127.0.0.1:${host.port} (pid ${process.pid})\n`);
-    process.on("SIGINT", () => host.close().then(() => process.exit(0)));
-    process.on("SIGTERM", () => host.close().then(() => process.exit(0)));
+    proc.stderr.write(`[${formatLogStamp(Date.now())}] [info] terminal host listening on 127.0.0.1:${host.port} (pid ${proc.pid})\n`);
+    proc.on("SIGINT", () => host.close().then(() => proc.exit(0)));
+    proc.on("SIGTERM", () => host.close().then(() => proc.exit(0)));
     // Relay-owned mode: the parent relay pid arrives via env; when the relay
     // is gone this host must follow. Without the env var (tests, single
     // runs) nothing changes.
-    const parentPid = Number.parseInt(process.env[TERMINAL_PARENT_PID_ENV] ?? "", 10);
-    watchParentProcess({
+    const parentPid = Number.parseInt(env[TERMINAL_PARENT_PID_ENV] ?? "", 10);
+    watchParent({
       parentPid,
-      onDead: () => host.close().then(() => process.exit(0)),
+      onDead: () => host.close().then(() => proc.exit(0)),
     });
+    return host;
   }).catch((error) => {
-    process.stderr.write(`[terminal-host] failed: ${error.stack || error}\n`);
-    process.exit(1);
+    proc.stderr.write(`[terminal-host] failed: ${error.stack || error}\n`);
+    proc.exit(1);
   });
+}
+
+const isMain = process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === process.argv[1].toLowerCase();
+if (isMain) {
+  runTerminalHostEntry();
 }

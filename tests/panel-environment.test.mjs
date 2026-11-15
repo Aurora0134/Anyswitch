@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPanelRouter, deriveVisibleEndpointIds } from "../src/panel/panel.mjs";
-import { executeClientUpdate } from "../src/agents/client-update-journal.mjs";
+// listen(0) 会抽中 fetch（undici）拒连的「bad port」，共享夹具命中即关掉换口重试。
+import { listenLoopback } from "../test-helpers/loopback.mjs";
+import { executeClientUpdate, listClientUpdateRuns } from "../src/agents/client-update-journal.mjs";
 import { compareVersions } from "../src/ops/version-check.mjs";
 
 // 面板只负责登记并拉起。测试里的「安装进程」就在本进程里把登记跑完，
@@ -66,26 +67,9 @@ async function withPanel(options, run) {
       res.end("unhandled route error");
     });
   });
-  // undici 的 fetch 会直接拒连 WHATWG「bad port」受限清单上的端口（6000、
-  // 5060、10080 等都在内）。本机 netsh 的动态端口范围从 1024 起，listen(0)
-  // 可能分到这类端口，用例会偶发假红（实测撞过一次「fetch failed: bad port」）；
-  // 监听后校验，撞上就换口重听。
-  const BLOCKED_PORTS = new Set([
-    1, 7, 18, 19, 20, 21, 22, 23, 25, 37, 42, 43, 69, 77, 79, 87, 95, 101, 102,
-    103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 139, 143, 161, 179,
-    389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556,
-    563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045,
-    5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080,
-  ]);
-  let port;
-  for (;;) {
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    port = server.address().port;
-    if (!BLOCKED_PORTS.has(port)) break;
-    server.close();
-    await once(server, "close");
-  }
+  // listen(0) 可能分到 undici fetch 拒连的「bad port」，用例偶发假红；共享夹具
+  // 监听后校验，命中即关掉换口重试（test-helpers/loopback.mjs 有完整说明）。
+  const { port } = await listenLoopback(server);
   const root = `http://127.0.0.1:${port}`;
   try {
     await run(
@@ -106,6 +90,8 @@ async function withPanel(options, run) {
         });
         return { status: response.status, body: await response.json() };
       },
+      // 拉起失败分支的登记落盘要直接核对 journal（500 响应体不带 runId）
+      { journalDir },
     );
   } finally {
     server.closeAllConnections();
@@ -354,6 +340,51 @@ test("客户端更新按客户端分锁：同一客户端任务进行中再来�
     const again = await post("/panel/api/environment/update", { id: "claude", action: "update" });
     assert.equal(again.status, 202);
   });
+});
+
+test("worker 拉起失败：500 spawn_failed，登记如实落 failed，锁随即释放可重试", async () => {
+  const journalDir = mkdtempSync(join(tmpdir(), "anys-spawn-fail-"));
+  try {
+    let mode = "throw"; // throw=spawn 抛错 | zero=返回非正数 pid | ok=正常 pid
+    await withPanel({
+      clientUpdateJournalDir: journalDir,
+      environmentService: { async getState() { return clientState(); } },
+      releaseService: { async getClientLatest() { return latestFor("1.1.0"); } },
+      spawnClientUpdateWorkerFn: () => {
+        if (mode === "throw") throw new Error("spawn broken");
+        if (mode === "zero") return 0;
+        return process.pid;
+      },
+    }, async (get, post, ctx) => {
+      // spawn 抛错：500 spawn_failed，登记落 done/failed，不留 running 锁。
+      // 删掉 500 spawn_failed 守卫时这里会拿到 202（running 记录挂着空 pid），
+      // 前端永远停在「更新中」，只能等惰性 reap 兜底。
+      mode = "throw";
+      const failed = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+      assert.equal(failed.status, 500);
+      assert.equal(failed.body.error, "spawn_failed");
+      assert.equal(failed.body.message, "更新失败，请重新检测确认结果");
+      const runs = listClientUpdateRuns(ctx.journalDir);
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].clientId, "claude");
+      assert.equal(runs[0].state, "done");
+      assert.equal(runs[0].result.outcome, "failed");
+      assert.equal(runs[0].workerPid, null);
+      const active = await get("/panel/api/environment/updates/active");
+      assert.deepEqual(active.body.runs, [], "无 running：单飞锁没有卡死");
+      // 返回非正数 pid：同样按拉起失败处理
+      mode = "zero";
+      const zero = await post("/panel/api/environment/update", { id: "kimi", action: "update" });
+      assert.equal(zero.status, 500);
+      assert.equal(zero.body.error, "spawn_failed");
+      // 恢复正常 spawn：同一客户端立即可以再开工（锁已释放）
+      mode = "ok";
+      const retry = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+      assert.equal(retry.status, 202, "拉起失败后锁已释放，可重试");
+    });
+  } finally {
+    rmSync(journalDir, { recursive: true, force: true });
+  }
 });
 
 test("一个客户端跑完不会解锁另一个客户端正在进行的任务", async () => {

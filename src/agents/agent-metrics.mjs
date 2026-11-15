@@ -2215,7 +2215,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   const background = meta.background === true;
   // Optional per-instance tag (multi-instance endpoints). Validated once here
   // so the journal row and the instance bucket never see a raw header value.
-  const journalInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
+  let journalInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
   // onTransition fires only at busy-idle boundaries (0→N on this start, N→0 in
   // recordEnd); the activity publisher fans it out as an absolute-state frame.
   const crossedIdleToActive = state.activeRequests === 0;
@@ -2422,6 +2422,9 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     noteKeepAliveExhausted: () => {
       state.keepAliveExhausted += 1;
       state.lastKeepAliveAt = nowFn();
+    },
+    setJournalInstanceId: (instanceId) => {
+      journalInstanceId = sanitizeInstanceId(instanceId);
     },
     recordEnd: (info = {}) => {
       if (ended) return;
@@ -4699,6 +4702,7 @@ export function createAgentMetricsCollector(options = {}) {
           publishActivity(bucketAgentId, instanceId, count);
         });
       instanceAttached = true;
+      primary.setJournalInstanceId?.(instanceId);
       composed = composeInstanceTracker(primary, mirror);
       // 迟到挂载补标：链归属（resolver + 当前成员）只在请求开头的成员循环里
       // 宣布一次，netstat 快照补挂的镜像从创建起就错过了那次宣布，会把链服务
@@ -6777,8 +6781,8 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   const stabilityPending = [];
   const STABILITY_PENDING_MAX = 500;
   let stabilitySeq = 0;
-  const pushStability = (rec) => {
-    if (!rec || typeof rec.model !== "string" || !rec.model) return;
+  const pushStability = (rec, background = false) => {
+    if (background || !rec || typeof rec.model !== "string" || !rec.model) return;
     stabilityPending.push({ seq: ++stabilitySeq, ...rec });
     while (stabilityPending.length > STABILITY_PENDING_MAX) stabilityPending.shift();
   };
@@ -7020,7 +7024,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       cached: extractCachedTokens(u),
       ttftMs: null,
       at: nowFn(),
-    });
+    }, ctx.meta?.background === true);
   }
 
   function recordEndCtx(ctx, { usage, error, status, aborted } = {}) {
@@ -7073,7 +7077,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     // not a rate). The rule is window-based, never a tok/s cap.
     const reqDuration = Math.max(1, endTime - ctx.startTime);
     const norm = normalizeUsageTokens(usage);
-    if (!hadError && !aborted) {
+    if (!hadError && !aborted && ctx.meta?.background !== true) {
       if (norm.completion > 0) {
         pushSessionSample({
           completion: norm.completion,
@@ -7148,7 +7152,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         cached: norm.cached,
         ttftMs: hadError ? null : (ctx.firstChunk !== null ? Math.max(1, ctx.firstChunk - ctx.startTime) : reqDuration),
         at: endTime,
-      });
+      }, ctx.meta?.background === true);
     }
 
     sendSnapshot();

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   buildInstanceId,
   buildWorkbuddyLauncherEnv,
+  main,
   realSpawnWorkbuddy,
   resolveBundledNode,
   resolvePathNode,
@@ -257,4 +258,20 @@ test("realSpawnWorkbuddy runs node with the CLI entry first and the argv verbati
   assert.deepEqual(pids, [999]);
   exitHandler(0, null);
   assert.equal(await promise, 0);
+});
+
+test("main() passes argv through verbatim and reports the session end", async () => {
+  // main 的依赖注入缝只服务测试：args 被静默吞掉时 runWorkbuddyLauncher 单测
+  // 看不出来，这里用真实 main 调用把 argv 跟队与上报顺序钉住。零真实进程、
+  // 零真实 relay、零真实落盘（writeConfig 是桩，node/cli 解析钉在夹具上）。
+  const deps = recordingDeps({
+    startRelay: async () => ({ port: RELAY_PORT, token: "per-launch-token", close: async () => {} }),
+    resolveNode: () => "C:\\node\\node.exe",
+  });
+  const code = await main(["--version"], deps);
+  assert.equal(code, 0);
+  assert.deepEqual(deps.spawned.args, ["--version"], "argv must reach the child verbatim");
+  assert.deepEqual(deps.spawned.node, "C:\\node\\node.exe");
+  assert.deepEqual(deps.calls, ["createTracker", "writeConfig", "spawnWorkbuddy", "reportEnd"]);
+  assert.equal(deps.tracker.endCount, 1);
 });

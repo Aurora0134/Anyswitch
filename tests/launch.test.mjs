@@ -21,39 +21,14 @@ import { loadSettings, createCredentialCacheEnabledGate } from "../src/relay/rel
 import { createHandler } from "../src/relay/handler.mjs";
 import { createUsageJournal } from "../src/shared/usage-journal.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { dpapiTestOptions, probeDpapi } from "../test-helpers/dpapi-probe.mjs";
 
 const PLAINTEXT = "synthetic-launch-test-key-not-a-real-credential";
 
-// Tests that seal a fixture credential spawn the real powershell.exe DPAPI
-// bridge; where it is unavailable the runner must report them as skipped
-// rather than fail. A file-exists check is not enough: a context that can
-// spawn powershell but has no usable user profile / CurrentUser DPAPI would
-// turn every needsDpapi case into a hard failure, so probe an actual
-// protect→unprotect round-trip once (pure DPAPI, entropy-derived — the probe
-// writes nothing to disk).
-async function dpapiWorks() {
-  if (process.platform !== "win32") return false;
-  if (!existsSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))) {
-    return false;
-  }
-  const providerId = "anyswitch-launch-test-probe";
-  const plaintext = Buffer.from("dpapi-probe");
-  try {
-    const sealed = await protect(plaintext, providerId, { generation: "v2" });
-    const opened = await unprotect(sealed, providerId, { generation: "v2" });
-    const ok = opened.equals(plaintext);
-    sealed.fill(0);
-    opened.fill(0);
-    return ok;
-  } catch {
-    return false;
-  } finally {
-    plaintext.fill(0);
-  }
-}
-
-const dpapiAvailable = await dpapiWorks();
-const needsDpapi = dpapiAvailable ? {} : { skip: "requires working CurrentUser DPAPI (powershell.exe)" };
+// The environment probe calls dpapi.ps1 directly rather than asking the
+// production protect/unprotect bridge whether it works. Once that independent
+// probe succeeds, bridge failures below are failures, never a skip+green run.
+const needsDpapi = dpapiTestOptions(await probeDpapi());
 
 function makePaths(t) {
   const root = mkTestDir("anyswitch-launch-");

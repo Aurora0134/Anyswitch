@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIHandler } from "../src/relay/openai-handler.mjs";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const TOKEN = "test-token-lb";
 const PATH = "/openai/test-pool/v1/chat/completions";
@@ -219,6 +220,89 @@ describe("pool load balancing — server concurrency", () => {
       router.releaseAll();
       await Promise.all(requests);
     } finally {
+      await close();
+    }
+  });
+
+  it("settling a request returns its member to the pool: endMember must zero the in-flight count", async () => {
+    // 归零的判据是选头行为本身：a 在途时新请求避开 a；a 结束（stream-pipe 的
+    // finally → server onMemberEnd → balancer.end 归零）后新请求重新落回 a。
+    // endMember 接线一断，a 的在途计数永远挂在 1，第三条请求会继续避开 a——
+    // 这里就红。旧用例只验证了 begin（在途抬升），end 从未被任何用例钉住。
+    const enc = new TextEncoder();
+    const calls = [];
+    let releaseA;
+    const parkedA = new Promise((resolve) => { releaseA = resolve; });
+    let aParked;
+    const aAtGate = new Promise((resolve) => { aParked = resolve; });
+    const upstreamFetch = (urls) => {
+      const url = Array.isArray(urls) ? urls[0] : urls;
+      const memberId = new URL(url).host.split(".")[0];
+      calls.push(memberId);
+      if (memberId === "member-a") {
+        // member-a 交出首块后停驻在闸门前，直到测试放行——模拟一个慢上游。
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: (async function* () {
+            yield enc.encode('data: {"id":"1","choices":[{"delta":{"content":"member-a answers"}}]}\n\n');
+            aParked();
+            await parkedA;
+            yield enc.encode("data: [DONE]\n\n");
+          })(),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          yield enc.encode(`data: {"id":"1","choices":[{"delta":{"content":"${memberId} answers"}}]}\n\n`);
+          yield enc.encode("data: [DONE]\n\n");
+        })(),
+      });
+    };
+    const server = createOpenAIRelayServer(serverDeps({ upstreamFetch }, () => true));
+    const { port, close } = await listenLoopback(server, 0);
+    // 截止线只把「接线断了会挂起的路径」变成响亮的失败，不参与正常路径的判定。
+    const deadline = (promise, ms, message) => Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        const t = setTimeout(() => reject(new Error(message)), ms);
+        t.unref?.();
+      }),
+    ]);
+    try {
+      const post = () => fetch(`http://127.0.0.1:${port}/openai/test-pool/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: TOKEN, "content-type": "application/json", "x-agent-id": "zcode" },
+        body: JSON.stringify({ model: "gpt-pool", stream: true, messages: [{ role: "user", content: "hi" }] }),
+      });
+
+      const first = post();
+      await deadline(aAtGate, 10000, "member-a 的首块未被管道取走——夹具失灵");
+      assert.deepEqual(calls, ["member-a"], "第一条请求落在 member-a，且 begin 已计数（先于上游调用）");
+
+      const second = post();
+      const secondRes = await deadline(second, 10000, "第二条请求未应答——在途的 a 没有抬高其负载分");
+      assert.equal(secondRes.status, 200);
+      const secondText = await secondRes.text();
+      assert.ok(secondText.includes("member-b answers"),
+        `a 在途时第二条请求必须避开 a（拿到：${secondText.slice(0, 80)}）`);
+      assert.deepEqual(calls, ["member-a", "member-b"]);
+
+      releaseA();
+      const firstRes = await deadline(first, 10000, "放行后第一条请求未收尾");
+      assert.equal(firstRes.status, 200);
+      await firstRes.text();
+
+      const thirdRes = await deadline(post(), 10000, "第三条请求未应答");
+      assert.equal(thirdRes.status, 200);
+      const thirdText = await thirdRes.text();
+      assert.ok(thirdText.includes("member-a answers"),
+        "a 结束并归还计数后必须重新成为选头（endMember 未接线时这里会继续避开 a）");
+      assert.deepEqual(calls, ["member-a", "member-b", "member-a"]);
+    } finally {
+      releaseA();
       await close();
     }
   });

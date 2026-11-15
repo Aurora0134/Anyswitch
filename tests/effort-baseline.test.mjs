@@ -1,10 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  catalogForRoot,
+  clearEffortCatalogCache,
   EFFORT_LEVELS_ORDER,
   normalizeEffortEntry,
+  resolveModelEfforts,
 } from "../src/catalog/effort-catalog.mjs";
 
 const BASELINE_PATH = fileURLToPath(new URL("../thinking-efforts-baseline.json", import.meta.url));
@@ -94,5 +99,31 @@ describe("thinking-efforts 脱敏基线", () => {
     assert.equal(models["minimax-m3.1-flash"].default, "max");
     assert.equal(models["agnes-image-2.0-flash"].kind, "non-text");
     assert.equal(models["agnes-image-2.0-flash"].levels, null);
+  });
+
+  it("运行时指针钉死：操作者库缺席时，兜底加载的就是产品自己定位的这份仓根基线", () => {
+    // 不注入 io.bundledBaselinePath：走 effort-catalog.mjs 里以模块位置为锚的
+    // BUNDLED_EFFORT_BASELINE_PATH 指针（运行时 fresh install 的真实兜底路径）。
+    // 指针改坏（相对深度写错、文件挪名）时，只走注入路径的三份 effort 测试仍会
+    // 全绿，这里必须红：兜底表来源必须还是 bundled、抽样模型必须答得上分档。
+    // io 只伪造「操作者库缺席」一件事——基线文件用真实 fs 读，指针错即读不到。
+    const root = mkdtempSync(join(tmpdir(), "anys-effort-root-"));
+    const io = {
+      existsSync: (p) => !String(p).replaceAll("\\", "/").endsWith("/thinking-efforts.db.json"),
+      readFileSync: (p, enc) => readFileSync(p, enc),
+    };
+    try {
+      const catalog = catalogForRoot(root, io);
+      assert.equal(catalog.source, "bundled", "操作者库缺席时必须由仓根基线兜底");
+      assert.equal(catalog.operatorWarning, "missing", "操作者库缺席的原因要如实保留");
+      assert.ok(catalog.loadedCount >= 100, `基线兜底装载的条目过少（${catalog.loadedCount}）`);
+      const resolved = resolveModelEfforts("deepseek-v4.1-flash", catalog);
+      assert.equal(resolved.origin, "library", "兜底表要能按 key 命中真实模型");
+      assert.deepEqual(resolved.levels, ["low", "high", "max"]);
+      assert.equal(resolved.default, "high");
+    } finally {
+      clearEffortCatalogCache();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

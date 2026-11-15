@@ -1155,6 +1155,11 @@ export function createPanelRouter({
   // Prompts tab facade (createPromptsPanelService). Injectable for tests;
   // `null` lazily builds the real facade on the first prompts request.
   promptsService = null,
+  // 两个服务的懒建工厂（注入缝）：默认就是真工厂，懒建行为与副作用顺序不变；
+  // 单测注入捕获工厂即可钉住「懒建时注入的 isEndpointVisible 来自环境检测」
+  // 这条接线——真 skills 服务会扫真实 home 目录，单测不能为验接线起真服务。
+  skillsServiceFactory = createSkillsService,
+  promptsServiceFactory = createPromptsPanelService,
   // Store tab service (store-service.mjs). Injectable so the router is
   // unit-testable with a mock; `null` lazily builds the real service on the
   // first store request, rooted at the same storePaths the router uses.
@@ -1209,7 +1214,36 @@ export function createPanelRouter({
   // 都取这里。默认真实时钟，行为不变；单测注入可控时钟，startTs/durationMs
   // 的跨度断言就不再依赖真实时间推进（消除墙钟 sleep 的不稳定模式）。
   sessionNowFn = Date.now,
+  // 统计渠道名映射是路由级快照，不随单次请求重建；时钟与 TTL 可注入。
+  statsNowFn = Date.now,
+  statsChannelLabelsTtlMs = 15_000,
 }) {
+  // 渠道显示名按不可变 id 分键，读取时解析为 displayName。快照属于路由器，
+  // 不属于某一次请求：TTL 内复用，过期才刷新，读失败沿用旧表。
+  let statsChannelLabels = { at: 0, map: new Map() };
+  const refreshStatsChannelLabels = async () => {
+    const now = statsNowFn();
+    if (now - statsChannelLabels.at < statsChannelLabelsTtlMs) return;
+    try {
+      if (!storeService) {
+        storeService = createStoreService({ paths: defaultStorePaths(storePaths?.root) });
+      }
+      const board = await storeService.getBoardState();
+      if (board?.ok === false || board?.storeOk === false) {
+        // 第一次读失败没有旧表可保：把 at 留在 0，下一拍仍可恢复。
+        if (statsChannelLabels.map.size > 0) statsChannelLabels.at = now;
+        return;
+      }
+      // 先池后渠道、占用键不覆盖 —— 同名共存时池赢。
+      const map = { ...board?.providerNames, ...board?.poolNames };
+      statsChannelLabels = { at: now, map: new Map(Object.entries(map)) };
+    } catch {
+      // store 不可读：保留旧映射（首次失败则全部回退裸 id），不阻塞统计。
+      // 首次失败没有旧表可保：与显式 storeOk:false 一样留在 at=0，下一次请求
+      // 可以立即恢复，而不是把空映射当作有效快照缓存一个 TTL。
+      if (statsChannelLabels.map.size > 0) statsChannelLabels.at = now;
+    }
+  };
   const settingsFile = defaultSettingsPath(base);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
@@ -4474,22 +4508,6 @@ export function createPanelRouter({
     // id）。池 id 可复用成员渠道 id（wire 语义 pools-before-providers 同
     // 款），同名时池的显示名赢。getBoardState 只带名字映射不带模型全量，
     // 快照 15s TTL，读失败沿用旧表。
-    let statsChannelLabels = { at: 0, map: new Map() };
-    const refreshStatsChannelLabels = async () => {
-      if (Date.now() - statsChannelLabels.at < 15000) return;
-      try {
-        if (!storeService) {
-          storeService = createStoreService({ paths: defaultStorePaths(storePaths?.root) });
-        }
-        const board = await storeService.getBoardState();
-        // 先池后渠道、占用键不覆盖 —— 同名共存时池赢
-        const map = { ...board.providerNames, ...board.poolNames };
-        statsChannelLabels = { at: Date.now(), map: new Map(Object.entries(map)) };
-      } catch {
-        // store 不可读：保留旧映射（首次失败则全部回退裸 id），不阻塞统计
-        statsChannelLabels.at = Date.now();
-      }
-    };
     if (path.startsWith("/panel/api/stats/")) {
       if (!statsService) {
         statsService = createUsageStats({
@@ -4690,7 +4708,7 @@ export function createPanelRouter({
         // 定时刷新保持新鲜，后续请求不再等待。
         await refreshEndpointVisibility();
         ensureEndpointVisibilityFreshness();
-        skillsService = createSkillsService({ base, isEndpointVisible });
+        skillsService = skillsServiceFactory({ base, isEndpointVisible });
       }
       const svc = skillsService;
 
@@ -4829,7 +4847,7 @@ export function createPanelRouter({
         // 天然只剩已安装的 Agent；syncAll 对未安装的按空预设集清理（见 facade）。
         await refreshEndpointVisibility();
         ensureEndpointVisibilityFreshness();
-        promptsService = createPromptsPanelService({ base, isEndpointVisible });
+        promptsService = promptsServiceFactory({ base, isEndpointVisible });
       }
       const svc = promptsService;
 

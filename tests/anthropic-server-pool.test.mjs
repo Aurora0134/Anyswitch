@@ -5,9 +5,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback as listenResident } from "../src/relay/openai-server.mjs";
-import { createRelayServer, listenLoopback as listenPerLaunch } from "../src/relay/server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
+import { createRelayServer } from "../src/relay/server.mjs";
 import { createAgentMetricsCollector } from "../src/agents/agent-metrics.mjs";
+// 两个生产 listenLoopback 都只被临时口用例调用：统一换共享夹具（命中 fetch
+// 「bad port」即关掉换口重试），返回结构不变。
+import { listenLoopback as listenResident, listenLoopback as listenPerLaunch } from "../test-helpers/loopback.mjs";
 
 const TOKEN = "test-token-anthropic-pool";
 
@@ -75,6 +78,7 @@ function createMockDeps({ upstreamFetch, getKeepAliveConfig, metricsCollector })
     recordGeneration: () => {},
     readGeneration: () => null,
     getKeepAliveConfig,
+    poolLoadBalancingGate: () => false,
     metricsCollector,
   };
 }
@@ -313,6 +317,32 @@ describe("resident relay /v1/messages pool routing: streaming", () => {
       assert.ok(text.includes("partial content"));
       assert.ok(text.includes("event: error"), "the mid-stream fault rides an Anthropic error frame");
       assert.deepEqual(calls, ["member-a"], "committed content is the red line: no failover, no retry");
+    });
+  });
+  it("(committed, resume mode) exhausts the same member instead of splicing another upstream", async () => {
+    const { upstreamFetch, calls } = memberRouter({
+      "member-a": () => ({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          yield new TextEncoder().encode('data: {"id":"1","choices":[{"delta":{"content":"partial from A"},"index":0}]}\n\n');
+          throw new Error("upstream socket died");
+        })(),
+      }),
+      "member-b": () => healthyStream("must never be sent"),
+    });
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 1 }),
+    });
+    await withResident(deps, async (port) => {
+      const res = await postMessages(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("partial from A"));
+      assert.equal(text.includes("must never be sent"), false);
+      assert.match(text, /event: error/);
+      assert.deepEqual(calls, ["member-a", "member-a"]);
     });
   });
 });

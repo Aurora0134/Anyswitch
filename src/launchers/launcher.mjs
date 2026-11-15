@@ -319,7 +319,9 @@ function createForwardingLogger(fetchFn = fetch) {
   return { info: forward("info"), warn: forward("warn"), error: forward("error") };
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv（乃至零参），每一个键缺省时都落到
+// 下面的生产实现——缺省路径的行为与注入前逐字节相同。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   // The per-launch relay runs inside this process and shares the user's
   // terminal with Claude. A stray promise rejection must not kill the whole
   // launch (and dump a raw stack into Claude's UI) — note it and continue.
@@ -330,16 +332,17 @@ export async function main(argv = process.argv.slice(2)) {
   // 无需重启任何常驻进程（与档位映射、抗截断同一口径）。
   let bypass = false;
   try {
-    bypass = loadSettings(defaultSettingsPath()).settings.claudeBypassPermissions === true;
+    const settings = (deps.loadSettings ?? loadSettings)(deps.settingsPath ?? defaultSettingsPath());
+    bypass = settings.settings.claudeBypassPermissions === true;
   } catch {
     bypass = false;
   }
   const code = await runLauncher({
-    startRelay: () => startProductionRelay({ logger: createForwardingLogger() }),
-    getClaudeVersion: realGetClaudeVersion,
-    spawnClaude: realSpawnClaude,
-    log: (line) => process.stderr.write(`${line}\n`),
-    base: process.env,
+    startRelay: deps.startRelay ?? (() => startProductionRelay({ logger: createForwardingLogger() })),
+    getClaudeVersion: deps.getClaudeVersion ?? realGetClaudeVersion,
+    spawnClaude: deps.spawnClaude ?? realSpawnClaude,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
+    base: deps.base ?? process.env,
     claudeArgs: withClaudeBypassPermissions(argv, bypass),
   });
   return code;

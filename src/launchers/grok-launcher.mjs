@@ -253,29 +253,31 @@ export function realSpawnGrok({ env, args, onPid = () => {} }) {
   });
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
+// ——缺省路径的行为与注入前逐字节相同。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runGrokLauncher({
-    startRelay: () => startOpenAIRelay(),
-    writeConfig: (store, port, token, sidecarRoot, configPath) =>
-      writeGrokConfig(store, port, token, sidecarRoot, configPath),
-    loadStore,
-    loadToken: (root) => loadOrGenerateToken(root),
+    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    writeConfig: deps.writeConfig ?? ((store, port, token, sidecarRoot, configPath) =>
+      writeGrokConfig(store, port, token, sidecarRoot, configPath)),
+    loadStore: deps.loadStore ?? loadStore,
+    loadToken: deps.loadToken ?? ((root) => loadOrGenerateToken(root)),
     // Per-launch session reporter (kimi pattern, agentId "grok"): posts the
     // session lifecycle to the resident panel relay. journal stays null —
     // per-request usage rows are journaled relay-side via the x-agent-id /
     // x-agent-instance headers; this reporter only carries pid bind + ended.
-    createTracker: ({ token }) => {
+    createTracker: deps.createTracker ?? (({ token }) => {
       const tracker = createSessionReporter({
         reportUrl: `http://127.0.0.1:${RELAY_PORT}/panel/api/session/report`,
         agentId: "grok",
       });
       tracker.setToken(token);
       return tracker;
-    },
-    spawnGrok: realSpawnGrok,
-    log: (line) => process.stderr.write(`${line}\n`),
+    }),
+    spawnGrok: deps.spawnGrok ?? realSpawnGrok,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     grokArgs: argv,
-    probeRelay: probeRelay,
+    probeRelay: deps.probeRelay ?? probeRelay,
   });
   return code;
 }

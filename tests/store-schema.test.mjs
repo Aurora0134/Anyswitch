@@ -700,3 +700,213 @@ test("validateStore rejects a non-boolean enabled flag on routing chain entries"
     assert.equal(result.errors.some((e) => /routingChains\.claude\.enabled: .*boolean/i.test(e)), true);
   }
 });
+
+// ---- virtualModels (虚拟模型): shape / name / enabled / chain ----------------
+// 与 routingChains 共用 validateChainNodeList，但入口字段不同（name/enabled 在
+// 数组元素上），且 nodeIds 同样由 providers+pools 组成——这里按 virtualModels
+// 自己的入口逐项钉住，routingChains 的用例不能替代。
+function legalStoreWithVirtualModel() {
+  const store = legalStoreWithPool();
+  store.virtualModels = [
+    {
+      name: "fast-tier",
+      chain: [
+        { node: "main-pool", model: "glm-5" },
+        { node: "deepseek", model: "deepseek-chat" },
+      ],
+    },
+  ];
+  return store;
+}
+
+test("validateStore accepts well-formed virtualModels (provider and pool nodes)", () => {
+  const result = validateStore(legalStoreWithVirtualModel());
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test("validateStore rejects a non-array virtualModels field", () => {
+  for (const virtualModels of [{}, "fast", 42, null, true]) {
+    const store = legalStoreWithPool();
+    store.virtualModels = virtualModels;
+    const result = validateStore(store);
+    assert.equal(result.valid, false, JSON.stringify(virtualModels));
+    assert.equal(result.errors.some((e) => /virtualModels: must be an array/i.test(e)), true);
+  }
+});
+
+test("validateStore rejects virtualModels entries that are not objects", () => {
+  const store = legalStoreWithVirtualModel();
+  store.virtualModels = ["fast-tier", null, 42, []];
+  const result = validateStore(store);
+  assert.equal(result.valid, false);
+  for (const index of [0, 1, 2, 3]) {
+    assert.equal(
+      result.errors.some((e) => e.startsWith(`virtualModels[${index}]: must be an object`)),
+      true,
+      `virtualModels[${index}] 实得：${JSON.stringify(result.errors)}`,
+    );
+  }
+});
+
+test("validateStore rejects illegal virtual model names (shape, leading digit, blank, oversized)", () => {
+  for (const name of [42, "", "  ", "1abc", "bad name", "bad/slash"]) {
+    const store = legalStoreWithVirtualModel();
+    store.virtualModels = [{ name, chain: [{ node: "deepseek", model: "deepseek-chat" }] }];
+    const result = validateStore(store);
+    assert.equal(result.valid, false, JSON.stringify(name));
+    assert.equal(
+      result.errors.some((e) => /virtualModels\[0\]\.name: must start with a letter/i.test(e)),
+      true,
+      `${JSON.stringify(name)} 实得：${JSON.stringify(result.errors)}`,
+    );
+  }
+  const oversized = legalStoreWithVirtualModel();
+  oversized.virtualModels = [{ name: "a".repeat(65), chain: [{ node: "deepseek", model: "deepseek-chat" }] }];
+  const result = validateStore(oversized);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.some((e) => /virtualModels\[0\]\.name: must be at most 64/i.test(e)), true);
+});
+
+test("validateStore rejects virtual model names that duplicate an earlier entry only by case", () => {
+  const store = legalStoreWithVirtualModel();
+  store.virtualModels = [
+    { name: "fast-tier", chain: [{ node: "deepseek", model: "deepseek-chat" }] },
+    { name: "FAST-TIER", chain: [{ node: "deepseek", model: "deepseek-chat" }] },
+  ];
+  const result = validateStore(store);
+  assert.equal(result.valid, false);
+  assert.equal(
+    result.errors.some((e) => /virtualModels\[1\]\.name: duplicate virtual model name/i.test(e)),
+    true,
+    JSON.stringify(result.errors),
+  );
+});
+
+test("validateStore reserves the auto id and endpoint ids as virtual model names", () => {
+  for (const name of ["auto", "claude"]) {
+    const store = legalStoreWithVirtualModel();
+    store.virtualModels = [{ name, chain: [{ node: "deepseek", model: "deepseek-chat" }] }];
+    const result = validateStore(store);
+    assert.equal(result.valid, false, name);
+    assert.equal(result.errors.some((e) => /virtualModels\[0\]\.name: ".*" is reserved/i.test(e)), true);
+  }
+});
+
+test("validateStore accepts optional boolean enabled on virtual models (absent = on)", () => {
+  for (const enabled of [undefined, true, false]) {
+    const store = legalStoreWithVirtualModel();
+    if (enabled !== undefined) store.virtualModels[0].enabled = enabled;
+    const result = validateStore(store);
+    assert.equal(result.valid, true, JSON.stringify(result.errors));
+    assert.deepEqual(result.errors, []);
+  }
+});
+
+test("validateStore rejects a non-boolean enabled flag on virtual models", () => {
+  for (const enabled of ["true", 1, 0, null, {}]) {
+    const store = legalStoreWithVirtualModel();
+    store.virtualModels[0].enabled = enabled;
+    const result = validateStore(store);
+    assert.equal(result.valid, false, JSON.stringify(enabled));
+    assert.equal(
+      result.errors.some((e) => /virtualModels\[0\]\.enabled: must be a boolean/i.test(e)),
+      true,
+      `${JSON.stringify(enabled)} 实得：${JSON.stringify(result.errors)}`,
+    );
+  }
+});
+
+test("validateStore rejects a missing, empty, oversized or non-array virtual model chain", () => {
+  const missing = legalStoreWithVirtualModel();
+  delete missing.virtualModels[0].chain;
+  const missingResult = validateStore(missing);
+  assert.equal(missingResult.valid, false);
+  assert.equal(
+    missingResult.errors.some((e) => /virtualModels\[0\]\.chain: must be a non-empty array/i.test(e)),
+    true,
+    JSON.stringify(missingResult.errors),
+  );
+
+  for (const chain of [[], "deepseek", 42]) {
+    const store = legalStoreWithVirtualModel();
+    store.virtualModels[0].chain = chain;
+    const result = validateStore(store);
+    assert.equal(result.valid, false, JSON.stringify(chain));
+    assert.equal(result.errors.some((e) => /virtualModels\[0\]\.chain: must be a non-empty array/i.test(e)), true);
+  }
+
+  const oversized = legalStoreWithPool();
+  for (const id of ["m3", "m4", "m5", "m6", "m7", "m8", "m9"]) {
+    oversized.providers[id] = {
+      displayName: id,
+      baseURL: `https://api.${id}.example/v1`,
+      protocol: "openai-compatible",
+      credentialFile: `credential-66666666-6666-6666-6666-66666666666${id.slice(1)}.dpapi`,
+      models: { x: { displayName: "x" } },
+    };
+  }
+  oversized.virtualModels = [
+    {
+      name: "wide",
+      chain: ["deepseek", "zhipu", "main-pool", "m3", "m4", "m5", "m6", "m7", "m9"]
+        .map((node) => ({ node, model: "x" })),
+    },
+  ];
+  const oversizedResult = validateStore(oversized);
+  assert.equal(oversizedResult.valid, false);
+  assert.equal(oversizedResult.errors.some((e) => /virtualModels\[0\]\.chain: must contain 1-8/i.test(e)), true);
+});
+
+test("validateStore rejects virtual model chain items that are not { node, model } objects", () => {
+  const store = legalStoreWithVirtualModel();
+  store.virtualModels[0].chain = ["deepseek"];
+  const result = validateStore(store);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.some((e) => /virtualModels\[0\]\.chain\[0\].*must be an object/i.test(e)), true);
+});
+
+test("validateStore rejects a virtual model chain node that exists neither as provider nor pool", () => {
+  const store = legalStoreWithVirtualModel();
+  store.virtualModels[0].chain = [{ node: "ghost", model: "x" }];
+  const result = validateStore(store);
+  assert.equal(result.valid, false);
+  assert.equal(
+    result.errors.some((e) => /virtualModels\[0\]\.chain\[0\]\.node: node "ghost" does not exist/i.test(e)),
+    true,
+    JSON.stringify(result.errors),
+  );
+});
+
+test("validateStore rejects an empty model or a duplicate node+model pair in a virtual model chain", () => {
+  const blank = legalStoreWithVirtualModel();
+  blank.virtualModels[0].chain = [{ node: "deepseek", model: "  " }];
+  const blankResult = validateStore(blank);
+  assert.equal(blankResult.valid, false);
+  assert.equal(
+    blankResult.errors.some((e) => /virtualModels\[0\]\.chain\[0\]\.model: must be a non-empty string/i.test(e)),
+    true,
+    JSON.stringify(blankResult.errors),
+  );
+
+  const duplicate = legalStoreWithVirtualModel();
+  duplicate.virtualModels[0].chain = [
+    { node: "deepseek", model: "deepseek-chat" },
+    { node: "deepseek", model: "deepseek-chat" },
+  ];
+  const duplicateResult = validateStore(duplicate);
+  assert.equal(duplicateResult.valid, false);
+  assert.equal(
+    duplicateResult.errors.some((e) => /virtualModels\[0\]\.chain\[1\]: duplicate node "deepseek" with model "deepseek-chat"/i.test(e)),
+    true,
+    JSON.stringify(duplicateResult.errors),
+  );
+});
+
+test("validateStore rejects secret-like fields inside virtualModels", () => {
+  const store = legalStoreWithVirtualModel();
+  store.virtualModels[0].apiKey = "sk-should-not-be-here";
+  const result = validateStore(store);
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.some((e) => /secret-like/i.test(e)), true);
+});

@@ -394,15 +394,30 @@ const feedIo = {
   writeFileSync: (path, bytes) => writeFileSync(path, bytes),
 };
 const npmOk = (call, callback) => callback(null, "", "");
-// tasklist 问「DeepSeek Harness 在跑吗」：未在跑的回答。
-const notRunningTasklist = (call, callback) =>
-  callback(null, "INFO: No tasks are running which match the specified criteria.\r\n", "");
+// tasklist 桩按参数应答：查询过滤器对得上 dsh 桌面进程名（/FI IMAGENAME eq …，
+// /NH 无头、/FO CSV）才回放对应结果，对不上一律按「查无此进程」应答——
+// 旧夹具无视参数直接回放 CSV，放过过滤器改坏：查错进程名时生产上会把在跑的
+// 桌面端当成没在跑而硬装，测试却全绿。
+function dshTasklist({ running = false } = {}) {
+  const noTasks = "INFO: No tasks are running which match the specified criteria.\r\n";
+  return (call, callback) => {
+    const { args } = call;
+    const filterMatches = Array.isArray(args)
+      && args[0] === "/FI"
+      && args[1] === `IMAGENAME eq ${OFFICIAL_FEED_CLIENTS.dsh.processName}.exe`
+      && args[2] === "/NH"
+      && args[3] === "/FO"
+      && args[4] === "CSV";
+    if (!filterMatches) return callback(null, noTasks, "");
+    return callback(null, running ? `"${OFFICIAL_FEED_CLIENTS.dsh.processName}.exe","1234","Console","1","280,000 K"\r\n` : noTasks, "");
+  };
+}
 
 test("dsh 双腿串行：先 npm 后官方发布文件，安装参数取自 electron-updater 的静默更新口径", async () => {
   const calls = [];
   const spawn = (file, args, options, callback) => {
     calls.push({ file, args, options });
-    if (file === "tasklist") return notRunningTasklist(null, callback);
+    if (file === "tasklist") return dshTasklist()(calls[calls.length - 1], callback);
     return npmOk(null, callback);
   };
   const { fetchFn, seen } = feedFetch(desktopFeedBody(INSTALLER_BYTES));
@@ -442,8 +457,8 @@ test("dsh 桌面腿：本地已是官方最新时不下载、不执行安装包"
 test("dsh 桌面腿：安装包摘要与发布文件不符时中止，绝不执行下载物", async () => {
   const calls = [];
   const spawn = (file, args, options, callback) => {
-    calls.push({ file, args });
-    if (file === "tasklist") return notRunningTasklist(null, callback);
+    calls.push({ file, args, options });
+    if (file === "tasklist") return dshTasklist()(calls[calls.length - 1], callback);
     return npmOk(null, callback);
   };
   // 把 files[] 里那条的摘要换成错的（发布文件顶层的 sha512 是同一个值，别动它：
@@ -463,8 +478,8 @@ test("dsh 桌面腿：安装包摘要与发布文件不符时中止，绝不执�
 test("dsh 桌面腿：应用在跑时不装，如实记失败", async () => {
   const calls = [];
   const spawn = (file, args, options, callback) => {
-    calls.push({ file, args });
-    if (file === "tasklist") return callback(null, '"DeepSeek Harness.exe","1234","Console","1","280,000 K"\r\n', "");
+    calls.push({ file, args, options });
+    if (file === "tasklist") return dshTasklist({ running: true })(calls[calls.length - 1], callback);
     return npmOk(null, callback);
   };
   const { fetchFn } = feedFetch(desktopFeedBody(INSTALLER_BYTES));
@@ -476,6 +491,16 @@ test("dsh 桌面腿：应用在跑时不装，如实记失败", async () => {
   assert.equal(desktop.ok, false);
   assert.equal(desktop.appRunning, true);
   assert.equal(calls.some((c) => /anys-.*\.exe$/.test(c.file)), false);
+  // 查活的查询过滤器本身钉死：按 dsh 桌面进程名过滤、无头 CSV 输出、不经 shell。
+  // 过滤器查错进程名（生产上等于把在跑的桌面端当成没在跑而硬装）在这里立刻红。
+  const tasklist = calls.find((c) => c.file === "tasklist");
+  assert.ok(tasklist, "桌面腿先查活再动安装包");
+  assert.deepEqual(
+    tasklist.args,
+    ["/FI", `IMAGENAME eq ${OFFICIAL_FEED_CLIENTS.dsh.processName}.exe`, "/NH", "/FO", "CSV"],
+  );
+  assert.equal(tasklist.options.windowsHide, true);
+  assert.equal(tasklist.options.shell, undefined, "不经 shell，参数逐项传递");
 });
 
 test("dsh 桌面腿：发布文件取不到时归网络失败，CLI 腿的结果不受牵连", async () => {

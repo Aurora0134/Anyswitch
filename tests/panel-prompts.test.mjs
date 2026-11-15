@@ -248,6 +248,61 @@ describe("panel router prompts routes", () => {
     }
   });
 
+  // 回归钉（懒建缝）：不注入 promptsService 时，首个请求走懒建——工厂收到的
+  // isEndpointVisible 必须来自环境检测（deriveVisibleEndpointIds 的判定），检测
+  // 异常时按 fail-open 恒可见。去掉懒建处的该参数，这条就红。
+  it("懒建 prompts 服务：isEndpointVisible 来自环境检测，检测异常按恒可见放行", async () => {
+    const clients = [
+      { id: "claude", installations: [{ status: "found" }] },
+      { id: "grok", installations: [{ status: "not_found" }, { status: "not_found" }] },
+    ];
+    const env = { getState: async () => ({ clients }) };
+    const base = { LOCALAPPDATA: "C:/fake/local", APPDATA: "C:/fake/roaming" };
+    const factories = [];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null,
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+      environmentService: env,
+      base,
+      promptsServiceFactory: (args) => {
+        factories.push(args);
+        return { getState: () => ({ enabled: false, presets: [], endpointOverrides: {}, endpoints: [{ id: "lazy-built" }], sync: {} }) };
+      },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/prompts/state", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(factories.length, 1, "首个请求懒建恰一次");
+    assert.equal(factories[0].base, base, "懒建把路由的 base 原样交给工厂");
+    const visible = factories[0].isEndpointVisible;
+    assert.equal(typeof visible, "function", "懒建必须把 isEndpointVisible 注入工厂");
+    assert.equal(visible("claude"), true, "已安装端点可见");
+    assert.equal(visible("grok"), false, "全部形态都未找到的端点不可见");
+    assert.deepEqual(json().endpoints, [{ id: "lazy-built" }], "响应由懒建的服务答出");
+
+    // 检测异常形态：快照为 null，谓词 fail-open 恒可见（宁可多显示）。
+    const broken = { getState: async () => { throw new Error("detection broken"); } };
+    const failOpen = [];
+    const router2 = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null,
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+      environmentService: broken,
+      promptsServiceFactory: (args) => {
+        failOpen.push(args);
+        return { getState: () => ({ endpoints: [] }) };
+      },
+    });
+    const first = fakeReqRes("/panel/api/prompts/state", "GET");
+    await router2.handle(first.req, first.res);
+    assert.equal(first.res.statusCode, 200);
+    assert.equal(typeof failOpen[0].isEndpointVisible, "function");
+    assert.equal(failOpen[0].isEndpointVisible("grok"), true, "检测异常时恒可见（fail-open）");
+  });
+
   it("rejects prompts POSTs without the panel header as CSRF (service never called)", async () => {
     let called = false;
     const counting = new Proxy(mockService(), {

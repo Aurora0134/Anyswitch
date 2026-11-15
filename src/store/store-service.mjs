@@ -275,6 +275,10 @@ export function createStoreService({
   fetchImpl = fetch,
   journalPath = join(paths.root, "delete-journal.json"),
   fsOps = { exists: existsSync, lstat: lstatSync, remove: (path) => rmSync(path, { force: true }) },
+  // getBoardState 触发 delete-journal 重放的调度缝：默认同步直调（重放链路全是
+  // 同步 fs，行为与副作用顺序和直呼 resumeDeletions 逐位一致）；测试注入可挡的
+  // 调度器才能把「响应不等重放」与「重放随后落地」分开钉住。
+  scheduleResume = (task) => task(),
 } = {}) {
   const load = () => loadStore(paths);
   const write = (store, options) => writeStore(store, { paths, ...options });
@@ -397,8 +401,7 @@ export function createStoreService({
     // Step 2: verify the store no longer references the provider before the
     // irreversible credential removal.
     const reloaded = load();
-    const finalV2Present = reloaded.ok && Object.hasOwn(reloaded.store.providers ?? {}, providerId);
-    if (finalV2Present) {
+    if (!reloaded.ok || Object.hasOwn(reloaded.store.providers ?? {}, providerId)) {
       throw new Error(`Provider ${providerId} deletion could not be verified; credential was retained`);
     }
 
@@ -511,7 +514,7 @@ export function createStoreService({
      * paying delete-journal IO on the board's polling path.
      */
     async getBoardState() {
-      void resumeDeletions().catch(() => {}); // fire-and-forget, 不进响应
+      void Promise.resolve(scheduleResume(() => resumeDeletions())).catch(() => {}); // fire-and-forget, 不进响应
       const loaded = load();
       if (!loaded.ok) {
         return { ok: true, storeOk: false, storeError: loaded.reason, routingChains: [], providerNames: {}, poolNames: {} };

@@ -3,6 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as realFs from "node:fs";
 import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync, mkdirSync, renameSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -523,6 +524,77 @@ test("withDirectoryLock reclaims a legacy single-file lock whose owner is gone",
   withDirectoryLock(target, () => { ran = true; }, { ownerlessGraceMs: 50 });
   assert.equal(ran, true);
   assert.equal(existsSync(`${target}.lock`), false, "the reclaimed legacy lock is gone after release");
+});
+
+// 遗留单文件锁的回收是「判定读取 → 确认读取 → 删除」三步：判定之后、删除之前，
+// 锁文件可能被别的进程换掉或删掉。这两条竞态分支在真实盘上没有可复现的窗口
+// （两次相邻读之间读不到中间态），只能经 withDirectoryLock 自带的 fs 注入缝
+// 模拟；断言的公共行为是「没有重新验证过的锁绝不回收」——fail-closed 由测试
+// 保证，而不是只由实现保证。
+function legacyLockRacyFs(lockPath, confirmRead) {
+  // 锁路径上的读取次序是固定的：removeAbandonedDirLock 先取一份原文（raw），
+  // dirLockOwnerReclaimable 里再读一次做判定，然后才是删除前的确认读取——
+  // 第 3 次起才拦成 confirmRead，让第 1、2 次都看到盘上真实的旧锁内容。
+  let reads = 0;
+  const passthrough = (name) => (...args) => realFs[name](...args);
+  return {
+    mkdirSync: passthrough("mkdirSync"),
+    statSync: passthrough("statSync"),
+    readdirSync: passthrough("readdirSync"),
+    writeFileSync: passthrough("writeFileSync"),
+    rmSync: passthrough("rmSync"),
+    rmdirSync: passthrough("rmdirSync"),
+    readFileSync: (path, encoding) => {
+      if (String(path) === String(lockPath)) {
+        reads += 1;
+        if (reads >= 3) return confirmRead(); // 确认读取
+      }
+      return realFs.readFileSync(path, encoding);
+    },
+  };
+}
+
+test("withDirectoryLock refuses to reclaim a legacy lock whose bytes changed before the confirmation read", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  const lockPath = `${target}.lock`;
+  const stale = `${JSON.stringify({ createdAt: Date.now() - 60_000 })}\n`;
+  writeFileSync(lockPath, stale, "utf8");
+  // 判定读取（第一次）看到 stale 的死主锁；确认读取看到的是被换成的新锁内容
+  // （持锁进程还活着）。真盘上旧文件原样留着——回收必须被确认读取拦下。
+  const replaced = `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "replacement" })}\n`;
+  const racyFs = legacyLockRacyFs(lockPath, () => replaced);
+
+  let ran = false;
+  assert.throws(
+    () => withDirectoryLock(target, () => { ran = true; }, { fs: racyFs, waitMs: 150 }),
+    (error) => error instanceof LockTimeoutError,
+  );
+  assert.equal(ran, false, "换掉的锁没有重新验证过，绝不回收");
+  assert.equal(readFileSync(lockPath, "utf8"), stale, "盘上的旧锁文件原样幸存");
+});
+
+test("withDirectoryLock keeps waiting when the confirmation read of a legacy lock fails", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  const lockPath = `${target}.lock`;
+  const stale = `${JSON.stringify({ createdAt: Date.now() - 60_000 })}\n`;
+  writeFileSync(lockPath, stale, "utf8");
+  // 确认读取时锁文件已被删掉（ENOENT）：回收无从确认，只能继续等。ENOENT 归
+  // 「仍在争用」，不作为 EACCES/EPERM 类底层错误向上抛——超时仍是 LockTimeoutError。
+  const racyFs = legacyLockRacyFs(lockPath, () => {
+    const error = new Error("ENOENT: lock raced away");
+    error.code = "ENOENT";
+    throw error;
+  });
+
+  let ran = false;
+  assert.throws(
+    () => withDirectoryLock(target, () => { ran = true; }, { fs: racyFs, waitMs: 150 }),
+    (error) => error instanceof LockTimeoutError,
+  );
+  assert.equal(ran, false, "确认读取失败的锁不得回收");
+  assert.equal(readFileSync(lockPath, "utf8"), stale, "锁文件原样幸存，等下一个持有者自己清场");
 });
 
 test("withDirectoryLock never reclaims a live holder, not even for a nested acquire", () => {

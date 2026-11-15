@@ -13,12 +13,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHandler } from "../src/relay/handler.mjs";
-import { createRelayServer, listenLoopback } from "../src/relay/server.mjs";
+import { createRelayServer } from "../src/relay/server.mjs";
 import { createSessionReporter } from "../src/agents/agent-metrics.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
-import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID, resolveVirtualModelEntry } from "../src/channels/chain-routing.mjs";
+import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "../src/channels/chain-routing.mjs";
 import { unpackWireId } from "../src/relay/wire-id.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const TOKEN = "test-token-anthropic-chain";
 
@@ -143,6 +144,7 @@ function createMockDeps({ upstreamFetch, store = STORE, getKeepAliveConfig } = {
     recordGeneration: () => {},
     readGeneration: () => null,
     getKeepAliveConfig,
+    poolLoadBalancingGate: () => false,
     effortInjector: OFF_EFFORT_INJECTOR(),
   };
 }
@@ -412,6 +414,35 @@ describe("per-launch relay /v1/messages chain routing (model auto)", () => {
       assert.ok(text.includes("event: message_stop"));
       assert.deepEqual(calls, ["chan-a"]);
       assert.equal(bodies[0].model, "claude-a");
+    });
+  });
+
+  it("(retry budget) 链成员按自己的 keep-alive 预算重试后才退避下一员", async () => {
+    // 其余 anthropic 链路集成用例全部钉住 maxRetries:0，链节点的重试预算从未
+    // 上过场：预算在链节点上失守（首试即换员）没有任何旧用例会红。这条给整条
+    // 链挂 maxRetries:1——渠道节点与池成员各以两次尝试耗尽预算，再退避下一员。
+    const { upstreamFetch, calls } = memberRouter({
+      "chan-a": () => statusError(503),
+      "member-a": () => statusError(503),
+      "member-b": () => statusError(503),
+      "chan-b": () => healthyStream("anthropic chain recovered on B"),
+    });
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 5 }),
+    });
+
+    await withPerLaunch(deps, async (port) => {
+      const res = await postMessages(port, { model: "auto", stream: true });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("anthropic chain recovered on B"));
+      assert.deepEqual(calls, [
+        "chan-a", "chan-a",       // 链首渠道节点：先耗尽自己的重试预算
+        "member-a", "member-a",   // 池成员 1：同样两次尝试
+        "member-b", "member-b",   // 池成员 2：同样两次尝试
+        "chan-b",                 // 末位节点应答
+      ], "每个链成员先消耗自己的 keep-alive 预算，再轮到下一员");
     });
   });
 
@@ -788,13 +819,13 @@ describe("per-launch claude usage journal（claude 端点进入按端点统计�
   it("(auto) 稳定性批量随快照捎带：失败尝试与终态各一条，归因到节点", async () => {
     const { upstreamFetch, calls } = memberRouter({
       "chan-a": () => statusError(503),
-      "member-a": () => nonStreamJson("pool answers"),
+      "member-a": () => healthyStream("pool streams"),
     });
     const { deps, posted } = reporterDeps({ upstreamFetch });
     await withPerLaunch(deps, async (port) => {
-      const res = await postMessages(port, { model: "auto", stream: false });
+      const res = await postMessages(port, { model: "auto", stream: true });
       assert.equal(res.status, 200);
-      await res.json();
+      await res.text();
     });
     assert.deepEqual(calls, ["chan-a", "member-a"]);
     // 批量是「至少一次」投递：一条记录可能随多个快照重发（常驻侧按 seq 去重），
@@ -869,6 +900,7 @@ describe("virtual model routing (anthropic 路径）", () => {
     ...STORE,
     virtualModels: [
       { name: "my-vm", chain: [{ node: "chan-a", model: "claude-a" }, { node: "chan-b", model: "claude-b" }] },
+      { name: "on-vm", enabled: true, chain: [{ node: "chan-a", model: "claude-a" }] },
       { name: "off-vm", enabled: false, chain: [{ node: "chan-a", model: "claude-a" }] },
     ],
   };
@@ -906,22 +938,30 @@ describe("virtual model routing (anthropic 路径）", () => {
     assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined, "auto 仍按端点链控制");
   });
 
-  it("目录露出与请求路径准入同源：每个虚拟模型在目录里 ⇔ resolveVirtualModelEntry 认得它", async () => {
-    // 准入单一收口的端到端钉：目录侧（handleModels）与请求侧（查链入口）必须
-    // 对同一批虚拟模型给出同一判定——启用、停用两种形态逐一比对。中继准入收紧
-    // （改 resolveVirtualModelEntry），目录自动跟随，这条仍然绿；哪一侧另立口径，
-    // 这条就红。空链形态进不了这条路径：loadValidStore 按 schema 整店拒绝
-    // （存储层守卫），空链判定由 chain-routing 的单元钉与合并/面板侧钉覆盖。
+  it("目录露出与请求路径准入同源：期望取自夹具声明（启用 ⇔ 出目录 ⇔ 准入放行）", async () => {
+    // 准入单一收口的端到端钉：目录侧（handleModels）与请求侧（planChainMessages）
+    // 必须对同一批虚拟模型给出同一判定——启用缺席、显式启用、停用三种形态逐一
+    // 比对。期望独立取自夹具数据（enabled !== false），不用被测算子自己生成
+    // 期望——此前期望由 resolveVirtualModelEntry 生成，而目录侧正是它算出来的，
+    // 两侧同变时这条永远绿。空链形态进不了这条路径：loadValidStore 按 schema
+    // 整店拒绝（存储层守卫），空链判定由 chain-routing 的单元钉覆盖。
     const store = { ...VM_STORE };
     const handler = makeVmHandler(store);
     const result = await handler.handleModels({ authorization: TOKEN }, "claude");
     assert.equal(result.status, 200);
     for (const vm of store.virtualModels) {
+      const shouldServe = vm.enabled !== false;
       const inCatalog = result.body.data.some((entry) => entry.id === `anthropic/${vm.name}`);
       assert.equal(
         inCatalog,
-        resolveVirtualModelEntry(store, vm.name) !== null,
-        `${vm.name}: 目录露出必须与请求路径准入一致`,
+        shouldServe,
+        `${vm.name}: 目录露出必须与夹具的启用声明一致`,
+      );
+      const plan = await handler.planChainMessages({ authorization: TOKEN }, { model: `anthropic/${vm.name}` }, "claude");
+      assert.equal(
+        plan !== null,
+        shouldServe,
+        `${vm.name}: 请求路径准入必须与目录露出同一判定`,
       );
     }
   });

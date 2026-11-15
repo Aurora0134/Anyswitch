@@ -128,6 +128,50 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     assert.match(persist, /d\.settings\?\.claudeTierMappings/);
   });
 
+  it("真跑 persistClaudeTier：在存标记先于请求置位（在飞窗口可观察），重入被闸，收尾复位后重渲", async () => {
+    // 「saving 先于 await 置位」原先只靠字符串命中：把置位移到 await 之后回灌守卫
+    // 就在在飞窗口里失明（轮询把乐观值盖回去），字符串断言却照旧全绿。这里把函数
+    // 体抽出真跑：请求挂在闸上制造在飞窗口，断言窗口内标记已置位、乐观值已落地。
+    const persistSrc = sliceBetween(js, "async function persistClaudeTier(", "\n    for (const [tier, input]", "persistClaudeTier");
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const posts = [];
+    const toasts = [];
+    const saving = {};
+    const applySnapshots = [];
+    const harness = new Function(
+      "claudeTierInputs", "claudeTierSaving", "api", "toast", "panelError", "applyClaudeTierUi",
+      `let claudeTierMappings = { Sonnet: "anthropic/old" };\nlet settingsLoadGen = 0;\n${persistSrc}\n`
+        + "return { persist: persistClaudeTier, mappings: () => claudeTierMappings, gen: () => settingsLoadGen };",
+    )(
+      { Sonnet: {} },
+      saving,
+      async (method, path, body) => {
+        posts.push(body);
+        await gate;
+        return { ok: true, settings: { claudeTierMappings: { Sonnet: "anthropic/server" } } };
+      },
+      (text) => toasts.push(text),
+      (err, fallback) => fallback,
+      () => applySnapshots.push({ ...saving }),
+    );
+    const first = harness.persist("Sonnet", "anthropic/next");
+    // 首个 await 之前的同步段已跑完：标记、乐观值、代际都在请求在飞时就可观察。
+    assert.equal(saving.Sonnet, true, "saving 标记先于请求置位（移到 await 之后这条就红）");
+    assert.equal(harness.mappings().Sonnet, "anthropic/next", "乐观值先落地");
+    assert.equal(harness.gen(), 1, "settingsLoadGen 同步递增");
+    // 在飞重入被闸：同一行不叠加第二笔请求；POST 只带本档。
+    await harness.persist("Sonnet", "anthropic/other");
+    assert.deepEqual(posts, [{ claudeTierMappings: { Sonnet: "anthropic/next" } }], "重入不发第二笔请求");
+    release();
+    await first;
+    assert.equal(saving.Sonnet, false, "收尾复位");
+    assert.equal(harness.mappings().Sonnet, "anthropic/server", "服务端归一值是最终真相");
+    assert.equal(applySnapshots.length, 1, "收尾重渲恰一拍");
+    assert.ok(!applySnapshots[0].Sonnet, "收尾 applyClaudeTierUi 跑在标记复位之后（重渲不再看到在存行）");
+    assert.deepEqual(toasts, ["档位映射已保存"]);
+  });
+
   it("在存的那一行不被轮询回灌覆盖，其余行照常同步", () => {
     assert.match(js, /const anyClaudeTierSaving = \(\) => Object\.values\(claudeTierSaving\)\.some\(Boolean\);/);
     const hydrate = sliceBetween(js, "// 档位映射按服务端归一值回灌", "\n      } catch {}", "档位回灌");

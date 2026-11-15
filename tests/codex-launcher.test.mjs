@@ -18,6 +18,7 @@ import {
   runCodexLauncher,
   realSpawnCodex,
   RELAY_PORT,
+  main,
 } from "../src/launchers/codex-launcher.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -192,9 +193,13 @@ test("runCodexLauncher starts relay, writes config, spawns codex, closes relay",
   assert.equal(code, 0);
   assert.deepEqual(deps.calls, ["startRelay", "writeConfig", "spawnCodex", "closeRelay"]);
   assert.match(capturedEnv.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
-  // The shared scheme is "<cwd basename>-<launcher pid>"; this process IS the
-  // launcher here, so the id ends with our own pid.
-  assert.ok(capturedEnv.ANYSWITCH_INSTANCE_ID.endsWith(`-${process.pid}`));
+  // The shared scheme is "<cwd basename>-<launcher pid>" and this process IS
+  // the launcher here, so the id must be exactly what buildInstanceId()
+  // computes for this process. Equality rather than a pid-suffix check: the
+  // 64-char cap (pinned in buildInstanceId's own test) can truncate the pid
+  // tail when the run directory's basename is long, and that must not depend
+  // on where the suite happens to run.
+  assert.equal(capturedEnv.ANYSWITCH_INSTANCE_ID, buildInstanceId());
   assert.equal(capturedEnv.NO_PROXY, "127.0.0.1,localhost");
   assert.equal("ANYSWITCH_RELAY_TOKEN" in capturedEnv, false, "token must not leak into the child env");
 });
@@ -371,14 +376,96 @@ test("runCodexLauncher rejects a caller that omits writeConfig before any side e
 test("main() wires every machine-touching dep to its real implementation", async () => {
   // No defaults means main() is the only place the real writers get through —
   // if a wiring line is dropped the launcher stops syncing config.toml loudly,
-  // so pin the wiring here rather than letting it rot silently.
+  // so pin the wiring here rather than letting it rot silently. startRelay 也
+  // 在列：删掉这行时 runCodexLauncher 拿到 undefined，acquireRelayOrNative 会
+  // 把 TypeError 当「relay 起不来」吞掉、静默退化为 native 启动——静态检查是
+  // 第一道，真正的行为钉子在下面那条真实 main 用例里。
   const source = readFileSync(fileURLToPath(new URL("../src/launchers/codex-launcher.mjs", import.meta.url)), "utf8");
   const body = source.slice(source.indexOf("export async function main"));
   assert.ok(body.length > 0, "main() must stay in codex-launcher.mjs");
   assert.match(body, /await import\("\.\/codex-merge-config\.mjs"\)/);
-  assert.match(body, /writeConfig: \([\s\S]{0,120}writeCodexConfig\(/);
-  assert.match(body, /loadStore[,\s]/);
-  assert.match(body, /spawnCodex: realSpawnCodex/);
+  assert.match(body, /startRelay: deps\.startRelay \?\? \(\(\) => startOpenAIRelay\(\)\)/);
+  assert.match(body, /writeConfig: deps\.writeConfig \?\? \([\s\S]{0,120}writeCodexConfig\(/);
+  assert.match(body, /loadStore: deps\.loadStore \?\? loadStore/);
+  assert.match(body, /spawnCodex: deps\.spawnCodex \?\? realSpawnCodex/);
+});
+
+test("main() wires startRelay to the real relay starter: the native fallback carries the REAL relay failure", async () => {
+  // 不注入 startRelay，让 main() 缺省接上的真实 startOpenAIRelay 真跑一次：
+  // 用户根整体重定向进空临时根（store 缺失），relay 必然在监听前失败，native
+  // 回退日志里必须出现真实失败原因。若 main 里的 startRelay 接线被删，runCodex
+  // Launcher 拿到 undefined，日志会变成 "startRelay is not a function"——这里红。
+  // 全程零真实 relay（监听前就失败）、零真实 spawn、零真实凭据。
+  const prevEnv = {};
+  for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
+    prevEnv[key] = process.env[key];
+    process.env[key] = mkTestDir("codex-main-env-");
+  }
+  const dir = mkTestDir("codex-main-native-");
+  const logs = [];
+  const calls = [];
+  let spawnedEnv = null;
+  try {
+    const code = await main(["exec"], {
+      writeConfig: async () => {
+        calls.push("writeConfig");
+        return { ok: true, unchanged: true };
+      },
+      loadStore: () => ({ ok: true, store: FAKE_STORE }),
+      spawnCodex: async ({ env }) => {
+        calls.push("spawnCodex");
+        spawnedEnv = env;
+        return 0;
+      },
+      log: (line) => logs.push(line),
+      base: { USERPROFILE: join(dir, "home"), LOCALAPPDATA: join(dir, "local") },
+    });
+    assert.equal(code, 0, "relay 起不来不拒绝启动：codex 照常 native 启动");
+    assert.ok(
+      logs.some((l) =>
+        l.includes("Anyswitch relay unavailable")
+        && l.includes("the Anyswitch global store is not usable; refusing to start the codex relay"),
+      ),
+      `native 回退必须携带真实 startOpenAIRelay 的失败原因，实际日志：${JSON.stringify(logs)}`,
+    );
+    assert.deepEqual(calls, ["writeConfig", "spawnCodex"], "native 模式照样同步配置并启动子进程");
+    assert.equal("ANYSWITCH_INSTANCE_ID" in spawnedEnv, false, "真实 relay 失败后按 native 环境启动");
+  } finally {
+    for (const key of Object.keys(prevEnv)) {
+      if (prevEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = prevEnv[key];
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("main() forwards argv to the child, syncs through the writer and closes the relay", async () => {
+  // main 的依赖注入缝只服务测试：argv 被静默吞掉（codexArgs 接错变量、丢参）
+  // 时静态的接线检查看不出来，这里用真实 main 调用把它钉住。全程零真实
+  // relay、零真实 spawn，落盘路径全部钉在夹具上。
+  const calls = [];
+  let spawnedArgs = null;
+  const code = await main(["exec", "--json"], {
+    startRelay: async () => ({
+      port: RELAY_PORT,
+      token: "per-launch-token",
+      close: async () => calls.push("closeRelay"),
+    }),
+    writeConfig: async () => {
+      calls.push("writeConfig");
+      return { ok: true, unchanged: true };
+    },
+    loadStore: () => ({ ok: true, store: FAKE_STORE }),
+    spawnCodex: async ({ args }) => {
+      calls.push("spawnCodex");
+      spawnedArgs = args;
+      return 4;
+    },
+    base: FAKE_BASE,
+  });
+  assert.equal(code, 4, "child exit code passes through main");
+  assert.deepEqual(spawnedArgs, ["exec", "--json"], "argv must reach the child verbatim");
+  assert.deepEqual(calls, ["writeConfig", "spawnCodex", "closeRelay"], "sync → spawn → teardown order");
 });
 
 test("realSpawnCodex passes the caller's args through the dispatcher", async () => {

@@ -185,6 +185,28 @@ describe("usage journal wiring", () => {
     assert.equal(journal.lines.length, 0);
   });
 
+  it("fault→abort race: the fault that landed first writes one failure line, the late abort adds nothing", () => {
+    // 竞态的另一侧：上游 fault 先被管道/keep-alive 看到，客户端 abort 才到。
+    // 先到的 fault 是本请求的确定性终结信号——失败账照写；迟到的 abort 不得
+    // 再写第二行，稳定性也只记这一笔（记录在先、重放为空操作）。
+    let t = 1000;
+    const journal = fakeJournal();
+    const collector = testCollector({ nowFn: () => t, journal });
+
+    const req = collector.startRequest({ providerId: "p1", model: "m1" });
+    t = 1500;
+    req.recordEnd({ status: 502, error: { status: 502, message: "upstream 502" } });
+    req.recordEnd({ aborted: true });
+
+    assert.equal(journal.lines.length, 1, "先到的 fault 定终结：只写一行");
+    assert.equal(journal.lines[0].ok, false);
+    assert.equal(journal.lines[0].errKind, "http_5xx");
+    assert.equal(journal.lines[0].status, 502);
+    const stab = collector.getModelStability();
+    assert.equal(stab.models.length, 1);
+    assert.equal(stab.models[0].total, 1, "失败只进稳定性一次，迟到的 abort 不补第二笔");
+  });
+
   it("keeps the pool id as providerId for pool requests", () => {
     let t = 1000;
     const journal = fakeJournal();

@@ -16,6 +16,7 @@ import {
   loadV1Store,
   LOAD_REASON,
 } from "../src/store/store-io.mjs";
+import { createStoreService } from "../src/store/store-service.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 function tempPaths() {
@@ -366,4 +367,84 @@ test("loadV1Store classifies absent, unparsable and invalid v1 scopes", () => {
       assert.equal(loadV1Store(scope).reason, LOAD_REASON.INVALID);
     }
   });
+});
+
+// ---- delete-journal 重放的触发语义（store-service getBoardState）-------------
+// resumeDeletions 是 store IO 层的事务：读清 delete-journal、CAS 写 store、
+// 删凭据。getBoardState 把它挂成 fire-and-forget（不 await、结果不进响应）。
+// 重放链路本身全是同步 fs，「void 直调」与「await」在默认装配下不可区分——
+// 所以经 scheduleResume 注入缝把事务闸在可控调度上：闸门还关时看板必须已返回，
+// 闸门放开后事务必须完整落地。放 store-io.test.mjs 而非 store-service.test.mjs，
+// 是因为后者不在本任务的文件所有权内，而这里钉的正是 journal/凭据这两份 IO 状态。
+function journalFixture() {
+  const paths = tempPaths();
+  ensureLayout(paths);
+  assert.equal(writeStore({ version: 2, providers: {} }, { paths }).ok, true);
+  writeFileSync(join(paths.credentialsDir, "prov.dpapi"), Buffer.from("enc:sk-test", "utf8"));
+  writeFileSync(
+    join(paths.root, "delete-journal.json"),
+    JSON.stringify({ pending: [{ providerId: "prov", credentialFile: "prov.dpapi", recordedAt: "x" }], completed: [] }),
+  );
+  return paths;
+}
+
+const nextTick = () => new Promise((resolve) => setImmediate(resolve));
+
+test("getBoardState 触发 delete-journal 重放：响应不等事务，闸门放开后事务完整落地", async () => {
+  const paths = journalFixture();
+
+  let releaseGate;
+  const gate = new Promise((resolve) => { releaseGate = resolve; });
+  let scheduled = false;
+  const svc = createStoreService({
+    paths,
+    scheduleResume: (task) => {
+      scheduled = true;
+      return gate.then(task);
+    },
+  });
+
+  let boardSettled = false;
+  const boardPromise = svc.getBoardState();
+  boardPromise.then(() => { boardSettled = true; }, () => { boardSettled = true; });
+
+  // setImmediate 在微任务队列清空后运行：这一拍之前所有能结算的 promise 都
+  // 已结算。若实现把重放挂进了响应链（await），boardPromise 链在闸门后面，
+  // 不可能在这拍之前结算。
+  await nextTick();
+
+  assert.equal(scheduled, true, "重放事务已被调度启动");
+  assert.equal(boardSettled, true, "getBoardState 不等重放事务返回（fire-and-forget 实语义）");
+  // 闸门还关着：事务没落地，残留凭据与 pending 原样。
+  assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), true);
+  let journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+  assert.deepEqual(journal.pending.map((e) => e.providerId), ["prov"]);
+  assert.deepEqual(journal.completed, []);
+
+  releaseGate();
+  const board = await boardPromise;
+  assert.equal(board.ok, true);
+  assert.equal("resumeResult" in board, false, "重放结果不进响应");
+  await nextTick();
+
+  // 事务随后完整落地：凭据删除、journal 结账，一步不少。
+  assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), false, "重放删掉残留凭据");
+  journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+  assert.deepEqual(journal.pending, []);
+  assert.deepEqual(journal.completed.map((e) => e.providerId), ["prov"]);
+});
+
+test("delete-journal 重放经默认 scheduleResume 与直调同序：重放不丢", async () => {
+  // 默认装配（scheduleResume 同步直调）下行为不得变化：getBoardState 返回时
+  // 重放事务（全同步 fs）已跑完，残留凭据与 pending 当场清掉。
+  const paths = journalFixture();
+  const svc = createStoreService({ paths });
+
+  const board = await svc.getBoardState();
+  assert.equal(board.ok, true);
+  assert.equal("resumeResult" in board, false);
+  assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), false, "同步重放当场删掉残留凭据");
+  const journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+  assert.deepEqual(journal.pending, []);
+  assert.deepEqual(journal.completed.map((e) => e.providerId), ["prov"]);
 });

@@ -311,16 +311,21 @@ export function realSpawnZcodeCli({ env, args, entry, spawnFn = spawn, nodeExe =
   });
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
+// ——缺省路径的行为与注入前逐字节相同。可缺省的 resolveExecutable /
+// resolveBuiltinConfig 传 undefined 时由 runZcodeCliLauncher 的参数默认值接管。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runZcodeCliLauncher({
-    startRelay: () => startOpenAIRelay(),
-    writeConfig: (store, port, token, slotRoot) => writeZcodeCliConfig(store, port, token, slotRoot),
-    loadStore,
-    loadToken: (root) => loadOrGenerateToken(root),
-    spawnZcodeCli: realSpawnZcodeCli,
-    log: (line) => process.stderr.write(`${line}\n`),
+    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    writeConfig: deps.writeConfig ?? ((store, port, token, slotRoot) => writeZcodeCliConfig(store, port, token, slotRoot)),
+    loadStore: deps.loadStore ?? loadStore,
+    loadToken: deps.loadToken ?? ((root) => loadOrGenerateToken(root)),
+    spawnZcodeCli: deps.spawnZcodeCli ?? realSpawnZcodeCli,
+    resolveExecutable: deps.resolveExecutable,
+    resolveBuiltinConfig: deps.resolveBuiltinConfig,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     zcodeArgs: argv,
-    probeRelay: probeRelay,
+    probeRelay: deps.probeRelay ?? probeRelay,
   });
   return code;
 }

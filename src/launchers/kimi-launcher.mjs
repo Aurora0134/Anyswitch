@@ -227,14 +227,16 @@ export async function runKimiLauncher({
   }
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
+// ——缺省路径的行为与注入前逐字节相同。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runKimiLauncher({
     // agentId "kimi"：per-launch relay 的 auto 路由、usage journal 行与
     // session 上报都归到 kimi 端点，不再落进 claude 桶。
-    startRelay: () => startProductionRelay({ agentId: "kimi" }),
-    buildEnv: buildKimiLauncherEnv,
-    spawnKimi: realSpawnKimi,
-    log: (line) => process.stderr.write(`${line}\n`),
+    startRelay: deps.startRelay ?? (() => startProductionRelay({ agentId: "kimi" })),
+    buildEnv: deps.buildEnv ?? buildKimiLauncherEnv,
+    spawnKimi: deps.spawnKimi ?? realSpawnKimi,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     kimiArgs: argv,
   });
   return code;

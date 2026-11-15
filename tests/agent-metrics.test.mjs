@@ -30,7 +30,7 @@ import {
   PS_PROBE_OPTIONAL_TIMEOUT_MS,
 } from "../src/agents/agent-metrics.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
-import { hasRunningCommand } from "../src/terminal/terminal-switch-guard.mjs";
+import { probeTerminalCommandTree } from "../src/terminal/terminal-switch-guard.mjs";
 import { attributeTerminalSessions } from "../src/terminal/terminal-attribution.mjs";
 
 describe("getTtftColor", () => {
@@ -557,17 +557,24 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(zcode.lastError.model, "glm-5.3");
   });
 
-  it("an abandoned model's fault expires after the idle TTL; lastError history remains", async () => {
+  it("an abandoned model's fault expires after the idle TTL while a repeatedly failing one stays latched across it; lastError history remains", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
-    // zcode 进程活着：本例验证的是故障空闲 TTL，不是 run 清零——零进程夹具
-    // 会让 run zeroing 先把整账连同故障史收走，TTL 路径根本走不到。
+    // zcode/kimi 进程都活着：本例验证的是故障空闲 TTL，不是 run 清零——零进程
+    // 夹具会让 run zeroing 先把整账连同故障史收走，TTL 路径根本走不到。
     const mockExec = (cmd, opts, cb) =>
-      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\ZCode.exe,zcode.exe,12345\r\n");
+      cb(null,
+        "Node,CommandLine,Name,ProcessId\r\n" +
+        "LAPTOP,C:\\ZCode.exe,zcode.exe,12345\r\n" +
+        "LAPTOP,C:\\kimi\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,23456\r\n");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Model A errors and is then abandoned; the user switches to model B.
     const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "model-a" });
+    // Meanwhile another endpoint's pair fails too — and will KEEP failing.
+    const live = collector.startRequest({ agentId: "kimi", providerId: "acme-live", model: "model-live" });
+    mockTime = 1500;
+    live.recordEnd({ status: 502, error: { status: 502, message: "upstream unavailable" } });
     mockTime = 2000;
     bad.recordEnd({ status: 503, error: { status: 503, message: "upstream unavailable" } });
 
@@ -578,46 +585,45 @@ describe("createAgentMetricsCollector", () => {
     mockTime = 4000;
     ok.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 4 } });
 
-    // Well within the TTL: fault still latched
+    // Well within the TTL: both faults still latched
     let status = await collector.getAgentsStatus();
     let zcode = status.find((a) => a.id === "zcode");
+    let kimi = status.find((a) => a.id === "kimi");
     assert.equal(zcode.errorActive, true);
     assert.equal(zcode.activeErrors.length, 1);
     assert.equal(zcode.activeErrors[0].model, "model-a");
+    assert.equal(kimi.errorActive, true);
+    assert.equal(kimi.activeErrors.length, 1);
+    assert.equal(kimi.activeErrors[0].message, "upstream unavailable");
 
-    // Past 60s idle: the abandoned model's fault expires on the status read
+    // The failing pair errors again at t=52000 — 50.5s after its first failure.
+    // Each error rewrites the latched entry (entry.time included), so this
+    // second failure is the refresh that must carry the latch past t=61500,
+    // the point where its FIRST failure would otherwise idle out.
+    mockTime = 51000;
+    const liveRetry = collector.startRequest({ agentId: "kimi", providerId: "acme-live", model: "model-live" });
+    mockTime = 52000;
+    liveRetry.recordEnd({ status: 502, error: { status: 502, message: "still down" } });
+
+    // One read past both TTL boundaries (t=62000): the abandoned model's fault
+    // expires on the status read, while the repeatedly failing one — whose
+    // entry.time was refreshed at t=52000 — is still 10s inside its TTL and
+    // stays latched. Same read, same clock: only the refresh separates them.
     mockTime = 2000 + 60000;
     status = await collector.getAgentsStatus();
     zcode = status.find((a) => a.id === "zcode");
+    kimi = status.find((a) => a.id === "kimi");
     assert.equal(zcode.errorActive, false);
     assert.equal(zcode.activeErrors.length, 0);
     assert.ok(zcode.lastError); // history retained for the banner's record
     assert.equal(zcode.lastError.model, "model-a");
     assert.equal(zcode.lastError.status, 503);
-  });
-
-  it("a repeatedly failing model refreshes its fault timestamp and never expires while live", async () => {
-    let mockTime = 1000;
-    const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => cb(null, "");
-    const collector = testCollector({ execFn: mockExec, nowFn });
-
-    // Two failures on the same provider+model pair, 50s apart (t=1000 and
-    // t=51000); the read happens at t=51000. The pair holds one fault entry,
-    // rewritten by the second error, so the observation is inside the 60s TTL
-    // either way — this pins "the pair keeps its single latch across retries",
-    // not the entry.time refresh itself (that needs a read past t=61000).
-    for (let round = 0; round < 2; round++) {
-      const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "model-a" });
-      mockTime = 1000 + round * 50000;
-      bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
-    }
-
-    const status = await collector.getAgentsStatus();
-    const zcode = status.find((a) => a.id === "zcode");
-    assert.equal(zcode.errorActive, true);
-    assert.equal(zcode.activeErrors.length, 1);
-    assert.equal(zcode.activeErrors[0].model, "model-a");
+    assert.equal(kimi.errorActive, true, "repeat errors refresh entry.time, so the pair never idles out");
+    assert.equal(kimi.activeErrors.length, 1);
+    assert.equal(kimi.activeErrors[0].model, "model-live");
+    assert.equal(kimi.activeErrors[0].message, "still down", "the second error rewrote the latched entry");
+    assert.ok(kimi.lastError);
+    assert.equal(kimi.lastError.status, 502);
   });
 
   it("a keyless fault (no provider/model meta) also expires after the idle TTL", async () => {
@@ -1023,6 +1029,13 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(claude.sessionsCount, 1);
     assert.equal(claude.sessions[0].id, "claude-7777");
     assert.equal(claude.sessions[0].requests, 1);
+    // 守卫丢掉也不许测不出来的那半：上面的三个字段与「同 pid 原地更新旧行」的
+    // 退化实现完全同值（token_B 的报告同样把 requests 覆盖成 1）。分叉点在退役
+    // 账——只有守卫真的把旧会话退役吸收时，token_A 的累计（5 次请求、500 prompt）
+    // 才会出现在端点级 retiredMetrics；活行则只装 token_B 自己的 50。
+    assert.equal(claude.retiredMetrics.requests, 5, "被复用取代的旧会话累计进退役账");
+    assert.equal(claude.retiredMetrics.promptTokens, 500, "旧会话的 token 累计随退役账保留");
+    assert.equal(claude.sessions[0].tokens.prompt, 50, "活行只装新报告（token_B）的累计");
   });
 
   it("does not briefly show two sessions when process scanning creates a placeholder before reportSession", async () => {
@@ -1195,6 +1208,9 @@ describe("createAgentMetricsCollector", () => {
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
     assert.equal(claude.sessions[0].id, "claude-4444");
+    // 只断言行数与 id 时，进程扫描的占位行（requests=0）就能满足——reportSession
+    // 把这份报告整个丢弃也测不出来。requests=1 钉住「报告本体落到了行上」。
+    assert.equal(claude.sessions[0].requests, 1, "非字符串 agentId 的报告按 claude 落账，不是被丢弃后剩占位行");
   });
 
   it("trims a padded claude agentId instead of early-returning (panel journal parity)", async () => {
@@ -1215,6 +1231,9 @@ describe("createAgentMetricsCollector", () => {
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
     assert.equal(claude.sessions[0].id, "claude-4444");
+    // 未 trim 的早退实现里，进程扫描的占位行（requests=0）同样能撑起上面两条
+    // 断言——报告必须真落到行上才算数。
+    assert.equal(claude.sessions[0].requests, 1, "带空白的 claude 归属被 trim 后落账，不是早退后剩占位行");
   });
 
   it("automatically detects running claude.exe process even before first reportSession call", async () => {
@@ -3446,7 +3465,8 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
     // 快照刷新后才 attachInstance 补挂。镜像在宣布之后创建，必须把已宣布的
     // 链归属重放进去，否则实例行把链服务请求整段显示成直连「生成中」。
     let mockTime = 1000;
-    const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
+    const journal = fakeJournal();
+    const collector = testCollector({ nowFn: () => mockTime, journal });
     const req = collector.startRequest({ agentId: "kimi", providerId: null, model: "auto", path: "openai" });
     req.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "kimi-k3" } : null));
     req.setCurrentMember("chan-a/m1");
@@ -3464,6 +3484,8 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
     const after = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
     const instAfter = after.instances.find((i) => i.id === "ws-a");
     assert.deepEqual(instAfter?.activeTargets ?? [], [], "结束后镜像账本清空");
+    assert.equal(journal.lines.length, 1, "迟挂载仍只写一行请求账");
+    assert.equal(journal.lines[0].instanceId, instAfter.id, "账本与实例行使用同一把最终实例键");
   });
 
   it("attach before the chain announcement still receives it via the fan-out (先挂后宣布)", async () => {
@@ -3561,6 +3583,42 @@ describe("createSessionReporter", () => {
     });
     return { reporter, lines, posted, tick: (t) => { mockTime = t; } };
   }
+
+  it("keeps background usage in the journal without user samples or stability rows", async () => {
+    const { reporter, lines, posted, tick } = reporterHarness();
+    reporter.setClaudePid(4242);
+    const user = reporter.startRequest({ model: "claude-opus-5", stream: true, path: "anthropic" });
+    tick(1500);
+    user.recordFirstChunk();
+    tick(2500);
+    user.recordEnd({ status: 200, usage: { input_tokens: 10, output_tokens: 8 } });
+    const before = posted[posted.length - 1];
+
+    const background = reporter.startRequest({ model: "claude-haiku-4", stream: true, path: "anthropic", background: true });
+    tick(3000);
+    background.recordFirstChunk();
+    background.recordRetry({ usage: { input_tokens: 2 }, memberId: "chan-b/m1" });
+    tick(3500);
+    background.recordEnd({ status: 200, usage: { input_tokens: 5, output_tokens: 4 } });
+    const after = posted[posted.length - 1];
+
+    assert.deepEqual(after.samples, before.samples, "后台请求不改用户速度样本");
+    assert.deepEqual(after.sparkHistory, before.sparkHistory, "后台请求不改用户折线");
+    assert.deepEqual(after.stabilityBatch, before.stabilityBatch, "后台终态与重试都不增加模型稳定性行");
+    assert.equal(after.stabilityBatch.some((row) => row.model === "claude-haiku-4"), false);
+    assert.equal(lines.length, 2, "后台用量仍单独写一行账");
+    assert.deepEqual({
+      instanceId: lines[1].instanceId,
+      prompt: lines[1].prompt,
+      completion: lines[1].completion,
+      model: lines[1].model,
+    }, {
+      instanceId: "claude-4242",
+      prompt: 5,
+      completion: 4,
+      model: "claude-haiku-4",
+    });
+  });
 
   it("journals one request row per recordEnd with anthropic-shaped usage normalized", async () => {
     const { reporter, lines, tick } = reporterHarness();
@@ -4375,6 +4433,16 @@ describe("createSessionReporter", () => {
     const wider = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
     assert.equal(wider.metrics.sparkHistory.ttft.length, 20, "环里只有 20 个样本");
     assert.equal(wider.instances[0].sparkHistory.ttft.length, 20, "实例行同样给到环里的全部样本");
+
+    // 继续加样越过新窗宽（环被 push/trim 到 keep=max(18, 24)）：跟随新窗宽的
+    // 实例行收 24 点，停在出生窗口（20）的实现收 20 点——只有 20 个样本时两种
+    // 实现产物同长，宽度是否跟随测不出来。
+    issue(6);
+    const widened = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(widened.metrics.sparkHistory.ttft.length, 24, "端点级按新窗宽收 24 点");
+    assert.equal(widened.instances[0].sparkHistory.ttft.length, 24, "实例行跟着新窗宽收 24 点（停在出生窗口 20 即红）");
+    assert.equal(widened.instances[0].sparkHistory.tps.length, 24);
+    assert.equal(widened.instances[0].sparkHistory.cache.length, 24);
   });
 
   it("carries per-session sparkHistory so cc-card sparklines survive page reloads", async () => {
@@ -4715,6 +4783,27 @@ describe("per-launch stability batch + chain runtime relay（一次性 relay 盲
     });
     row = collector.getModelStability().models.find((m) => m.provider === "sensenova" && m.model === "kimi-k3");
     assert.equal(row.total, 3, "recycled PID starts a fresh seq line and must record");
+
+    // 按 at 落桶（8h 窗、10 分钟桶），不是按读时刻。上面的夹具里 at 与 nowFn
+    // 都落在同一个桶，忽略 at、全部记进 nowFn 的桶也测不出来——这里用相隔一个
+    // 桶的两条记录把落桶位置钉死：cells 只在上一桶与本桶各有一个样本。
+    const bucketTime = 3_600_000; // bucketStart(3_600_000) = 3_600_000（10 分钟桶）
+    const bucketCollector = testCollector({ nowFn: () => bucketTime });
+    bucketCollector.reportSession("tok_bucket", {
+      pid: 5555,
+      agentId: "claude",
+      stabilityBatch: [
+        { seq: 1, providerId: "bucket-probe", model: "m1", ok: true, latencyMs: 10, at: 3_600_000 },
+        { seq: 2, providerId: "bucket-probe", model: "m1", ok: false, latencyMs: 0, at: 3_000_000 },
+      ],
+    });
+    const bucketRow = bucketCollector.getModelStability().models.find((m) => m.provider === "bucket-probe");
+    assert.ok(bucketRow, "按 at 落桶的记录进得了窗口");
+    assert.equal(bucketRow.total, 2, "两条记录都在 8h 窗内");
+    // 窗口是 48 个 10 分钟桶，末桶（idx 47）从 bucketStart(nowFn) 起；
+    // at=3_600_000 → 本桶 idx 47，at=3_000_000 → 上一桶 idx 46。
+    const nonEmpty = bucketRow.cells.map((cell, idx) => [idx, cell.n]).filter(([, n]) => n > 0);
+    assert.deepEqual(nonEmpty, [[46, 1], [47, 1]], "at=3_600_000 落本桶（47）、at=3_000_000 落上一桶（46）；忽略 at 会把两条都记进 47");
   });
 
   it("reportSession 存 chainRuntime 全量快照，getReportedChainRuntime 供链运行时合并", async () => {
@@ -8652,17 +8741,39 @@ describe("terminal attribution feed (getDetectedClientProcesses)", () => {
       assert.equal(byPid.get(6400).busy, false, "光杆引擎：判无活命令");
     });
 
-    it("verdict is computed by the switch-guard predicate on the same table", async () => {
-      // 同源是这套判据的全部意义：不能出现「面板说忙、守卫放行」或反向。
-      // 这里直接拿 switch-guard 的 hasRunningCommand 复算一遍同一张表。
+    it("feed verdict matches hand-derived truth AND the guard's own probe on the same tree", async () => {
+      // 同源的意义是「面板说忙、守卫放行」（或反向）永不出现。拿守卫的
+      // hasRunningCommand 复算 getProcessTableForGuard 的同一张表是同源自证：
+      // 谓词和表都来自被测方，两侧恒等，抓不到任何分叉。这里换成两路独立真值：
+      // (1) 手写期望——按守卫语义从夹具树直接推导（挂活命令的引擎忙、光杆不忙）；
+      // (2) 守卫真实入口 probeTerminalCommandTree（自带 parseProcessTable）——
+      //     同一棵树按守卫自己的行形状喂进去。收集器与守卫任何一侧的表变形
+      //     （列序漂移、缺行、命令行截断）都会让两路判定分叉而红。
       const collector = testCollector({ execFn: busyExec, nowFn: () => 10000, kimiRegistryLookup: async () => new Map() });
       const counts = await collector.scanProcesses();
       const feed = collector.getDetectedClientProcesses();
-      const table = collector.getProcessTableForGuard?.() ?? null;
-      assert.ok(table, "扫描保留守卫形状的全表（pid/ppid/name/命令行）");
+      const byPid = new Map(feed.map((entry) => [entry.pid, entry]));
+      assert.deepEqual([...byPid.keys()].sort((a, b) => a - b), [6300, 6400], "检测面仍只列两条引擎");
+      // (1) 手写真值（与守卫语义同构，但不经任何生产代码复算）。
+      assert.equal(byPid.get(6300).busy, true, "手写真值：6300 底下挂着 ping（非祖先前缀命令行）→ 忙");
+      assert.equal(byPid.get(6400).busy, false, "手写真值：6400 光杆等输入 → 不忙");
+      // (2) 守卫真实探针：BUSY_SCAN 同一棵树按守卫查询的行形状
+      //     （pid\tppid\tname\t命令行）重组，execFileFn 注入桩，不碰真 PowerShell。
+      //     锚 = 引擎 pid，与 feed 判据用的是同一个锚。
+      const guardTree = [
+        "9000\t8000\tpowershell.exe\tC:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile",
+        "6200\t9000\tnode.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js --profile dsh-tui",
+        "6300\t6200\tnode.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js --profile dsh-tui",
+        "6310\t6300\tping.exe\tping -n 45 127.0.0.1 > nul",
+        "6400\t9000\tnode.exe\tC:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js --profile dsh-tui",
+        "7000\t6000\tsvchost.exe\tC:\\Windows\\System32\\svchost.exe -k netsvcs",
+      ].join("\n");
       for (const entry of feed) {
-        const expected = hasRunningCommand(table, { rootPid: entry.pid, anchorPid: entry.pid });
-        assert.equal(entry.busy, expected, `pid ${entry.pid} 的判据与守卫同源`);
+        const guardVerdict = await probeTerminalCommandTree(entry.pid, {
+          anchorPid: entry.pid,
+          execFileFn: (cmd, args, opts, cb) => cb(null, guardTree),
+        });
+        assert.equal(entry.busy, guardVerdict, `pid ${entry.pid}：feed 判定必须与守卫真实探针同判`);
       }
       assert.ok(counts.ppidByPid.has(6310), "无关进程行进谱系表");
     });

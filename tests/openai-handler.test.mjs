@@ -40,11 +40,11 @@ function makeStore() {
   };
 }
 
-function makeHandler({ store = makeStore(), credential = "sk-test", upstream = null } = {}) {
+function makeHandler({ store = makeStore(), credential = "sk-test", upstream = null, serviceHealth = null, loadStore = null } = {}) {
   let generation = null;
   return createOpenAIHandler({
     token: TOKEN,
-    loadStore: () => ({ ok: true, store }),
+    loadStore: loadStore ?? (() => ({ ok: true, store })),
     loadCredential: (providerId) =>
       credential === null
         ? { ok: false, reason: "credential missing" }
@@ -55,6 +55,7 @@ function makeHandler({ store = makeStore(), credential = "sk-test", upstream = n
       generation = value;
     },
     readGeneration: () => generation,
+    serviceHealth,
   });
 }
 
@@ -940,5 +941,134 @@ describe("openai handler 图片降级", () => {
       { type: "text", text: "look at this" },
       { type: "text", text: "[Unsupported Image]" },
     ]);
+  });
+});
+
+// ── 中继自检打点（serviceHealth）─────────────────────────────────────────────
+//
+// 四处打点各是一条公共语义：store 读不了/校验不过记 store 失败；凭据读不出记
+// credential 失败；请求真的到了上游即记成功（上游 4xx/5xx 是别人的问题，不改
+// 判）；客户端发错（401/404）不记任何打点。这些语义没有任何旧用例背书——四条
+// 打点整行删掉，42 条 handler 旧测试仍然全绿。
+
+describe("openai handler serviceHealth 打点", () => {
+  function recorder() {
+    const calls = [];
+    return {
+      calls,
+      health: {
+        recordFailure: (kind) => calls.push(["failure", kind]),
+        recordSuccess: () => calls.push(["success"]),
+      },
+    };
+  }
+
+  const ask = (handler, body = { model: "claude-opus-5", messages: [] }) => handler.handleChatCompletions(
+    "/openai/poke-api/v1/chat/completions",
+    { authorization: `Bearer ${TOKEN}` },
+    body,
+  );
+
+  it("store 读不出来：记一次 store 失败，502 收尾", async () => {
+    const { calls, health } = recorder();
+    const handler = makeHandler({ loadStore: () => ({ ok: false }), serviceHealth: health });
+    const result = await ask(handler);
+    assert.equal(result.status, 502);
+    assert.deepEqual(calls, [["failure", "store"]]);
+  });
+
+  it("store 校验不过：同样记 store 失败", async () => {
+    const { calls, health } = recorder();
+    const handler = makeHandler({ store: { version: 1, providers: {} }, serviceHealth: health });
+    const result = await ask(handler);
+    assert.equal(result.status, 502);
+    assert.match(result.body.error.message, /schema/);
+    assert.deepEqual(calls, [["failure", "store"]]);
+  });
+
+  it("凭据读不出来：记 credential 失败", async () => {
+    const { calls, health } = recorder();
+    const handler = makeHandler({ credential: null, serviceHealth: health });
+    const result = await ask(handler);
+    assert.equal(result.status, 502);
+    assert.deepEqual(calls, [["failure", "credential"]]);
+  });
+
+  it("请求到达上游即记成功：上游 500 不改判（relay 的活干完了）", async () => {
+    const { calls, health } = recorder();
+    const handler = makeHandler({ upstream: { ok: false, status: 500, json: async () => ({}) }, serviceHealth: health });
+    const result = await ask(handler);
+    assert.equal(result.status, 500, "上游状态原样透传");
+    assert.deepEqual(calls, [["success"]], "上游故障不记中继失败，只记成功");
+  });
+
+  it("客户端发错（401/404）不记任何打点", async () => {
+    const { calls, health } = recorder();
+    const handler = makeHandler({ serviceHealth: health });
+    const unauthorized = await handler.handleChatCompletions(
+      "/openai/poke-api/v1/chat/completions",
+      { authorization: "Bearer wrong" },
+      { model: "claude-opus-5", messages: [] },
+    );
+    assert.equal(unauthorized.status, 401);
+    const unknownModel = await ask(handler, { model: "no-such-model", messages: [] });
+    assert.equal(unknownModel.status, 404);
+    assert.deepEqual(calls, [], "4xx 是客户端自己的问题，中继自检不得计失败");
+  });
+});
+
+// ── 链节点失败计数：一次请求只计一次（per-request 去重）─────────────────────
+//
+// 号池节点的两个成员在同一请求里先后彻底失败时，server 侧 onMemberFault 会回调
+// plan.noteFailure 两次（每个成员一次）。链状态的连续失败计数是「请求数」口径，
+// 不是「成员数」口径——去重集缺位时，一次请求就能把节点直接顶进降级门槛。
+
+describe("openai handler chain noteFailure 一次请求只计一次", () => {
+  // zcode 链只有一个池节点；池内两个成员都携带同一绑定模型（同一 node+model 键）。
+  function makePoolChainHandler() {
+    const store = {
+      version: 2,
+      providers: {
+        "member-a": {
+          displayName: "MA", baseURL: "https://ma.invalid/v1", protocol: "openai-compatible",
+          credentialFile: "ma.dpapi", models: { "shared-m": { displayName: "Shared" } },
+        },
+        "member-b": {
+          displayName: "MB", baseURL: "https://mb.invalid/v1", protocol: "openai-compatible",
+          credentialFile: "mb.dpapi", models: { "shared-m": { displayName: "Shared" } },
+        },
+      },
+      pools: { "pool-x": { displayName: "Pool X", members: ["member-a", "member-b"] } },
+      routingChains: { zcode: { chain: [{ node: "pool-x", model: "shared-m" }] } },
+    };
+    return makeHandler({ store });
+  }
+
+  const planFor = (handler) => handler.planChainChatCompletions(
+    "/openai/member-a/v1/chat/completions",
+    { authorization: `Bearer ${TOKEN}` },
+    { model: "auto", messages: [] },
+    "zcode",
+  );
+
+  it("同一请求内两个池成员先后失败：链节点只计一次失败", async () => {
+    const handler = makePoolChainHandler();
+    const plan = await planFor(handler);
+    assert.equal(plan.ok, true);
+    const memberIds = plan.members.map((member) => member.memberId);
+    assert.deepEqual(memberIds, ["pool-x/member-a", "pool-x/member-b"],
+      "夹具前提：池节点的两个成员各自以扁平 id 入列");
+    plan.noteFailure(memberIds[0]);
+    plan.noteFailure(memberIds[1]);
+    assert.equal(handler.chainState.consecutive("pool-x", "shared-m"), 1,
+      "两个成员失败仍是同一个节点的同一次请求——去重集必须拦住第二次计数");
+  });
+
+  it("去重是 per-request 的：下一个请求的失败照常累积", async () => {
+    const handler = makePoolChainHandler();
+    (await planFor(handler)).noteFailure("pool-x/member-a");
+    (await planFor(handler)).noteFailure("pool-x/member-b");
+    assert.equal(handler.chainState.consecutive("pool-x", "shared-m"), 2,
+      "两个请求各失败一次，计数是 2——去重不得跨请求吞掉计数");
   });
 });

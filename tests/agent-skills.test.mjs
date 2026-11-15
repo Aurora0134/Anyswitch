@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -25,6 +26,7 @@ import {
   pickFile,
   pickFolder,
   readSkillBody,
+  recycleDir,
   resolveConflictSkill,
   saveSkillsConfig,
   scanEndpoints,
@@ -1231,6 +1233,21 @@ describe("diffSkillContent", () => {
       const states = Object.fromEntries(contentDiff(home, repo).files.map((f) => [f.path, f.state]));
       assert.equal(states["helper.txt"], "only-endpoint", "仓库侧被删掉 = 只剩端点侧");
       assert.equal(states["only-here.txt"], "only-endpoint");
+    } finally { cleanup(); }
+  });
+
+  it("仓库独有（only-repo）的文件同样进清单并写明缺在仓库对侧", () => {
+    // 与上一条互补的另一方向：端点还没收到、仓库已新增的文件。只覆盖
+    // only-endpoint 方向的夹具会让 only-repo 分支静默漂移。
+    const { dir, cleanup } = tempRoot();
+    const { home, repo } = pair(dir, {});
+    writeFileSync(join(repo, "skill-a", "repo-only.txt"), "repo side only");
+    try {
+      const files = contentDiff(home, repo).files;
+      const f = files.find((x) => x.path === "repo-only.txt");
+      assert.ok(f, "仓库独有文件必须进差异清单");
+      assert.equal(f.state, "only-repo", "仓库独有 = 只剩仓库侧");
+      assert.deepEqual(f.rows, [], "单侧文件没有对照行");
     } finally { cleanup(); }
   });
 
@@ -2501,6 +2518,72 @@ describe("全局端点同径退让（主仓库与识别目录重叠）", () => {
   });
 });
 
+describe("Agent 端点同径退让（主仓库落在某个 Agent 自己的 skills 目录）", () => {
+  // 退让过滤对全部端点生效，不只全局目录：主仓库落在某个 Agent 的技能目录时，
+  // 该端点卡上的「本地/部署状态」是同一段磁盘的幻影（收编比一致、异常卡可一键
+  // 删到本体），不撤会误导与误删。此前只有全局端点用例钉住这一行为。
+  const baseOf = (dir) => ({ LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") });
+
+  it("主仓库就是 claude 的技能目录时：claude 端点整卡撤下，其余端点与全局不受影响", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const claudeDir = join(home, ".claude", "skills");
+      writeSkill(join(claudeDir, "skill-a"), { name: "skill-a" });
+      const svc = createSkillsService({ homeDir: home, base: baseOf(dir), recycleDirFn: mockRecycle([]) });
+      svc.setRepoPath(claudeDir);
+      const state = svc.getState();
+      assert.equal(state.endpoints.some((e) => e.id === "claude"), false, "同径退让：claude 端点撤下");
+      assert.ok(state.endpoints.some((e) => e.id === "zcode"), "其余端点不受影响");
+      assert.ok(state.globalEndpoint, "全局目录与仓库不同径，照常在场");
+      assert.deepEqual(state.skills.map((s) => s.name), ["skill-a"], "技能全部以主仓库身份在场");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("嵌套形态：仓库是 claude 技能目录的父或子时同样撤下", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const claudeDir = join(home, ".claude", "skills");
+      writeSkill(join(claudeDir, "skill-a"), { name: "skill-a" });
+      writeSkill(join(claudeDir, "sub", "skill-b"), { name: "skill-b" });
+
+      // 父形态：repo = home——claude 的技能目录整段落在仓库里，必须撤
+      const svcParent = createSkillsService({ homeDir: home, base: baseOf(dir), recycleDirFn: mockRecycle([]) });
+      svcParent.setRepoPath(home);
+      assert.equal(svcParent.getState().endpoints.some((e) => e.id === "claude"), false, "父形态退让");
+
+      // 子形态：repo = claude 技能目录里的子目录——部署链接会落到仓库路径上，同样撤
+      const svcChild = createSkillsService({ homeDir: home, base: baseOf(dir), recycleDirFn: mockRecycle([]) });
+      svcChild.setRepoPath(join(claudeDir, "sub"));
+      assert.equal(svcChild.getState().endpoints.some((e) => e.id === "claude"), false, "子形态退让");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("双区域端点任一根重叠即退让：仓库落在 qoder-cn 区域根的技能目录时 qoder 撤下", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      // qoder 的 altRelSkillsDirs：CN 区域版数据根 ~/.qoder-cn/skills。退让判定
+      // 走 skillsDirs 全量清单，只查主根的实现会在这里漏掉它。
+      const cnDir = join(home, ".qoder-cn", "skills");
+      writeSkill(join(cnDir, "skill-cn"), { name: "skill-cn" });
+      const svc = createSkillsService({ homeDir: home, base: baseOf(dir), recycleDirFn: mockRecycle([]) });
+      svc.setRepoPath(cnDir);
+      const state = svc.getState();
+      assert.equal(state.endpoints.some((e) => e.id === "qoder"), false, "区域根重叠同样撤下 qoder");
+      assert.ok(state.endpoints.some((e) => e.id === "zcode"), "其余端点不受影响");
+      assert.deepEqual(state.skills.map((s) => s.name), ["skill-cn"]);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("写路径自指守卫（端点目录与主仓库重叠时拒绝，不动盘）", () => {
   it("deploy 拒绝把主仓库本体当部署目标（400 + 机读码）", async () => {
     const { dir, cleanup } = tempRoot();
@@ -2577,6 +2660,126 @@ describe("写路径自指守卫（端点目录与主仓库重叠时拒绝，不�
         },
       );
       assert.equal(calls.length, 0, "回收站零调用");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("recycleDir 的 PowerShell 实现（真实执行，注入替身子进程）", () => {
+  // 所有删除/收编/替换用例都在 recycleDirFn 缝上换 mock——真正的回收站实现
+  // （PowerShell + VisualBasic FileIO）从未被执行过。这里沿产品自带的 spawnFn
+  // 注入缝跑真实现，替身的只是 powershell 子进程本身（绝不真碰回收站）。
+  function fakePowershell({ exitCode = 0, stderr = "", stdout = "" } = {}) {
+    const calls = [];
+    const spawnFn = (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stdout.end(stdout);
+      child.stderr = new PassThrough();
+      child.stderr.end(stderr);
+      child.kill = () => {};
+      setTimeout(() => child.emit("close", exitCode), 10);
+      return child;
+    };
+    return { calls, spawnFn };
+  }
+
+  it("真正执行回收脚本：powershell 命令行带 VisualBasic 的 SendToRecycleBin 删除调用", async () => {
+    const { dir, cleanup } = tempRoot();
+    const victim = join(dir, "gone");
+    mkdirSync(victim, { recursive: true });
+    const { calls, spawnFn } = fakePowershell();
+    try {
+      await recycleDir(victim, { spawnFn });
+      assert.equal(calls.length, 1, "恰好一次子进程调用");
+      assert.equal(calls[0].cmd, "powershell.exe");
+      assert.deepEqual(calls[0].args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
+      const script = calls[0].args[3];
+      assert.ok(script.includes("Add-Type -AssemblyName Microsoft.VisualBasic"), "先装 VisualBasic 程序集");
+      assert.ok(
+        script.includes(`[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('${victim}', 'OnlyErrorDialogs', 'SendToRecycleBin')`),
+        "删除调用必须是回收站语义",
+      );
+      assert.doesNotMatch(script, /Remove-Item/i, "绝不带硬删除回退");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("路径里的单引号按 PowerShell 字符串规则转义", async () => {
+    const { dir, cleanup } = tempRoot();
+    const victim = join(dir, "it's skill");
+    const { calls, spawnFn } = fakePowershell();
+    try {
+      await recycleDir(victim, { spawnFn });
+      assert.ok(
+        calls[0].args[3].includes(`'${victim.replace(/'/g, "''")}'`),
+        "单引号必须翻倍转义，否则脚本注入/炸参数",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("非零退出如实报失败（stderr 内容优先），绝不退化为硬删除", async () => {
+    const { dir, cleanup } = tempRoot();
+    const victim = join(dir, "kept");
+    mkdirSync(victim, { recursive: true });
+    const { spawnFn } = fakePowershell({ exitCode: 1, stderr: "recycle bin unavailable\n" });
+    try {
+      await assert.rejects(
+        recycleDir(victim, { spawnFn }),
+        /recycle bin unavailable/,
+        "失败必须向上抛——删除链路据此拒绝并保留原目录",
+      );
+      assert.equal(existsSync(victim), true, "实现自己不做兜底删除");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("stderr 为空的失败报退出码", async () => {
+    const { dir, cleanup } = tempRoot();
+    const { spawnFn } = fakePowershell({ exitCode: 3 });
+    try {
+      await assert.rejects(recycleDir(join(dir, "gone"), { spawnFn }), /powershell exited 3/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("spawnFn 同步抛错（找不到 powershell）原样向上抛", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      await assert.rejects(
+        recycleDir(join(dir, "gone"), { spawnFn: () => { throw new Error("spawn ENOENT"); } }),
+        /spawn ENOENT/,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("删除链路真实经过回收站实现：deleteRepoSkill 经 recycleDir 到 powershell 脚本", async () => {
+    // mockRecycle 之上的所有删除用例只证明「调了回收缝」；这条证明缝的默认实现
+    // 就是上面那套 PowerShell 回收脚本。
+    const { dir, cleanup } = tempRoot();
+    const home = join(dir, "home");
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    const { calls, spawnFn } = fakePowershell();
+    try {
+      const r = await deleteRepoSkill(
+        { repoPath: repo, skillName: "skill-a" },
+        { homeDir: home, recycleDirFn: (p) => recycleDir(p, { spawnFn }) },
+      );
+      assert.equal(r.ok, true);
+      assert.equal(calls.length, 1, "仓库技能目录进回收站恰好一次");
+      const script = calls[0].args[3];
+      assert.ok(script.includes("SendToRecycleBin"), "删除走回收站语义");
+      assert.ok(script.includes("skill-a"), "被回收的正是这个技能目录");
     } finally {
       cleanup();
     }

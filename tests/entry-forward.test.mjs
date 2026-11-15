@@ -10,7 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
 import { forwardEntry } from "../src/shared/entry-forward.mjs";
@@ -115,5 +115,29 @@ test("换树窗口根壳与真入口逐一在盘、壳文本确实转发到该 t
     // 真入口必须带 isEntryModule 守卫——守卫在才说明壳的转发 exec 形态是必需的
     const targetText = readFileSync(targetPath, "utf8");
     assert.ok(targetText.includes("isEntryModule"), `${target} 缺 isEntryModule 守卫（守卫没了要回头重估壳形态）`);
+  }
+});
+
+test("壳的 new URL 必须以壳自身为基准解析到真入口（基准写死或丢失即红）", () => {
+  // 旧断言只匹配 `new URL("./<target>"` 这个前缀子串：基准参数被换成写死的
+  // 路径、别的变量甚至整个删掉时照样全绿——而换树后写死的基准指向的旧树位置
+  // 不再存在，转发必然 ENOENT。这里把调用形态整段解析出来：基准必须是
+  // import.meta.url，且以壳自身位置解析出的入口必须等于真入口的实际落点。
+  for (const { shell, target } of ROOT_ENTRY_SHELLS) {
+    const shellPath = join(appRoot, shell);
+    const text = readFileSync(shellPath, "utf8");
+    const call = text.match(/forwardEntry\(\s*new URL\(\s*("(?:[^"\\]|\\.)*")\s*,\s*([^)\s][^)]*?)\s*\)\s*\)/);
+    assert.ok(call, `${shell} 必须以 forwardEntry(new URL(<字符串字面量>, <基准>)) 的形态转发`);
+    assert.equal(
+      call[2].trim(),
+      "import.meta.url",
+      `${shell} 的 URL 基准必须是壳自身路径（import.meta.url），写死的基准在换树后指向旧树`,
+    );
+    const resolved = new URL(JSON.parse(call[1]), pathToFileURL(shellPath).href);
+    assert.equal(
+      resolved.href,
+      pathToFileURL(join(appRoot, target)).href,
+      `${shell} 以自身为基准解析出的入口必须是 ${target} 的实际落点`,
+    );
   }
 });

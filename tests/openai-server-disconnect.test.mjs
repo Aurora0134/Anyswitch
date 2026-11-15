@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createAgentMetricsCollector } from "../src/agents/agent-metrics.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 
 const TOKEN = "test-token-disconnect";
 
@@ -196,7 +197,14 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
   });
 
   it("(c) slow empty upstream + client aborts mid-wait: aborted, no 502 latch, no blind retry", async () => {
+    // 用闸门取代固定睡眠抢占：空流判定被闸在「客户端已离开」之后，abort 必然
+    // 落在管道停驻等下一块上游数据的中途——「判定落在中止之前」的时序抖动被
+    // 消灭。此前 50ms/200ms 双定时器在慢机器上会换序，分支未真正执行也仍绿。
     let callCount = 0;
+    let releaseUpstream;
+    const gate = new Promise((resolve) => { releaseUpstream = resolve; });
+    let pipeParked;
+    const pipeParkedAtGate = new Promise((resolve) => { pipeParked = resolve; });
     const upstreamFetch = async () => {
       callCount += 1;
       return {
@@ -205,9 +213,9 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
         body: (async function* () {
           const enc = new TextEncoder();
           yield enc.encode('data: {"id":"1","choices":[{"delta":{}}]}\n\n');
-          // Slow upstream: the empty-stream verdict would land ~200ms in, but
-          // the coding agent walks away first (ask-user confirmation pause).
-          await new Promise((r) => setTimeout(r, 200));
+          // 管道取走首块后会来拉第二块——此时它已停驻在等上游数据的途中。
+          pipeParked();
+          await gate;
           yield enc.encode("data: [DONE]\n\n");
         })(),
       };
@@ -218,15 +226,18 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
     await withServer(deps, async (port) => {
       const ac = new AbortController();
       const resPromise = postChatStream(port, ac.signal);
-      // Abort while the upstream is still mid-stream, before any verdict.
-      await new Promise((r) => setTimeout(r, 50));
+      // 确定性同步：管道停驻在等第二块上游数据的途中（空流判定必然未发生）。
+      await pipeParkedAtGate;
+      // 客户端离开（ask-user confirmation pause），然后放行上游——空流判定落
+      // 在一个已经消失的客户端头上。
       ac.abort();
+      releaseUpstream();
       await resPromise.then(
         () => {},
         () => {},
       );
-      // Let the relay finish the now client-less request cycle.
-      await new Promise((r) => setTimeout(r, 300));
+      // 放行后的判定链是同步级联，留一个宏任务余量让记账落地；这不是竞速。
+      await new Promise((r) => setTimeout(r, 100));
 
       assert.equal(callCount, 1, "no blind keep-alive retry against a dead client");
 
@@ -238,11 +249,11 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
   });
 
   it("(d) client walks away during keep-alive backoff: aborted, no phantom 502 fault", async () => {
-    // The empty-stream verdict landed, the relay entered the backoff sleep,
-    // and the client left during it. The definitive outcome is "aborted",
-    // not a 502 — the fault must latch only when retries are exhausted
-    // while the client is still there. A long backoff (200ms) pins the
-    // abort inside the sleep window deterministically.
+    // 用日志观察取代固定 15ms 睡眠抢占：relay 在进退避睡眠前必发
+    // "keep-alive: retrying"（同一同步块内先记日志再 sleep），看到日志再中止
+    // 就必然落在睡眠窗口之内——分支被真正执行，不再赌时序。退避取 5000ms，
+    // 截止线 2000ms 夹在两者之间：中止截断睡眠时请求毫秒级收尾；截断失守时
+    // 要等满 5000ms，截止线变红。
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -255,26 +266,47 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
         ]),
       };
     };
+    const warns = [];
+    const logger = {
+      warn: (message) => warns.push(String(message)),
+      error: (message) => warns.push(String(message)),
+      info: () => {},
+    };
     const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
     const deps = {
       ...createMockDeps({ upstreamFetch, metricsCollector: collector }),
-      getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 200 }),
+      logger,
+      getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 5000 }),
     };
 
     await withServer(deps, async (port) => {
       const ac = new AbortController();
       const resPromise = postChatStream(port, ac.signal);
-      // First (empty) attempt resolves in ~1ms with the fast mock; the relay
-      // then sleeps 200ms before the retry. Abort at +15ms — mid-backoff.
-      await new Promise((r) => setTimeout(r, 15));
+      // 等到「进入退避」的日志出现——这是睡眠已开启的确定性信号。
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          const poll = setInterval(() => {
+            if (warns.some((m) => m.includes("keep-alive: retrying"))) {
+              clearInterval(poll);
+              resolve();
+            }
+          }, 5);
+          const t = setTimeout(() => { clearInterval(poll); reject(new Error("relay never entered the keep-alive backoff — fixture broken")); }, 10000);
+          t.unref?.();
+        }),
+      ]);
       ac.abort();
-      await resPromise.then(
-        () => {},
-        () => {},
-      );
-      // Let the backoff window elapse so a broken implementation would have
-      // fired the retry and latched the exhaustion 502 by now.
-      await new Promise((r) => setTimeout(r, 400));
+      // 中止应立刻截断退避睡眠并收尾；若实现忽视退避中的中止，请求要等满
+      // 5000ms，截止线（2000ms）先红。
+      await Promise.race([
+        resPromise.then(() => {}, () => {}),
+        new Promise((_, reject) => {
+          const t = setTimeout(() => reject(new Error("the request outlived the 2s deadline — the abort did not cut the backoff short")), 2000);
+          t.unref?.();
+        }),
+      ]);
+      // 退避从未完整走完，重试无从发生；留一个宏任务余量让记账落地。
+      await new Promise((r) => setTimeout(r, 100));
 
       assert.equal(callCount, 1, "no retry against a departed client");
 

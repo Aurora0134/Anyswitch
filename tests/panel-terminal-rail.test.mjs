@@ -55,6 +55,14 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   ${names.map(extractFn).join("\n")}
 `;
 
+// 产线常量取原句（2026-11-15 测试审计）：沙盒不再另抄一份常数——产线改值时沙盒
+// 跟着走，用到它的用例当场红；「基线值」本身由「产线常量基线」专组钉死。
+const railConstDecl = (name) => {
+  const decl = panelJs.match(new RegExp(`const ${name} = [^;]+;`))?.[0];
+  assert.ok(decl, `${name} 在 panel.js 里`);
+  return decl;
+};
+
 const cssRule = (selector) => {
   const at = panelCss.indexOf(selector);
   assert.ok(at >= 0, `样式规则 ${selector} 在册`);
@@ -392,7 +400,7 @@ describe("终端视图左栏换血", () => {
 
     it("水位线：基线 5、点一次 +5、剩余 ≤5 一次全展开、全展开后「收起」回基线", () => {
       const run = new Function(`
-        const TERMINAL_RAIL_WATERMARK = 5;
+        ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
         ${extractFn("terminalRailWatermarkView")}
         ${extractFn("terminalRailNextWatermark")}
         ${extractFn("terminalRailMoreLabel")}
@@ -546,7 +554,7 @@ describe("终端视图左栏换血", () => {
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
-        const TERMINAL_RAIL_WATERMARK = 5;
+        ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
         const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
         const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -648,7 +656,7 @@ describe("终端视图左栏换血", () => {
         ${extractFn("terminalRailFindOpenSession")}
         let terminalRailSelectPending = null;
         let terminalRailSelectSeq = 0;
-        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
@@ -846,7 +854,7 @@ describe("终端视图左栏换血", () => {
         let terminalRailSelectPending = null;
         let terminalRailSelectSeq = 0;
         let terminalSwitchInFlight = false;
-        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         function renderTerminalPreviewTabs() { log.tabsRenders = (log.tabsRenders || 0) + 1; }
         function renderTerminalEmptyState() { log.emptyRenders = (log.emptyRenders || 0) + 1; }
@@ -1019,7 +1027,7 @@ describe("终端视图左栏换血", () => {
       let terminalRailSelectPending = null;
       let terminalRailSelectSeq = 0;
       let terminalSwitchInFlight = false;
-      const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+      ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
       function renderTerminalRail() { log2.rails += 1; }
       ${extractFn("terminalRailSwitchBusy")}
       ${extractFn("terminalRailBeginSelect")}
@@ -1082,7 +1090,7 @@ describe("终端视图左栏换血", () => {
         let terminalRailSelectPending = null;
         let terminalRailSelectSeq = 0;
         let terminalSwitchInFlight = false;
-        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
         let screenRuns = 0;
         function renderTerminalRail() { log2.rails += 1; }
         function renderTerminalPreviewSession() { screenRuns += 1; }
@@ -1254,6 +1262,51 @@ describe("终端视图左栏换血", () => {
       const open = extractFn("openTerminalPreview");
       assert.ok(open.includes("dispatchTerminalEntry()"), "点击进入同样走这条分派（单一实现）");
       assert.ok(!open.includes('api("GET", "/api/terminal/host/status")'), "现取宿主状态已收进分派函数，点击路径不另写一份");
+    });
+
+    it("vm 真跑：刷新落回走完整链——分派落地后由 resumeTerminalBackendAfterEntry 补连（2026-11-15 测试审计）", async () => {
+      // 链路后半段此前只有「dispatchTerminalEntry() 存在」一处源码钉：
+      // `.then(resumeTerminalBackendAfterEntry)` 整段删掉（宿主 running 而本地未就绪
+      // 时刷新回来恒停「终端服务未运行」——缺陷 A 的回归面）其余断言照样全绿。
+      // 真身直跑 restoreView + resumeTerminalBackendAfterEntry，分派替成可控桩，
+      // 断言落在补连函数是否真被兑现、兑现时的门控条件上。
+      const run = ({ hostState = "running", ready = false } = {}) => {
+        const log = { views: [], dispatches: 0, connects: 0 };
+        const store = { "panel-view": "board", "panel-settings-open": "0", "panel-terminal-open": "1" };
+        const localStorage = {
+          getItem: (k) => (k in store ? store[k] : null),
+          setItem: () => {},
+        };
+        const fn = new Function("localStorage", "window", "log", "hostState", `
+          let currentView = "board";
+          let suppressViewEnter = false;
+          let settingsReturnView = "board";
+          let restartEnterView = "";
+          let terminalBackendReady = ${ready};
+          async function dispatchTerminalEntry() { log.dispatches += 1; return hostState; }
+          function connectTerminalBackend() { log.connects += 1; }
+          ${extractFn("resumeTerminalBackendAfterEntry")}
+          function switchView(v) { log.views.push(v); currentView = v; }
+          ${extractFn("restoreView")}
+          return { restore: restoreView };
+        `)(localStorage, {}, log, hostState);
+        return { fn, log };
+      };
+      const { fn, log } = run();
+      await fn.restore();
+      await flush();
+      assert.ok(log.views.includes("terminal"), "落回终端视图");
+      assert.equal(log.dispatches, 1, "宿主状态分派一次");
+      assert.equal(log.connects, 1, "宿主 running 而本地未就绪：补连一次（删掉链路后半段本断言红）");
+      const notRunning = run({ hostState: "stopped" });
+      await notRunning.fn.restore();
+      await flush();
+      assert.equal(notRunning.log.dispatches, 1, "分派照走");
+      assert.equal(notRunning.log.connects, 0, "宿主未运行不补连（谓词不被链路带动失效）");
+      const alreadyReady = run({ hostState: "running", ready: true });
+      await alreadyReady.fn.restore();
+      await flush();
+      assert.equal(alreadyReady.log.connects, 0, "本地已就绪不重复补连");
     });
   });
 
@@ -1783,7 +1836,7 @@ describe("终端视图左栏换血", () => {
           const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
           let terminalRailLastGroups = [];
-          const TERMINAL_RAIL_WATERMARK = 5;
+          ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
           const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
           const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
           const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -1901,7 +1954,7 @@ ${extractFn("terminalRailPendingRowHtml")}
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
-        const TERMINAL_RAIL_WATERMARK = 5;
+        ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
         const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
         const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -2112,7 +2165,7 @@ describe("运行中转圈与水位线联动", () => {
     const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
-    const TERMINAL_RAIL_WATERMARK = 5;
+    ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
     const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
     const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
     const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -2286,7 +2339,7 @@ describe("live 推导（绑定未落地空窗）", () => {
     const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
-    const TERMINAL_RAIL_WATERMARK = 5;
+    ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
     const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
     const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
     const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -2575,3 +2628,19 @@ describe("done（跑完未读）标记与绿点", () => {
   });
 });
 
+
+// 「基线值」由产品值保证（2026-11-15 测试审计）：此前各 vm 沙盒自己另抄一份
+// TERMINAL_RAIL_WATERMARK / TERMINAL_RAIL_SELECT_TTL_MS，产线改 5→3 仍全绿——
+// 「基线 5」只活在测试里。现在沙盒一律从 panel.js 取原句注入（railConstDecl），
+// 行为用例随产线值走；这里再把产品值本身钉死，改值当场红。
+describe("产线常量基线", () => {
+  it("水位线基线 5：真身取值＝5，改值当场红", () => {
+    const value = new Function(`${railConstDecl("TERMINAL_RAIL_WATERMARK")}\nreturn TERMINAL_RAIL_WATERMARK;`)();
+    assert.equal(value, 5, "水位线基线是产品值 5（水印「展开其余 N」文案、一档 5 条都建立在它上）");
+  });
+
+  it("乐观选中窗 12s：真身取值＝12000ms，改值当场红", () => {
+    const value = new Function(`${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}\nreturn TERMINAL_RAIL_SELECT_TTL_MS;`)();
+    assert.equal(value, 12000, "乐观高亮 12s 武装窗（同 creation TTL 量级，短了会闪回、长了压住真行）");
+  });
+});

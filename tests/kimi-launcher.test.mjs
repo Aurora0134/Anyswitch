@@ -3,9 +3,9 @@
 
 import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runKimiLauncher, buildKimiLauncherEnv, buildKimiNativeFallbackEnv, buildInstanceId, writeKimiConfig } from "../src/launchers/kimi-launcher.mjs";
+import { runKimiLauncher, buildKimiLauncherEnv, buildKimiNativeFallbackEnv, buildInstanceId, writeKimiConfig, main } from "../src/launchers/kimi-launcher.mjs";
 import { readSidecar } from "../src/launchers/kimi-merge-config.mjs";
 import { sanitizeInstanceId } from "../src/agents/agent-metrics.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
@@ -76,6 +76,38 @@ test("buildKimiLauncherEnv injects endpoint identity and instance tag via KIMI_C
     "x-agent-id": "kimi",
     "x-agent-instance": "ws-1",
   });
+});
+
+test("buildKimiLauncherEnv strips an inherited ANTHROPIC_API_KEY so the relay token is the sole auth", () => {
+  // kimi 也读 ANTHROPIC_API_KEY：剥除缺失时，继承的真 key 会绕开 relay 会话
+  // 令牌直连上游。功能性变量（PATH）照常随行。
+  const env = buildKimiLauncherEnv({
+    port: 8080,
+    token: "abc123",
+    base: { ANTHROPIC_API_KEY: "sk-real-anthropic-key", PATH: "/usr/bin" },
+  });
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "abc123");
+  assert.equal(env.PATH, "/usr/bin");
+});
+
+test("runKimiLauncher strips ANTHROPIC_API_KEY on the full relay-mode path", async () => {
+  const { state, handle } = fakeRelay();
+  let spawnedEnv = null;
+  const code = await runKimiLauncher({
+    startRelay: async () => handle,
+    buildEnv: buildKimiLauncherEnv,
+    spawnKimi: async ({ env }) => {
+      spawnedEnv = env;
+      return 0;
+    },
+    base: { ANTHROPIC_API_KEY: "sk-real-anthropic-key" },
+  });
+  assert.equal(code, 0);
+  assert.equal(spawnedEnv.ANTHROPIC_API_KEY, undefined, "继承的真 key 不得随 relay 模式子进程出站");
+  assert.equal(spawnedEnv.ANTHROPIC_AUTH_TOKEN, "relay-session-token");
+  assert.equal(state.closed, true);
+  // 原生回落不剥 key 的口径已由「falls back to the native configuration」用例钉住。
 });
 
 test("buildKimiLauncherEnv always carries x-agent-id, even without an instanceId", () => {
@@ -281,6 +313,120 @@ describe("writeKimiConfig", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("writeKimiConfig 注入推理强度总开关的默认接线", () => {
+  // effort 参数留空（生产形态）时的默认解析就是这段接线：开关缺省为开，
+  // 开着才允许接管用户的 [thinking] 表、才把库里的档位写进托管块。
+  // operator 库文件（thinking-efforts.db.json）按测试目录各自落盘——缓存按
+  // 路径区分，夹具互不串线。
+  const OPERATOR_DB = {
+    models: {
+      "mocha-9-thinker": { kind: "reasoning", levels: ["low", "high"], default: "high", wire: {}, thinkingFormat: null },
+    },
+  };
+  function effortStore() {
+    return {
+      version: 2,
+      providers: {
+        "poke-api": {
+          displayName: "Poke API",
+          baseURL: "https://poke.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "poke-api.dpapi",
+          models: { "mocha-9-thinker": { displayName: "Mocha", contextWindow: 100000 } },
+        },
+      },
+    };
+  }
+  const seedThinkingConfig = (configPath) =>
+    writeFileSync(configPath, 'default_model = "_x/m"\n\n[thinking]\nenabled = false\n', "utf8");
+
+  it("缺省（无 settings.json）＝开：档位写进托管块、[thinking] 被接管、状态随结果返回", async () => {
+    const dir = mkTestDir("kimi-effort-default-on-");
+    writeFileSync(join(dir, "thinking-efforts.db.json"), JSON.stringify(OPERATOR_DB, null, 2), "utf8");
+    const configPath = join(dir, "config.toml");
+    seedThinkingConfig(configPath);
+
+    const result = await writeKimiConfig(effortStore(), 47821, "tok", dir, configPath);
+    assert.equal(result.ok, true);
+    assert.equal(result.thinking, "updated", "接管状态必须随结果返回（面板文案消费它）");
+    const text = readFileSync(configPath, "utf8");
+    assert.match(text, /^enabled = true$/m, "总开关开着：用户的全局开关被接管");
+    assert.match(text, /support_efforts = \["low", "high"\]/);
+    assert.match(text, /default_effort = "high"/);
+    assert.match(text, /capabilities = \["thinking"\]/);
+  });
+
+  it("settings.json 写 injectThinkingEffort:false＝关：不写档位也不接管 [thinking]", async () => {
+    const dir = mkTestDir("kimi-effort-off-");
+    writeFileSync(join(dir, "thinking-efforts.db.json"), JSON.stringify(OPERATOR_DB, null, 2), "utf8");
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: false }), "utf8");
+    const configPath = join(dir, "config.toml");
+    seedThinkingConfig(configPath);
+
+    const result = await writeKimiConfig(effortStore(), 47821, "tok", dir, configPath);
+    assert.equal(result.ok, true);
+    assert.equal(result.thinking, undefined, "没接管就没有 thinking 状态");
+    const text = readFileSync(configPath, "utf8");
+    assert.match(text, /^enabled = false$/m, "开关关着：用户的 [thinking] 原样保留");
+    assert.doesNotMatch(text, /support_efforts/);
+    assert.doesNotMatch(text, /default_effort/);
+    assert.doesNotMatch(text, /capabilities = \["thinking"\]/);
+  });
+
+  it("settings.json 存在但没写这个键＝仍是默认开", async () => {
+    const dir = mkTestDir("kimi-effort-unset-");
+    writeFileSync(join(dir, "thinking-efforts.db.json"), JSON.stringify(OPERATOR_DB, null, 2), "utf8");
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ keepAlive: { enabled: true, mode: "on" } }), "utf8");
+    const configPath = join(dir, "config.toml");
+    seedThinkingConfig(configPath);
+
+    const result = await writeKimiConfig(effortStore(), 47821, "tok", dir, configPath);
+    assert.equal(result.ok, true);
+    assert.equal(result.thinking, "updated");
+    assert.match(readFileSync(configPath, "utf8"), /support_efforts = \["low", "high"\]/);
+  });
+});
+
+describe("main() argv 接线", () => {
+  // main 的每个副作用入口都是注入缝：这里的 fake 全程零真实 relay、零真实
+  // spawn。argv 被静默吞掉（kimiArgs 接错变量、丢参）时这里翻红。
+  it("argv 原样跟队给子进程，退出码透传，relay 随之拆除", async () => {
+    const { state, handle } = fakeRelay();
+    const spawned = [];
+    const code = await main(["--resume", "session-1"], {
+      startRelay: async () => handle,
+      spawnKimi: async ({ env, args }) => {
+        spawned.push({ env, args });
+        return 5;
+      },
+    });
+    assert.equal(code, 5);
+    assert.deepEqual(spawned[0].args, ["--resume", "session-1"]);
+    assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, "http://127.0.0.1:54321", "relay 形态的 env 注入照常生效");
+    assert.equal(state.closed, true);
+  });
+
+  it("relay 起不来时 argv 仍原样跟队（原生回落）", async () => {
+    const spawned = [];
+    const logs = [];
+    const code = await main(["-p", "hi"], {
+      startRelay: async () => {
+        throw new Error("the Anyswitch global store is not usable");
+      },
+      spawnKimi: async ({ env, args }) => {
+        spawned.push({ env, args });
+        return 0;
+      },
+      log: (line) => logs.push(line),
+      base: { PATH: "/usr/bin" },
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(spawned[0].args, ["-p", "hi"]);
+    assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, undefined, "回落形态不注入");
+    assert.ok(logs.some((line) => line.includes("native configuration")));
   });
 });
 

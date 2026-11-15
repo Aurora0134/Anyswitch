@@ -739,6 +739,138 @@ test("anthropicToOpenAI drops Claude Code's fixed reasoning_effort", () => {
   assert.ok(!("reasoning_effort" in out));
 });
 
+// tools / tool_choice / stop_sequences / temperature / top_p / system 数组：
+// Claude Code 实际会发的工具与采样字段，漏翻译会让工具调用与采样参数静默丢失。
+test("anthropicToOpenAI translates tools into the function catalog, filtering invalid entries and filling defaults", () => {
+  const out = anthropicToOpenAI(
+    {
+      tools: [
+        null,
+        42,
+        { description: "no name, dropped" },
+        { name: "read" },
+        { name: "write", description: "write a file", input_schema: { type: "object", properties: { path: { type: "string" } } } },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    },
+    "m",
+  );
+  assert.deepEqual(out.tools, [
+    { type: "function", function: { name: "read", description: "", parameters: { type: "object", properties: {} } } },
+    { type: "function", function: { name: "write", description: "write a file", parameters: { type: "object", properties: { path: { type: "string" } } } } },
+  ]);
+});
+
+test("anthropicToOpenAI emits no tools key for absent, empty or non-array tools", () => {
+  for (const tools of [undefined, [], "nope"]) {
+    const out = anthropicToOpenAI({ tools, messages: [{ role: "user", content: "hi" }] }, "m");
+    assert.ok(!("tools" in out), JSON.stringify(tools));
+  }
+});
+
+test("anthropicToOpenAI translates every tool_choice variant and omits unknown shapes", () => {
+  const base = { messages: [{ role: "user", content: "hi" }] };
+  assert.equal(anthropicToOpenAI({ ...base, tool_choice: { type: "auto" } }, "m").tool_choice, "auto");
+  assert.equal(anthropicToOpenAI({ ...base, tool_choice: { type: "any" } }, "m").tool_choice, "required");
+  assert.equal(anthropicToOpenAI({ ...base, tool_choice: { type: "none" } }, "m").tool_choice, "none");
+  assert.deepEqual(
+    anthropicToOpenAI({ ...base, tool_choice: { type: "tool", name: "read" } }, "m").tool_choice,
+    { type: "function", function: { name: "read" } },
+  );
+  for (const bad of [{ type: "some-future-mode" }, null, "auto", 7]) {
+    const out = anthropicToOpenAI({ ...base, tool_choice: bad }, "m");
+    assert.ok(!("tool_choice" in out), JSON.stringify(bad));
+  }
+});
+
+test("anthropicToOpenAI carries sampling numbers and stop sequences, dropping non-numbers and empty stop lists", () => {
+  const full = anthropicToOpenAI(
+    { temperature: 0.2, top_p: 0.9, stop_sequences: ["END", "STOP"], messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  assert.equal(full.temperature, 0.2);
+  assert.equal(full.top_p, 0.9);
+  assert.deepEqual(full.stop, ["END", "STOP"]);
+
+  const absent = anthropicToOpenAI({ messages: [{ role: "user", content: "hi" }] }, "m");
+  for (const key of ["temperature", "top_p", "stop"]) {
+    assert.ok(!(key in absent), key);
+  }
+
+  const malformed = anthropicToOpenAI(
+    { temperature: "0.2", top_p: null, stop_sequences: [], messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  for (const key of ["temperature", "top_p", "stop"]) {
+    assert.ok(!(key in malformed), `${key} from ${JSON.stringify({ temperature: "0.2", top_p: null, stop_sequences: [] })}`);
+  }
+});
+
+test("anthropicToOpenAI joins an array system into one leading system message", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: [
+        { type: "text", text: "be terse" },
+        { type: "text", text: "answer in Chinese" },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    },
+    "m",
+  );
+  assert.deepEqual(out.messages[0], { role: "system", content: "be terse\nanswer in Chinese" });
+  assert.equal(out.messages.length, 2, "两条 text 块合成一条 system 消息，user 消息照旧");
+});
+
+test("anthropicToOpenAI's array system filters non-text blocks and emits no empty system message", () => {
+  const filtered = anthropicToOpenAI(
+    {
+      system: [
+        { type: "image", source: { type: "url", url: "https://example.invalid/x.png" } },
+        { type: "text", text: "real rule" },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+    },
+    "m",
+  );
+  assert.deepEqual(filtered.messages[0], { role: "system", content: "real rule" });
+
+  for (const system of [[], [{ type: "image", source: { type: "url", url: "https://example.invalid/x.png" } }]]) {
+    const out = anthropicToOpenAI({ system, messages: [{ role: "user", content: "hi" }] }, "m");
+    assert.equal(out.messages[0].role, "user", `no text → no system message (${JSON.stringify(system)})`);
+  }
+});
+
+test("handleMessages carries the full tool/sampling/system-array translation to the upstream body", async () => {
+  const sent = [];
+  const handler = createHandler(makeDeps({
+    upstreamFetch: async (urls, init) => {
+      sent.push(JSON.parse(init.body));
+      return okResponse;
+    },
+  }));
+  const out = await handler.handleMessages(AUTH, {
+    model: "anthropic/poke-api/claude-opus-5",
+    max_tokens: 64,
+    system: [{ type: "text", text: "be terse" }, { type: "text", text: "answer in Chinese" }],
+    temperature: 0.2,
+    top_p: 0.9,
+    stop_sequences: ["END"],
+    tools: [{ name: "read", description: "read a file", input_schema: { type: "object", properties: { path: { type: "string" } } } }],
+    tool_choice: { type: "tool", name: "read" },
+    messages: [{ role: "user", content: "hello" }],
+  });
+  assert.equal(out.status, 200);
+  const body = sent[0];
+  assert.deepEqual(body.messages[0], { role: "system", content: "be terse\nanswer in Chinese" });
+  assert.equal(body.temperature, 0.2);
+  assert.equal(body.top_p, 0.9);
+  assert.deepEqual(body.stop, ["END"]);
+  assert.deepEqual(body.tools, [
+    { type: "function", function: { name: "read", description: "read a file", parameters: { type: "object", properties: { path: { type: "string" } } } } },
+  ]);
+  assert.deepEqual(body.tool_choice, { type: "function", function: { name: "read" } });
+});
+
 // ---------- mid-conversation system rewrite（会话缓存优化） ----------
 
 test("anthropicToOpenAI rewrites mid-conversation system to user under the gate, head system untouched", () => {
@@ -972,27 +1104,42 @@ test("missing or wrong token is 401 and never reaches upstream", async () => {
   assert.equal(upstreamCalls, 0);
 });
 
-test("a same-length wrong token is 401 via the constant-time path", async () => {
-  // Exercises the timingSafeEqual branch (the different-length case above
-  // short-circuits before it), so the buffer-wiping finally is covered too.
+test("equal-length wrong tokens (wrong tail, case-swapped, Bearer-prefixed) are 401 with no upstream, and auth survives them", async () => {
+  // timingSafeEqual 只接受等长 Buffer，所以等长错误 token 是唯一真正走进比较
+  // 分支的形态（上面那条不同长度的在比较前就短路了）。「比较本身是常时」无法
+  // 从公共行为证明，这条用例只钉可观察契约：等长≠相等一律 401（含仅大小写不
+  // 同——比较是逐字节的，不是归一化的）；拒绝绝不触达上游；连续失败之后，正确
+  // token 的裸值与 Bearer 形态都仍然可用。
   let upstreamCalls = 0;
   const handler = createHandler(
     makeDeps({ upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); } }),
   );
-  const sameLength = `${TOKEN.slice(0, -1)}X`;
-  assert.equal(sameLength.length, TOKEN.length);
-  assert.notEqual(sameLength, TOKEN);
+  const wrongTail = `${TOKEN.slice(0, -1)}X`;
+  const caseSwapped = `${TOKEN.slice(0, -1)}${TOKEN.slice(-1).toUpperCase()}`;
+  assert.equal(wrongTail.length, TOKEN.length);
+  assert.notEqual(wrongTail, TOKEN);
+  assert.equal(caseSwapped.length, TOKEN.length);
+  assert.notEqual(caseSwapped, TOKEN, "仅大小写不同的 token 不是同一个 token");
+  assert.equal(caseSwapped.toLowerCase(), TOKEN, "字符排列相同：拒绝必须来自逐字节比较，不能靠大小写归一化蒙混过关");
 
-  const out = await handler.handleMessages(
-    { authorization: sameLength },
-    messageBody("anthropic/poke-api/claude-opus-5"),
-  );
-  assert.equal(out.status, 401);
-  assert.equal(out.body.error.type, "authentication_error");
-  assert.equal(upstreamCalls, 0);
+  for (const [label, presented] of [
+    ["wrong tail", wrongTail],
+    ["case-swapped", caseSwapped],
+    ["Bearer wrong tail", `Bearer ${wrongTail}`],
+  ]) {
+    const out = await handler.handleMessages(
+      { authorization: presented },
+      messageBody("anthropic/poke-api/claude-opus-5"),
+    );
+    assert.equal(out.status, 401, label);
+    assert.equal(out.body.error.type, "authentication_error", label);
+    assert.equal(upstreamCalls, 0, label);
+  }
 
-  // The correct token still authorizes after the failed comparison.
+  // The correct token still authorizes after the failed comparisons — bare and
+  // Bearer forms.
   assert.equal((await handler.handleModels(AUTH)).status, 200);
+  assert.equal((await handler.handleModels({ authorization: `Bearer ${TOKEN}` })).status, 200);
 });
 
 test("discovery also requires the token", async () => {

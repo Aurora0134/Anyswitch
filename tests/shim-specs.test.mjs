@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SHIM_SPECS, renderShimScripts } from "../src/agents/shim-manager.mjs";
@@ -262,5 +262,37 @@ test("rendered shims exec a launcher under src/launchers and nothing else", () =
         `${spec.id}.${kind}: every enumerated exec must land under %LOCALAPPDATA%\\Anyswitch\\app`,
       );
     }
+  }
+});
+
+// id 与启动器的一一对应：存在性检查（第一个用例）与渲染自洽（第三个用例）都
+// 照不出「规格行指错了启动器」——指到别的启动器文件或非入口模块时，文件在
+// 盘上、渲染照常自洽，装出来的命令却不是这个 id 承诺的那个端点。
+const LAUNCHER_NAME_EXCEPTIONS = new Map([
+  // 历史命名：claude 的入口从第一版起就叫 launcher.mjs。
+  ["claude", "src/launchers/launcher.mjs"],
+]);
+
+test("每个在册垫片 id 与其启动器一一对应：不共用、是入口模块、名字随 id", () => {
+  const live = SHIM_SPECS.filter((spec) => !spec.retired);
+
+  // 一一对应的第一半：两个在册 id 不得共用同一个启动器——复制规格行忘了改
+  // launcher 字段时，两个命令会装上同一个入口，其余检查一律全绿。
+  const shared = duplicates(live.map((spec) => spec.launcher));
+  assert.deepEqual(shared, [], `multiple shim ids share one launcher: ${shared.join(", ")}`);
+
+  for (const spec of live) {
+    // 第二半：被指名的文件必须真的是一个启动器入口——导出 main()、带
+    // isEntryModule 自动执行守卫。指到 merge-config 这类库模块时存在性与渲染
+    // 检查照常全绿，而命令装上去只会加载模块然后什么都不做。
+    const source = readFileSync(resolve(REPO_ROOT, spec.launcher), "utf8");
+    assert.match(source, /export (?:async )?function main\(/, `${spec.launcher} must export main()`);
+    assert.match(source, /isEntryModule\(process\.argv\[1\]/, `${spec.launcher} must run main only as the entry module`);
+
+    // 第三半：id 与启动器的对应关系本身——启动器文件名随 id 走
+    // （<id>-launcher.mjs）。既有例外只有 claude；新例外必须先进上面的表，
+    // 让偏离命名约定这件事变成一次显式决定而不是一次静默漂移。
+    const expected = LAUNCHER_NAME_EXCEPTIONS.get(spec.id) ?? `src/launchers/${spec.id}-launcher.mjs`;
+    assert.equal(spec.launcher, expected, `${spec.id} 的启动器应当是 ${expected}`);
   }
 });

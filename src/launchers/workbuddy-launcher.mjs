@@ -272,25 +272,29 @@ export function realSpawnWorkbuddy({ env, args, onPid = () => {}, node, cli, spa
   });
 }
 
-export async function main(argv = process.argv.slice(2)) {
+// deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
+// ——缺省路径的行为与注入前逐字节相同。可缺省的 resolveNode 传 undefined 时
+// 由 runWorkbuddyLauncher 的参数默认值接管。
+export async function main(argv = process.argv.slice(2), deps = {}) {
   return runWorkbuddyLauncher({
-    startRelay: () => startOpenAIRelay(),
-    writeConfig: (store, port, token, sidecarRoot, modelsPath) =>
-      writeWorkbuddyModels(store, port, token, sidecarRoot, modelsPath),
-    loadStore,
-    loadToken: (root) => loadOrGenerateToken(root),
-    createTracker: ({ token }) => {
+    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    writeConfig: deps.writeConfig ?? ((store, port, token, sidecarRoot, modelsPath) =>
+      writeWorkbuddyModels(store, port, token, sidecarRoot, modelsPath)),
+    loadStore: deps.loadStore ?? loadStore,
+    loadToken: deps.loadToken ?? ((root) => loadOrGenerateToken(root)),
+    createTracker: deps.createTracker ?? (({ token }) => {
       const tracker = createSessionReporter({
         reportUrl: `http://127.0.0.1:${RELAY_PORT}/panel/api/session/report`,
         agentId: "workbuddy",
       });
       tracker.setToken(token);
       return tracker;
-    },
-    spawnWorkbuddy: realSpawnWorkbuddy,
-    log: (line) => process.stderr.write(`${line}\n`),
+    }),
+    spawnWorkbuddy: deps.spawnWorkbuddy ?? realSpawnWorkbuddy,
+    resolveNode: deps.resolveNode,
+    log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     args: argv,
-    probeRelay,
+    probeRelay: deps.probeRelay ?? probeRelay,
   });
 }
 

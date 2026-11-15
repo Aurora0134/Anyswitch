@@ -15,6 +15,38 @@ import {
 import { atomicWriteFile } from "../src/store/atomic-write.mjs";
 import { managedConnectionId } from "../src/launchers/qoder-merge-config.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+// 常驻装配接线（startResidentRelay→spawnAgentSync→writeSyncStatus）的驱动入口
+// 与共享常量。startResidentRelay 的装配链按函数默认参数现读 process.env（如
+// createProductionDeps 里的凭据缓存门走 defaultSettingsPath()），装配期间必须
+// 把用户根整体重定向进本进程的临时根——否则会读到真实机器的 Anyswitch 设置；
+// 重定向只在常驻装配用例窗口内生效，本文件其余用例不读 env，不受影响。
+// spawnAgentSync 注入替身也保证绝不真正 spawn 同步子进程。
+import { startResidentRelay } from "../src/relay/relay-host.mjs";
+import { createProductionDeps } from "../src/launchers/launch.mjs";
+import { storePaths } from "../src/store/store-io.mjs";
+import { readSyncStatus } from "../src/shared/sync-status.mjs";
+
+// startResidentRelay 装配窗口内的用户根重定向：进临时根、出原样恢复。装配完成
+// 后残留的只有已 unref 的 store watcher 与 stderr tee，不再读 env。
+async function withResidentEnvRoot(run) {
+  const envRoot = mkTestDir("agent-sync-env-");
+  const saved = {};
+  for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
+    saved[key] = process.env[key];
+    process.env[key] = envRoot;
+  }
+  const gitAnchorSaved = process.env.ANYSWITCH_GIT_ANCHOR;
+  delete process.env.ANYSWITCH_GIT_ANCHOR;
+  try {
+    return await run(envRoot);
+  } finally {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    if (gitAnchorSaved !== undefined) process.env.ANYSWITCH_GIT_ANCHOR = gitAnchorSaved;
+  }
+}
 
 function markInstallFile(path) {
   mkdirSync(dirname(path), { recursive: true });
@@ -357,6 +389,20 @@ describe("agent-sync pools", () => {
     assert.doesNotMatch(grokText, /anyswitch-alpha/);
     assert.doesNotMatch(grokText, /anyswitch-beta/);
 
+    // WorkBuddy 的托管面同样来自共享渠道派生，必须与 TOML 家族同一拍吸收/还原。
+    // 它不在矩阵里时，池/成员吸收回归只会在它的 models.json 里发作且无测试看见。
+    const workbuddy1 = JSON.parse(readFileSync(join(tmpRoot, ".workbuddy", "models.json"), "utf8"));
+    assert.deepEqual(
+      workbuddy1.models.map((m) => m.id).sort(),
+      ["pool-ab~model-1", "pool-ab~model-2"],
+      "pool channel in workbuddy models.json",
+    );
+    assert.equal(
+      workbuddy1.models.some((m) => m.id === "alpha~model-1" || m.id === "beta~model-2"),
+      false,
+      "members absorbed into the pool channel — no endpoint lists them",
+    );
+
     // Dissolve the pool and re-sync: the pool channel disappears everywhere,
     // the absorbed member channels resurface as standalone channels.
     const second = await syncAllAgentConfigs(syncOpts(poolStore(false)));
@@ -384,6 +430,13 @@ describe("agent-sync pools", () => {
     assert.doesNotMatch(grokText2, /anyswitch-pool-ab/, "grok pool channel cleaned up after dissolve");
     assert.match(grokText2, /\[model\."anyswitch-alpha~model-1"\]/);
     assert.match(grokText2, /\[model\."anyswitch-beta~model-2"\]/);
+
+    const workbuddy2 = JSON.parse(readFileSync(join(tmpRoot, ".workbuddy", "models.json"), "utf8"));
+    assert.deepEqual(
+      workbuddy2.models.map((m) => m.id).sort(),
+      ["alpha~model-1", "beta~model-2"],
+      "workbuddy pool channel cleaned up after dissolve; member channels resurface",
+    );
   });
 });
 
@@ -896,6 +949,180 @@ describe("agent-sync 未安装端点闸门", () => {
     assert.equal(res.results.grok.notInstalled, undefined, "拿不准不跳过");
     assert.equal(res.results.grok.ok, true);
     assert.ok(existsSync(join(tmpRoot, ".grok", "config.toml")), "fail-open：宁可多写不误伤");
+  });
+});
+
+// ---- 常驻装配的同步接线（relay-host.mjs 的 onStoreChange→spawnAgentSync→
+// writeSyncStatus 链路）------------------------------------------------------
+//
+// 这条链此前没有任何测试：store.json 变更触发同步子进程、启动首同步、结果落
+// sync-status.json，任何一环在装配层断掉，面板的「上次同步未成功」与端点同步
+// 都会静默失效。用例经真实入口 startResidentRelay 驱动：spawnAgentSync 注入
+// 替身（绝不真正 spawn），store watcher 用真实的 createStoreWatcher（fs.watch
+// 句柄已被 unref，不钉事件循环），sync-status.json 的读取走面板同款
+// readSyncStatus——公共可观察面只有磁盘上的这份文件。
+//
+// terminalSupervisor / tokenRotationScheduleFn / metricsCollector / 出网两键
+// 全部注入替身，绑定端口经 options.relayPort 落在临时端口上；默认行为与副作用
+// 顺序不变（默认路径仍是真实 spawn 与真实 watcher）。
+describe("agent-sync 常驻装配的同步接线", () => {
+  function residentSyncHarness() {
+    const tmp = mkTestDir("agent-sync-resident-");
+    const base = { LOCALAPPDATA: tmp, USERPROFILE: tmp, APPDATA: tmp };
+    const root = join(tmp, "Anyswitch");
+    mkdirSync(root, { recursive: true });
+    // store 预检要求一个可用的 store.json：最小合法 schema（version 2 + providers）。
+    writeFileSync(join(root, "store.json"), JSON.stringify({ version: 2, providers: {} }), "utf8");
+    const logPath = join(tmp, "relay-host.log");
+    const syncSpawns = [];
+    // 首次 spawn 返回带机器可读摘要行的成功结果；之后一律进程级失败——两个方向
+    // 都得流到 sync-status.json 才算接线完整。
+    const spawnAgentSync = async ({ port }) => {
+      const index = syncSpawns.length;
+      syncSpawns.push(port);
+      return index === 0
+        ? { ok: true, stdout: `${SYNC_RESULT_PREFIX}${JSON.stringify({ ok: true, synced: ["zcode", "kimi"], failed: [] })}\n`, stderr: "" }
+        : { ok: false, code: 1, stdout: "", stderr: "" };
+    };
+    const supervisor = {
+      async start() { return { ok: true, pid: 1 }; },
+      async stop() {},
+      status() { return { state: "stopped", pid: null, lastExit: null }; },
+      setManualStop() {},
+      isManualStop() { return false; },
+    };
+    const ready = startResidentRelay({
+      base,
+      paths: storePaths(root),
+      logPath,
+      relayPort: 0,
+      terminalSupervisor: supervisor,
+      spawnAgentSync,
+      // 真实的 createStoreWatcher 由装配自己创建——本用例不注入 storeWatcher。
+      tokenRotationScheduleFn: (check) => {
+        void check;
+        return () => {};
+      },
+      createProductionDeps: (opts) => ({
+        ...createProductionDeps(opts),
+        upstreamFetch: async () => { throw new Error("no upstream in test"); },
+        loadCredential: async () => ({ ok: false, errors: ["test: no credentials"] }),
+      }),
+      metricsCollector: {
+        startRequest: () => null,
+        noteZcodeSessionRequest() {},
+        persistMetricsSnapshot() {},
+        getAgentsStatus: async () => [],
+        onActivity: () => () => {},
+      },
+      socketOwner: { lookup: () => null, onRefresh: () => () => {} },
+      serviceHealth: { snapshot: () => ({ degraded: false, consecutiveFailures: 0 }), recordFailure() {}, recordSuccess() {} },
+    });
+    return { tmp, root, ready, syncSpawns };
+  }
+
+  it("启动首同步把结果落进 sync-status.json，真实 store watcher 触发的变更同步也落盘", async () => {
+    await withResidentEnvRoot(async () => {
+    const h = residentSyncHarness();
+    const result = await h.ready;
+    try {
+      // 启动首同步：装配后立刻发生，且带实际绑定端口。
+      assert.deepEqual(h.syncSpawns, [result.port], "启动首同步恰好发生一次，带实际绑定端口");
+      const startupStatus = readSyncStatus(h.root);
+      assert.ok(startupStatus, "sync-status.json 必须在启动同步后落盘");
+      assert.equal(startupStatus.source, "startup");
+      assert.equal(startupStatus.ok, true);
+      assert.deepEqual(startupStatus.synced, ["zcode", "kimi"], "摘要行里的成功名单原样落盘");
+      assert.deepEqual(startupStatus.failed, []);
+      assert.ok(Number.isFinite(Date.parse(startupStatus.at)), "at 是可解析的时间戳");
+
+      // store.json 变更：经真实 fs.watch + debounce 驱动装配的 onStoreChange，
+      // 轮询等待（fs 事件投递与 debounce 都是墙钟敏感，deadline 只会等得更久）。
+      atomicWriteFile(
+        join(h.root, "store.json"),
+        JSON.stringify({ version: 2, providers: { late: { displayName: "Late" } } }),
+      );
+      const deadline = Date.now() + 5000;
+      while (h.syncSpawns.length < 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(h.syncSpawns.length, 2, "store.json 变更必须触发第二次同步 spawn");
+      assert.deepEqual(h.syncSpawns, [result.port, result.port], "变更同步同样带实际绑定端口");
+
+      const changeStatus = readSyncStatus(h.root);
+      assert.ok(changeStatus, "变更同步的结果必须覆盖写进 sync-status.json");
+      assert.equal(changeStatus.source, "store-change", "落盘状态必须标记来源是 store.json 变更");
+      assert.equal(changeStatus.ok, false, "进程级失败如实落盘");
+      assert.equal(changeStatus.error, "runner exit 1");
+      assert.deepEqual(changeStatus.failed, [], "进程级失败没有端点名单");
+
+      // sync-status.json 自己落盘不得再次触发 watcher（isStoreRelated 只认
+      // store.json 形状的文件名）：等过三个 debounce 窗口后 spawn 数必须停在 2。
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      assert.equal(h.syncSpawns.length, 2, "sync-status 落盘不得反过来触发同步");
+    } finally {
+      await result.close();
+    }
+    });
+  });
+
+  it("退出码 0 但个别端点没同步上：失败名单如实落进 sync-status.json", async () => {
+    // 同步子进程「整次跑完但挂了个别端点」时退出码仍为 0，失败面只能来自
+    // stdout 上的机器可读摘要行。这条最常见的失败形状必须原样流到落盘文件，
+    // 面板的「上次同步未成功」才有据可依。
+    await withResidentEnvRoot(async () => {
+    const tmp = mkTestDir("agent-sync-resident-fail-");
+    const base = { LOCALAPPDATA: tmp, USERPROFILE: tmp, APPDATA: tmp };
+    const root = join(tmp, "Anyswitch");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "store.json"), JSON.stringify({ version: 2, providers: {} }), "utf8");
+    const supervisor = {
+      async start() { return { ok: true, pid: 1 }; },
+      async stop() {},
+      status() { return { state: "stopped", pid: null, lastExit: null }; },
+      setManualStop() {},
+      isManualStop() { return false; },
+    };
+    const result = await startResidentRelay({
+      base,
+      paths: storePaths(root),
+      logPath: join(tmp, "relay-host.log"),
+      relayPort: 0,
+      terminalSupervisor: supervisor,
+      spawnAgentSync: async () => ({
+        ok: true,
+        code: 0,
+        stdout: `${SYNC_RESULT_PREFIX}${JSON.stringify({ ok: true, synced: ["zcode"], failed: ["kimi"] })}\n`,
+        stderr: "",
+      }),
+      tokenRotationScheduleFn: () => () => {},
+      createProductionDeps: (opts) => ({
+        ...createProductionDeps(opts),
+        upstreamFetch: async () => { throw new Error("no upstream in test"); },
+        loadCredential: async () => ({ ok: false, errors: ["test: no credentials"] }),
+      }),
+      metricsCollector: {
+        startRequest: () => null,
+        noteZcodeSessionRequest() {},
+        persistMetricsSnapshot() {},
+        getAgentsStatus: async () => [],
+        onActivity: () => () => {},
+      },
+      socketOwner: { lookup: () => null, onRefresh: () => () => {} },
+      serviceHealth: { snapshot: () => ({ degraded: false, consecutiveFailures: 0 }), recordFailure() {}, recordSuccess() {} },
+    });
+    try {
+      const status = readSyncStatus(root);
+      assert.ok(status, "个别端点失败也要落盘，不能让面板只看到退出码 0");
+      assert.equal(status.source, "startup");
+      assert.equal(status.ok, false, "有端点没写进去就不算成功");
+      assert.deepEqual(status.failed, ["kimi"]);
+      assert.deepEqual(status.synced, ["zcode"]);
+      assert.equal(status.error, undefined, "失败名单已点名时不再带进程级 error");
+    } finally {
+      await result.close();
+    }
+    });
   });
 });
 

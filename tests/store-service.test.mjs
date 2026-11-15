@@ -586,6 +586,34 @@ describe("store-service deleteProvider", () => {
     assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), true);
   });
 
+  it("retains the credential and pending journal when the confirmation read fails", async () => {
+    const paths = makeRoot();
+    seedStore(paths, { prov: richEntry("prov", ["m1"]) });
+    writeCredential(paths, "prov");
+    const realLoad = loadStore;
+    let loads = 0;
+    const svc = makeService(paths, {
+      loadStore: (storePaths) => {
+        loads += 1;
+        if (loads === 3) return { ok: false, reason: "store-unreadable" };
+        return realLoad(storePaths);
+      },
+    });
+
+    const result = await svc.deleteProvider("prov");
+    assert.equal(result.ok, false);
+    assert.match(result.error, /could not be verified/);
+    assert.match(result.error, /credential was retained/);
+    assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), true);
+    const journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+    assert.deepEqual(journal.pending.map((entry) => entry.providerId), ["prov"]);
+    assert.deepEqual(journal.completed, []);
+
+    const resumed = await svc.resumeDeletions();
+    assert.deepEqual(resumed.resumed, ["prov"]);
+    assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), false);
+  });
+
   it("surfaces cas-conflict from the store removal write", async () => {
     const paths = makeRoot();
     seedStore(paths, { prov: richEntry("prov", ["m1"]) });

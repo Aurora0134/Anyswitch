@@ -18,7 +18,11 @@ import { atomicWriteFile } from "../store/atomic-write.mjs";
 export function readSidecar(path) {
   if (!existsSync(path)) return { providers: [] };
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.providers)) {
+      return { providers: [] };
+    }
+    return parsed;
   } catch {
     return { providers: [] };
   }

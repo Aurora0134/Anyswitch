@@ -62,6 +62,14 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   ${names.map(extractFn).join("\n")}
 `;
 
+// 产线常量取原句（2026-11-15 测试审计）：沙盒不再另抄一份常数——产线改值时沙盒
+// 跟着走，用到它的用例当场红；「基线值」本身由「产线常量基线」专组钉死。
+const railConstDecl = (name) => {
+  const decl = panelJs.match(new RegExp(`const ${name} = [^;]+;`))?.[0];
+  assert.ok(decl, `${name} 在 panel.js 里`);
+  return decl;
+};
+
 const cssRule = (selector) => {
   const at = panelCss.indexOf(selector);
   assert.ok(at >= 0, `样式规则 ${selector} 在册`);
@@ -94,7 +102,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const terminalRailSelfHealFailed = new Set();
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
-    const TERMINAL_RAIL_WATERMARK = 5;
+    ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
     const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
     const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
     const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -155,7 +163,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     let terminalRailSelectSeq = 0;
     let terminalRailCreatePending = createPending;
     let terminalSwitchInFlight = false;
-    const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+    ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
     function renderTerminalRail() { renderTerminalRailHistory(terminalRailAgentId()); }
     ${extractFn("terminalRailSwitchBusy")}
     ${extractFn("terminalRailBeginSelect")}
@@ -1078,6 +1086,79 @@ describe("组头三件（工作区行按钮）", () => {
       assert.ok(src.includes("pointerover") && src.includes("pointerout"), "指针进出驱动显隐");
     });
 
+    it("hover 卡构建函数真跑：三行内容、会话计数含兜底行、整卡复制路径（2026-11-15 测试审计）", () => {
+      // 构建函数（showTerminalRailHoverCard）此前从未被执行，三行内容/计数/复制反馈
+      // 只靠上面的源码字符串。真身直跑：document/window 替成记账桩，断言落在卡的
+      // 结构、文本与点击行为上——删行、改计数口径、换复制目标都当场红。
+      const delayDecl = railConstDecl("TERMINAL_RAIL_HOVER_DELAY_MS");
+      const make = ({ groups, menuKey = "" }) => {
+        const log = { copies: [], appended: [], timers: [] };
+        const fn = new Function("head", "key", "document", "window", "groups", "menuKey", "log", `
+          ${delayDecl}
+          let terminalRailLastGroups = groups;
+          let terminalRailHoverEl = null;
+          let terminalRailHoverTimer = null;
+          let terminalRailHoverHead = null;
+          let terminalRailMenuKey = menuKey;
+          const setTimeout = (fn, ms) => { log.timers.push(ms); return 1; };
+          const clearTimeout = () => {};
+          function sessDirName(key) { const parts = String(key).split("\\\\"); return parts[parts.length - 1] || key; }
+          function sessCopyText(text, msg) { log.copies.push({ text, msg }); }
+          function terminalRailSameDir(a, b) { return a === b; }
+          ${extractFn("showTerminalRailHoverCard")}
+          ${extractFn("scheduleTerminalRailHoverCard")}
+          ${extractFn("closeTerminalRailHoverCard")}
+          return {
+            show: showTerminalRailHoverCard,
+            schedule: scheduleTerminalRailHoverCard,
+            close: closeTerminalRailHoverCard,
+            hoverEl: () => terminalRailHoverEl,
+          };
+        `)(
+          { getBoundingClientRect: () => ({ bottom: 100, right: 300 }) },
+          "C:\\dev\\alpha",
+          {
+            createElement: () => ({ className: "", style: {}, children: [], append(...kids) { this.children.push(...kids); }, addEventListener() {} }),
+            body: { append: (el) => { log.appended.push(el); } },
+          },
+          { innerWidth: 1200 },
+          groups, menuKey, log,
+        );
+        return { fn, log };
+      };
+      const groups = [
+        { key: "C:\\dev\\alpha", rows: [{ id: "a-1" }, { id: "a-2" }, { id: "a-3" }], pending: [{ id: "p-1" }, { id: "p-2" }] },
+        { key: "C:\\dev\\beta", rows: [{ id: "b-1" }], pending: [] },
+      ];
+      const { fn, log } = make({ groups });
+      // 排程：800ms 后出卡；未分组（空键）与菜单开着都不排
+      fn.schedule({ getBoundingClientRect: () => ({ bottom: 0, right: 0 }) }, "C:\\dev\\alpha");
+      assert.deepEqual(log.timers, [800], "排程按产线延迟登记");
+      fn.schedule({ getBoundingClientRect: () => ({ bottom: 0, right: 0 }) }, "");
+      assert.equal(log.timers.length, 1, "空键（未分组）不排卡");
+      const menuOpen = make({ groups, menuKey: "C:\\dev\\alpha" });
+      menuOpen.fn.schedule({ getBoundingClientRect: () => ({ bottom: 0, right: 0 }) }, "C:\\dev\\alpha");
+      assert.deepEqual(menuOpen.log.timers, [], "⋯ 菜单开着不排卡");
+
+      const card = fn.show({ getBoundingClientRect: () => ({ bottom: 100, right: 300 }) }, "C:\\dev\\alpha") ?? fn.hoverEl();
+      assert.ok(card, "卡已构建并在册");
+      assert.equal(card.className, "rail-term-hover-card", "卡类名");
+      assert.deepEqual(card.children.map((row) => `${row.className}=${row.textContent}`), [
+        "rail-term-hover-name=alpha",
+        "rail-term-hover-path=C:\\dev\\alpha",
+        "rail-term-hover-count=5 个会话",
+      ], "三行内容：目录短名 / 完整路径 / N 个会话（计数含兜底行 3+2；删行、改口径本断言红）");
+      card.onclick();
+      assert.deepEqual(log.copies, [{ text: "C:\\dev\\alpha", msg: "已复制" }], "整卡点击复制完整路径，反馈「已复制」");
+      assert.equal(log.appended.length, 1, "卡挂在 body 下（portal 同款）");
+      assert.ok(fn.hoverEl() === card, "在册引用指向卡（收场靠它）");
+
+      // 组键对不上（只在 beta 组里找 alpha）＝零行不出卡
+      const miss = make({ groups: [{ key: "C:\\dev\\beta", rows: [{ id: "b-1" }], pending: [] }] });
+      const noCard = miss.fn.show({ getBoundingClientRect: () => ({ bottom: 0, right: 0 }) }, "C:\\dev\\alpha");
+      assert.equal(noCard, undefined, "组里没有这个目录：不出卡");
+    });
+
     it("⋯ 菜单打开期间抑制 hover 卡（disabled: menuOpen）", () => {
       const src = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(/if \(!head \|\| !key \|\| terminalRailMenuKey\) return/.test(src),
@@ -1314,7 +1395,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         ${extractFn("terminalRailActivateSession")}
         let terminalRailSelectPending = null;
         let terminalRailSelectSeq = 0;
-        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
@@ -1736,7 +1817,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       const terminalRailSelfHealFailed = new Set();
       const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
       let terminalRailLastGroups = [];
-      const TERMINAL_RAIL_WATERMARK = 5;
+      ${railConstDecl("TERMINAL_RAIL_WATERMARK")}
       const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
       const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
       const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -1983,6 +2064,33 @@ describe("文案与时间格式", () => {
     assert.equal(blank.btn.title, "新建终端", "title 同步换");
     assert.equal(blank.btn["aria-label"], "新建终端", "aria-label 同步换");
   });
+
+  it("renderTerminalRail 真身渲树：renderTerminalRailHistory 与 syncTerminalRailHistory 各被调一次", () => {
+    // 树渲染调用此前零断言：删掉 renderTerminalRailHistory(agentId) 这行后左栏树
+    // 永不重绘，其余断言照样全绿。真身直跑，把两个下游都换成记账桩钉住。
+    const run = ({ view = "terminal", dir = {} } = {}) => {
+      const log = { history: [], sync: [] };
+      const btn = { disabled: false, title: "", querySelector: () => null, setAttribute() {} };
+      const fn = new Function("btn", "log", "view", "dir", `
+        let currentView = view;
+        let terminalBackendReady = true;
+        function $(id) { return id === "railTermNewBtn" ? btn : (id === "railTerminalDir" ? dir : null); }
+        function renderTerminalRailHistory(agentId) { log.history.push(agentId); }
+        function syncTerminalRailHistory(agentId) { log.sync.push(agentId); }
+        function terminalRailAgentId() { return "kimi"; }
+        ${extractFn("renderTerminalRail")}
+        return renderTerminalRail;
+      `)(btn, log, view, dir);
+      fn();
+      return log;
+    };
+    const log = run();
+    assert.deepEqual(log.history, ["kimi"], "栏体渲染必须重铺树（删掉 renderTerminalRailHistory 调用＝左栏永不重绘，本断言红）");
+    assert.deepEqual(log.sync, ["kimi"], "渲完同拍认身份（接线由 loading 文件的源码钉子另锚）");
+    const offView = run({ view: "board" });
+    assert.deepEqual(offView.history, [], "非终端视图不白跑");
+    assert.deepEqual(offView.sync, [], "非终端视图不认身份");
+  });
 });
 
 describe("组文件夹图标含当前会话时变主题色", () => {
@@ -2091,6 +2199,61 @@ describe("段头搜索", () => {
       assert.equal(hits.length, 25, "匹配函数本身不截");
       // 截断在渲染层（TERMINAL_RAIL_SEARCH_LIMIT = 20）
       assert.ok(panelJs.includes("TERMINAL_RAIL_SEARCH_LIMIT = 20"), "上限 20（Host 侧同值）");
+    });
+
+    it("渲染器真跑：上限 20 条＋截断句、无匹配句、搜索中态、同帧去重（2026-11-15 测试审计）", () => {
+      // 渲染器此前零行为覆盖（只靠源码字符串钉常量与文案）：去掉 20 条上限、
+      // 删掉截断句分支都全绿。真身直跑 renderTerminalRailSearchResults，行生成替成
+      // 记名桩（渲染器自己的契约是截断/文案/去重，行 markup 由 terminalRailRowHtml
+      // 的专组沙盒钉），断言落在列表的最终 innerHTML 上。
+      const limitDecl = railConstDecl("TERMINAL_RAIL_SEARCH_LIMIT");
+      const limitValue = new Function(`${limitDecl}\nreturn TERMINAL_RAIL_SEARCH_LIMIT;`)();
+      const make = ({ sessions, search }) => {
+        const list = { html: "", writes: 0 };
+        Object.defineProperty(list, "innerHTML", {
+          get: () => list.html,
+          set: (v) => { list.writes += 1; list.html = v; },
+        });
+        const fn = new Function("list", "search", "sessions", `
+          let terminalRailRendered = { history: null };
+          const terminalRailSearch = search;
+          ${limitDecl}
+          ${extractFn("renderTerminalRailSearchResults")}
+          function terminalRailSearchMatches() { return sessions; }
+          function terminalRailVisibleSessions() { return sessions; }
+          function terminalRailFindOpenSession() { return null; }
+          const activeTerminalPreviewId = null;
+          function terminalRailRowHtml(session) { return '<div class="row" data-row="' + session.id + '"></div>'; }
+          return renderTerminalRailSearchResults;
+        `)(list, search, sessions);
+        return { list, render: () => fn(list) };
+      };
+      const many = Array.from({ length: limitValue + 5 }, (_, i) => ({ id: `m-${i}` }));
+      const capped = make({ sessions: many, search: { open: true, query: "q", searching: false } });
+      capped.render();
+      const rowCount = (capped.list.html.match(/class="row"/g) || []).length;
+      assert.equal(rowCount, 20, `只出上限 ${limitValue} 条（去掉 slice 上限本断言红：会出 ${limitValue + 5} 条）`);
+      assert.ok(capped.list.html.includes("仅显示前 20 条结果，请缩小搜索范围。"), "截断句逐字（删掉截断分支本断言红）");
+
+      const few = make({ sessions: [{ id: "a" }, { id: "b" }, { id: "c" }], search: { open: true, query: "q", searching: false } });
+      few.render();
+      assert.equal((few.list.html.match(/class="row"/g) || []).length, 3, "不足上限不截");
+      assert.ok(!few.list.html.includes("仅显示前 20 条"), "不超上限不出截断句");
+      assert.ok(!few.list.html.includes("无匹配会话"), "有行不出无匹配句");
+
+      const empty = make({ sessions: [], search: { open: true, query: "q", searching: false } });
+      empty.render();
+      assert.ok(empty.list.html.includes("无匹配会话"), "无匹配句逐字（删掉空态分支本断言红）");
+
+      const searching = make({ sessions: [{ id: "a" }], search: { open: true, query: "q", searching: true } });
+      searching.render();
+      assert.ok(searching.list.html.includes("正在搜索会话历史…"), "搜索中态文案逐字");
+      assert.equal((searching.list.html.match(/class="row"/g) || []).length, 0, "搜索中不排行");
+
+      const twice = make({ sessions: [{ id: "a" }], search: { open: true, query: "q", searching: false } });
+      twice.render();
+      twice.render();
+      assert.equal(twice.list.writes, 1, "同帧内容零变化不重写（diff 去重真跑）");
     });
   });
 
@@ -2481,6 +2644,153 @@ describe("评审必修 1：取消归档钮的行委托断链", () => {
     // 对照组：点普通历史行（无 unarchive 钮）照旧走续接两分支
     click({ target: { closest: (sel) => (sel === "[data-rail-term-resume]" ? rowEl : null) } });
     assert.deepEqual(log.resume, ["s-1"], "普通行点击仍走续接（判序修复没误伤）");
+  });
+});
+
+// ── 点击委托真跑（判序与接线，2026-11-15 测试审计）──────────────────
+// 归档 × / 行内关闭 × / 组头 ⊕ / 占位行守卫此前只有源码 indexOf 断言（删掉整段分支
+// 后 indexOf 落 -1，「-1 < 正数」照样恒真）或只验 markup＋直接调用。这里把
+// initTerminalRail 真身跑起来、收下栏体 click 委托，用「属性祖先链」假 DOM 派发点击：
+// closest 沿 parentNode 逐级匹配 data-* 属性（与真 DOM 祖先查找同语义）。删分支、
+// 挪分支都会让点击掉进相邻分支或空转，以下用例当场红。
+describe("点击委托真跑：分支接线与判序（假 DOM 祖先链）", () => {
+  // 假元素：attrs 是本节点声明的 data-*；closest 只支持 [attr] 与 [attr="value"]
+  // 两种选择器（委托里用到的全部形状），不认识的形状抛错——不许静默命中空。
+  const railNode = (attrs = {}, parent = null) => {
+    const self = {
+      attrs, parentNode: parent,
+      getAttribute: (name) => (name in attrs ? attrs[name] : null),
+      closest(sel) {
+        const m = /^\[([^\]=]+)(?:="([^"]*)")?\]$/.exec(sel);
+        assert.ok(m, `夹具不支持的选择器：${sel}`);
+        let cur = self;
+        while (cur) {
+          if (m[1] in cur.attrs && (m[2] === undefined || String(cur.attrs[m[1]]) === m[2])) return cur;
+          cur = cur.parentNode;
+        }
+        return null;
+      },
+    };
+    return self;
+  };
+
+  const harness = () => {
+    const log = {
+      close: [], archive: [], unarchive: [], groupNew: [], viewReset: [],
+      activate: [], resume: [], toggleGroup: [], more: [], create: [], groupMenu: [],
+    };
+    const listeners = {};
+    const dirStub = { addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); } };
+    const btnStub = () => ({ onclick: null, addEventListener: () => {}, disabled: false });
+    const els = {
+      railTerminalDir: dirStub,
+      railTermNewBtn: btnStub(),
+      railTermSearchBtn: btnStub(), railTermSearchInput: btnStub(), railTermSearchClear: btnStub(),
+      railTermViewOptionsBtn: btnStub(), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+    };
+    const fn = new Function("els", "listeners", "log", `
+      const terminalRailMenuEl = null;
+      const terminalRailViewMenuEl = null;
+      const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+      const terminalRailHoverEl = null;
+      const terminalRailHoverHead = null;
+      let terminalRailMotionArmed = false;
+      let terminalRailHistory = { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null };
+      function $(id) { return els[id] ?? null; }
+      const document = { addEventListener: () => {} };
+      function initTerminalRailScrollbarQuiet() {}
+      function loadTerminalRailViewPrefs() {}
+      function loadTerminalRailCollapsedGroups() {}
+      function closeTerminalRailGroupMenu() {}
+      function closeTerminalRailViewMenu() {}
+      function closeTerminalRailSearch() {}
+      function closeTerminalRailHoverCard() {}
+      function openTerminalRailSearch() {}
+      function openTerminalRailViewMenu() {}
+      function onTerminalRailSearchInput() {}
+      function scheduleTerminalRailHoverCard() {}
+      function terminalRailHeadKey() { return ""; }
+      function terminalRailCloseSession(id) { log.close.push(id); }
+      function terminalRailArchiveSession(id) { log.archive.push(id); }
+      function terminalRailUnarchiveSession(endpoint, id) { log.unarchive.push({ endpoint, id }); }
+      function toggleTerminalRailGroupMenu(key) { log.groupMenu.push(key); }
+      function terminalRailCreateTerminalInDir(dir) { log.groupNew.push(dir); }
+      function terminalRailCreateTerminal() { log.create.push(1); }
+      function terminalRailRemoveGroup() {}
+      function applyTerminalRailViewChoice() { log.viewReset.push(1); }
+      function terminalRailActivateSession(id) { log.activate.push(id); }
+      function terminalRailResumeHistoryRow(id) { log.resume.push(id); }
+      function toggleTerminalRailGroup(key) { log.toggleGroup.push(key); }
+      function toggleTerminalRailWatermark(key) { log.more.push(key); }
+      function refreshTerminalRailHistory() {}
+      function terminalRailMoveInManualOrder() {}
+      function renderTerminalRailHistory() {}
+      function toast() {}
+      ${extractFn("initTerminalRail")}
+      return initTerminalRail;
+    `)(els, listeners, log);
+    fn();
+    const click = listeners.click[0];
+    assert.equal(typeof click, "function", "前置：栏体 click 委托已挂");
+    return { click, log };
+  };
+
+  it("点归档行的「归档」钮＝归档这条会话，不被行点击抢成续接", () => {
+    const { click, log } = harness();
+    const row = railNode({ "data-rail-term-resume": "s-1" });
+    const archiveBtn = railNode({ "data-rail-term-archive": "s-1" }, row);
+    click({ target: archiveBtn });
+    assert.deepEqual(log.archive, ["s-1"], "归档分支接到点击（删掉归档分支本断言红）");
+    assert.deepEqual(log.resume, [], "不续接（删掉分支点击会掉进续接——正是断言拦下的回归）");
+    assert.deepEqual(log.activate, [], "不聚焦");
+    assert.deepEqual(log.close, [], "不误关");
+    // 对照组：点行本体（不带钮）照旧走续接
+    click({ target: row });
+    assert.deepEqual(log.resume, ["s-1"], "行本体点击仍走续接");
+    assert.deepEqual(log.archive, ["s-1"], "归档计数不变");
+  });
+
+  it("live 行的行内 ×＝关这条终端，不被行点击抢成聚焦/续接", () => {
+    const { click, log } = harness();
+    const row = railNode({ "data-rail-term-resume": "s-1", "data-rail-term-live": "t-1" });
+    const closeBtn = railNode({ "data-rail-term-close": "t-1" }, row);
+    click({ target: closeBtn });
+    assert.deepEqual(log.close, ["t-1"], "关闭分支接到点击（删掉关闭分支本断言红）");
+    assert.deepEqual(log.activate, [], "不聚焦（删掉分支点击会掉进 live 聚焦分支——本断言拦下）");
+    assert.deepEqual(log.resume, [], "不续接");
+    // 对照组：点 live 行本体＝聚焦
+    click({ target: row });
+    assert.deepEqual(log.activate, ["t-1"], "行本体点击仍走聚焦");
+    assert.deepEqual(log.close, ["t-1"], "关闭计数不变");
+  });
+
+  it("组头 ⊕＝在该目录新建终端，不掉进组折叠分支空转", () => {
+    const { click, log } = harness();
+    // 真 DOM 形状：⊕（data-rail-term-group-new）与折叠钮（data-rail-term-group）
+    // 是组头（data-rail-term-group-head）里的兄弟节点——closest 对折叠选择器返回 null。
+    const head = railNode({ "data-rail-term-group-head": "C:\\dev\\alpha" });
+    const plus = railNode({ "data-rail-term-group-new": "C:\\dev\\alpha" }, head);
+    click({ target: plus });
+    assert.deepEqual(log.groupNew, ["C:\\dev\\alpha"], "⊕ 新建该目录终端（删掉 ⊕ 分支本断言红：点击落到分支尾部空转）");
+    assert.deepEqual(log.toggleGroup, [], "不折叠组");
+    assert.deepEqual(log.create, [], "不走栏底新建（无 agent 分支）");
+  });
+
+  it("创建在飞的占位行整行无动作：不聚焦/不续接/不关闭（乐观高亮不被撤）", () => {
+    const { click, log } = harness();
+    // 占位行同时带 data-rail-term-session 与 data-rail-term-create-pending：
+    // 守卫不在时会被会话行分支接走（聚焦一个不存在的终端＝撤掉乐观高亮）。
+    const row = railNode({ "data-rail-term-session": "pending-1", "data-rail-term-create-pending": "1" });
+    const title = railNode({}, row);
+    click({ target: title });
+    assert.deepEqual(log.activate, [], "占位行点击不聚焦（删掉守卫本断言红：落进会话行分支）");
+    assert.deepEqual(log.resume, [], "不续接");
+    assert.deepEqual(log.close, [], "不关闭");
+    assert.deepEqual(log.archive, [], "不归档");
+    // 对照组：真兜底行（无 create-pending 标记）照常可聚焦
+    const realRow = railNode({ "data-rail-term-session": "pending-1" });
+    click({ target: realRow });
+    assert.deepEqual(log.activate, ["pending-1"], "无守卫标记的兜底行不受影响");
   });
 });
 
@@ -3373,7 +3683,7 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
     ${extractFn("enrichTerminalSessions").replace("function enrichTerminalSessions(", "function enrichTerminalSessionsReal(")}
     let terminalRailSelectPending = null;
     let terminalRailSelectSeq = 0;
-    const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+    ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
     function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
     ${extractFn("terminalRailSwitchBusy")}
     ${extractFn("terminalRailBeginSelect")}
@@ -4333,7 +4643,7 @@ describe("视口化验收（页签＝视口）", () => {
       let terminalRailFlipMode = "instant";
       const terminalRailMotionArmed = false;
       let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
-      const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+      ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
       const terminalDoneUnread = new Map();
       const terminalPrevWorking = new Map();
       const terminalTurnArmed = new Set();
@@ -4498,6 +4808,9 @@ describe("视口化验收（页签＝视口）", () => {
         sync: () => terminalViewportSyncFromHost(),
         rawViewports: () => terminalViewports,
         inFlight: () => (typeof terminalCreateInFlight === "number" ? terminalCreateInFlight : null),
+        // 存档读取驱动口（2026-11-15 测试审计）：loadTerminalViewports 是整页加载
+        // 一次性入口（syncFromHost 之前），迁移行为用例直接驱动它。
+        loadViewports: () => loadTerminalViewports(),
         // 空白终端两条直连 POST 的驱动口（P1 同伞用例）：左栏「新建终端」无 agent
         // 分支与页签条「+」菜单分支。
         createBlank: () => terminalRailCreateTerminal(),
@@ -4709,6 +5022,44 @@ describe("视口化验收（页签＝视口）", () => {
     assert.deepEqual(log.closes, [], "仍被另一个页签显示的终端不得结束");
     assert.ok(sandbox.sessions()["t-a"], "终端仍在");
     assert.deepEqual(sandbox.viewports().map((row) => row.id), ["viewport-2"], "只销毁这个页签");
+  });
+
+  it("A15 旧存档迁移：顶层 background 里没被认领的 id 归位到活跃视口（2026-11-15 测试审计）", () => {
+    // 迁移段此前零行为覆盖（host 恒置 null 也不红）：孤儿 id 只进镜像集合、不落到
+    // 任何视口的 background——旧版本回滚后写回存档时这些终端会从布局里消失。
+    // 真身 loadTerminalViewports 直跑，断言落在逐视口 background 与镜像集合上。
+    const store = {
+      "panel-terminal-viewports": JSON.stringify({
+        active: "viewport-1",
+        viewports: [
+          { id: "viewport-1", terminalId: "t-a" },
+          { id: "viewport-2", terminalId: "t-b" },
+        ],
+        background: ["t-x", "t-y", "t-a"],
+      }),
+    };
+    const { sandbox } = viewportHarness({ store });
+    sandbox.loadViewports();
+    assert.deepEqual(sandbox.viewports().map((row) => row.terminalId), ["t-a", "t-b"], "前置：两个视口按存档恢复");
+    assert.deepEqual(sandbox.viewportBackgrounds("viewport-1"), ["t-x", "t-y"], "孤儿 id 归位活跃视口（迁移 host 恒置 null 本断言红）");
+    assert.deepEqual(sandbox.viewportBackgrounds("viewport-2"), [], "不外溢到别的视口");
+    assert.deepEqual(sandbox.background(), ["t-x", "t-y"], "镜像同步；正被显示的 t-a 丢弃（不算后台）");
+
+    // 活跃 id 失效（存档被手改/视口已消失）：退而求其次归位第一个视口
+    const store2 = {
+      "panel-terminal-viewports": JSON.stringify({
+        active: "viewport-gone",
+        viewports: [
+          { id: "viewport-1", terminalId: "t-a" },
+          { id: "viewport-2", terminalId: "t-b" },
+        ],
+        background: ["t-z"],
+      }),
+    };
+    const second = viewportHarness({ store: store2 });
+    second.sandbox.loadViewports();
+    assert.deepEqual(second.sandbox.viewportBackgrounds("viewport-1"), ["t-z"], "无活跃视口时归位第一个");
+    assert.deepEqual(second.sandbox.viewportBackgrounds("viewport-2"), []);
   });
 
   // ── P3 页签守恒不变量矩阵（判定门全分支 × 真视口簿记）──────────────
@@ -4927,7 +5278,8 @@ describe("视口化验收（页签＝视口）", () => {
   //   · 整条链恰好一条 POST 落地（/switch 或保活新建，二选一）。
   describe("P3 真委托全链路（点击非 live 历史行）", () => {
     function delegationHarness({ items, agents = AGENT_IDLE, switchImpl = null } = {}) {
-      const log = { creates: [], switchBodies: [], viewportCreates: [], toasts: [], enters: 0, arms: 0 };
+      const log = { creates: [], switchBodies: [], viewportCreates: [], toasts: [], enters: 0, arms: 0,
+        railClose: [], railArchive: [], railGroupMenu: [], railGroupNew: [], railUnarchive: [], railToggleGroup: [], activates: [] };
       const state = { items, agents, switchImpl, created: 0 };
       const listeners = {};
       const btn = () => ({ onclick: null, addEventListener: () => {}, disabled: false });
@@ -4944,10 +5296,11 @@ describe("视口化验收（页签＝视口）", () => {
         let terminalDefaultCwd = "";
         let terminalSwitchInFlight = false;
         let terminalSwitchInFlightSessionId = null;
+        let terminalBooting = null;
         let terminalCreateInFlight = 0;
         let terminalRailSelectPending = null;
         let terminalRailSelectSeq = 0;
-        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        ${railConstDecl("TERMINAL_RAIL_SELECT_TTL_MS")}
         const terminalDoneUnread = new Map();
         const terminalPrevWorking = new Map();
         const terminalTurnArmed = new Set();
@@ -5027,6 +5380,7 @@ describe("视口化验收（页签＝视口）", () => {
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalSwitchLog(event, detail) { log.switchEvents = (log.switchEvents || []).concat({ event, detail }); }
         ${extractFn("terminalSwitchBusySignals")}
+        ${extractFn("terminalSwitchStaleWidened")}
         function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
         function panelError(err, fallback) { return fallback; }
         function enterTerminalSwitchLoading() { log.enters += 1; }
@@ -5053,7 +5407,8 @@ describe("视口化验收（页签＝视口）", () => {
         ${extractFn("terminalRailActivateSession")}
         ${extractFn("terminalRailResumeSession")}
         ${extractFn("terminalRailResumeHistoryRow")}
-        // initTerminalRail 的周边桩（只挂委托，不验它们的行为）
+        // initTerminalRail 的周边桩（只挂委托，不验它们的行为）；左栏动作桩带记账——
+        // 「点击委托真跑」用例靠它们分辨点到了哪个分支（2026-11-15 测试审计）。
         function loadTerminalRailViewPrefs() {}
         function loadTerminalRailCollapsedGroups() {}
         function initTerminalRailScrollbarQuiet() {}
@@ -5066,20 +5421,24 @@ describe("视口化验收（页签＝视口）", () => {
         function onTerminalRailSearchInput() {}
         function scheduleTerminalRailHoverCard() {}
         function terminalRailHeadKey() { return ""; }
-        function terminalRailCloseSession() {}
-        function terminalRailArchiveSession() {}
-        function toggleTerminalRailGroupMenu() {}
-        function terminalRailCreateTerminalInDir() {}
+        function terminalRailCloseSession(id) { log.railClose.push(id); }
+        function terminalRailArchiveSession(id) { log.railArchive.push(id); }
+        function toggleTerminalRailGroupMenu(key) { log.railGroupMenu.push(key); }
+        function terminalRailCreateTerminalInDir(dir) { log.railGroupNew.push(dir); }
         function terminalRailRemoveGroup() {}
         function applyTerminalRailViewChoice() {}
-        function terminalRailUnarchiveSession() {}
-        function toggleTerminalRailGroup() {}
+        function terminalRailUnarchiveSession(endpoint, id) { log.railUnarchive.push({ endpoint, id }); }
+        function toggleTerminalRailGroup(key) { log.railToggleGroup.push(key); }
         function toggleTerminalRailWatermark() {}
         function terminalRailCreateTerminal() {}
         function refreshTerminalRailHistory() {}
         function terminalRailMoveInManualOrder() {}
         function renderTerminalRailHistory() {}
         function terminalRailIsArchived() { return false; }
+        ${extractFn("terminalRailActivateSession").replace("function terminalRailActivateSession(", "function terminalRailActivateSessionReal(")}
+        function terminalRailActivateSession(id) { log.activates.push(id); return terminalRailActivateSessionReal(id); }
+        ${extractFn("terminalRailResumeSession")}
+        ${extractFn("terminalRailResumeHistoryRow")}
         ${extractFn("initTerminalRail")}
         return {
           beat: (items) => { rebuildTerminalBackendSessions(items); enrichTerminalSessions(state.agents.agents); },
@@ -5089,6 +5448,11 @@ describe("视口化验收（页签＝视口）", () => {
           viewports: () => terminalViewports.map((viewport) => ({ id: viewport.id, terminalId: viewport.terminalId })),
           activeTerminal: () => activeTerminalPreviewId,
           background: () => Array.from(terminalBackgroundIds),
+          // 在飞闸与放宽档谓词的观察面（2026-11-15 测试审计）：生产侧置位会话 id 的
+          // 那一行（terminalSwitchInFlightSessionId = active.id）此前无任何断言。
+          switchInFlight: () => terminalSwitchInFlight,
+          switchInFlightSession: () => terminalSwitchInFlightSessionId,
+          staleWidened: (sessionId) => terminalSwitchStaleWidened(sessionId),
         };
       `)(state, els, listeners, log);
       return { sandbox, log, state };
@@ -5160,6 +5524,26 @@ describe("视口化验收（页签＝视口）", () => {
       assert.equal(log.creates.length, 1, "被拒后保活新建，挂当前视口");
       assert.deepEqual(sandbox.viewports().map((row) => row.id), beforeIds, "视口 id 序列不变");
       assert.deepEqual(sandbox.background(), ["t-old"], "旧终端保活");
+    });
+
+    it("换绑在飞的会话 id 由产线判定门置位：放宽档谓词认的是这条会话（2026-11-15 测试审计）", async () => {
+      // 生产侧那一行（terminalSwitchInFlightSessionId = active.id）此前零断言：消费侧
+      // （terminalSwitchStaleWidened / parkTerminalScreen）全被夹具 setSwitchInFlight
+      // 喂过，删掉置位行放宽档就永远不生效，测试照样全绿。这里走真判定门（/switch
+      // 挂起保持在飞），断言在飞 id 与放宽档谓词的真实输出。
+      const items = [TERM_ITEM("t-old")];
+      const { sandbox, log } = delegationHarness({ items, switchImpl: () => new Promise(() => {}) });
+      sandbox.beat(items);
+      sandbox.setHistory([HISTORY]);
+      sandbox.init();
+      clickHistoryRow(sandbox, "s-1");
+      await flush();
+      assert.equal(log.switchBodies.length, 1, "前置：/switch 已发出（挂起不落地）");
+      assert.equal(sandbox.switchInFlight(), true, "前置：在飞闸置位");
+      assert.equal(sandbox.switchInFlightSession(), "t-old", "在飞记的是被换绑的那条终端（删掉置位行本断言红）");
+      assert.equal(sandbox.staleWidened("t-old"), true, "放宽档谓词认它：这条会话的垫片按 6s 档");
+      assert.equal(sandbox.staleWidened("t-other"), false, "别的会话不放宽");
+      assert.equal(sandbox.staleWidened(null), false, "拿不到会话 id 一律普通档");
     });
   });
 

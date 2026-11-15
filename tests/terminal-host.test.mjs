@@ -1,10 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTerminalHost, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "../src/terminal/terminal-host.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { createTerminalHost, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, runTerminalHostEntry, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE, TERMINAL_SESSION_DIR } from "../src/terminal/terminal-host.mjs";
+import { TERMINAL_PARENT_PID_ENV } from "../src/terminal/terminal-process-manager.mjs";
 import { createScreenMirror } from "../src/terminal/terminal-screen.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
+
+// 真实入口文件（isMain 接线的被测对象）：子进程 spawn 用，路径不手拼。
+const HOST_ENTRY_PATH = fileURLToPath(new URL("../src/terminal/terminal-host.mjs", import.meta.url));
 
 class FakePty {
   constructor() {
@@ -52,11 +59,9 @@ function headers(host) {
 }
 
 async function listen(host) {
-  await new Promise((resolve, reject) => {
-    host.server.once("error", reject);
-    host.server.listen(0, "127.0.0.1", resolve);
-  });
-  return host.server.address().port;
+  // listen(0) 会抽中 fetch（undici）拒连的「bad port」，共享夹具命中即关掉换口重试。
+  const { port } = await listenLoopback(host.server);
+  return port;
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -801,6 +806,53 @@ test("G2(a) 快照带镜像行列：与 PTY 尺寸一致；镜像缺失/非法�
       .then((r) => r.json());
     assert.equal("screenCols" in bogus, false, "非法列宽不下发");
     assert.equal("screenRows" in bogus, false, "非法行宽不下发");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// G2(b)：分叉场景本体——镜像 resize 失败被跳过（resize 路由的 warn 分支）后，PTY 尺寸
+// 与镜像尺寸真正分道扬镳。此时快照的 cols/rows（PTY）与 screenCols/screenRows（镜像，
+// 回放坐标系）必须各报各的：面板的几何闸拿 screenCols/screenRows 判「回放能不能画进
+// 这块屏」，拿错那只就会把分叉判定成匹配。快照若改用 PTY 尺寸充数，本用例稳定红。
+test("G2(b) 镜像 resize 失败被跳过：快照的镜像行列保持旧值，与 PTY 行列如实分叉", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-geomfork-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "分叉", cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+    calls[0].pty.dataListener?.("hello\r\n");
+    await sleep(10);
+    assert.equal(host.sessions.get(created.id).screen.info().cols, 100, "前置：镜像已按 100 列建起");
+
+    // 换上「resize 必败」的镜像桩：宿主对镜像 resize 失败的处置是记 warn、跳过、
+    // 继续重排 PTY（源码 resize 路由的 catch 分支）——这正是两套尺寸分叉的现场。
+    // info() 保持旧值：镜像没重排成功，回放坐标系就还停在 100×30。
+    host.sessions.get(created.id).screen = {
+      info: () => ({ cols: 100, rows: 30 }),
+      resize: () => { throw new Error("synthetic mirror resize failure"); },
+    };
+
+    const response = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 120, rows: 40 }),
+    });
+    assert.equal(response.status, 200, "镜像 resize 失败不得拦下路由：PTY 照常重排，降级不失败");
+    assert.deepEqual(await response.json(), { ok: true, cols: 120, rows: 40 });
+    assert.deepEqual(calls[0].pty.resizeCalls, [[120, 40]], "PTY 真的按新尺寸重排了");
+
+    const forked = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) })
+      .then((r) => r.json());
+    assert.equal(forked.cols, 120, "PTY 行列如实报新值");
+    assert.equal(forked.rows, 40);
+    assert.equal(forked.screenCols, 100, "镜像行列保持它真实所在的旧值——回放坐标系以它为准");
+    assert.equal(forked.screenRows, 30, "镜像行列保持它真实所在的旧值");
+    assert.notEqual(forked.screenCols, forked.cols, "两套尺寸确实分叉：同尺寸下的断言判不出错报");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -1553,6 +1605,125 @@ test("⑫ 建关混合压力下索引与记录文件自洽：不许出现「索�
   }
 });
 
+// ---------------------------------------------------------------------------
+// 恢复期的孤儿剪枝与 keep-set 纪律（restore → pruneSessionRecords）。
+//
+// 索引是成员表的唯一权威，两条纪律各有一个会翻车的回归形态，都必须有红证：
+//   ① 剪枝被整个删掉：崩溃窗口的孤儿记录、原子写残留的 .tmp、relay clearSessions
+//      兜底（只 unlink 索引）留下的 N×128KB 正文就一直躺在盘上；
+//   ② keep-set 改用「这次读成功的记录」：一次瞬时读失败（杀软锁/EACCES/半截 JSON）
+//      就把索引点名、只是这次没读到的记录当场删成永久丢尾部。
+// 夹具从真实落盘路径来：第一代宿主建会话、出字、关停，第二代宿主按 restore 的
+// 剪枝逻辑面对同一份盘面。剪枝发生在 createTerminalHost 的同步段里，构造完即可断言。
+async function makePersistedRoot(root, label) {
+  const { calls, ptyModule } = capturingPtyModule();
+  const first = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(first);
+  const created = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+    method: "POST", headers: headers(first),
+    body: JSON.stringify({ label, cwd: root, shell: "powershell" }),
+  }).then((r) => r.json());
+  calls[0].pty.dataListener?.("GEN-ONE\r\n");
+  await first.close();
+  return created;
+}
+
+test("恢复剪枝：索引没点名的孤儿记录与 .tmp 残留被清掉，在册记录原样保留", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-prune-"));
+  try {
+    const created = await makePersistedRoot(root, "在册");
+    const sessionDir = join(root, TERMINAL_SESSION_DIR);
+    writeFileSync(join(sessionDir, "ghost-orphan.json"),
+      JSON.stringify({ version: 2, id: "ghost-orphan", label: "无人认领" }), "utf8");
+    writeFileSync(join(sessionDir, `${created.id}.json.tmp`), "half-written", "utf8");
+
+    const second = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} } });
+    const port = await listen(second);
+    try {
+      assert.equal(second.sessions.has(created.id), true, "在册会话照常恢复");
+      assert.equal(existsSync(join(sessionDir, "ghost-orphan.json")), false, "索引没点名的孤儿记录被剪掉");
+      assert.equal(existsSync(join(sessionDir, `${created.id}.json.tmp`)), false, "原子写残留的 .tmp 被剪掉");
+      assert.equal(existsSync(second.sessionStatePath(created.id)), true, "在册记录不动");
+      const listed = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, { headers: headers(second) }).then((r) => r.json());
+      assert.deepEqual(listed.sessions.map((s) => s.label), ["在册"], "恢复出的成员表与剪枝后的盘面一致");
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("keep-set 纪律：索引点名但这次读失败的记录文件不得被剪掉（瞬时故障 ≠ 永久丢尾部）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-keepset-"));
+  try {
+    const { calls, ptyModule } = capturingPtyModule();
+    const first = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+    const port = await listen(first);
+    const url = (path) => `http://127.0.0.1:${port}${path}`;
+    const a = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(first), body: JSON.stringify({ label: "甲", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    const b = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(first), body: JSON.stringify({ label: "乙", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    await first.close();
+    // 读失败的代理夹具：readPersistedRecords 的 catch 对「文件读不回来」一视同仁
+    // （杀软锁 / EACCES / 半截 JSON 都走同一个 catch），坏 JSON 即同款形态。
+    writeFileSync(first.sessionStatePath(b.id), '{"version":2,"id":"截断', "utf8");
+
+    const second = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} } });
+    try {
+      assert.equal(second.sessions.has(a.id), true, "读得回来的会话照常恢复");
+      assert.equal(second.sessions.has(b.id), false, "读失败的记录这一代恢复不出来（既有语义）");
+      assert.equal(existsSync(second.sessionStatePath(b.id)), true,
+        "索引点名的记录文件必须原样保留——keep-set 是索引点名的全部 id，不是「这次读成功的记录」");
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("索引不在盘上（relay clearSessions 兜底只 unlink 索引）：无人认领的记录随恢复一并清掉", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-noindex-"));
+  try {
+    const created = await makePersistedRoot(root, "遗孤");
+    unlinkSync(join(root, TERMINAL_STATE_FILE));
+
+    const second = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} } });
+    try {
+      assert.equal(second.sessions.size, 0, "索引不在＝成员表为空（既有语义）");
+      assert.equal(existsSync(second.sessionStatePath(created.id)), false,
+        "索引没在盘上就等于宣称没有会话：屏幕正文不许一直留在盘上等到下一次「索引读成功」的启动");
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("索引存在但读不出来（半截 JSON）：什么都不删，可恢复的数据等下一次启动", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-badindex-"));
+  try {
+    const created = await makePersistedRoot(root, "瞬时故障");
+    writeFileSync(join(root, TERMINAL_STATE_FILE), '{"version":2,"sessions":["截断', "utf8");
+
+    const second = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} } });
+    try {
+      assert.equal(second.sessions.size, 0, "索引读不出来＝这一代恢复不出会话（既有语义）");
+      assert.equal(existsSync(second.sessionStatePath(created.id)), true,
+        "瞬时故障什么都不删：删了就把可恢复的数据变成不可恢复");
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ⑬ 关停全量冲净不许被并发的定向冲净降级（评审 P1 的钉子）。
 //
 // 形态：一批会话置脏 → 250ms 防抖起一轮**有界**写盘（只写 4 份）→ 在那一轮飞行
@@ -1720,6 +1891,60 @@ test("⑯ 全量冲净未完成时 close() 返回 complete=false 且留下可观
     assert.ok(host.persistStats.lastFullFlushIncomplete,
       "撞上限或写失败时 lastFullFlushIncomplete 必须有记录（这是「盘上不是整份状态」的机器可判信号）");
   } finally {
+    if (!result) await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑰ 关停闸：close() 一进来（同步段，先于任何 await）置 shuttingDown，此后到达的
+// 输出整块丢弃。这是「close() 返回时盘上是整份状态」这句承诺在「PTY 仍在连续出字」
+// 时仍成立的唯一保证——不掐断的话每轮全量冲净都会被新输出重新置脏，撞满 32 轮上限
+// 仍剩欠账（源码注释里的实测：6 会话每 5ms 一块时 close 被拖到 1.3–1.6s）。
+// 判据全部确定性：闸门后同步注入的标记块既不落盘、也不把 close 拖到 complete=false。
+test("⑰ close() 的关停闸：关停中到达的输出整块丢弃，连续出字拖不住全量冲净", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-shutdowngate-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const marker = "AFTER-GATE-MARKER";
+  let noise = null;
+  let result = null;
+  try {
+    const ids = [];
+    for (let i = 0; i < 6; i += 1) {
+      const created = await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+      }).then((r) => r.json());
+      ids.push(created.id);
+    }
+    // 关停前最后一批有内容的状态：close 的冲净必须把它整份写上盘。
+    for (const call of calls) call.pty.dataListener("pre-close-tail");
+    // 连续出字：close 进行期间一直有块到达（6 会话 × 每 5ms 一块，源码注释的实测形态）。
+    noise = setInterval(() => {
+      for (const call of calls) call.pty.dataListener("noise");
+    }, 5);
+    const closing = host.close();
+    // close() 的同步段（置闸、起冲净）已执行完：此刻到达的块必须被闸门整块丢弃，
+    // 不进字节窗、不进镜像、不置脏。必须在任何 await 之前同步注入，否则窗口已过。
+    for (const call of calls) call.pty.dataListener(marker);
+    result = await closing;
+
+    assert.equal(result.complete, true,
+      "连续出字下的关停必须照常兑现「返回时盘上是整份状态」（无闸回归会撞满 32 轮上限）");
+    assert.equal(result.backlog, 0, `关停返回时不许有欠账（实得 ${result.backlog}）`);
+    assert.equal(host.persistStats.lastFullFlushIncomplete, null,
+      "关停没有被出字拖到撞轮次上限（撞了会留下不完整记录）");
+    for (const id of ids) {
+      const record = readSessionRecord(host, id);
+      assert.ok(recordScreenText(record).includes("pre-close-tail"),
+        "关停前的最后状态必须已整份落盘（丢弃的只是闸门之后到达的块）");
+      assert.equal(recordScreenText(record).includes(marker), false,
+        "闸门后到达的块不得落盘：关停后到的字节本来就无人接收，丢在入口才让内存态与盘上态在 close 返回那一刻完全相同");
+    }
+  } finally {
+    if (noise) clearInterval(noise);
     if (!result) await host.close().catch(() => {});
     rmSync(root, { recursive: true, force: true });
   }
@@ -2867,6 +3092,147 @@ test("installTerminalHostFaultHandlers never throws on an unwritable log path", 
   }
 });
 
+// 「注册的监听器确实调用 record」的真证。上面两例只驱动返回的 handle（record 本体）
+// 与监听器计数——把 process.on 那两行删掉，record 面照样绿、计数面甚至凑得出「+1 再
+// -1」。这里在真子进程里发射真实事件：log-and-continue 的全部意义就是这两种事件不再
+// 杀进程（见 installTerminalHostFaultHandlers 的注释），缺注册的回归里子进程以 1 退出。
+test("installTerminalHostFaultHandlers 注册到进程的监听器确实走 record：真事件进日志、进程不死", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-faults-live-"));
+  const logPath = join(root, "logs", "terminal-host.log");
+  const script = `
+    import { installTerminalHostFaultHandlers } from ${JSON.stringify(pathToFileURL(HOST_ENTRY_PATH).href)};
+    installTerminalHostFaultHandlers({ logPath: process.env.FAULT_LOG, write: () => {} });
+    setTimeout(() => {
+      Promise.reject(new Error("stray rejection"));
+      setTimeout(() => { throw new Error("uncaught boom"); }, 20);
+    }, 10);
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, FAULT_LOG: logPath },
+    encoding: "utf8",
+    timeout: 15000,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0,
+    `log-and-continue：两种故障都不能杀进程（没注册监听器时 Node 默认以 1 退出，实得 ${result.status}）`);
+  const text = readFileSync(logPath, "utf8");
+  const headers = text.match(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(uncaughtException|unhandledRejection)\] /gm) ?? [];
+  assert.equal(headers.length, 2, "两类事件各落一条记录");
+  assert.ok(text.includes("uncaught boom"), "uncaughtException 走到了 record");
+  assert.ok(text.includes("stray rejection"), "unhandledRejection 走到了 record");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// 宿主入口接线（isMain 块的本体 runTerminalHostEntry）。isMain 在测试进程里恒为假，
+// 接线只有抽出成可注入函数才能逐根钉住：故障处理器先装、SIGINT/SIGTERM 各走
+// close→exit(0)、env 里的父 pid 接到死亡契约、启动失败写 stderr 并 exit(1)。默认参数
+// 就是真实依赖（见 runTerminalHostEntry 的注释），下面用注入桩逐根红证；真实进程面
+// 另有 isMain 正负两条冒烟。
+test("宿主入口接线：故障处理器先装、SIGINT/SIGTERM 各走 close→exit(0)、死亡契约按 env 接线", async () => {
+  const writes = [];
+  const exits = [];
+  const closed = [];
+  const listening = [];
+  const fakeProc = {
+    pid: 31415,
+    stderr: { write: (line) => writes.push(line) },
+    on: (event, fn) => listening.push([event, fn]),
+    exit: (code) => exits.push(code),
+  };
+  const fakeHost = { port: 47901, close: async () => { closed.push("close"); } };
+  const installCalls = [];
+  const watchCalls = [];
+  const host = await runTerminalHostEntry({
+    proc: fakeProc,
+    env: { [TERMINAL_PARENT_PID_ENV]: "4242" },
+    startHost: async () => fakeHost,
+    installFaultHandlers: (opts) => { installCalls.push(opts); return { dispose() {} }; },
+    watchParent: (opts) => { watchCalls.push(opts); return null; },
+    logPath: join("unused-root", "logs", "terminal-host.log"),
+  });
+  assert.equal(host, fakeHost, "启动成功时入口把宿主交回");
+  assert.deepEqual(installCalls.map((c) => c.logPath), [join("unused-root", "logs", "terminal-host.log")],
+    "故障处理器先于宿主安装，日志路径原样传入");
+  assert.deepEqual(listening.map(([event]) => event), ["SIGINT", "SIGTERM"], "两根信号线都接上");
+  // 信号 → close → exit(0)：关停承诺在信号路径上逐根兑现。
+  await listening[0][1]();
+  await listening[1][1]();
+  assert.deepEqual(closed, ["close", "close"]);
+  assert.deepEqual(exits, [0, 0], "close 完成后进程退出 0");
+  // 死亡契约：env 的父 pid 原样交给 watchdog；onDead 同样 close→exit(0)。
+  assert.equal(watchCalls.length, 1, "死亡契约接了一次");
+  assert.equal(watchCalls[0].parentPid, 4242);
+  await watchCalls[0].onDead();
+  assert.deepEqual(closed, ["close", "close", "close"]);
+  assert.deepEqual(exits, [0, 0, 0]);
+  // tee 日志的启动锚点：排障靠它认这个进程代。
+  assert.equal(writes.length, 1);
+  assert.match(writes[0], /terminal host listening on 127\.0\.0\.1:47901 \(pid 31415\)/);
+});
+
+test("宿主入口接线：env 未带父 pid 时 watchdog 收到 NaN（单跑不受影响）；启动失败写 stderr 并 exit(1)", async () => {
+  const writes = [];
+  const exits = [];
+  const watchCalls = [];
+  await runTerminalHostEntry({
+    proc: { pid: 1, stderr: { write: (line) => writes.push(line) }, on: () => {}, exit: (code) => exits.push(code) },
+    env: {},
+    startHost: async () => ({ port: 0, close: async () => {} }),
+    installFaultHandlers: () => ({ dispose() {} }),
+    watchParent: (opts) => { watchCalls.push(opts); return null; },
+    logPath: "unused",
+  });
+  assert.equal(watchCalls.length, 1);
+  assert.ok(Number.isNaN(watchCalls[0].parentPid), "env 缺父 pid：watchdog 收 NaN，自己按无契约处置（单跑/测试不受影响）");
+
+  const failWrites = [];
+  const failExits = [];
+  await runTerminalHostEntry({
+    proc: { pid: 1, stderr: { write: (line) => failWrites.push(line) }, on: () => {}, exit: (code) => failExits.push(code) },
+    env: {},
+    startHost: async () => { throw new Error("synthetic boot failure"); },
+    installFaultHandlers: () => ({ dispose() {} }),
+    watchParent: () => null,
+    logPath: "unused",
+  });
+  assert.deepEqual(failExits, [1], "启动失败必须 exit(1)");
+  assert.equal(failWrites.length, 1);
+  assert.match(failWrites[0], /^\[terminal-host\] failed: /, "失败证据写 stderr（tee 进 terminal-host.log）");
+});
+
+// 真入口冒烟（真实进程、真实 isMain 判定，不用桩）。启动失败形态：数据根被同名文件
+// 占住让 mkdir 必败 → 入口的 catch 接住 → stderr 写失败证据 → exit(1)。不占真实端口、
+// 不碰装机服务：LOCALAPPDATA 只对本子进程生效。
+test("真实入口（isMain）启动失败路径 exit(1) 且写 stderr；import 本模块不启动宿主", () => {
+  const blocked = join(tmpdir(), `anyswitch-entry-blocked-${process.pid}`);
+  writeFileSync(blocked, "not a directory", "utf8");
+  try {
+    const result = spawnSync(process.execPath, [HOST_ENTRY_PATH], {
+      env: { ...process.env, LOCALAPPDATA: blocked },
+      encoding: "utf8",
+      timeout: 20000,
+      windowsHide: true,
+    });
+    assert.equal(result.status, 1, `启动失败必须 exit(1)（实得 ${result.status}）`);
+    assert.match(String(result.stderr), /\[terminal-host\] failed:/, "失败证据必须写 stderr");
+  } finally {
+    rmSync(blocked, { recursive: true, force: true });
+  }
+
+  // isMain 负例：被 import 的模块不得启动宿主——不监听、不写启动行、进程自然退出。
+  // 若回归成 import 即启动，server 句柄会挂住进程，spawnSync 超时杀掉后 status 为 null。
+  const probe = spawnSync(process.execPath, ["--input-type=module", "-e",
+    `await import(${JSON.stringify(pathToFileURL(HOST_ENTRY_PATH).href)});`], {
+    env: { ...process.env },
+    encoding: "utf8",
+    timeout: 10000,
+    windowsHide: true,
+  });
+  assert.equal(probe.status, 0, `import 方不得启动宿主（启动即挂住进程、超时后被杀，实得 ${probe.status}）`);
+  assert.doesNotMatch(String(probe.stderr), /terminal host listening|failed:/, "宿主没被启动：没有启动行也没有失败行");
+});
+
 
 // ---------------------------------------------------------------------------
 // 关闭路径的进程树终结。病灶（2026-10-16 幽灵 kimi 实证）：close 只调
@@ -2900,6 +3266,47 @@ test("close 路由在 pty.kill 之后对会话 shell 树杀，会话照常删除
     assert.equal(res.status, 200);
     assert.deepEqual(killed, [shellPid], "close 必须对登记的 shell pid 补树杀");
     assert.equal(host.sessions.has(created.id), false, "会话照常从表里删除");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("树杀失败时 close/clear-all/restart 不删除记录或启动新进程，恢复后可重试", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-failure-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  let failKill = true;
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0, ptyModule, logger: { warn() {} },
+    killTreeFn: async (pid) => {
+      killed.push(pid);
+      if (failKill) throw new Error("synthetic kill failure");
+    },
+    isAliveFn: () => true,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "可重试", cwd: root, shell: "cmd" }),
+    }).then((r) => r.json());
+    const recordBefore = readSessionRecord(host, created.id);
+    for (const path of [`/terminal/sessions/${created.id}/close`, "/terminal/sessions/clear-all", `/terminal/sessions/${created.id}/restart`]) {
+      const response = await fetch(url(path), { method: "POST", headers: headers(host), body: "{}" });
+      assert.equal(response.status, 500, `${path} must fail closed when a live tree survives`);
+      assert.equal(host.sessions.has(created.id), true, `${path} must retain the session`);
+      assert.equal(readSessionRecord(host, created.id).id, recordBefore.id, "落盘记录仍可重试");
+    }
+    assert.equal(calls.length, 1, "restart 不得在旧树仍活着时 spawn");
+    assert.equal(host.sessions.get(created.id).livePids.has(created.pid), true, "pid 登记保留");
+
+    failKill = false;
+    const retry = await fetch(url(`/terminal/sessions/${created.id}/close`), { method: "POST", headers: headers(host) });
+    assert.equal(retry.status, 200);
+    assert.equal(host.sessions.has(created.id), false);
+    assert.equal(killed.filter((pid) => pid === created.pid).length, 4);
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -3645,69 +4052,87 @@ test("排空中途 attach：回放包含全部已喂字节，且与整块解析�
 // 复审发现：如果 info() 顺手排空积压，那么每次建连（stream 判断要不要发回放）
 // 都会把整批积压同步做掉——一次 resume 之后是几十毫秒，正是本次要消除的卡顿。
 // 现在建连改成按预算分轮排空，回放帧晚几轮到达。
-test("建连遇到镜像积压时不同步排空：回放分轮到达且内容完整", async () => {
+test("建连遇到镜像积压时不同步排空：事件循环让路、回放分轮到达且内容完整", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-attach-`);
-  let pty = null;
+  const { calls, ptyModule } = capturingPtyModule();
   const host = createTerminalHost({
     root,
     port: 0,
-    ptyModule: { spawn: () => (pty = new FakePty()) },
+    ptyModule,
     logger: { warn() {} },
   });
   const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
   const controller = new AbortController();
   try {
-    const created = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
-      method: "POST",
-      headers: headers(host),
-      body: JSON.stringify({ label: "积压建连", cwd: root, shell: "powershell" }),
-    }).then((response) => response.json());
-    const session = host.sessions.get(created.id);
+    // 判据一（结构性，本用例的主判据）：建连在飞时，一条并发的轻请求必须能被及时
+    // 服务——这正是「建连不得把事件循环按住」的可观察面。预算化排空在轮间让路，
+    // 轻请求时延只含 HTTP 往返（实测 ~5–10ms）；同步排空的回归把循环按住一整段
+    // 解析，轻请求被压到解析结束才被读。夹具体积是这条判据的量纲：12KB 的旧夹具
+    // 同步做掉只要 ~2ms，任何阈值都拦不住（审计 1:5 的病灶）；现在的夹具 3800 条
+    // 238 字符宽行 ≈ 912KB（历史 1MB 帽内、5000 行帽内、pending 1MB 帽内——超了
+    // 1MB 会撞 drain 的同步兜底，预算化路径自己就变成同步排空，判据失效），整段
+    // 同步解析实测 ~50ms，与预算化建连隔着整个量级。
+    // 判据二（墙钟粗护栏）：attachSync 只量到响应头，防的是把排空整段挪到响应头
+    // 之前的量级回退。「积压没丢、与整块解析逐字节一致」的精确契约由对照断言钉住，
+    // 不靠时钟。重试纪律与 writeSliced 预算门槛用例同款：3 次取任一达标，全超限才判红。
+    const payload = "HEAD-MARKER\r\n" + `${"x".repeat(238)}\r\n`.repeat(3800) + "TAIL-MARKER\r\n";
+    const latencies = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const created = await fetch(url("/terminal/sessions"), {
+        method: "POST",
+        headers: headers(host),
+        body: JSON.stringify({ label: `积压建连${attempt}`, cwd: root, shell: "powershell", cols: 240, rows: 30 }),
+      }).then((response) => response.json());
+      const session = host.sessions.get(created.id);
+      // 积压制备走 writeSliced 极小预算直喂（与本用例的原夹具同款，制备不是被测行为）：
+      // 不走 emit 是刻意的——emit 会置脏并在 250ms 后起一笔 912KB 记录的落盘，它的
+      // 同步序列化段会撞进并发轻请求的时延窗里，把结构性判据搅成看运气。
+      calls[attempt].pty.dataListener("warm\r\n");
+      session.screen.writeSliced(payload, 0.001);
+      assert.ok(session.screen.info().pendingChars > 0, "前置条件：镜像必须还有积压");
 
-    // 制造一段确定存在的积压。不能靠「4ms 预算解析不完」来间接制造——机器快时
-    // 十几 KB 一次就排完了，前置条件会随机不成立（本用例最初就这么 flaky）。
-    // 这里先喂一小段建立镜像，再用极小预算入队，保证 pendingChars > 0。
-    // 行数控制在 5000 行历史上限以内：超出的话开头标记会被历史裁剪吃掉，那属于
-    // 既有的回放预算语义，不是本用例要验的东西。
-    pty.dataListener("warm\r\n");
-    const payload = "HEAD-MARKER\r\n" + "line\r\n".repeat(2000) + "TAIL-MARKER\r\n";
-    session.screen.writeSliced(payload, 0.001);
-    assert.ok(session.screen.info().pendingChars > 0, "前置条件：镜像必须还有积压");
+      const started = performance.now();
+      const streamPromise = fetch(url(`/terminal/sessions/${created.id}/stream`), {
+        headers: { authorization: `Bearer ${host.token}` },
+        signal: controller.signal,
+      });
+      // 并发轻请求与建连同时起飞：同步排空的回归里它要等整段解析做完才被读。
+      const probeStarted = performance.now();
+      const probe = await fetch(url("/terminal/sessions"), { headers: headers(host) });
+      assert.equal(probe.status, 200, "并发轻请求必须照常被服务");
+      await probe.json();
+      latencies.push(performance.now() - probeStarted);
+      const attachSync = performance.now() - started;
+      const response = await streamPromise;
+      assert.equal(response.status, 200);
+      assert.ok(attachSync < 150, `建连同步耗时 ${attachSync.toFixed(1)}ms，不得把积压整段同步做掉`);
 
-    const started = performance.now();
-    const response = await fetch(`http://127.0.0.1:${port}/terminal/sessions/${created.id}/stream`, {
-      headers: { authorization: `Bearer ${host.token}` },
-      signal: controller.signal,
-    });
-    const attachSync = performance.now() - started;
-    assert.equal(response.status, 200);
-    // 墙钟只防量级回退：本断言含一次完整 fetch + HTTP 往返（本机实测 ~6–11ms），
-    // 40ms 的旧阈值余量只有个位数倍，CI 抖动即可越线。150ms 仍远低于「把整段
-    // 积压同步做掉」的形态；「积压没丢、排空后与整块解析逐字节一致」的精确契约
-    // 由下面的对照断言钉住，不靠时钟。
-    assert.ok(attachSync < 150, `建连同步耗时 ${attachSync.toFixed(1)}ms，不得把积压整段同步做掉`);
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let received = "";
-    const replayStart = () => received.indexOf("event: data\ndata: ");
-    while (replayStart() < 0 || received.indexOf("\n\n", replayStart()) < 0) {
-      const { done, value } = await reader.read();
-      assert.ok(!done, "stream ended before the replay frame");
-      received += decoder.decode(value, { stream: true });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let received = "";
+      const replayStart = () => received.indexOf("event: data\ndata: ");
+      while (replayStart() < 0 || received.indexOf("\n\n", replayStart()) < 0) {
+        const { done, value } = await reader.read();
+        assert.ok(!done, "stream ended before the replay frame");
+        received += decoder.decode(value, { stream: true });
+      }
+      const from = replayStart() + "event: data\ndata: ".length;
+      const replay = JSON.parse(received.slice(from, received.indexOf("\n\n", from)));
+      // 分轮排空之后回放必须仍然覆盖整段积压，且与整块解析逐字节一致。
+      assert.ok(replay.includes("HEAD-MARKER"), "回放必须包含积压开头的标记");
+      assert.ok(replay.includes("TAIL-MARKER"), "回放必须包含积压末尾的标记");
+      assert.equal(session.screen.info().pendingChars, 0, "回放发出前积压必须排空");
+      const info = session.screen.info();
+      const reference = createScreenMirror({ cols: info.cols, rows: info.rows });
+      // 参照实现必须喂同一串字节（含建立镜像时的 warm 行），否则画面天然不同。
+      reference.write("warm\r\n");
+      reference.write(payload);
+      assert.equal(replay, reference.toReplay(), "分轮排空后的回放必须与整块解析一致");
+      if (latencies[attempt] < 30) break;
     }
-    const from = replayStart() + "event: data\ndata: ".length;
-    const replay = JSON.parse(received.slice(from, received.indexOf("\n\n", from)));
-    // 分轮排空之后回放必须仍然覆盖整段积压，且与整块解析逐字节一致。
-    assert.ok(replay.includes("HEAD-MARKER"), "回放必须包含积压开头的标记");
-    assert.ok(replay.includes("TAIL-MARKER"), "回放必须包含积压末尾的标记");
-    assert.equal(session.screen.info().pendingChars, 0, "回放发出前积压必须排空");
-    const info = session.screen.info();
-    const reference = createScreenMirror({ cols: info.cols, rows: info.rows });
-    // 参照实现必须喂同一串字节（含建立镜像时的 warm 行），否则画面天然不同。
-    reference.write("warm\r\n");
-    reference.write(payload);
-    assert.equal(replay, reference.toReplay(), "分轮排空后的回放必须与整块解析一致");
+    assert.ok(latencies.some((latency) => latency < 30),
+      `建连在飞时并发轻请求必须被及时服务（实测 ${latencies.map((l) => l.toFixed(1)).join(" / ")}ms，全部 ≥ 30ms 即建连把事件循环按住一整段解析）`);
   } finally {
     controller.abort();
     await host.close();

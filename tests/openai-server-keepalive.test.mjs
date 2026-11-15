@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback } from "../src/relay/openai-server.mjs";
+import { createOpenAIRelayServer } from "../src/relay/openai-server.mjs";
 import { createAgentMetricsCollector } from "../src/agents/agent-metrics.mjs";
 import { createEffortInjector } from "../src/catalog/effort-injection.mjs";
+import { listenLoopback } from "../test-helpers/loopback.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS } from "../src/relay/relay-settings.mjs";
 
 const TOKEN = "test-token-keepalive";
