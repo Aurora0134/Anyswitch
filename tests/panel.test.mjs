@@ -17846,9 +17846,12 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/\.live-log-stack \.live-log-msg\.is-appearing \{ opacity: 0; transform: translateY\(-8px\) scale\(1\.02\); transition: none; \}/.test(panelCss), "新卡从顶部淡入落定，走同族 transition");
     assert.ok(/\.live-log-viewport \.live-log-msg\.is-appearing \{ opacity: 0; transform: translateY\(-8px\); \}/.test(panelCss), "展开态新消息同样从顶部淡入");
     assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*translateY\(calc\(var\(--ll-step\) \* 3\)\) scale\(0\.88\)[^}]*transition-duration: 160ms;/.test(panelCss), "最末一张再退一层后淡出");
+    const leaveBlock = panelCss.match(/\.live-log-stack \.live-log-msg\.is-leaving \{([\s\S]*?)\}/)?.[1] ?? "";
+    assert.ok(/transition-property: transform, opacity, background-color, border-color, box-shadow;/.test(leaveBlock), "离场逐项写全 transition，双 class 共存时也不会被 is-appearing 的 transition:none 吃掉");
+    assert.ok(/transition-timing-function: var\(--ease-out\);/.test(leaveBlock), "曲线一并取回，与基础过渡同拍");
     assert.ok(/filter: blur\(1\.2px\); transition-duration: 160ms;/.test(panelCss), "离场虚化单调加深，不回落成反弹");
     assert.ok(!/translateY\(54px\) scale\(0\.9\)/.test(panelCss), "旧的硬跳离场已撤");
-    assert.ok(/\.live-log\[data-clearing\] \.live-log-stack \.live-log-msg\.is-leaving \{ transition-duration: 120ms; \}/.test(panelCss), "清空整批淡出更短促，仍共用同一档景深");
+    assert.ok(/\.live-log\[data-clearing\] \.live-log-stack \.live-log-msg\.is-leaving,\s*\.live-log\[data-clearing\] \.live-log-viewport \.live-log-msg\.is-leaving \{ transition-duration: 120ms; \}/.test(panelCss), "清空整批两层同取 120ms，不再叠卡还在淡出而视口已先清空");
     assert.ok(/\.live-log-viewport \.live-log-msg\.is-leaving \{ opacity: 0; transform: translateY\(8px\); \}/.test(panelCss), "视口离场与顶部基准同向");
   });
 
@@ -17899,16 +17902,26 @@ describe("看板运行日志：无框消息提示式双态流", () => {
       this.tagName = tag; this._classes = new Set(); this.classList = new FakeClassList(this);
       this.dataset = {};
       this.style = { setProperty(k, v) { this[k] = v; }, removeProperty(k) { delete this[k]; } };
-      this.children = []; this.parentNode = null;
+      this.children = []; this.parentNode = null; this._inserts = 0;
       this.attributes = {}; this.innerHTML = ""; this.textContent = "";
       this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0; this.offsetHeight = 0; this.tabIndex = -1;
       this.hidden = false; this.onclick = null; this._listeners = {};
     }
     get className() { return [...this._classes].join(" "); }
     set className(v) { this._classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
-    appendChild(child) {
+    get firstChild() { return this.children[0] ?? null; }
+    get nextSibling() {
+      if (!this.parentNode) return null;
+      const i = this.parentNode.children.indexOf(this);
+      return i >= 0 ? (this.parentNode.children[i + 1] ?? null) : null;
+    }
+    appendChild(child) { return this.insertBefore(child, null); }
+    insertBefore(child, ref) {
+      this._inserts++;
       if (child.parentNode) child.parentNode.removeChild(child);
-      child.parentNode = this; this.children.push(child); return child;
+      const at = ref ? this.children.indexOf(ref) : -1;
+      this.children.splice(at < 0 ? this.children.length : at, 0, child);
+      child.parentNode = this; return child;
     }
     removeChild(child) {
       const i = this.children.indexOf(child);
@@ -17938,12 +17951,27 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     els.logBody.tabIndex = -1;
     els.logLevelSelect.value = "";
     let timers = []; let nextTimerId = 1;
+    const frames = [];
+    let frameMode = "sync";
+    let reduced = false;
     const setTimeoutFake = (fn, ms) => { const id = nextTimerId++; timers.push({ id, fn, ms }); return id; };
     const clearTimeoutFake = (id) => { timers = timers.filter((t) => t.id !== id); };
     const flush = (ms) => {
       const due = timers.filter((t) => t.ms <= ms);
       timers = timers.filter((t) => t.ms > ms);
       for (const t of due) t.fn();
+    };
+    // 默认同步出帧（老断言依赖 DOM 当帧就绪）；queued 模式用来模拟后台页签 rAF
+    // 冻结，验证入场摘类有帧无关的定时器兜底。
+    const rafFake = (cb) => {
+      if (frameMode === "sync") { cb(); return 0; }
+      frames.push(cb); return frames.length;
+    };
+    const flushFrames = (passes = 2) => {
+      for (let p = 0; p < passes; p++) {
+        const due = frames.splice(0);
+        for (const cb of due) cb();
+      }
     };
     const apiCalls = [];
     const api = async (method, path, body) => {
@@ -17953,12 +17981,13 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     };
     const block = panelJs.match(/\/\/ 实时 SSE 日志流[\s\S]*?\n  \/\/ 开机自启/)[0].replace(/\n  \/\/ 开机自启$/, "");
     const factory = new Function(
-      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE",
+      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE", "matchMedia",
       `let es = null;
        ${block}
        return {
          appendLog, handleLogEntry, restartLogStream, applyLogLevel, applyLoggingEnabled,
          startLogStream, connectLogStream, setLogExpanded, resetLogFeed, fadeClearLogFeed,
+         setLogCardOpen, logReducedMotion,
          get entries() { return logEntries; }, get expanded() { return logExpanded; },
          get follow() { return followLogs; }, get es() { return es; }, set es(v) { es = v; },
        };`,
@@ -17968,10 +17997,17 @@ describe("看板运行日志：无框消息提示式双态流", () => {
       (id) => els[id] ?? null,
       (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
       api,
-      (cb) => { cb(); return 0; },
+      rafFake,
       setTimeoutFake, clearTimeoutFake, FakeEventSource, "/panel",
+      () => ({ matches: reduced }),
     );
-    return { sandbox, els, flush, apiCalls };
+    return {
+      sandbox, els, flush, apiCalls, flushFrames,
+      setFrameMode: (mode) => { frameMode = mode; },
+      setReduced: (v) => { reduced = !!v; },
+      frameCount: () => frames.length,
+      timerCount: () => timers.length,
+    };
   }
 
   it("收起态只显示最新 3 张：最新在顶 slot0，旧卡依次 slot1/slot2，淘汰卡淡出后移除", () => {
@@ -18078,16 +18114,166 @@ describe("看板运行日志：无框消息提示式双态流", () => {
   it("JS 钉住动效组边界：合批不补播、交接期不叠播、离场不改 slot、贴顶跟随", () => {
     const stackSrc = panelJs.match(/function renderLogStack\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
     const viewSrc = panelJs.match(/function renderLogViewport\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
-    assert.ok(stackSrc && viewSrc, "两个渲染函数可取到源码");
+    const setSrc = panelJs.match(/function setLogExpanded\(expanded\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    assert.ok(stackSrc && viewSrc && setSrc, "三个相关函数可取到源码");
     assert.ok(/fresh\.length === 1/.test(stackSrc) && /fresh\.length === 1/.test(viewSrc), "rAF 合批多条直接按终态落位，不逐条补播");
     assert.ok(/!motion/.test(stackSrc) && /!motion/.test(viewSrc), "两态交接期不叠播入场");
-    assert.ok(/is-appearing/.test(stackSrc) && !/is-entering/.test(stackSrc), "入场改同族 transition 起始态");
+    assert.ok(/!reduced/.test(stackSrc) && /!reduced/.test(viewSrc), "reduced-motion 不叠播入场");
+    assert.ok(/playLogAppearing\(fresh\[0\]\)/.test(stackSrc) && /playLogAppearing\(fresh\[0\]\)/.test(viewSrc), "两层入场统一走带兜底的 helper");
+    assert.ok(!/is-entering/.test(panelJs), "入场 keyframes 那条旧路已彻底退役");
+    assert.ok(/function markLogLeaving\(node\) \{[\s\S]*?clearLogAppearing\(node\);[\s\S]*?classList\.add\("is-leaving"\)/.test(panelJs), "离场前先摘入场态，两个 class 不共存");
     assert.equal((stackSrc.match(/node\.dataset\.slot = String\(slot\);/g) ?? []).length, 1, "slot 只在 latest 循环设一次，离场卡保留原值");
     assert.ok(/scrollTop <= 24/.test(panelJs), "贴顶跟随判据");
     assert.ok(/scrollTop = 0/.test(viewSrc) && !/scrollTop = body\.scrollHeight/.test(viewSrc), "视口归顶、不再贴底");
     assert.ok(/overflow-anchor: none/.test(panelCss), "顶部插入禁用滚动锚定");
     assert.ok(/setAttribute\("data-clearing", "1"\)/.test(panelJs) && /removeAttribute\("data-clearing"\)/.test(panelJs), "清空整批淡出档与收尾成组");
     assert.ok(/--ll-step-expanded/.test(panelJs), "展开行距由脚本量值写入");
+    assert.ok(/body\.insertBefore\(node, ref\)/.test(viewSrc) && !/for \(const node of ordered\) body\.appendChild/.test(viewSrc), "视口增量重排，只插错位节点");
+    assert.equal((setSrc.match(/"handoff"/g) ?? []).length, 1, "收起刻意硬切：只有展开摊开到位才走一次 handoff");
+    assert.ok(/if \(root\) root\.removeAttribute\("data-motion"\);/.test(setSrc), "展收入口无条件清交接态，中途切 reduce 不留残影");
+    assert.ok(/LOG_ANIM_MS = 160;[\s\S]*?LOG_CLEAR_MS = 120;[\s\S]*?LOG_MOTION_MS = 220;[\s\S]*?LOG_HANDOFF_MS = 60;/.test(panelJs), "四档时长集中定义，与 CSS 同值");
+  });
+
+  it("入场/离场互斥：离场前先摘 is-appearing，迟到的入场回调不复活", () => {
+    const { sandbox, els, flush, flushFrames, setFrameMode } = makeSandbox();
+    setFrameMode("queued");
+    sandbox.appendLog({ level: "info", message: "race" });
+    flushFrames(1); // 只出 render 那一帧，双重 rAF 仍冻结
+    const card = els.logStack.children[0];
+    assert.ok(card, "新卡已入堆叠");
+    assert.ok(card.classList.contains("is-appearing"), "rAF 冻结时停在入场起始态");
+
+    sandbox.handleLogEntry({ type: "clear" });
+    assert.ok(!card.classList.contains("is-appearing"), "进入离场前先摘入场态");
+    assert.ok(card.classList.contains("is-leaving"), "离场态已挂");
+    flushFrames(); // 迟到的双重 rAF 回调不得把入场态装回来
+    assert.ok(!card.classList.contains("is-appearing"), "入场回调已作废");
+    assert.ok(card.classList.contains("is-leaving"), "离场态不被打断");
+    flush(120);
+  });
+
+  it("帧无关兜底：rAF 冻结时定时器强制摘类，新卡不会永远停在起始态", () => {
+    const { sandbox, els, flush, flushFrames, setFrameMode } = makeSandbox();
+    setFrameMode("queued");
+    sandbox.appendLog({ level: "info", message: "frozen" });
+    flushFrames(1);
+    const card = els.logStack.children[0];
+    assert.ok(card.classList.contains("is-appearing"), "起始态在册");
+    flush(200); // LOG_ANIM_MS + 40
+    assert.ok(!card.classList.contains("is-appearing"), "兜底计时器已摘类");
+    flushFrames();
+    assert.ok(!card.classList.contains("is-appearing"), "迟到的 rAF 不再装回起始态");
+  });
+
+  it("reduced-motion：不写入场 class、不起交接计时器，中途切换清掉半程残影", () => {
+    const { sandbox, els, setReduced, timerCount } = makeSandbox();
+    setReduced(true);
+    sandbox.appendLog({ level: "info", message: "quiet" });
+    assert.ok(!els.logStack.children[0].classList.contains("is-appearing"), "减少动效时不挂入场起始态");
+    sandbox.setLogExpanded(true);
+    assert.equal(els.liveLog.dataset.state, "expanded");
+    assert.equal(els.liveLog.getAttribute("data-motion"), null, "直接落稳态展开");
+    assert.equal(timerCount(), 0, "不排任何动效计时器");
+    assert.equal(sandbox.logReducedMotion(), true, "统一闸门可读");
+
+    setReduced(false);
+    sandbox.setLogExpanded(false);
+    assert.equal(els.liveLog.getAttribute("data-motion"), "collapsing");
+    setReduced(true);
+    sandbox.setLogExpanded(true);
+    assert.equal(els.liveLog.getAttribute("data-motion"), null, "中途切 reduce 不留半程交接态");
+    assert.equal(timerCount(), 0, "上一轮计时器一并清掉");
+  });
+
+  it("reduced-motion 清空：不写 data-clearing、不排计时器，直接落空稳态", () => {
+    const { sandbox, els, setReduced, timerCount } = makeSandbox();
+    setReduced(true);
+    for (let i = 1; i <= 4; i++) sandbox.appendLog({ level: "info", message: "q" + i });
+    assert.equal(timerCount(), 0, "减少动效下单张淘汰也不排离场计时器");
+    sandbox.handleLogEntry({ type: "clear" });
+    assert.equal(els.liveLog.getAttribute("data-clearing"), null);
+    assert.equal(els.logBody.children.length, 0);
+    assert.equal(els.logStack.children.length, 0);
+    assert.equal(sandbox.entries.length, 0);
+    assert.equal(timerCount(), 0);
+  });
+
+  it("清空单一 120ms：两层同拍淡出并一起移除，不再有第二轮 160ms 残影", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    for (let i = 1; i <= 4; i++) sandbox.appendLog({ level: "info", message: "c" + i });
+    flush(160);
+    sandbox.handleLogEntry({ type: "clear" });
+    assert.equal(els.liveLog.getAttribute("data-clearing"), "1");
+    assert.ok(els.logStack.children.length > 0 && els.logStack.children.every((n) => n.classList.contains("is-leaving")), "叠卡整批立刻进入离场");
+    assert.ok(els.logBody.children.length > 0 && els.logBody.children.every((n) => n.classList.contains("is-leaving")), "视口整批立刻进入离场");
+    flush(119);
+    assert.equal(els.liveLog.getAttribute("data-clearing"), "1", "未到 120ms 不提前清场");
+    flush(120);
+    assert.equal(els.liveLog.getAttribute("data-clearing"), null, "清空档落定");
+    assert.equal(els.logStack.children.length, 0, "叠卡节点一次移除");
+    assert.equal(els.logBody.children.length, 0, "视口节点一次移除");
+    assert.equal(sandbox.entries.length, 0);
+    assert.equal(els.logStack.children.some((n) => n.classList.contains("is-leaving")), false, "不留越界离场卡");
+  });
+
+  it("清空期间来新消息：旧批 120ms 清走，新消息存活且不补播到离场节点", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    for (let i = 1; i <= 5; i++) sandbox.appendLog({ level: "info", message: "old" + i });
+    flush(160);
+    sandbox.handleLogEntry({ type: "clear" });
+    sandbox.appendLog({ level: "warn", message: "after" });
+    const freshNode = els.logStack.children.find((n) => n.innerHTML.includes("after"));
+    assert.ok(freshNode, "新消息在清空期间照常上屏");
+    assert.ok(!freshNode.classList.contains("is-leaving"), "新消息不带离场态");
+    flush(120);
+    assert.equal(els.logStack.children.length, 1, "只留新消息");
+    assert.ok(els.logStack.children[0].innerHTML.includes("after"));
+    assert.equal(els.logBody.children.length, 1);
+    assert.equal(sandbox.entries.length, 1);
+  });
+
+  it("视口增量重排：新消息只插一张，旧卡原地不动", () => {
+    const { sandbox, els } = makeSandbox();
+    for (let i = 1; i <= 4; i++) sandbox.appendLog({ level: "info", message: "n" + i });
+    const before = [...els.logBody.children];
+    const inserts = els.logBody._inserts;
+    sandbox.appendLog({ level: "info", message: "n5" });
+    const after = [...els.logBody.children];
+    assert.equal(after.length, 5);
+    assert.ok(after[0].innerHTML.includes("n5"), "新卡在顶部");
+    assert.equal(after[1], before[0], "原首卡原地不动");
+    assert.equal(after[2], before[1]);
+    assert.equal(after[3], before[2]);
+    assert.equal(after[4], before[3]);
+    assert.equal(els.logBody._inserts - inserts, 1, "只搬一张新卡，不再全列 appendChild");
+  });
+
+  it("重新展开一律回到最新并恢复跟随，不接着上次的阅读位", async () => {
+    const { sandbox, els } = makeSandbox();
+    await sandbox.startLogStream();
+    for (let i = 1; i <= 6; i++) sandbox.appendLog({ level: "info", message: "f" + i });
+    els.logBody.scrollHeight = 1000; els.logBody.clientHeight = 320;
+    sandbox.setLogExpanded(true);
+    els.logBody.scrollTop = 400; els.logBody.dispatch("scroll");
+    assert.equal(sandbox.follow, false, "下翻后暂停跟随");
+    sandbox.setLogExpanded(false);
+    sandbox.setLogExpanded(true);
+    assert.equal(sandbox.follow, true, "重新展开恢复跟随");
+    assert.equal(els.logBody.scrollTop, 0, "重新展开归顶，第一屏即最新");
+  });
+
+  it("卡内展开在 reduced-motion 下直接落终态，在途动画不把卡收回", () => {
+    const { sandbox, els, setReduced, timerCount, flush } = makeSandbox();
+    sandbox.appendLog({ level: "info", message: "long" });
+    const node = els.logBody.children[0];
+    sandbox.setLogCardOpen(node, true);
+    assert.ok(node.classList.contains("is-open"), "正常动效下先展开");
+    assert.equal(timerCount(), 1, "height 动画排了一个收尾计时器");
+    setReduced(true);
+    sandbox.setLogCardOpen(node, true);
+    assert.ok(node.classList.contains("is-open"), "reduce 下仍是展开态");
+    flush(240);
+    assert.ok(node.classList.contains("is-open"), "在途动画的收尾回调已作废，不会把卡收回");
   });
 
   it("记录开关：关掉断流清场并收起双态，重开才重新建连；换档重连走同一淡出", async () => {
