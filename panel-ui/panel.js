@@ -2706,6 +2706,10 @@ async function api(method, path, body) {
   const logStackLeaving = new Map();
   const logTextAnim = new WeakMap();
   let logFadeTimer = null;
+  // 两态交接单飞计时器：摊开/收回期由 data-motion 把叠卡留在可见层，到位后才交给
+  // 视口；反向切换先清掉上一轮，避免两个 motion 叠在一起。
+  let logMotionTimer = null;
+  let logMotionTail = null;
 
   function queueLogRender() {
     if (logRenderQueued) return;
@@ -2771,15 +2775,23 @@ async function api(method, path, body) {
   function renderLogViewport() {
     const body = $("logBody");
     if (!body) return;
+    const root = $("liveLog");
+    const motion = !!root?.getAttribute?.("data-motion");
     const seen = new Set();
-    for (const entry of logEntries) {
+    const ordered = [];
+    const fresh = [];
+    // 最新在顶：与收起叠卡同一基准。键控复用节点，只在顺序不符时重排，避免每帧
+    // 搬动整列 DOM；新消息从顶部插入，贴顶跟随由下方 scrollTop=0 兑现。
+    for (let i = logEntries.length - 1; i >= 0; i--) {
+      const entry = logEntries[i];
       seen.add(entry.id);
       let node = logViewportNodes.get(entry.id);
       if (!node) {
         node = createLogMessageNode(entry);
         logViewportNodes.set(entry.id, node);
-        body.appendChild(node);
+        fresh.push(node);
       }
+      ordered.push(node);
       node.classList.toggle("is-leaving", !!entry.fading);
       // 超行检测只针对截断态：已展开的卡保留钮（供收起），不重测以免把全文高当截断高。
       if (!node.classList.contains("is-open")) {
@@ -2787,30 +2799,47 @@ async function api(method, path, body) {
         node.classList.toggle("is-overflowing", !!text && text.scrollHeight > text.clientHeight + 1);
       }
     }
+    const current = body.children;
+    let needReorder = current.length !== ordered.length;
+    if (!needReorder) {
+      for (let i = 0; i < ordered.length; i++) {
+        if (current[i] !== ordered[i]) { needReorder = true; break; }
+      }
+    }
+    if (needReorder) for (const node of ordered) body.appendChild(node);
     for (const [id, node] of logViewportNodes) {
       if (!seen.has(id)) {
         node.remove();
         logViewportNodes.delete(id);
       }
     }
-    if (logExpanded && followLogs) body.scrollTop = body.scrollHeight;
+    // 合批多条与两态交接期不逐条补播入场，避免层层追赶或与摊开叠加。
+    if (logExpanded && fresh.length === 1 && !motion) {
+      const node = fresh[0];
+      node.classList.add("is-appearing");
+      requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("is-appearing")));
+    }
+    if (logExpanded && followLogs) body.scrollTop = 0;
   }
 
   function renderLogStack() {
     const stack = $("logStack");
     if (!stack) return;
+    const root = $("liveLog");
+    const motion = !!root?.getAttribute?.("data-motion");
     const latest = logEntries.slice(-LOG_STACK_SIZE);
     const seen = new Set();
+    const fresh = [];
     for (let i = latest.length - 1; i >= 0; i--) {
       const entry = latest[i];
       const slot = latest.length - 1 - i;
       seen.add(entry.id);
       let node = logStackNodes.get(entry.id);
-      const isNew = !node;
-      if (isNew) {
+      if (!node) {
         node = createLogMessageNode(entry);
         logStackNodes.set(entry.id, node);
         stack.appendChild(node);
+        fresh.push(node);
       }
       const leaving = logStackLeaving.get(entry.id);
       if (leaving) {
@@ -2821,13 +2850,10 @@ async function api(method, path, body) {
       node.dataset.slot = String(slot);
       node.style.zIndex = String(LOG_STACK_SIZE - slot);
       node.classList.toggle("is-leaving", !!entry.fading);
-      if (isNew && !entry.fading) {
-        node.classList.add("is-entering");
-        setTimeout(() => node.classList.remove("is-entering"), 200);
-      }
     }
     for (const [id, node] of logStackNodes) {
       if (seen.has(id) || logStackLeaving.has(id)) continue;
+      // 越界卡保留原 slot，由 .is-leaving 的第 4 档接管景深，景深规则不失配。
       node.classList.add("is-leaving");
       const timer = setTimeout(() => {
         logStackLeaving.delete(id);
@@ -2835,6 +2861,13 @@ async function api(method, path, body) {
         if (logStackNodes.get(id) === node) logStackNodes.delete(id);
       }, 160);
       logStackLeaving.set(id, timer);
+    }
+    // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条，或两态
+    // 交接进行中，都直接按终态落位，不逐条补播。
+    if (!logExpanded && fresh.length === 1 && !motion && !fresh[0].classList.contains("is-leaving")) {
+      const node = fresh[0];
+      node.classList.add("is-appearing");
+      requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("is-appearing")));
     }
   }
 
@@ -2844,8 +2877,24 @@ async function api(method, path, body) {
   }
 
   function setLogExpanded(expanded) {
-    logExpanded = expanded;
     const root = $("liveLog");
+    const body = $("logBody");
+    const stack = $("logStack");
+    if (logMotionTimer) { clearTimeout(logMotionTimer); logMotionTimer = null; }
+    if (logMotionTail) { clearTimeout(logMotionTail); logMotionTail = null; }
+    const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    logExpanded = expanded;
+    // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
+    if (expanded && root && body) {
+      const first = body.children[0];
+      const h = first?.offsetHeight || 0;
+      const mb = first && typeof getComputedStyle === "function"
+        ? parseFloat(getComputedStyle(first).marginBottom) || 0 : 0;
+      if (h > 0) root.style.setProperty("--ll-step-expanded", (h + mb) + "px");
+    }
+    // 两阶段：data-motion 期间叠卡保持不透明并完成摊开/收回，到位后才与视口交接；
+    // 摊开不再被自身淡出吃掉。reduced-motion 直接落稳态，不等动画计时。
+    if (root && !reduced) root.setAttribute("data-motion", expanded ? "expanding" : "collapsing");
     if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
     const toggle = $("logToggle");
     if (toggle) {
@@ -2853,21 +2902,37 @@ async function api(method, path, body) {
       const label = toggle.querySelector(".live-log-toggle-text");
       if (label) label.textContent = expanded ? "收起" : "展开";
     }
-    const body = $("logBody");
     if (body) body.tabIndex = expanded ? 0 : -1;
-    const stack = $("logStack");
     if (stack) stack.setAttribute("aria-hidden", String(expanded));
     if (expanded && followLogs) {
       requestAnimationFrame(() => {
         const viewport = $("logBody");
-        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+        if (viewport) viewport.scrollTop = 0;
       });
+    }
+    if (root && !reduced) {
+      if (expanded) {
+        logMotionTimer = setTimeout(() => {
+          root.setAttribute("data-motion", "handoff");
+          logMotionTail = setTimeout(() => {
+            root.removeAttribute("data-motion");
+            logMotionTimer = null; logMotionTail = null;
+          }, 60);
+        }, 220);
+      } else {
+        logMotionTimer = setTimeout(() => {
+          root.removeAttribute("data-motion");
+          logMotionTimer = null;
+        }, 220);
+      }
     }
   }
 
   function resetLogFeed() {
     logEntries = [];
     followLogs = true;
+    const root = $("liveLog");
+    if (root) root.removeAttribute("data-clearing");
     if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
     for (const timer of logStackLeaving.values()) clearTimeout(timer);
     logStackLeaving.clear();
@@ -2879,11 +2944,14 @@ async function api(method, path, body) {
   }
 
   function fadeClearLogFeed() {
+    const root = $("liveLog");
+    if (root) root.setAttribute("data-clearing", "1");
     for (const entry of logEntries) entry.fading = true;
     queueLogRender();
     if (logFadeTimer) clearTimeout(logFadeTimer);
     logFadeTimer = setTimeout(() => {
       logFadeTimer = null;
+      if (root) root.removeAttribute("data-clearing");
       logEntries = logEntries.filter((entry) => !entry.fading);
       queueLogRender();
     }, 160);
@@ -2930,11 +2998,11 @@ async function api(method, path, body) {
   // 所以不影响首屏；读不到就按默认开——日志是排障时唯一的凭据，一次读失败不该把它
   // 静默关掉。问的途中用户已经在设置页切过开关，就以那次为准，不被这次结果盖回。
   async function startLogStream() {
-    // 滚动跟随只挂一次：贴底时自动跟随新日志，上翻查看旧日志即暂停，回到底部自动
+    // 滚动跟随只挂一次：贴顶时自动跟随新日志，下翻查看旧日志即暂停，回到顶部自动
     // 恢复。挂在开与关之外，反复切开关不会越积越多份监听。
     const body = $("logBody");
     body.addEventListener("scroll", () => {
-      followLogs = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
+      followLogs = body.scrollTop <= 24;
     });
     const toggle = $("logToggle");
     if (toggle) toggle.onclick = (e) => { e.stopPropagation(); setLogExpanded(!logExpanded); };
