@@ -17823,7 +17823,8 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/--ll-step: 78px/.test(panelCss), "旧硬编码行距已撤");
     assert.ok(/\.live-log-viewport \{[^}]*overflow-anchor: none;/.test(panelCss), "新消息从顶部插入不吃滚动锚定");
     assert.ok(/\.live-log\[data-motion="expanding"\] \{ --ll-step: var\(--ll-step-expanded\); \}/.test(panelCss));
-    assert.ok(panelCss.includes(".live-log[data-motion=\"expanding\"] .live-log-stack,") && panelCss.includes("opacity: 1; pointer-events: auto; }"), "摊开/收回期叠卡保持可见");
+    assert.ok(/\.live-log\[data-motion="expanding"\] \.live-log-stack \{ opacity: 1; pointer-events: none; z-index: 2; \}/.test(panelCss), "摊开期叠卡可见、让出点击并压在视口之上");
+    assert.ok(/\.live-log\[data-motion="collapsing"\] \.live-log-stack \{ opacity: 1; pointer-events: auto; \}/.test(panelCss), "收回期叠卡保持可见可点");
     assert.ok(panelCss.includes('.live-log[data-motion="handoff"] .live-log-stack,\n  .live-log[data-motion="handoff"] .live-log-viewport { transition: opacity 60ms var(--ease-out); }'), "到位后只做 60ms 交叉淡化");
     assert.ok(!/transition-delay: 80ms/.test(panelCss), "旧的 80ms 错位淡入已撤");
     assert.ok(panelCss.includes(".live-log[data-motion] .live-log-stack .live-log-msg,") && /transition-delay: 0ms; \}/.test(panelCss), "交接期禁用退层 stagger");
@@ -17835,6 +17836,21 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/\.live-log-viewport::-webkit-scrollbar-thumb \{ background: var\(--border-strong\);/.test(panelCss));
     assert.ok(/@media \(prefers-reduced-motion: reduce\) \{ \* \{ transition: none !important; animation: none !important; \} \}/.test(panelCss));
     assert.ok(!/\.log-console/.test(panelCss), "旧控制台样式不再残留");
+  });
+
+  it("CSS 钉住交接不空白不跳宽：槽位恒留＋两层同宽＋摊开期视口在场＋底部收口", () => {
+    assert.ok(/\.live-log-viewport \{[^}]*scrollbar-gutter: stable;/.test(panelCss), "滚动条槽恒留，日志少时也不回收宽度");
+    assert.ok(/--ll-gutter: 0px;/.test(panelCss), "槽宽变量有兜底，未量到时两层仍可解析");
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*left: 2px; right: calc\(2px \+ var\(--ll-gutter\)\);/.test(panelCss), "叠卡按视口内容区取齐，右侧让出同宽槽位");
+    assert.ok(!/\.live-log\[data-motion="expanding"\] \.live-log-viewport \{ opacity: 0/.test(panelCss), "摊开期不再把视口钉成全透明，下半段从第一帧就有行");
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-viewport \{ opacity: 1; pointer-events: auto; \}/.test(panelCss), "展开态视口在场");
+    const fadeBlock = [...panelCss.matchAll(/\.live-log\[data-state="expanded"\] \.live-log-viewport \{([\s\S]*?)\}/g)]
+      .map((m) => m[1]).find((b) => b.includes("mask-image")) ?? "";
+    assert.ok(/mask-image:/.test(fadeBlock) && /calc\(100% - 34px\)/.test(fadeBlock), "末 34px 由内容自己渐隐");
+    assert.ok(/calc\(var\(--ll-gutter\) \+ 1px\) 100%/.test(fadeBlock), "滚条槽那一列保持不透明");
+    assert.equal((panelCss.match(/\.live-log-stage::after/g) ?? []).length, 1, "底部卡缘只挂展开态，规则唯一");
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-viewport \{\s*padding-bottom: 22px;/.test(panelCss), "底部留白让渐隐带不压住末行卡");
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{[^}]*bottom: 0; height: 20px;/.test(panelCss), "底部常驻 20px 半透明卡顶缘");
   });
 
   it("CSS 钉住浮出→逐层退远→退到远处淡出的完整动效链", () => {
@@ -18142,6 +18158,22 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
     sandbox.appendLog({ level: "info", message: "s4" });
     assert.equal(els.liveLog.style["--ll-card-h"], "49px", "卡高写入 --ll-card-h，舞台跟内容走");
+  });
+
+  it("槽宽量自视口并写回根变量：两层同宽，平台槽宽变化跟得上", () => {
+    const { sandbox, els } = makeSandbox();
+    els.logBody.offsetWidth = 347;
+    els.logBody.clientWidth = 337;
+    sandbox.appendLog({ level: "info", message: "gutter-a" });
+    assert.equal(els.liveLog.style["--ll-gutter"], "10px", "实测 10px 槽宽写入根变量");
+    assert.equal(els.liveLog.dataset.llGutter, "10", "同值守卫在册，不重复触发样式重算");
+    els.logBody.clientWidth = 331;
+    sandbox.appendLog({ level: "info", message: "gutter-b" });
+    assert.equal(els.liveLog.style["--ll-gutter"], "16px", "换成宽滚动条的平台也跟上");
+    sandbox.setLogExpanded(true);
+    assert.equal(els.liveLog.style["--ll-gutter"], "16px", "展收那拍先同步，量到的行距可信");
+    assert.ok(/function syncLogGutter\(\)/.test(panelJs), "槽宽同步函数在册");
+    assert.ok(/renderLogFeed\(\) \{\s*syncLogGutter\(\);/.test(panelJs), "每次渲染先同步槽宽");
   });
 
   it("清空批次退出槽位序列，新消息独占顶层", () => {

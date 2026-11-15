@@ -2942,7 +2942,22 @@ async function api(method, path, body) {
     }
   }
 
+  // 恒留滚动条槽的实测宽度写回根变量：叠卡右缘据此让出同宽，两层文字可用宽一致，
+  // 交接时同一句话不会在两套宽度里重新换行。槽宽由平台与滚动条样式决定，量而不写死；
+  // 只在变化时写，免得每次渲染都触发一次样式重算。
+  function syncLogGutter() {
+    const root = $("liveLog");
+    const body = $("logBody");
+    if (!root || !body) return;
+    const gutter = body.offsetWidth - body.clientWidth;
+    if (!Number.isFinite(gutter) || gutter < 0) return;
+    if (root.dataset.llGutter === String(gutter)) return;
+    root.dataset.llGutter = String(gutter);
+    root.style.setProperty("--ll-gutter", gutter + "px");
+  }
+
   function renderLogFeed() {
+    syncLogGutter();
     renderLogViewport();
     renderLogStack();
   }
@@ -2954,6 +2969,8 @@ async function api(method, path, body) {
     if (logMotionTimer) { clearTimeout(logMotionTimer); logMotionTimer = null; }
     if (logMotionTail) { clearTimeout(logMotionTail); logMotionTail = null; }
     const reduced = logReducedMotion();
+    // 展开行距量自视口首卡，先同步槽宽，量到的卡高才是交接后真正的行距。
+    syncLogGutter();
     logExpanded = expanded;
     // 入口无条件清交接态：中途切到 reduced-motion 或连点展收，都不留半程残影。
     if (root) root.removeAttribute("data-motion");
