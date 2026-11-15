@@ -2519,6 +2519,38 @@ describe("live 推导（绑定未落地空窗）", () => {
     assert.ok(html.indexOf('data-rail-term-resume="s-old"') < html.indexOf('data-rail-term-close="t1"'), "关闭叉挂在旧行（不是新行）");
     assert.ok(!html.includes("新会话"), "带 resume 的终端不出兜底行（既有口径）");
   });
+
+  it("绑定先到而目标历史行未到：保留兜底，目标行到达后精确接管", () => {
+    const sessions = {
+      t1: {
+        id: "t1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working",
+        boundConversation: { endpoint: "kimi", id: "s-own" }, backendState: { spawnedAt: 500 },
+      },
+    };
+    const gapHistory = { endpoint: "kimi", sessions: [
+      { id: "s-other", endpoint: "kimi", project: "C:\\dev\\alpha", title: "同目录其他会话", lastActive: 600 },
+    ], fetchedAt: 1, error: null };
+    const gapList = makeList();
+    derivedSandbox(gapList, { collapsed: new Set(), scrolled: [] }, gapHistory, sessions, "t1").render("kimi");
+    const gapHtml = gapList.html;
+    assert.ok(gapHtml.includes("新会话"), "绑定目标尚未进列表时仍保留该终端的兜底行");
+    assert.ok(!gapHtml.includes('data-rail-term-live="t1"'), "同目录其他历史行不能冒领绑定目标");
+    assert.equal(countOf(gapHtml, "is-active"), 1, "空窗期间仍只有兜底行被选中");
+
+    const landedHistory = { endpoint: "kimi", sessions: [
+      ...gapHistory.sessions,
+      { id: "s-own", endpoint: "kimi", project: "C:\\dev\\alpha", title: "自己的会话", lastActive: 700 },
+    ], fetchedAt: 2, error: null };
+    const landedList = makeList();
+    derivedSandbox(landedList, { collapsed: new Set(), scrolled: [] }, landedHistory, sessions, "t1").render("kimi");
+    const landedHtml = landedList.html;
+    const ownAt = landedHtml.indexOf('data-rail-term-resume="s-own"');
+    assert.ok(ownAt >= 0, "绑定目标历史行到达后出现在树里");
+    const ownLiveAt = landedHtml.indexOf('data-rail-term-live="t1"', ownAt);
+    assert.ok(ownLiveAt >= ownAt && ownLiveAt < landedHtml.indexOf("</button>", ownAt), "目标历史行精确接管终端");
+    assert.equal(countOf(landedHtml, "is-active"), 1, "接管后仍只有目标行被选中");
+    assert.ok(!landedHtml.includes("新会话"), "目标历史行接管后撤下兜底行");
+  });
 });
 
 describe("done（跑完未读）标记与绿点", () => {
