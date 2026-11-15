@@ -2055,7 +2055,7 @@ describe("panel.html sessions tab", () => {
       documentElement: { getAttribute: () => null },
     };
     new Function("document", "getComputedStyle", "$",
-      `${targets}\n${replay}\n${board}\n${dispatch}\n
+      `${targets}\n${replay}\n${extractFn("boardEnterItems", "view")}\n${board}\n${dispatch}\n
        for (const n of ["terminal", "board", "skills", "presets", "store", "stats", "settings", "sessions", "nope"]) playViewEnter(n);
       `)(doc, () => ({ animationName: "none" }), (id) => doc.getElementById(id));
     assert.deepEqual(played, [
@@ -2098,8 +2098,11 @@ describe("panel.html sessions tab", () => {
     const m = panelJs.match(/function playBoardEnter\(view\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "playBoardEnter found in panel.js");
     assert.ok(m[1].includes('classList.add("board-enter")'), "container entrance plays");
-    assert.ok(m[1].includes('querySelectorAll(".panel-card")'), "stagger covers the board panel cards");
-    assert.ok(m[1].includes("!el.hidden"), "hidden cards skipped from the stagger");
+    assert.ok(m[1].includes("boardEnterItems(view)"), "stagger samples the shared board item list");
+    const itemsSrc = extractFn("boardEnterItems", "view");
+    assert.ok(itemsSrc.includes('querySelectorAll(".panel-card, .live-log-region")'),
+      "运行日志区与卡片按同一条 DOM 序取样");
+    assert.ok(itemsSrc.includes("!el.hidden"), "hidden items skipped from the stagger");
     // 单卡装配抽成 armBoardCardEnter 后，延迟公式与 hero 变奏随它搬走；playBoardEnter 的
     // 循环只剩调用。迟到放出的卡也走这里补台阶，故两段的接线一并钉住。
     const arm = extractFn("armBoardCardEnter", "card, index");
@@ -7181,6 +7184,7 @@ describe("设置项「看板排布」", () => {
     // armBoardCardEnter 的调用。
     const armFn = extractFn("armBoardCardEnter", "card, index");
     const armStripFn = extractFn("armBoardIconStrip", "strip, cardCount");
+    const itemsFn = extractFn("boardEnterItems", "view");
     const enterFn = extractFn("playBoardEnter", "view");
     const cards = Array.from({ length: cardCount }, mkBoardAnimEl);
     const slots = Array.from({ length: slotCount }, mkBoardAnimEl);
@@ -7188,11 +7192,11 @@ describe("设置项「看板排布」", () => {
     strip.hidden = stripHidden;
     strip.querySelectorAll = (sel) => (sel === ".board-icon-slot" ? slots : []);
     const view = mkBoardAnimEl();
-    view.querySelectorAll = (sel) => (sel === ".panel-card" ? cards : []);
+    view.querySelectorAll = (sel) => (sel === ".panel-card" || sel === ".panel-card, .live-log-region" ? cards : []);
     view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
     const doc = { documentElement: { getAttribute: () => null } };
     new Function("view", "document", "getComputedStyle",
-      `${armFn}\n${armStripFn}\n${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
+      `${armFn}\n${armStripFn}\n${itemsFn}\n${enterFn}\nplayBoardEnter(view);`)(view, doc, () => ({ animationName: "none" }));
     return { cards, strip, slots };
   }
 
@@ -7235,6 +7239,7 @@ describe("设置项「看板排布」", () => {
   // 触发以模拟「阶梯播完」（entry 类按真实行为摘掉）。
   const armFn = extractFn("armBoardCardEnter", "card, index");
   const armStripFn = extractFn("armBoardIconStrip", "strip, cardCount");
+  const itemsFn = extractFn("boardEnterItems", "view");
   const inFlightFn = extractFn("boardEnterInFlight");
   const releaseFn = extractFn("armReleasedBoardCards", "released");
   const visFn = extractFn("applyAgentCardVisibility", "ids");
@@ -7255,7 +7260,7 @@ describe("设置项「看板排布」", () => {
     if (startHidden !== null) cards[startHidden].hidden = true;
     const container = { querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []) };
     const view = mkBoardAnimEl();
-    view.querySelectorAll = (sel) => (sel === ".panel-card" ? cards : []);
+    view.querySelectorAll = (sel) => (sel === ".panel-card" || sel === ".panel-card, .live-log-region" ? cards : []);
     view.querySelector = () => null; // 只有 .board-icon-strip 会被问到
     const doc = {
       documentElement: { getAttribute: () => null, removeAttribute: () => {} },
@@ -7269,6 +7274,7 @@ describe("设置项「看板排布」", () => {
       function $(id) { return null; }
       ${armFn}
       ${armStripFn}
+      ${itemsFn}
       ${inFlightFn}
       ${releaseFn}
       ${visFn}
@@ -7401,7 +7407,7 @@ describe("设置项「看板排布」", () => {
     };
     const container = { querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []) };
     const view = mkBoardAnimEl();
-    view.querySelectorAll = (sel) => (sel === ".panel-card" ? allCards : []);
+    view.querySelectorAll = (sel) => (sel === ".panel-card" || sel === ".panel-card, .live-log-region" ? allCards : []);
     view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
     const doc = {
       documentElement: { getAttribute: () => null, removeAttribute: () => {} },
@@ -7417,6 +7423,7 @@ describe("设置项「看板排布」", () => {
       function syncBoardIconStrip() { rebuild(); }
       ${armFn}
       ${armStripFn}
+      ${itemsFn}
       ${inFlightFn}
       ${releaseFn}
       ${visFn}
@@ -7473,6 +7480,101 @@ describe("设置项「看板排布」", () => {
     const apply = m[1].indexOf("applyBoardLiveAgentIds(");
     assert.ok(reorder >= 0 && apply >= 0, "两处调用都在");
     assert.ok(reorder < apply, "先重排取得最终卡序，再落定显隐");
+  });
+
+  // ── 运行日志区并入看板入场阶梯 ──
+  // 无框化后这块不再是 .panel-card，曾经既不进阶梯、也不占延迟位，揭幕第一拍孤立地
+  // 亮着。四处取样统一后，它按 DOM 序占一格，后续卡与图标行自然顺延。
+  it("阶梯四处取样共用 boardEnterItems，运行日志区按 DOM 序占一格", () => {
+    const items = extractFn("boardEnterItems", "view");
+    assert.ok(items.includes('querySelectorAll(".panel-card, .live-log-region")'),
+      "卡片与无框运行日志区按同一条文档序取样");
+    assert.ok(items.includes("!el.hidden"), "记录开关关掉时整区不占位");
+    for (const name of ["playBoardEnter", "boardEnterInFlight", "armReleasedBoardCards", "applyAgentCardVisibility"]) {
+      assert.ok(extractFn(name).includes("boardEnterItems("), `${name} 不再自立一套 .panel-card 取样`);
+    }
+    assert.ok(!/querySelectorAll\("\.panel-card"\)/.test(panelJs), "旧的纯卡取样口径全数退役");
+    assert.ok(panelHtml.indexOf('class="live-log-region"') > panelHtml.indexOf('<section class="telemetry-view">'),
+      "运行日志区在 .telemetry-view 内，才谈得上被同一套取样收编");
+
+    // 真跑：按 HTML 文档序（服务状态 / 终端入口 / 状态检测 / 运行日志 / 端点卡…）
+    // 构造带区域的看板，验证它拿到自己那一格、后续每项顺延 40ms、图标行跟着起拍。
+    const hero = mkBoardAnimEl(), c1 = mkBoardAnimEl(), c2 = mkBoardAnimEl();
+    const c3 = mkBoardAnimEl(), c4 = mkBoardAnimEl(), region = mkBoardAnimEl();
+    const all = [hero, c1, c2, region, c3, c4];
+    const strip = mkBoardAnimEl();
+    strip.querySelectorAll = () => [];
+    const view = mkBoardAnimEl();
+    view.querySelectorAll = (sel) => (sel === ".panel-card, .live-log-region" ? all : []);
+    view.querySelector = (sel) => (sel === ".board-icon-strip" ? strip : null);
+    const doc = { documentElement: { getAttribute: () => null } };
+    const delays = () => ({
+      hero: hero.styleProps["--board-delay"], c1: c1.styleProps["--board-delay"],
+      c2: c2.styleProps["--board-delay"], region: region.styleProps["--board-delay"],
+      c3: c3.styleProps["--board-delay"], c4: c4.styleProps["--board-delay"],
+      strip: strip.styleProps["--board-delay"],
+    });
+    const play = () => new Function("view", "document", "getComputedStyle",
+      `${armFn}\n${armStripFn}\n${itemsFn}\n${enterFn}\nplayBoardEnter(view);`
+    )(view, doc, () => ({ animationName: "none" }));
+
+    play();
+    assert.deepEqual(delays(), {
+      hero: "100ms", c1: "150ms", c2: "190ms", region: "230ms",
+      c3: "270ms", c4: "310ms", strip: "350ms",
+    }, "运行日志区按 DOM 序第 4 位拿 230ms，后续每项顺延一格，图标行基数跟着多一格");
+    assert.ok(region.classList.contains("board-card-enter"), "区域拿到与其他卡同一支入场动画");
+    assert.ok(!region.classList.contains("board-card-enter-scale"), "它不是首卡，不走 hero 变奏");
+
+    // 记录开关关掉：整区退出取样，后续卡与图标行各回退一格，绝不留下空格。
+    region.hidden = true;
+    delete region.styleProps["--board-delay"];
+    play();
+    const hiddenDelays = delays();
+    assert.equal(hiddenDelays.region, undefined, "隐藏的区域不再被装配，也不发延迟");
+    assert.equal(hiddenDelays.c3, "230ms", "后续卡回退一档，不空跳");
+    assert.equal(hiddenDelays.strip, "310ms", "图标行基数同步回退");
+  });
+
+  it("容器项只认自己的 animationend，内部动画冒泡不提前收场", () => {
+    const arm = extractFn("armBoardCardEnter", "card, index");
+    assert.ok(arm.includes("e.target !== card") && arm.includes("removeEventListener"),
+      "运行日志区是容器：内部动画结束不能摘掉整块的入场类、把现役判定提前判假");
+  });
+
+  it("记录开关关掉时摘净入场类，重新打开不会把现役闸门焊死", () => {
+    const apply = extractFn("applyLoggingEnabled", "enabled");
+    assert.ok(apply.includes("card.hidden = !enabled"), "整区显隐仍只由这一处切");
+    assert.ok(apply.includes('classList.remove("board-card-enter", "board-card-enter-scale")'),
+      "隐藏会取消动画、animationend 不会到达，须主动摘类");
+    assert.ok(/@keyframes boardEnter \{/.test(panelCss)
+      && /\.board-card-enter \{ animation: boardEnter/.test(panelCss),
+      "复用同一支入场动画，无框区域无需另立 CSS 规则");
+  });
+
+  it("开屏与阶梯期间日志流静默；阶梯结束自动恢复，reduced 由通配规则兜住", () => {
+    const quiet = extractFn("logBoardEnterQuiet");
+    assert.ok(quiet.includes('hasAttribute?.("data-startup")'), "开屏层在场即静默");
+    assert.ok(quiet.includes('board-card-enter') && !quiet.includes("boardEnterInFlight"),
+      "只认运行日志区自己的入场态；整列残留 entry 类不得把逐条动效长期焊死");
+    for (const name of ["renderLogStack", "renderLogViewport"]) {
+      const src = extractFn(name);
+      assert.ok(src.includes("playLogAppearing(fresh[0])") && src.includes("!logBoardEnterQuiet()"),
+        `${name} 的单条入场受静默闸门约束`);
+      assert.ok(src.includes("!motion") && src.includes("!reduced"), `${name} 原有两道判据不丢`);
+    }
+    const region = (hidden, classes) => ({ hidden, classList: { contains: (c) => classes.includes(c) } });
+    const probe = (startup, reg) => new Function("document", "$",
+      `${quiet}\nreturn logBoardEnterQuiet();`)(
+      { documentElement: { hasAttribute: (k) => startup && k === "data-startup" } }, () => reg);
+    assert.equal(probe(false, region(false, [])), false, "平稳期照常逐条入场");
+    assert.equal(probe(true, region(false, [])), true, "开屏遮挡期静默，不在毛玻璃后先演完一套");
+    assert.equal(probe(false, region(false, ["board-card-enter"])), true, "区域随阶梯浮入期静默");
+    assert.equal(probe(false, region(false, ["board-card-enter-scale"])), true, "hero 变奏同样静默");
+    assert.equal(probe(false, region(true, ["board-card-enter"])), false, "区域被隐藏不算现役");
+    assert.equal(probe(true, region(true, [])), true, "开屏与隐藏叠加仍静默");
+    assert.ok(/@media \(prefers-reduced-motion: reduce\) \{ \* \{ transition: none !important; animation: none !important; \} \}/
+      .test(panelCss), "减少动效时 backwards 初态不生效，区域与所有卡一样保持可见");
   });
 });
 
@@ -8462,7 +8564,7 @@ describe("设置项「运行日志」", () => {
   it("关掉时断流、清空并隐去整卡；重新打开才重新建连", () => {
     const source = panelJs.match(/function applyLoggingEnabled\(enabled\) \{[\s\S]*?\n  \}/);
     assert.ok(source, "applyLoggingEnabled 在 panel.js 里");
-    const card = { hidden: false };
+    const card = { hidden: false, classList: { remove(...cs) { (card.removed ??= []).push(...cs); } } };
     const body = { innerHTML: "old rows" };
     const state = { es: { closed: false, close() { this.closed = true; } } };
     let connects = 0;
@@ -8738,7 +8840,7 @@ describe("设置项「运行日志」", () => {
   it("整段的显隐只在 applyLoggingEnabled 一处切，级别行不另立第二套判据", () => {
     const source = panelJs.match(/function applyLoggingEnabled\(enabled\) \{[\s\S]*?\n  \}/);
     assert.ok(source, "applyLoggingEnabled 在 panel.js 里");
-    const card = { hidden: false };
+    const card = { hidden: false, classList: { remove(...cs) { (card.removed ??= []).push(...cs); } } };
     const rows = { hidden: true };
     const body = { innerHTML: "old rows" };
     const run = new Function(
