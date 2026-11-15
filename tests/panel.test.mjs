@@ -17812,13 +17812,13 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
   });
 
-  it("CSS 钉住顶部基准与两阶段交接：96→320、摊开期叠卡可见、行距量值驱动", () => {
-    assert.ok(/\.live-log-stage \{[^}]*height: 96px;[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
+  it("CSS 钉住顶部基准与两阶段交接：卡高自适应舞台、摊开期叠卡可见、行距量值驱动", () => {
+    assert.ok(/\.live-log-stage \{[^}]*height: calc\(var\(--ll-card-h\) \+ var\(--ll-step\) \* 2\);[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
     assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height: 320px; \}/.test(panelCss));
     assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚，随舞台长高不被拽");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*height: 76px;/.test(panelCss), "卡高内容驱动，与视口卡同形");
     assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*transform-origin: 50% 0;/.test(panelCss), "缩放基准在顶边");
-    assert.ok(/--ll-step: 13px; --ll-step-expanded: 55px;/.test(panelCss), "收起错位 13px、展开行距兜底 55px");
+    assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(panelCss), "收起错位 22px（够露出整行 meta）、展开行距兜底 55px");
     assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1;/.test(panelCss), "展开行距由量值驱动");
     assert.ok(!/--ll-step: 78px/.test(panelCss), "旧硬编码行距已撤");
     assert.ok(/\.live-log-viewport \{[^}]*overflow-anchor: none;/.test(panelCss), "新消息从顶部插入不吃滚动锚定");
@@ -17843,13 +17843,13 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="2"\] \{[^}]*transition-delay: var\(--ll-retreat-delay\);/.test(panelCss), "后层晚 45ms 才退，读得出依次");
     assert.ok(!/\.live-log-stack \.live-log-msg\[data-slot="[12]"\] \{ transform: translateY\(-/.test(panelCss), "不再向上错位");
     assert.ok(!/is-entering|@keyframes liveLogMsgIn|animation: liveLogMsgIn/.test(panelCss), "入场 keyframes 退役，不再吞掉退层");
-    assert.ok(/\.live-log-stack \.live-log-msg\.is-appearing \{ opacity: 0; transform: translateY\(-8px\) scale\(1\.02\); transition: none; \}/.test(panelCss), "新卡从顶部淡入落定，走同族 transition");
+    assert.ok(/\.live-log-stack \.live-log-msg\.is-appearing \{ opacity: 0\.55; transform: translateY\(-6px\) scale\(1\.01\); transition: none; \}/.test(panelCss), "新卡从顶部淡入落定，起始态仍留轮廓");
     assert.ok(/\.live-log-viewport \.live-log-msg\.is-appearing \{ opacity: 0; transform: translateY\(-8px\); \}/.test(panelCss), "展开态新消息同样从顶部淡入");
-    assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*translateY\(calc\(var\(--ll-step\) \* 3\)\) scale\(0\.88\)[^}]*transition-duration: 160ms;/.test(panelCss), "最末一张再退一层后淡出");
+    assert.ok(/\.live-log-stack \.live-log-msg\.is-leaving \{[^}]*translateY\(calc\(var\(--ll-step\) \* 2\)\) scale\(0\.9\)[^}]*transition-duration: 140ms;/.test(panelCss), "最末一张停在第三层原位淡出，不滑出舞台");
     const leaveBlock = panelCss.match(/\.live-log-stack \.live-log-msg\.is-leaving \{([\s\S]*?)\}/)?.[1] ?? "";
     assert.ok(/transition-property: transform, opacity, background-color, border-color, box-shadow;/.test(leaveBlock), "离场逐项写全 transition，双 class 共存时也不会被 is-appearing 的 transition:none 吃掉");
     assert.ok(/transition-timing-function: var\(--ease-out\);/.test(leaveBlock), "曲线一并取回，与基础过渡同拍");
-    assert.ok(/filter: blur\(1\.2px\); transition-duration: 160ms;/.test(panelCss), "离场虚化单调加深，不回落成反弹");
+    assert.ok(/filter: blur\(1\.2px\); transition-duration: 140ms;/.test(panelCss), "离场虚化单调加深，不回落成反弹");
     assert.ok(!/translateY\(54px\) scale\(0\.9\)/.test(panelCss), "旧的硬跳离场已撤");
     assert.ok(/\.live-log\[data-clearing\] \.live-log-stack \.live-log-msg\.is-leaving,\s*\.live-log\[data-clearing\] \.live-log-viewport \.live-log-msg\.is-leaving \{ transition-duration: 120ms; \}/.test(panelCss), "清空整批两层同取 120ms，不再叠卡还在淡出而视口已先清空");
     assert.ok(/\.live-log-viewport \.live-log-msg\.is-leaving \{ opacity: 0; transform: translateY\(8px\); \}/.test(panelCss), "视口离场与顶部基准同向");
@@ -17874,7 +17874,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
   it("CSS 钉住叠卡景深与暗色层界：三档参数、虚化只落文字、两态归位", () => {
     const rootBlock = panelCss.match(/\.live-log \{([\s\S]*?)\}/)?.[1] ?? "";
     const expandedBlock = panelCss.match(/\.live-log\[data-state="expanded"\] \{([\s\S]*?)\}/)?.[1] ?? "";
-    assert.ok(/--ll-step: 13px; --ll-step-expanded: 55px;/.test(rootBlock) && /--ll-scale-1: 0\.96; --ll-scale-2: 0\.92;/.test(rootBlock) && /--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;/.test(rootBlock) && /--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(rootBlock), "收起态逐层缩小、虚化、变淡");
+    assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(rootBlock) && /--ll-scale-1: 0\.96; --ll-scale-2: 0\.92;/.test(rootBlock) && /--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;/.test(rootBlock) && /--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(rootBlock), "收起态逐层缩小、虚化、变淡");
     assert.ok(/--ll-retreat-delay: 45ms;/.test(rootBlock), "后层退远的 stagger 在册");
     assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1; --ll-scale-2: 1;/.test(expandedBlock) && /--ll-blur-1: 0px; --ll-blur-2: 0px;/.test(expandedBlock) && /--ll-opacity-1: 1; --ll-opacity-2: 1;/.test(expandedBlock), "展开态间距放大到行距、景深归位");
     assert.ok(/\.live-log-stack \.live-log-meta,\s*\.live-log-stack \.live-log-text \{ filter: blur\(0px\); transition: filter 220ms var\(--ease-out\); \}/.test(panelCss), "卡内文字可过渡虚化");
@@ -18091,7 +18091,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(bySlot["0"].innerHTML.includes("n4"), "叠卡 slot0＝最新消息且在顶部，与视口首卡同基准");
     const oldest = els.logStack.children.find((n) => n.classList.contains("is-leaving"));
     assert.ok(oldest && oldest.innerHTML.includes("n1"), "最旧一张进入离场档");
-    assert.equal(oldest.dataset.slot, "2", "离场卡保留原 slot，景深规则不失配");
+    assert.equal(oldest.dataset.slot, "leaving", "离场卡退出槽位序列，不与补位卡争同一层");
     flush(160);
 
     els.logBody.children[0].offsetHeight = 49;
@@ -18122,7 +18122,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/playLogAppearing\(fresh\[0\]\)/.test(stackSrc) && /playLogAppearing\(fresh\[0\]\)/.test(viewSrc), "两层入场统一走带兜底的 helper");
     assert.ok(!/is-entering/.test(panelJs), "入场 keyframes 那条旧路已彻底退役");
     assert.ok(/function markLogLeaving\(node\) \{[\s\S]*?clearLogAppearing\(node\);[\s\S]*?classList\.add\("is-leaving"\)/.test(panelJs), "离场前先摘入场态，两个 class 不共存");
-    assert.equal((stackSrc.match(/node\.dataset\.slot = String\(slot\);/g) ?? []).length, 1, "slot 只在 latest 循环设一次，离场卡保留原值");
+    assert.equal((stackSrc.match(/node\.dataset\.slot = String\(slot\);/g) ?? []).length, 1, "slot 只在 latest 主循环设一次，离场卡退出序列");
     assert.ok(/scrollTop <= 24/.test(panelJs), "贴顶跟随判据");
     assert.ok(/scrollTop = 0/.test(viewSrc) && !/scrollTop = body\.scrollHeight/.test(viewSrc), "视口归顶、不再贴底");
     assert.ok(/overflow-anchor: none/.test(panelCss), "顶部插入禁用滚动锚定");
@@ -18131,7 +18131,32 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/body\.insertBefore\(node, ref\)/.test(viewSrc) && !/for \(const node of ordered\) body\.appendChild/.test(viewSrc), "视口增量重排，只插错位节点");
     assert.equal((setSrc.match(/"handoff"/g) ?? []).length, 1, "收起刻意硬切：只有展开摊开到位才走一次 handoff");
     assert.ok(/if \(root\) root\.removeAttribute\("data-motion"\);/.test(setSrc), "展收入口无条件清交接态，中途切 reduce 不留残影");
-    assert.ok(/LOG_ANIM_MS = 160;[\s\S]*?LOG_CLEAR_MS = 120;[\s\S]*?LOG_MOTION_MS = 220;[\s\S]*?LOG_HANDOFF_MS = 60;/.test(panelJs), "四档时长集中定义，与 CSS 同值");
+    assert.ok(/LOG_ANIM_MS = 140;[\s\S]*?LOG_APPEAR_FALLBACK_MS = 120;[\s\S]*?LOG_CLEAR_MS = 120;[\s\S]*?LOG_MOTION_MS = 220;[\s\S]*?LOG_HANDOFF_MS = 60;/.test(panelJs), "时长集中定义，与 CSS 同值");
+  });
+
+  it("三张叠卡槽位唯一，卡高按内容写入舞台变量", () => {
+    const { sandbox, els } = makeSandbox();
+    for (let i = 1; i <= 3; i++) sandbox.appendLog({ level: "info", message: "s" + i });
+    const slots = els.logStack.children.map((n) => n.dataset.slot).sort();
+    assert.deepEqual(slots, ["0", "1", "2"], "三张各占一层，无重复槽位");
+    els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
+    sandbox.appendLog({ level: "info", message: "s4" });
+    assert.equal(els.liveLog.style["--ll-card-h"], "49px", "卡高写入 --ll-card-h，舞台跟内容走");
+  });
+
+  it("清空批次退出槽位序列，新消息独占顶层", () => {
+    const { sandbox, els } = makeSandbox();
+    for (let i = 1; i <= 3; i++) sandbox.appendLog({ level: "info", message: "c" + i });
+    sandbox.handleLogEntry({ type: "clear" });
+    sandbox.appendLog({ level: "warn", message: "fresh" });
+    const cards = els.logStack.children;
+    const fresh = cards.find((n) => n.innerHTML.includes("fresh"));
+    assert.ok(fresh, "新消息已入叠卡");
+    assert.equal(fresh.dataset.slot, "0", "新消息独占 slot0");
+    const leaving = cards.filter((n) => n.classList.contains("is-leaving"));
+    assert.ok(leaving.length >= 1, "旧批仍在淡出");
+    assert.ok(leaving.every((n) => n.dataset.slot === "leaving"), "淡出卡全部退出 0/1/2 槽位");
+    assert.equal(cards.filter((n) => n.dataset.slot === "0").length, 1, "slot0 唯一");
   });
 
   it("入场/离场互斥：离场前先摘 is-appearing，迟到的入场回调不复活", () => {
@@ -18159,7 +18184,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     flushFrames(1);
     const card = els.logStack.children[0];
     assert.ok(card.classList.contains("is-appearing"), "起始态在册");
-    flush(200); // LOG_ANIM_MS + 40
+    flush(120); // LOG_APPEAR_FALLBACK_MS
     assert.ok(!card.classList.contains("is-appearing"), "兜底计时器已摘类");
     flushFrames();
     assert.ok(!card.classList.contains("is-appearing"), "迟到的 rAF 不再装回起始态");

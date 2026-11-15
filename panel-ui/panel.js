@@ -2710,14 +2710,15 @@ async function api(method, path, body) {
   // 视口；反向切换先清掉上一轮，避免两个 motion 叠在一起。
   let logMotionTimer = null;
   let logMotionTail = null;
-  // 一条链上只留一组时长：单张挤出 160ms、整批清空 120ms、摊开/收回 220ms、交接 60ms，
-  // CSS 与这里的计时器同取这些值，不再各自写死数字。
-  const LOG_ANIM_MS = 160;
+  // 一条链上只留一组时长：单张挤出 140ms、入场兜底 120ms、整批清空 120ms、摊开/收回
+  // 220ms、交接 60ms，CSS 与这里的计时器同取这些值，不再各自写死数字。
+  const LOG_ANIM_MS = 140;
+  const LOG_APPEAR_FALLBACK_MS = 120;
   const LOG_CLEAR_MS = 120;
   const LOG_MOTION_MS = 220;
   const LOG_HANDOFF_MS = 60;
   // 入场的帧无关兜底：后台页签 rAF 会被节流甚至冻结，只靠双重 rAF 摘类会让新卡
-  // 永远停在起始态。Map 同时充当 token，供离场/清场时取消尚未执行的入场回调。
+  // 停在起始态。Map 同时充当 token，供离场/清场时取消尚未执行的入场回调。
   const logAppearing = new Map();
 
   function logReducedMotion() {
@@ -2741,7 +2742,7 @@ async function api(method, path, body) {
       if (logAppearing.get(node) !== timer) return;
       node.classList.remove("is-appearing");
       logAppearing.delete(node);
-    }, LOG_ANIM_MS + 40);
+    }, LOG_APPEAR_FALLBACK_MS);
     logAppearing.set(node, timer);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (logAppearing.get(node) !== timer) return;
@@ -2752,10 +2753,12 @@ async function api(method, path, body) {
   }
 
   // 进入离场前先摘入场态：is-appearing 的 transition:none 会吃掉整支离场过渡，
-  // 清空期间连续来消息最容易撞上这两个 class 共存。
+  // 清空期间连续来消息最容易撞上这两个 class 共存。叠卡同时退出 0/1/2 槽位，
+  // 统一由 .is-leaving 停在第三层，不再与补位卡争同一层；视口卡没有 slot，不受影响。
   function markLogLeaving(node) {
     clearLogAppearing(node);
     node.classList.add("is-leaving");
+    if (node.dataset.slot != null) node.dataset.slot = "leaving";
   }
 
   function queueLogRender() {
@@ -2892,7 +2895,7 @@ async function api(method, path, body) {
         stack.appendChild(node);
         fresh.push(node);
       }
-      // 清空批次的卡保留原 slot 与景深档，只维持离场态；移除由清场计时器一次排完。
+      // 清空批次的卡退出槽位序列，只维持离场态；移除由清场计时器一次排完。
       if (entry.fading) { markLogLeaving(node); continue; }
       const leaving = logStackLeaving.get(entry.id);
       if (leaving) {
@@ -2906,13 +2909,13 @@ async function api(method, path, body) {
     for (const [id, node] of logStackNodes) {
       if (seen.has(id) || logStackLeaving.has(id)) continue;
       if (reduced) {
-        // 减少动效时单张淘汰也直接移除，不挂离场 class、不排 160ms 计时器。
+        // 减少动效时单张淘汰也直接移除，不挂离场 class、不排 140ms 计时器。
         clearLogAppearing(node);
         node.remove();
         logStackNodes.delete(id);
         continue;
       }
-      // 越界卡保留原 slot，由 .is-leaving 的第 4 档接管景深，景深规则不失配。
+      // 越界卡停在第三层原位淡出，由 .is-leaving 接管这一档的位移与透明度。
       markLogLeaving(node);
       const timer = setTimeout(() => {
         logStackLeaving.delete(id);
@@ -2925,6 +2928,18 @@ async function api(method, path, body) {
     // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条、两态
     // 交接进行中、或 reduced-motion，都直接按终态落位，不逐条补播。
     if (!logExpanded && fresh.length === 1 && !motion && !reduced) playLogAppearing(fresh[0]);
+    // 舞台高度跟卡高走：卡高内容驱动，窄窗下卡变高时三层仍各露一个完整步长。
+    // 取非离场卡的最大布局高，避免某一条只有一行时舞台被压矮；只在量值变化时写
+    // 变量，避免每帧都触发一次样式重算。
+    let cardH = 0;
+    for (const node of stack.children) {
+      if (node.classList.contains("is-leaving")) continue;
+      if (node.offsetHeight > cardH) cardH = node.offsetHeight;
+    }
+    if (cardH > 0 && root && root.dataset.llCardH !== String(cardH)) {
+      root.dataset.llCardH = String(cardH);
+      root.style.setProperty("--ll-card-h", cardH + "px");
+    }
   }
 
   function renderLogFeed() {
@@ -3029,7 +3044,7 @@ async function api(method, path, body) {
     }
     if (root) root.setAttribute("data-clearing", "1");
     // 整批清空只排一次移除：这一批节点在下一帧 render 里只维持离场态，不再各自
-    // 等一轮越界判定又排 160ms 的单张淘汰；两层与 CSS 清空档同为 120ms。
+    // 等一轮越界判定又排 140ms 的单张淘汰；两层与 CSS 清空档同为 120ms。
     const fadingStack = [...logStackNodes.entries()];
     const fadingViewport = [...logViewportNodes.entries()];
     for (const [, node] of fadingStack) markLogLeaving(node);
