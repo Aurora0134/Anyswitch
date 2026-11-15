@@ -2578,6 +2578,7 @@ export function createPanelRouter({
   let endpointVisibilityTimer = null;
   let endpointVisibilityKey; // 变更检测用：undefined=首算前；之后每轮检测后更新（null→"null"）
   let promptsPrewarmed = false; // prewarmPromptsBackfill 仅首调做显式回填（见该方法注释）
+  let skillsPrewarmed = false; // prewarmSkillsBackfill 同上（技能面补齐，见该方法注释）
   async function refreshEndpointVisibility() {
     if (endpointVisibilityRefresh) return endpointVisibilityRefresh;
     endpointVisibilityRefresh = (async () => {
@@ -2590,15 +2591,16 @@ export function createPanelRouter({
       } finally {
         endpointVisibilityRefresh = null;
       }
-      // 可见集变更钩子（注入面非变更回填的运行中触发面）：上一轮 key 在册
-      // （非首算）且新快照非 null 且 key 变了 → 回填一次注入面（fire-and-
-      // forget，失败静默）。首算不触发——启动回填归 prewarmPromptsBackfill
-      // 的显式 resync，避免双计；运行中检测失败翻转（Set→null）不触发——
-      // 非用户主动路径零写盘，不给未装端点造文件；检测恢复（null→Set）照
-      // 触发——补填，无永久漏回填。
+      // 可见集变更钩子（注入面/技能面非变更回填的运行中触发面）：上一轮 key
+      // 在册（非首算）且新快照非 null 且 key 变了 → 两个落盘面各回填一次
+      // （fire-and-forget，失败静默）。首算不触发——启动回填归
+      // prewarmPromptsBackfill / prewarmSkillsBackfill 的显式调用，避免双计；
+      // 运行中检测失败翻转（Set→null）不触发——非用户主动路径零写盘，不给未
+      // 装端点造文件；检测恢复（null→Set）照触发——补填，无永久漏回填。
       const key = endpointVisibility === null ? "null" : [...endpointVisibility].sort().join(",");
       if (endpointVisibilityKey !== undefined && endpointVisibility !== null && key !== endpointVisibilityKey) {
         try { promptsService?.resync?.(); } catch { /* 钩子失败静默：预设变更路径照旧兜底 */ }
+        try { Promise.resolve(skillsService?.catchUp?.()).catch(() => {}); } catch { /* 同上 */ }
       }
       endpointVisibilityKey = key;
     })();
@@ -5103,6 +5105,28 @@ export function createPanelRouter({
           promptsPrewarmed = true;
           if (endpointVisibility !== null) {
             try { promptsService.resync(); } catch { /* 静默：预设变更路径照旧兜底 */ }
+          }
+        }
+      })().catch(() => {});
+    },
+    // 技能面的启动补齐（panel-host 启动时调一次，与 prewarmPromptsBackfill 同
+    // 接线纪律）：junction 唯一的写入触发面原本是面板上的部署/解除——新的区域
+    // 版数据根出现、或装上但从未部署过的 Agent，都要等用户手点一次才有技能，
+    // Qoder CN 读不到注入技能的 anys 侧根因即此。这里把补齐提前到进程启动：
+    // 先等一次可见性快照，检测正常时做一次显式 catchUp；检测失败（快照 null）
+    // 跳过整次调用——自动路径不给未确认在装的端点造目录——恢复后由 null→Set
+    // 翻转的变更钩子自动补上。fire-and-forget、失败静默；仅首调做显式补齐，
+    // 后续调用只刷新可见性。注入 mock 服务的测试原样保留、只谈触发次数。
+    prewarmSkillsBackfill() {
+      return (async () => {
+        await refreshEndpointVisibility();
+        skillsService ??= createSkillsService({ base, isEndpointVisible });
+        ensureEndpointVisibilityFreshness();
+        if (!skillsPrewarmed) {
+          skillsPrewarmed = true;
+          if (endpointVisibility !== null) {
+            // 异步补齐不阻塞启动：同步抛与异步 reject 都静默（面板部署路径照旧兜底）
+            try { Promise.resolve(skillsService.catchUp?.()).catch(() => {}); } catch { /* 同上 */ }
           }
         }
       })().catch(() => {});

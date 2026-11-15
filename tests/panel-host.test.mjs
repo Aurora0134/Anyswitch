@@ -74,3 +74,21 @@ test("createPanelServer 启动即预热注入回填（漏接线则 resync 计数
   }
   assert.equal(resyncs, 1, "启动即一次注入回填");
 });
+
+// 技能面同一接线纪律：junction 唯一的写入触发面是面板部署，漏掉这行接线则
+// 后装的区域版根 / 从没部署过的 Agent 在用户手点之前永远没有技能。
+test("createPanelServer 启动即预热技能补齐（漏接线则 catchUp 计数为 0）", async () => {
+  const env = { getState: async () => ({ clients: [{ id: "claude", installations: [{ status: "found" }] }] }) };
+  let catchUps = 0;
+  const skillsService = { catchUp: async () => { catchUps += 1; return { ok: true, created: [], skipped: [] }; } };
+  createPanelServer({
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    environmentService: env,
+    skillsService,
+  });
+  const deadline = Date.now() + 100;
+  while (catchUps === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(catchUps, 1, "启动即一次技能补齐");
+});

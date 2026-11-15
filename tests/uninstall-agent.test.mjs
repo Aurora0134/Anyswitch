@@ -416,6 +416,39 @@ test("qoder 双区域版：卸载摘双根提示词托管块，只剩块的文�
   for (const step of again.steps) assert.equal(step.changed, false, step.step);
 });
 
+// 卸载 qoder 同样摘双根的技能联接（与 claude/workbuddy 的 skill-junctions 对称）：
+// 部署侧 ENDPOINT_DEFS 的 qoder 是双根写面，卸载必须够得着两个根的链接——只管
+// 提示词块会把技能链接留在用户家目录里。rmdir 只摘链接、实体目录原样保留。
+test("qoder 双区域版：卸载摘双根技能联接，实体目录与目标目录都不动，幂等", async () => {
+  const home = mkTestDir("uninstall-qoder-skills-");
+  const { driver, sidecarRoot } = testDriver(home);
+  seedQoder(home, sidecarRoot);
+  const repo = mkTestDir("qoder-skills-uninstall-repo-");
+  mkdirSync(join(repo, "my-skill"), { recursive: true });
+  writeFileSync(join(repo, "my-skill", "SKILL.md"), "---\nname: my-skill\n---\n");
+  const intlSkills = join(home, ".qoder", "skills");
+  const cnSkills = join(home, ".qoder-cn", "skills");
+  mkdirSync(intlSkills, { recursive: true });
+  mkdirSync(cnSkills, { recursive: true });
+  createJunction(join(intlSkills, "my-skill"), join(repo, "my-skill"));
+  createJunction(join(cnSkills, "my-skill"), join(repo, "my-skill"));
+  // 用户自建实体目录：卸载不认领
+  mkdirSync(join(cnSkills, "local-skill"), { recursive: true });
+  writeFileSync(join(cnSkills, "local-skill", "SKILL.md"), "---\nname: local-skill\n---\n");
+
+  const result = await driver.uninstallEndpoint("qoder");
+  assert.equal(result.ok, true, JSON.stringify(result.steps));
+  assert.equal(stepsByName(result)["skill-junctions"].changed, true);
+  assert.ok(!existsSync(join(intlSkills, "my-skill")), "国际版根的联接撤销");
+  assert.ok(!existsSync(join(cnSkills, "my-skill")), "CN 根的联接撤销");
+  assert.ok(existsSync(join(repo, "my-skill", "SKILL.md")), "junction 目标目录完好");
+  assert.ok(existsSync(join(cnSkills, "local-skill", "SKILL.md")), "实体目录原样保留");
+
+  const again = await driver.uninstallEndpoint("qoder");
+  assert.equal(again.ok, true);
+  for (const step of again.steps) assert.equal(step.changed, false, step.step);
+});
+
 // ─────────────────────────────────────────────────────────────
 // zcode
 // ─────────────────────────────────────────────────────────────
