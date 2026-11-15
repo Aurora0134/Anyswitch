@@ -13578,7 +13578,9 @@ async function api(method, path, body) {
       // ≥ 旧出生时刻，按它判这条会被立刻扣掉——而这正是本次点击要接替的那批行。
       // 判据只认无主行：被其他在跑终端阳性占用（绑定/续接身份命中）的行归兄弟
       // 终端，不能拿来顶掉这台终端的兜底行（见 terminalRailClaimedRowKeys）。
-      if (!armed) {
+      // 已知绑定但目标行尚未进列表时，不能用目录/时间近似把兄弟历史行当成接替者：
+      // 这台终端继续保留兜底，等绑定目标按精确身份到达后再交接。
+      if (!armed && !session.boundConversation) {
         const claimedByOthers = terminalRailClaimedRowKeys(session.id);
         const taken = terminalRailHistory.sessions.some((row) =>
           !claimedByOthers.has(terminalRailArchivedKey(row)) &&
@@ -13622,8 +13624,9 @@ async function api(method, path, body) {
     if (!agentId) return claims;
     for (const session of Object.values(terminalRailSessionMap())) {
       if (!session || terminalRailAgentId(session) !== agentId) continue;
-      // 带绑定或带 resume 的终端有阳性身份，不参与推导（绑定在列的由精确匹配接住；
-      // 绑定不在列的是扫描未回，等下一拍，不拿目录近似顶上）。
+      // 带 resume 的终端有阳性身份，由精确匹配接住，不参与推导。绑定目标
+      // 不在列时仍由 pending 兜底行守住，不能拿同目录近似行冒领；目标进列表后
+      // 由下方精确匹配接管。
       if (session.resume || session.boundConversation) continue;
       const state = session.backendState;
       const born = state && Number.isFinite(state.spawnedAt) ? state.spawnedAt
