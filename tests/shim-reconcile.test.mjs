@@ -262,6 +262,76 @@ test("reconcile：共享 bin/ 部分在册——未要的命令清掉，目录�
   assert.equal(runner.pathStore.state.value, `${bin};C:\\Windows\\System32`, "共享目录条目恰一条");
 });
 
+test("reconcile：本机没装 codex 不告警——没装是正常状态", async (t) => {
+  const home = makeHome();
+  t.after(() => rmSync(home.home, { recursive: true, force: true }));
+  const logs = [];
+  // 走生产默认探针（不注入 isEndpointInstalled）：沙箱 env 里既没有 npm shim
+  // 也没有原生 bin 目录，codex 的执行体解析会抛 ENOENT。修复前这个异常一路
+  // 抛到每个 spec 的 catch 分支，被记成「reconcile failed for codex」的 warn。
+  // 用户看到的是「我根本没装 codex，anyswitch 却报故障」。
+  const report = await reconcileShims({
+    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
+    pathStore: fakePathStore("C:\\Windows"),
+    broadcastFn: async () => {},
+    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
+    log: (level, message) => logs.push([level, message]),
+  });
+  assert.equal(report.ok, true);
+  assert.ok(
+    !logs.some(([level, message]) => level === "warn" && message.includes("codex")),
+    "没装 codex 不是故障，不告警",
+  );
+  assert.ok(!logs.some(([level]) => level === "warn"), "整轮对账无告警");
+  assert.ok(!report.installed.includes("codex"), "没装的端点不装 shim 脚本");
+  assert.ok(!existsSync(join(home.home, ".config", "anyswitch-bin", "bin-codex")), "codex 的 shim 目录不生成");
+});
+
+test("reconcile：没装 codex 时磁盘上旧的 shim 脚本照常移除", async (t) => {
+  const home = makeHome();
+  t.after(() => rmSync(home.home, { recursive: true, force: true }));
+  const codex = specOf("codex");
+  const binCodex = join(home.home, ".config", "anyswitch-bin", "bin-codex");
+  writeTriplet(codex, binCodex, codex);
+  const logs = [];
+  // 修复前：探针抛 ENOENT → codex 这一格对账被 catch 分支打断 → 移除分支
+  // 没有执行到，旧的 shim 脚本留在磁盘上，PATH 条目也留着（用户装过又卸掉
+  // codex 时，codex 命令仍然指向 anyswitch 的 shim 脚本）。
+  const report = await reconcileShims({
+    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
+    pathStore: fakePathStore(`${binCodex};C:\\Windows`),
+    broadcastFn: async () => {},
+    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
+    log: (level, message) => logs.push([level, message]),
+  });
+  assert.deepEqual(report.removed, ["codex"]);
+  assert.ok(!existsSync(binCodex), "旧的 shim 目录随移除一起删掉");
+  assert.ok(
+    !logs.some(([level, message]) => level === "warn" && message.includes("codex")),
+    "移除是正常动作，不告警",
+  );
+});
+
+test("reconcile：执行体解析出真异常时仍然告警", async (t) => {
+  const home = makeHome();
+  t.after(() => rmSync(home.home, { recursive: true, force: true }));
+  const logs = [];
+  // CODEX_EXECUTABLE 写成裸名：absoluteOverride 抛的是「配置写坏了」，这类
+  // 真故障必须继续告警，否则会连同上面的误报一起被吞掉，问题就没人知道了。
+  const report = await reconcileShims({
+    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming"), CODEX_EXECUTABLE: "codex" },
+    pathStore: fakePathStore("C:\\Windows"),
+    broadcastFn: async () => {},
+    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
+    log: (level, message) => logs.push([level, message]),
+  });
+  assert.equal(report.ok, true, "单 spec 失败不拖倒其余");
+  assert.ok(
+    logs.some(([level, message]) => level === "warn" && message.includes("codex")),
+    "真异常照旧告警",
+  );
+});
+
 test("reconcile：store 不可读——整体不动，PATH 零读零写", async (t) => {
   const home = makeHome();
   t.after(() => rmSync(home.home, { recursive: true, force: true }));

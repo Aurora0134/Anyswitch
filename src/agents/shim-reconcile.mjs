@@ -71,6 +71,11 @@ const realFs = {
 // 族 resolver。codex 直用 agent-discovery 的执行体解析（含 npm shim 候选）；
 // 环境页自己的 resolveCodexShim 是它检测面的专属包装，不在此复用——本表只回
 // 答「CLI 在不在本机」，不关心桌面入口形态。
+//
+// 各 resolver 报「没装」的方式不同，下面 endpointInstalled 要把它们统一：
+// claude/opencode/pi/dsh/zcode/workbuddy/grok 一律把候选路径报出来（存在性
+// 由调用方判），codex 则在两种形态（npm shim 与原生 bin 目录）都不存在时抛
+// ENOENT。
 const SPEC_RESOLVERS = {
   claude: resolveClaudeExecutable,
   codex: resolveCodexExecutable,
@@ -81,6 +86,29 @@ const SPEC_RESOLVERS = {
   workbuddy: resolveWorkbuddyExecutable,
   zcode: resolveZcodeExecutable,
 };
+
+/**
+ * 某个 CLI 在本机装没装。没装是正常状态，不用报错：本机没装 codex 的机器上，
+ * 这条判断应当安静地返回没装，不该把整轮对账打成失败。
+ *
+ * codex 的执行体解析在两种形态都不存在时抛 ENOENT，这正是没装该有的返回
+ * （launcher 侧要的就是这条文案）。agentInstallState 早已是同一套兜底：
+ * ENOENT / ENOTDIR 当没找到，其余异常才算拿不准。本函数与它一致。
+ *
+ * 没装的端点不装 shim 脚本：磁盘上还留着旧脚本的，按移除处理（移除分支在
+ * 对账主循环里，和安装走同一段代码）。以后不会走到那个会抛异常的探针上，
+ * 也不会把「用户没装这个 CLI」记成 warn。
+ */
+function endpointInstalled(specId, base) {
+  const resolve = SPEC_RESOLVERS[specId];
+  if (!resolve) return false;
+  try {
+    return resolve(base) != null;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return false;
+    throw error;
+  }
+}
 
 /**
  * 端点此刻是否接线。渠道与虚拟模型是全体端点共享的（各 Agent 的配置同步写
@@ -140,7 +168,7 @@ export async function reconcileShims(deps = {}) {
     pathStore = createRegistryPathStore(),
     broadcastFn = createEnvironmentBroadcaster(),
     loadStoreFn = () => loadStore(storePaths()),
-    isEndpointInstalled = (specId, base) => SPEC_RESOLVERS[specId]?.(base) != null,
+    isEndpointInstalled = (specId, base) => endpointInstalled(specId, base),
     log = () => {},
   } = deps;
 
