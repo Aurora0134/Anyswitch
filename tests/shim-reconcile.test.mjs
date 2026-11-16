@@ -332,6 +332,63 @@ test("reconcile：执行体解析出真异常时仍然告警", async (t) => {
   );
 });
 
+test("reconcile：CLI 没装的端点，一个 shim 脚本都不装", async (t) => {
+  const home = makeHome();
+  t.after(() => rmSync(home.home, { recursive: true, force: true }));
+  const logs = [];
+  // 走生产默认探针（不注入 isEndpointInstalled）：沙箱里 8 个端点的执行体在
+  // 磁盘上都不存在。修复前探针只看「resolver 报不报得出路径」，于是八个端点
+  // 全被判成装了，shim 脚本照装。脚本把命令指向 anyswitch 的 launcher，
+  // 而 launcher 找不到真正的 CLI。
+  const report = await reconcileShims({
+    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
+    pathStore: fakePathStore("C:\\Windows"),
+    broadcastFn: async () => {},
+    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
+    log: (level, message) => logs.push([level, message]),
+  });
+  assert.equal(report.ok, true);
+  assert.deepEqual(report.installed, [], "没装的端点一个 shim 脚本都不装");
+  assert.ok(!logs.some(([level]) => level === "warn"), "没装不是故障，不告警");
+  assert.ok(!existsSync(join(home.home, ".config", "anyswitch-bin")), "shim 目录不生成");
+});
+
+test("reconcile：CLI 装着才装 shim 脚本", async (t) => {
+  const home = makeHome();
+  t.after(() => rmSync(home.home, { recursive: true, force: true }));
+  // pi 的执行体形态是 %APPDATA%\\npm\\pi.cmd：文件在磁盘上存在才算装了。
+  const piExe = join(home.home, "AppData", "Roaming", "npm", "pi.cmd");
+  mkdirSync(join(home.home, "AppData", "Roaming", "npm"), { recursive: true });
+  writeFileSync(piExe, "@echo off\r\n");
+  const report = await reconcileShims({
+    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
+    pathStore: fakePathStore("C:\\Windows"),
+    broadcastFn: async () => {},
+    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
+    log: () => {},
+  });
+  assert.deepEqual(report.installed, ["pi"], "装着 CLI 的端点照装");
+  assert.ok(existsSync(join(home.home, ".config", "anyswitch-bin", "bin-pi", "pi.cmd")), "pi 的 shim 落盘");
+});
+
+test("reconcile：CLI 没装的端点，磁盘上旧的 shim 脚本照常移除", async (t) => {
+  const home = makeHome();
+  t.after(() => rmSync(home.home, { recursive: true, force: true }));
+  const pi = specOf("pi");
+  const binPi = join(home.home, ".config", "anyswitch-bin", "bin-pi");
+  writeTriplet(pi, binPi, pi);
+  const report = await reconcileShims({
+    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
+    pathStore: fakePathStore(`${binPi};C:\\Windows`),
+    broadcastFn: async () => {},
+    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
+    log: () => {},
+  });
+  assert.deepEqual(report.removed, ["pi"], "用户装过又卸掉的端点，残留的 shim 脚本删掉");
+  assert.ok(!existsSync(binPi), "shim 目录随移除一起删掉");
+  assert.equal(report.pathChanged, true, "PATH 里的死条目一起清掉");
+});
+
 test("reconcile：store 不可读——整体不动，PATH 零读零写", async (t) => {
   const home = makeHome();
   t.after(() => rmSync(home.home, { recursive: true, force: true }));
