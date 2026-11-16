@@ -2547,11 +2547,13 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「高级选项」：四张卡，依次为更新通道、导出配置包、导入配置包、备份位置。版式沿用
-         本页既有卡的写法——卡头右侧用 .card-head-actions 放动作按钮（与「关于」的本地环境
-         卡同构）；有状态行的卡（导出/导入/备份位置）首行是 role=status 的状态行、次行是
-         次要明细，需要控件的行才用 .modal-item（更新通道卡即整卡一行 .modal-item，没有状态
-         行）；状态色调走 data-tone，与 about-status 同规则。 -->
+    <!-- 「高级选项」：四张卡，依次为更新通道、号池分流逻辑、配置迁移、配置备份
+         （2026-11-16 用户裁决：导出/导入合为「配置迁移」，备份位置/备份文件合为
+         「配置备份」）。更新通道与号池分流逻辑整卡一行 .modal-item；两张合并大卡
+         卡头不放动作钮，按钮收进各自行内右侧，卡体 gap:0 让 .modal-item 的分隔线
+         自然衔接。状态行是「结果」型文案（§六.5）：markup 里即空且 hidden，功能
+         发生时由控制器揭开，离开子页复位回收；状态色调走 data-tone，与
+         about-status 同规则。 -->
     <div class="settings-panel" id="settingsPanelAdvanced" hidden role="tabpanel" aria-labelledby="settingsTabAdvanced">
       <!-- 先行版开关：开=只切检测通道（换装仍由关于页的两步更新完成）；关=确认后
            先回退到最近的稳定版本再回到正式更新。开关行说明只摆两态事实，回退的
@@ -2600,57 +2602,69 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
+      <!-- 配置迁移：导出/导入同一功能域合一张大卡（用户终裁标题）。两行
+           .modal-item，按钮在行内右侧；状态行与摘要行空闲时整行收起（markup
+           即空且 hidden），只在功能发生时揭开。密钥警告是持久事实，固定可见。 -->
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            导出配置包
+            配置迁移
           </h2>
-          <div class="card-head-actions">
+        </div>
+        <div class="card-body data-card-flush">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">导出配置包</div>
+              <div class="data-bundle-status" id="dataExportStatus" role="status" aria-live="polite" hidden></div>
+              <div class="data-bundle-meta" id="dataExportMeta"></div>
+              <div class="data-bundle-note">包内含渠道、号池、路由链、提示词预设、Skills 目录与 API 密钥；用量统计不在包内。</div>
+              <div class="data-bundle-note" data-tone="warn">zip 未加密，包内是明文 API 密钥，等同于把密钥带在手上；导入完成后请删除该文件。</div>
+            </div>
             <button type="button" class="btn btn-mini" id="dataExportBtn">选择位置并导出</button>
           </div>
-        </div>
-        <div class="card-body">
-          <div class="data-bundle-status" id="dataExportStatus" role="status" aria-live="polite">尚未导出</div>
-          <div class="data-bundle-meta" id="dataExportMeta"></div>
-          <div class="data-bundle-note">包内含渠道、号池、路由链、提示词预设、Skills 目录与 API 密钥；用量统计不在包内。</div>
-          <div class="data-bundle-note" data-tone="warn">zip 未加密，包内是明文 API 密钥，等同于把密钥带在手上；导入完成后请删除该文件。</div>
-        </div>
-      </div>
-
-      <div class="panel-card">
-        <div class="card-header">
-          <h2 class="card-title">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            导入配置包
-          </h2>
-          <div class="card-head-actions">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">导入配置包</div>
+              <div class="data-bundle-status" id="dataImportSummary" role="status" aria-live="polite" hidden></div>
+              <div class="data-bundle-meta" id="dataImportMeta"></div>
+              <div class="modal-item-desc">导入 zip 配置包，写入前自动备份当前配置。</div>
+            </div>
             <button type="button" class="btn btn-mini" id="dataImportPickBtn">选择配置包</button>
           </div>
         </div>
-        <div class="card-body">
-          <div class="data-bundle-status" id="dataImportSummary" role="status" aria-live="polite">尚未选择配置包</div>
-          <div class="data-bundle-meta" id="dataImportMeta"></div>
-        </div>
       </div>
 
-      <!-- 备份位置：上面两张卡每次写入前都会在这里留一份备份。路径是本机事实，
-           只存本机（不进配置包）；换目录时服务端先把历史备份整体迁过去再落盘。 -->
+      <!-- 配置备份：备份位置与备份文件合一张大卡（用户终裁标题）。位置行三钮
+           收进行内右侧；路径是本机事实，只存本机（不进配置包），换目录时服务端
+           先把历史备份整体迁过去再落盘。备份文件段列出写入前的两族备份
+           （pre-import/byok-import），按名降序（同族内即新→旧）；行内删除走
+           确认弹窗。 -->
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-            备份位置
+            配置备份
           </h2>
-          <div class="card-head-actions">
-            <button type="button" class="btn btn-mini" id="dataBackupOpenBtn">打开文件夹</button>
-            <button type="button" class="btn btn-mini" id="dataBackupPickBtn">更改位置…</button>
-            <button type="button" class="btn btn-mini" id="dataBackupResetBtn" hidden>恢复默认</button>
-          </div>
         </div>
-        <div class="card-body">
-          <div class="data-bundle-meta data-backup-path" id="dataBackupPath" role="status" aria-live="polite"></div>
-          <div class="data-bundle-note">导入配置包、导入本地渠道并移除原配置时，备份保存在此文件夹；更改位置时，已有备份将一并迁移至新位置。</div>
+        <div class="card-body data-card-flush">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">备份位置</div>
+              <div class="data-bundle-meta data-backup-path" id="dataBackupPath" role="status" aria-live="polite"></div>
+              <div class="modal-item-desc">导入配置包、导入本地渠道并移除原配置时，备份保存在此文件夹；更改位置时，已有备份将一并迁移至新位置。</div>
+            </div>
+            <div class="data-backup-actions">
+              <button type="button" class="btn btn-mini" id="dataBackupOpenBtn">打开文件夹</button>
+              <button type="button" class="btn btn-mini" id="dataBackupPickBtn">更改位置…</button>
+              <button type="button" class="btn btn-mini" id="dataBackupResetBtn" hidden>恢复默认</button>
+            </div>
+          </div>
+          <div class="data-backup-section">
+            <div class="modal-item-title data-backup-section-title">备份文件</div>
+            <div class="data-backup-empty" id="dataBackupListEmpty" hidden>暂无备份</div>
+            <div class="data-backup-list" id="dataBackupList"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -2924,6 +2938,28 @@ if (window.panelStartupController) panelStartupPlay();
     <div class="modal-foot">
       <button class="btn" id="dataImportModalCancel">取消</button>
       <button class="btn btn-primary" id="dataImportApplyBtn">备份并导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 备份文件删除确认（复用 .modal-overlay/.modal-card 体系，与会话删除弹窗同构）：
+     行内删除钮唤起，正文与按钮为 2026-11-16 用户逐字定稿；文件名是数据不是文案，
+     用 sess-dlg-target 同款等宽块展示正在删除的对象。 -->
+<div class="modal-overlay" id="dataBackupDeleteModal">
+  <div class="modal-card" style="max-width:440px;" role="dialog" aria-modal="true" aria-labelledby="dataBackupDeleteTitle">
+    <div class="modal-head">
+      <h3 id="dataBackupDeleteTitle">删除备份</h3>
+      <button class="modal-close-btn" id="dataBackupDeleteClose" aria-label="关闭">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="sess-dlg-target"><span class="t2" id="dataBackupDeleteName"></span></div>
+      <div class="sess-dlg-desc">该备份文件将被永久删除，无法撤销。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="dataBackupDeleteCancel">取消</button>
+      <button class="btn btn-danger" id="dataBackupDeleteConfirm">删除</button>
     </div>
   </div>
 </div>

@@ -154,4 +154,89 @@ describe("panel backup location routes", () => {
       assert.equal(existsSync(join(m.root, "backups")), true, "explorer 要有东西可开：目录先建出来");
     } finally { m.cleanup(); }
   });
+
+  it("GET /list：回两族备份的名称/族/时间/大小，按名降序；空根回空数组", async () => {
+    const m = machine();
+    try {
+      const dir = join(m.root, "backups");
+      mkdirSync(join(dir, "pre-import-20261031-120000"), { recursive: true });
+      writeFileSync(join(dir, "pre-import-20261031-120000", "store.json"), "{\"a\":1}", "utf8");
+      writeFileSync(join(dir, "pre-import-20261031-120000", "manifest.json"),
+        JSON.stringify({ backupId: "20261031-120000", createdAt: "2026-10-31T04:00:00.000Z", saved: ["store.json"] }), "utf8");
+      mkdirSync(join(dir, "byok-import-20261030-090000", "kimi"), { recursive: true });
+      writeFileSync(join(dir, "byok-import-20261030-090000", "kimi", "config.toml"), "xx", "utf8");
+      mkdirSync(join(dir, "not-a-backup"), { recursive: true });
+
+      const router = routerAt(m.root);
+      const list = fakeReqRes("/panel/api/backups/list", "GET");
+      await router.handle(list.req, list.res);
+      assert.equal(list.res.statusCode, 200);
+      const payload = list.json();
+      assert.equal(payload.ok, true);
+      assert.deepEqual(payload.items.map((i) => i.name), ["pre-import-20261031-120000", "byok-import-20261030-090000"],
+        "按名降序，同名异物不进列表");
+      assert.deepEqual(Object.keys(payload.items[0]).sort(), ["createdAt", "kind", "name", "sizeBytes"], "条目形状");
+      assert.equal(payload.items[0].kind, "pre-import");
+      assert.equal(payload.items[0].createdAt, "2026-10-31T04:00:00.000Z", "manifest 优先");
+      assert.equal(payload.items[0].sizeBytes,
+        Buffer.byteLength("{\"a\":1}") + Buffer.byteLength(JSON.stringify({ backupId: "20261031-120000", createdAt: "2026-10-31T04:00:00.000Z", saved: ["store.json"] })),
+        "大小递归求和");
+      assert.equal(payload.items[1].kind, "byok-import");
+      assert.equal(payload.items[1].sizeBytes, 2);
+      assert.equal(new Date(payload.items[1].createdAt).getTime(), new Date(2026, 9, 30, 9, 0, 0).getTime(), "无 manifest 回退名解析");
+
+      // 既有 GET /panel/api/backups 响应形状不受新路由影响（deepEqual 原样钉住）。
+      const info = fakeReqRes("/panel/api/backups", "GET");
+      await router.handle(info.req, info.res);
+      assert.deepEqual(info.json(), { ok: true, path: join(m.root, "backups"), isDefault: true });
+
+      const empty = machine();
+      try {
+        const emptyList = fakeReqRes("/panel/api/backups/list", "GET");
+        await routerAt(empty.root).handle(emptyList.req, emptyList.res);
+        assert.deepEqual(emptyList.json(), { ok: true, items: [] });
+      } finally { empty.cleanup(); }
+    } finally { m.cleanup(); }
+  });
+
+  it("POST /delete：删掉指定备份目录并回 ok；锚定外的名字拒绝且目录原样保留", async () => {
+    const m = machine();
+    try {
+      const dir = join(m.root, "backups");
+      mkdirSync(join(dir, "pre-import-20261031-120000"), { recursive: true });
+      writeFileSync(join(dir, "pre-import-20261031-120000", "store.json"), "{}", "utf8");
+      mkdirSync(join(dir, "my-own-folder"), { recursive: true });
+      writeFileSync(join(dir, "my-own-folder", "a.txt"), "x", "utf8");
+
+      const router = routerAt(m.root);
+      const del = fakeReqRes("/panel/api/backups/delete", "POST", { name: "pre-import-20261031-120000" });
+      await router.handle(del.req, del.res);
+      assert.equal(del.res.statusCode, 200);
+      assert.deepEqual(del.json(), { ok: true });
+      assert.equal(existsSync(join(dir, "pre-import-20261031-120000")), false);
+
+      for (const bad of ["my-own-folder", "../backups", "pre-import-20261031-120000/extra", "pre-import-1"]) {
+        const refused = fakeReqRes("/panel/api/backups/delete", "POST", { name: bad });
+        await router.handle(refused.req, refused.res);
+        assert.equal(refused.res.statusCode, 200, `业务失败走 200：${bad}`);
+        assert.equal(refused.json().ok, false, `应拒绝：${bad}`);
+      }
+      assert.equal(existsSync(join(dir, "my-own-folder", "a.txt")), true, "用户自建目录一个字节不动");
+
+      const gone = fakeReqRes("/panel/api/backups/delete", "POST", { name: "byok-import-20261030-090000" });
+      await router.handle(gone.req, gone.res);
+      assert.equal(gone.json().ok, false);
+      assert.match(gone.json().error, /备份不存在/);
+    } finally { m.cleanup(); }
+  });
+
+  it("删除端点同样受面板变更守卫保护（缺请求头 = 403）", async () => {
+    const m = machine();
+    try {
+      const router = routerAt(m.root);
+      const blocked = fakeReqRes("/panel/api/backups/delete", "POST", { name: "pre-import-20261031-120000" }, { "x-anyswitch-panel": "" });
+      await router.handle(blocked.req, blocked.res);
+      assert.equal(blocked.res.statusCode, 403);
+    } finally { m.cleanup(); }
+  });
 });

@@ -3312,12 +3312,12 @@ async function api(method, path, body) {
     };
   }
 
-  // 高级选项页的数据搬迁。导出与导入都只把「路径」交给后端，包体不过界面，
-  // 所以十几 MB 的包也不受请求体上限影响。导入分两步：先读包回摘要与一次性
-  // 票据，用户点「备份并导入」才写入；票据过期只能重选包，不做静默重试。
-  // 结构沿用本页其它设置卡的写法：卡头右侧放动作按钮，卡体第一行是状态行、第二行是
-  // 次要明细，需要独立控件的行用 .modal-item；状态色只由 data-tone 决定。
-  function createDataBundleController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback }) {
+  // 高级选项页的数据搬迁（「配置迁移」卡）。导出与导入都只把「路径」交给后端，
+  // 包体不过界面，所以十几 MB 的包也不受请求体上限影响。导入分两步：先读包回摘要
+  // 与一次性票据，用户点「备份并导入」才写入；票据过期只能重选包，不做静默重试。
+  // 结构沿用本页其它设置卡的写法：两行 .modal-item、按钮收进行内右侧；状态色只由
+  // data-tone 决定。
+  function createDataBundleController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback, onImportApplied = () => {} }) {
     const get = (id) => doc.getElementById(id);
     const exportBtn = get("dataExportBtn");
     const exportStatus = get("dataExportStatus");
@@ -3347,11 +3347,13 @@ async function api(method, path, body) {
     let preview = null;
     let customPath = null;
     let busy = false;
-    // 本卡文本分两种身份，复位规则不同——混为一谈就会出现「成功文案无限期挂着」：
-    //   状态 = 卡面初始行。预览摘要与 Skills 落点选择都在弹窗里，不占卡面。
-    //   结果 = 一次性回执。导出成功/失败、导入完成/失败、取消都是结果，必须有界：
-    //          离开本页即回初值；若结果是用户离开期间才落地的，留到切回看过，再于
-    //          下次离开复位（与渠道刷新小字的「等切回」同精神）。
+    // 卡面文本分两种身份，复位规则不同——混为一谈就会出现「成功文案无限期挂着」：
+    //   空闲态 = 不占屏。markup 里导出状态行与导入摘要行初始即空且 hidden（用户
+    //          裁决「空闲时收掉那一行」），控制器取到的初值就是这份空值。
+    //   结果 = 一次性回执。导出成功/失败、导入完成/失败、取消都是结果，落地时揭开
+    //          所在行；离开本页即回初值（连同行一起收起）；若结果是用户离开期间
+    //          才落地的，留到切回看过，再于下次离开复位（「等切回」）。
+    // 预览摘要与 Skills 落点选择都在弹窗里，不占卡面。
     // 初值一律取 markup 里写的那份，不在这里另造文案，两边不会漂。
     const initial = {
       export: exportStatus.textContent,
@@ -3379,14 +3381,20 @@ async function api(method, path, body) {
       if (tone) el.dataset.tone = tone;
       else delete el.dataset.tone;
     }
+    // 卡面行（导出状态/导入摘要）随内容揭收：有文本才显示，空文本连行收起。
+    // 弹窗内的行不收，继续用 show。
+    function showCardLine(el, tone, text) {
+      show(el, tone, text);
+      el.hidden = text === "";
+    }
     function showMeta(el, text) { el.textContent = text ?? ""; }
     // 结果落地：人不在本页就置「等切回」，别让结果在没人看的时候被复位掉。
     function resultLanded() { if (away) awaitReturn = true; }
-    // 复位结果：导出与导入都回 markup 初值。
+    // 复位结果：导出与导入都回 markup 初值（空且收行）。
     function resetResults() {
-      show(exportStatus, "", initial.export);
+      showCardLine(exportStatus, "", initial.export);
       showMeta(exportMeta, "");
-      show(summaryLine, "", initial.import);
+      showCardLine(summaryLine, "", initial.import);
       showMeta(importMeta, "");
     }
     function setBusy(on) {
@@ -3398,22 +3406,22 @@ async function api(method, path, body) {
     async function runExport() {
       if (busy) return;
       setBusy(true);
-      show(exportStatus, "busy", "正在打包…");
+      showCardLine(exportStatus, "busy", "正在打包…");
       showMeta(exportMeta, "");
       try {
         const result = await request("POST", "/api/data/export-pick", {});
         if (result.cancelled) {
-          show(exportStatus, "", "未选择导出位置");
+          showCardLine(exportStatus, "", "未选择导出位置");
           resultLanded();
           return;
         }
         const skipped = (result.skippedCredentials ?? []).length;
-        show(exportStatus, "ok", `已导出 ${baseName(result.path)}`);
+        showCardLine(exportStatus, "ok", `已导出 ${baseName(result.path)}`);
         showMeta(exportMeta, `${countsText(result.counts)}${skipped ? ` · ${skipped} 个密钥未取到` : ""}`);
         resultLanded();
         notify("导出完成", false);
       } catch (err) {
-        show(exportStatus, "danger", errorText(err, "导出未完成"));
+        showCardLine(exportStatus, "danger", errorText(err, "导出未完成"));
         showMeta(exportMeta, "");
         resultLanded();
       } finally {
@@ -3431,7 +3439,7 @@ async function api(method, path, body) {
       ticket = null;
       preview = null;
       customPath = null;
-      show(summaryLine, "", initial.import);
+      showCardLine(summaryLine, "", initial.import);
       showMeta(importMeta, "");
     }
 
@@ -3478,19 +3486,19 @@ async function api(method, path, body) {
     async function runPick() {
       if (busy) return;
       setBusy(true);
-      show(summaryLine, "busy", "正在读取包内容…");
+      showCardLine(summaryLine, "busy", "正在读取包内容…");
       showMeta(importMeta, "");
       try {
         const result = await request("POST", "/api/data/import-pick", {});
         if (result.cancelled) {
-          show(summaryLine, "", "未选择配置包");
+          showCardLine(summaryLine, "", "未选择配置包");
           resultLanded();
           return;
         }
-        show(summaryLine, "", initial.import);
+        showCardLine(summaryLine, "", initial.import);
         showPreview(result);
       } catch (err) {
-        show(summaryLine, "danger", errorText(err, "包内容读取失败"));
+        showCardLine(summaryLine, "danger", errorText(err, "包内容读取失败"));
         resultLanded();
       } finally {
         setBusy(false);
@@ -3581,13 +3589,15 @@ async function api(method, path, body) {
         preview = null;
         customPath = null;
         modal.classList.remove("show");
-        show(summaryLine, note ? "warn" : "ok",
+        showCardLine(summaryLine, note ? "warn" : "ok",
           `${summary}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
         showMeta(importMeta, [...metaParts, note].filter(Boolean).join(" · "));
         resultLanded();
         notify(result.backupDir
           ? `导入完成，已备份到 ${result.backupDir}`
           : `导入完成，已备份为 ${result.backupId}`, false);
+        // 写入前的那份 pre-import 备份已落地：通知「配置备份」卡刷新备份文件列表。
+        onImportApplied();
       } catch (err) {
         // 票据在服务端已一次性作废，留在弹窗里只能取消后重选包。
         const detail = errorText(err, "导入未完成");
@@ -3623,16 +3633,26 @@ async function api(method, path, body) {
     };
   }
 
-  // 备份位置：只改目录，不碰备份内容。换目录与恢复默认都走同一条迁移——服务端
-  // 先整份复制再删源，目标有同名项就整次拒绝，所以失败时源目录一个字节不动，
-  // 文案才能直说「未做任何改动」。
+  // 配置备份卡：备份位置＋备份文件列表。位置只改目录，不碰备份内容。换目录与
+  // 恢复默认都走同一条迁移——服务端先整份复制再删源，目标有同名项就整次拒绝，
+  // 所以失败时源目录一个字节不动，文案才能直说「未做任何改动」。
+  // 列表展示写入前的两族备份（pre-import/byok-import），行结构：名称等宽、
+  // 时间·大小次行、右侧行内删除钮；删除走确认弹窗（复用 .modal-overlay），
+  // 成功后重拉列表。恢复备份不在此卡（后续工作），行结构已预留动作位。
   function createBackupLocationController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback }) {
     const get = (id) => doc.getElementById(id);
     const pathLine = get("dataBackupPath");
     const openBtn = get("dataBackupOpenBtn");
     const pickBtn = get("dataBackupPickBtn");
     const resetBtn = get("dataBackupResetBtn");
-    if (!pathLine || !openBtn || !pickBtn || !resetBtn) return { enter() {}, leave() {} };
+    const listEl = get("dataBackupList");
+    const emptyEl = get("dataBackupListEmpty");
+    const delModal = get("dataBackupDeleteModal");
+    const delName = get("dataBackupDeleteName");
+    const delConfirm = get("dataBackupDeleteConfirm");
+    const delCancel = get("dataBackupDeleteCancel");
+    const delClose = get("dataBackupDeleteClose");
+    if (!pathLine || !openBtn || !pickBtn || !resetBtn || !listEl || !emptyEl || !delModal || !delName || !delConfirm || !delCancel || !delClose) return { enter() {}, leave() {}, refresh() {} };
 
     let busy = false;
     const render = (path, isDefault) => {
@@ -3647,12 +3667,94 @@ async function api(method, path, body) {
     };
     const failure = (err) => notify(`未做任何改动：${errorText(err, "未知原因")}`, true);
 
+    // 时间用本机格式原样摆；备份目录名里的时间戳就是本地时间，不另行换算。
+    const timeText = (iso) => {
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? String(iso ?? "") : d.toLocaleString();
+    };
+    const sizeText = (n) => {
+      const v = Number(n);
+      if (!Number.isFinite(v) || v < 0) return "";
+      if (v < 1024) return `${v} B`;
+      if (v < 1048576) return `${(v / 1024).toFixed(1)} KB`;
+      return `${(v / 1048576).toFixed(1)} MB`;
+    };
+
+    let pendingDelete = null;
+    let deleting = false;
+    function openDelete(name) {
+      pendingDelete = name;
+      delName.textContent = name;
+      delModal.classList.add("show");
+    }
+    function closeDelete() {
+      if (deleting) return;
+      pendingDelete = null;
+      delModal.classList.remove("show");
+    }
+    async function confirmDelete() {
+      if (!pendingDelete || deleting) return;
+      deleting = true;
+      delConfirm.disabled = true;
+      delCancel.disabled = true;
+      try {
+        await request("POST", "/api/backups/delete", { name: pendingDelete });
+        pendingDelete = null;
+        delModal.classList.remove("show");
+        notify("已删除备份", false);
+        loadList();
+      } catch (err) {
+        notify(errorText(err, "删除失败"), true);
+      } finally {
+        deleting = false;
+        delConfirm.disabled = false;
+        delCancel.disabled = false;
+      }
+    }
+
+    function renderList(items) {
+      listEl.replaceChildren();
+      emptyEl.hidden = items.length > 0;
+      for (const item of items) {
+        const row = doc.createElement("div");
+        row.className = "data-backup-row";
+        const main = doc.createElement("div");
+        main.className = "data-backup-row-main";
+        const name = doc.createElement("div");
+        name.className = "data-backup-name";
+        name.textContent = String(item.name ?? "");
+        const meta = doc.createElement("div");
+        meta.className = "data-backup-row-meta";
+        meta.textContent = [timeText(item.createdAt), sizeText(item.sizeBytes)].filter(Boolean).join(" · ");
+        main.appendChild(name);
+        main.appendChild(meta);
+        const del = doc.createElement("button");
+        del.type = "button";
+        del.className = "data-backup-del";
+        del.setAttribute("aria-label", "删除备份");
+        del.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+        del.onclick = () => openDelete(String(item.name ?? ""));
+        row.appendChild(main);
+        row.appendChild(del);
+        listEl.appendChild(row);
+      }
+    }
+
     async function load() {
       try {
         const info = await request("GET", "/api/backups");
         render(info.path, info.isDefault);
       } catch (err) {
         notify(errorText(err, "读取备份位置失败"), true);
+      }
+    }
+
+    async function loadList() {
+      try {
+        const data = await request("GET", "/api/backups/list");
+        renderList(Array.isArray(data?.items) ? data.items : []);
+      } catch (err) {
+        notify(errorText(err, "读取备份列表失败"), true);
       }
     }
 
@@ -3703,10 +3805,15 @@ async function api(method, path, body) {
     openBtn.onclick = openFolder;
     pickBtn.onclick = pick;
     resetBtn.onclick = reset;
+    delConfirm.onclick = confirmDelete;
+    delCancel.onclick = closeDelete;
+    delClose.onclick = closeDelete;
     return {
       // 进子页现读：本机文件可能被别处改过，不吃页面加载时的旧值。
-      enter() { load(); },
+      enter() { load(); loadList(); },
       leave() {},
+      // 导入配置包成功后会多出一册 pre-import 备份，由数据搬迁卡回调触发刷新。
+      refresh() { loadList(); },
     };
   }
 
@@ -5219,8 +5326,9 @@ async function api(method, path, body) {
     selfUpdateWatcher.setAboutProbe(about.selfUpdateTracking);
     // 数据搬迁用 panelFailure：被折叠的失败要额外告诉用户「刷新页面重试」这条
     // 有意义的下一步，并指向面板日志里的服务端原文。
-    const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelFailure });
+    // 备份卡先建：数据搬迁卡在导入成功后经 onImportApplied 回调它刷新备份文件列表。
     const backupLocation = createBackupLocationController({ request: api, doc: document, notify: toast, errorText: panelFailure });
+    const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelFailure, onImportApplied: () => backupLocation.refresh() });
     leaveSettingsView = () => { about.leave(); dataBundle.leave(); backupLocation.leave(); };
     const settingsSubTabs = {
       general: ["settingsTabGeneral", "settingsPanelGeneral"],

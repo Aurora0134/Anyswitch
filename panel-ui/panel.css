@@ -2141,13 +2141,15 @@
   }
   .seg-switch-btn:hover { color: var(--text); background: var(--surface-hover); }
   .seg-switch-btn[aria-checked="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-xs); }
-  /* 「高级选项」的数据迁移：卡头右侧放动作、卡体第一行状态第二行明细，与「关于」的本地
-     环境卡同一写法；状态色只改文字色、不加色块，取值抄 about-status 那一组。
+  /* 「高级选项」的数据迁移与配置备份：两张合并大卡（五卡合四卡，2026-11-16 用户
+     裁决）卡头不放动作钮，按钮收进各自行内右侧；状态行是结果型文案，空闲时整行
+     收起。状态色只改文字色、不加色块，取值抄 about-status 那一组。
      display 必须显式挂 #settingsPanelAdvanced：本页各子面板的 display 与行样式全按 id 写，
      少一格就没有 flex、没有卡间距，整块会贴成一坨。 */
   #settingsPanelAdvanced { display: flex; flex-direction: column; gap: 20px; }
   #settingsPanelAdvanced .card-body { display: flex; flex-direction: column; gap: 8px; }
-  #settingsPanelAdvanced .card-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  /* 合并大卡卡体不再叠 gap：行间分隔全靠 .modal-item 自身的 border-top 与内边距 */
+  #settingsPanelAdvanced .card-body.data-card-flush { gap: 0; }
   .data-bundle-status { font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
   .data-bundle-status[data-tone="busy"] { color: var(--accent); }
   .data-bundle-status[data-tone="ok"] { color: var(--ok); }
@@ -2159,6 +2161,22 @@
   .data-bundle-note[data-tone="warn"] { color: var(--warn); }
   /* 备份位置：用户会照着这行去资源管理器里找，等宽字更易逐段核对 */
   .data-backup-path { font-family: var(--font-mono); }
+  /* 备份位置行的三颗动作钮收进行内右侧，窄处允许折行 */
+  .data-backup-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; flex: none; }
+  /* 备份文件段：段头＋限高滚动列表。行结构参照 cc-switch 的 BackupListSection——
+     左列名称等宽、时间·大小次行，右侧行内删除钮（纯图标，aria-label「删除备份」）；
+     空态一行小字，初值写在 markup 里。 */
+  .data-backup-section { padding-top: 12px; border-top: 1px solid var(--divider); }
+  .data-backup-section-title { margin-bottom: 8px; }
+  .data-backup-empty { font-size: 12px; line-height: 1.6; color: var(--text-3); padding-bottom: 10px; }
+  .data-backup-list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
+  .data-backup-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: var(--radius-md, 8px); background: var(--surface-sunken); }
+  .data-backup-row-main { min-width: 0; }
+  .data-backup-name { font-family: var(--font-mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+  .data-backup-row-meta { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+  .data-backup-del { background: transparent; border: none; color: var(--text-3); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .data-backup-del:hover { color: var(--danger); background: var(--danger-soft); }
+  .data-backup-del:disabled { opacity: .45; cursor: default; }
   /* 导入弹窗里的 Skills 落点：仓库勾选是小字注释量级（不是正栏），路径等宽再小一档；
      自选位置与勾选互斥——自选选到文件夹后勾选强制退出并锁定，锁定的点击在 JS 里
      拦下弹报错，这里只负责把它画得不可点。 */

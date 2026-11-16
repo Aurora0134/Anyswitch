@@ -9,6 +9,8 @@ import {
   applyBackupRoot,
   backupRootInfo,
   defaultBackupRoot,
+  deleteBackup,
+  listBackups,
   migrateBackups,
   readBackupRoot,
 } from "../src/ops/backup-location.mjs";
@@ -387,4 +389,83 @@ test("BYOK 移除接线：删除备份落在用户改过的位置，服务默认
     }
     rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+// ── 备份列表与删除（「配置备份」卡的备份文件段）──────────────────────────────
+
+test("listBackups：两族目录按名倒序（mission 口径：name 降序），createdAt 优先 manifest、回退名解析", () => {
+  const m = machine();
+  try {
+    const dir = defaultBackupRoot(m.root);
+    seed(join(dir, "pre-import-20261031-120000"), {
+      "store.json": "{\"beta\":1}",
+      "manifest.json": JSON.stringify({ backupId: "20261031-120000", createdAt: "2026-10-31T04:00:00.000Z", saved: ["store.json"] }),
+    });
+    seed(join(dir, "byok-import-20261115-101000", "kimi"), { "config.toml": "xxxx" });
+
+    const items = listBackups(m.root);
+    // 名字内嵌零填充时间戳，同族内字典序即时间序；跨族按字典序分组（pre 恒在 byok 前）。
+    assert.deepEqual(items.map((i) => i.name), ["pre-import-20261031-120000", "byok-import-20261115-101000"], "按 name 降序");
+    const [pre, byok] = items;
+    assert.equal(byok.kind, "byok-import");
+    assert.equal(pre.kind, "pre-import");
+    assert.equal(pre.createdAt, "2026-10-31T04:00:00.000Z", "manifest 里的 ISO 原样采用");
+    assert.equal(pre.sizeBytes, Buffer.byteLength("{\"beta\":1}") + Buffer.byteLength(JSON.stringify({ backupId: "20261031-120000", createdAt: "2026-10-31T04:00:00.000Z", saved: ["store.json"] })), "大小递归求和");
+    assert.equal(byok.sizeBytes, 4, "byok 目录递归求和");
+    // 无 manifest 回退名解析：目录名时间戳是本地时间拼的，还原成同一时刻的 ISO。
+    const parsed = new Date(2026, 10, 15, 10, 10, 0);
+    assert.equal(new Date(byok.createdAt).getTime(), parsed.getTime(), "名解析回退到目录名时间戳");
+  } finally { m.cleanup(); }
+});
+
+test("listBackups：异物与散文件不进列表；备份根不存在回空；坏 manifest 回退名解析", () => {
+  const m = machine();
+  try {
+    assert.deepEqual(listBackups(m.root), [], "备份根不存在回空，不报错");
+    const dir = defaultBackupRoot(m.root);
+    seed(join(dir, "pre-import-20261031-120000"), { "store.json": "{}" });
+    seed(join(dir, "pre-import-20261031-120000-冗余项"), { "store.json": "{}" });
+    seed(join(dir, "my-own-folder"), { "a.txt": "x" });
+    seed(join(dir, "pre-import-20261101-090000"), {
+      "store.json": "{}",
+      "manifest.json": "{ 不是 JSON",
+    });
+    writeFileSync(join(dir, "loose-file.txt"), "x", "utf8");
+
+    const items = listBackups(m.root);
+    assert.deepEqual(items.map((i) => i.name), ["pre-import-20261101-090000", "pre-import-20261031-120000"],
+      "同名异物、用户自建目录、散文件一律不进列表");
+    assert.equal(new Date(items[0].createdAt).getTime(), new Date(2026, 10, 1, 9, 0, 0).getTime(), "坏 manifest 回退名解析");
+  } finally { m.cleanup(); }
+});
+
+test("listBackups：用户改过的备份位置同样生效", () => {
+  const m = machine();
+  try {
+    const custom = join(m.root, "moved");
+    seed(join(custom, "pre-import-20261031-120000"), { "store.json": "{}" });
+    writeFileSync(join(m.root, BACKUP_ROOT_FILE), JSON.stringify({ root: custom }), "utf8");
+    const items = listBackups(m.root);
+    assert.deepEqual(items.map((i) => i.name), ["pre-import-20261031-120000"]);
+  } finally { m.cleanup(); }
+});
+
+test("deleteBackup：删掉指定备份目录；锚定外的名字与不存在的一律拒绝", () => {
+  const m = machine();
+  try {
+    const dir = defaultBackupRoot(m.root);
+    seed(join(dir, "pre-import-20261031-120000"), { "store.json": "{}" });
+    seed(join(dir, "my-own-folder"), { "a.txt": "x" });
+
+    const done = deleteBackup(m.root, "pre-import-20261031-120000");
+    assert.deepEqual(done, { ok: true });
+    assert.equal(existsSync(join(dir, "pre-import-20261031-120000")), false);
+
+    for (const bad of ["my-own-folder", "../backups", "pre-import-20261031-120000/x", "pre-import-1", "", 42]) {
+      const refused = deleteBackup(m.root, bad);
+      assert.equal(refused.ok, false, `应拒绝：${bad}`);
+    }
+    assert.equal(existsSync(join(dir, "my-own-folder", "a.txt")), true, "用户自建目录一个字节不动");
+    assert.equal(deleteBackup(m.root, "byok-import-20261031-120000").error, "备份不存在");
+  } finally { m.cleanup(); }
 });
