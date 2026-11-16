@@ -18260,7 +18260,8 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal((panelCss.match(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/g) ?? []).length, 1, "卡面底只有一处定义，卡与舞台底缘共用");
     assert.ok(/background: var\(--ll-face\);/.test(panelCss.match(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{([^}]*)\}/)?.[1] ?? ""), "舞台底缘取同一处底，改一处两边同变");
     assert.ok(/border: 1px solid var\(--border-strong\)/.test(cardBaseBlock), "卡面基座描边取强调档");
-    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\);\s*padding: 7px 10px;/.test(cardBaseBlock), "卡面基座只保留下缘高光，不叠投影：收起态与改动前逐像素同值");
+    assert.equal((cardBaseBlock.match(/box-shadow:/g) ?? []).length, 1, "卡面基座只有一条下缘高光，不叠投影：收起态与改动前逐像素同值");
+    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\);/.test(cardBaseBlock), "下缘高光取值与改动前叠卡块同值");
     assert.ok(!/liveLogPulse/.test(panelCss) && !/#logConn/.test(panelCss), "连接态脉冲与指示退场，不上屏");
     assert.ok(/\.live-log-bar \{[^}]*justify-content: space-between;/.test(panelCss), "无框控制行：标题左、动作右");
     assert.ok(/\.live-log-title \{[^}]*font-weight: 600;/.test(panelCss), "区域标题「运行日志」在册");
