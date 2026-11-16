@@ -7248,6 +7248,10 @@ async function api(method, path, body) {
   // 1s 轮询与用户意图拉锯）。
   let terminalInspectorHollowCollapsed = false;
   const terminalInspectorUserPinned = new Set();
+  // inspector 开机首渲染标记：开机第一拍直接按当前归属数据落定收拢形态（见
+  // renderTerminalSessionData 空壳分支），此后运行期的闪断防抖照旧。页面级
+  // 内存态，刷新即复位。
+  let terminalInspectorBootRendered = false;
   // 空壳塌缩防抖：归属轮询在「归属丢失/恢复」的边界上会闪一帧空 agent——面板按
   // 进程祖先链认领会话，检测面一拍缺席（agent 进程起落、relay 短暂没喂检测数据）
   // 这一拍整批会话就变空壳。原逻辑当拍即收拢、下一拍归属回来又展开，340↔48px 的
@@ -8817,30 +8821,52 @@ async function api(method, path, body) {
   // 返回 promise 落定（成功或失败已处置），不覆盖 250ms 后的第二次尝试——那只兜
   // 极端失败，建连不必等它。成功时兑现宿主回的 result（含夹取后的 cols/rows），
   // 失败路径兑现 undefined：调用方（几何重对齐）要拿它把夹过的值回夹进 xterm。
+  //
+  // 稳定闸（两拍同值才发，2026-11-16）：POST 是面板所有几何变更进 PTY 的唯一
+  // 出口，测量点到派发点之间布局还在动（刷新时骨架→真渲染→监测列收放的多段
+  // 过渡、窗口拖动的连续跳变）的这一拍尺寸已过期——写进 PTY 就是宽度一收一放，
+  // ConPTY 折行把承载的 TUI 画面绞进滚动区（Claude Code 品牌块每刷新成对入史即
+  // 此）。派发前等一帧复测：xterm 已不在这个尺寸上就整单作废（兑现 null，更新
+  // 的测量会经自己的 fit 再来），过期尺寸一个字节都不进 PTY。页面隐藏 rAF 不排
+  // 帧（隐藏期也没有布局 churn）就不排队直接派发，闸不许把几何重对齐挂死；桩
+  // 环境没有 rAF 时 typeof 闸放行立即派发（同 scheduleTerminalFit 的 deferScreen
+  // 路径惯例）。
   function postTerminalResize(session, cols, rows, attempt = 0) {
-    return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
-      .then((result) => {
-        if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
-          session.backendState = {
-            ...session.backendState,
-            cols: result.cols,
-            rows: result.rows,
-            // 回声戳随响应即达（不等 1s 轮询整表换血）：亚秒内切走也判得出回声。
-            // 只在宿主本次打了戳才带字段——流式形态的响应不带，这里不抹旧值。
-            ...(Number.isFinite(result.lastResizeAt) ? { lastResizeAt: result.lastResizeAt } : {}),
-          };
-        }
-        return result;
-      })
-      .catch((error) => {
-        const stillCurrent = () => terminalXterm && terminalXterm.cols === cols && terminalXterm.rows === rows;
-        if (!stillCurrent()) return; // 已有更新的测量接管，旧失败不回溯也不告警
-        if (attempt === 0) {
-          setTimeout(() => { if (stillCurrent()) postTerminalResize(session, cols, rows, 1); }, 250);
-          return;
-        }
-        console.warn("[terminal] resize failed:", error);
-      });
+    const dispatch = () => {
+      if (typeof terminalXterm !== "undefined" && terminalXterm
+        && (terminalXterm.cols !== cols || terminalXterm.rows !== rows)) {
+        // 过期测量：更新的 fit 已把 xterm 挪到别的尺寸，这一单作废
+        return Promise.resolve(null);
+      }
+      return api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
+        .then((result) => {
+          if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
+            session.backendState = {
+              ...session.backendState,
+              cols: result.cols,
+              rows: result.rows,
+              // 回声戳随响应即达（不等 1s 轮询整表换血）：亚秒内切走也判得出回声。
+              // 只在宿主本次打了戳才带字段——流式形态的响应不带，这里不抹旧值。
+              ...(Number.isFinite(result.lastResizeAt) ? { lastResizeAt: result.lastResizeAt } : {}),
+            };
+          }
+          return result;
+        })
+        .catch((error) => {
+          const stillCurrent = () => terminalXterm && terminalXterm.cols === cols && terminalXterm.rows === rows;
+          if (!stillCurrent()) return; // 已有更新的测量接管，旧失败不回溯也不告警
+          if (attempt === 0) {
+            setTimeout(() => { if (stillCurrent()) postTerminalResize(session, cols, rows, 1); }, 250);
+            return;
+          }
+          console.warn("[terminal] resize failed:", error);
+        });
+    };
+    if (typeof requestAnimationFrame === "function"
+      && !(typeof document !== "undefined" && document.hidden)) {
+      return new Promise((resolve) => { requestAnimationFrame(() => { resolve(dispatch()); }); });
+    }
+    return dispatch();
   }
 
   // 「重画终端画面」：画面看着不对时的兜底入口。两件事各治一半——
@@ -10122,25 +10148,6 @@ async function api(method, path, body) {
     return revive || state.deathUnobserved === true;
   }
 
-  // 首帧回放带应用态模式，其中 ?1004h 会让 xterm 5.5 在解析时同步触发
-  // _onRequestSendFocus → _reportFocus → triggerDataEvent("\u001b[I")，这一字节经
-  // onData 原样送进 PTY，TUI 收到就整屏重绘一次（Claude Code 的品牌头随之再进历史）。
-  // 写帧期掐掉 stdin：triggerDataEvent 在 disableStdin 为真时直接早退（同
-  // parkTerminalScreen 的第二道），回调里恢复；模式序列照原样回放，此后的真实焦点
-  // 事件不受影响。
-  function writeTerminalReplayFrame(term, text) {
-    const options = term.options;
-    const previous = options.disableStdin;
-    options.disableStdin = true;
-    const restore = () => { options.disableStdin = previous; };
-    try {
-      term.write(text, restore);
-    } catch (error) {
-      restore();
-      throw error;
-    }
-  }
-
   async function connectTerminalStream(session, { revive = true } = {}) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
@@ -10423,7 +10430,7 @@ async function api(method, path, body) {
           // 擦除那一刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸
           // 护只切本函数真跑的单测桩环境（那些沙箱不声明模块级变量）。
           if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
-          writeTerminalReplayFrame(term, text);
+          term.write(text);
           return;
         }
         // 其后的帧走突发合并器（见 queueTerminalChunk）：小帧经合帧层零延迟直通，
@@ -10739,6 +10746,15 @@ async function api(method, path, body) {
           // 用户在此会话空壳态拉回过：保持展开，换页签回来也不缩回
           collapsed = false;
           terminalInspectorHollowCollapsed = false;
+        } else if (!terminalInspectorBootRendered) {
+          // 开机首渲染直接按当前数据落定：防抖护的是运行期闪断，开机前没有任何
+          // 可见形态要保护；等 3 拍的代价是监测列先按展开出画再收拢 292px——刷新
+          // 时建流前 fit 正好量到这个过渡宽度 POST 进 PTY，宽度一收一放，ConPTY
+          // 折行把承载的 TUI 画面绞进滚动区（Claude Code 品牌块每刷新成对入史，
+          // 2026-11-16）。开机即细条，终端区宽度当帧就是终值，建流前 fit 与其后
+          // 的同值早退都按终值走，PTY 不吃翻转。
+          collapsed = true;
+          terminalInspectorHollowCollapsed = true;
         } else if ((terminalHollowStreak.get(session.id) || 0) >= TERMINAL_HOLLOW_COLLAPSE_STREAK) {
           // 连续 3 拍归属观测都空壳才认「真丢了归属」，系统收拢标记也只在此时落
           collapsed = true;
@@ -10755,6 +10771,8 @@ async function api(method, path, body) {
         }
         terminalInspectorHollowCollapsed = false;
       }
+      // 开机态只消费一次：此后空壳/恢复走运行期防抖（闪断保护照旧）。
+      terminalInspectorBootRendered = true;
       inspector.classList.toggle("is-collapsed", collapsed);
       workspace.classList.toggle("is-inspector-collapsed", collapsed);
       if (wasCollapsed !== collapsed) {

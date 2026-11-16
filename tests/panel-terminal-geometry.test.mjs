@@ -125,7 +125,6 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     ${extractFn("scheduleTerminalGeometryRealign")}
     ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
-    ${extractFn("writeTerminalReplayFrame")}
     return {
       connect: connectTerminalStream,
       term: () => terminalXterm,
@@ -169,13 +168,12 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
         cols: state.client.cols,
         rows: state.client.rows,
         disposed: false,
-        options: { disableStdin: false },
         focus() {},
         // reset 落记录：「弃帧即清屏」那半边行为（dropTerminalReplayFrame 的
         // term?.reset?.()）由此可断言，空实现会把清屏腿变成不可观测。
         reset() { state.resets.push(1); },
         onData() { return { dispose() {} }; },
-        write(text, cb) { state.writes.push(text); if (typeof cb === "function") cb(); },
+        write(text) { state.writes.push(text); },
         resize(cols, rows) { state.resizes.push({ cols, rows }); term.cols = cols; term.rows = rows; },
         dispose() { term.disposed = true; state.disposed += 1; },
       };
@@ -587,5 +585,87 @@ describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回�
     es.emit("snapshot", { pid: 2, cols: 120, rows: 34 });
     es.emit("data", "自足整屏回放");
     assert.deepEqual(world.state.writes, ["自足整屏回放"], "新 snapshot 后整屏回放重新落屏");
+  });
+});
+
+// resize POST 稳定闸（两拍同值才发）：POST 是面板所有几何变更进 PTY 的唯一
+// 出口，测量点到派发点之间布局还在动（刷新时骨架→真渲染的多段过渡、窗口拖动
+// 的连续跳变）的这一拍尺寸已经过期——写进 PTY 就是宽度一收一放，ConPTY 折行
+// 把承载的 TUI 画面绞进滚动区。派发前下一帧复测：xterm 已不在这个尺寸上就整单
+// 作废（更新的测量会经自己的 fit 再来）。
+describe("resize POST 稳定闸：过期测量不进 PTY", () => {
+  function makeResizeGateWorld({ raf = true, docHidden = false } = {}) {
+    const state = { posts: [], warnings: [], rafPending: [] };
+    const session = { id: "S1", backendState: { status: "running", cols: 120, rows: 34 } };
+    state.session = session;
+    const factory = new Function(
+      "state", "session", "api", "requestAnimationFrame", "document", "console", "setTimeout",
+      `
+      let terminalXterm = { cols: 120, rows: 34 };
+      ${extractFn("postTerminalResize")}
+      return {
+        post: (cols, rows) => postTerminalResize(session, cols, rows),
+        setClient: (cols, rows) => { terminalXterm = { cols, rows }; },
+        fireRaf: () => { const cbs = state.rafPending.splice(0); for (const cb of cbs) cb(); },
+        rafQueued: () => state.rafPending.length,
+      };
+      `
+    );
+    const world = factory(
+      state,
+      session,
+      (method, path, body) => {
+        state.posts.push({ method, path, body });
+        return Promise.resolve({ ok: true, cols: body.cols, rows: body.rows, lastResizeAt: 12345 });
+      },
+      raf ? (cb) => { state.rafPending.push(cb); } : undefined,
+      { hidden: docHidden },
+      { warn(...args) { state.warnings.push(args); } },
+      () => 0,
+    );
+    world.state = state;
+    return world;
+  }
+
+  it("两拍同值才发：下一帧 xterm 已挪走，这一拍整单作废不发 POST", async () => {
+    const world = makeResizeGateWorld();
+    const promise = world.post(100, 30);
+    assert.equal(world.rafQueued(), 1, "POST 先在 rAF 上排一拍再派发");
+    assert.deepEqual(world.state.posts, [], "复测前不派发");
+    world.setClient(178, 44); // 下一帧布局已到新值：这一拍的 100×30 是过期测量
+    world.fireRaf();
+    assert.strictEqual(await promise, null, "作废兑现 null（与「没发 POST」的既有口径同形）");
+    assert.deepEqual(world.state.posts, [], "过期尺寸一个请求都不发——PTY 不吃宽度一收一放");
+  });
+
+  it("两拍同值：尺寸没变照常派发并回写 backendState", async () => {
+    const world = makeResizeGateWorld();
+    world.setClient(100, 30); // 真实流先 fit 落定 xterm 再 POST：请求尺寸与活实例一致
+    const promise = world.post(100, 30);
+    world.fireRaf();
+    const result = await promise;
+    assert.deepEqual(world.state.posts.map((p) => p.body), [{ cols: 100, rows: 30 }], "闸只拦过期测量，不拦真对齐");
+    assert.equal(result.cols, 100);
+    assert.equal(result.rows, 30);
+    assert.equal(world.state.session.backendState.cols, 100, "落定回写 backendState（几何重对齐的回夹依赖它）");
+    assert.equal(world.state.session.backendState.lastResizeAt, 12345, "回声戳随响应即达");
+  });
+
+  it("页面隐藏没有 rAF 帧：不排拍直接派发，闸不许把重对齐挂死", async () => {
+    const world = makeResizeGateWorld({ docHidden: true });
+    world.setClient(100, 30);
+    const promise = world.post(100, 30);
+    assert.equal(world.rafQueued(), 0, "隐藏页 rAF 零帧，排拍就是挂死");
+    const result = await promise;
+    assert.deepEqual(world.state.posts.map((p) => p.body), [{ cols: 100, rows: 30 }], "隐藏期没有布局 churn，直接派发");
+    assert.equal(result.cols, 100);
+  });
+
+  it("rAF 不可用的环境立即派发（typeof 闸护桩环境，同 scheduleTerminalFit 惯例）", async () => {
+    const world = makeResizeGateWorld({ raf: false });
+    world.setClient(100, 30);
+    const result = await world.post(100, 30);
+    assert.deepEqual(world.state.posts.map((p) => p.body), [{ cols: 100, rows: 30 }]);
+    assert.equal(result.cols, 100);
   });
 });
