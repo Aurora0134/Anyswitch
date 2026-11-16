@@ -77,16 +77,19 @@ function harness({ respondPost, errorText } = {}) {
   const match = source.match(/  function createDataBundleController\([\s\S]*?\n  \}/);
   assert.ok(match, "testable data bundle controller exists in panel.js");
   const factory = vm.runInNewContext(`(${match[0]})`, { URL, setTimeout, clearTimeout, Date, Number });
+  let importApplied = 0;
   const controller = factory({
     request,
     doc,
     notify: (message, isErr) => toasts.push({ message, isErr }),
     errorText: errorText ?? ((err, fallback) => err?.code || fallback),
+    onImportApplied: () => { importApplied += 1; },
   });
-  const line = (id) => ({ text: nodes.get(id).textContent, tone: nodes.get(id).dataset.tone });
+  const line = (id) => ({ text: nodes.get(id).textContent, tone: nodes.get(id).dataset.tone, hidden: nodes.get(id).hidden });
   return {
     nodes, mutations, toasts, controller,
     get: (id) => nodes.get(id),
+    importApplied: () => importApplied,
     exportStatus: () => line("dataExportStatus"),
     exportMeta: () => nodes.get("dataExportMeta").textContent,
     summary: () => line("dataImportSummary"),
@@ -149,9 +152,15 @@ test("markup 与控制器共用同一批 id，且注册表里有高级选项子 
   for (const id of ["dataExportBtn", "dataImportPickBtn", "dataImportApplyBtn", "dataImportModalClose", "dataImportModalCancel", "dataSkillsCustomPickBtn", "dataSkillsCustomClearBtn", "dataSkillsDefaultPickBtn"]) {
     assert.equal(typeof h.get(id).onclick, "function", `#${id} 应被控制器接管`);
   }
-  assert.equal(initialText("dataExportStatus"), "尚未导出", "状态行要有初始值，与「关于」的尚未检查更新同一写法");
-  assert.equal(initialText("dataImportSummary"), "尚未选择配置包");
-  assert.equal(h.exportStatus().text, "尚未导出", "控制器不抢写初始值（保持 markup 那份）");
+  // 空闲收行（2026-11-16 用户裁决）：状态/摘要行是「结果」型文案，空闲时整行
+  // 收起——markup 初值即空且 hidden，控制器不抢写。
+  assert.equal(initialText("dataExportStatus"), "", "状态行初值清空，不再有「尚未导出」");
+  assert.equal(initialText("dataImportSummary"), "", "摘要行初值清空，不再有「尚未选择配置包」");
+  assert.match(html, /id="dataExportStatus"[^>]*\bhidden\b/, "状态行 markup 即 hidden");
+  assert.match(html, /id="dataImportSummary"[^>]*\bhidden\b/, "摘要行 markup 即 hidden");
+  assert.equal(h.exportStatus().text, "", "控制器不抢写初始值（保持 markup 那份）");
+  assert.equal(h.exportStatus().hidden, true, "空闲时状态行整行收起");
+  assert.equal(h.summary().hidden, true, "空闲时摘要行整行收起");
   assert.equal(h.get("dataImportApplyBtn").disabled, true, "没选包之前不给写入");
   assert.equal(h.modalOpen(), false, "弹窗初始不开");
 });
@@ -159,6 +168,8 @@ test("markup 与控制器共用同一批 id，且注册表里有高级选项子 
 test("版式按 id 挂：本页各子面板的 display 都写在 id 上，漏一格就贴成一坨", () => {
   assert.match(css, /#settingsPanelAdvanced \{ display: flex; flex-direction: column; gap: 20px; \}/,
     "高级选项面板要有自己的 display 规则，与通用/关于同一待遇");
+  assert.match(css, /#settingsPanelAdvanced \.card-body\.data-card-flush \{ gap: 0; \}/,
+    "合并大卡 body gap:0，行间分隔靠 .modal-item 自身");
   for (const tone of ["busy", "ok", "warn", "danger"]) {
     assert.ok(css.includes(`.data-bundle-status[data-tone="${tone}"] { color: var(--`), `状态行缺 ${tone} 色调`);
   }
@@ -171,11 +182,30 @@ test("版式按 id 挂：本页各子面板的 display 都写在 id 上，漏一
   assert.match(css, /\.toast \{[\s\S]*?z-index: 400;/, "toast 要浮在弹窗蒙层（300）之上，否则弹窗内的报错被盖住");
 });
 
-test("导出：状态行报结果、明细行摆计数，按钮始终在卡头右侧", async () => {
+test("合并大卡结构：导出/导入并成「配置迁移」，按钮收进行内右侧，卡头不再放动作钮", () => {
+  assert.ok(html.includes("配置迁移"), "合并大卡标题为用户定稿");
+  assert.ok(!html.includes('<div class="card-head-actions">\n            <button type="button" class="btn btn-mini" id="dataExportBtn"'),
+    "导出钮不在卡头");
+  const exportRow = html.slice(html.lastIndexOf('<div class="modal-item">', html.indexOf('id="dataExportBtn"')));
+  assert.ok(exportRow.includes('id="dataExportBtn"'), "导出钮收进行内");
+  assert.ok(exportRow.indexOf('id="dataExportStatus"') < exportRow.indexOf('id="dataExportBtn"'), "状态行在钮之前");
+  const importRow = html.slice(html.indexOf('id="dataImportSummary"'), html.indexOf('id="dataImportPickBtn"'));
+  assert.ok(importRow.includes("导入 zip 配置包，写入前自动备份当前配置。"), "导入行说明为定稿文案");
+  // 高级选项区四卡：更新通道、号池分流逻辑、配置迁移、配置备份。
+  const section = html.slice(html.indexOf('id="settingsPanelAdvanced"'), html.indexOf('id="terminalView"'));
+  const titles = [...section.matchAll(/<h2 class="card-title">[\s\S]*?<\/h2>/g)].map((m) => m[0]);
+  assert.equal(titles.length, 4, "高级选项区四张卡");
+  for (const t of ["更新通道", "号池分流逻辑", "配置迁移", "配置备份"]) {
+    assert.ok(titles.some((x) => x.includes(t)), `缺卡：${t}`);
+  }
+});
+
+test("导出：状态行报结果、明细行摆计数，结果落地时状态行揭开", async () => {
   const h = harness({ respondPost: () => EXPORT_OK });
   await click(h, "dataExportBtn");
   assert.equal(h.exportStatus().tone, "ok");
   assert.equal(h.exportStatus().text, "已导出 anyswitch-export-20260923-120000.zip");
+  assert.equal(h.exportStatus().hidden, false, "有结果时状态行揭开");
   assert.equal(h.exportMeta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22");
   assert.equal(h.get("dataExportBtn").disabled, false, "结束后按钮回到可点");
   assert.equal(h.toasts.at(-1).message, "导出完成");
@@ -208,13 +238,14 @@ test("导出：取消目录框是中性色，失败原因出服务端原文并�
   assert.equal(failed.exportMeta(), "");
 });
 
-test("导入：选包后预览进弹窗，卡面回初值；形态 A 的勾选与自选行都在", async () => {
+test("导入：选包后预览进弹窗，卡面回空闲（收行）；形态 A 的勾选与自选行都在", async () => {
   const h = harness({ respondPost: () => PREVIEW });
   await pickPackage(h);
   assert.equal(h.modalOpen(), true, "预览以整体弹窗呈现");
   assert.match(h.modalSummary().text, /^已读取包内容：来自 DESKTOP-A1B2C3 · /);
   assert.equal(h.modalMeta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22");
-  assert.equal(h.summary().text, "尚未选择配置包", "卡面不占预览内容");
+  assert.equal(h.summary().text, "", "卡面不占预览内容，回空闲空值");
+  assert.equal(h.summary().hidden, true, "空闲时摘要行收起");
   assert.equal(h.get("dataSkillsRepoLine").hidden, false);
   assert.equal(h.get("dataSkillsRepoPath").textContent, "C:\\Users\\me\\Desktop\\work\\skills");
   assert.equal(h.get("dataSkillsRepoCheck").checked, true, "默认导入到本机仓库");
@@ -368,7 +399,8 @@ test("导入：取消/关闭弹窗丢弃这次选择，一个写入请求都不�
   await click(h, "dataImportModalCancel");
   assert.equal(h.modalOpen(), false);
   assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"]);
-  assert.equal(h.summary().text, "尚未选择配置包");
+  assert.equal(h.summary().text, "", "取消后卡面回空闲空值");
+  assert.equal(h.summary().hidden, true, "空闲收行");
 });
 
 test("导入：读包失败在卡面转 danger；写入失败在弹窗里出原文、票据作废", async () => {
@@ -430,11 +462,11 @@ test("导入后 followAgent 没对齐回来：状态行转提醒色，明细行�
 });
 
 // ─────────────────────────────────────────────────────────────
-// 文案生命周期：结果离开即复位；离开期间落地的结果等切回
+// 文案生命周期：结果离开即复位（连行收起）；离开期间落地的结果等切回
 //
-// 预览与落点选择都在弹窗里（弹窗不关就不受子 tab 切换影响），卡面只有初始行
-// 与一次性回执，所以复位规则只剩「结果」这一半要管。
-// 复位用的初值一律取 markup 里写的那份，控制器不另造文案。
+// 预览与落点选择都在弹窗里（弹窗不关就不受子 tab 切换影响），卡面空闲时没有任何
+// 常驻行，只有一次性回执在结果落地时揭开，所以复位规则只剩「结果」这一半要管。
+// 复位用的初值一律取 markup 里写的那份（空串＋hidden），控制器不另造文案。
 
 test("生命周期：导出结果离开子页即回初值，且复位文案就是 markup 的初值", async () => {
   const h = harness({ respondPost: () => EXPORT_OK });
@@ -444,6 +476,7 @@ test("生命周期：导出结果离开子页即回初值，且复位文案就�
   h.controller.leave();
   assert.equal(h.exportStatus().text, initialText("dataExportStatus"), "回初值，不另造文案");
   assert.equal(h.exportStatus().tone, undefined, "色调一并摘掉，不留半截态");
+  assert.equal(h.exportStatus().hidden, true, "复位连行收起");
   assert.equal(h.exportMeta(), "", "明细行一起收");
 });
 
@@ -455,6 +488,7 @@ test("生命周期：导入弹窗开着时离开不受影响，卡面本就只�
   h.controller.leave();
   assert.equal(h.modalOpen(), true, "弹窗是确认现场，离开不收");
   assert.equal(h.summary().text, initialText("dataImportSummary"));
+  assert.equal(h.summary().hidden, true);
 });
 
 test("生命周期：导入完成的结果离开也复位", async () => {
@@ -465,8 +499,10 @@ test("生命周期：导入完成的结果离开也复位", async () => {
   await pickPackage(h);
   await confirmApply(h);
   assert.equal(h.summary().tone, "ok");
+  assert.equal(h.summary().hidden, false, "完成回执揭开摘要行");
   h.controller.leave();
   assert.equal(h.summary().text, initialText("dataImportSummary"), "完成回执离开即回初值");
+  assert.equal(h.summary().hidden, true);
   assert.equal(h.meta(), "");
 });
 
@@ -496,6 +532,27 @@ test("生命周期：控制器真的接进了设置页子 tab 机制，不留「
   assert.ok(source.includes("enter() { away = false; awaitReturn = false; }"), "enter 消费「等切回」");
   assert.ok(source.includes("leave() { away = true; if (awaitReturn) return; resetResults(); }"), "leave 按等切回决定清不清");
   assert.ok(!source.includes("dataBundle.reset"), "旧的死钩子不该留着");
+});
+
+test("导入成功经 onImportApplied 通知备份卡刷新列表；失败不通知", async () => {
+  const ok = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : APPLY_OK),
+  });
+  await pickPackage(ok);
+  await confirmApply(ok);
+  assert.equal(ok.importApplied(), 1, "导入落定会多一册 pre-import 备份，列表要刷新");
+
+  const failed = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
+      ? PREVIEW
+      : { ok: false, error: "导入确认已过期或无效，请重新选择导出包" }),
+  });
+  await pickPackage(failed);
+  await confirmApply(failed);
+  assert.equal(failed.importApplied(), 0, "写入没发生，备份列表无变化");
+
+  // 装配处把数据搬迁卡的回调接到备份卡的 refresh 上（同面板内联动，不经后端推送）。
+  assert.match(source, /onImportApplied: \(\) => backupLocation\.refresh\(\)/, "装配处接线");
 });
 
 // 号池分流逻辑卡：智能分流开关。文案为对稿定稿（仅描述开启态、中性、不披露机制），
