@@ -13078,6 +13078,15 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
     assert.ok(tick.indexOf("syncTerminalDataStream") < tick.indexOf('if (document.hidden) return;'), "核拍排在隐藏早退之前，否则隐藏期根本跑不到");
     assert.ok(tick.indexOf("syncTerminalActivityStream()") < tick.indexOf("syncTerminalDataStream()"), "两条流的闸同拍，字节流不落在真值流后面");
   });
+
+  it("防御性监听：pageshow(persisted)/freeze 只给缓冲打来源标记，不改分流判据", () => {
+    const block = panelJs.slice(panelJs.indexOf('window.addEventListener("pageshow"'), panelJs.indexOf("document.addEventListener(\"visibilitychange\""));
+    assert.ok(block.includes("event.persisted"), "pageshow 只认 persisted");
+    assert.ok(block.includes("terminalHiddenBacklog.bfcache = true"), "bfcache 恢复标记缓冲来源");
+    assert.ok(block.includes("terminalHiddenBacklog.frozen = true"), "freeze 标记缓冲来源");
+    assert.ok(block.includes("terminalSwitchLog"), "两路都走日志级归类");
+    assert.ok(!block.includes("queueTerminalChunk") && !block.includes("renderTerminalPreviewSession"), "不改分流判据");
+  });
 });
 
 // 键盘兜底转发（首开吞字收口）：焦点不在 xterm 隐藏输入框（首开未就绪/未聚焦
