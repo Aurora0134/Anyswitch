@@ -12,7 +12,7 @@
 //   4. 源目录空了才移除，非空保留。
 // 失败路径因此永远能对用户说「未做任何改动」。
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, statSync } from "node:fs";
 import { isAbsolute, join, parse, resolve, sep } from "node:path";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
 
@@ -143,4 +143,81 @@ export function applyBackupRoot({ root, target = null }) {
   }
 
   return { ok: true, path: next, moved: moved.moved, undeleted: moved.undeleted ?? [] };
+}
+
+// ── 备份列表与删除 ─────────────────────────────────────────
+// 列表与删除都只认两族备份目录：pre-import-<ts>/（导入配置包前整份备份）与
+// byok-import-<ts>/（导入本地渠道并移除原配置前的原文件备份）。名字锚定全匹配，
+// 用户在备份根里自建的同名异物不进列表、也删不到；名字内嵌零填充时间戳，
+// 字典序即时间序，排序按名倒序（新→旧）。
+
+const BACKUP_DIR_NAME_RE = /^(pre-import|byok-import)-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/;
+
+// 与 data-bundle.mjs 的 MANIFEST_NAME 同一文件名约定：pre-import 备份落盘时
+// 写入 manifest.json（含 createdAt）；byok-import 备份没有 manifest。
+const BACKUP_MANIFEST_NAME = "manifest.json";
+
+// 递归求和目录大小；个别条目读不到（权限、竞态被删）跳过，不让一个坏条目掀翻整列。
+function dirSizeBytes(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) total += dirSizeBytes(full);
+      else if (entry.isFile()) total += statSync(full).size;
+    } catch { /* 读不到的条目跳过 */ }
+  }
+  return total;
+}
+
+// createdAt 优先 manifest 里的 ISO 串；没有 manifest（byok-import）或值不可用时，
+// 回退到从目录名的时间戳解析（写入时按本地时间拼的，还原也用本地时间）。
+function backupCreatedAt(dir, match) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, BACKUP_MANIFEST_NAME), "utf8"));
+    const value = parsed?.createdAt;
+    if (typeof value === "string" && !Number.isNaN(new Date(value).getTime())) return value;
+  } catch { /* 无 manifest 或不可读：回退名解析 */ }
+  const [, , y, mo, d, h, mi, s] = match;
+  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).toISOString();
+}
+
+export function listBackups(root) {
+  const dir = readBackupRoot(root);
+  let entries = [];
+  try {
+    if (existsSync(dir)) entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const items = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const match = entry.name.match(BACKUP_DIR_NAME_RE);
+    if (!match) continue;
+    const full = join(dir, entry.name);
+    items.push({ name: entry.name, kind: match[1], createdAt: backupCreatedAt(full, match), sizeBytes: dirSizeBytes(full) });
+  }
+  items.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
+  return items;
+}
+
+// 只删名字锚定匹配的那单个目录：名字过不了全匹配就拒绝，join 出的路径不可能
+// 越出备份根。
+export function deleteBackup(root, name) {
+  if (typeof name !== "string" || !BACKUP_DIR_NAME_RE.test(name)) return { ok: false, error: "备份名不可用" };
+  const dir = join(readBackupRoot(root), name);
+  if (!existsSync(dir)) return { ok: false, error: "备份不存在" };
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    return { ok: false, error: error?.message ?? String(error) };
+  }
+  return { ok: true };
 }

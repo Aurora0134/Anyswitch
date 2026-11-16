@@ -36,7 +36,7 @@ import { spawnAgentSync } from "../agents/agent-sync-spawn.mjs";
 import { readSyncStatus, writeSyncStatus, syncStatusFromResult } from "../shared/sync-status.mjs";
 import { createSkillsService, pickFile, pickFolder } from "../agents/agent-skills.mjs";
 import { createDataBundleService } from "../store/data-bundle.mjs";
-import { applyBackupRoot, backupRootInfo, readBackupRoot } from "../ops/backup-location.mjs";
+import { applyBackupRoot, backupRootInfo, deleteBackup, listBackups, readBackupRoot } from "../ops/backup-location.mjs";
 import { createPromptsService } from "../agents/agent-prompts.mjs";
 import { createPromptsInjector } from "../agents/agent-prompts-inject.mjs";
 import { createStoreService } from "../store/store-service.mjs";
@@ -4073,6 +4073,10 @@ export function createPanelRouter({
     if (path === "/panel/api/backups" && method === "GET") {
       return sendJson(res, 200, { ok: true, ...backupRootInfo(relayRoot) });
     }
+    // 备份文件列表：两族备份（pre-import/byok-import）的名称、时间、大小，新→旧。
+    if (path === "/panel/api/backups/list" && method === "GET") {
+      return sendJson(res, 200, { ok: true, items: listBackups(relayRoot) });
+    }
     if (path === "/panel/api/relay/status" && method === "GET") return handleRelayStatus(res);
     if (path === "/panel/api/relay/start" && method === "POST") return handleRelayStart(res);
     if (path === "/panel/api/relay/stop" && method === "POST") return handleRelayStop(res);
@@ -4976,6 +4980,10 @@ export function createPanelRouter({
           // 不能带 windowsHide：explorer 的文件夹窗口继承 SW_HIDE，开出来是隐形的。
           spawnExplorerFn("explorer.exe", [dir], { detached: true, stdio: "ignore" }).unref();
           return sendJson(res, 200, { ok: true });
+        }
+        if (path === "/panel/api/backups/delete") {
+          const result = deleteBackup(relayRoot, body.name);
+          return sendJson(res, 200, result.ok ? { ok: true } : { ok: false, error: result.error });
         }
         return sendJson(res, 404, { ok: false, error: "not found" });
       } catch (err) {
