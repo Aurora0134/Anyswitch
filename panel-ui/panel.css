@@ -2283,10 +2283,13 @@
      定高且位置上跨头行/看板两行，若作为在流网格项参与轨道 sizing，看板克隆比一屏矮时
      （compact 图标行档、运行端点少、窄窗一屏折算变高都会命中）装不下的余量会被整段
      灌进第 1 行，头行从 48px 被撑到一百多 px，预览映射顶部多出一段空屏（用户报障）。
-     绝对定位后只铺位不占轨，行高回归头行/看板自身内容，矮页余量留在页底由 sizer 裁。 */
+     绝对定位后只铺位不占轨，行高回归头行/看板自身内容，矮页余量留在页底由 sizer 裁。
+     这里不声明 width：栏自身宽与真栏同源（基座 72/媒体 216/手动态同链规则，克隆体
+     全部命中）；若锚实测变量，首拍变量未设时 width 会落成收缩适应宽顶掉 216/72，
+     量出的错值又经变量粘住，列 1 与自然宽补偿从此跟着歪。 */
   :root[data-ui-version="v2"] .settings-mirror-scale { display: grid; grid-template-columns: var(--mirror-rail-w, auto) minmax(0, 1fr); column-gap: 24px; row-gap: 24px; }
   :root[data-ui-version="v2"] .settings-mirror-scale .rail {
-    position: absolute; top: 0; left: 0; width: var(--mirror-rail-w);
+    position: absolute; top: 0; left: 0;
     height: var(--preview-vh, 100vh); overflow: hidden;
   }
   :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { grid-column: 2; min-width: 0; }

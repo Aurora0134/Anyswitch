@@ -4240,7 +4240,8 @@ describe("panel.html 设置全页视图", () => {
     // 一段异常空屏、内容被下挤）。列 1 宽改由 JS 把实测栏宽写进变量供网格与栏共用。
     assert.ok(panelCss.includes("grid-template-columns: var(--mirror-rail-w, auto) minmax(0, 1fr)"),
       "镜像列 1 宽取 JS 实测栏宽变量，不再由栏克隆在流撑出");
-    assert.ok(railRule.includes("width: var(--mirror-rail-w)"), "镜像栏自身宽同取实测值");
+    assert.ok(!/width:/.test(railRule),
+      "镜像栏不声明 width：自身宽交给与真栏同源的媒体/手动态规则——若锚实测变量，首拍变量未设时收缩适应宽会顶掉 216/72，且错值经变量粘住");
     assert.ok(!railRule.includes("align-self"), "栏不再作为网格项参与对齐与轨道 sizing");
     assert.ok(panelCss.includes(".settings-mirror-sizer { position: relative; width: 100%; overflow: hidden; }"),
       "sizer 宽度交还容器，整页克隆体由它裁掉");
