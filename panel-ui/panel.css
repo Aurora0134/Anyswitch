@@ -1535,6 +1535,8 @@
     --ll-blur-1: 0.4px; --ll-blur-2: 0.8px;
     --ll-opacity-1: 0.86; --ll-opacity-2: 0.72;
     --ll-retreat-delay: 45ms;
+    /* 卡面那块提亮的底：卡与舞台底缘共用一处，改一处两边同变。 */
+    --ll-face: color-mix(in srgb, var(--surface) 94%, white 6%);
   }
   /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与舞台长高同拍。
      --ll-step-expanded 由 setLogExpanded 量视口首卡行距写入，55px 是无卡时兜底。 */
@@ -1600,12 +1602,6 @@
   .live-log[data-motion] .live-log-stack .live-log-msg,
   .live-log[data-motion] .live-log-stack .live-log-meta,
   .live-log[data-motion] .live-log-stack .live-log-text { transition-delay: 0ms; }
-  /* 摊开期把叠卡专补的暗色层界过渡回普通卡样式，交接时与视口卡外观一致。 */
-  .live-log[data-state="expanded"] .live-log-stack .live-log-msg,
-  .live-log[data-motion="expanding"] .live-log-stack .live-log-msg,
-  .live-log[data-motion="handoff"] .live-log-stack .live-log-msg {
-    background-color: var(--surface); border-color: var(--border); box-shadow: var(--shadow-xs);
-  }
   .live-log-viewport::-webkit-scrollbar { width: 8px; }
   .live-log-viewport::-webkit-scrollbar-track { background: transparent; }
   .live-log-viewport::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
@@ -1632,13 +1628,19 @@
     content: ""; position: absolute; z-index: 3; pointer-events: none;
     left: 2px; right: calc(2px + var(--ll-gutter)); bottom: 0; height: 20px;
     box-sizing: border-box; opacity: 0.55;
-    background: color-mix(in srgb, var(--surface) 94%, white 6%);
+    background: var(--ll-face);
     border: 1px solid var(--border-strong); border-bottom: none;
     border-radius: var(--radius-md, 8px) var(--radius-md, 8px) 0 0;
   }
+  /* 卡面是两层共用的一套皮，必须两态同值：全局暗色把卡面与描边的对比压得很低，
+     单张可读、叠起来会糊成一片（方角弱影的皮肤尤甚），所以描边取 --border-strong、
+     底混入少量白。这层皮一旦只补在叠卡态，展开那一拍就是「底没了」——收起与展开
+     用同一条规则，状态切换只剩位置与显隐，不再换皮。 */
   .live-log-msg {
-    box-sizing: border-box; background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-xs);
+    box-sizing: border-box; background: var(--ll-face);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md, 8px);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent);
     padding: 7px 10px; overflow: hidden;
   }
   .live-log-meta {
@@ -1679,16 +1681,11 @@
   .live-log-msg.is-overflowing .live-log-msg-fold { display: inline-flex; }
   .live-log-msg.is-open .live-log-msg-fold { transform: rotate(90deg); }
   .live-log-stack .live-log-msg-fold { display: none; }
-  /* 叠卡态单独补回层界：全局暗色刻意压低卡面与描边的对比，单张可读、叠起来会糊成
-     一片，方角弱影的皮肤尤甚。描边取 --border-strong，卡面混入少量白（暗色提亮、
-     亮色保持原白），下缘加一条随亮暗自适应的高光线；视口卡与全局 token 不动。
+  /* 叠卡只定位置与退层过渡，卡面那套皮在 .live-log-msg 基座上两态共用。
      卡高内容驱动、与视口卡同为截 2 行，摊开终态才与视口前三条重合；左右按视口
      内容区取齐（右侧让出恒留槽位），两层文字不在交接时重新换行。 */
   .live-log-stack .live-log-msg {
     position: absolute; left: 2px; right: calc(2px + var(--ll-gutter)); top: 0; margin: 0;
-    background-color: color-mix(in srgb, var(--surface) 94%, white 6%);
-    border-color: var(--border-strong);
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent);
     transform-origin: 50% 0;
     transition: transform 220ms var(--ease-out), opacity 220ms var(--ease-out),
                 background-color 220ms var(--ease-out), border-color 220ms var(--ease-out),
@@ -1733,6 +1730,18 @@
      不再出现叠卡还在淡出、视口已先清空的错位。 */
   .live-log[data-clearing] .live-log-stack .live-log-msg.is-leaving,
   .live-log[data-clearing] .live-log-viewport .live-log-msg.is-leaving { transition-duration: 120ms; }
+  /* 收起态整叠是一个点击面（#logStack 是唯一监听），悬停按整叠给一层薄反馈：逐卡只
+     会点亮露出的那 22px 边带，末卡比最高卡矮时舞台底部还会剩一条可点却无反馈的死区。
+     只动上面已挂进 220ms 过渡的三条属性——transform 被 data-slot 位移与
+     is-appearing / is-leaving 共用，碰它要么被源序压死、要么把槽位位移顶掉。
+     放在这组状态规则之后：同特异性时源序在后，谁往槽位/入场/离场里加底或描边，
+     悬停也不会被静默压死。展开态由 .live-log-viewport 的 pointer-events 接管，
+     视口卡不可点，因此没有悬停——不给假的可点暗示。 */
+  .live-log-stack:hover .live-log-msg {
+    background-color: color-mix(in srgb, var(--surface) 88%, white 12%);
+    border-color: color-mix(in srgb, var(--border-strong) 75%, var(--text) 25%);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 26%, transparent), var(--shadow-sm);
+  }
 
   /* ── 「日志级别」下拉（设置 → 通用 → 运行日志卡）────────────────────────────
      与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色
