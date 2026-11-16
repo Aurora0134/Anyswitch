@@ -10393,16 +10393,19 @@ async function api(method, path, body) {
         // 隐藏期字节闸：窗口藏着、人还在终端页时一个字节都不喂 xterm（xterm 的解析
         // 在这一侧被节流到每秒一片、rAF 零帧，喂了就只进不出；离开终端页的活流是
         // 既有保留策略，照常直写）。首帧回放 / 同步合帧 / 突发合并在此全部不动作，
-        // 它们服务的「新画面就绪才揭幕」判据因而自然不成立。闸外两条路都可见：
-        // 缓冲溢出或隐藏期几何闸作废旧字节后，本帧及后续帧直接丢（恢复必走整屏
-        // 重建，写的是注定被替换的屏）；回前台的分流落定拍在 pollTerminalSessions
-        // 落定才跑，其间新帧若绕闸直写会把「新帧在前、旧缓冲稍后回灌」的顺序颠倒，
-        // 所以分流落定前只要 backlog 仍在就继续入闸。typeof 与常量存在性双闸护
-        // 单测桩环境。
+        // 它们服务的「新画面就绪才揭幕」判据因而自然不成立。
+        // 入闸口径是「backlog 仍在 + 终端页」，不看 document.hidden：隐藏转折只负责
+        // 建闸（syncTerminalDataStream），backlog 在台前的存活窗口只有「回前台到
+        // pollTerminalSessions 分流落定」这一段（finally 回灌 / 建流 / 拆流三处清它）。
+        // 这段窗口里新帧若绕闸直写，finally 回灌的旧字节就会排在新帧之后，字节流时序
+        // 倒挂——TUI 相对重绘帧序被拆乱，屏面即错位/重复/残框（2026-11-16 切回错屏
+        // 事故，f96fafec 注释写明本意却在条件里漏写了「backlog 仍在」）。入闸把新帧
+        // 追加在旧字节之后，回灌时序才守得住。
+        // overflow 兜底照旧：超上限后本帧及后续帧直接丢（恢复必走整屏重建，写的
+        // 是注定被替换的屏）。typeof 与常量存在性双闸护单测桩环境。
         if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog
             && typeof TERMINAL_HIDDEN_BACKLOG_MAX_BYTES === "number"
-            && currentView === "terminal"
-            && (typeof document === "undefined" || document.hidden || terminalHiddenBacklog.overflow)) {
+            && currentView === "terminal") {
           if (terminalHiddenBacklog.overflow) return;
           terminalHiddenBacklog.bytes += text.length;
           if (terminalHiddenBacklog.bytes > TERMINAL_HIDDEN_BACKLOG_MAX_BYTES) {
@@ -10412,6 +10415,15 @@ async function api(method, path, body) {
           }
           terminalHiddenBacklog.chunks.push(text);
           return;
+        }
+        // 走到这里还带着 backlog，只可能是「页已不在终端页」（入闸第三条不满足）：
+        // 活流照常直写（既有保留策略），屏面就此越过积压内容——旧字节此后任何时刻
+        // 回灌都必乱序，作废掉。等价于把这轮积压推给整屏重建路径，下次隐藏转折从零
+        // 攒。回前台 poll 窗口内的极速切页-切回（走这里直写过）就是这条作废在兜。
+        // typeof 闸护单测桩环境（那些沙箱不声明模块级变量）。
+        if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog
+            && currentView !== "terminal") {
+          terminalHiddenBacklog = null;
         }
         // 建连后的第一帧是自足整屏重绘（见 absorbTerminalSnapshot），直写——此刻
         // 合帧层刚被 snapshot 清空、burst 也刚被丢弃，两层都干净，直写不乱序；

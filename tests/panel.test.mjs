@@ -14023,6 +14023,40 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.deepEqual(idle.sandbox.backlog(), { chunks: [], bytes: 0, overflow: false }, "隐藏且终端页即立闸，与是否有实例无关");
     assert.equal(idle.state.eventSources.length, 0, "没有实例时不会另开连接");
   });
+
+  it("回前台分流落定前新帧继续入闸：追加在旧字节之后，直写-后回灌的倒挂不复存在", async () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    await sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    const src = sandbox.source();
+    src.emit("data", "隐藏期的一帧");
+    // 切回前台：pollTerminalSessions 还在飞（分流落定在 finally），这扇窗口里到达的
+    // 新帧必须继续入闸——直写落屏的话，finally 回灌的旧字节会排在新帧之后，TUI
+    // 相对重绘帧序即被拆乱（2026-11-16 切回错屏事故的病灶）。
+    sandbox.setWindowHidden(false);
+    src.emit("data", "分流落定前的新帧");
+    assert.deepEqual(term.writes, [], "窗口期新帧一个不写屏：backlog 仍在即入闸，不看 document.hidden");
+    assert.deepEqual(sandbox.backlog().chunks, ["隐藏期的一帧", "分流落定前的新帧"],
+      "新帧追加在旧字节之后，回灌时序守得住");
+    assert.equal(sandbox.backlog().bytes, "隐藏期的一帧".length + "分流落定前的新帧".length, "字节量随帧累计");
+  });
+
+  it("非终端页帧直写即作废积压：屏面越过积压内容，残字节不再混进下一轮回灌", async () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    await sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    sandbox.source().emit("data", "隐藏期的一帧");
+    assert.equal(sandbox.backlog().chunks.length, 1, "隐藏期收进缓冲");
+    // 用户切到别的页：活流照常直写（既有保留策略），屏面就此越过积压内容
+    sandbox.setCurrentView("board");
+    sandbox.source().emit("data", "别的页期间的帧");
+    assert.ok(term.writes.join("").includes("别的页期间的帧"), "非终端页照常直写落屏");
+    assert.equal(sandbox.backlog(), null, "直写作废积压：残字节不再等下次隐藏转折混进回灌");
+  });
 });
 
 // 输入法候选框抽搐：组字期间 xterm 内核每次渲染都把隐藏输入框改写到实时光标格，
