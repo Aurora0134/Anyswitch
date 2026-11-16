@@ -520,6 +520,22 @@ async function api(method, path, body) {
   }
   // panel-asset-freshness end
 
+  // 防御性留痕：bfcache 恢复与页面冻结到达时给缓冲标记来源，只供日志归类，
+  // 不改分流判据（积压量与几何作废仍是唯一口径）。typeof 闸护单测桩环境。
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted) return;
+    try {
+      if (terminalHiddenBacklog) terminalHiddenBacklog.bfcache = true;
+      if (typeof terminalSwitchLog === "function") terminalSwitchLog("hidden-backlog-bfcache", { bytes: terminalHiddenBacklog ? terminalHiddenBacklog.bytes : 0 });
+    } catch { /* 桩环境无缓冲设施：留痕跳过 */ }
+  });
+  document.addEventListener("freeze", () => {
+    try {
+      if (terminalHiddenBacklog) terminalHiddenBacklog.frozen = true;
+      if (typeof terminalSwitchLog === "function") terminalSwitchLog("hidden-backlog-freeze", { bytes: terminalHiddenBacklog ? terminalHiddenBacklog.bytes : 0 });
+    } catch { /* 同上 */ }
+  });
+
   // 后台切回立即补刷。三处轮询（本页 1s/15s、统计页 30s）都带 document.hidden
   // 闸，隐藏期间完全不取数；而 Chrome 会把隐藏页的定时器节流到约每分钟一次，
   // 所以回前台后首个 tick 仍可能等近一分钟——期间画面停在切走前的旧数字上，
@@ -528,15 +544,13 @@ async function api(method, path, body) {
   document.addEventListener("visibilitychange", () => {
     // 先记账再动手：这条转折由本处处理完了，兜底那一拍就不必再补一次。
     terminalVisibilityWasHidden = document.hidden;
-    // 进后台先把屏面状态记进交接单：紧随其后的 parkTerminalScreen 会拆流、把旧实例
-    // 从模块级引用上摘掉，之后再读就读不到切走前的阅读位与外层滚动位了。
+    // 进后台先把屏面状态记进交接单：保流路径下它到点自然作废，超量重建路径则排给
+    // 紧随其后的整屏重建（见回前台分支）。
     if (document.hidden && typeof captureTerminalForegroundFrame === "function") captureTerminalForegroundFrame();
-    // 进后台第一件事是拆掉会话字节流（理由见 syncTerminalDataStream）；回前台由下面
-    // 各视图分支重建。这条转折漏发也不要紧：1s 轮询拍里同一个函数再核一次。
-    //
-    // 拆之前先把画面停成垫片（见 parkTerminalScreen）：拆流之后唯一还能留在屏上
-    // 的只有垫片，切回时它就是「新画面画好之前的内容」。typeof 闸护单测桩环境。
-    if (typeof parkTerminalScreen === "function") parkTerminalScreen();
+    // 进后台不拆流不毁实例（2026-11-16 用户裁决）：拆流是把「切回卡顿」换成「每次
+    // 切回整屏重建」，日常切走-切回无一幸免。现在立字节闸——隐藏期 data 帧原样攒进
+    // 模块级缓冲（terminalHiddenBacklog，一个字节都不解析），回前台按积压量分流。
+    // 这条转折漏发也不要紧：1s 轮询拍里同一个函数再核一次。
     syncTerminalDataStream();
     // 垫片兜底窗只在前台计时：隐藏页的定时器会被节流甚至冻结，回调常拖到切回前台
     // 才跑，那时窗口已可见，按普通档到点就把「切回时的那一屏」撤走了。隐藏这一拍
@@ -560,7 +574,27 @@ async function api(method, path, body) {
       // 隐藏前的旧「running」去判会把死于重启的会话漏成死屏干等。轮询早退（未
       // 就绪/在飞）时这拍照旧立即重建，漏判由 1s 轮询里的
       // maybeAutoReviveTerminalSession 兜住。
-      pollTerminalSessions().finally(() => renderTerminalPreviewSession({ revive: false }));
+      pollTerminalSessions().finally(() => {
+        // 按积压量分流（积压字节全在这一拍收进 terminalHiddenBacklog，见
+        // syncTerminalDataStream 与 data 帧处理器）：
+        //   · 缓冲为空或超量/作废 → 走既有重建（前者零积压，后者画面已不可信）；
+        //   · 小量 → 逐条回灌合并器（突发窗口把整段合成一次落屏），同会话健存闸
+        //     命中后零重建——阅读位与外层滚动位原样，交接单到点自然作废。
+        const backlog = typeof terminalHiddenBacklog !== "undefined" ? terminalHiddenBacklog : null;
+        const replayable = !!backlog && !backlog.overflow && backlog.bytes > 0
+          && typeof TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES === "number"
+          && backlog.bytes <= TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES;
+        if (!replayable) {
+          if (backlog) terminalHiddenBacklog = null;
+          renderTerminalPreviewSession({ revive: false });
+          return;
+        }
+        const term = terminalXterm;
+        const chunks = backlog.chunks.slice();
+        terminalHiddenBacklog = null;
+        for (const chunk of chunks) queueTerminalChunk(term, chunk);
+        renderTerminalPreviewSession({ revive: false });
+      });
       return;
     }
     if (!boardVisible()) return;
@@ -7116,6 +7150,21 @@ async function api(method, path, body) {
   let terminalReplayRestoring = false;
   let terminalReplayRestoreArm = null;
   let terminalReplayRestoreCancel = null;
+  // 隐藏期字节闸（见 syncTerminalDataStream）：窗口隐藏且人在终端页时 data 帧改
+  // 收进这份自有缓冲，不喂 xterm。chunks 到达即只进不出，一个字节都不解析，因此
+  // 量与「内存里攒了多少」直接成正比；回前台按 bytes 分流——小量逐条回灌
+  // 合并器一次落屏，超量/作废则整屏重建（见 visibilitychange 处理器的终端分支）。
+  let terminalHiddenBacklog = null;
+  const TERMINAL_HIDDEN_BACKLOG_MAX_BYTES = 8 * 1024 * 1024;
+  const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = 2 * 1024 * 1024;
+  // 快照照吸收（快照是状态不是画面字节），只有这几处画面基线转折会让缓冲失效：
+  // 几何重对齐 / 作废整屏回放 / 拆流挂起（见 absorbTerminalSnapshot 的三处调用）。
+  function terminalHiddenBacklogInvalidate() {
+    if (!terminalHiddenBacklog || terminalHiddenBacklog.overflow) return;
+    terminalHiddenBacklog.chunks.length = 0;
+    terminalHiddenBacklog.bytes = 0;
+    terminalHiddenBacklog.overflow = true;
+  }
   // 同步输出合帧（见 connectTerminalStream）：撤掉未闭合块的兜底定时器并丢弃
   // 其字节。连接重建时指向新连接的闭包，关流时由 closeTerminalStream 调一次。
   let terminalStreamSyncCancel = null;
@@ -8038,6 +8087,10 @@ async function api(method, path, body) {
     terminalStreamSyncCancel = null;
     // 合帧写者随流关闭摘除：burst 冲刷从此回退直写（旧 term 已 dispose，本就不该再写）。
     terminalStreamWrite = null;
+    // 隐藏期字节缓冲随这条流作废：画面基线随实例销毁，攒着的增量帧已没有可续接的
+    // 屏，留着只会在恢复时误判成「小量可直写」。隐藏期自身基线失效由
+    // terminalHiddenBacklogInvalidate 负责（置 overflow 走重建）。typeof 闸护桩环境。
+    if (typeof terminalHiddenBacklog !== "undefined") terminalHiddenBacklog = null;
     // 未落屏的突发随实例销毁：攒着的字节写进已 dispose 的实例没有意义，定时器
     // 更要在销毁前撤掉。
     discardTerminalBurst();
@@ -9805,6 +9858,9 @@ async function api(method, path, body) {
       // 不是「不用担心」的信号。改成拆流挂起：终端页可见时 RO / window resize / 组字
       // 释放都会再走一次 fit，那时量准了由 fit 把流接回来（见 remountDeferredTerminalStream），
       // 屏幕空白只持续到那一拍。
+      // 隐藏期到达的 snapshot 踩中这条闸：缓冲的 live 帧必须作废（解释见 data 处理器
+      // 的缓冲闸），置 overflow 让恢复走既有整屏重建。
+      if (typeof terminalHiddenBacklogInvalidate === "function") terminalHiddenBacklogInvalidate();
       dropTerminalReplayFrame(term);
       session.backendState = state;
       session.shell.pid = state.pid || "—";
@@ -9817,7 +9873,8 @@ async function api(method, path, body) {
         && Date.now() - terminalGeometryRealignAt >= TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS;
       if (realignable) {
         // 重对齐在飞期间到达的回放一律丢弃（见 data 帧处理器的第一行），否则它仍会写进
-        // 错宽度的屏。
+        // 错宽度的屏。缓冲的隐藏期字节同理作废：几何变了这批字节进不了当前屏。
+        if (typeof terminalHiddenBacklogInvalidate === "function") terminalHiddenBacklogInvalidate();
         terminalGeometryRealignAt = Date.now();
         terminalGeometryRealignStreak += 1;
         terminalGeometryRealignPending = true;
@@ -9839,7 +9896,8 @@ async function api(method, path, body) {
       }
       // 刹车拦下的错配帧：同样是错宽回放，一个字节都不画（M5 收紧的第二、三处退让）。
       // 作废回放即清屏，屏上是一块干净空态——绝不留一屏错列宽的残行，也不让后续
-      // 纯相对增量帧在旧行上继续叠画。
+      // 纯相对增量帧在旧行上继续叠画。缓冲的隐藏期字节随这次作废一并失效。
+      if (typeof terminalHiddenBacklogInvalidate === "function") terminalHiddenBacklogInvalidate();
       dropTerminalReplayFrame(term);
       session.backendState = state;
       session.shell.pid = state.pid || "—";
@@ -9859,7 +9917,9 @@ async function api(method, path, body) {
         return;
       }
       // 冷却窗内：账还热着，等窗过去再对齐（此前这一帧按原逻辑照常落屏，等于拖窗口
-      // 的每一拍都往屏上糊一层错宽内容）。
+      // 的每一拍都往屏上糊一层错宽内容）。缓冲的隐藏期字节同样作废——到点重开流拿
+      // 整屏，这批增量已属旧几何。
+      if (typeof terminalHiddenBacklogInvalidate === "function") terminalHiddenBacklogInvalidate();
       scheduleTerminalGeometryRealign(term, session, clientCols, clientRows);
       return;
     }
@@ -10081,6 +10141,8 @@ async function api(method, path, body) {
     // 建流即焦点回守：进页、切签、新建、降级重试都经此处，终端的隐藏输入框
     // 重新拿到焦点，其后的键入与 Ctrl+C/V 才不会静默落空。
     term.focus();
+    // 建流连同上一段缓冲一并作废：画面基线被 reset 重建，缓冲的增量帧无从续接。
+    if (typeof terminalHiddenBacklog !== "undefined") terminalHiddenBacklog = null;
     terminalInputDisposable = term.onData((data) => {
       // 用户开始键入即落屏：攒着的历史不能排在输入回显后面。
       flushTerminalBurst();
@@ -10274,6 +10336,26 @@ async function api(method, path, body) {
       // 占位一起撤走。撤层判据是「新画面真的出字」，见 watchTerminalBootingOverlay。
       try {
         const text = JSON.parse(event.data);
+        // 隐藏期字节闸：窗口藏着、人还在终端页时一个字节都不喂 xterm（xterm 的解析
+        // 在这一侧被节流到每秒一片、rAF 零帧，喂了就只进不出；离开终端页的活流是
+        // 既有保留策略，照常直写）。首帧回放 / 同步合帧 / 突发合并在此全部不动作，
+        // 它们服务的「新画面就绪才揭幕」判据因而自然不成立。闸外两条路都可见：
+        // 缓冲溢出或隐藏期几何闸作废旧字节后，本帧及后续帧直接丢（恢复必走整屏
+        // 重建，写的是注定被替换的屏）；分流确认前的中途切走保留已缓冲字节，
+        // 回前台仍按量分流。typeof 与常量存在性双闸护单测桩环境。
+        if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog
+            && typeof TERMINAL_HIDDEN_BACKLOG_MAX_BYTES === "number"
+            && typeof document !== "undefined" && document.hidden && currentView === "terminal") {
+          if (terminalHiddenBacklog.overflow) return;
+          terminalHiddenBacklog.bytes += text.length;
+          if (terminalHiddenBacklog.bytes > TERMINAL_HIDDEN_BACKLOG_MAX_BYTES) {
+            terminalHiddenBacklog.chunks.length = 0;
+            terminalHiddenBacklog.overflow = true;
+            return;
+          }
+          terminalHiddenBacklog.chunks.push(text);
+          return;
+        }
         // 建连后的第一帧是自足整屏重绘（见 absorbTerminalSnapshot），直写——此刻
         // 合帧层刚被 snapshot 清空、burst 也刚被丢弃，两层都干净，直写不乱序；
         // 它自带完整画面，进合并器只会平白多等一个静默窗口。
@@ -11627,14 +11709,18 @@ async function api(method, path, body) {
   // 输出只进不出地挂在页面的 xterm 实例上；浏览器把标签页冻结时更狠，恢复一刻成吨
   // 回灌。切回即卡一阵、只有终端区卡，就是这么来的。
   //
-  // 拆流不丢任何东西：PTY 归宿主进程所有，宿主对每段输出都无条件喂回放窗与镜像，
-  // 有没有观众都一样画（实测断开流 9 秒，pid、尺寸、产出全不变）。切回时重建，画面
-  // 来自镜像的自足重绘（实测跑了 3 小时的会话回放才 22KB，上限 2MB 约合 50ms 工作量）。
-  // 顺带一并清掉的还有：错列宽折行、组字锚点悬挂、以及连接已死却无人重建的死角。
+  // 现行做法不再拆流毁实例（2026-11-16 用户裁决），而是立闸：data 帧处理器在
+  // document.hidden && currentView==="terminal" 时把字节原样收进模块级缓冲
+  // （terminalHiddenBacklog），一个字节都不解析，因此成本与「攒了多少」直接成正比、
+  // 与隐藏了多久无关。回前台按积压量分流（见 visibilitychange 处理器的终端分支）：
+  // 小量逐条回灌合并器一次落屏，超量/作废走既有整屏重建。上限 8MB、分流阈值 2MB，
+  // 内置不外露。
   function syncTerminalDataStream() {
     if (!document.hidden) return;
-    // 隐藏拆流：切回时按镜像重建（见 switchView / renderTerminalPreviewSession 的补挂通路）。
-    if (terminalEventSource || terminalXterm) closeTerminalStream();
+    if (currentView !== "terminal") return;
+    if (typeof terminalHiddenBacklog === "undefined") return;
+    if (terminalHiddenBacklog) return;
+    terminalHiddenBacklog = { chunks: [], bytes: 0, overflow: false };
   }
 
   // 活跃真值流的活性门控与轮询完全一致：terminal-backend 就绪、窗口可见、
@@ -11717,10 +11803,10 @@ async function api(method, path, body) {
       terminalVisibilityWasHidden = document.hidden;
       terminalPollTimer = setInterval(() => {
         syncTerminalActivityStream();
-        // 拆流的兜底一拍：只在「本该已进后台但那次转折没送达」时收流。开局就是 hidden
-        // 不算转折（terminalVisibilityWasHidden 按初值认），所以常驻隐藏的环境里终端页
-        // 照常能建流，不把可验证性一起拆掉。回前台那一侧重建有天然退路——回终端页时
-        // 实例为空就补挂（见 switchView）。
+        // 立闸的兜底一拍：只在「本该已进后台但那次转折没送达」时补立缓冲闸。开局就是
+        // hidden 不算转折（terminalVisibilityWasHidden 按初值认），所以常驻隐藏的环境里
+        // 终端页照常能建流，不把可验证性一起拆掉。回前台那一侧的分流由 visibilitychange
+        // 处理器的终端分支兜底（见那处）。
         if (document.hidden && !terminalVisibilityWasHidden) {
           terminalVisibilityWasHidden = true;
           syncTerminalDataStream();

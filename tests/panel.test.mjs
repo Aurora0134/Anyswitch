@@ -13024,7 +13024,7 @@ describe("虚拟终端底部自动对齐", () => {
 
 // 挂后台/切回的总闸：终端页各数据源对 document.hidden 的分工在这一个处理器里。
 // 处理器整体抽进桩环境真跑——不靠字符串比对猜"接了线"，每个视图分支按调用序列钉。
-describe("虚拟终端后台转折：进后台拆流、切回按镜像重建（「死于重启」的复活另见被动重挂组）", () => {
+describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量分流（「死于重启」的复活另见被动重挂组）", () => {
   const handlerBody = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(handlerBody, "visibilitychange 处理器可取样");
 
@@ -13038,22 +13038,24 @@ describe("虚拟终端后台转折：进后台拆流、切回按镜像重建（�
       function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); return Promise.resolve(); }
       function renderTerminalPreviewSession(opts) { state.calls.push("renderPreview:revive=" + (opts && opts.revive)); }
       function syncTerminalDataStream() { state.calls.push("syncTerminalDataStream"); }
+      function queueTerminalChunk() { state.calls.push("queueTerminalChunk"); }
       function boardVisible() { return state.view === "board"; }
       let currentView = state.view;
       let terminalVisibilityWasHidden = false;
+      let terminalXterm = null;
       ${handlerBody}
     `)(state, { hidden });
     return state.calls;
   }
 
-  it("进后台：只拆流，其余一概不刷", () => {
+  it("进后台：只立缓冲闸，其余一概不刷", () => {
     assert.deepEqual(run("terminal", true), ["syncTerminalDataStream"]);
     assert.deepEqual(run("board", true), ["syncTerminalDataStream"]);
   });
 
-  it("切回终端页：先核一次闸（可见即空操作），补一拍归属数据，画面重建排在这拍数据之后", async () => {
+  it("切回终端页：先核一次闸（可见即空操作），补一拍归属数据，画面分流排在这拍数据之后", async () => {
     const calls = run("terminal", false);
-    // 重建挂在 pollTerminalSessions 的落定拍上（桩为已落定）：让出一个宏任务再断言。
+    // 分流挂在 pollTerminalSessions 的落定拍上（桩为已落定）：让出一个宏任务再断言。
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(calls, [
       "syncTerminalDataStream", "refreshStatus", "pollTerminalSessions", "renderPreview:revive=false",
@@ -13072,9 +13074,18 @@ describe("虚拟终端后台转折：进后台拆流、切回按镜像重建（�
     assert.ok(init.includes("terminalVisibilityWasHidden = document.hidden;"), "定时器建立时按当下可见性起算初值");
     const at = init.indexOf("terminalPollTimer = setInterval");
     const tick = init.slice(at, init.indexOf("}, 1000);", at));
-    assert.ok(tick.includes("document.hidden && !terminalVisibilityWasHidden"), "拆流核拍以转折为条件，不是以隐藏为条件");
+    assert.ok(tick.includes("document.hidden && !terminalVisibilityWasHidden"), "核拍以转折为条件，不是以隐藏为条件");
     assert.ok(tick.indexOf("syncTerminalDataStream") < tick.indexOf('if (document.hidden) return;'), "核拍排在隐藏早退之前，否则隐藏期根本跑不到");
     assert.ok(tick.indexOf("syncTerminalActivityStream()") < tick.indexOf("syncTerminalDataStream()"), "两条流的闸同拍，字节流不落在真值流后面");
+  });
+
+  it("防御性监听：pageshow(persisted)/freeze 只给缓冲打来源标记，不改分流判据", () => {
+    const block = panelJs.slice(panelJs.indexOf('window.addEventListener("pageshow"'), panelJs.indexOf("document.addEventListener(\"visibilitychange\""));
+    assert.ok(block.includes("event.persisted"), "pageshow 只认 persisted");
+    assert.ok(block.includes("terminalHiddenBacklog.bfcache = true"), "bfcache 恢复标记缓冲来源");
+    assert.ok(block.includes("terminalHiddenBacklog.frozen = true"), "freeze 标记缓冲来源");
+    assert.ok(block.includes("terminalSwitchLog"), "两路都走日志级归类");
+    assert.ok(!block.includes("queueTerminalChunk") && !block.includes("renderTerminalPreviewSession"), "不改分流判据");
   });
 });
 
@@ -13441,7 +13452,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "terminalBackgroundHasAlpha", "connectTerminalStream", "writeTerminalReplayFrame", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "terminalBackgroundHasAlpha", "connectTerminalStream", "writeTerminalReplayFrame", "terminalSessionShouldRevive", "dropTerminalStaleScreen", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst", "terminalHiddenBacklogInvalidate", "absorbTerminalSnapshot"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -13483,6 +13494,11 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       function requestAnimationFrame(cb) { cb(); }
       // 底部自动对齐：本沙箱不验其行为（行为钉见「虚拟终端底部自动对齐」组），补空桩接线
       function installTerminalBottomAlign() {}
+      // 缓冲闸阈值从源码取样注入：测试不抄数字，改阈值这里就红。
+      const TERMINAL_HIDDEN_BACKLOG_MAX_BYTES = ${/const TERMINAL_HIDDEN_BACKLOG_MAX_BYTES = ([^;]+);/.exec(panelJs)?.[1] ?? "8 * 1024 * 1024"};
+      const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = ${/const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = ([^;]+);/.exec(panelJs)?.[1] ?? "2 * 1024 * 1024"};
+      // data 处理器闸要读活动视图（生产模块级同名），默认钉在终端页。
+      let currentView = "terminal";
       class FakeFitAddon {
         fit() {
           const term = this.term;
@@ -13508,10 +13524,11 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         hasSelection() { return this.selection; }
       };
       class FakeEventSource {
-        constructor(url) { this.url = url; this.closed = false; state.eventSources.push(this); }
-        addEventListener() {}
-        set onerror(fn) {}
+        constructor(url) { this.url = url; this.closed = false; this.handlers = {}; state.eventSources.push(this); }
+        addEventListener(type, fn) { (this.handlers[type] ||= []).push(fn); }
+        set onerror(fn) { this.handlers.error = [fn]; }
         close() { this.closed = true; }
+        emit(type, payload) { for (const fn of this.handlers[type] || []) fn({ data: JSON.stringify(payload) }); }
       }
       const EventSource = FakeEventSource;
       class FakeResizeObserver {
@@ -13560,6 +13577,25 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let terminalReplayFramePending = false;
       // 垫片账本（connectTerminalStream 的复活分支会撤它；本组不验其行为，初值即可）
       let terminalStaleScreen = null;
+      // 隐藏期字节缓冲：隐藏闸的本体，生产模块级同名声明。桩按真跑取用。
+      let terminalHiddenBacklog = null;
+      // data 处理器的其他既存引用（只被读不被写时 typeof 即可，这里摆真值以真跑）。
+      let terminalGeometryReplayDrop = false;
+      let terminalGeometryRealignPending = false;
+      let terminalLastStreamDataAt = 0;
+      // absorbTerminalSnapshot 的几何闸其余记账（重对齐冷却/上限与收尾设施）。
+      let terminalGeometryRealignAt = 0;
+      let terminalGeometryRealignStreak = 0;
+      let terminalStreamDeferred = false;
+      let terminalDeferredSessionId = null;
+      let terminalGeometryRealignTimer = null;
+      const TERMINAL_GEOMETRY_REALIGN_COOLDOWN_MS = 1500;
+      const TERMINAL_GEOMETRY_REALIGN_MAX_ATTEMPTS = 2;
+      const TERMINAL_GEOMETRY_REALIGN_STALL_MS = 3000;
+      function dropTerminalReplayFrame(term) { terminalGeometryReplayDrop = true; terminalReplayFramePending = false; if (term && term.reset) term.reset(); }
+      function finishTerminalGeometryRealign() { terminalGeometryRealignPending = false; }
+      function scheduleTerminalGeometryRealign() {}
+      function deferTerminalStream() { terminalStreamDeferred = true; }
       return {
         connect: (session, opts) => connectTerminalStream(session, opts),
         close: () => closeTerminalStream(),
@@ -13574,6 +13610,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         setHostSize: (w, h) => { host.clientWidth = w; host.clientHeight = h; },
         setMeasured: (cols, rows) => { state.measured = { cols, rows }; },
         observers: () => state.resizeObservers,
+        setCurrentView: (v) => { currentView = v; },
+        backlog: () => terminalHiddenBacklog,
       };
     `)(state);
     return { sandbox, state, view };
@@ -13764,7 +13802,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.deepEqual(resizePosts(state)[1].body, { cols: 119, rows: 26 });
   });
 
-  it("进后台即拆会话字节流：连接断开、实例销毁，未解析积压随实例一起清掉", async () => {
+  it("进后台立缓冲闸：连接保活、实例保活，零积压不产生缓冲", async () => {
     const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
     // 建连里 fit 的 resize POST 落定后才开流（时序钉见 T10）：await 到 EventSource 就绪
     await sandbox.connect(backendSession("sess-a"));
@@ -13772,27 +13810,79 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const source = sandbox.source();
     sandbox.setWindowHidden(true);
     sandbox.sync();
-    assert.equal(source.closed, true, "SSE 断开：隐藏期不再收字节，宿主也不再为这个客户端堆缓冲");
-    assert.equal(term.disposed, true, "xterm 实例随流销毁：WriteBuffer 里排队的旧字节不会被切回时一次成吨解析");
-    assert.equal(sandbox.xterm(), null, "实例引用清空，回前台走新建实例重建");
-    assert.equal(sandbox.source(), null, "流引用清空");
-    assert.equal(state.terms.length, 1, "拆流不顺手新建实例");
+    assert.equal(source.closed, false, "SSE 保持：不再拆流毁实例");
+    assert.equal(term.disposed, false, "xterm 实例随流保活");
+    assert.equal(sandbox.xterm(), term, "实例引用保持，回前台零重建");
+    assert.equal(sandbox.source(), source, "流引用保持");
+    assert.equal(state.terms.length, 1, "不新建实例");
+    assert.deepEqual(sandbox.backlog(), { chunks: [], bytes: 0, overflow: false }, "缓冲闸就位");
   });
 
-  it("可见时不误拆、无流时拆是空操作", async () => {
+  it("缓冲闸幂等：重复 sync 只立一次，不覆盖既有缓冲", async () => {
+    const { sandbox } = terminalGateSandbox({ viewHidden: false });
+    await sandbox.connect(backendSession("sess-a"));
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    const first = sandbox.backlog();
+    sandbox.sync();
+    assert.equal(sandbox.backlog(), first, "闸已立时不重置");
+  });
+
+  it("隐藏期 data 帧入缓冲不入屏，零字节直达 xterm", async () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    await sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    const src = state.eventSources[0];
+    const payload = "隐藏期的一帧输出";
+    src.emit("data", payload);
+    assert.deepEqual(term.writes, [], "隐藏期字节一个不写屏");
+    assert.deepEqual(sandbox.backlog().chunks, [payload], "帧收进缓冲");
+    assert.equal(sandbox.backlog().bytes, payload.length, "字节量与帧一致");
+  });
+
+  it("缓冲上限：超界即停收并置 overflow，后续帧直丢", async () => {
+    const { sandbox } = terminalGateSandbox({ viewHidden: false });
+    await sandbox.connect(backendSession("sess-a"));
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    const src = sandbox.source();
+    const big = "x".repeat(8 * 1024 * 1024 + 1);
+    src.emit("data", big);
+    assert.equal(sandbox.backlog().overflow, true, "越界即置 overflow");
+    assert.equal(sandbox.backlog().chunks.length, 0, "越界即丢缓冲");
+    assert.equal(sandbox.backlog().bytes, 8 * 1024 * 1024 + 1, "记账保留，供恢复分流");
+    src.emit("data", "又一帧");
+    assert.equal(sandbox.backlog().chunks.length, 0, "overflow 后直丢不再收");
+  });
+
+  it("几何闸触发即作废缓冲：缓冲积压不再回灌", async () => {
+    const { sandbox } = terminalGateSandbox({ viewHidden: false });
+    await sandbox.connect(backendSession("sess-a"));
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    sandbox.source().emit("data", "隐藏期的一帧");
+    assert.equal(sandbox.backlog().chunks.length, 1, "隐藏期收进缓冲");
+    // 宿主的镜像尺寸改到与客户端（119×26）不一致，几何闸的重对齐分支作废缓冲
+    sandbox.source().emit("snapshot", { pid: 1, screenCols: 240, screenRows: 60 });
+    assert.equal(sandbox.backlog() && sandbox.backlog().overflow, true, "几何不一致即作废积压");
+  });
+
+  it("可见时不立闸、无流时也照常立闸（缓冲依赖的是 SSE 连接，不是实例）", async () => {
     const { sandbox } = terminalGateSandbox({ viewHidden: false });
     await sandbox.connect(backendSession("sess-a"));
     const source = sandbox.source();
     sandbox.setWindowHidden(false);
     sandbox.sync();
+    assert.equal(sandbox.backlog(), null, "可见时不立闸");
     assert.equal(source.closed, false, "正在看着的终端不被核拍收走");
-    assert.notEqual(sandbox.xterm(), null, "实例保持存活");
 
     const idle = terminalGateSandbox({ viewHidden: false });
     idle.sandbox.setWindowHidden(true);
     idle.sandbox.sync();
-    assert.equal(idle.state.terms.length, 0, "无实例无流：拆流不建、不报错");
-    assert.equal(idle.state.eventSources.length, 0, "同上，没有连接被打开");
+    assert.deepEqual(idle.sandbox.backlog(), { chunks: [], bytes: 0, overflow: false }, "隐藏且终端页即立闸，与是否有实例无关");
+    assert.equal(idle.state.eventSources.length, 0, "没有实例时不会另开连接");
   });
 });
 
