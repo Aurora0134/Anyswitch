@@ -139,7 +139,7 @@ describe("壁纸态平铺盒补底（T1）", () => {
     assert.ok(!panelCss.slice(comp, panelCss.indexOf("}", comp)).includes("!important"),
       "不靠 !important 压层叠");
     // 平铺段自身仍是透明描边盒（补偿是叠加的一层，不是把平铺段改回实底——
-    // 那样 saas/aurora/sepia 三套皮肤会跟着变）
+    // 那样 cyan/aurora/sepia 三套皮肤会跟着变）
     for (const [sel, label] of [[STAGE2_SETTINGS_SEL, "阶段 2 设置段"], [STAGE3_STATS_SEL, "阶段 3 统计段"]]) {
       const body = ruleBody(sel, label);
       assert.ok(body.decls.includes("background: transparent"), `${label} 仍为透明描边盒`);
@@ -162,7 +162,7 @@ describe("壁纸态平铺盒补底（T1）", () => {
       "卡面规则恰好两个选择器（设置页四面板 + 统计页）");
     for (const { sel } of compensation) {
       assert.ok(sel.includes('[data-ui-version="v2"]'), "补偿只作用于 v2（v1 平铺段不存在，无需补）");
-      for (const skin of ["saas", "aurora", "sepia"]) {
+      for (const skin of ["cyan", "aurora", "sepia"]) {
         assert.ok(!sel.includes(skin), `${skin} 不得进补偿段作用域`);
       }
     }

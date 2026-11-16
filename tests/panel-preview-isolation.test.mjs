@@ -2,7 +2,7 @@
 // 预览是「壁纸主题生效时真实看板」的镜像克隆（panel.js 的 captureMirrorInto），克隆体位于
 // :root 之下，所以当前静态皮肤的规则与私有 token 天然会命中/继承进去，预览就失真。本文件
 // 守两条隔离：
-// 一、@scope 收边：panel.css 里凡以 saas/aurora/sepia 字面量键控的皮肤规则，必须落在
+// 一、@scope 收边：panel.css 里凡以 default/cyan/aurora/sepia 字面量键控的皮肤规则，必须落在
 //     `@scope (…) to (.wallpaper-preview)` 内。唯一例外是 `:root` 上只声明自定义属性的
 //     皮肤 token 规则——自定义属性靠继承下发，@scope 管不到继承，收边无意义。
 //     作用域不含作用域根自身：块内选择器必须把「`:root` + 皮肤键」前缀改写成
@@ -13,7 +13,7 @@
 // 二、私有 token：`.wallpaper-preview` 上按壁纸主题生效时真实看板的 computed 值逐项补齐
 //     皮肤私有 token（基座段有定义的抄基座段，没有的显式 initial）。
 // 口径说明：
-// - 作用域起点必须覆盖规则自身的皮肤键：写错皮肤（如 sepia 规则包进 saas 作用域）会让该条
+// - 作用域起点必须覆盖规则自身的皮肤键：写错皮肤（如 sepia 规则包进 cyan 作用域）会让该条
 //   在真实看板上失效，属于「静默丢样式」，必须拦。
 // - token 取值与基座段 + 壁纸主题覆盖逐项对账：改基座段不改隔离层即为红。
 import test, { describe, it } from "node:test";
@@ -28,8 +28,17 @@ const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const panelCss = readFileSync(join(rootDir, "panel-ui", "panel.css"), "utf8").replace(/\r\n/g, "\n");
 const panelHtml = readFileSync(join(rootDir, "panel-ui", "panel.html"), "utf8");
 const panelJs = readFileSync(join(rootDir, "panel-ui", "panel.js"), "utf8");
-const SLUGS = ["saas", "aurora", "sepia"];
+const SLUGS = ["default", "cyan", "aurora", "sepia"];
 const PREVIEW = ".wallpaper-preview";
+// 皮肤键历史别名：saas 皮肤改名为 cyan。base 版本（218f6f9）里仍是 saas 字面量，
+// 读回后统一把皮肤键别名改写为当前键，逐条等价对账才不会因改名误报「皮肤键不在起点内」。
+// default 是本次新增皮肤，base 里没有对应片段，readBaseCss 返回 null 走 skip。
+const SKIN_ALIASES = { saas: "cyan" };
+const aliasSkin = (text) => text
+  .replace(/data-style="(saas|aurora|sepia|cyan|default)"/g,
+    (m, key) => `data-style="${SKIN_ALIASES[key] ?? key}"`)
+  // 皮肤私有动画名也随 saas→cyan 改名（声明体逐字对账依赖同名）
+  .replace(/saas-modal-in/g, "cyan-modal-in");
 // 改写前的基准版本：@scope 收边已存在但选择器仍是「:root + 皮肤键」前缀的最后一版。
 // e01ede8 首个把皮肤覆盖规则收进 @scope，218f6f9 补齐 v2 集中段的收边，0b51458 才把
 // 块内前缀改写成 :scope:scope——基准必须取 218f6f9：早于 e01ede8 的版本里 inScope
@@ -49,12 +58,12 @@ const RETIRED_BASE_SKIN_RULES = new Map([
   ["panel-ui/panel.css", new Set([
     // 2026-11-12：终端会话栏底部渐隐改挂滚动层 mask（原渐变色块在壁纸主题的半透明栏底
     // 上会叠出第二层 alpha，暗色下读成一道黑带）。渐隐不再取栏底色，--rail-bg 的
-    // saas/sepia 对调失去用点，随渐隐一并删除。
-    ':root[data-ui-version="v2"][data-style="saas"] #v2Rail, :root[data-ui-version="v2"][data-style="sepia"] #v2Rail',
+    // cyan/sepia 对调失去用点，随渐隐一并删除。选择器串按 base 别名（saas→cyan）写。
+    ':root[data-ui-version="v2"][data-style="cyan"] #v2Rail, :root[data-ui-version="v2"][data-style="sepia"] #v2Rail',
     // 2026-11-14：实时输出改消息提示式双态流，伪终端壳（.log-console/.log-toolbar）
     // 退场；消息卡走基座 surface/border/shadow token，皮肤不再单独覆盖。
-    ':root[data-style="saas"] .log-console',
-    ':root[data-style="saas"] .log-toolbar',
+    ':root[data-style="cyan"] .log-console',
+    ':root[data-style="cyan"] .log-toolbar',
     ':root[data-style="aurora"] .log-console',
     ':root[data-style="aurora"] .log-toolbar',
     ':root[data-style="aurora"] .log-clear-btn',
@@ -62,10 +71,10 @@ const RETIRED_BASE_SKIN_RULES = new Map([
     ':root[data-style="aurora"][data-theme="dark"] .log-console',
     ':root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console',
   ])],
-  ["panel-ui/style-lab/saas.css", new Set([
+  ["panel-ui/style-lab/cyan.css", new Set([
     // 2026-11-14：同 panel.css——实时输出伪终端壳退场，消息卡吃基座 token。
-    ':root[data-style="saas"] .log-console',
-    ':root[data-style="saas"] .log-toolbar',
+    ':root[data-style="cyan"] .log-console',
+    ':root[data-style="cyan"] .log-toolbar',
   ])],
   ["panel-ui/style-lab/aurora.css", new Set([
     // 2026-11-14：同 panel.css——实时输出伪终端壳退场，消息卡吃基座 token。
@@ -78,10 +87,15 @@ const RETIRED_BASE_SKIN_RULES = new Map([
   ])],
 ]);
 function readBaseCss(relPath) {
+  // cyan 是 saas 的改名：base 版本里只有 saas.css，映射到它再对账。
+  // default 是本次新增皮肤，base 里没有对应文件——返回 null，对账用例走 skip。
+  const basePath = relPath.replace(/style-lab\/cyan\.css$/, "style-lab/saas.css");
+  if (/style-lab\/default\.css$/.test(relPath)) return null;
   try {
-    return execFileSync("git", ["show", `${BASE_REV}:${relPath}`], {
+    const text = execFileSync("git", ["show", `${BASE_REV}:${basePath}`], {
       cwd: rootDir, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"],
     }).toString("utf8").replace(/\r\n/g, "\n");
+    return aliasSkin(text);
   } catch {
     return null;
   }
@@ -151,7 +165,7 @@ function declPairs(body) {
   return map;
 }
 const selectorList = (sel) => sel.split(",").map((s) => s.trim()).filter(Boolean);
-const skinKeys = (sel) => [...sel.matchAll(/data-style="(saas|aurora|sepia)"/g)].map((m) => m[1]);
+const skinKeys = (sel) => [...sel.matchAll(/data-style="(default|cyan|aurora|sepia)"/g)].map((m) => m[1]);
 
 // ─── 作用域改写等价性：前缀归一化 / 特异性 / 与 base 逐条对账 ───
 function skipBalanced(text, i, open, close) {
@@ -183,7 +197,7 @@ function splitSelectorList(sel) {
   parts.push(sel.slice(start).trim());
   return parts.filter(Boolean);
 }
-const DATA_STYLE_ATTR = /^\[\s*data-style\s*=\s*["'](saas|aurora|sepia)["']\s*\]$/;
+const DATA_STYLE_ATTR = /^\[\s*data-style\s*=\s*["'](default|cyan|aurora|sepia)["']\s*\]$/;
 // 把 base 选择器的链首「:root + 皮肤键」归一化成改写后的 :scope:scope 形态。
 // 其余条件（[data-theme="dark"]、v2 块的 [data-ui-version="v2"] 等）原样保留在后。
 function canonicalSelector(sel) {
@@ -267,13 +281,13 @@ const specificityText = (sel) => splitSelectorList(sel)
   .map((part) => specificityOfPart(part).join(","))
   .sort()
   .join(" | ");
-// base 版本里「主语是 :root 之后元素、且键控 saas/aurora/sepia」的皮肤覆盖规则；
+// base 版本里「主语是 :root 之后元素、且键控皮肤键（别名后为 cyan/aurora/sepia）」的皮肤覆盖规则；
 // 主语就是 :root 的 token 定义不计入（它们必须留在 @scope 外）。
 const ROOT_ONLY_PREFIX = /^:root(?:\[[^\]]*\]|:not\([^)]*\)|:is\([^)]*\))*(?=\s|$)/;
 function isRootFacingSkinRule(sel) {
   const parts = splitSelectorList(sel);
   if (parts.length === 0) return false;
-  if (!parts.every((part) => ROOT_ONLY_PREFIX.test(part) && /data-style="(saas|aurora|sepia)"/.test(part))) return false;
+  if (!parts.every((part) => ROOT_ONLY_PREFIX.test(part) && /data-style="(default|cyan|aurora|sepia)"/.test(part))) return false;
   const tokenOnly = parts.every((part) => {
     const m = part.match(ROOT_ONLY_PREFIX);
     return Boolean(m) && part.replace(/\s+/g, "") === m[0].replace(/\s+/g, "");
@@ -366,7 +380,7 @@ describe("皮肤规则的 @scope 收边", () => {
       const scope = scopeFrame(pre);
       assert.ok(scope, `@scope 写法不可解析：${pre}`);
       assert.ok(skinKeys(scope.start).length > 0,
-        `@scope 起点必须携带皮肤键（saas/aurora/sepia），实为「${scope.start}」——皮肤归属只剩起点这一个载体，起点不带皮肤键等于给挪块开了门`);
+        `@scope 起点必须携带皮肤键（default/cyan/aurora/sepia），实为「${scope.start}」——皮肤归属只剩起点这一个载体，起点不带皮肤键等于给挪块开了门`);
       assert.equal(scope.end, PREVIEW, `@scope 终点应恰为 ${PREVIEW}，实为 ${scope.end}`);
     }
   });
@@ -485,17 +499,17 @@ describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
   }, () => {
     const baseCss = readBaseCss("panel-ui/panel.css");
     const lines = panelCss.split("\n");
-    // 挪动设计：取 saas/sepia 合并块的第一条规则，挪到它前面最近的 aurora 块内末尾。
+    // 挪动设计：取 cyan/sepia 合并块的第一条规则，挪到它前面最近的 aurora 块内末尾。
     // 两块之间没有别的 @scope 内规则，尾接尾挪动后展平顺序不变——前缀归一化、特异性、
     // 声明、多重集全部照旧绿，唯一该红的是皮肤键闸（复核复现过：这条变异在闸补上前
-    // violations=[]、175/175 全绿）。挪进 aurora 块后，该条对 saas/sepia 看板整条失效，
+    // violations=[]、175/175 全绿）。挪进 aurora 块后，该条对 cyan/sepia 看板整条失效，
     // 正是文件头口径声明要拦的「静默丢样式」。
     const mergeRule = RULES.find((r) => {
       if (!r.chain.some((p) => p.startsWith("@scope"))) return false;
       const keys = scopeSkinKeys(r);
-      return keys.size === 2 && keys.has("saas") && keys.has("sepia");
+      return keys.size === 2 && keys.has("cyan") && keys.has("sepia");
     });
-    assert.ok(mergeRule, "panel.css 应存在 saas/sepia 合并 @scope 块内的规则（本用例的挪动源）");
+    assert.ok(mergeRule, "panel.css 应存在 cyan/sepia 合并 @scope 块内的规则（本用例的挪动源）");
     const auroraBefore = RULES.filter((r) => {
       const keys = scopeSkinKeys(r);
       return keys.size === 1 && keys.has("aurora") && r.line < mergeRule.line;
@@ -507,8 +521,8 @@ describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
     lines.splice(lastAurora.endLine, 0, ...moved);
     const report = auditScopedCss(lines.join("\n"), baseCss, "panel-ui/panel.css");
     const skinGate = report.violations.filter((v) => v.includes("不在其 @scope 起点内"));
-    assert.deepEqual(skinGate.map((v) => /皮肤键 (\w+)/.exec(v)[1]).sort(), ["saas", "sepia"],
-      "挪进 aurora 块的 saas/sepia 规则必须报出两个皮肤键都不在起点内：" + JSON.stringify(report.violations, null, 2));
+    assert.deepEqual(skinGate.map((v) => /皮肤键 (\w+)/.exec(v)[1]).sort(), ["cyan", "sepia"],
+      "挪进 aurora 块的 cyan/sepia 规则必须报出两个皮肤键都不在起点内：" + JSON.stringify(report.violations, null, 2));
     const others = report.violations.filter((v) => !v.includes("不在其 @scope 起点内"));
     assert.deepEqual(others, [],
       "尾接尾挪动保持展平顺序——前缀归一化/条数/特异性/声明/多重集必须照旧全绿，红只能来自皮肤键闸：" +
