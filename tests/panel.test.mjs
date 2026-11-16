@@ -13030,7 +13030,7 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
   const handlerBody = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(handlerBody, "visibilitychange 处理器可取样");
 
-  function run(view, hidden) {
+  function run(view, hidden, opts = {}) {
     const state = { view, calls: [] };
     new Function("state", "document", `
       function refreshStatus() { state.calls.push("refreshStatus"); return Promise.resolve(); }
@@ -13038,13 +13038,15 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
       function refreshModelStability() { state.calls.push("refreshModelStability"); }
       function refreshStatsState() { state.calls.push("refreshStatsState"); }
       function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); return Promise.resolve(); }
-      function renderTerminalPreviewSession(opts) { state.calls.push("renderPreview:revive=" + (opts && opts.revive)); }
+      function renderTerminalPreviewSession(o) { state.calls.push("renderPreview:revive=" + (o && o.revive) + (o && o.force ? ":force" : "")); }
       function syncTerminalDataStream() { state.calls.push("syncTerminalDataStream"); }
       function queueTerminalChunk() { state.calls.push("queueTerminalChunk"); }
       function boardVisible() { return state.view === "board"; }
       let currentView = state.view;
       let terminalVisibilityWasHidden = false;
       let terminalXterm = null;
+      let terminalHiddenBacklog = ${JSON.stringify(opts.backlog ?? null)};
+      const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = 2 * 1024 * 1024;
       ${handlerBody}
     `)(state, { hidden });
     return state.calls;
@@ -13062,6 +13064,24 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
     assert.deepEqual(calls, [
       "syncTerminalDataStream", "refreshStatus", "pollTerminalSessions", "renderPreview:revive=false",
     ]);
+  });
+
+  it("零积压切回终端页：不穿透健存闸（零重建路径，2026-11-16 用户裁决 A）", async () => {
+    const calls = run("terminal", false, { backlog: { chunks: [], bytes: 0, overflow: false } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(calls.includes("renderPreview:revive=false"), "零积压走不带 force 的复用调用");
+    assert.ok(!calls.some((c) => c.includes(":force")), "零积压不穿透健存闸——流健在时由它短路成零重建");
+  });
+
+  it("超量/作废切回终端页：穿透健存闸整屏重建（画面已不可信）", async () => {
+    for (const backlog of [
+      { chunks: [], bytes: 9 * 1024 * 1024, overflow: false },   // 超 WRITE_BYTES
+      { chunks: [], bytes: 100, overflow: true },                // 几何作废
+    ]) {
+      const calls = run("terminal", false, { backlog });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.ok(calls.includes("renderPreview:revive=false:force"), `超量/作废须穿透重建: ${JSON.stringify(backlog)}`);
+    }
   });
 
   it("切回看板/统计/其它页：不碰终端重建，看板照常补两拍", () => {

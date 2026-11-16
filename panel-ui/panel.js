@@ -577,18 +577,25 @@ async function api(method, path, body) {
       pollTerminalSessions().finally(() => {
         // 按积压量分流（积压字节全在这一拍收进 terminalHiddenBacklog，见
         // syncTerminalDataStream 与 data 帧处理器）：
-        //   · 缓冲为空或超量/作废 → 走既有重建（前者零积压，后者画面已不可信）；
+        //   · 缓冲为空 → 画面零漂移：流还健在同会话闸自动短路、零重建直接复用；
+        //     流已断则由 renderTerminalPreviewSession 自建一条（实例缺失场景）。
         //   · 小量 → 逐条回灌合并器（突发窗口把整段合成一次落屏），同会话健存闸
         //     命中后零重建——阅读位与外层滚动位原样，交接单到点自然作废。
+        //   · 超量/作废 → 画面已不可信，穿透健存闸整屏重建（force 的语义见
+        //     renderTerminalPreviewSession 的闸注释）。
         const backlog = typeof terminalHiddenBacklog !== "undefined" ? terminalHiddenBacklog : null;
-        const replayable = !!backlog && !backlog.overflow && backlog.bytes > 0
-          && typeof TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES === "number"
-          && backlog.bytes <= TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES;
-        if (!replayable) {
-          if (backlog) terminalHiddenBacklog = null;
-          // 保流后流健在，不穿透健存闸重建就会被短路：缓冲已丢、画面已不可信，
-          // 这一闸必须越过去（同会话健存闸的穿透孔，见 renderTerminalPreviewSession）。
+        // 超量/作废是唯一必须穿透重建的路径：缓冲已丢、画面已不可信。
+        const mustRebuild = !!backlog && (backlog.overflow || backlog.bytes > (typeof TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES === "number" ? TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES : 0));
+        if (mustRebuild) {
+          terminalHiddenBacklog = null;
           renderTerminalPreviewSession({ revive: false, force: true });
+          return;
+        }
+        if (!backlog || backlog.bytes === 0) {
+          // 零积压：屏面内容就是活的，不带 force——同会话流健在时健存闸短路掉重建，
+          // 阅读位零扰动；流不在（实例缺失/被回收）时该调用自己建流补齐。
+          terminalHiddenBacklog = null;
+          renderTerminalPreviewSession({ revive: false });
           return;
         }
         const term = terminalXterm;
