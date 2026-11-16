@@ -586,7 +586,9 @@ async function api(method, path, body) {
           && backlog.bytes <= TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES;
         if (!replayable) {
           if (backlog) terminalHiddenBacklog = null;
-          renderTerminalPreviewSession({ revive: false });
+          // 保流后流健在，不穿透健存闸重建就会被短路：缓冲已丢、画面已不可信，
+          // 这一闸必须越过去（同会话健存闸的穿透孔，见 renderTerminalPreviewSession）。
+          renderTerminalPreviewSession({ revive: false, force: true });
           return;
         }
         const term = terminalXterm;
@@ -10341,11 +10343,14 @@ async function api(method, path, body) {
         // 既有保留策略，照常直写）。首帧回放 / 同步合帧 / 突发合并在此全部不动作，
         // 它们服务的「新画面就绪才揭幕」判据因而自然不成立。闸外两条路都可见：
         // 缓冲溢出或隐藏期几何闸作废旧字节后，本帧及后续帧直接丢（恢复必走整屏
-        // 重建，写的是注定被替换的屏）；分流确认前的中途切走保留已缓冲字节，
-        // 回前台仍按量分流。typeof 与常量存在性双闸护单测桩环境。
+        // 重建，写的是注定被替换的屏）；回前台的分流落定拍在 pollTerminalSessions
+        // 落定才跑，其间新帧若绕闸直写会把「新帧在前、旧缓冲稍后回灌」的顺序颠倒，
+        // 所以分流落定前只要 backlog 仍在就继续入闸。typeof 与常量存在性双闸护
+        // 单测桩环境。
         if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog
             && typeof TERMINAL_HIDDEN_BACKLOG_MAX_BYTES === "number"
-            && typeof document !== "undefined" && document.hidden && currentView === "terminal") {
+            && currentView === "terminal"
+            && (typeof document === "undefined" || document.hidden || terminalHiddenBacklog.overflow)) {
           if (terminalHiddenBacklog.overflow) return;
           terminalHiddenBacklog.bytes += text.length;
           if (terminalHiddenBacklog.bytes > TERMINAL_HIDDEN_BACKLOG_MAX_BYTES) {
@@ -11616,7 +11621,7 @@ async function api(method, path, body) {
   // 回放最后一屏，不替用户重开空壳。点页签、新建、降级重试等主动通路照旧走默认。
   // deferScreen:true —— live 行快路径（terminalRailActivateSession）专用口径：
   // 停放/建流/fit 整组延后双 rAF，让栏体高亮当拍先渲（见下方分支内注释）。
-  function renderTerminalPreviewSession({ revive = true, deferScreen = false } = {}) {
+  function renderTerminalPreviewSession({ revive = true, deferScreen = false, force = false } = {}) {
     // 左栏终端会话栏先渲：它与终端屏的就绪三态无关（降级/零会话时栏体照常可用——
     // 「新建终端」自带就绪闸，历史会话按当前 agent 取）。切页签 / 新建 / 关闭 /
     // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境；try 护连接
@@ -11658,7 +11663,11 @@ async function api(method, path, body) {
     //（xterm＋SSE 各重来一遍）——抽搐的主要视觉放大器。closeTerminalStream 同步清
     // terminalBoundSessionId，条件自洽：流被拆过就必然不满足，重建照旧。typeof 闸护
     // 单测桩环境（模块级量不随行）。
-    if (typeof terminalBoundSessionId !== "undefined" && terminalBoundSessionId === session.id
+    // force 是重建闸的穿透孔（2026-11-16 积压根治修）：回前台分流判「超量/作废必须
+    // 重建」时，缓冲已丢弃、画面已不可信，健存闸再拦就是屏面永久停在旧帧；重建
+    // 分支显式传 force:true 越过这一闸，其余入口不变。
+    if (!force
+      && typeof terminalBoundSessionId !== "undefined" && terminalBoundSessionId === session.id
       && typeof terminalEventSource !== "undefined" && terminalEventSource) return;
     if (deferScreen) {
       // live 行快路径让帧：左栏点已开着的会话行时，这一帧先让栏体当拍重渲

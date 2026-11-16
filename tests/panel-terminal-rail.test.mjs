@@ -1558,7 +1558,8 @@ describe("终端视图左栏换血", () => {
 
     it("live 行快路径让帧：停放/建流/fit 成对延后双 rAF，帧令牌保连点（源码+vm 真跑）", async () => {
       const render = extractFn("renderTerminalPreviewSession");
-      assert.ok(render.includes("{ revive = true, deferScreen = false } = {}"), "开关默认关，其余调用点行为不变");
+      assert.ok(render.includes("{ revive = true, deferScreen = false, force = false } = {}"),
+        "deferScreen/force 默认关，其余调用点行为不变");
       const branch = render.slice(render.indexOf("if (deferScreen)"));
       assert.ok(branch.includes("requestAnimationFrame(() => requestAnimationFrame(runDeferredScreen))"),
         "双 rAF 调度（一帧给渲染器排程、一帧给合成器上屏）");
