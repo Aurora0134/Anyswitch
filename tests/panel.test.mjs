@@ -19156,3 +19156,80 @@ describe("看板运行日志：无框消息提示式双态流", () => {
   });
 });
 
+describe("壁纸域运行日志卡实底＋底缘条退场＋主题页外部预览壁纸垫底", () => {
+  it("卡面实底化：wallpaper 域 --ll-face 改调不透明基色 token，基座定义与其他皮肤不动", () => {
+    assert.ok(panelCss.includes(':root[data-style="wallpaper"] .live-log { --ll-face: color-mix(in srgb, var(--surface-opaque) 94%, white 6%); }'),
+      "wallpaper 域卡面底改取 --surface-opaque（--surface 带玻璃化 alpha，字会压上透出的壁纸）");
+    assert.equal((panelCss.match(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/g) ?? []).length, 1,
+      "基座卡面底仍唯一一处定义，且不被覆盖规则顶成第二处");
+    assert.equal((panelCss.match(/:root\[data-style="wallpaper"\] \.live-log \{ --ll-face:/g) ?? []).length, 1,
+      "wallpaper 域卡面覆盖规则唯一");
+  });
+
+  it("底缘条透明度变量化：基座读 var(--ll-lip-o, 0.55)，wallpaper 域置 0，::after 规则仍唯一", () => {
+    const lip = panelCss.match(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{([^}]*)\}/)?.[1] ?? "";
+    assert.ok(lip.includes("opacity: var(--ll-lip-o, 0.55)"), "底缘条透明度改读变量，默认档 0.55 原样");
+    assert.ok(!/opacity: 0\.55/.test(lip.replace("var(--ll-lip-o, 0.55)", "")), "底缘条不再写死 0.55");
+    assert.ok(panelCss.includes(':root[data-style="wallpaper"] .live-log { --ll-lip-o: 0; }'),
+      "wallpaper 域底缘条整根退场（实底下那条半透明卡顶缘成了多余的一道）");
+    assert.equal((panelCss.match(/\.live-log-stage::after/g) ?? []).length, 1, "底缘条 ::after 规则仍唯一，不靠新增选择器压层叠");
+  });
+
+  it("外部预览垫底结构：sizer 内、镜像克隆体之前垫图片层＋压暗层，纯装饰不进可读树", () => {
+    const sizer = panelHtml.indexOf('id="settingsMirrorSizer"');
+    const scale = panelHtml.indexOf('id="settingsMirrorScale"');
+    assert.ok(sizer > 0 && scale > sizer, "镜像 sizer/scale 在册");
+    const seg = panelHtml.slice(sizer, scale);
+    assert.ok(seg.includes('class="settings-mirror-backdrop"'), "垫底容器垫在镜像克隆体之前（先画垫底再画内容）");
+    assert.ok(/class="settings-mirror-backdrop" aria-hidden="true"/.test(seg), "垫底纯装饰，aria 隐藏");
+    assert.ok(seg.includes('id="settingsMirrorBackdropImage"'), "图片层在册");
+    assert.ok(seg.includes('id="settingsMirrorBackdropDim"'), "压暗层在册");
+    // 结构钉：对照「自定义主题」窗内预览的垫底构造（容器 class + 两层 id）
+    const backdrop = seg.match(/<div class="settings-mirror-backdrop" aria-hidden="true">([\s\S]*?)<\/div>\s*<\/div>/)?.[0] ?? "";
+    assert.ok(backdrop.includes('id="settingsMirrorBackdropImage"') && backdrop.includes('id="settingsMirrorBackdropDim"'),
+      "图片层与压暗层同垫底容器内");
+  });
+
+  it("垫底 CSS：基座默认收编铺满 sizer，图片层外扩防模糊露边，壁纸主题有图才门控放行", () => {
+    assert.ok(/\.settings-mirror-backdrop \{ display: none; position: absolute; inset: 0;/.test(panelCss),
+      "基座默认收编，绝对定位铺满 sizer（一屏）");
+    assert.ok(/\.settings-mirror-backdrop-image \{ position: absolute; inset: -40px;[^}]*background-size: cover;/.test(panelCss),
+      "图片层外扩 40px＋cover（模糊滤镜虚边推出视口，与全局垫底同口径）");
+    assert.ok(/\.settings-mirror-backdrop-dim \{ position: absolute; inset: 0;/.test(panelCss), "压暗层铺满垫底");
+    assert.ok(panelCss.includes(':root[data-style="wallpaper"][data-wallpaper="active"] .settings-mirror-backdrop { display: block; }'),
+      "门控＝壁纸主题且有图双条件（与全局垫底同一门控口径）");
+    assert.equal((panelCss.match(/\.settings-mirror-backdrop \{ display: none;/g) ?? []).length, 1, "垫底基座规则唯一");
+  });
+
+  it("syncSettingsMirrorWallpaper：从全局垫底直拷三条内联样式，拍镜像与壁纸变更两处都接线", () => {
+    assert.ok(/^ {2}function syncSettingsMirrorWallpaper\(\) \{/m.test(panelJs), "声明在 IIFE 顶层（两处调用点都够得到）");
+    // 行为面：桩 $ 直读四元素，拷齐 backgroundImage / filter / background 三条内联样式
+    const els = {
+      wallpaperBackdropImage: { style: { backgroundImage: 'url("blob:x")', filter: "blur(5px)" } },
+      wallpaperBackdropDim: { style: { background: "rgba(0, 0, 0, 0.15)" } },
+      settingsMirrorBackdropImage: { style: {} },
+      settingsMirrorBackdropDim: { style: {} },
+    };
+    const sync = vm.runInNewContext(
+      `(() => { ${extractFn("syncSettingsMirrorWallpaper")}\nreturn syncSettingsMirrorWallpaper; })()`,
+      { $: (id) => els[id] ?? null },
+    );
+    sync();
+    assert.equal(els.settingsMirrorBackdropImage.style.backgroundImage, 'url("blob:x")', "图片同步");
+    assert.equal(els.settingsMirrorBackdropImage.style.filter, "blur(5px)", "模糊同步");
+    assert.equal(els.settingsMirrorBackdropDim.style.background, "rgba(0, 0, 0, 0.15)", "压暗同步");
+    els.wallpaperBackdropImage.style.backgroundImage = "";
+    els.wallpaperBackdropImage.style.filter = "";
+    els.wallpaperBackdropDim.style.background = "";
+    sync();
+    assert.equal(els.settingsMirrorBackdropImage.style.backgroundImage, "", "移除后镜像跟着清，不留残影");
+    // 接线面：进主题页拍镜像时同步一次；壁纸确认/移除/启动恢复（onAfterChange）后跟着全局垫底同步
+    const capture = panelJs.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/)?.[1] ?? "";
+    assert.ok(capture.includes("captureMirrorInto("), "captureSettingsMirror 仍拍看板镜像");
+    assert.ok(capture.includes("syncSettingsMirrorWallpaper()"), "进主题页拍镜像时同步垫底");
+    const initWp = extractFn("initWallpaper");
+    assert.ok(/onAfterChange: \(\) => \{[^}]*applyTerminalXtermTheme\(\)[^}]*syncSettingsMirrorWallpaper\(\)[^}]*\}/.test(initWp),
+      "onAfterChange 组合：终端屏配色重刷＋镜像垫底随全局垫底同步");
+  });
+});
+

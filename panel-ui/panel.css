@@ -1627,7 +1627,7 @@
   .live-log[data-state="expanded"] .live-log-stage::after {
     content: ""; position: absolute; z-index: 3; pointer-events: none;
     left: 2px; right: calc(2px + var(--ll-gutter)); bottom: 0; height: 20px;
-    box-sizing: border-box; opacity: 0.55;
+    box-sizing: border-box; opacity: var(--ll-lip-o, 0.55);
     background: var(--ll-face);
     border: 1px solid var(--border-strong); border-bottom: none;
     border-radius: var(--radius-md, 8px) var(--radius-md, 8px) 0 0;
@@ -2280,6 +2280,13 @@
   }
   .settings-mirror-sizer { position: relative; width: 100%; overflow: hidden; }
   .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; pointer-events: none; }
+  /* 主题页外部预览的壁纸垫底：与全局垫底（.wallpaper-backdrop）同构的图片层＋压暗层，
+     垫在镜像克隆体之下；图片/模糊/压暗三条内联样式由 panel.js#syncSettingsMirrorWallpaper
+     从全局垫底直拷，显隐按壁纸主题＋有图双条件门控（与全局垫底同一口径）。 */
+  .settings-mirror-backdrop { display: none; position: absolute; inset: 0; }
+  .settings-mirror-backdrop-image { position: absolute; inset: -40px; background-size: cover; background-position: center; background-repeat: no-repeat; }
+  .settings-mirror-backdrop-dim { position: absolute; inset: 0; }
+  :root[data-style="wallpaper"][data-wallpaper="active"] .settings-mirror-backdrop { display: block; }
   .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
   /* v2 的镜像：主导航在左栏，镜像改克隆一份迷你栏与看板镜像横排（captureSettingsMirror
      只在 v2 下才放栏克隆进来）。真栏 fixed 通高贴视口、长页滚动时不动；进镜像后按
@@ -2357,6 +2364,11 @@
   :root[data-ui-version="v2"][data-style="wallpaper"] .view-tabs.stats-subtabs {
     background: var(--surface-sunken); border-color: var(--border);
   }
+  /* 壁纸态运行日志卡：卡面改调不透明基色 --surface-opaque（--surface 带玻璃化 alpha，
+     卡面透出壁纸、字压图），提亮配方与基座同源只换底；展开态底缘条整根退场——实底下
+     那条半透明卡顶缘成了多余的一道。 */
+  :root[data-style="wallpaper"] .live-log { --ll-face: color-mix(in srgb, var(--surface-opaque) 94%, white 6%); }
+  :root[data-style="wallpaper"] .live-log { --ll-lip-o: 0; }
   /* 「自定义主题」窗口（主题列表「自定义...」点开）：上传/调参在窗口内暂存，预览
      与主题页右栏同构（settings-mirror 三层），背景图与压暗层垫在镜像下；容器上的
      .has-image 切空态/有图态，皮肤 token 由 JS 注入 #wallpaperPreview 作用域。 */
