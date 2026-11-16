@@ -1535,6 +1535,8 @@
     --ll-blur-1: 0.4px; --ll-blur-2: 0.8px;
     --ll-opacity-1: 0.86; --ll-opacity-2: 0.72;
     --ll-retreat-delay: 45ms;
+    /* 卡面那块提亮的底：卡与舞台底缘共用一处，改一处两边同变。 */
+    --ll-face: color-mix(in srgb, var(--surface) 94%, white 6%);
   }
   /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与舞台长高同拍。
      --ll-step-expanded 由 setLogExpanded 量视口首卡行距写入，55px 是无卡时兜底。 */
@@ -1626,16 +1628,16 @@
     content: ""; position: absolute; z-index: 3; pointer-events: none;
     left: 2px; right: calc(2px + var(--ll-gutter)); bottom: 0; height: 20px;
     box-sizing: border-box; opacity: 0.55;
-    background: color-mix(in srgb, var(--surface) 94%, white 6%);
+    background: var(--ll-face);
     border: 1px solid var(--border-strong); border-bottom: none;
     border-radius: var(--radius-md, 8px) var(--radius-md, 8px) 0 0;
   }
-  /* 卡面是两层共用的一套皮：提亮的底、强调档描边、下缘一条高光线。全局暗色刻意
-     压低卡面与描边的对比，单张可读、叠起来会糊成一片，方角弱影的皮肤尤甚，所以
-     描边取 --border-strong、卡面混入少量白（暗色提亮、亮色保持原白）。收起与展开
-     用同一套皮，摊开那一拍不会「掉底」，也不再需要按态换色。 */
+  /* 卡面是两层共用的一套皮，必须两态同值：全局暗色把卡面与描边的对比压得很低，
+     单张可读、叠起来会糊成一片（方角弱影的皮肤尤甚），所以描边取 --border-strong、
+     底混入少量白。这层皮一旦只补在叠卡态，展开那一拍就是「底没了」——收起与展开
+     用同一条规则，状态切换只剩位置与显隐，不再换皮。 */
   .live-log-msg {
-    box-sizing: border-box; background: color-mix(in srgb, var(--surface) 94%, white 6%);
+    box-sizing: border-box; background: var(--ll-face);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md, 8px);
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent), var(--shadow-xs);
@@ -1689,16 +1691,6 @@
                 background-color 220ms var(--ease-out), border-color 220ms var(--ease-out),
                 box-shadow 220ms var(--ease-out);
   }
-  /* 收起态整叠是一个点击面（#logStack 是唯一监听），悬停按整叠给一层薄反馈：逐卡
-     只会点亮露出的那 22px 边带，末卡比最高卡矮时舞台底部还会剩一条可点却无反馈的死区。
-     只动上面已挂进 220ms 过渡的三条属性——transform 被 data-slot 位移与
-     is-appearing / is-leaving 共用，碰它要么被源序压死、要么把槽位位移顶掉。
-     展开态视口卡不可点，不给悬停（不制造假的可点暗示）。 */
-  .live-log-stack:hover .live-log-msg {
-    background-color: color-mix(in srgb, var(--surface) 88%, white 12%);
-    border-color: color-mix(in srgb, var(--border-strong) 75%, var(--text) 25%);
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 26%, transparent), var(--shadow-sm);
-  }
   /* 退一层＝下移、缩小、变淡、文字虚化、降层级五件事同拍；后层再晚 45ms，读得出
      「新卡浮出→旧卡依次退远」的推进，而非四张卡同时各自过渡。 */
   .live-log-stack .live-log-msg[data-slot="0"] { transform: translateY(0) scale(1); opacity: 1; z-index: 3; }
@@ -1738,6 +1730,18 @@
      不再出现叠卡还在淡出、视口已先清空的错位。 */
   .live-log[data-clearing] .live-log-stack .live-log-msg.is-leaving,
   .live-log[data-clearing] .live-log-viewport .live-log-msg.is-leaving { transition-duration: 120ms; }
+  /* 收起态整叠是一个点击面（#logStack 是唯一监听），悬停按整叠给一层薄反馈：逐卡只
+     会点亮露出的那 22px 边带，末卡比最高卡矮时舞台底部还会剩一条可点却无反馈的死区。
+     只动上面已挂进 220ms 过渡的三条属性——transform 被 data-slot 位移与
+     is-appearing / is-leaving 共用，碰它要么被源序压死、要么把槽位位移顶掉。
+     放在这组状态规则之后：同特异性时源序在后，谁往槽位/入场/离场里加底或描边，
+     悬停也不会被静默压死。展开态由 .live-log-viewport 的 pointer-events 接管，
+     视口卡不可点，因此没有悬停——不给假的可点暗示。 */
+  .live-log-stack:hover .live-log-msg {
+    background-color: color-mix(in srgb, var(--surface) 88%, white 12%);
+    border-color: color-mix(in srgb, var(--border-strong) 75%, var(--text) 25%);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 26%, transparent), var(--shadow-sm);
+  }
 
   /* ── 「日志级别」下拉（设置 → 通用 → 运行日志卡）────────────────────────────
      与上面那组 .lvl 同形：选项文字就是实时输出行打出来的那三个大写 token，颜色

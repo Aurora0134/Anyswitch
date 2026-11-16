@@ -18256,7 +18256,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(panelCss.includes(".live-log[data-motion] .live-log-stack .live-log-msg,") && /transition-delay: 0ms; \}/.test(panelCss), "交接期禁用退层 stagger");
     assert.ok(!panelCss.includes(".live-log[data-state=\"expanded\"] .live-log-stack .live-log-msg,"), "卡面不再按展开态换皮：摊开期不归位，展开后底不消失");
     const cardBaseBlock = panelCss.match(/\n  \.live-log-msg \{([\s\S]*?)\}/)?.[1] ?? "";
-    assert.ok(/background: color-mix\(in srgb, var\(--surface\) 94%, white 6%\)/.test(cardBaseBlock), "卡面基座自带提亮底：两层同一套皮");
+    assert.ok(/background: var\(--ll-face\);/.test(cardBaseBlock), "卡面基座自带提亮底：两层同一套皮");
+    assert.equal((panelCss.match(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/g) ?? []).length, 1, "卡面底只有一处定义，卡与舞台底缘共用");
+    assert.ok(/background: var\(--ll-face\);/.test(panelCss.match(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{([^}]*)\}/)?.[1] ?? ""), "舞台底缘取同一处底，改一处两边同变");
     assert.ok(/border: 1px solid var\(--border-strong\)/.test(cardBaseBlock), "卡面基座描边取强调档");
     assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\)/.test(cardBaseBlock), "卡面基座保留下缘高光");
     assert.ok(!/liveLogPulse/.test(panelCss) && !/#logConn/.test(panelCss), "连接态脉冲与指示退场，不上屏");
@@ -18328,7 +18330,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/transition-delay: var\(--ll-retreat-delay\);/.test(panelCss), "景深三档同拍、后层整体延后");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*filter: blur/.test(panelCss), "整卡不虚化，保住层界");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*border-color: var\(--border-strong\);/.test(panelCss), "层界不再只在叠卡态补：基座统一，展开态不掉底");
-    assert.ok(/background: color-mix\(in srgb, var\(--surface\) 94%, white 6%\)/.test(panelCss), "暗色提亮卡面、亮色保持原白");
+    assert.ok(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/.test(panelCss), "暗色提亮卡面、亮色保持原白");
     assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\), var\(--shadow-xs\);/.test(panelCss), "下缘高光线与底影同层，两层共用");
   });
 
@@ -18341,6 +18343,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/transform|translate|scale|filter/.test(rule), "不碰 transform：data-slot 位移与入场离场共用该属性");
     assert.ok(!/\.live-log-msg:hover/.test(panelCss), "整叠给反馈，不逐卡：露出的边带与末卡底部会漏");
     assert.equal((panelCss.match(/\.live-log-stack:hover/g) ?? []).length, 1, "悬停规则唯一");
+    assert.ok(panelCss.indexOf(".live-log-stack:hover .live-log-msg") > panelCss.indexOf(".live-log-stack .live-log-msg.is-leaving {"), "悬停排在槽位/入场/离场之后：同特异性靠源序取胜，不被后来的状态规则静默压死");
   });
 
   it("展开行距取亚像素卡高：叠卡与视口逐行不错位", () => {

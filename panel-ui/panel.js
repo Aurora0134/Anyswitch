@@ -3044,17 +3044,11 @@ async function api(method, path, body) {
     if (expanded && root && body) {
       const first = body.children[0];
       const computed = first && typeof getComputedStyle === "function" ? getComputedStyle(first) : null;
-      // 行距＝卡的实际使用高度＋下边距。offsetHeight 是取整值，与视口靠亚像素累加
-      // 排出来的真实行距差半到一个像素，摊开期叠卡还看得见时逐行露错位；先取
-      // computed height 的亚像素使用值，取不到再退回 rect / offsetHeight。
+      // 行距＝卡的实际使用高度＋下边距。offsetHeight 取整，与视口靠亚像素累加排出来
+      // 的真实行距差半到一个像素，摊开期叠卡还看得见时逐行露错位；computed height 给
+      // 的是 border-box 的亚像素使用值（实测 66.375 对 offsetHeight 66），取不到才退回。
       const exact = computed ? parseFloat(computed.height) : NaN;
-      const raw = Number.isFinite(exact) && exact > 0
-        ? exact
-        : (first
-          ? (typeof first.getBoundingClientRect === "function"
-            ? first.getBoundingClientRect().height
-            : first.offsetHeight) || 0
-          : 0);
+      const raw = Number.isFinite(exact) && exact > 0 ? exact : (first ? first.offsetHeight : 0);
       const mb = computed ? parseFloat(computed.marginBottom) || 0 : 0;
       const step = Math.round((raw + mb) * 1000) / 1000;
       if (step > 0) root.style.setProperty("--ll-step-expanded", step + "px");
