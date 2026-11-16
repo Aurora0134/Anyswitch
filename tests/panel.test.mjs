@@ -19191,6 +19191,24 @@ describe("壁纸域运行日志卡实底＋底缘条退场＋主题页外部预�
     assert.equal((panelCss.match(/\.live-log-stage::after/g) ?? []).length, 1, "底缘条 ::after 规则仍唯一，不靠新增选择器压层叠");
   });
 
+  it("退层不再变淡：wallpaper 域退层整卡透明度两档归 1，基座 0.86/0.72 与展开归位不动", () => {
+    assert.ok(panelCss.includes(':root[data-style="wallpaper"] .live-log { --ll-opacity-1: 1; --ll-opacity-2: 1; }'),
+      "wallpaper 域退层两档归 1（整卡 opacity 会把卡面带字跟壁纸混洗，退层小字实测掉到 3:1 上下）");
+    assert.ok(/--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(panelCss), "基座退层档原样保留，其他皮肤不变淡");
+    assert.equal((panelCss.match(/--ll-opacity-1: /g) ?? []).length, 3,
+      "退层档定义仅三处：基座、展开归位、壁纸覆盖（消费端 var() 不计入）");
+  });
+
+  it("标题行垫底：wallpaper 域 .live-log-bar 补卡面同款垫底成条，基座仍无框无底", () => {
+    const chip = panelCss.match(/:root\[data-style="wallpaper"\] \.live-log-bar \{([^}]*)\}/)?.[1] ?? "";
+    assert.ok(chip, "wallpaper 域标题行垫底规则在册");
+    assert.ok(chip.includes("background: var(--ll-face)"), "垫底取卡面同一处底，改一处同变");
+    assert.ok(chip.includes("border: 1px solid var(--border-strong)"), "描边与卡面同规格");
+    assert.ok(chip.includes("margin: 0 2px"), "条缘与叠卡层同宽对齐");
+    const base = panelCss.match(/\.live-log-bar \{([^}]*)\}/)?.[1] ?? "";
+    assert.ok(!/background|border/.test(base), "基座标题行保持无框无底，非壁纸主题不受影响");
+  });
+
   it("外部预览垫底结构：sizer 内、镜像克隆体之前垫图片层＋压暗层，纯装饰不进可读树", () => {
     const sizer = panelHtml.indexOf('id="settingsMirrorSizer"');
     const scale = panelHtml.indexOf('id="settingsMirrorScale"');

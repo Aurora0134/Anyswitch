@@ -2366,9 +2366,19 @@
   }
   /* 壁纸态运行日志卡：卡面改调不透明基色 --surface-opaque（--surface 带玻璃化 alpha，
      卡面透出壁纸、字压图），提亮配方与基座同源只换底；展开态底缘条整根退场——实底下
-     那条半透明卡顶缘成了多余的一道。 */
+     那条半透明卡顶缘成了多余的一道。退层整卡 opacity 会把卡面带字跟壁纸混洗（实机实测
+     退层小字对比掉到 3:1 上下），壁纸域两档归 1，退层感由缩放+错位+描边层叠继续表达。 */
   :root[data-style="wallpaper"] .live-log { --ll-face: color-mix(in srgb, var(--surface-opaque) 94%, white 6%); }
   :root[data-style="wallpaper"] .live-log { --ll-lip-o: 0; }
+  :root[data-style="wallpaper"] .live-log { --ll-opacity-1: 1; --ll-opacity-2: 1; }
+  /* 标题行在壁纸域是无垫底的浅灰字压照片（实测 ~2:1）：补卡面同款垫底成条，
+     与「卡即框」同一套皮；margin 与叠卡层同宽，条缘与卡缘对齐。 */
+  :root[data-style="wallpaper"] .live-log-bar {
+    margin: 0 2px; padding: 5px 8px;
+    background: var(--ll-face);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md, 8px);
+  }
   /* 「自定义主题」窗口（主题列表「自定义...」点开）：上传/调参在窗口内暂存，预览
      与主题页右栏同构（settings-mirror 三层），背景图与压暗层垫在镜像下；容器上的
      .has-image 切空态/有图态，皮肤 token 由 JS 注入 #wallpaperPreview 作用域。 */
