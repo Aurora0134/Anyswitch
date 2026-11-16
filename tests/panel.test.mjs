@@ -18260,7 +18260,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal((panelCss.match(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/g) ?? []).length, 1, "卡面底只有一处定义，卡与舞台底缘共用");
     assert.ok(/background: var\(--ll-face\);/.test(panelCss.match(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{([^}]*)\}/)?.[1] ?? ""), "舞台底缘取同一处底，改一处两边同变");
     assert.ok(/border: 1px solid var\(--border-strong\)/.test(cardBaseBlock), "卡面基座描边取强调档");
-    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\)/.test(cardBaseBlock), "卡面基座保留下缘高光");
+    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\);\s*padding: 7px 10px;/.test(cardBaseBlock), "卡面基座只保留下缘高光，不叠投影：收起态与改动前逐像素同值");
     assert.ok(!/liveLogPulse/.test(panelCss) && !/#logConn/.test(panelCss), "连接态脉冲与指示退场，不上屏");
     assert.ok(/\.live-log-bar \{[^}]*justify-content: space-between;/.test(panelCss), "无框控制行：标题左、动作右");
     assert.ok(/\.live-log-title \{[^}]*font-weight: 600;/.test(panelCss), "区域标题「运行日志」在册");
@@ -18276,6 +18276,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*left: 2px; right: calc\(2px \+ var\(--ll-gutter\)\);/.test(panelCss), "叠卡按视口内容区取齐，右侧让出同宽槽位");
     assert.ok(!/\.live-log\[data-motion="expanding"\] \.live-log-viewport \{ opacity: 0/.test(panelCss), "摊开期不再把视口钉成全透明，下半段从第一帧就有行");
     assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-viewport \{ opacity: 1; pointer-events: auto; \}/.test(panelCss), "展开态视口在场");
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stack \{ opacity: 0; pointer-events: none; \}/.test(panelCss), "展开态叠卡退出命中：视口卡不可点，悬停反馈不会跟到展开态");
     const fadeBlock = [...panelCss.matchAll(/\.live-log\[data-state="expanded"\] \.live-log-viewport \{([\s\S]*?)\}/g)]
       .map((m) => m[1]).find((b) => b.includes("mask-image")) ?? "";
     assert.ok(/mask-image:/.test(fadeBlock) && /calc\(100% - 34px\)/.test(fadeBlock), "末 34px 由内容自己渐隐");
@@ -18331,7 +18332,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*filter: blur/.test(panelCss), "整卡不虚化，保住层界");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*border-color: var\(--border-strong\);/.test(panelCss), "层界不再只在叠卡态补：基座统一，展开态不掉底");
     assert.ok(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/.test(panelCss), "暗色提亮卡面、亮色保持原白");
-    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\), var\(--shadow-xs\);/.test(panelCss), "下缘高光线与底影同层，两层共用");
+    assert.ok(/box-shadow: 0 1px 0 color-mix\(in srgb, var\(--text\) 16%, transparent\);/.test(panelCss), "下缘高光线定层数");
   });
 
   it("卡面悬停反馈：整叠一个点击面，只走已在过渡表里的三条属性", () => {
