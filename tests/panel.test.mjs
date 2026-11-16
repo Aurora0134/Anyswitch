@@ -4090,6 +4090,123 @@ describe("panel.html 设置全页视图", () => {
       "换头行那一刻先按即将落的那一格写好页题（子 tab 激活晚于首帧）");
   });
 
+  it("设置子 tab 高亮与页题同帧落位：首帧前同步、只动呈现", () => {
+    // 病根：离开设置不重置子 tab DOM，旧格 .active 留到下次进入；真正的激活排在
+    // 首帧之后（scheduleViewEntry），旧高亮先亮一帧再被 140ms 过渡挪走。修法与页题
+    // 同款先手：switchView 换头行那刻同步高亮/显隐，且只动呈现不碰副作用。
+    assert.ok(panelJs.includes("let syncSettingsSubTabUi = () => {};"), "同步钩子有无操作默认值（桩环境安全）");
+    const hook = panelJs.match(/syncSettingsSubTabUi = \(which\) => \{([\s\S]*?)\n    \};/);
+    assert.ok(hook, "initSettingsView 里装配 syncSettingsSubTabUi");
+    assert.ok(/const key = settingsSubTabs\[which\] \? which : "general";/.test(hook[1]),
+      "空键/退役键兜底落「通用」，与页题同一退路");
+    for (const needle of [
+      '$(tabId).classList.toggle("active", on);',
+      '$(tabId).setAttribute("aria-selected", String(on));',
+      '$(tabId).tabIndex = on ? 0 : -1;',
+      '$(panelId).hidden = !on;',
+      'dirItem.classList.toggle("active", on);',
+      'dirItem.setAttribute("aria-selected", String(on));',
+    ]) assert.ok(hook[1].includes(needle), `首帧同步覆盖「${needle}」`);
+    for (const forbidden of ["localStorage", "replayViewEnter", "resetPageScroll", "refreshStoreState",
+      "captureSettingsMirror", "about.", "dataBundle.", "backupLocation."]) {
+      assert.ok(!hook[1].includes(forbidden), `首帧同步只动呈现，不掺「${forbidden}」（副作用归真正激活）`);
+    }
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found");
+    const body = sw[1];
+    const iTitle = body.indexOf("if (settings) syncSettingsHeadTitle(settingsSubTabToRestore);");
+    const iSync = body.indexOf("if (settings) syncSettingsSubTabUi(settingsSubTabToRestore);");
+    const iRemove = body.indexOf('document.documentElement.removeAttribute("data-prepaint-view")');
+    const iEnter = body.indexOf("if (settings) viewReady = enterSettingsView()");
+    assert.ok(iTitle >= 0 && iSync > iTitle, "高亮同步紧随页题前置写入");
+    assert.ok(iSync < iRemove && iSync < iEnter,
+      "同步落在摘首帧属性与进入钩子之前：高亮与头行同帧，不留旧格亮一帧");
+  });
+
+  it("恢复路径激活不被首帧同步短路：取数与子页生命周期照常", async () => {
+    // 首帧同步会把目标格先置成 .active，activateSettingsSubTab 的「已选中即早退」
+    // 守卫随之命中——恢复分支必须先摘 .active 再激活，否则 general 的档位下拉取数、
+    // about/dataBundle/backupLocation 的 enter 全被跳过。真跑一遍验证。
+    const tabs = panelJs.match(/    const settingsSubTabs = \{[\s\S]*?\n    \};/);
+    const dirItems = panelJs.match(/    const settingsDirItems = \{[\s\S]*?\n    \};/);
+    const activate = panelJs.match(/    function activateSettingsSubTab\(which, animate\) \{[\s\S]*?\n    \}/);
+    const reset = panelJs.match(/    function resetSettingsSubTab\(\) \{[\s\S]*?\n    \}/);
+    const enter = panelJs.match(/\n    enterSettingsView = \(\) => \{([\s\S]*?)\n    \};/);
+    assert.ok(tabs && dirItems && activate && reset && enter, "恢复链各段在 panel.js 里找得到");
+    const run = (restore, preActive) => {
+      const els = {};
+      const el = (id) => els[id] ??= {
+        textContent: id, hidden: false, tabIndex: 0, attrs: {}, classes: new Set(),
+        classList: {
+          add: (c) => els[id].classes.add(c),
+          remove: (c) => els[id].classes.delete(c),
+          contains: (c) => els[id].classes.has(c),
+          toggle: (c, on) => { if (on) els[id].classes.add(c); else els[id].classes.delete(c); return on; },
+        },
+        setAttribute(k, v) { els[id].attrs[k] = v; },
+        removeAttribute(k) { delete els[id].attrs[k]; },
+        getAttribute(k) { return els[id].attrs[k] ?? null; },
+      };
+      // 模拟首帧同步已把目标格置位（修复前这会让恢复激活整段早退）
+      if (preActive) el(preActive).classes.add("active");
+      const env = {
+        restore, els,
+        calls: { store: 0, tiers: 0, aboutEnter: 0, bundleEnter: 0, backupEnter: 0 },
+        written: {},
+        $: el,
+        syncSettingsHeadTitle() {},
+        resetPageScroll() {},
+        replayViewEnter() {},
+        captureSettingsMirror() {},
+        about: { enter() { env.calls.aboutEnter++; }, leave() {} },
+        dataBundle: { enter() { env.calls.bundleEnter++; }, leave() {} },
+        backupLocation: { enter() { env.calls.backupEnter++; }, leave() {} },
+        refreshStoreState: () => { env.calls.store++; return Promise.resolve(); },
+        renderClaudeTierOptions() { env.calls.tiers++; },
+        loadSettingsState: () => Promise.resolve(),
+        localStorage: { setItem: (k, v) => { env.written[k] = v; }, getItem: () => null },
+      };
+      new Function("env", `
+        const { $, syncSettingsHeadTitle, resetPageScroll, replayViewEnter, captureSettingsMirror,
+                about, dataBundle, backupLocation, refreshStoreState, renderClaudeTierOptions,
+                loadSettingsState, localStorage } = env;
+        let settingsSubTabToRestore = env.restore;
+        let mirrorAwaitRender = false;
+${tabs[0]}
+${dirItems[0]}
+${activate[0]}
+${reset[0]}
+        const enterSettingsView = () => {${enter[1]}
+        };
+        enterSettingsView();
+      `)(env);
+      return env;
+    };
+    const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
+    // 存档＝general：静态 HTML 里它本就带 .active，是早退短路的最易感格
+    const general = run("general", "settingsTabGeneral");
+    await flush();
+    assert.equal(general.calls.store, 1, "恢复进通用仍拉 store state");
+    assert.equal(general.calls.tiers, 1, "数据落地后重生成档位下拉选项");
+    assert.ok(general.els.railDirGeneral.classes.has("active"), "v2 栏目录项高亮不被早退吞掉");
+    assert.equal(general.written["panel-settings-subtab"], "general", "存档照常写");
+    const about = run("about", "settingsTabAbout");
+    await flush();
+    assert.equal(about.calls.aboutEnter, 1, "恢复进关于仍走 about.enter");
+    assert.ok(about.els.railDirAbout.classes.has("active"), "关于目录项高亮落位");
+    assert.equal(about.els.settingsPanelAbout.hidden, false, "关于面板露出");
+    assert.equal(about.els.settingsPanelGeneral.hidden, true, "其余面板收起");
+    const advanced = run("advanced", "settingsTabAdvanced");
+    await flush();
+    assert.equal(advanced.calls.bundleEnter, 1, "恢复进高级选项仍进入数据搬迁卡");
+    assert.equal(advanced.calls.backupEnter, 1, "恢复进高级选项仍进入备份位置卡");
+    // 无存档：走 resetSettingsSubTab 回落通用，行为与修复前一致
+    const fallback = run(null, null);
+    await flush();
+    assert.ok(fallback.els.settingsTabGeneral.classes.has("active"), "无存档回落通用");
+    assert.equal(fallback.calls.store, 1, "回落通用同样取数");
+  });
+
   it("设置页题不随子 tab 内容高低横移：滚动条槽位恒留，满屏浮层按整窗宽补回", () => {
     // 病根：各子 tab 内容高度不同 → 文档滚动条时有时无 → 可用宽度差 10px；内容列是按
     // 可用宽度居中的，于是整列连同页题左右各挪 5px（1920 宽实测 151px ↔ 156px）。

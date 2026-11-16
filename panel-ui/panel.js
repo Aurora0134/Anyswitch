@@ -454,6 +454,9 @@ async function api(method, path, body) {
   // 一次：子 tab 的激活排在首帧之后的进入工作里，光靠 activateSettingsSubTab 会让头行
   // 先带着上一格的字亮一帧。参数＝即将落的那一格，空值按「通用」兜底。
   let syncSettingsHeadTitle = () => {};
+  // 子 tab 高亮/显隐的首帧前同步（实现在 initSettingsView）。与页题同理：真正的激活
+  // 排在首帧之后，离开设置时旧格的 .active 还留着，不同步会让旧高亮先亮一帧。
+  let syncSettingsSubTabUi = () => {};
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -5232,6 +5235,25 @@ async function api(method, path, body) {
       const key = settingsSubTabs[which] ? which : "general";
       if (settingsHeadTitle) settingsHeadTitle.textContent = $(settingsSubTabs[key][0]).textContent.trim();
     };
+    // 只动呈现（高亮类/aria/面板显隐），与 activateSettingsSubTab 的 DOM 循环同套；
+    // 不写存档、不播动画、不重置滚动、不取数、不碰生命周期——那些属于首帧之后的
+    // 真正激活。空键按「通用」兜底，与页题同一退路。
+    syncSettingsSubTabUi = (which) => {
+      const key = settingsSubTabs[which] ? which : "general";
+      for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
+        const on = name === key;
+        $(tabId).classList.toggle("active", on);
+        $(tabId).setAttribute("aria-selected", String(on));
+        $(tabId).tabIndex = on ? 0 : -1;
+        $(panelId).hidden = !on;
+        const dirItem = $(settingsDirItems[name]);
+        if (dirItem) {
+          dirItem.classList.toggle("active", on);
+          dirItem.setAttribute("aria-selected", String(on));
+          if (on) dirItem.setAttribute("aria-current", "page"); else dirItem.removeAttribute("aria-current");
+        }
+      }
+    };
     function activateSettingsSubTab(which, animate) {
       const selected = settingsSubTabs[which];
       if (!selected) return;
@@ -5330,8 +5352,12 @@ async function api(method, path, body) {
       // 仍旧从头看起，落「通用」。存档只在此消费一次，不留到下一次进入。
       const restore = settingsSubTabToRestore;
       settingsSubTabToRestore = null;
-      if (restore && Object.keys(settingsSubTabs).includes(restore)) activateSettingsSubTab(restore, false);
-      else resetSettingsSubTab();
+      if (restore && Object.keys(settingsSubTabs).includes(restore)) {
+        // 首帧同步已把该格置成 .active，先摘再激活：否则早退守卫会跳过取数与
+        // about/dataBundle/backupLocation 的 enter 等副作用（resetSettingsSubTab 同款）。
+        for (const [id] of Object.values(settingsSubTabs)) $(id).classList.remove("active");
+        activateSettingsSubTab(restore, false);
+      } else resetSettingsSubTab();
       return loadSettingsState();
     };
 
@@ -16201,6 +16227,9 @@ async function api(method, path, body) {
     // 激活排在首帧之后，只在那里写会让头行先带着上一格的字亮一帧。恢复进设置时那格来自
     // 存档（enterSettingsView 消费的就是它），主动进设置恒落「通用」。
     if (settings) syncSettingsHeadTitle(settingsSubTabToRestore);
+    // 子 tab 高亮/显隐同帧落位：离开设置时旧格的 .active 与面板显隐原样留着，真正的
+    // 激活在首帧之后，不先同步会让旧高亮亮一帧再被过渡动画挪走（页题同款先手）。
+    if (settings) syncSettingsSubTabUi(settingsSubTabToRestore);
     $("tabBoard").classList.toggle("active", board);
     $("tabSkills").classList.toggle("active", name === "skills");
     $("tabPresets").classList.toggle("active", presets);
