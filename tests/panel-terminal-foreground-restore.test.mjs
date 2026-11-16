@@ -123,13 +123,13 @@ describe("后台切回屏面交接：接线", () => {
   const vis = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
   assert.ok(vis, "visibilitychange 处理器可取样");
 
-  it("隐藏拍先记交接单再停放/拆流；可见拍核交接单且不改既有调用序列", () => {
+  it("隐藏拍先记交接单；保流路径下停放/拆流全部退场，可见拍核交接单", () => {
     const capture = vis.indexOf("captureTerminalForegroundFrame()");
-    const park = vis.indexOf("parkTerminalScreen()");
     const hiddenReturn = vis.indexOf("if (document.hidden) return;");
     const resume = vis.indexOf("resumeTerminalForegroundFrame()");
-    assert.ok(capture > 0 && capture < park, "进后台先抄屏面状态，park 会摘掉旧实例");
-    assert.ok(park > 0 && park < hiddenReturn, "停放仍排在隐藏早退之前");
+    assert.ok(capture > 0 && capture < hiddenReturn, "进后台先抄屏面状态，且排在隐藏早退之前");
+    assert.equal(vis.indexOf("parkTerminalScreen("), -1,
+      "保流路径不拆实例：park 一并退场（2026-11-16 积压根治，隐藏期改立字节缓冲闸）");
     assert.ok(resume > hiddenReturn, "回前台核交接单挂在可见分支");
     assert.ok(vis.includes('if (document.hidden && typeof captureTerminalForegroundFrame === "function")'),
       "隐藏拍带 typeof 闸，桩环境空转");
