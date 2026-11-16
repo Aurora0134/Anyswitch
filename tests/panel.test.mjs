@@ -16883,13 +16883,16 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       { id: "kimi", name: "Kimi Code", installations: [{ status: "found", kind: "cli", path: "C:\\kimi.cmd" }] },
       { id: "zcode", name: "ZCode", installations: [{ status: "found", kind: "cli", path: "C:\\zcode\\bin\\zcode.mjs" }, { status: "found", kind: "desktop" }] },
       { id: "qoder", name: "Qoder", installations: [{ status: "found", kind: "cli" }] },
+      // dsh 只装本体没装插件：cli 记录（harness）found、tui 记录（插件）not_found
+      // ——菜单不得给出入口，点了只会得到一个秒死的页签。
+      { id: "dsh", name: "DeepSeek Harness", installations: [{ status: "found", kind: "cli", path: "C:\\dsh.cmd" }, { status: "not_found", kind: "tui" }] },
     ],
   };
 
   it("已安装清单：只收白名单内 status=found 且 kind=cli 的端点", async () => {
     const { sandbox, els, log } = addMenuSandbox({ environment: ENVIRONMENT });
     const agents = await sandbox.load();
-    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi", "zcode", "qoder"], "未安装（status≠found）不进菜单；zcode 桌面端是 GUI，但 CLI 形态经 launcher 进终端");
+    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi", "zcode", "qoder"], "未安装（status≠found）不进菜单；zcode 桌面端是 GUI，但 CLI 形态经 launcher 进终端；dsh 缺 tui 插件不进菜单");
     assert.equal(log.environmentFetches, 1);
     await sandbox.load();
     assert.equal(log.environmentFetches, 1, "60s TTL 内不重复探测");
@@ -16900,7 +16903,20 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Kimi Code"));
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Qoder"), "qoder 已有 CLI 形态，进新建菜单");
     assert.ok(els.terminalAddMenuList.innerHTML.includes("ZCode"), "zcode 桌面端是 GUI，但 CLI 形态经 launcher 进终端，进新建菜单");
+    assert.ok(!els.terminalAddMenuList.innerHTML.includes("DeepSeek Harness"), "dsh 只装本体没装 dsh-tui 插件，不进新建菜单");
     assert.equal(els.terminalAddMenuNote.hidden, true, "有可用 agent 时不显示提示");
+  });
+
+  it("已安装清单：dsh 的 tui 插件记录 found 时才进菜单（本体 cli 记录不算数）", async () => {
+    const installed = addMenuSandbox({ environment: {
+      clients: [
+        { id: "dsh", name: "DeepSeek Harness", installations: [{ status: "found", kind: "cli", path: "C:\\dsh.cmd" }, { status: "found", kind: "tui" }] },
+        // 本体缺失而插件在装：cli 门先挡下，不因插件 found 反向放行。
+        { id: "kimi", name: "Kimi Code", installations: [{ status: "not_found", kind: "cli" }] },
+      ],
+    } });
+    const agents = await installed.sandbox.load();
+    assert.deepEqual(agents.map((a) => a.id), ["dsh"], "本体与插件都在装时 dsh 进菜单；本体缺失的端点照旧不进");
   });
 
   it("启动方式列表双预热：面板启动与进终端页各补一次", () => {

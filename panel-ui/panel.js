@@ -11442,7 +11442,13 @@ async function api(method, path, body) {
           if (!client || !TERMINAL_ADD_MENU_AGENT_IDS.includes(client.id)) continue;
           const installations = Array.isArray(client.installations) ? client.installations : [];
           const installed = installations.find((item) => item && item.status === "found" && item.kind === "cli");
-          if (installed) agents.push({ id: client.id, name: client.name || client.id });
+          // dsh 的 cli 记录是本体 harness，一键启动真正要的是界面插件 dsh-tui
+          //（kind "tui"，服务端另有同判据的启动闸）：只装本体没装插件时入口
+          // 不再给出，免得点开只剩一个秒死的页签。其余端点维持原判据。
+          const tuiInstalled = client.id === "dsh"
+            ? installations.find((item) => item && item.status === "found" && item.kind === "tui")
+            : true;
+          if (installed && tuiInstalled) agents.push({ id: client.id, name: client.name || client.id });
         }
         terminalAddMenuAgents = agents;
         terminalAddMenuAgentsAt = Date.now();

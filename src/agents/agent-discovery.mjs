@@ -285,6 +285,19 @@ export function resolveDshExecutable(base = process.env, io = { existsSync }) {
   return io.existsSync(cmdPath) ? cmdPath : join(roamingNpm(base), "dsh");
 }
 
+// 终端一键启动（agent-session-env 的 launchArgs）、dsh-cli 快捷命令（shim-manager
+// 的 launcherArgs）与续接模板（session-scan 的 RESUME_COMMAND）三处同口径钉死
+// profile 名 dsh-tui。该 profile 不在 dsh 的内置模板表内（内置只有 acp/web/
+// headless/sdk/sdk-minimal），只能由用户装插件时创建；这里给出它固定的插件入口
+// 落点，供启动组装前校验「这条命令真的能起」——本体在装不等于 profile 存在。
+export function dshTuiLaunchProfileBin(base = process.env) {
+  const dshHome = base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh");
+  return join(
+    dshHome, "profiles", "dsh-tui", "node_modules",
+    "@deepseek-harness-tui", "dsh-tui", "bin", "dsh-tui.js",
+  );
+}
+
 // dsh-tui 是社区界面插件（@deepseek-harness-tui/dsh-tui），装进某个 dsh
 // profile 的 node_modules，入口是包里的 bin/dsh-tui.js（清单 bin 同时声明
 // dsh-tui 与 dst 两个名字，指向同一个文件）。profile 名由用户安装时决定，
@@ -302,12 +315,9 @@ export function resolveDshTuiExecutable(base = process.env, io = { existsSync, r
     entries = io.readdirSync(profilesDir);
   } catch (error) {
     if (io.strictErrors && !["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
-    // 目录列不出来时退回旧的固定落点：能列出目录才谈得上遍历，列不出来不该
-    // 让原本认得到的 dsh-tui profile 一起消失。
-    const legacy = join(
-      profilesDir, "dsh-tui", "node_modules",
-      "@deepseek-harness-tui", "dsh-tui", "bin", "dsh-tui.js",
-    );
+    // 目录列不出来时退回旧的固定落点（dshTuiLaunchProfileBin，同一份路径）：
+    // 能列出目录才谈得上遍历，列不出来不该让原本认得到的 dsh-tui profile 一起消失。
+    const legacy = dshTuiLaunchProfileBin(base);
     return io.existsSync(legacy) ? legacy : null;
   }
   const installs = [];

@@ -11,6 +11,7 @@ import {
   buildAgentSessionLaunch,
   buildAgentResumeArgs,
 } from "../src/agents/agent-session-env.mjs";
+import { dshTuiLaunchProfileBin } from "../src/agents/agent-discovery.mjs";
 // 续接身份上限与 terminal-host 的 argv 上限互钉：夹具边界直接取宿主的真值，
 // 不再手抄 4096——任何一侧漂移都在「续接：身份值有长度上限」里爆红。
 import { MAX_LAUNCH_ARG_BYTES } from "../src/terminal/terminal-host.mjs";
@@ -61,6 +62,12 @@ function fakeBase(root, { claudePackageVersion = undefined, ...overrides } = {})
   writeFileSync(join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"), "");
   mkdirSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli"), { recursive: true });
   writeFileSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"), "");
+  // dsh 的终端形态 = 本体 + dsh-tui 插件：fake 默认是「插件已装」的机器（一键启动
+  // 组装校验的 profile 落点，判据取生产同款 dshTuiLaunchProfileBin）。落点刻意
+  // 钉在 USERPROFILE 默认家：DSH_HOME 覆盖的用例要的正是「那个家里没有 profile」，
+  // 夹具不得跟着覆盖走。「只装本体」的用例传一个空目录当 DSH_HOME 即可。
+  mkdirSync(dirname(dshTuiLaunchProfileBin({ USERPROFILE: base.USERPROFILE })), { recursive: true });
+  writeFileSync(dshTuiLaunchProfileBin({ USERPROFILE: base.USERPROFILE }), "");
   return base;
 }
 
@@ -305,6 +312,30 @@ test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动
       // launcher 路径（launcher 形态见专项测试）。其他端点不追加主题覆盖参数。
       assert.equal(launch.launch.args.length, agentId === "zcode" || agentId === "workbuddy" ? 8 : 7, `${agentId} 的附加参数清单`);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dsh 只装本体没装 dsh-tui 插件：组装即拒，不再产出秒死的页签", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    // 本体在装（DSH_EXECUTABLE 指向真实文件）、DSH_HOME 指向没有 profile 的空
+    // 目录——恰是「只装 dsh 没装插件」的机器形态。旧行为是把 dsh.cmd --profile
+    // dsh-tui 原样交给 PTY，dsh 自抛 "profile does not exist" 退程，面板零提示。
+    const bareHome = join(root, "bare-dsh-home");
+    mkdirSync(bareHome, { recursive: true });
+    const base = fakeBase(root, { DSH_HOME: bareHome });
+    assert.throws(
+      () => buildAgentSessionLaunch({ agentId: "dsh", cwd: root, token: TOKEN, base }),
+      (error) => error.code === "dsh_tui_missing" && /dsh-tui/.test(error.message),
+      "缺插件要抛 dsh_tui_missing（错误句含插件名，经 400 的 error.message 走 toast）",
+    );
+    // 拒的是插件缺位，不是 dsh 端点本身：把插件落点补上，同一份 base 立即可启动。
+    mkdirSync(dirname(dshTuiLaunchProfileBin(base)), { recursive: true });
+    writeFileSync(dshTuiLaunchProfileBin(base), "");
+    const launch = buildAgentSessionLaunch({ agentId: "dsh", cwd: root, token: TOKEN, base });
+    assert.deepEqual(launch.launch.args.slice(7), ["--profile", "dsh-tui"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

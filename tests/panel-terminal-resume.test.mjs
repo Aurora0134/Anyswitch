@@ -7,6 +7,7 @@ import { createPanelRouter } from "../src/panel/panel.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 import { loadOrGenerateToken } from "../src/launchers/pi-relay-token.mjs";
 import { createBindingStore } from "../src/terminal/terminal-conversation-bindings.mjs";
+import { dshTuiLaunchProfileBin } from "../src/agents/agent-discovery.mjs";
 
 // 路由级：点历史会话续接时，面板只把会话身份（endpoint/id/file）交给服务端，
 // 命令行按 session-scan 的 RESUME_COMMAND 模板重建；客户端给什么命令原文都不接。
@@ -97,6 +98,11 @@ function withFakeAgents(fn) {
   writeFileSync(join(overrides.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"), "");
   mkdirSync(join(overrides.USERPROFILE, ".qoder", "bin", "qodercli"), { recursive: true });
   writeFileSync(join(overrides.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"), "");
+  // dsh 的终端形态 = 本体 + dsh-tui 插件：一键启动组装前校验 profile 落点（生产
+  // 同款 dshTuiLaunchProfileBin 判据），沙盒一并摆出插件已装的机器——DSH_HOME
+  // 未被覆盖时组装读的正是这份 USERPROFILE 默认家。
+  mkdirSync(dirname(dshTuiLaunchProfileBin({ USERPROFILE: overrides.USERPROFILE })), { recursive: true });
+  writeFileSync(dshTuiLaunchProfileBin({ USERPROFILE: overrides.USERPROFILE }), "");
   const saved = {};
   for (const [key, value] of Object.entries(overrides)) {
     saved[key] = process.env[key];

@@ -51,6 +51,7 @@ import {
   resolveQoderLaunchCliExecutable,
   resolveZcodeCliExecutable,
   resolveWorkbuddyExecutable,
+  dshTuiLaunchProfileBin,
 } from "./agent-discovery.mjs";
 import { RESUME_COMMAND } from "./session-scan.mjs";
 import { INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
@@ -417,6 +418,15 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
   if (!directory) throw agentError("请先填写工作目录", "invalid_cwd");
   if (!existsSync(directory)) throw agentError("工作目录不存在，请检查后重试", "invalid_cwd");
   const executable = resolveAgentExecutable(agentId, base);
+  // dsh 的终端形态由本体 harness 与界面插件 dsh-tui 两件组成，启动命令钉死
+  // `--profile dsh-tui`（见 AGENT_TERMINAL_TARGETS）。执行体校验只验本体
+  // （dsh.cmd），本体在装不等于终端能起：该 profile 只能由用户装插件时创建
+  // （不在 dsh 内置模板表内），缺插件时 dsh 自己抛 "profile \"dsh-tui\" does
+  // not exist" 并退程——面板只落一个秒死页签，零提示。组装前就地校验插件
+  // 落点，缺了报人话（经各处理器 400 的 error.message 走 toast 通路）。
+  if (agentId === "dsh" && !existsSync(dshTuiLaunchProfileBin(base))) {
+    throw agentError("DeepSeek Harness 的终端界面插件未安装，请先安装 dsh-tui", "dsh_tui_missing");
+  }
   const instance = sessionInstanceId(agentId, directory, instanceId);
   // 续接参数在 cwd 与执行体都确认可用之后才校验：这两项是每次启动的硬前提，
   // 报错优先级保持不变（工作目录错就报工作目录，不因续接字段把既有错误盖掉）。
