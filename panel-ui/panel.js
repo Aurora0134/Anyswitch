@@ -3043,10 +3043,21 @@ async function api(method, path, body) {
     // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
     if (expanded && root && body) {
       const first = body.children[0];
-      const h = first?.offsetHeight || 0;
-      const mb = first && typeof getComputedStyle === "function"
-        ? parseFloat(getComputedStyle(first).marginBottom) || 0 : 0;
-      if (h > 0) root.style.setProperty("--ll-step-expanded", (h + mb) + "px");
+      const computed = first && typeof getComputedStyle === "function" ? getComputedStyle(first) : null;
+      // 行距＝卡的实际使用高度＋下边距。offsetHeight 是取整值，与视口靠亚像素累加
+      // 排出来的真实行距差半到一个像素，摊开期叠卡还看得见时逐行露错位；先取
+      // computed height 的亚像素使用值，取不到再退回 rect / offsetHeight。
+      const exact = computed ? parseFloat(computed.height) : NaN;
+      const raw = Number.isFinite(exact) && exact > 0
+        ? exact
+        : (first
+          ? (typeof first.getBoundingClientRect === "function"
+            ? first.getBoundingClientRect().height
+            : first.offsetHeight) || 0
+          : 0);
+      const mb = computed ? parseFloat(computed.marginBottom) || 0 : 0;
+      const step = Math.round((raw + mb) * 1000) / 1000;
+      if (step > 0) root.style.setProperty("--ll-step-expanded", step + "px");
     }
     // 重新展开一律回到最新并恢复跟随：第一屏就是最新消息，接着上次的阅读位
     // 会让人以为日志没在更新。
