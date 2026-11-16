@@ -600,6 +600,9 @@
     return {
       ...STATIC_TOKENS,
       ...surfaceTokens,
+      // --surface 混合后、上玻璃化 alpha 前的那份不透明基色：壁纸域实底卡面调色用，
+      // 不随「阅读区不透明度」滑杆变透
+      "--surface-opaque": rgbToHex(surfaceOpaque["--surface"]),
       "--terminal-bg": terminalBg,
       ...textTokens,
       "--border": rgba(borderRgb, light ? 0.32 : 0.3),

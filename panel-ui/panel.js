@@ -5066,6 +5066,19 @@ async function api(method, path, body) {
     return true;
   }
 
+  // 主题页外部预览的壁纸垫底与全局垫底同源：图片/模糊/压暗三条内联样式直拷；
+  // 显隐由 CSS 按 data-style + data-wallpaper 门控，这里只保持取值同步
+  function syncSettingsMirrorWallpaper() {
+    const srcImage = $("wallpaperBackdropImage");
+    const srcDim = $("wallpaperBackdropDim");
+    const mirrorImage = $("settingsMirrorBackdropImage");
+    const mirrorDim = $("settingsMirrorBackdropDim");
+    if (!srcImage || !srcDim || !mirrorImage || !mirrorDim) return;
+    mirrorImage.style.backgroundImage = srcImage.style.backgroundImage;
+    mirrorImage.style.filter = srcImage.style.filter;
+    mirrorDim.style.background = srcDim.style.background;
+  }
+
   // 设置全页视图与各项开关
   function initSettingsView() {
     const keepAliveToggle = $("keepAliveToggle");
@@ -5301,6 +5314,7 @@ async function api(method, path, body) {
 
     function captureSettingsMirror() {
       captureMirrorInto($("settingsMirrorViewport"), $("settingsMirrorSizer"), $("settingsMirrorScale"));
+      syncSettingsMirrorWallpaper();
     }
     // 恢复路径下进「主题」的那次快照可能拍在首刷数据落地之前（空壳看板）：挂一次性补拍，
     // 等 refreshAgents 把真实内容渲染完再拍。正常路径拍到的已是真实内容，补拍值相同、
@@ -12923,7 +12937,7 @@ async function api(method, path, body) {
       store: openWallpaperImageStore(),
       preferDark: () => window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
       notify: toast,
-      onAfterChange: () => applyTerminalXtermTheme(),
+      onAfterChange: () => { applyTerminalXtermTheme(); syncSettingsMirrorWallpaper(); },
       onApplyStyle: () => setPanelStyle(WALLPAPER_STYLE),
       onFallbackStyle: () => setPanelStyle("default"),
       isStyleActive: () => currentPanelStyle() === WALLPAPER_STYLE,

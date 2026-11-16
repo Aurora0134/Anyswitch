@@ -11,6 +11,7 @@ const { extractTheme } = WallpaperTheme;
 const TOKEN_KEYS = [
   "--font-sans", "--font-mono", "--ease-out",
   "--bg", "--bg-page", "--surface", "--surface-sunken", "--surface-hover", "--surface-glass",
+  "--surface-opaque",
   "--terminal-bg",
   "--text", "--text-2", "--text-3", "--text-4",
   "--border", "--border-strong", "--divider",
@@ -173,6 +174,27 @@ test("--terminal-bg 随壁纸主色生成不透明六位 hex，不受 surfaceAlp
   assert.ok(gg > gr && gg > gb, `绿色壁纸亮色 --terminal-bg 应呈绿色调，实得 rgb(${gr},${gg},${gb})`);
   const [rr, rg, rb] = parseColor(extractTheme(RED).light["--terminal-bg"]).rgb;
   assert.ok(rr > rg && rr > rb, `红色壁纸亮色 --terminal-bg 应呈红色调，实得 rgb(${rr},${rg},${rb})`);
+});
+
+test("--surface-opaque 为 --surface 同源的不透明六位 hex，不随 surfaceAlpha 滑杆带 alpha", () => {
+  // 壁纸域实底卡面（运行日志卡）的调色基料：--surface 走玻璃化 alpha 会透出壁纸，
+  // 卡面垫底必须取混合后、上 alpha 前的那一份不透明基色。
+  for (const fixture of [BLUE, GREEN, RED, PURPLE, TWO_TONE, WHITE_DOMINANT, NEAR_BLACK, GRAY, EMPTY]) {
+    const theme = extractTheme(fixture);
+    for (const mode of ["light", "dark"]) {
+      const opaque = parseColor(theme[mode]["--surface-opaque"]);
+      assert.equal(opaque.alpha, 1, `${mode} --surface-opaque 恒不透明`);
+      assert.match(theme[mode]["--surface-opaque"], /^#[0-9a-f]{6}$/, `${mode} --surface-opaque 必须是六位 hex`);
+      assert.deepEqual(opaque.rgb, parseColor(theme[mode]["--surface"]).rgb,
+        `${mode} --surface-opaque 与 --surface 同 RGB，只剥 alpha`);
+    }
+  }
+  const theme = extractTheme(BLUE);
+  const overridden = extractTheme(BLUE, { surfaceAlpha: { light: { "--surface": 0.4 }, dark: { "--surface": 0.4 } } });
+  for (const mode of ["light", "dark"]) {
+    assert.equal(overridden[mode]["--surface-opaque"], theme[mode]["--surface-opaque"],
+      `${mode} --surface-opaque 不受 surfaceAlpha 滑杆影响`);
+  }
 });
 
 test("确定性：同输入同输出（含零像素边界输入）", () => {
