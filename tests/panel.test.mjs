@@ -4209,7 +4209,7 @@ describe("panel.html 设置全页视图", () => {
     // v2 镜像栏只剥成 static 而未定高，grid 的 stretch 把它拉到整页高，栏内
     // margin-top:auto 的 tab 组与底行被推到整页底部——短页栏底就超出视口，长页整组
     // 跑到屏幕外。用户裁决：视口不可滚。改法：sizer 只撑一屏、整页由它裁掉，镜像栏按
-    // --preview-vh（一屏自然高）定高并 align-self:start；缩放比封顶 1 与比例注入保留。
+    // --preview-vh（一屏自然高）定高；缩放比封顶 1 与比例注入保留。
     // 基座规则要按声明锚定：皮肤覆盖段里还有一条同名的 .settings-theme-preview 换底规则
     const themeBox = panelCss.match(/\.settings-theme-preview \{\s*pointer-events: none;([^}]*)\}/)[1];
     for (const pin of ["aspect-ratio: var(--preview-aspect, 1.6)", "min-width: 0", "min-height: 0", "overflow: hidden", "display: flex"]) {
@@ -4231,9 +4231,17 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!/overflow-y:\s*auto|scrollbar-gutter|pointer-events:\s*auto/.test(modalViewport),
       "窗内预览视口不留滚动槽、不开放交互");
     const railRule = panelCss.match(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{([^}]*)\}/)[1];
-    for (const pin of ["align-self: start", "height: var(--preview-vh, 100vh)", "overflow: hidden"]) {
+    for (const pin of ["position: absolute", "height: var(--preview-vh, 100vh)", "overflow: hidden"]) {
       assert.ok(railRule.includes(pin), `镜像栏含 ${pin}`);
     }
+    // 栏克隆改绝对定位脱离轨道 sizing：它按一屏定高又跨头行/看板两行，作为在流网格项
+    // 时看板克隆比一屏矮（compact 图标行档/运行端点少/窄窗一屏折算变高）装不下的余量
+    // 会被整段灌进第 1 行，头行从 48px 被撑成一百多 px 的空屏（用户报障：预览映射顶部
+    // 一段异常空屏、内容被下挤）。列 1 宽改由 JS 把实测栏宽写进变量供网格与栏共用。
+    assert.ok(panelCss.includes("grid-template-columns: var(--mirror-rail-w, auto) minmax(0, 1fr)"),
+      "镜像列 1 宽取 JS 实测栏宽变量，不再由栏克隆在流撑出");
+    assert.ok(railRule.includes("width: var(--mirror-rail-w)"), "镜像栏自身宽同取实测值");
+    assert.ok(!railRule.includes("align-self"), "栏不再作为网格项参与对齐与轨道 sizing");
     assert.ok(panelCss.includes(".settings-mirror-sizer { position: relative; width: 100%; overflow: hidden; }"),
       "sizer 宽度交还容器，整页克隆体由它裁掉");
 
@@ -4243,6 +4251,8 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(capture.includes('sizer.style.height = availH + "px"'), "sizer 只撑一屏高度");
     assert.ok(capture.includes('setProperty("--preview-vh", availH / s + "px")'),
       "一屏自然高注入镜像栏，缩放后栏底贴视口底");
+    assert.ok(capture.includes('setProperty("--mirror-rail-w", mirrorRailW + "px")'),
+      "实测栏宽注入变量：v2 网格列 1 与绝对定位的镜像栏共用同一值");
     assert.ok(!capture.includes("scaleEl.offsetHeight"), "整页自然高不再参与尺寸链");
     assert.ok(!capture.includes('naturalW * s + "px"'), "旧的 sizer 固定 px 宽已撤");
     assert.ok(!capture.includes("viewport.scrollTop = 0"), "旧的定高内滚复位已撤");
@@ -4265,6 +4275,7 @@ describe("panel.html 设置全页视图", () => {
       return {
         s, width: scaleEl.style.width, sizerW: sizer.style.width,
         sizerH: parseFloat(sizer.style.height), railH: parseFloat(cssVars["--preview-vh"]),
+        railW: cssVars["--mirror-rail-w"],
       };
     };
     const classic = runChain(1430, 216, 48, 216, 948, 584, 969);   // naturalW 1406
@@ -4275,6 +4286,8 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(classic.s < 1 && classic.s > 0.6, "经典比例按宽度等比缩");
     assert.equal(classic.sizerH, 584, "sizer 高＝视口高，整页由它裁掉");
     assert.ok(Math.abs(classic.railH * classic.s - 584) < 0.001, "镜像栏按 s 缩放后正好一屏高");
+    assert.equal(classic.railW, "216px", "宽档实测栏宽 216 进变量");
+    assert.equal(narrow.railW, "72px", "窄栏实测栏宽 72 进变量");
     assert.equal(longPage.s, classic.s, "长页不改缩放比");
     assert.equal(longPage.sizerH, classic.sizerH, "长页不撑高 sizer：预览框与内容裁切位都不变");
     assert.equal(longPage.railH, classic.railH, "长页不改镜像栏高：栏底恒等于视口底");
@@ -4314,10 +4327,10 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/\+ \(mirrorRailW \? mirrorRailW \+ 24 : 0\)/.test(body),
       "镜像自然宽补回栏克隆实渲宽 + 24px 栏间隔（宽档 216+24、窄栏随媒体查询 72+24，与布局左让同源）");
     assert.ok(/railClone\.offsetWidth/.test(body), "栏宽按克隆实渲取值，不硬编码档宽");
-    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: grid; grid-template-columns: auto minmax\(0, 1fr\); column-gap: 24px; row-gap: 24px; \}/.test(panelCss),
-      "镜像画布在新版下两列网格：栏跨头行/看板两行，栏与内容区间照真实布局留 24px 间隔，行距 24 照 main padding-top");
-    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{\s*position: static;[^}]*align-self: start;[^}]*height: var\(--preview-vh, 100vh\)/.test(panelCss),
-      "镜像内的栏剥 fixed 通高形态并按一屏高定高：栏底贴视口底而非整页底");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: grid; grid-template-columns: var\(--mirror-rail-w, auto\) minmax\(0, 1fr\); column-gap: 24px; row-gap: 24px; \}/.test(panelCss),
+      "镜像画布在新版下两列网格：列 1 宽取实测栏宽变量，栏与内容区间照真实布局留 24px 间隔，行距 24 照 main padding-top");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{\s*position: absolute;[^}]*height: var\(--preview-vh, 100vh\)/.test(panelCss),
+      "镜像内的栏剥 fixed 通高形态改绝对定位铺第 1 列：按一屏高定高栏底贴视口底，且不再作为网格项把跨行余量灌进头行");
     assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale > \.telemetry-view \{ grid-column: 2; min-width: 0; \}/.test(panelCss),
       "看板镜像落右列第二行、吃掉栏外全部宽度，不超宽也不缩水");
     assert.ok(body.includes('document.querySelector("#mainHeadInner")'),

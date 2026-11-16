@@ -5005,6 +5005,9 @@ async function api(method, path, body) {
     scaleEl.style.transform = `scale(${s})`;
     // 镜像栏的 fixed 通高折算成一屏自然高：按 s 缩放后栏底正好等于视口底。
     scaleEl.style.setProperty("--preview-vh", availH / s + "px");
+    // 栏克隆实渲宽交给 CSS：v2 网格列 1 与绝对定位的镜像栏共用同一值。栏改绝对定位
+    // 脱离网格轨道 sizing 的根因见 .settings-mirror-scale .rail 处注释（余量灌头行）。
+    scaleEl.style.setProperty("--mirror-rail-w", mirrorRailW + "px");
     // sizer 不写死 px 宽：设置页右栏是 grid 1fr，固定 px 宽会把列撑开，下一轮
     // availW 读到撑开后的旧宽，窄窗口下缩放比自锁放大。
     sizer.style.width = "";
