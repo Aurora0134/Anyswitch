@@ -1,6 +1,6 @@
 # 面板美术风格重构 · 风格片段契约（常驻主题机制）
 
-目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 3 套可切换面板主题片段（`saas` 默认 / `aurora` / `sepia`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上；另有动态第四主题「自定义」（`wallpaper`），不进本机制，见下文专节。
+目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 4 套可切换面板主题片段（`default` 默认 / `cyan` / `aurora` / `sepia`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上；另有动态第五主题「自定义」（`wallpaper`），不进本机制，见下文专节。`default` 是经典默认蓝，token 与基座 :root 三段同源；`cyan` 是原 `saas` 皮肤改名（深海青），老存档 `saas` 由首帧脚本别名迁移为 `cyan`。
 **布局、DOM 结构、文案、既有注释一律不动**；只换皮肤。
 
 主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
@@ -13,10 +13,11 @@
 
 ## 切换机制（集成方实现，片段作者只需了解）
 
-- `<html>` 上新增 `data-style` 属性：`saas`（默认）/ `aurora` / `sepia` = 三套风格，
-  另有动态第四项 `wallpaper`（见下节，不走静态片段机制）。
+- `<html>` 上新增 `data-style` 属性：`default`（默认）/ `cyan` / `aurora` / `sepia` = 四套风格，
+  另有动态第五项 `wallpaper`（见下节，不走静态片段机制）。
   已退役的 `blueprint` / `neon` / `industrial` / `editorial` / `anthropic` 片段随退役删除；
-  存档缺失、空串、上述退役值或任何未知值，首帧一律解析为 `saas` 并覆写存档。
+  `saas` 是 `cyan` 的历史键名：老存档的 `saas` 首帧别名迁移为 `cyan`，不按退役值丢弃。
+  存档缺失、空串、上述退役值或任何未知值，首帧一律解析为 `default` 并覆写存档。
 - 亮暗仍由既有 `data-theme="light|dark"` + `prefers-color-scheme` 决定，与 `data-style` 正交，
   亮暗由右上角按钮独立控制。
 - 设置弹窗「面板主题」栏切换，即时生效，localStorage `panel-style` 记忆在本机。
@@ -29,8 +30,8 @@
 差量注入并按 `data-theme` 取用；切走「自定义」时全量清掉注入属性，静态皮肤的
 CSS 规则自然恢复生效。
 
-清单对账因此分两层：panel.html 的 PANEL_STYLES 与 panel.js 的 STYLES 是四项
-（三静态 + `wallpaper`），style-lab-sync.test.mjs 的横幅块/源文件校验只覆盖三静态，
+清单对账因此分两层：panel.html 的 PANEL_STYLES 与 panel.js 的 STYLES 是五项
+（四静态 + `wallpaper`），style-lab-sync.test.mjs 的横幅块/源文件校验只覆盖四静态，
 并反向断言动态项没有 `style-lab/` 源文件。壁纸垫底结构、终端屏半透明与主题页
 从属控件的样式写在 panel.css 基座段（非横幅块），由 `:root[data-style="wallpaper"]`
 门控。
@@ -113,7 +114,7 @@ token 一起失效、整套皮肤退化为基座值。同理，`@keyframes` 不�
 - **预览隔离**：皮肤覆盖规则（主语是 `:root` 之后的元素）必须收在
   `@scope (:root[data-style="SLUG"]) to (.wallpaper-preview)` 内，块内选择器以 `:scope:scope` 顶替
   原「`:root` + 皮肤键」前缀；主语就是 `:root` 的 token 定义留在块外——`@scope` 的作用域不含
-  作用域根自身，收进去会让 token 整体失效。panel.css 里以 `data-style="saas|aurora|sepia"`
+  作用域根自身，收进去会让 token 整体失效。panel.css 里以 `data-style="default|cyan|aurora|sepia"`
   字面量键控的覆盖规则同样收边、同样改写前缀。
   皮肤私有 token（不属于壁纸 token 契约、取色引擎不派生的那些）必须在 `.wallpaper-preview` 上
   按壁纸主题生效时真实看板的取值补齐，见 panel.css「预览的皮肤隔离层」段。

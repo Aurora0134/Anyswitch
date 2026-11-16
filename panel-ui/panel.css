@@ -446,7 +446,7 @@
 
   /* aurora 栏材质：栏基座是 var(--surface)（aurora 下本就半透），补玻璃模糊即与卡片
      同一玻璃配方（--glass-blur 既有 token，不造新色值/新模糊量）。双属性选择器提优先
-     级——皮肤块同优先级且位置更靠后，不这样写会被盖。saas/sepia 的 --surface 是实底，
+     级——皮肤块同优先级且位置更靠后，不这样写会被盖。cyan/sepia 的 --surface 是实底，
      基座规则已够，不添。 */
   /* 预览隔离：镜像里的栏克隆同样是 .rail，本条收边到 .wallpaper-preview 外——
      皮肤栏材质属于真实看板与主题页镜像，「自定义」窗口的预览要的是壁纸主题观感。 */
@@ -502,7 +502,7 @@
      只作用新版（v2），旧版零变化；只剥容器壳，控件（按钮/开关/下拉/输入）的可点击
      指示一律保留。四块内容（1/2 为试点初版，3/4 与分隔感补强为验收修整）：
      1) 设置区块成描边盒（材质修正定稿，取代初版去壳）：透明底（坐页面背景）+ 四边
-        1px 描边（--border）+ 圆角随皮肤语言（--radius-md：saas 恰 10px 档、sepia
+        1px 描边（--border）+ 圆角随皮肤语言（--radius-md：cyan 恰 10px 档、sepia
         方角 3px）、无影、hover 不浮也不描边变化；盒间距 28px、盒内卡头 16/0 +
         卡体 12/16（标题到内容 12px），无头平卡顶距同档 16。卡头标题 15px/600/正文色。
         aurora 例外 = 恢复其皮肤原生卡片材质（玻璃透底 + 模糊 + 顶部 hairline + 描边，
@@ -1154,13 +1154,13 @@
      内容抬亮一档、栏再压暗）。对调 = 既有 token 互换位：内容区底 body 用 --surface、
      栏底用 --bg-page——亮暗同一条规则（token 随亮暗自动换值），v1 零变化。terminal-
      view 与主题预览镜像视口同步换（切页不跳变；镜像演示的是新明暗关系，不换就是在
-     预览里画旧版式）。只作用 saas/sepia：aurora 摘出——它的 --surface 是半透玻璃料，
+     预览里画旧版式）。只作用 cyan/sepia：aurora 摘出——它的 --surface 是半透玻璃料，
      body 换它会让极光晕透底洗白、栏换实底会毁掉玻璃层次；aurora 的页面底即其「面」，
      方向不动（它的设置在 1) 里恢复玻璃卡）。 */
   /* 预览隔离：本块皮肤键控规则会命中主题预览镜像里的克隆体（栏 / 视口 / 页身），
      整体收边到 .wallpaper-preview 外——真实看板与主题页镜像照旧，「自定义」窗口的
      壁纸预览不吃当前皮肤的对调底色。 */
-  @scope (:root[data-ui-version="v2"][data-style="saas"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {
+  @scope (:root[data-ui-version="v2"][data-style="cyan"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {
   :scope:scope[data-ui-version="v2"] body,
   :scope:scope[data-ui-version="v2"] body { background: var(--surface); }
   :scope:scope[data-ui-version="v2"] .rail,
@@ -1196,13 +1196,13 @@
     display: none;
   }
 
-  /* ── 遥测四宫格扁平化（v2，照 sepia 的平样板）：saas 皮肤段的微渐变底 + 顶部内高光是
+  /* ── 遥测四宫格扁平化（v2，照 sepia 的平样板）：cyan 皮肤段的微渐变底 + 顶部内高光是
      v1 的立体语言，与 v2「页面是平的，浮层才有影」相悖——收为平涂 --surface-sunken
      （与基座、sepia 同值）、撤内高光。圆角与字距属皮肤语言不动；aurora 按拍板保持
      现状（玻璃微渐变原样，此处不加 aurora 规则）；v1 零变化（皮肤基座段原样，此处
      仅 v2 双属性覆写）。镜像克隆同吃这条（类选择器），预览与真实一并转平。 */
-  /* 预览隔离：镜像里的遥测卡是同一类，本条同样收边，否则预览卡会读成 saas 的平涂。 */
-  @scope (:root[data-ui-version="v2"][data-style="saas"]) to (.wallpaper-preview) {
+  /* 预览隔离：镜像里的遥测卡是同一类，本条同样收边，否则预览卡会读成 cyan 的平涂。 */
+  @scope (:root[data-ui-version="v2"][data-style="cyan"]) to (.wallpaper-preview) {
   :scope:scope[data-ui-version="v2"] .telemetry-card {
     background: var(--surface-sunken);
     box-shadow: none;
@@ -2338,7 +2338,7 @@
      字就压在图上——这正是「部分块在自定义背景下缺乏底层」的两处来源。补偿只加一层底：
      取主题自身的 --surface / --surface-sunken（随「阅读区不透明度」滑杆走），描边与圆角
      沿用平铺盒那两条规则的取值（--border / --radius-md / 无影），不引入新材质；aurora 在
-     这两处已有自己的玻璃卡例外，本条只锚 data-style="wallpaper"，saas/aurora/sepia 与
+     这两处已有自己的玻璃卡例外，本条只锚 data-style="wallpaper"，cyan/aurora/sepia 与
      默认外观零变化。
      作用域照抄两条平铺规则：设置页按四面板 id 列举（不整罩——主题子页的看板预览镜像里是
      克隆的真实看板 DOM，含 .panel-card，整罩会把镜像卡也套上新底、毁掉预览保真）；统计页
@@ -3350,7 +3350,7 @@
     color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);
   }
   /* 选区底色必须半透明：textarea 在高层且字是透明的，不透明底色会把下层高亮文字
-     整片盖住（saas/sepia 亮色主题的 --accent-soft 是实色，选中即看不到字）。
+     整片盖住（cyan/sepia 亮色主题的 --accent-soft 是实色，选中即看不到字）。
      用 accent 的透明度版本，任何皮肤下都只染一层薄色、字仍可读。 */
   .skills-editor-input::selection { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   /* 高亮只动颜色/底色，不动字重与字形——它们会改字形宽度，让折行点错位 */
@@ -4220,15 +4220,274 @@
 
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
-  /* ===== style-lab: saas ===== */
+  /* ===== style-lab: default ===== */
 /* ==========================================================================
-   风格片段：saas｜现代 SaaS · Linear 风
+   风格片段：default｜默认蓝
+   经典默认蓝：Slate/Zinc 工业质感技术仪表盘，蓝色强调色（亮 #2563eb /
+   暗 #3b82f6，色相 ~217）。token 全量与 panel.css 基座 :root 三段同源，
+   选中本皮肤时以同名 data-style 规则把基座值显式落一份，观感与经典默认一致。
+   仅换肤：不改 DOM、不改文案。
+
+   布局级覆盖清单：无。本片段只落 token，不动任何几何/装饰规则——皮肤覆盖
+   一律沿用 panel.css 基座，故下方 @scope 为空壳（收边边界仍照契约保留）。
+   ========================================================================== */
+
+/* 1) 亮色 token 全集 */
+:root[data-style="default"] {
+  color-scheme: light;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --bg: #f8fafc;
+  --bg-page: #f1f5f9;
+  --surface: #ffffff;
+  --surface-sunken: #f8fafc;
+  --surface-hover: #f1f5f9;
+  --surface-glass: rgba(255, 255, 255, 0.92);
+
+  --text: #0f172a;
+  --text-2: #334155;
+  --text-3: #64748b;
+  --text-4: #94a3b8;
+
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --divider: #f1f5f9;
+
+  --accent: #2563eb;
+  --accent-soft: #eff6ff;
+  --accent-border: #bfdbfe;
+
+  --ok: #059669;
+  --ok-soft: #ecfdf5;
+  --ok-border: #a7f3d0;
+
+  --warn: #d97706;
+  --warn-soft: #fffbeb;
+  --warn-border: #fde68a;
+
+  --danger: #dc2626;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+
+  --pool: #7c3aed;
+  --pool-soft: #f5f3ff;
+  --pool-border: #ddd6fe;
+
+  --spark-line: #2563eb;
+  --spark-fill: rgba(59, 130, 246, 0.12);
+  --danger-glow: rgba(220, 38, 38, 0.18);
+
+  --shadow-xs: 0 1px 2px 0 rgba(15, 23, 42, 0.04);
+  --shadow-sm: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.06), 0 2px 4px -2px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.04);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  --accent-glow: 0 2px 8px rgba(37, 99, 235, 0.35);
+
+  --store-drag-accent: var(--accent);
+  --store-drag-glow: 0 2px 14px color-mix(in srgb, var(--store-drag-accent) 32%, transparent);
+  --store-drag-ease: ease;
+
+  --glass-blur: blur(12px) saturate(150%);
+  --console-bg: #ffffff;
+  --console-toolbar-bg: #f8fafc;
+  --console-border: #e2e8f0;
+  --console-fg: #1e293b;
+  --console-muted: #64748b;
+  --console-hover-bg: #e2e8f0;
+  --console-hover-fg: #0f172a;
+  --console-live: var(--ok);
+  --console-info: #0284c7;
+  --console-warn: #b45309;
+  --console-error: #dc2626;
+
+  --terminal-bg: #f8fafc;
+  --terminal-fg: #1e293b;
+  --terminal-cursor: #334155;
+  --terminal-selection: #bfdbfe;
+  --terminal-muted: #64748b;
+}
+
+/* 2) 暗色 token 全集（显式 dark） */
+:root[data-style="default"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --bg: #0b0f19;
+  --bg-page: #070a12;
+  --surface: #111827;
+  --surface-sunken: #0c1220;
+  --surface-hover: #172033;
+  --surface-glass: rgba(17, 24, 39, 0.92);
+
+  --text: #f9fafb;
+  --text-2: #d1d5db;
+  --text-3: #9ca3af;
+  --text-4: #6b7280;
+
+  --border: #1f2937;
+  --border-strong: #374151;
+  --divider: #182234;
+
+  --accent: #3b82f6;
+  --accent-soft: rgba(59, 130, 246, 0.16);
+  --accent-border: #1d4ed8;
+
+  --ok: #10b981;
+  --ok-soft: rgba(16, 185, 129, 0.16);
+  --ok-border: #047857;
+
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.16);
+  --warn-border: #b45309;
+
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.18);
+  --danger-border: #b91c1c;
+
+  --pool: #a78bfa;
+  --pool-soft: rgba(167, 139, 250, 0.16);
+  --pool-border: #6d28d9;
+
+  --spark-line: #60a5fa;
+  --spark-fill: rgba(96, 165, 250, 0.18);
+  --danger-glow: rgba(239, 68, 68, 0.32);
+
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.45), 0 1px 2px -1px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.55), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.65), 0 4px 6px -4px rgba(0, 0, 0, 0.45);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  --accent-glow: 0 2px 8px rgba(37, 99, 235, 0.35);
+
+  --glass-blur: blur(12px) saturate(150%);
+  --console-bg: #090d16;
+  --console-toolbar-bg: #0f172a;
+  --console-border: #1e293b;
+  --console-fg: #e2e8f0;
+  --console-muted: #94a3b8;
+  --console-hover-bg: #1e293b;
+  --console-hover-fg: #f8fafc;
+  --console-live: var(--ok);
+  --console-info: #38bdf8;
+  --console-warn: #fbbf24;
+  --console-error: #f87171;
+
+  --terminal-bg: #0b1220;
+  --terminal-fg: #d5e2f4;
+  --terminal-cursor: #dbeafe;
+  --terminal-selection: #29486d;
+  --terminal-muted: #71829a;
+}
+
+/* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="default"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    --bg: #0b0f19;
+    --bg-page: #070a12;
+    --surface: #111827;
+    --surface-sunken: #0c1220;
+    --surface-hover: #172033;
+    --surface-glass: rgba(17, 24, 39, 0.92);
+
+    --text: #f9fafb;
+    --text-2: #d1d5db;
+    --text-3: #9ca3af;
+    --text-4: #6b7280;
+
+    --border: #1f2937;
+    --border-strong: #374151;
+    --divider: #182234;
+
+    --accent: #3b82f6;
+    --accent-soft: rgba(59, 130, 246, 0.16);
+    --accent-border: #1d4ed8;
+
+    --ok: #10b981;
+    --ok-soft: rgba(16, 185, 129, 0.16);
+    --ok-border: #047857;
+
+    --warn: #f59e0b;
+    --warn-soft: rgba(245, 158, 11, 0.16);
+    --warn-border: #b45309;
+
+    --danger: #ef4444;
+    --danger-soft: rgba(239, 68, 68, 0.18);
+    --danger-border: #b91c1c;
+
+    --pool: #a78bfa;
+    --pool-soft: rgba(167, 139, 250, 0.16);
+    --pool-border: #6d28d9;
+
+    --spark-line: #60a5fa;
+    --spark-fill: rgba(96, 165, 250, 0.18);
+    --danger-glow: rgba(239, 68, 68, 0.32);
+
+    --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+    --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.45), 0 1px 2px -1px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.55), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.65), 0 4px 6px -4px rgba(0, 0, 0, 0.45);
+
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+    --accent-glow: 0 2px 8px rgba(37, 99, 235, 0.35);
+
+    --glass-blur: blur(12px) saturate(150%);
+    --console-bg: #090d16;
+    --console-toolbar-bg: #0f172a;
+    --console-border: #1e293b;
+    --console-fg: #e2e8f0;
+    --console-muted: #94a3b8;
+    --console-hover-bg: #1e293b;
+    --console-hover-fg: #f8fafc;
+    --console-live: var(--ok);
+    --console-info: #38bdf8;
+    --console-warn: #fbbf24;
+    --console-error: #f87171;
+
+    --terminal-bg: #0b1220;
+    --terminal-fg: #d5e2f4;
+    --terminal-cursor: #dbeafe;
+    --terminal-selection: #29486d;
+    --terminal-muted: #71829a;
+  }
+}
+
+/* ==========================================================================
+   皮肤覆盖规则：本片段沿用基座，无额外覆盖。@scope 空壳仅为守收边契约——
+   作用域起 `:root[data-style="default"]`，止 `.wallpaper-preview`。
+   ========================================================================== */
+@scope (:root[data-style="default"]) to (.wallpaper-preview) {
+}
+
+  /* ===== style-lab: cyan ===== */
+/* ==========================================================================
+   风格片段：cyan｜深海青 · Linear 风
    柔和中性底 + 半透明高光细边 + 大圆角 + 深海青渐变点缀 + 玻璃拟态
    仅换肤：不改 DOM、不改文案。
    主色：深海青 teal-cyan（亮 #0b7f96 / 暗 #3ec2d6，色相 ~190），
    与基座蓝 #3b82f6（~217）、ok 绿 #0d9d70（~158）均拉开明显色相距离。
 
-   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="saas"]，
+   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="cyan"]，
    不触碰 .view-tabs / .seg-control 几何，仅做圆角与装饰）：
    1. border-radius 全量上调：卡片 / 按钮 / 徽章 / 输入 / 浮层 / toggle /
       seg-control & view-tabs 容器与选中块（圆角值，不改尺寸）。
@@ -4239,13 +4498,13 @@
    ========================================================================== */
 
 /* @keyframes 不参与样式匹配，按 CSS 规范不能收在 @scope 内：提到作用域块外顶层。 */
-@keyframes saas-modal-in {
+@keyframes cyan-modal-in {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 /* 1) 亮色 token 全集 */
-:root[data-style="saas"] {
+:root[data-style="cyan"] {
   color-scheme: light;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
@@ -4333,7 +4592,7 @@
 }
 
 /* 2) 暗色 token 全集（显式 dark） */
-:root[data-style="saas"][data-theme="dark"] {
+:root[data-style="cyan"][data-theme="dark"] {
   color-scheme: dark;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
@@ -4417,7 +4676,7 @@
 
 /* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
 @media (prefers-color-scheme: dark) {
-  :root[data-style="saas"]:not([data-theme="light"]):not([data-theme="dark"]) {
+  :root[data-style="cyan"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
     --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
@@ -4506,7 +4765,7 @@
 
 /* ==========================================================================
    作用域收边：自本行起，本文件的皮肤覆盖规则整块包在下面这个 @scope 内——
-   作用域起 `:root[data-style="saas"]`，止 `.wallpaper-preview`（终点元素及其后代不在
+   作用域起 `:root[data-style="cyan"]`，止 `.wallpaper-preview`（终点元素及其后代不在
    作用域内，故「自定义」主题窗口里的壁纸看板预览吃不到当前皮肤；设置页「主题」子页的
    镜像不是这个容器，继续随皮肤。
    块内选择器以 `:scope:scope` 顶替原来的「`:root` + 皮肤键」前缀：@scope 的作用域不含
@@ -4518,7 +4777,7 @@
    @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
    @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内（前缀同样写 `:scope:scope`）。
    ========================================================================== */
-@scope (:root[data-style="saas"]) to (.wallpaper-preview) {
+@scope (:root[data-style="cyan"]) to (.wallpaper-preview) {
 /* 页面：顶部一抹品牌色径向光晕，营造控制台氛围 */
 :scope:scope body {
   background: var(--page-bg-image), var(--bg-page);
@@ -4665,7 +4924,7 @@
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
 :scope:scope .modal-overlay.show .modal-card {
-  animation: saas-modal-in 160ms var(--ease-out);
+  animation: cyan-modal-in 160ms var(--ease-out);
 }
 
 /* 输入控件：圆角统一 + 聚焦柔光环 */
@@ -5887,7 +6146,7 @@
      的 fill（core），见 #startupSvg 的 <stop> 与 panelStartupPlay 里建节点那段。
      :root 这一组是兜底：data-style 缺失或变量未解析时回落到原品牌蓝，不闪黑。 */
   :root { --startup-deep: #00377f; --startup-mid: #007bed; --startup-core: #00d8eb; }
-  :root[data-style="saas"] { --startup-deep: #054051; --startup-mid: #0a889f; --startup-core: #2ee9cf; }
+  :root[data-style="cyan"] { --startup-deep: #054051; --startup-mid: #0a889f; --startup-core: #2ee9cf; }
   :root[data-style="aurora"] { --startup-deep: #1a0f4d; --startup-mid: #3d5cd6; --startup-core: #3ee8ff; }
   :root[data-style="sepia"] { --startup-deep: #59300e; --startup-mid: #c85e20; --startup-core: #ffd48a; }
   html[data-startup] #panelStartup {

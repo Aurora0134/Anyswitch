@@ -1,9 +1,9 @@
 // style-lab 主题同步校验：panel.css 内嵌块（/* ===== style-lab: SLUG ===== */ 横幅）
 // 必须与 panel-ui/style-lab/SLUG.css 源文件逐字一致（归一化 CRLF/LF 行尾后比对）。
-// 在册主题清单＝静态三皮肤（saas/aurora/sepia，走本文件的横幅块与源文件校验）＋
-// 动态第四项 wallpaper（「自定义」：token 由取色引擎按背景图运行时注入，无静态
+// 在册主题清单＝静态四皮肤（default/cyan/aurora/sepia，走本文件的横幅块与源文件校验）＋
+// 动态第五项 wallpaper（「自定义」：token 由取色引擎按背景图运行时注入，无静态
 // 片段，不进本文件的块校验）。panel.html 的 PANEL_STYLES 与 panel.js 的 STYLES
-// 必须是「三静态 + wallpaper」四项；panel.css 横幅块集合仍恰为三静态——已退役
+// 必须是「四静态 + wallpaper」五项；panel.css 横幅块集合仍恰为四静态——已退役
 // 主题的横幅块残留、在册静态皮肤缺块、同名横幅重复都会红。
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,11 +12,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const SLUGS = ["saas", "aurora", "sepia"];
-// 动态主题：不进 style-lab 静态片段机制，但占用主题清单第四项
+const SLUGS = ["default", "cyan", "aurora", "sepia"];
+// 动态主题：不进 style-lab 静态片段机制，但占用主题清单第五项
 const DYNAMIC_STYLES = ["wallpaper"];
 
-test("在册主题清单两处一致：panel.html PANEL_STYLES = panel.js STYLES = 三静态皮肤 + 动态第四项", () => {
+test("在册主题清单两处一致：panel.html PANEL_STYLES = panel.js STYLES = 四静态皮肤 + 动态第五项", () => {
   const html = readFileSync(join(root, "../panel-ui", "panel.html"), "utf8");
   const js = readFileSync(join(root, "../panel-ui", "panel.js"), "utf8");
   const htmlList = html.match(/var PANEL_STYLES = (\[[^\]]*\]);/);

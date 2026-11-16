@@ -3524,9 +3524,9 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
     assert.ok(m[1].includes("suppressStoreClick"), "click delegate swallows the click after drag");
   });
 
-  it("基础层 + saas/aurora/sepia 三皮肤段均定义 --store-drag-accent", () => {
+  it("基础层 + default/cyan/aurora/sepia 四皮肤段均定义 --store-drag-accent", () => {
     assert.match(panelCss, /:root \{[\s\S]*?--store-drag-accent:/, "base :root defines --store-drag-accent");
-    for (const skin of ["saas", "aurora", "sepia"]) {
+    for (const skin of ["default", "cyan", "aurora", "sepia"]) {
       const re = new RegExp(`:root\\[data-style="${skin}"\\] \\{[\\s\\S]*?--store-drag-accent:`);
       assert.ok(re.test(panelCss), `${skin} skin defines --store-drag-accent`);
     }
@@ -3961,7 +3961,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(tileHover && !/var\(--accent\)/.test(tileHover[1]) && !/box-shadow/.test(tileHover[1]),
       "悬停不用品牌色描边、不跳投影档（品牌色描边只表示选中/启用）");
     // 材质只走 token，不留主题特化：皮肤段若给瓦片单画材质，就会出现「不随主题重画的表面」
-    const skinSection = panelCss.slice(panelCss.indexOf("/* ===== style-lab: saas ===== */"));
+    const skinSection = panelCss.slice(panelCss.indexOf("/* ===== style-lab: default ===== */"));
     assert.ok(skinSection.includes("style-lab: sepia"), "皮肤段切片锚点有效");
     assert.ok(!/\.route-ep-/.test(skinSection), "主题片段不覆盖 route-ep 选择器");
     assert.ok(!panelCss.includes(".route-ep-tile--off"), "无停用降档投影（质感不绑状态）");
@@ -4168,14 +4168,14 @@ describe("panel.html 设置全页视图", () => {
       "svg[hidden] 显式兜底规则在册（罩 4 处按钮 8 颗 SVG）");
   });
 
-  it("「主题」子 tab：左栏前三项点选即生效，「自定义...」开配置窗口；右栏预览为真实看板镜像", () => {
+  it("「主题」子 tab：左栏前四项点选即生效，「自定义...」开配置窗口；右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
     const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)" role="radio" aria-checked="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
     assert.deepEqual(items.map((m) => [m[1], m[3], m[2]]), [
-      ["saas", "Default", "true"], ["aurora", "Aurora", "false"], ["sepia", "Sepia", "false"],
+      ["default", "Default", "true"], ["cyan", "Cyan", "false"], ["aurora", "Aurora", "false"], ["sepia", "Sepia", "false"],
       ["wallpaper", "自定义...", "false"],
-    ], "四项主题与样式值一一对应，Default 按钮静态 aria-checked=\"true\"");
+    ], "五项主题与样式值一一对应，Default 按钮静态 aria-checked=\"true\"");
     assert.ok(panelJs.includes('picker.querySelectorAll(".settings-theme-item")'),
       "initStylePicker 同步选中态到新列表项");
     assert.ok(/b\.dataset\.style === WALLPAPER_STYLE[\s\S]{0,200}?openModal\(\)/.test(panelJs),
@@ -4375,11 +4375,13 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelHtml.includes("<summary>高级选项</summary>"), "展开钮文案原样，零文案改动");
   });
 
-  it("主题存档恢复：内联脚本四项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
-    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];'),
-      "PANEL_STYLES 恰为 saas/aurora/sepia 三静态皮肤 + wallpaper 动态项");
-    assert.ok(panelHtml.includes('? panelStyleRaw : "saas"'),
-      "缺失或非法存档一律回落 \"saas\"");
+  it("主题存档恢复：内联脚本五项在册、saas 别名迁移为 cyan、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
+    assert.ok(panelHtml.includes('var PANEL_STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];'),
+      "PANEL_STYLES 恰为 default/cyan/aurora/sepia 四静态皮肤 + wallpaper 动态项");
+    assert.ok(panelHtml.includes('if (panelStyleRaw === "saas") panelStyleRaw = "cyan";'),
+      "历史存档 saas 平滑迁移为 cyan，老用户主题不跳变");
+    assert.ok(panelHtml.includes('? panelStyleRaw : "default"'),
+      "缺失或非法存档一律回落 \"default\"");
     assert.ok(panelHtml.includes("if (panelStyleRaw !== panelStyle)"),
       "解析结果与原始存档不一致时进入覆写分支");
     assert.ok(panelHtml.includes('localStorage.setItem("panel-style", panelStyle)'),
@@ -4390,8 +4392,8 @@ describe("panel.html 设置全页视图", () => {
       "panel.html 无 removeAttribute(\"data-style\") 分支");
     assert.ok(!panelJs.includes('removeAttribute("data-style")'),
       "panel.js 无 removeAttribute(\"data-style\") 分支");
-    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia", "wallpaper"];'),
-      "panel.js 的 STYLES 数组恰为四项（三静态皮肤 + wallpaper 动态项）");
+    assert.ok(panelJs.includes('const STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];'),
+      "panel.js 的 STYLES 数组恰为五项（四静态皮肤 + wallpaper 动态项）");
   });
 
   it("齿轮改为切入设置视图，退出回到进入前视图；设置页另用 panel-settings-open 持久化", () => {
@@ -7842,11 +7844,11 @@ describe("设置项「UI版本」", () => {
     assert.ok(!aurora[1].includes("--shadow-sm") && !aurora[1].includes("--shadow-md"), "aurora 只留 inset 顶部高光、去投影");
   });
 
-  it("v2 明暗关系交换：saas/sepia 内容区与栏底 token 对调，aurora 摘出，v1 原样", () => {
-    // 改写后皮肤键只在 @scope 起点上；合并块的 saas/sepia 两格选择器同形。
-    const swapScope = '@scope (:root[data-ui-version="v2"][data-style="saas"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {';
+  it("v2 明暗关系交换：cyan/sepia 内容区与栏底 token 对调，aurora 摘出，v1 原样", () => {
+    // 改写后皮肤键只在 @scope 起点上；合并块的 cyan/sepia 两格选择器同形。
+    const swapScope = '@scope (:root[data-ui-version="v2"][data-style="cyan"], :root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {';
     assert.ok(panelCss.includes(`${swapScope}\n  :scope:scope[data-ui-version="v2"] body,`),
-      "对调块覆盖 saas/sepia 内容区底换 --surface");
+      "对调块覆盖 cyan/sepia 内容区底换 --surface");
     assert.ok(panelCss.includes(`${swapScope}\n  :scope:scope[data-ui-version="v2"] body,\n  :scope:scope[data-ui-version="v2"] body { background: var(--surface); }`),
       "内容区底 = --surface（亮：白；暗：抬亮一档）");
     assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
@@ -7866,16 +7868,16 @@ describe("设置项「UI版本」", () => {
     assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[\s\S]*?background: var\(--surface\);/.test(panelCss), "v2 栏基座底色规则原样（对调由双属性覆写承担）");
   });
 
-  it("v2 遥测四宫格扁平化：saas 收为平涂撤打光（照 sepia），aurora 与 v1 原样", () => {
-    assert.ok(panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="saas"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card {\n    background: var(--surface-sunken);\n    box-shadow: none;\n  }'),
-      "saas 四宫格 v2 平涂 --surface-sunken + 撤内高光");
+  it("v2 遥测四宫格扁平化：cyan 收为平涂撤打光（照 sepia），aurora 与 v1 原样", () => {
+    assert.ok(panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="cyan"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card {\n    background: var(--surface-sunken);\n    box-shadow: none;\n  }'),
+      "cyan 四宫格 v2 平涂 --surface-sunken + 撤内高光");
     assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="aurora"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card'),
       "aurora 四宫格保持现状（无 v2 覆写）");
     assert.ok(!panelCss.includes('@scope (:root[data-ui-version="v2"][data-style="sepia"]) to (.wallpaper-preview) {\n  :scope:scope[data-ui-version="v2"] .telemetry-card'),
       "sepia 本就是平样板（无需覆写）");
-    // v1 零变化：saas 皮肤段的渐变底 + 顶部内高光原样在册（v2 靠双属性提级覆写；改写只动前缀）
+    // v1 零变化：cyan 皮肤段的渐变底 + 顶部内高光原样在册（v2 靠双属性提级覆写；改写只动前缀）
     assert.ok(panelCss.includes(':scope:scope .telemetry-card {\n  border-radius: var(--radius-md);\n  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);\n  box-shadow: inset 0 1px 0 var(--hl-inset);\n}'),
-      "saas 皮肤段四宫格打光规则原样（v1 观感不动）");
+      "cyan 皮肤段四宫格打光规则原样（v1 观感不动）");
   });
 
   it("设置子导航迁入左栏：设置态主 tab 组整组换目录、栏底齿轮换「返回」，首帧与运行时可交棒", () => {
@@ -8176,18 +8178,18 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     assert.ok(m[1].includes("backdrop-filter: var(--glass-blur);") && m[1].includes("-webkit-backdrop-filter: var(--glass-blur);"),
       "玻璃模糊取既有 --glass-blur（aurora 卡片玻璃同配方）");
     assert.ok(!m[1].includes("background"), "半透底沿用基座 var(--surface)（aurora 下本就半透），不造新色值");
-    // 阶段 2 材质修正后，saas/sepia 栏各多一条 v2 底色对调规则（栏底换 --bg-page）——
-    // 那是明暗交换、不是玻璃材质；本例仍钉「saas/sepia 栏的规则只有对调这一条」。
+    // 阶段 2 材质修正后，cyan/sepia 栏各多一条 v2 底色对调规则（栏底换 --bg-page）——
+    // 那是明暗交换、不是玻璃材质；本例仍钉「cyan/sepia 栏的规则只有对调这一条」。
     // 改写后皮肤键在 @scope 起点上、选择器统一为 :scope:scope[data-ui-version="v2"]，
     // 合并块的两格同形：全文件该前缀的 .rail 选择器恰为 aurora 玻璃栏 + 对调两格。
     // 「合并选择器各占一格」是 0b51458 定下的显式计数口径，不是可清理的改写残留：
-    // base（d170982）里 saas/sepia 是两格真选择器，@scope 改写后收成同形一对，成对
+    // base（d170982）里 cyan/sepia 是两格真选择器，@scope 改写后收成同形一对，成对
     // 形态被 panel-preview-isolation 对 base 的逐条等价对账钉着——列表内去重（匹配集
     // 与特异性虽等价）会让那份对账在归一化文本、特异性与多重集三处判红。
     const swapRail = [...panelCss.matchAll(/:scope:scope\[data-ui-version="v2"\] \.rail[ ,]/g)];
-    assert.equal(swapRail.length, 3, "aurora 玻璃栏一格 + saas/sepia 底色对调两格（合并选择器各占一格）");
+    assert.equal(swapRail.length, 3, "aurora 玻璃栏一格 + cyan/sepia 底色对调两格（合并选择器各占一格）");
     assert.ok(panelCss.includes(':scope:scope[data-ui-version="v2"] .rail { background: var(--bg-page); }'),
-      "saas/sepia 栏底对调为 --bg-page；玻璃材质仍只有 aurora");
+      "cyan/sepia 栏底对调为 --bg-page；玻璃材质仍只有 aurora");
   });
 
   it("布局断点按栏态校准：宽档 +240 / 窄栏 +96（栏常驻，窄栏块无下界）；只校准真挤压的布局断点", () => {

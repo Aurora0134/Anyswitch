@@ -1,11 +1,11 @@
 /* ==========================================================================
-   风格片段：saas｜现代 SaaS · Linear 风
+   风格片段：cyan｜深海青 · Linear 风
    柔和中性底 + 半透明高光细边 + 大圆角 + 深海青渐变点缀 + 玻璃拟态
    仅换肤：不改 DOM、不改文案。
    主色：深海青 teal-cyan（亮 #0b7f96 / 暗 #3ec2d6，色相 ~190），
    与基座蓝 #3b82f6（~217）、ok 绿 #0d9d70（~158）均拉开明显色相距离。
 
-   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="saas"]，
+   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="cyan"]，
    不触碰 .view-tabs / .seg-control 几何，仅做圆角与装饰）：
    1. border-radius 全量上调：卡片 / 按钮 / 徽章 / 输入 / 浮层 / toggle /
       seg-control & view-tabs 容器与选中块（圆角值，不改尺寸）。
@@ -16,13 +16,13 @@
    ========================================================================== */
 
 /* @keyframes 不参与样式匹配，按 CSS 规范不能收在 @scope 内：提到作用域块外顶层。 */
-@keyframes saas-modal-in {
+@keyframes cyan-modal-in {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 /* 1) 亮色 token 全集 */
-:root[data-style="saas"] {
+:root[data-style="cyan"] {
   color-scheme: light;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
@@ -110,7 +110,7 @@
 }
 
 /* 2) 暗色 token 全集（显式 dark） */
-:root[data-style="saas"][data-theme="dark"] {
+:root[data-style="cyan"][data-theme="dark"] {
   color-scheme: dark;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
@@ -194,7 +194,7 @@
 
 /* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
 @media (prefers-color-scheme: dark) {
-  :root[data-style="saas"]:not([data-theme="light"]):not([data-theme="dark"]) {
+  :root[data-style="cyan"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
     --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
@@ -283,7 +283,7 @@
 
 /* ==========================================================================
    作用域收边：自本行起，本文件的皮肤覆盖规则整块包在下面这个 @scope 内——
-   作用域起 `:root[data-style="saas"]`，止 `.wallpaper-preview`（终点元素及其后代不在
+   作用域起 `:root[data-style="cyan"]`，止 `.wallpaper-preview`（终点元素及其后代不在
    作用域内，故「自定义」主题窗口里的壁纸看板预览吃不到当前皮肤；设置页「主题」子页的
    镜像不是这个容器，继续随皮肤。
    块内选择器以 `:scope:scope` 顶替原来的「`:root` + 皮肤键」前缀：@scope 的作用域不含
@@ -295,7 +295,7 @@
    @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
    @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内（前缀同样写 `:scope:scope`）。
    ========================================================================== */
-@scope (:root[data-style="saas"]) to (.wallpaper-preview) {
+@scope (:root[data-style="cyan"]) to (.wallpaper-preview) {
 /* 页面：顶部一抹品牌色径向光晕，营造控制台氛围 */
 :scope:scope body {
   background: var(--page-bg-image), var(--bg-page);
@@ -442,7 +442,7 @@
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
 :scope:scope .modal-overlay.show .modal-card {
-  animation: saas-modal-in 160ms var(--ease-out);
+  animation: cyan-modal-in 160ms var(--ease-out);
 }
 
 /* 输入控件：圆角统一 + 聚焦柔光环 */

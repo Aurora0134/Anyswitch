@@ -10,18 +10,20 @@
 <script>
 // 面板主题——绘制前恢复本机选择的主题，避免刷新时先闪过默认主题（Default）
 // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
-// 等历史主题已退役不可选：缺失、空值或任何非法存档一律回落默认主题（saas）并改写存档，
+// 等历史主题已退役不可选：缺失、空值或任何非法存档一律回落默认主题（default）并改写存档，
 // 避免残留已删样式
 // 这份清单与 panel.js 的 STYLES 是同一份，改动需两侧同步（panel.test.mjs 有同值断言）。
-// 前三项 saas/aurora/sepia 是 style-lab 静态皮肤；第四项 wallpaper（列表文案
+// 前四项 default/cyan/aurora/sepia 是 style-lab 静态皮肤；第五项 wallpaper（列表文案
 // 「自定义...」）是动态主题：token 由取色引擎按背景图生成、运行时注入 <html> 内联
 // 样式，没有静态皮肤段。
-var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];
+var PANEL_STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];
 var panelStyleRaw = null;
 try {
   panelStyleRaw = localStorage.getItem("panel-style");
 } catch (e) {}
-var panelStyle = PANEL_STYLES.indexOf(panelStyleRaw) >= 0 ? panelStyleRaw : "saas";
+// saas 是 cyan 的历史键名：老存档平滑迁移，避免主题跳变
+if (panelStyleRaw === "saas") panelStyleRaw = "cyan";
+var panelStyle = PANEL_STYLES.indexOf(panelStyleRaw) >= 0 ? panelStyleRaw : "default";
 if (panelStyleRaw !== panelStyle) {
   try { localStorage.setItem("panel-style", panelStyle); } catch (e) {}
 }
@@ -2462,13 +2464,14 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「主题」：左栏前三项点选即全局生效（setStyle），「自定义...」点开配置窗口
+    <!-- 「主题」：左栏前四项点选即全局生效（setStyle），「自定义...」点开配置窗口
          （上传/调参在窗口内暂存预览，确认才全局生效）；右栏看板镜像实时预览 -->
     <div class="settings-panel" id="settingsPanelTheme" hidden role="tabpanel" aria-labelledby="settingsTabTheme">
       <p class="settings-theme-desc">点选主题即时生效并记住选择。</p>
       <div class="settings-theme-grid">
         <div class="settings-theme-list" id="stylePicker" role="radiogroup" aria-label="主题">
-          <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="true">Default</button>
+          <button type="button" class="settings-theme-item" data-style="default" role="radio" aria-checked="true">Default</button>
+          <button type="button" class="settings-theme-item" data-style="cyan" role="radio" aria-checked="false">Cyan</button>
           <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">Aurora</button>
           <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">Sepia</button>
           <button type="button" class="settings-theme-item" data-style="wallpaper" role="radio" aria-checked="false">自定义...</button>

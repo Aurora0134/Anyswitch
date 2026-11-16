@@ -25,8 +25,8 @@ const panelJs = readFileSync(join(rootDir, "panel-ui", "panel.js"), "utf8");
 
 describe("壁纸主题静态接线", () => {
   it("head 恢复脚本：wallpaper 在册且绘制前从 token 缓存注入，不闪默认皮肤", () => {
-    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia", "wallpaper"];'),
-      "PANEL_STYLES 含 wallpaper 第四项");
+    assert.ok(panelHtml.includes('var PANEL_STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];'),
+      "PANEL_STYLES 含 wallpaper 第五项");
     const head = panelHtml.slice(panelHtml.indexOf("var PANEL_STYLES"), panelHtml.indexOf("</script>"));
     assert.ok(head.includes('if (panelStyle === "wallpaper")'), "仅壁纸主题才走缓存注入");
     assert.ok(head.includes('localStorage.getItem("panel-wallpaper-tokens")'), "读 token 缓存");
@@ -119,7 +119,7 @@ describe("壁纸主题静态接线", () => {
   });
 
   it("panel.js 接线：清单四项、「自定义...」开窗分支、主题/亮暗切换进控制器、xterm 透明开关按底色门控", () => {
-    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia", "wallpaper"];'), "STYLES 四项");
+    assert.ok(panelJs.includes('const STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];'), "STYLES 五项");
     assert.ok(/b\.dataset\.style === WALLPAPER_STYLE[\s\S]{0,200}?openModal\(\)/.test(panelJs),
       "「自定义...」点开配置窗口");
     assert.ok(panelJs.includes("wallpaperController.syncStyle(s === WALLPAPER_STYLE)"),
@@ -128,7 +128,7 @@ describe("壁纸主题静态接线", () => {
       "setTheme 与系统亮暗监听都跟随 syncMode");
     assert.ok(panelJs.includes('onApplyStyle: () => setPanelStyle(WALLPAPER_STYLE)'),
       "确认走标准换肤路径");
-    assert.ok(panelJs.includes("onFallbackStyle: () => setPanelStyle(\"saas\")"),
+    assert.ok(panelJs.includes("onFallbackStyle: () => setPanelStyle(\"default\")"),
       "确认删除已存图时切回 Default");
     assert.ok(panelJs.includes("allowTransparency: terminalBackgroundHasAlpha(),"),
       "构造首帧按底色是否带 alpha 决定开关");
@@ -166,8 +166,8 @@ describe("终端透明栅格化守门闸：底色带 alpha 才开（2026-11-13 �
 
   // 六档终端底色从 panel.css 的皮肤 token 规则切出（亮档 :root[data-style=…]、暗档
   // 同选择器加 [data-theme="dark"]），手抄字面量退役——皮肤改值或写回带 alpha 的底色，
-  // 这里取到的是新值，六档观测才落在现行 token 上。saas 暗档须取皮肤段而非基座
-  // :root[data-theme="dark"] 段：基座特异性低一档，saas 态被皮肤段压住，喂基座值
+  // 这里取到的是新值，六档观测才落在现行 token 上。cyan 暗档须取皮肤段而非基座
+  // :root[data-theme="dark"] 段：基座特异性低一档，cyan 态被皮肤段压住，喂基座值
   // 观测的是不生效的 token。
   function skinTerminalBg(selector) {
     const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -183,8 +183,8 @@ describe("终端透明栅格化守门闸：底色带 alpha 才开（2026-11-13 �
 
   it("三静态皮肤亮暗六档都是六位 hex，透明开关恒关", () => {
     for (const [label, bg] of [
-      ["saas 亮档", skinTerminalBg(':root[data-style="saas"] {')],
-      ["saas 暗档", skinTerminalBg(':root[data-style="saas"][data-theme="dark"] {')],
+      ["cyan 亮档", skinTerminalBg(':root[data-style="cyan"] {')],
+      ["cyan 暗档", skinTerminalBg(':root[data-style="cyan"][data-theme="dark"] {')],
       ["aurora 亮档", skinTerminalBg(':root[data-style="aurora"] {')],
       ["aurora 暗档", skinTerminalBg(':root[data-style="aurora"][data-theme="dark"] {')],
       ["sepia 亮档", skinTerminalBg(':root[data-style="sepia"] {')],

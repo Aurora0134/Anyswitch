@@ -12892,7 +12892,7 @@ async function api(method, path, body) {
       notify: toast,
       onAfterChange: () => applyTerminalXtermTheme(),
       onApplyStyle: () => setPanelStyle(WALLPAPER_STYLE),
-      onFallbackStyle: () => setPanelStyle("saas"),
+      onFallbackStyle: () => setPanelStyle("default"),
       isStyleActive: () => currentPanelStyle() === WALLPAPER_STYLE,
       captureMirror: () => captureMirrorInto($("wallpaperPreviewViewport"), $("wallpaperPreviewSizer"), $("wallpaperPreviewScale")),
     });
@@ -12987,17 +12987,17 @@ async function api(method, path, body) {
   }
 
   // 面板主题清单：与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份，改动需两侧
-  // 同步（panel.test.mjs 有同值断言）。前三项 saas/aurora/sepia 是 style-lab 静态
-  // 皮肤（CSS 片段）；第四项 wallpaper（列表文案「自定义...」）是动态主题——token
+  // 同步（panel.test.mjs 有同值断言）。前四项 default/cyan/aurora/sepia 是 style-lab 静态
+  // 皮肤（CSS 片段）；第五项 wallpaper（列表文案「自定义...」）是动态主题——token
   // 由取色引擎按背景图生成、运行时注入 <html> 内联样式，没有静态皮肤段；列表项是
   // 配置窗口入口，确认才落 data-style。
   // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
   // 等历史主题均已退役，CSS 片段已随退役删除；历史 localStorage 存档的退役样式
-  // 由 <head> 恢复脚本兜底回落默认主题（saas）。
-  const STYLES = ["saas", "aurora", "sepia", "wallpaper"];
+  // 由 <head> 恢复脚本兜底回落默认主题（default）。
+  const STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];
   function currentPanelStyle() {
     const s = document.documentElement.getAttribute("data-style") || "";
-    return STYLES.includes(s) ? s : "saas";
+    return STYLES.includes(s) ? s : "default";
   }
   // 换皮肤：落属性、记存档、同步列表选中态，再让壁纸控制器进/出「自定义」、
   // 重刷终端屏配色（--terminal-bg 随皮肤变；全皮肤均为不透明取值）
@@ -13014,7 +13014,7 @@ async function api(method, path, body) {
     applyTerminalXtermTheme();
   }
 
-  // 面板主题（设置视图「主题」子 tab 左栏列表）。前三项点选即全局生效；
+  // 面板主题（设置视图「主题」子 tab 左栏列表）。前四项点选即全局生效；
   // 「自定义...」是配置窗口入口：点开窗口、确认才生效，不在这里切换主题
   function initStylePicker() {
     const picker = $("stylePicker");

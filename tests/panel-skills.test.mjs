@@ -1287,7 +1287,7 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
     // 整句式标题（折叠组 + 分叉冲突）按正文口径 0.02em。
     // 皮肤归属锚定：这组规则的真实归属是 sepia 的 @scope 块（改写后块内选择器不再带
     // 皮肤键），匹配域收进剥注释后的 sepia 作用域块——规则被注释掉（剥注释后消失）、
-    // 或整条挪进 saas / aurora 的 @scope 块，都会因 sepia 块内找不到而红；全文件文本
+    // 或整条挪进 cyan / aurora 的 @scope 块，都会因 sepia 块内找不到而红；全文件文本
     // 匹配只守「文件里存在这段文字」，守不住用例名声称的 sepia 前提。
     const scopeOpen = panelCss.indexOf('@scope (:root[data-style="sepia"]) to (.wallpaper-preview) {');
     assert.ok(scopeOpen >= 0, "panel.css 里找不到 sepia 皮肤的 @scope 收边外壳（本用例的前提）");
