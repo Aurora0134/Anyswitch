@@ -249,7 +249,8 @@ function runWingetUpdate({ spec, spawn, timeoutMs, maxOutputChars }) {
 // 与其退出码无关；spawn 都失败才算没打开。注入替身可能不返回子进程，unref 逐层可选。
 function openStorePage({ spec, spawn }) {
   try {
-    const child = spawn("explorer.exe", [spec.storeUrl], { detached: true, windowsHide: true, stdio: "ignore" }, () => {});
+    // 不能带 windowsHide：explorer 衍生的窗口会继承 SW_HIDE（商店页/文件夹隐形），不传。
+    const child = spawn("explorer.exe", [spec.storeUrl], { detached: true, stdio: "ignore" }, () => {});
     child?.unref?.();
     return true;
   } catch {

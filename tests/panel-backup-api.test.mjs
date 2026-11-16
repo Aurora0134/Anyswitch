@@ -129,4 +129,29 @@ describe("panel backup location routes", () => {
       assert.equal(blocked.res.statusCode, 403);
     } finally { m.cleanup(); }
   });
+
+  it("open 拉起 explorer 开备份根，参数不带 windowsHide（隐形窗口坑）", async () => {
+    const m = machine();
+    try {
+      const calls = [];
+      const router = createPanelRouter({
+        storePaths: { root: m.root },
+        logger: null,
+        metricsCollector: null,
+        fetchRelayAgents: async () => null,
+        spawnExplorerFn: (file, args, options) => { calls.push({ file, args, options }); return { unref() {} }; },
+      });
+      const open = fakeReqRes("/panel/api/backups/open", "POST", {});
+      await router.handle(open.req, open.res);
+      assert.equal(open.res.statusCode, 200);
+      assert.deepEqual(open.json(), { ok: true });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].file, "explorer.exe");
+      assert.deepEqual(calls[0].args, [join(m.root, "backups")]);
+      // windowsHide 会让 explorer 的文件夹窗口继承 SW_HIDE：窗口开出来是隐形的，
+      // 用户看到的就是「点了没反应」。参数形状整体钉死，回潮即红。
+      assert.deepEqual(calls[0].options, { detached: true, stdio: "ignore" });
+      assert.equal(existsSync(join(m.root, "backups")), true, "explorer 要有东西可开：目录先建出来");
+    } finally { m.cleanup(); }
+  });
 });

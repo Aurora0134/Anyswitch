@@ -322,6 +322,8 @@ test("codex 桌面腿失败时打开商店页降级，整体记失败", async ()
   assert.equal(desktop.storePageOpened, true);
   const store = calls.find((c) => c.file === "explorer.exe");
   assert.deepEqual(store.args, ["ms-windows-store://pdp/?productid=9PLM9XGG6VKS"]);
+  // windowsHide 会让 explorer 衍生的窗口继承 SW_HIDE（隐形），不能回潮。
+  assert.deepEqual(store.options, { detached: true, stdio: "ignore" });
 });
 
 test("codex 桌面腿 winget 缺失时不伪装失败也不开商店页", async () => {

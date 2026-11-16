@@ -1148,6 +1148,10 @@ export function createPanelRouter({
   dataBundleService = null,
   pickFolderFn = pickFolder,
   pickFileFn = pickFile,
+  // 备份位置「打开文件夹」的 explorer 拉起。可注入以便单测不开真资源管理器窗口；
+  // 真实现不带 windowsHide——explorer 新开的文件夹窗口会继承 SW_HIDE 提示，
+  // 窗口在隐藏态诞生，用户看到的就是「点了没反应」。
+  spawnExplorerFn = spawn,
   // BYOK 渠道导入服务（byok-import.mjs 装配 byok-remove.mjs）。可注入以便单测；
   // `null` 时首次请求按当前 relayRoot 惰性建真服务。真实模块经动态 import 装入
   // （见路由块注释），所以注入假服务的测试永远不会加载真模块。
@@ -4969,7 +4973,8 @@ export function createPanelRouter({
         if (path === "/panel/api/backups/open") {
           const dir = readBackupRoot(relayRoot);
           mkdirSync(dir, { recursive: true });
-          spawn("explorer.exe", [dir], { detached: true, windowsHide: true, stdio: "ignore" }).unref();
+          // 不能带 windowsHide：explorer 的文件夹窗口继承 SW_HIDE，开出来是隐形的。
+          spawnExplorerFn("explorer.exe", [dir], { detached: true, stdio: "ignore" }).unref();
           return sendJson(res, 200, { ok: true });
         }
         return sendJson(res, 404, { ok: false, error: "not found" });
