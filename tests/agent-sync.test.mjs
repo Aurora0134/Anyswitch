@@ -53,16 +53,20 @@ function markInstallFile(path) {
   writeFileSync(path, "stub");
 }
 
-// 九端点「已安装」的盘上形状，落点取自 agent-discovery 各解析器的候选路径
+// 十端点「已安装」的盘上形状，落点取自 agent-discovery 各解析器的候选路径
 // （每端点一份主形态）。同步闸门上线后，happy-path 断言「配置被写入」的用例
 // 都要先让端点在盘上「在装」，否则整轮被跳过。opencode 的解析器不认 npm 垫片
-// （Anyswitch 接管 shim 会绕回启动器），须摆真实包布局。
+// （Anyswitch 接管 shim 会绕回启动器），须摆真实包布局。claude 的形态是 npm 位
+// claude.exe：桩文件非 PE 时解析器落引擎扫描、扫不到再回落 npm 位，agentInstallState
+// 只看该文件存在与否，故桩即算在装。claude 已在装但没有 3p 配置时同步步仍按
+// 「未接入」跳过——要它进 synced 名单得另摆 markClaude3pProfile。
 // homeDataRoots=false 不摆 qoder/grok 两枚安装指纹：它们的数据根就在 home 顶层
 // （~/.qoder、~/.grok），摆了会在夹具根顶层预建目录——「同步结果摘要」区的
 // 「home 缺失」用例靠 CWD 顶层清单前后 diff 观测落盘，预建即把这两端点的相对
 // 路径落盘从观测面里遮掉；该区要九端点全在装的用例改调 markHomeDataRootShapes。
 function installAgentShapes(home, { homeDataRoots = true } = {}) {
   const npm = join(home.APPDATA, "npm");
+  markInstallFile(join(npm, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
   markInstallFile(join(home.LOCALAPPDATA, "Programs", "zcode", "ZCode.exe"));
   markInstallFile(join(npm, "dsh.cmd"));
   markInstallFile(join(npm, "pi.cmd"));
@@ -85,6 +89,23 @@ function installAgentShapes(home, { homeDataRoots = true } = {}) {
 function markHomeDataRootShapes(home) {
   markInstallFile(join(home.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"));
   markInstallFile(join(home.USERPROFILE, ".grok", "bin", "grok.exe"));
+}
+
+// claude 3p 配置夹具：configLibrary 一份指向本 relay 的 gateway 配置。apiKey
+// 默认给与同步 token 不同的值，让「密钥保鲜」路径真的走改写分支。
+function markClaude3pProfile(home, apiKey = "stale-generation-token") {
+  const profilePath = join(home.LOCALAPPDATA, "Claude-3p", "configLibrary", "11111111-2222-4333-8444-555555555555.json");
+  mkdirSync(dirname(profilePath), { recursive: true });
+  writeFileSync(profilePath, JSON.stringify({
+    inferenceProvider: "gateway",
+    inferenceCredentialKind: "static",
+    inferenceGatewayBaseUrl: "http://127.0.0.1:47821",
+    inferenceGatewayApiKey: apiKey,
+    inferenceGatewayAuthScheme: "bearer",
+    inferenceModels: [],
+    inferenceCustomHeaders: { "x-agent-id": "claude" },
+  }, null, "\t"));
+  return profilePath;
 }
 
 describe("agent-sync", () => {
@@ -720,10 +741,11 @@ describe("agent-sync 同步结果摘要", () => {
   });
 
   it("单个端点写不进去时整体仍算成功，失败名单列出该端点", async () => {
-    // 末尾断言九端点各归一个名单，须九端点全在装；qoder/grok 的安装指纹
+    // 末尾断言十端点各归一个名单，须十端点全在装或全接入；qoder/grok 的安装指纹
     // beforeEach 默认不摆（顶层预建会遮掉「home 缺失」用例的落盘观测面，
-    // 见 installAgentShapes 注释），这里补上。
+    // 见 installAgentShapes 注释），这里补上；claude 另需 3p 配置才算接入。
     markHomeDataRootShapes({ USERPROFILE: tmpRoot });
+    markClaude3pProfile({ LOCALAPPDATA: tmpRoot });
     // 拿目录顶住 codex 的配置文件：只有 codex 这一步读不出来，其余端点照常写。
     mkdirSync(join(tmpRoot, ".codex", "config.toml"), { recursive: true });
     const res = await syncAllAgentConfigs({
@@ -744,7 +766,7 @@ describe("agent-sync 同步结果摘要", () => {
     for (const name of summary.failed) {
       assert.ok(!summary.synced.includes(name), `${name} 不能同时出现在两个名单里`);
     }
-    assert.equal(summary.synced.length + summary.failed.length, 9, "九个端点各归一个名单");
+    assert.equal(summary.synced.length + summary.failed.length, 10, "十个端点各归一个名单");
   });
 
   it("仓库数据读不出来时整体失败，不给面板任何端点名单", async () => {
@@ -910,7 +932,7 @@ describe("agent-sync 未安装端点闸门", () => {
     const summary = buildSyncSummary(res);
     assert.deepEqual(summary.synced, [], "跳过不上成功名单");
     assert.deepEqual(summary.failed, [], "跳过不上失败名单");
-    for (const dir of [".zcode", ".dsh", ".pi", ".kimi-code", ".qoder", ".codex", ".config", ".grok", ".workbuddy"]) {
+    for (const dir of [".zcode", ".dsh", ".pi", ".kimi-code", ".qoder", ".codex", ".config", ".grok", ".workbuddy", "Claude-3p"]) {
       assert.equal(existsSync(join(tmpRoot, dir)), false, `${dir} 不被凭空创建`);
     }
   });
@@ -949,6 +971,35 @@ describe("agent-sync 未安装端点闸门", () => {
     assert.equal(res.results.grok.notInstalled, undefined, "拿不准不跳过");
     assert.equal(res.results.grok.ok, true);
     assert.ok(existsSync(join(tmpRoot, ".grok", "config.toml")), "fail-open：宁可多写不误伤");
+  });
+
+  it("claude 3p 配置密钥随同步保鲜：过期密钥重指现行 token，留滚动备份", async () => {
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
+    const profilePath = markClaude3pProfile({ LOCALAPPDATA: tmpRoot });
+    const res = await syncAllAgentConfigs(homeOpts());
+    assert.equal(res.results.claude.ok, true);
+    assert.equal(res.results.claude.notInstalled, undefined, "已接入：不是跳过");
+    assert.equal(res.results.claude.unchanged, false, "密钥确实改写过");
+    assert.equal(res.results.claude.refreshed, 1);
+    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+    assert.equal(profile.inferenceGatewayApiKey, "test-token", "密钥重指现行 token");
+    assert.equal(profile.inferenceGatewayBaseUrl, "http://127.0.0.1:47821", "baseUrl 原样");
+    assert.deepEqual(profile.inferenceCustomHeaders, { "x-agent-id": "claude" }, "其他字段不被顺手改");
+    const backup = JSON.parse(readFileSync(`${profilePath}.bak-anys`, "utf8"));
+    assert.equal(backup.inferenceGatewayApiKey, "stale-generation-token", "备份保留改写前的旧密钥");
+    const summary = buildSyncSummary(res);
+    assert.ok(summary.synced.includes("claude"), "接入后进成功名单");
+  });
+
+  it("claude 已装但没有 3p 配置：按未接入跳过，不建目录不上名单", async () => {
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
+    const res = await syncAllAgentConfigs(homeOpts());
+    assert.equal(res.results.claude.ok, true);
+    assert.equal(res.results.claude.notInstalled, true, "没有 3p 配置＝未接入");
+    assert.equal(existsSync(join(tmpRoot, "Claude-3p")), false, "不凭空建 Claude-3p");
+    const summary = buildSyncSummary(res);
+    assert.ok(!summary.synced.includes("claude"), "不进成功名单");
+    assert.ok(!summary.failed.includes("claude"), "不进失败名单");
   });
 });
 

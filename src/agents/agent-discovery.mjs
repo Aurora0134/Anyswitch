@@ -556,13 +556,17 @@ export function resolveWorkbuddyDesktopExecutable(base = process.env) {
 // agent-sync 闸门的安装形态表：每端点「任意一份形态在盘就算在装」的解析器清单。
 // 与 environment-service 的 CLIENTS 接线是同一批形态的两侧消费，改端点形态时
 // 两侧同步动；端点覆盖面由 agent-discovery.test.mjs 与 AGENT_ENDPOINTS 互钉。
-// 表里只收纯路径形态：codex/claude 的 Store MSIX 桌面形态要靠 PowerShell 查询，
-// 不进本表——同步子进程 store 一变就跑，spawn 探测会把探测进程喂进 relay 扫描
+// 表里只收纯路径形态：codex 的 Store MSIX 桌面形态要靠 PowerShell 查询，不进
+// 本表——同步子进程 store 一变就跑，spawn 探测会把探测进程喂进 relay 扫描
 // （qoder 幽灵卡的病根）；codex 桌面版自带 CLI 副本落 %LOCALAPPDATA%\OpenAI\Codex\bin，
 // resolveCodexExecutable 的原生分支已覆盖桌面-only 机器，无需求助 MSIX。
+// claude 的同步步是 3p 配置密钥保鲜（agent-sync 第 10 步），安装判定交给
+// resolveClaudeExecutable：npm 包＋桌面托管引擎两形态都在里面，引擎扫描认
+// Claude-3p/Claude/.claude 三根，同样覆盖桌面-only 机器；MSIX 桌面形态不进表。
 // qoder 的双区域版各出两形态（CLI/桌面 × intl/cn），任一命中即端点在装——
 // agentInstallState 的聚合语义天然覆盖「只装了 CN」的机器。
 export const AGENT_INSTALL_FORMS = Object.freeze({
+  claude: Object.freeze([resolveClaudeExecutable]),
   zcode: Object.freeze([resolveZcodeExecutable, resolveZcodeCliExecutable]),
   dsh: Object.freeze([resolveDshExecutable, resolveDshDesktopExecutable]),
   pi: Object.freeze([resolvePiExecutable]),
