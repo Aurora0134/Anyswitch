@@ -771,6 +771,7 @@ export function createHandler(deps) {
       modelId: unpacked.modelId,
       members: routing.ordered.map(({ memberId, provider }) => ({
         memberId,
+        model: unpacked.modelId,
         call: (options = {}) => attemptMessages(memberId, provider, body, unpacked.modelId, options),
       })),
       noteSuccess: (memberId, ttftMs) => routing.noteSuccess(memberId, ttftMs),
