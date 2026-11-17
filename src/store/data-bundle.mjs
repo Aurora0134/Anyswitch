@@ -8,6 +8,9 @@
 // 导入语义是整体覆盖，覆盖前先把当前这几份写进 backups/pre-import-<ts>/，
 // 备份号回显给界面。任何校验不通过就整包拒绝，一个字节都不落。
 //
+// 恢复（restoreBackup）是导入的逆操作：读 pre-import 备份的 manifest，先对
+// 当前状态再造一份同型安全备份，再按 saved[] 写回。预检不过同样整单拒绝。
+//
 // 明文密钥只为「本机 → 本机」这一跳服务：包一旦离开这台机器就是敏感文件，
 // 界面必须提示导入完成后删除。DPAPI 密文不在包里——CurrentUser 作用域绑本机
 // 本账户，换机器解不开，带上只是自欺。
@@ -42,7 +45,7 @@ export const TICKET_TTL_MS = 15 * 60 * 1000;
 
 const CONFIG_FILES = ["store.json", "settings.json", "prompts.json", "skills.json"];
 // 恢复只认 pre-import 整份快照（byok-import 是按端点的部分文件，无回滚语义）；
-// saved[] 只可能装着这两类条目，清单里出现别的名字即不可信，整单拒绝。
+// saved[] 只可能装着这几种条目，清单里出现别的名字即不可信，整单拒绝。
 const RESTORE_NAME_RE = /^pre-import-\d{8}-\d{6}$/;
 const RESTORE_SAVED_ENTRIES = new Set([...CONFIG_FILES, "credentials/"]);
 // Skills 主仓库本身就是个 git 仓库：.git 既不是「人写的配置」，git 对象又是只读
