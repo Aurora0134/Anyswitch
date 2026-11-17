@@ -242,7 +242,9 @@ function realSpawnPi({ env, args }) {
 }
 
 // deps 是测试注入缝：生产调用只传 argv，每个键缺省时都落到下面的生产实现
-// ——缺省路径的行为与注入前逐字节相同。
+// ——缺省路径的行为与注入前逐字节相同。modelsPath 一缝测试必须显式传夹具
+// 路径：缺省值是模块加载期冻结的 PI_MODELS_PATH（真用户配置），注入缺位时
+// retag 会拿桩 token 写满真文件（main() 用例 2026-11-17 就这样打过真文件）。
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runPiLauncher({
     startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
@@ -250,7 +252,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     spawnPi: deps.spawnPi ?? realSpawnPi,
     log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),
     piArgs: argv,
-    modelsPath: PI_MODELS_PATH,
+    modelsPath: deps.modelsPath ?? PI_MODELS_PATH,
   });
   return code;
 }

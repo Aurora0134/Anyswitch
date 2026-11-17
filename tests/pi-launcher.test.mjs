@@ -108,6 +108,28 @@ function writeFakeStore(root) {
   writeFileSync(join(root, "Anyswitch", "store.json"), `${JSON.stringify(VALID_STORE, null, 2)}\n`, "utf8");
 }
 
+// 托管条目的盘上形态：静态 token + "direct" 实例值，直启不崩；launcher 拉起前
+// 改写为本次启动值、退出后恢复静态值。runPiLauncher 与 main 两个 describe 共用。
+const managedModelsJson = () => ({
+  providers: {
+    _poke: {
+      name: "poke",
+      baseUrl: "http://127.0.0.1:7000/openai/poke/v1",
+      apiKey: "stable-token",
+      api: "openai-completions",
+      headers: { "x-agent-id": "pi", "x-agent-instance": "direct" },
+      models: [{ id: "m1" }],
+    },
+    "user-own": {
+      name: "mine",
+      baseUrl: "https://x.example/v1",
+      apiKey: "sk-user",
+      headers: { "x-agent-id": "custom" },
+      models: [{ id: "u1" }],
+    },
+  },
+});
+
 describe("runPiLauncher", () => {
   it("starts relay, writes models, spawns pi, closes relay", async () => {
     await withFakeLocalAppData(async (storeRoot) => {
@@ -241,28 +263,6 @@ describe("runPiLauncher", () => {
       assert.deepEqual(spawned.args, ["--help"]);
       assert.ok(logs.some((line) => line.includes("relay unavailable")), "stderr explains the fallback");
     });
-  });
-
-  // 托管条目的盘上形态：静态 token + "direct" 实例值，直启不崩；launcher 拉起前
-  // 改写为本次启动值、退出后恢复静态值。
-  const managedModelsJson = () => ({
-    providers: {
-      _poke: {
-        name: "poke",
-        baseUrl: "http://127.0.0.1:7000/openai/poke/v1",
-        apiKey: "stable-token",
-        api: "openai-completions",
-        headers: { "x-agent-id": "pi", "x-agent-instance": "direct" },
-        models: [{ id: "m1" }],
-      },
-      "user-own": {
-        name: "mine",
-        baseUrl: "https://x.example/v1",
-        apiKey: "sk-user",
-        headers: { "x-agent-id": "custom" },
-        models: [{ id: "u1" }],
-      },
-    },
   });
 
   it("retags managed providers for the launch and restores the static values on exit", async () => {
@@ -425,10 +425,15 @@ describe("main", () => {
   // main 的依赖注入缝只服务测试：argv→piArgs、夹具 store→writeModels、退出码
   // 透传，全在 main 这一层的接线上。runPiLauncher 单测看不到它，参数被静默
   // 吞掉时这里翻红。模块级 loadStore 读 process.env.LOCALAPPDATA——套在
-  // withFakeLocalAppData 里，读的是夹具而非宿主机真实数据。
+  // withFakeLocalAppData 里，读的是夹具而非宿主机真实数据。modelsPath 一缝
+  // 同理必须显式传夹具路径：缺省接的是真用户配置，注入缺位时 retag 拿桩
+  // token 写满真文件（本用例 2026-11-17 就这样打通过真 models.json）。
   it("wires argv to the child, syncs from the fixture store and closes the relay", async () => {
     await withFakeLocalAppData(async (storeRoot) => {
       writeFakeStore(storeRoot);
+      const modelsPath = join(storeRoot, "pi-agent", "models.json");
+      mkdirSync(join(storeRoot, "pi-agent"), { recursive: true });
+      writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
       const spawned = [];
       const written = [];
       let closed = false;
@@ -444,6 +449,7 @@ describe("main", () => {
         },
         log: () => {},
         base: { LOCALAPPDATA: storeRoot },
+        modelsPath,
       });
       assert.equal(code, 3, "child exit code passes through main");
       assert.deepEqual(spawned[0].args, ["-p", "hello"], "argv must reach the child verbatim");
@@ -456,6 +462,14 @@ describe("main", () => {
         },
       ], "the sync runs against the fixture store and fixture data root");
       assert.equal(closed, true);
+      // 防复发钉：retag 必须落在注入的夹具路径上（托管条目收到本次桩 token、
+      // 退出恢复 direct 实例头）。main() 若丢掉 modelsPath 注入、退回模块期
+      // 冻结的真路径，夹具收不到 "tok" 即翻红；注入路径上的行为由 runPiLauncher
+      // 的 retag/restore 单测覆盖，这里钉的是 main 接线本身。
+      const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+      assert.equal(after.providers._poke.apiKey, "tok", "retag lands on the injected modelsPath, never the real user config");
+      assert.equal(after.providers._poke.headers["x-agent-instance"], "direct", "restore runs on the injected path too");
+      assert.equal(after.providers["user-own"].apiKey, "sk-user", "foreign provider never retagged");
     });
   });
 });
