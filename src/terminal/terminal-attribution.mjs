@@ -13,6 +13,14 @@
 // the phase the relay metrics are blind to: the agent has finished its turn
 // but a process it spawned is still running. true / false when the scan could
 // read command lines, null when it could not (degraded round) — never a guess.
+//
+// `requestsInFlight` (2026-11-17) rides the same feed: the relay's per-pid
+// count of non-background model requests held by that client process. It
+// bypasses the instance-row join on purpose — endpoints without a session
+// header land their requests on the aggregate bucket when the netstat lookup
+// misses, so the terminal's instance row reads count=0 while the request is
+// in flight. Passthrough only: a number when the relay ships it, 0 otherwise
+// (old relay) — the panel's kill-criteria consume it, display surfaces don't.
 
 // Endpoints whose instance rows are session-granular (see sessionRowInstanceIdFor).
 const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode", "workbuddy", "zcode"]);
@@ -201,7 +209,15 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
       const ancestorPid = ancestors[index];
       if (!Number.isFinite(ancestorPid)) continue;
       const list = byAncestor.get(ancestorPid);
-      const entry = { agentId: proc.agentId, pid: proc.pid, distance: index + 1, busy: proc.busy ?? null };
+      const entry = {
+        agentId: proc.agentId,
+        pid: proc.pid,
+        distance: index + 1,
+        busy: proc.busy ?? null,
+        requestsInFlight: Number.isFinite(proc.requestsInFlight) && proc.requestsInFlight > 0
+          ? proc.requestsInFlight
+          : 0,
+      };
       if (list) list.push(entry);
       else byAncestor.set(ancestorPid, [entry]);
     }
@@ -289,6 +305,11 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
         // 拒换（409），前端静默新开页签。这一位把守卫同源判据补进面板的视野。
         // null（降级轮读不出命令行）时不猜，面板回落既有信号。
         busy: best.busy ?? null,
+        // 该客户端进程名下的非 background 在途模型请求数（提交窗在途桥，
+        // 2026-11-17）：per-pid 计数经本 join 落到终端会话，绕开实例行折叠——
+        // 无会话头端点请求落聚合桶时，杀前判据仍看得到「这个 CLI 有请求没回」。
+        // 只供杀判据，不进展示面；老 relay 的 feed 缺字段按 0（判据回落）。
+        requestsInFlight: best.requestsInFlight ?? 0,
       },
     };
   });

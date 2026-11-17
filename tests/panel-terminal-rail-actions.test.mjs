@@ -52,13 +52,16 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
   // 屏尾/未使用槽判据是关闭、内切、新开三处闸门的共用依赖（2026-11-03 A1/A2/A4）。
   // 桩环境的 xterm 实例为空：屏尾判据对 null 返回 false，行为面由专用用例覆盖。
-  // 统一在跑判据（2026-11-05）另需输出窗与进程树忙两个纯函数，随源抽出。
+  // 统一在跑判据（2026-11-05/11-17）另需输出窗、进程树忙、提交窗与在途请求
+  // 四个纯函数，随源抽出。
   let terminalXterm = null;
   ${extractFn("terminalScreenAtPrompt")}
   ${extractFn("terminalManualShellBusy")}
   ${extractFn("terminalSessionUnusedAgentSlot")}
   ${extractFn("terminalBusyByOutput")}
   ${extractFn("terminalCommandRunning")}
+  ${extractFn("terminalSubmitWindowFresh")}
+  ${extractFn("terminalRequestInFlight")}
   ${names.map(extractFn).join("\n")}
 `;
 
@@ -4872,6 +4875,8 @@ describe("视口化验收（页签＝视口）", () => {
       // 有了它 typeof 闸全部放行，埋点分支真跑；busy 保活分支的信号镜像同域给真
       // 实现（只读复评，不改变行为）。
       function terminalSwitchLog(event, detail) { log.switchEvents = (log.switchEvents || []).concat({ event, detail }); }
+      ${extractFn("terminalSubmitWindowFresh")}
+      ${extractFn("terminalRequestInFlight")}
       ${extractFn("terminalSwitchBusySignals")}
       ${extractFn("createAgentTerminal")}
       // 空白终端两条直连 POST 通路（P1 同伞用例）：菜单态固定未选 agent、目录解析
@@ -5515,6 +5520,8 @@ describe("视口化验收（页签＝视口）", () => {
         }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalSwitchLog(event, detail) { log.switchEvents = (log.switchEvents || []).concat({ event, detail }); }
+        ${extractFn("terminalSubmitWindowFresh")}
+        ${extractFn("terminalRequestInFlight")}
         ${extractFn("terminalSwitchBusySignals")}
         ${extractFn("terminalSwitchStaleWidened")}
         function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
@@ -6332,6 +6339,8 @@ describe("手开终端在跑判据（屏尾 / 关闭确认 / 内切保活 / 未�
       ${extractFn("terminalManualShellBusy")}
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSubmitWindowFresh")}
+      ${extractFn("terminalRequestInFlight")}
       ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalViewportRefDrop")}
       ${extractFn("terminalCloseTerminalNow")}
@@ -6473,6 +6482,8 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
   const running = (session, now = SNAP_NOW) => new Function("session", "now", `
     ${extractFn("terminalBusyByOutput")}
     ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalSubmitWindowFresh")}
+    ${extractFn("terminalRequestInFlight")}
     ${extractFn("terminalSessionRunning")}
     return terminalSessionRunning(session, now);
   `)(session, now);
@@ -6506,6 +6517,8 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
       ${extractFn("terminalViewportRefAdd")}
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSubmitWindowFresh")}
+      ${extractFn("terminalRequestInFlight")}
       ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalViewportRetire")}
       return {
@@ -6555,6 +6568,8 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
       function panelError(err, fallback) { return fallback; }
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSubmitWindowFresh")}
+      ${extractFn("terminalRequestInFlight")}
       ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalViewportRefDrop")}
       ${extractFn("terminalCloseTerminalNow")}
@@ -6626,6 +6641,8 @@ describe("2026-11-07 resize 回声回归（切到→重渲染→快切走被误�
   const running = (session, now = Date.now()) => new Function("session", "now", `
     ${extractFn("terminalBusyByOutput")}
     ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalSubmitWindowFresh")}
+    ${extractFn("terminalRequestInFlight")}
     ${extractFn("terminalSessionRunning")}
     return terminalSessionRunning(session, now);
   `)(session, now);
@@ -6687,6 +6704,8 @@ describe("2026-11-07 resize 回声回归（切到→重渲染→快切走被误�
       ${extractFn("terminalViewportRefAdd")}
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSubmitWindowFresh")}
+      ${extractFn("terminalRequestInFlight")}
       ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalViewportRetire")}
       return {
@@ -6724,6 +6743,8 @@ describe("2026-11-07 resize 回声回归（切到→重渲染→快切走被误�
       function panelError(err, fallback) { return fallback; }
       ${extractFn("terminalBusyByOutput")}
       ${extractFn("terminalCommandRunning")}
+      ${extractFn("terminalSubmitWindowFresh")}
+      ${extractFn("terminalRequestInFlight")}
       ${extractFn("terminalSessionRunning")}
       ${extractFn("terminalViewportRefDrop")}
       ${extractFn("terminalCloseTerminalNow")}
@@ -6809,6 +6830,133 @@ describe("同会话流短路（关非活跃页签不再整拆重建）", () => {
     sandbox.stream(false); // 生产里 closeTerminalStream 会同时清绑定——这里只拆流也必须重建
     sandbox.render({});
     assert.deepEqual(log.connects, ["t1"], "流不在了：重建照旧");
+  });
+});
+
+// ── 2026-11-17 生命周期判活：提交窗＋在途请求桥 ──
+// 缺口：用户消息已发、agent 未回复的窗口里，统一判据的五条既有信号无一保证热
+// （working 位刷新即丢；无会话头的端点请求落聚合桶、实例行 count=0；输出窗/
+// 进程树/屏尾对「零输出等待」结构性冷）——切走即被当空闲槽树杀。两枚新信号：
+// · 提交窗（terminalSubmitWindowFresh）：人刚把消息发给 CLI 的窗口内一律判
+//   在跑。锚点 lastUserInputAt 由宿主按 POST /input 的 origin 自报过滤——
+//   xterm 对 DSR/DA/焦点报告的自动应答与用户键入同走那条 POST，会刷
+//   lastInputAt（键入抑制/回收器防线照旧吃）但不刷它；
+// · 在途请求桥（terminalRequestInFlight）：relay 按连接属主 pid 记的「这个
+//   CLI 进程有模型请求没回」随归属数据下发（agent.requestsInFlight，与
+//   agent.busy 同通道）——绕开实例行折叠，补 2026-11-05「端点级请求不落到
+//   会话实例」的归属失败面。手开 shell 同享提交窗（统一口径）。
+describe("2026-11-17 提交窗＋在途请求判活（统一判据两枚新信号）", () => {
+  const NOW = 10_000_000;
+  // 全冷基座：输出窗冷（lastActiveAt=0）、进程树冷、请求冷、working 位冷、
+  // 键入抑制无关（无输出）。以此钉「单变量翻热」的判定方向。
+  const BASE = (over = {}) => ({
+    id: "t-a", backend: true,
+    agent: { endpointId: "kimi", instanceId: null, busy: false },
+    agentId: "kimi", status: "idle", metrics: { activeRequests: 0 },
+    backendState: { status: "running", lastActiveAt: 0, lastInputAt: 0, spawnedAt: 0, createdAt: 0 },
+    ...over,
+  });
+
+  const running = (session, now = NOW) => new Function("session", "now", `
+    ${extractFn("terminalBusyByOutput")}
+    ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalSubmitWindowFresh")}
+    ${extractFn("terminalRequestInFlight")}
+    ${extractFn("terminalSessionRunning")}
+    return terminalSessionRunning(session, now);
+  `)(session, now);
+
+  const signals = (session, now = NOW) => new Function("session", "now", `
+    ${extractFn("terminalBusyByOutput")}
+    ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalSubmitWindowFresh")}
+    ${extractFn("terminalRequestInFlight")}
+    ${extractFn("terminalSwitchBusySignals")}
+    return terminalSwitchBusySignals(session, now);
+  `)(session, now);
+
+  it("提交窗：人敲字后 3 秒、其余信号全冷 → 判在跑（主缺口堵上）", () => {
+    const session = BASE({
+      backendState: { status: "running", lastActiveAt: 0, lastInputAt: NOW - 3000, lastUserInputAt: NOW - 3000, spawnedAt: 0, createdAt: 0 },
+    });
+    assert.equal(running(session), true, "刚提交的消息还在等回复，不可杀");
+  });
+
+  it("提交窗过期：30 秒前敲的字、全冷 → 判不在跑（窗宽 5s，窗外确定空闲照旧可收）", () => {
+    const session = BASE({
+      backendState: { status: "running", lastActiveAt: 0, lastInputAt: NOW - 30_000, lastUserInputAt: NOW - 30_000, spawnedAt: 0, createdAt: 0 },
+    });
+    assert.equal(running(session), false);
+  });
+
+  it("自动应答污染：lastInputAt 新鲜但 lastUserInputAt 缺位 → 判不在跑（只认人敲的字）", () => {
+    const session = BASE({
+      backendState: { status: "running", lastActiveAt: 0, lastInputAt: NOW - 1000, spawnedAt: 0, createdAt: 0 },
+    });
+    assert.equal(running(session), false, "TUI 查询的自动应答不开提交窗");
+  });
+
+  it("在途请求桥：agent.requestsInFlight=1、其余全冷 → 判在跑", () => {
+    const session = BASE({ agent: { endpointId: "kimi", instanceId: null, busy: false, requestsInFlight: 1 } });
+    assert.equal(running(session), true, "归属失败落聚合桶的在途请求也保得住");
+  });
+
+  it("在途请求桥不救已退出：exited＋requestsInFlight=1 → 判不在跑", () => {
+    const session = BASE({
+      agent: { endpointId: "kimi", instanceId: null, busy: false, requestsInFlight: 1 },
+      backendState: { status: "exited", lastActiveAt: 0, lastInputAt: 0, lastUserInputAt: 0, spawnedAt: 0, createdAt: 0 },
+    });
+    assert.equal(running(session), false, "迟到的活跃信号不复活已退出进程");
+  });
+
+  it("手开 shell 同享提交窗（统一口径）：刚敲完字的手开终端不可杀", () => {
+    const session = BASE({
+      agent: null, agentId: null,
+      backendState: { status: "running", lastActiveAt: 0, lastInputAt: NOW - 2000, lastUserInputAt: NOW - 2000, spawnedAt: 0, createdAt: 0 },
+    });
+    assert.equal(running(session), true, "回车后命令刚起、子进程还没长出来的空窗也保得住");
+  });
+
+  it("诊断镜像同序点名：submit-window / request-in-flight 命中名在册，全冷不留假名", () => {
+    const fresh = signals(BASE({
+      backendState: { status: "running", lastActiveAt: 0, lastInputAt: NOW - 1000, lastUserInputAt: NOW - 1000, spawnedAt: 0, createdAt: 0 },
+    }));
+    assert.ok(fresh.includes("submit-window"), "提交窗命中名在册");
+    const inflight = signals(BASE({ agent: { endpointId: "kimi", instanceId: null, busy: false, requestsInFlight: 2 } }));
+    assert.ok(inflight.includes("request-inflight"), "在途桥命中名在册");
+    assert.deepEqual(signals(BASE()), [], "全冷时镜像不留假名");
+  });
+});
+
+// ── 2026-11-17 提交窗的 origin 自报（前端发送侧）──
+// sendTerminalInput 是键入的唯一出口；自动应答与用户键入同走 onData。应答字节
+// 形状固定（应答终结符收尾的转义序列；方向键/功能键同为转义序列但终结符不同），
+// 据此自报 origin，判不准按 user（未知来源倒向多保）。
+describe("2026-11-17 键入 origin 自报（sendTerminalInput）", () => {
+  const AUTO_REPLY_CONST_SRC = panelJs.match(/^[ \t]*const TERMINAL_INPUT_AUTO_REPLY = .*$/m)?.[0];
+
+  const sentOrigin = (data) => {
+    assert.ok(AUTO_REPLY_CONST_SRC, "TERMINAL_INPUT_AUTO_REPLY 可从 panel.js 取到");
+    const bodies = [];
+    new Function("log", `
+      const terminalDoneUnread = new Set(["s1"]);
+      const terminalUserInputAt = new Map();
+      function terminalSessionFor() { return null; }
+      function api(method, path, body) { log.push(body); return Promise.resolve({ ok: true }); }
+      ${AUTO_REPLY_CONST_SRC}
+      ${extractFn("sendTerminalInput")}
+      return sendTerminalInput("s1", ${JSON.stringify(data)});
+    `)(bodies);
+    return bodies[0]?.origin;
+  };
+
+  it("人敲的字与方向键报 user；DSR/DA/CPR/焦点应答报 auto-reply", () => {
+    assert.equal(sentOrigin("hello\r"), "user", "普通键入");
+    assert.equal(sentOrigin("\x1b[C"), "user", "右方向键：同形转义序列但终结符不同，不得误伤");
+    assert.equal(sentOrigin("\x1b[3~"), "user", "Delete 键");
+    assert.equal(sentOrigin("\x1b[24;80R"), "auto-reply", "CPR 应答");
+    assert.equal(sentOrigin("\x1b[?6c"), "auto-reply", "DA1 应答");
+    assert.equal(sentOrigin("\x1b[I"), "auto-reply", "焦点入报（DECSET 1004）");
   });
 });
 

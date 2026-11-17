@@ -6980,6 +6980,14 @@ async function api(method, path, body) {
     // 进程树忙判据：不看回合闸。流式输出／后台命令期间请求计数可能已归零或漏记，
     // relay 下发的 busy 位仍看得见进程在忙。
     if (terminalCommandRunning(session)) return true;
+    // 提交窗（2026-11-17）：人刚把消息发给 CLI 的窗口内一律判在跑——「已发出
+    // 未回复」时上面几条无一保证热，切走即误杀（2026-11-05 案的镜像：那案有
+    // 输出无归属，本案零输出等待）。见 terminalSubmitWindowFresh 头注。
+    if (terminalSubmitWindowFresh(session, now)) return true;
+    // 在途请求桥（2026-11-17）：relay 按连接属主 pid 记的「这个 CLI 有请求没回」
+    // 随归属数据下发——无会话头端点的请求落聚合桶时实例行 count=0，这一位绕开
+    // 实例行直接保住等待窗。见 terminalRequestInFlight 头注。
+    if (terminalRequestInFlight(session)) return true;
     // 最近确有非回显输出：输出窗自带孵化豁免与键入回显抑制，且不带回合闸——刷新页面
     // 丢掉内存里的闸、或请求从未归属到这条会话时，仍能保住正在出字的终端。
     if (terminalBusyByOutput(session, undefined, now)) {
@@ -7009,9 +7017,9 @@ async function api(method, path, body) {
   }
 
   // 判忙信号的诊断镜像：与 terminalSessionRunning 同序复评各信号，返回命中名
-  // 清单（working 位／在途请求／agent.busy 进程树／输出窗／屏尾）。只进日志
-  // （terminalSwitchLog 的 keep-alive 埋点），永远不参与判定——判定口径改动时
-  // 必须同步这里，它只是留痕，写宽写窄都不改变行为。
+  // 清单（working 位／在途请求／agent.busy 进程树／提交窗／在途请求桥／输出窗／
+  // 屏尾）。只进日志（terminalSwitchLog 的 keep-alive 埋点），永远不参与判定——
+  // 判定口径改动时必须同步这里，它只是留痕，写宽写窄都不改变行为。
   function terminalSwitchBusySignals(session, now = Date.now()) {
     if (!session) return ["no-record"];
     const state = session.backendState ? session.backendState : null;
@@ -7020,6 +7028,8 @@ async function api(method, path, body) {
     if (session.status === "working") hits.push("working");
     if (session.metrics && Number(session.metrics.activeRequests) > 0) hits.push("active-requests");
     if (terminalCommandRunning(session)) hits.push("agent-busy");
+    if (terminalSubmitWindowFresh(session, now)) hits.push("submit-window");
+    if (terminalRequestInFlight(session)) hits.push("request-inflight");
     if (terminalBusyByOutput(session, undefined, now)) hits.push("output-window");
     if (typeof terminalXterm !== "undefined" && typeof activeTerminalPreviewId !== "undefined"
       && typeof terminalManualShellBusy === "function" && terminalManualShellBusy(session)) hits.push("screen-tail");
@@ -8089,6 +8099,37 @@ async function api(method, path, body) {
   function terminalCommandRunning(session) {
     const agent = session && session.agent ? session.agent : null;
     if (!agent || agent.busy !== true) return false;
+    const state = session && session.backendState ? session.backendState : null;
+    if (state && state.status === "exited") return false;
+    return true;
+  }
+
+  // 提交窗（2026-11-17）：用户刚把消息发给 CLI 的窗口内一律判在跑。这个窗口里
+  // working 位可能还没翻（1s 轮询）、在途请求可能没归属到会话实例（无会话头的
+  // 端点落聚合桶）、输出窗/进程树/屏尾对「零输出等待」结构性冷——切走判活全冷
+  // 即整树杀，丢掉一次进行中的请求。锚点 lastUserInputAt＝宿主只认人敲的字的
+  // 键入时刻（POST /input 的 origin 自报过滤掉 xterm 对 DSR/DA/焦点报告的自动
+  // 应答——那些会刷 lastInputAt 但不刷它）；缺位（老宿主快照、只剩自动应答）
+  // ＝无窗可开，不猜。窗宽与输出窗同宽：误保的代价是多留几秒后台，误杀的代价
+  // 是丢一次请求。不落盘（与 lastInputAt 同取舍）——切走判活是当拍动作，回收
+  // 器路径本就有更宽的 lastInputAt 防线。手开 shell 同享（统一口径）。
+  function terminalSubmitWindowFresh(session, now = Date.now()) {
+    const TERMINAL_SUBMIT_WINDOW_MS = 5000;
+    const state = session && session.backendState ? session.backendState : null;
+    if (!state || state.status === "exited") return false;
+    const at = state.lastUserInputAt;
+    return Number.isFinite(at) && at > 0 && now - at < TERMINAL_SUBMIT_WINDOW_MS;
+  }
+
+  // 在途请求桥（2026-11-17）：relay 按连接属主 pid 记的「这个 CLI 进程有模型
+  // 请求没回」（agent.requestsInFlight，与 agent.busy 同通道随归属下发）。它补
+  // 的是请求已发出但首字未回的等待窗——对无会话头的端点（请求落聚合桶、实例
+  // 行 count=0）尤其如此；有会话头的端点本就被实例行计数覆盖，这一位恒 0、零
+  // 影响。只供杀判据（不进卡片/徽章等展示面，转圈仍走请求/输出/回合闸）；exited
+  // 排除与 terminalCommandRunning 同一条（迟到的活跃信号不复活已退出进程）。
+  function terminalRequestInFlight(session) {
+    const agent = session && session.agent ? session.agent : null;
+    if (!agent || !(Number(agent.requestsInFlight) > 0)) return false;
     const state = session && session.backendState ? session.backendState : null;
     if (state && state.status === "exited") return false;
     return true;
@@ -10085,10 +10126,11 @@ async function api(method, path, body) {
     }
   }
 
-  // xterm 自动应答的字节形状（人类键入记账的判据）：CPR（ESC[行;列R）、
-  // DA 应答（ESC[?…c／ESC[>…c／ESC[=…c）、DSR 应答（ESC[0n）、焦点报告
-  // （ESC[I／ESC[O）。方向键/功能键同为转义序列但终结符不同（A–D、H/F、~
-  // 与 SS3 的 ESC O 字母），不落进这个集合；判不准按人类键入记（倒向多记）。
+  // xterm 自动应答的字节形状（键入 origin 自报与人类键入记账的共用判据）：CPR
+  // （ESC[行;列R）、DA1/DA2/DA3 应答（ESC[?…c／ESC[>…c／ESC[=…c）、DSR 应答
+  // （ESC[0n）、焦点报告（ESC[I／ESC[O）。方向键/功能键同为转义序列但终结符不同
+  // （A–D、H/F、~ 与 SS3 的 ESC O 字母），不落进这个集合；判不准两处都倒向多保
+  // （origin 记 user、键入照记）。
   const TERMINAL_INPUT_AUTO_REPLY = /^\x1b\[(?:[0-9;]*[Rn]|[?=>]?[0-9;]*c|[IO])$/;
 
   // 人类键入记账：会话栏追赶的滞后判据锚点（见 terminalRailRowKeyLagsInput）。
@@ -10102,6 +10144,10 @@ async function api(method, path, body) {
   // 会话推进「退出→自动重启→再退出」的循环。这里只把前端状态同步成 exited、
   // 放弃这次输入并返回 false，调用方保持沉默（终端上没有新增提示）；重开是
   // 显式动作，只认点页签的复活通路（connectTerminalStream 的 revive 分支）。
+  // origin 自报（2026-11-17）：xterm 对 TUI 查询（DSR/DA/CPR）与 DECSET 1004
+  // 焦点报告的自动应答与用户键入同走 onData→这条 POST；提交窗的锚点
+  // lastUserInputAt 只认人敲的字，宿主按这个字段过滤自动应答。判不准按 user
+  // （未知来源倒向多保）。
   function sendTerminalInput(sessionId, data) {
     if (sessionId === null || sessionId === undefined) return Promise.resolve(false);
     // 键入即读：往这个终端打字＝看着它，done（跑完未读）标记当场清。
@@ -10110,7 +10156,8 @@ async function api(method, path, body) {
     if (!TERMINAL_INPUT_AUTO_REPLY.test(data)) terminalUserInputAt.set(sessionId, Date.now());
     const path = `/api/terminal/sessions/${encodeURIComponent(sessionId)}/input`;
     const session = terminalSessionFor(sessionId);
-    return api("POST", path, { data })
+    const origin = TERMINAL_INPUT_AUTO_REPLY.test(data) ? "auto-reply" : "user";
+    return api("POST", path, { data, origin })
       .then(() => true)
       .catch((error) => {
         if (error?.code !== "session_exited") {

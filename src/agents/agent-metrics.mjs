@@ -3503,6 +3503,32 @@ export function createAgentMetricsCollector(options = {}) {
   // cannot attribute and sessions stay plain shells.
   const DETECTED_CLIENT_ENDPOINTS = ["codex", "dsh", "kimi", "claude", "opencode", "grok", "pi", "qoder", "workbuddy", "zcode"];
 
+  // ── 提交窗在途桥（2026-11-17）：per-pid 非 background 在途请求计数 ──
+  // socket 兜底家族（白名单见 late-socket-instance.mjs）的请求按「连接属主
+  // pid」另记一笔在途，随 getDetectedClientProcesses 下发（terminal-attribution
+  // 透传到 session.agent.requestsInFlight，面板杀前判据消费；不进卡片/徽章等
+  // 展示面）。补的缺口：无会话头的端点请求起手 netstat 未命中时只落聚合桶，
+  // 终端实例行 count=0（2026-11-05「端点级请求不落到会话实例」）——这一笔绕开
+  // 实例行折叠，直接回答「这个 CLI 进程有请求没回」。入账/出账/迟到补记的
+  // 生命周期在 startRequest 的 pidInFlight 三件套。30 分钟强制清零且锁到归零
+  // （须见一次下降沿才可再点亮）：防计数泄漏把终端焊死在「在跑」。collector
+  // 内存态：relay 重启自然归零（在途 TCP 随连接断，CLI 重试重新计数）。
+  const CLIENT_PID_REQUESTS_STALL_MS = 30 * 60 * 1000;
+  // 会话粒度实例行的 id 形状（codex/opencode/workbuddy/zcode 的 <agent>-sess-）：
+  // 这些请求本就落在终端可绑的会话行上，不进 per-pid 在途账（无缺口不重复补）。
+  const SESSION_ROW_ID_SHAPE = /^[a-z]+-sess-/;
+  const clientPidRequests = new Map(); // pid → { count, since, latched }
+  function requestsInFlightForPid(pid) {
+    const entry = clientPidRequests.get(pid);
+    if (entry === undefined) return 0;
+    if (entry.latched) return 0;
+    if (nowFn() - entry.since >= CLIENT_PID_REQUESTS_STALL_MS) {
+      entry.latched = true;
+      return 0;
+    }
+    return entry.count;
+  }
+
   function getDetectedClientProcesses() {
     const counts = cachedProcessCounts ?? createEmptyProcessScan();
     const out = [];
@@ -3523,7 +3549,9 @@ export function createAgentMetricsCollector(options = {}) {
         // 忙判据只对「这一轮真读得到命令行」的扫描算：降级轮不猜（见
         // commandRunningFor）。每个引擎 pid 各算一次，用的是同一张表——BFS 每步
         // 都扫全表，锚点个数量级在十个以内，代价可忽略。
-        out.push({ agentId, pid, ancestors, busy: commandRunningFor(pid) });
+        // requestsInFlight：提交窗在途桥的 per-pid 计数（见上方头注）；30 分钟
+        // 强制清零与下降沿重臂在读取侧（requestsInFlightForPid）。
+        out.push({ agentId, pid, ancestors, busy: commandRunningFor(pid), requestsInFlight: requestsInFlightForPid(pid) });
       }
     }
     return out;
@@ -4623,6 +4651,38 @@ export function createAgentMetricsCollector(options = {}) {
     const effMeta = normalized !== null && normalized.id !== rawInstanceId
       ? { ...meta, instanceId: normalized.id }
       : meta;
+    // —— 提交窗在途桥的计数生命周期（见 getDetectedClientProcesses 头注）——
+    // 入账资格：非 background（引擎/GUI 自发流量不得误标用户会话在途）；身份
+    // 不是会话粒度（<agent>-sess- 行的请求本就落在终端可绑的会话行上）。开始
+    // 侧记 pid（meta.clientPid，openai-server 反查连接属主捎带）；结束侧按开始
+    // 时记录的 pid 递减、绝不重查（keep-alive 换属主不影响已记账请求的回收）；
+    // 起手未命中的请求由 bindLateSocketInstance 捎带 pid 走 attachClientPid 迟到
+    // 补记，补记也失败不入账——宁少保（兜底回面板提交窗）不多保（泄漏＝永不
+    // 回收）。幂等：已在开始侧入账的（meta.clientPid 命中）重复补记为 no-op。
+    const pidInFlightEligible = !background
+      && !(rawInstanceId !== null && SESSION_ROW_ID_SHAPE.test(rawInstanceId));
+    let pidInFlightPid = null;
+    const pidInFlightEnter = (pid) => {
+      if (pidInFlightPid !== null || !pidInFlightEligible) return;
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return;
+      pidInFlightPid = pid;
+      const entry = clientPidRequests.get(pid);
+      if (entry === undefined) {
+        clientPidRequests.set(pid, { count: 1, since: nowFn(), latched: false });
+      } else {
+        entry.count += 1;
+      }
+    };
+    const pidInFlightExit = () => {
+      if (pidInFlightPid === null) return;
+      const pid = pidInFlightPid;
+      pidInFlightPid = null;
+      const entry = clientPidRequests.get(pid);
+      if (entry === undefined) return;
+      entry.count -= 1;
+      if (entry.count <= 0) clientPidRequests.delete(pid); // 下降沿：锁与账一并清，重臂
+    };
+    if (Number.isInteger(meta.clientPid)) pidInFlightEnter(meta.clientPid);
     const primary = trackAggregateRequest(targetState, effMeta, nowFn, recentSampleWindow, stability, journal, bucketAgentId,
       (count) => publishActivity(bucketAgentId, null, count), resolveZcodeParentRowId, logger);
     // A request start already moved totalRequests/activeRequests: mark the
@@ -4739,7 +4799,7 @@ export function createAgentMetricsCollector(options = {}) {
         recordRetry: (arg) => composed.recordRetry?.(arg),
         noteKeepAliveRecovery: (arg) => composed.noteKeepAliveRecovery?.(arg),
         noteKeepAliveExhausted: (arg) => composed.noteKeepAliveExhausted?.(arg),
-        recordEnd: (arg) => { markMetricsDirty(); return composed.recordEnd?.(arg); },
+        recordEnd: (arg) => { pidInFlightExit(); markMetricsDirty(); return composed.recordEnd?.(arg); },
         attachInstance,
       };
     }
@@ -4747,6 +4807,7 @@ export function createAgentMetricsCollector(options = {}) {
     let ended = false;
     const endOnce = (arg) => {
       ended = true;
+      pidInFlightExit();
       markMetricsDirty();
       return composed.recordEnd?.(arg);
     };
@@ -4761,6 +4822,12 @@ export function createAgentMetricsCollector(options = {}) {
       attachInstance: (rawId) => {
         if (ended) return;
         attachInstance(rawId);
+      },
+      // 迟到 pid 补记（bindLateSocketInstance 捎带）：结束后的迟到 pid 不入账
+      // （迟到信号不复活已结算的请求）；开始侧已入账的幂等跳过。
+      attachClientPid: (pid) => {
+        if (ended) return;
+        pidInFlightEnter(pid);
       },
     };
   }

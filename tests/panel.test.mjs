@@ -117,10 +117,12 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
-  // 统一在跑判据（2026-11-05）的两个纯函数依赖：视口纯函数按名抽出后模块级符号
+  // 统一在跑判据（2026-11-05/11-17）的四个纯函数依赖：视口纯函数按名抽出后模块级符号
   // 不跟着来，随源补上；屏尾判据依赖 xterm 实例，桩里没有时由生产实现自己降级跳过。
   ${panelFnSrc("terminalBusyByOutput")}
   ${panelFnSrc("terminalCommandRunning")}
+  ${panelFnSrc("terminalSubmitWindowFresh")}
+  ${panelFnSrc("terminalRequestInFlight")}
   ${names.map(panelFnSrc).join("\n")}
 `;
 // 回放突发合并器的阈值常量：沙箱按函数名切源码，常量不在其中，单独取出注入——
@@ -132,9 +134,10 @@ const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET
     return found;
   })
   .join("\n");
-// 键入唯一出口的新依赖（2026-11-18 人类键入记账）：形状判据是正则字面量，字符
-// 类里的 ; 会截断 [^;]+，按行取样；记账表是运行时状态，各沙箱自建空表。
-const terminalInputAutoReplyConst = panelJs.match(/const TERMINAL_INPUT_AUTO_REPLY = [^\n]+/)?.[0];
+// 键入唯一出口的应答形状常量（origin 自报与人类键入记账两个沙盒共用注入）：
+// 正则字面量字符类里的 ; 会截断 [^;]+，按整行锚定取样；记账表是运行时状态，
+// 各沙盒自建空表。
+const terminalInputAutoReplyConst = panelJs.match(/^[ \t]*const TERMINAL_INPUT_AUTO_REPLY = [^\n]+$/m)?.[0];
 assert.ok(terminalInputAutoReplyConst, "TERMINAL_INPUT_AUTO_REPLY 可从 panel.js 取到");
 // 闲剪（缓冲软顶回落）的阈值常量与跟随护栏的窗口常量：同款从源码取样注入——
 // 测试不抄数字，改阈值时行为钉跟着变（如闲剪落位钉 4500 按软顶 5000 折算）。
@@ -9890,7 +9893,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(res.statusCode, 200);
     const body = json();
     assert.equal(body.sessions.length, 1);
-    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null });
+    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null, requestsInFlight: 0 });
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
@@ -10048,7 +10051,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json().sessions[0].agent,
-      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null });
+      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null, requestsInFlight: 0 });
   });
 
   it("检测喂给中断（relay 挂）时列表照常返回纯外壳会话", async () => {
@@ -11318,6 +11321,7 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
     const writes = [];
     const sandbox = new Function("clock", "writes", `
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
       const setTimeout = clock.setTimeout;
       const clearTimeout = clock.clearTimeout;
       ${bodies}
@@ -11630,8 +11634,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(termA.keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true }), false, "Ctrl+Enter 从 xterm 求值摘出（内核只会折叠成 CR）");
     assert.equal(termA.keyEventHandler({ type: "keydown", key: "Enter", shiftKey: true }), false, "Shift+Enter 同样接管");
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
     ], "换行定投 LF 字节（opencode 与 Claude Code 的 ctrl+j 换行语义），不是 CR");
 
     // 真机漏点：keydown 摘出后内核还会吃 keypress，Shift+Enter 在那里被补折叠成 CR，
@@ -11639,8 +11643,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", shiftKey: true, keyCode: 13, charCode: 13 }), false, "Shift+Enter 的 keypress 一并摘出");
     assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", ctrlKey: true, keyCode: 13, charCode: 13 }), false, "Ctrl+Enter 的 keypress 一并摘出");
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
     ], "一次按键只有一个换行字节：keypress 不重复投");
 
     sandbox.connect(backendSession("sess-b"));
