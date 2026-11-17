@@ -99,9 +99,9 @@ describe("端点表跨表成员一致性", () => {
     }
   });
 
-  it("同步与 BYOK 导入面不含 claude（claude 的模型经中继动态发现，无本地配置可写/可导）", () => {
+  it("同步面含全部十个端点（claude 的 3p 静态密钥由同步面保鲜），BYOK 导入面不含 claude（模型经中继动态发现，无可导的本地模型配置）", () => {
+    assert.deepEqual([...sync].sort(), [...UNIVERSE].sort(), "AGENT_ENDPOINTS 应为十个真实端点全集");
     const expected = UNIVERSE.filter((id) => id !== "claude").sort();
-    assert.deepEqual([...sync].sort(), expected, "AGENT_ENDPOINTS 应为全集去掉 claude");
     assert.deepEqual([...byok].sort(), expected, "BYOK_IMPORT_AGENTS 应为全集去掉 claude");
   });
 

@@ -22,12 +22,14 @@ import { writeCodexConfig, codexConfigPath } from "../launchers/codex-merge-conf
 import { writeOpencodeConfig, opencodeConfigPath } from "../launchers/opencode-launcher.mjs";
 import { writeGrokConfig, grokConfigPath } from "../launchers/grok-merge-config.mjs";
 import { writeWorkbuddyModels, workbuddyModelsPath } from "../launchers/workbuddy-merge-models.mjs";
+import { writeClaudeDesktopConfig, claudeDesktopProfileDir } from "../launchers/claude-merge-config.mjs";
 
 // --- 同步结果的机器可读摘要 -----------------------------------------------
 // 同步子进程除了人看的日志，还在 stdout 上打一行定长前缀的 JSON 摘要，面板靠它
-// 区分「整次没做成」和「个别端点没写进去」：九个端点里挂掉一个，不该让同步按钮
-// 整颗报红。端点名与字段名固定，前端按名字取用。
-export const AGENT_ENDPOINTS = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok", "workbuddy"];
+// 区分「整次没做成」和「个别端点没写进去」：十个端点里挂掉一个，不该让同步按钮
+// 整颗报红。端点名与字段名固定，前端按名字取用。claude 在同步面维护的是 3p 配置
+// 的静态密钥（模型仍经中继动态发现），写入手见 claude-merge-config.mjs 模块头。
+export const AGENT_ENDPOINTS = ["claude", "zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok", "workbuddy"];
 export const SYNC_RESULT_PREFIX = "__ANYSWITCH_SYNC_RESULT__";
 
 // Codex 的模型目录每次同步都整份重写，而只改模型不动配置文本时 unchanged 为真，
@@ -343,6 +345,28 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.workbuddy = { ok: false, error: err.message };
     logger?.warn?.(`workbuddy config sync skipped: ${err.message}`);
+  }
+
+  // 10. Claude Desktop 3p 配置密钥保鲜（%LOCALAPPDATA%\Claude-3p\configLibrary）。
+  // claude 没有 launcher：3p 部署持静态密钥，轮换后靠这里重指到现行代次，否则
+  // 桌面端模型目录 401。与各端点同口径过安装闸门；profile 是否存在/是否指向本
+  // relay 由写手自判，不在盘上不新建任何文件。
+  try {
+    const cdDir = claudeDesktopProfileDir(base);
+    const cdResult = !isAbsolute(cdDir)
+      ? relativeHomeFailure(cdDir)
+      : agentInstallState("claude", base) === "absent"
+        ? skippedEndpointResult("claude", logger)
+        : writeClaudeDesktopConfig(port, token, cdDir, { log: logger });
+    results.claude = cdResult;
+    if (!cdResult.ok) {
+      logger?.warn?.(`claude 3p profile not updated: ${cdResult.reason ?? "unknown"}`);
+    } else if (!cdResult.unchanged) {
+      logger?.info?.("claude 3p profile credential synced");
+    }
+  } catch (err) {
+    results.claude = { ok: false, error: err.message };
+    logger?.error?.(`claude config sync failed: ${err.message}`);
   }
 
   // 完整性守卫：AGENT_ENDPOINTS 登记的每个端点都必须有写手结果。写手块漏写

@@ -29,6 +29,7 @@ test("同步闸门形态表覆盖 AGENT_ENDPOINTS 全部端点，未登记的端
   // 形态被删掉不会红——桌面-only 机器会从「installed」退成「absent」，同步闸门
   // 随即跳过写配置，而环境页另一侧仍显示已装，两侧口径就此分叉。
   const EXPECTED_FORMS = {
+    claude: ["resolveClaudeExecutable"],
     zcode: ["resolveZcodeExecutable", "resolveZcodeCliExecutable"],
     dsh: ["resolveDshExecutable", "resolveDshDesktopExecutable"],
     pi: ["resolvePiExecutable"],
