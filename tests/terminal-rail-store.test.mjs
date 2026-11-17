@@ -1,6 +1,6 @@
-// 终端会话栏视图状态：归档清单 + 已移除分组目录清单。
-// 三层断言：store 纯单测（清洗/归一化/幂等/落盘形状与重读）+ 路由级
-// （createPanelRouter 真跑五条端点，持久化跨router实例）+ 装配级
+// 终端会话栏视图状态：归档清单 + 已移除分组目录清单 + 分组显示顺序 + 会话置顶
+// 清单。三层断言：store 纯单测（清洗/归一化/幂等/落盘形状与重读）+ 路由级
+// （createPanelRouter 真跑七条端点，持久化跨router实例）+ 装配级
 // （不注入 store 真跑 panel.mjs 的惰性装配分支，落点与跨实例加载）。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -102,11 +102,11 @@ describe("终端会话栏视图状态存储", () => {
       const second = createRailStore({ file });
       assert.equal(second.isArchived("kimi", "s-1"), true, "归档跨实例");
       assert.equal(second.isGroupRemoved("c:/dev/alpha"), true, "移除分组跨实例");
-      // 落盘形状钉死：{version, archived, removedGroups} 三键俱全。version 由写侧
-      // 负责、读侧不认它（只取 archived/removedGroups），所以必须对原始文件断言，
-      // store API 层面看不出来。
+      // 落盘形状钉死：{version, archived, removedGroups, groupOrder, pinned} 五键
+      // 俱全。version 由写侧负责、读侧不认它（只取四张清单），所以必须对原始文件
+      // 断言，store API 层面看不出来。
       const onDisk = JSON.parse(readFileSync(file, "utf8"));
-      assert.deepEqual(onDisk, { version: 1, archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: ["C:\\Dev\\Alpha"] }, "落盘形状 {version, archived, removedGroups}");
+      assert.deepEqual(onDisk, { version: 1, archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: ["C:\\Dev\\Alpha"], groupOrder: [], pinned: [] }, "落盘形状 {version, archived, removedGroups, groupOrder, pinned}");
     });
 
     it("坏文件/缺文件从空开始：视图状态丢了不挡面板主流程", () => {
@@ -114,7 +114,7 @@ describe("终端会话栏视图状态存储", () => {
       const file = join(root, TERMINAL_RAIL_STORE_FILE);
       writeFileSync(file, "{ 这不是 json");
       const store = createRailStore({ file });
-      assert.deepEqual(store.list(), { archived: [], removedGroups: [] }, "损坏文件按空起步");
+      assert.deepEqual(store.list(), { archived: [], removedGroups: [], groupOrder: [], pinned: [] }, "损坏文件按空起步");
     });
   });
 
@@ -168,14 +168,112 @@ describe("终端会话栏视图状态存储", () => {
         version: 1,
         archived: [{ endpoint: "kimi", id: "s-1" }, { endpoint: "" }, "垃圾", null, { endpoint: "kimi", id: 7 }],
         removedGroups: ["C:\\Dev\\Alpha", "", null, "c:/dev/alpha", 42],
+        groupOrder: ["C:\\Dev\\Beta", "", null, "c:/dev/beta/", 42],
+        pinned: [{ endpoint: "kimi", id: "s-9" }, { endpoint: "kimi", id: "s-9" }, "垃圾", { endpoint: "" }, { endpoint: "kimi", id: 7 }],
       }));
       const store = createRailStore({ file });
       assert.deepEqual(store.list().archived, [{ endpoint: "kimi", id: "s-1" }], "坏归档条目被清洗");
       assert.deepEqual(store.list().removedGroups, ["C:\\Dev\\Alpha"], "坏目录条目被清洗、按归一化键去重、保留原始拼写");
+      assert.deepEqual(store.list().groupOrder, ["C:\\Dev\\Beta"], "顺序条目同款清洗（与移除清单共用一份目录清洗）");
+      assert.deepEqual(store.list().pinned, [{ endpoint: "kimi", id: "s-9" }], "坏置顶条目被清洗、同键去重");
     });
   });
 
-  describe("路由级：GET 全量 + POST 四个动作", () => {
+  describe("store：分组显示顺序", () => {
+    const withStore = (fn) => {
+      const root = mkTestDir("anyswitch-rail-store-");
+      return fn(createRailStore({ file: join(root, TERMINAL_RAIL_STORE_FILE) }), root);
+    };
+
+    it("全量替换写：真变序返回 true、幂等重放返回 false（调用方不必重渲）；拼写差异不算变序", () => {
+      withStore((store) => {
+        assert.equal(store.setGroupOrder(["C:\\Dev\\Alpha", "C:\\Dev\\Beta"]), true, "首设＝有变化");
+        assert.deepEqual(store.groupOrder(), ["C:\\Dev\\Alpha", "C:\\Dev\\Beta"]);
+        assert.equal(store.setGroupOrder(["c:/dev/alpha/", "C:\\DEV\\Beta"]), false, "归一化同键＝无变化");
+        assert.equal(store.setGroupOrder(["C:\\Dev\\Beta", "C:\\Dev\\Alpha"]), true, "真换序＝有变化");
+        assert.deepEqual(store.groupOrder(), ["C:\\Dev\\Beta", "C:\\Dev\\Alpha"], "顺序生效");
+      });
+    });
+
+    it("写入即清洗：非字符串/纯空白拒收，同键去重、保留原始拼写（与移除清单同款）", () => {
+      withStore((store) => {
+        store.setGroupOrder(["C:\\Dev\\Alpha", null, "", "c:/dev/alpha", "C:\\Dev\\Beta"]);
+        assert.deepEqual(store.groupOrder(), ["C:\\Dev\\Alpha", "C:\\Dev\\Beta"], "坏条目被清洗、同键留首个");
+      });
+    });
+
+    it("移除分组同步摘顺序条目：目录经自愈重现后按新组重新登记，不回旧位", () => {
+      withStore((store) => {
+        store.setGroupOrder(["C:\\Dev\\Alpha", "C:\\Dev\\Beta"]);
+        store.removeGroup("c:/dev/alpha");
+        assert.deepEqual(store.groupOrder(), ["C:\\Dev\\Beta"], "顺序条目同拍摘除");
+      });
+    });
+
+    it("老盘无此字段按空起步：写盘全字段（跨实例重读回环）", () => {
+      const root = mkTestDir("anyswitch-rail-store-");
+      const file = join(root, TERMINAL_RAIL_STORE_FILE);
+      writeFileSync(file, JSON.stringify({ version: 1, archived: [{ endpoint: "kimi", id: "s-1" }] }));
+      const store = createRailStore({ file });
+      assert.deepEqual(store.list().groupOrder, [], "老盘无顺序字段＝空清单起步");
+      assert.deepEqual(store.list().pinned, [], "老盘无置顶字段＝空清单起步");
+      store.setGroupOrder(["C:\\Dev\\Beta", "C:\\Dev\\Alpha"]);
+      const revived = createRailStore({ file });
+      assert.deepEqual(revived.groupOrder(), ["C:\\Dev\\Beta", "C:\\Dev\\Alpha"], "顺序跨实例读回");
+    });
+  });
+
+  describe("store：会话置顶清单", () => {
+    const withStore = (fn) => {
+      const root = mkTestDir("anyswitch-rail-store-");
+      return fn(createRailStore({ file: join(root, TERMINAL_RAIL_STORE_FILE) }), root);
+    };
+
+    it("置顶＝前插（最近置顶在最前），端点+会话双键，重复置顶幂等", () => {
+      withStore((store) => {
+        assert.equal(store.pin("kimi", "s-1"), true, "首次置顶");
+        assert.equal(store.pin("claude", "s-1"), true, "同 id 换端点是另一场会话");
+        assert.equal(store.pin("kimi", "s-1"), false, "重复置顶无变化");
+        assert.deepEqual(store.pinned(), [{ endpoint: "claude", id: "s-1" }, { endpoint: "kimi", id: "s-1" }], "最近置顶在最前");
+      });
+    });
+
+    it("与归档互斥：归档同拍摘置顶（同一份写）、已归档拒置顶；取消归档不回置（单向）", () => {
+      withStore((store) => {
+        store.pin("kimi", "s-1");
+        store.archive("kimi", "s-1");
+        assert.deepEqual(store.pinned(), [], "归档同拍摘置顶");
+        assert.equal(store.pin("kimi", "s-1"), false, "已归档拒置顶（兜底，前端不给入口）");
+        store.unarchive("kimi", "s-1");
+        assert.deepEqual(store.pinned(), [], "取消归档不回置");
+      });
+    });
+
+    it("取消置顶＝移除条目，重复取消幂等；非法入参一律拒", () => {
+      withStore((store) => {
+        store.pin("kimi", "s-1");
+        assert.equal(store.unpin("kimi", "s-1"), true, "取消生效");
+        assert.equal(store.unpin("kimi", "s-1"), false, "重复取消无变化");
+        for (const [endpoint, id] of [["", "s-1"], ["kimi", ""], [null, "s-1"], ["kimi", 42]]) {
+          assert.equal(store.pin(endpoint, id), false, `pin(${endpoint}, ${id}) 拒收`);
+          assert.equal(store.unpin(endpoint, id), false, `unpin(${endpoint}, ${id}) 拒收`);
+        }
+        assert.deepEqual(store.pinned(), [], "一条都不进");
+      });
+    });
+
+    it("落盘即持久化：新实例从盘上原样读回", () => {
+      const root = mkTestDir("anyswitch-rail-store-");
+      const file = join(root, TERMINAL_RAIL_STORE_FILE);
+      const first = createRailStore({ file });
+      first.pin("kimi", "s-1");
+      first.pin("claude", "s-2");
+      const second = createRailStore({ file });
+      assert.deepEqual(second.pinned(), [{ endpoint: "claude", id: "s-2" }, { endpoint: "kimi", id: "s-1" }], "置顶清单跨实例（含顺序）");
+    });
+  });
+
+  describe("路由级：GET 全量 + POST 六个动作", () => {
     const withRouter = (fn) => {
       const root = mkTestDir("anyswitch-rail-route-");
       const store = createRailStore({ file: join(root, TERMINAL_RAIL_STORE_FILE) });
@@ -183,12 +281,12 @@ describe("终端会话栏视图状态存储", () => {
       return fn({ router, store, root, file: join(root, TERMINAL_RAIL_STORE_FILE) });
     };
 
-    it("GET /panel/api/terminal/rail/prefs：全量下发归档与移除清单", async () => {
+    it("GET /panel/api/terminal/rail/prefs：全量下发归档、移除、顺序与置顶四张清单", async () => {
       await withRouter(async ({ router }) => {
         const { req, res, json } = fakeReqRes("/panel/api/terminal/rail/prefs", "GET");
         await router.handle(req, res);
         assert.equal(res.statusCode, 200);
-        assert.deepEqual(json(), { ok: true, archived: [], removedGroups: [] }, "空库原样");
+        assert.deepEqual(json(), { ok: true, archived: [], removedGroups: [], groupOrder: [], pinned: [] }, "空库原样");
       });
     });
 
@@ -236,12 +334,66 @@ describe("终端会话栏视图状态存储", () => {
       });
     });
 
+    it("置顶 → 取消置顶：POST 即落盘，快照跟随（最近置顶在前）；归档经由路由同拍摘置顶", async () => {
+      await withRouter(async ({ router }) => {
+        let call = fakeReqRes("/panel/api/terminal/rail/pin", "POST", { endpoint: "kimi", id: "s-1" });
+        await router.handle(call.req, call.res);
+        assert.equal(call.res.statusCode, 200);
+        call = fakeReqRes("/panel/api/terminal/rail/pin", "POST", { endpoint: "claude", id: "s-2" });
+        await router.handle(call.req, call.res);
+        assert.equal(call.res.statusCode, 200);
+        call = fakeReqRes("/panel/api/terminal/rail/prefs", "GET");
+        await router.handle(call.req, call.res);
+        assert.deepEqual(call.json().pinned, [{ endpoint: "claude", id: "s-2" }, { endpoint: "kimi", id: "s-1" }], "最近置顶在前");
+
+        call = fakeReqRes("/panel/api/terminal/rail/archive", "POST", { endpoint: "claude", id: "s-2" });
+        await router.handle(call.req, call.res);
+        assert.equal(call.res.statusCode, 200);
+        call = fakeReqRes("/panel/api/terminal/rail/prefs", "GET");
+        await router.handle(call.req, call.res);
+        assert.deepEqual(call.json().pinned, [{ endpoint: "kimi", id: "s-1" }], "归档摘置顶（互斥同一份写）");
+
+        call = fakeReqRes("/panel/api/terminal/rail/unpin", "POST", { endpoint: "kimi", id: "s-1" });
+        await router.handle(call.req, call.res);
+        assert.equal(call.res.statusCode, 200);
+        call = fakeReqRes("/panel/api/terminal/rail/prefs", "GET");
+        await router.handle(call.req, call.res);
+        assert.deepEqual(call.json().pinned, [], "取消置顶后出清单");
+      });
+    });
+
+    it("分组顺序：POST 全量替换即落盘，跨实例读回；空表/全垃圾 400 拒收", async () => {
+      await withRouter(async ({ router, root, file }) => {
+        let call = fakeReqRes("/panel/api/terminal/rail/group-order", "POST", { order: ["C:\\Dev\\Beta", "C:\\Dev\\Alpha"] });
+        await router.handle(call.req, call.res);
+        assert.equal(call.res.statusCode, 200);
+        assert.deepEqual(call.json().groupOrder, ["C:\\Dev\\Beta", "C:\\Dev\\Alpha"], "落盘原序");
+
+        const revived = railRouter({ root: dirname(file), store: createRailStore({ file }) });
+        call = fakeReqRes("/panel/api/terminal/rail/prefs", "GET");
+        await revived.handle(call.req, call.res);
+        assert.deepEqual(call.json().groupOrder, ["C:\\Dev\\Beta", "C:\\Dev\\Alpha"], "顺序跨实例读回");
+
+        for (const body of [{}, { order: [] }, { order: ["", null, 42] }]) {
+          call = fakeReqRes("/panel/api/terminal/rail/group-order", "POST", body);
+          await router.handle(call.req, call.res);
+          assert.equal(call.res.statusCode, 400, `order=${JSON.stringify(body.order)} 判空拒收`);
+        }
+        const finalPrefs = fakeReqRes("/panel/api/terminal/rail/prefs", "GET");
+        await router.handle(finalPrefs.req, finalPrefs.res);
+        assert.deepEqual(finalPrefs.json().groupOrder, ["C:\\Dev\\Beta", "C:\\Dev\\Alpha"], "拒收不清顺序");
+      });
+    });
+
     it("非法载荷 400 拒收，不落盘不炸", async () => {
       await withRouter(async ({ router, store }) => {
         for (const [path, body] of [
           ["/panel/api/terminal/rail/archive", { endpoint: "kimi" }],
           ["/panel/api/terminal/rail/archive", { id: "s-1" }],
           ["/panel/api/terminal/rail/archive", { endpoint: "  ", id: "s-1" }],
+          ["/panel/api/terminal/rail/pin", { id: "s-1" }],
+          ["/panel/api/terminal/rail/unpin", { endpoint: "kimi" }],
+          ["/panel/api/terminal/rail/pin", { endpoint: null, id: "s-1" }],
           ["/panel/api/terminal/rail/remove-group", {}],
           ["/panel/api/terminal/rail/remove-group", { dir: "   " }],
           ["/panel/api/terminal/rail/restore-group", { dir: null }],
@@ -251,7 +403,7 @@ describe("终端会话栏视图状态存储", () => {
           assert.equal(call.res.statusCode, 400, `${path} ${JSON.stringify(body)} 判非法`);
           assert.equal(call.json().ok, false, "带 ok:false");
         }
-        assert.deepEqual(store.list(), { archived: [], removedGroups: [] }, "一条都不进");
+        assert.deepEqual(store.list(), { archived: [], removedGroups: [], groupOrder: [], pinned: [] }, "一条都不进");
       });
     });
 
@@ -274,9 +426,9 @@ describe("终端会话栏视图状态存储", () => {
       assert.equal(call.res.statusCode, 200);
       assert.deepEqual(call.json().archived, [{ endpoint: "kimi", id: "s-1" }], "新实例从盘上惰性加载");
     });
-    // 五条路由的注册与 200/400 行为已由上面四条用例真跑覆盖（GET prefs +
-    // archive/unarchive/remove-group/restore-group 各自真发请求），不再保留
-    // panel.mjs 源码子串/正则钉死——那类断言对等价改写（改形制不改行为）会假红，
-    // 对装配被拆（import 行即含标识符）又假绿。
+    // 七条路由的注册与 200/400 行为已由上面六条用例真跑覆盖（GET prefs +
+    // archive/unarchive/pin/unpin/group-order/remove-group/restore-group 各自
+    // 真发请求），不再保留 panel.mjs 源码子串/正则钉死——那类断言对等价改写
+    // （改形制不改行为）会假红，对装配被拆（import 行即含标识符）又假绿。
   });
 });

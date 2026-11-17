@@ -1543,8 +1543,8 @@ export function createPanelRouter({
   // 视图状态全量快照。进终端会话栏时拉一次，之后每个动作的响应里也带最新快照，
   // 前端不必为了刷新状态再补一发 GET。
   function handleTerminalRailPrefs(res) {
-    const { archived, removedGroups } = terminalRailPrefs().list();
-    sendJson(res, 200, { ok: true, archived, removedGroups });
+    const { archived, removedGroups, groupOrder, pinned } = terminalRailPrefs().list();
+    sendJson(res, 200, { ok: true, archived, removedGroups, groupOrder, pinned });
   }
 
   // 归档动作的入参校验：endpoint 与 id 都必须是实言实的非空串。store 自己也会
@@ -1564,14 +1564,28 @@ export function createPanelRouter({
       return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
     }
     try {
-      if (action === "archive" || action === "unarchive") {
+      if (action === "archive" || action === "unarchive" || action === "pin" || action === "unpin") {
         const entry = railArchiveBody(body);
         if (!entry) return sendJson(res, 400, { ok: false, error: "会话身份不完整" });
         const store = terminalRailPrefs();
         if (action === "archive") store.archive(entry.endpoint, entry.id);
-        else store.unarchive(entry.endpoint, entry.id);
+        else if (action === "unarchive") store.unarchive(entry.endpoint, entry.id);
+        else if (action === "pin") store.pin(entry.endpoint, entry.id);
+        else store.unpin(entry.endpoint, entry.id);
         const snap = store.list();
-        return sendJson(res, 200, { ok: true, archived: snap.archived });
+        return sendJson(res, 200, { ok: true, archived: snap.archived, pinned: snap.pinned });
+      }
+      if (action === "group-order") {
+        // 全量替换写：前端算出终序（拖拽重排/新组登记）后整表落盘。清单里每项
+        // 都得是非空目录串，否则拒——半份顺序落了盘比拒一次请求更难收拾。
+        const order = Array.isArray(body?.order)
+          ? body.order.filter((item) => typeof item === "string" && item.trim() !== "")
+          : [];
+        if (order.length === 0) return sendJson(res, 400, { ok: false, error: "目录不能为空" });
+        const store = terminalRailPrefs();
+        store.setGroupOrder(order);
+        const snap = store.list();
+        return sendJson(res, 200, { ok: true, groupOrder: snap.groupOrder });
       }
       const dir = typeof body?.dir === "string" ? body.dir.trim() : "";
       if (!dir) return sendJson(res, 400, { ok: false, error: "目录不能为空" });
@@ -1579,7 +1593,7 @@ export function createPanelRouter({
       if (action === "remove-group") store.removeGroup(dir);
       else store.restoreGroup(dir);
       const snap = store.list();
-      return sendJson(res, 200, { ok: true, removedGroups: snap.removedGroups });
+      return sendJson(res, 200, { ok: true, removedGroups: snap.removedGroups, groupOrder: snap.groupOrder });
     } catch (error) {
       // 落盘失败如实回 500：视图状态没存上，前端要能知道（否则本地显示已归档、
       // 刷新回来还在，比报错更难理解）。
@@ -4156,10 +4170,10 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/terminal/requests" && method === "GET") return handleTerminalRequests(url, res);
-    // 终端会话栏视图状态：归档清单与已移除分组目录清单。GET 全量 + 四个
+    // 终端会话栏视图状态：归档/已移除分组/分组显示序/置顶清单。GET 全量 + 七个
     // 动作 POST，落点与绑定库同目录（见 terminalRailPrefs）。
     if (path === "/panel/api/terminal/rail/prefs" && method === "GET") return handleTerminalRailPrefs(res);
-    for (const action of ["archive", "unarchive", "remove-group", "restore-group"]) {
+    for (const action of ["archive", "unarchive", "remove-group", "restore-group", "pin", "unpin", "group-order"]) {
       if (path === `/panel/api/terminal/rail/${action}` && method === "POST") {
         return handleTerminalRailArchive(req, res, action);
       }

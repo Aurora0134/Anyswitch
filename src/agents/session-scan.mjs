@@ -15,9 +15,9 @@
 //
 // One adapter per endpoint, unified shape:
 //   { id, roots(), scan(), loadMessages(file), delete(file) }
-// scan() returns SessionMeta[] with an 11-field contract:
+// scan() returns SessionMeta[] with a 12-field contract:
 //   endpoint / id / title / summary / project / cwd / originator / file /
-//   createdAt / lastActive / resumeCommand
+//   createdAt / lastActive / lastPromptAt / resumeCommand
 //   — plus two zcode-only keys that makeMeta mounts only when it can
 //   establish them (every other endpoint's rows stay exactly 11 fields):
 //   `parentId` (child session → its parent session id; agent-metrics folds
@@ -40,6 +40,14 @@
 // row, the sqlite directory column) and falls back to "" when it cannot be
 // established — never to a guess. `project` keeps its existing meaning and
 // value; `cwd` is the same path when known, "" otherwise.
+// `lastPromptAt` is the last time a human sent a message in this session —
+// the ordering key the terminal rail sorts its 「最近更新」 rows by
+// (max(createdAt, lastPromptAt) on the frontend): agent output and tool
+// traffic advance `lastActive` but must not float a session up the list.
+// Each adapter derives it with the same user-turn predicate its own
+// transcript reader uses (injected user-role text never counts as a
+// prompt), reading at most a bounded tail window per file; null when no
+// user line is found and the consumer falls back to createdAt.
 // loadMessages(file) returns { role, content, ts }[] — always a bare array, never
 // a wrapper object and never a "no transcript" placeholder. Corrupt or
 // half-written records are skipped row by row, so a store that exists but holds
@@ -392,6 +400,110 @@ function readHeadTailLines(path, headN, tailN) {
 }
 
 // ---------------------------------------------------------------------------
+// lastPromptAt（最近用户提问时间）：会话行「最近更新」排序的键来源。
+//
+// lastActive 被任何写盘推进——agent 输出、工具结果、注入提醒都算活跃；
+// lastPromptAt 只在用户真的发消息时前进，排序键取 max(createdAt,
+// lastPromptAt)（前端算），agent 自己跑再久也不会把会话顶上去。口径与
+// 「对话目录」一致：注入的 user-role 文本（整块工具结果、命令回显、系统
+// 提醒）不推进该键。
+//
+// 提取是倒向分块扫描：从文件尾按 64KB 块往头读，找到最近的用户行即停
+// （谓词由各家 adapter 提供，与其 loadMessages 的用户判定同源）。浅命中只
+// 读一两个块；深 miss（agent 长跑把提问推远，实测分布在 450KB–2MB）才会把
+// 2MB 预算读满——预算按「最多读多少」定，不按「一定读多少」定。窗口外的
+// 旧提问靠 (size, mtime) memo 保住旧值——用户行只会追加、时间戳单调，找不
+// 到新值时沿用上轮结论，排序键只前进不回跳。首扫窗口内没有用户行时回落
+// null（调用方再回落 createdAt）：宁可低估，不猜。
+// ---------------------------------------------------------------------------
+
+const LAST_PROMPT_SCAN_BYTES = 2 * 1024 * 1024;
+const LAST_PROMPT_CHUNK_BYTES = 64 * 1024;
+
+// path → { size, mtimeMs, at }。扫描跑在常驻 worker 里，memo 跨轮存活：
+// 30s TTL 的列表刷新里大部分文件 (size, mtime) 未变 → 零读盘。
+const LAST_PROMPT_MEMO = new Map();
+
+// userLineTime(value)：一行 JSONL 的「用户提问时间」毫秒值；非用户行、注入
+// 行、坏行一律返回 null。
+function lastUserPromptAt(path, userLineTime) {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    LAST_PROMPT_MEMO.delete(path);
+    return null;
+  }
+  const memo = LAST_PROMPT_MEMO.get(path);
+  if (memo && memo.size === stats.size && memo.mtimeMs === stats.mtimeMs) return memo.at;
+  let at = memo ? memo.at : null;
+  try {
+    const fd = openSync(path, "r");
+    try {
+      at = scanLastUserPromptBackward(fd, stats.size, userLineTime) ?? at;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // 读窗失败：沿用 memo 旧值（或 null），排序键的提取绝不炸扫描。
+  }
+  LAST_PROMPT_MEMO.set(path, { size: stats.size, mtimeMs: stats.mtimeMs, at });
+  return at;
+}
+
+// 倒向分块的行扫描本体。行界在原始字节上找换行：0x0A 不会出现在 UTF-8 多
+// 字节序列内部，所以字节级切行是精确的；块边界骑着的半行以原始字节留到下
+// 一（更老的）块拼头，多字节字符跨块也能整字还原。读满预算（或读到文件
+// 头）都没命中时返回 null。
+function scanLastUserPromptBackward(fd, size, userLineTime) {
+  const buf = Buffer.alloc(LAST_PROMPT_CHUNK_BYTES);
+  // pending：窗口最老边界上那行不完整行的已读半截（较新侧），等更老的块补头。
+  let pending = Buffer.alloc(0);
+  let pos = size;
+  let scanned = 0;
+  while (pos > 0 && scanned < LAST_PROMPT_SCAN_BYTES) {
+    const want = Math.min(LAST_PROMPT_CHUNK_BYTES, pos, LAST_PROMPT_SCAN_BYTES - scanned);
+    pos -= want;
+    scanned += want;
+    const n = readSync(fd, buf, 0, want, pos);
+    if (n < want) break; // 常规文件不会部分读；真出现＝IO 异常，停扫沿用旧值
+    const combined = Buffer.concat([buf.subarray(0, n), pending]);
+    // 从最新侧往老找换行：两个相邻换行之间的字节段是一行完整行。首段以
+    // combined 末端（＝文件尾）收口——最后一条行天然完整。
+    let lineEnd = combined.length;
+    for (let i = combined.length - 1; i >= 0; i--) {
+      if (combined[i] !== 0x0a) continue;
+      const trimmed = combined.subarray(i + 1, lineEnd).toString("utf8").trim();
+      lineEnd = i;
+      if (trimmed === "") continue;
+      let value;
+      try {
+        value = JSON.parse(trimmed);
+      } catch {
+        continue; // 半行/坏行——整块跳过，绝不炸扫描
+      }
+      const ts = userLineTime(value);
+      if (ts !== null) return ts;
+    }
+    // 老侧边界前没有更多换行：整段都是未完行，原字节留给下一块。
+    pending = combined.subarray(0, lineEnd);
+  }
+  // 读到文件头（pos===0）时 pending 就是首行——完整行，补查一次。
+  if (pos === 0 && pending.length > 0) {
+    const trimmed = pending.toString("utf8").trim();
+    if (trimmed !== "") {
+      try {
+        const ts = userLineTime(JSON.parse(trimmed));
+        if (ts !== null) return ts;
+      } catch {
+        // 首行坏——与坏行同处置
+      }
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Concatenated Zstandard container reader.
 // DSH stores one session log as a CHAIN of independently decodable Zstandard
 // frames (a checksummed header frame plus one frame per durable write batch),
@@ -456,21 +568,26 @@ function scanZstdFrames(buffer) {
 }
 
 // Hold one container in memory: frame ranges plus a per-frame decoder.
+// decodeText 是解压后的原文（不做逐行 parse）：倒扫找特定记录时先做子串预筛，
+// 绝大多数帧整帧跳过——解压本身很便宜，全量 JSON.parse 才是帧级成本（实测
+// 8:1）。
 function readZstdContainer(path) {
   const buffer = readFileSync(path);
   const frames = scanZstdFrames(buffer);
-  const decode = (index) => {
+  const decodeText = (index) => {
     const frame = frames[index];
-    if (!frame) return [];
+    if (!frame) return "";
     try {
-      return parseJsonl(zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString("utf8"));
+      return zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString("utf8");
     } catch {
-      return []; // corrupt frame — keep the frames that did decode
+      return ""; // corrupt frame — keep the frames that did decode
     }
   };
+  const decode = (index) => parseJsonl(decodeText(index));
   return {
     frames,
     decode,
+    decodeText,
     allRecords() {
       const records = [];
       for (let i = 0; i < frames.length; i++) records.push(...decode(i));
@@ -546,13 +663,13 @@ function isPathUnder(file, root) {
   return f === r || f.startsWith(r + sep) || f.startsWith(r + "/") || f.startsWith(r + "\\");
 }
 
-function makeMeta({ endpoint, id, title = null, summary = null, project = null, cwd = null, originator = null, file = null, createdAt = null, lastActive = null, parentId = null, surface = null }) {
+function makeMeta({ endpoint, id, title = null, summary = null, project = null, cwd = null, originator = null, file = null, createdAt = null, lastActive = null, lastPromptAt = null, parentId = null, surface = null }) {
   // cwd 是「续接要在哪个目录起」的唯一依据（additive 字段）：调用方给的权威值优先，
   // 没给就取 project（两者历来同源同值），都没有落空串——绝不猜。
   const resolvedCwd = typeof cwd === "string" && cwd.trim() !== ""
     ? cwd
     : (typeof project === "string" && project.trim() !== "" ? project : "");
-  const meta = { endpoint, id, title, summary, project, cwd: resolvedCwd, originator, file, createdAt, lastActive, resumeCommand: "" };
+  const meta = { endpoint, id, title, summary, project, cwd: resolvedCwd, originator, file, createdAt, lastActive, lastPromptAt, resumeCommand: "" };
   // zcode 专属：parent_id 是子会话（workflow actor / subagent / 侧聊）→ 母会话的
   // 正源，surface 是桌面/CLI 的扫描判据。两者只在判得出时挂上，别家 adapter 与
   // 旧版库的 meta 形状保持一字不变（makeMeta 字段白名单有单测钉着）。
@@ -573,6 +690,17 @@ function makeMeta({ endpoint, id, title = null, summary = null, project = null, 
 
 function createClaudeAdapter(roots) {
   const isExcludedName = (name) => name.startsWith("agent-") || name === "journal.jsonl";
+
+  // 行级用户判据：与 parseSession 的标题判据同源（type/message.role 双形态），
+  // 再叠上「对话目录」同款注入过滤——整块工具结果的 user 记录、命令回显与
+  // 系统提醒都不算提问。
+  function claudeUserLineTime(value) {
+    const isUser = value.type === "user" || (value.message && value.message.role === "user");
+    if (!isUser || !value.message) return null;
+    if (allToolResultBlocks(value.message.content)) return null;
+    if (isInjectedUserTurn(extractText(value.message.content))) return null;
+    return parseTimestampMs(value.timestamp);
+  }
 
   function parseSession(path) {
     const { head, tail } = readHeadTailLines(path, 30, 30);
@@ -680,6 +808,7 @@ function createClaudeAdapter(roots) {
       file: path,
       createdAt,
       lastActive,
+      lastPromptAt: lastUserPromptAt(path, claudeUserLineTime),
     });
   }
 
@@ -793,6 +922,19 @@ function createKimiAdapter(roots) {
     return null;
   }
 
+  // 行级用户判据：与 firstPrompt 同一双事件形态 + 同一道 system-reminder 过滤
+  // ——「最后一条用户事件」与「第一条用户事件」必须是同一把尺。
+  function kimiUserLineTime(value) {
+    let text = null;
+    if (value.type === "prompt.accepted") {
+      text = extractText(value.content);
+    } else if (value.type === "context.append_message" && value.message && value.message.role === "user") {
+      text = extractText(value.message.content);
+    }
+    if (text === null || text.trim() === "" || text.startsWith("<system-reminder>")) return null;
+    return parseTimestampMs(value.time);
+  }
+
   // Last activity = newest `agents/<id>/wire.jsonl`. One readdir + one stat per
   // agent, never a recursive walk of the session dir: a walk has to stat every
   // tool-result and task-log file it contains just to answer "when was this
@@ -844,6 +986,10 @@ function createKimiAdapter(roots) {
               file: entry.sessionDir,
               createdAt: null, // index carries no creation time
               lastActive,
+              lastPromptAt: lastUserPromptAt(
+                join(entry.sessionDir, "agents", "main", "wire.jsonl"),
+                kimiUserLineTime,
+              ),
             }),
           );
         } catch {
@@ -992,10 +1138,12 @@ function dshSessionFile(sessionDir) {
 // readZstdContainer decodes, a plain `.jsonl` file is one frame of lines.
 function readDshContainer(path) {
   if (path.endsWith(".zstd")) return readZstdContainer(path);
-  const records = parseJsonl(readFileSync(path, "utf8"));
+  const text = readFileSync(path, "utf8");
+  const records = parseJsonl(text);
   return {
     frames: [records],
     decode: (index) => (index === 0 ? records : []),
+    decodeText: (index) => (index === 0 ? text : ""),
     allRecords: () => records,
   };
 }
@@ -1005,6 +1153,51 @@ function readDshContainer(path) {
 // liveness check; decoding whole transcripts here would make the list call pay
 // for every transcript on disk.
 const DSH_HEAD_MAX_FRAMES = 32;
+
+// 最近用户提问的帧回看上限。成本按「帧解压次数」计（zstd 单帧解压有固定每次
+// 开销，实测 15 万帧 ≈ 30s+），不是按字节——所以上限用帧数：96 帧内命中即得，
+// 更深的提问放弃、回落 createdAt（冷启动后旧会话短暂低估，用户下次提问即
+// 精确；未变化文件走 memo 零成本，活跃会话的键一旦建立就一直保真）。
+const DSH_PROMPT_MAX_FRAMES = 96;
+const DSH_PROMPT_MEMO = new Map();
+
+// dsh 的最近用户提问：帧从尾往头解、帧内行也从尾往头找，首个 user/message 即
+// 最近一次提问。解压后的帧文本先过 "user/message" 子串预筛（该字面量只能是
+// type 字段的取值；正文引用它只会造成假阳性多 parse 一行，不会漏），命中的
+// 行才 JSON.parse。文件 (size, mtime) 未变直接走 memo，跳过整段解压。
+function dshLastPromptAt(path, container) {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    DSH_PROMPT_MEMO.delete(path);
+    return null;
+  }
+  const memo = DSH_PROMPT_MEMO.get(path);
+  if (memo && memo.size === stats.size && memo.mtimeMs === stats.mtimeMs) return memo.at;
+  let at = memo ? memo.at : null;
+  const firstFrame = Math.max(0, container.frames.length - DSH_PROMPT_MAX_FRAMES);
+  search: for (let i = container.frames.length - 1; i >= firstFrame; i--) {
+    const text = container.decodeText(i);
+    if (!text.includes('"user/message"')) continue;
+    const lines = text.split("\n");
+    for (let j = lines.length - 1; j >= 0; j--) {
+      if (!lines[j].includes('"user/message"')) continue;
+      let record;
+      try {
+        record = JSON.parse(lines[j]);
+      } catch {
+        continue; // 半行/坏行
+      }
+      const message = record?.type === "user/message" ? dshRecordMessage(record) : null;
+      if (message === null || message.ts === null) continue;
+      at = message.ts;
+      break search;
+    }
+  }
+  DSH_PROMPT_MEMO.set(path, { size: stats.size, mtimeMs: stats.mtimeMs, at });
+  return at;
+}
 
 const DSH_CONVERSATION_TYPES = new Set(["user/message", "assistant/message", "tool/result"]);
 
@@ -1106,6 +1299,7 @@ function createDshAdapter(roots) {
                   file: sessionFile,
                   createdAt,
                   lastActive: parseTimestampMs(last?.time) ?? statSync(sessionFile).mtimeMs,
+                  lastPromptAt: dshLastPromptAt(sessionFile, container),
                 }),
               );
             } catch {
@@ -1161,6 +1355,15 @@ function createDshAdapter(roots) {
 // ---------------------------------------------------------------------------
 
 function createPiAdapter(roots) {
+  // 行级用户判据：与 loadMessages 同一形态（type=message + role=user），注入
+  // 过滤与「对话目录」共用一份名单。
+  function piUserLineTime(value) {
+    if (value.type !== "message" || !value.message || value.message.role !== "user") return null;
+    if (allToolResultBlocks(value.message.content)) return null;
+    if (isInjectedUserTurn(extractText(value.message.content))) return null;
+    return parseTimestampMs(value.message.timestamp) ?? parseTimestampMs(value.timestamp);
+  }
+
   function parseSession(path) {
     const { head, tail } = readHeadTailLines(path, 10, 30);
     const headValues = [];
@@ -1214,6 +1417,7 @@ function createPiAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
+      lastPromptAt: lastUserPromptAt(path, piUserLineTime),
     });
   }
 
@@ -1270,6 +1474,16 @@ function createPiAdapter(roots) {
 // ---------------------------------------------------------------------------
 
 function createQoderAdapter(roots) {
+  // 行级用户判据：qoder 与 claude 同为 Anthropic 形状，type=user 单形态（其
+  // parse 只认 type）；整块工具结果的 user 记录与注入文本同「对话目录」口径
+  // 一并排除。
+  function qoderUserLineTime(value) {
+    if (value.type !== "user" || !value.message) return null;
+    if (allToolResultBlocks(value.message.content)) return null;
+    if (isInjectedUserTurn(extractText(value.message.content))) return null;
+    return parseTimestampMs(value.timestamp);
+  }
+
   function parseTranscript(path) {
     const { head, tail } = readHeadTailLines(path, 30, 30);
 
@@ -1332,6 +1546,7 @@ function createQoderAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
+      lastPromptAt: lastUserPromptAt(path, qoderUserLineTime),
     });
   }
 
@@ -1455,6 +1670,14 @@ function codexMessage(value) {
   return null;
 }
 
+// 行级用户判据：直接复用 codexMessage——合成信封（AGENTS.md 前导 / 环境块）
+// 与空文本在它体内已经排除，剩下的 user 即真人提问。
+function codexUserLineTime(value) {
+  const message = codexMessage(value);
+  if (message === null || message.role !== "user") return null;
+  return parseTimestampMs(value?.timestamp);
+}
+
 function createCodexAdapter(roots) {
   // The index sits next to the sessions root (~/.codex/session_index.jsonl);
   // a missing or corrupt index just means no thread names.
@@ -1556,6 +1779,7 @@ function createCodexAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
+      lastPromptAt: lastUserPromptAt(path, codexUserLineTime),
     });
   }
 
@@ -1643,6 +1867,15 @@ function grokSessionUpdate(value) {
   return null;
 }
 
+// 行级用户判据：user_message_chunk 与 loadMessages 的用户轮同源（倒扫命中的
+// 是最后一轮的尾块，同轮各块时间戳几乎相同）；空块不算。
+function grokUserLineTime(value) {
+  const update = grokSessionUpdate(value);
+  if (update === null || update.sessionUpdate !== "user_message_chunk") return null;
+  if (extractText(update.content).trim() === "") return null;
+  return parseTimestampMs(update.ts) ?? parseTimestampMs(update.timestamp);
+}
+
 function createGrokAdapter(roots) {
   // The encoded-cwd group name is a slug+hash when the encoding exceeds 255
   // bytes; the original path then lives in the group's .cwd file (17-sessions.md).
@@ -1689,6 +1922,7 @@ function createGrokAdapter(roots) {
       file: sessionDir,
       createdAt,
       lastActive: parseTimestampMs(summary.updated_at) ?? createdAt,
+      lastPromptAt: lastUserPromptAt(join(sessionDir, "updates.jsonl"), grokUserLineTime),
     });
   }
 
@@ -1848,6 +2082,17 @@ function readLastAiTitle(path) {
   }
 }
 
+// 行级用户判据：workbuddyMessage 的 user 行 + 全量注入名单过滤。标题路径的
+// firstUserMessage 只挡 client 注入的整块上下文（isInjectedUserBlock），排序键
+// 这里必须更严——task-notification / 命令回显这类机器文本同样不推进键，否则
+// 长跑会话的排序键会被通知行一路推着走。
+function workbuddyUserLineTime(value) {
+  const message = workbuddyMessage(value);
+  if (message === null || message.role !== "user") return null;
+  if (isInjectedUserTurn(message.content)) return null;
+  return message.ts;
+}
+
 function createWorkbuddyAdapter(roots) {
   function parseSession(path, projectDirName) {
     // head 取 sessionId / cwd / 首条用户消息 / 创建时间，tail 取最近活跃时间与
@@ -1954,6 +2199,7 @@ function createWorkbuddyAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
+      lastPromptAt: lastUserPromptAt(path, workbuddyUserLineTime),
     });
   }
 
@@ -2099,6 +2345,25 @@ function scanSessionTable({ endpoint, dbPath }) {
       )
       .all();
     const desktopIds = endpoint === "zcode" ? zcodeDesktopSessionIds(db) : null;
+    // 最近用户提问：zcode 在 message.data.semantics.origin 上写明了行来源——
+    // real_user 是真人提问；agent_runtime / system 是客户端自己注入的余量提醒、
+    // 环境快照、工具回执（本机 24k user 行里 21k 是注入，全靠文本前缀根本筛不
+    // 干净）。判据是记录自带的，比文本猜稳；老库没有 semantics 字段时查不出提
+    // 问行，回落 createdAt——宁可低估不误报。LIKE 预筛纪律同
+    // zcodeDesktopSessionIds。
+    const lastPromptMap = endpoint === "zcode" && sqliteTableExists(db, "message")
+      ? new Map(
+          db
+            .prepare(
+              `SELECT session_id, MAX(time_created) AS at FROM message
+               WHERE data LIKE '%"real_user"%' AND json_valid(data)
+                 AND json_extract(data, '$.semantics.origin') = 'real_user'
+               GROUP BY session_id`,
+            )
+            .all()
+            .map((row) => [String(row.session_id), typeof row.at === "number" ? row.at : null]),
+        )
+      : null;
     return rows.map((row) => {
       const parentId = hasParentColumn && typeof row.parent_id === "string" && row.parent_id.trim() !== ""
         ? row.parent_id
@@ -2119,6 +2384,7 @@ function scanSessionTable({ endpoint, dbPath }) {
         file: `sqlite:${dbPath}#${row.id}`,
         createdAt: typeof row.time_created === "number" ? row.time_created : null,
         lastActive: typeof row.time_updated === "number" ? row.time_updated : null,
+        lastPromptAt: lastPromptMap !== null ? (lastPromptMap.get(String(row.id)) ?? null) : null,
       });
     });
   } finally {
@@ -2292,6 +2558,61 @@ function createZcodeAdapter(roots) {
 // and nothing is listed twice.
 const OPENCODE_SESSION_COLUMNS = "id, title, directory, time_created, time_updated";
 
+// opencode 的行来源标记：v2 / 1.x 两种存档形态都没有 zcode 那类 semantics 判据，
+// 最近提问按「注入文本名单」（与「对话目录」同一份）从全量 user 行倒序里挑。
+// 两趟各是全表一趟、每会话只认首条过筛行——注入串在尾部成段出现，倒序跳过
+// 它们即得最近真人提问；全注入/坏行则该会话缺席（回落 createdAt）。
+// v2：session_message(type='user')，文本就在 data.text。
+function userPromptMapFromV2(db) {
+  const map = new Map();
+  for (const row of db
+    .prepare("SELECT session_id, time_created, data FROM session_message WHERE type = 'user' ORDER BY time_created DESC")
+    .all()) {
+    const sessionId = String(row.session_id);
+    if (map.has(sessionId)) continue;
+    let text = null;
+    try {
+      const data = JSON.parse(row.data);
+      text = typeof data?.text === "string" ? data.text : null;
+    } catch {
+      continue; // 坏行跳过，宁缺毋滥
+    }
+    if (text === null || isInjectedUserTurn(text)) continue;
+    map.set(sessionId, typeof row.time_created === "number" ? row.time_created : null);
+  }
+  return map;
+}
+
+// 1.x：message(role=user) 的文本在 part 行，取首个 part（loadSqliteMessagesFrom
+// 读到的同一文本），过滤名单同源。
+function userPromptMapFromLegacy(db) {
+  const map = new Map();
+  const rows = db
+    .prepare(
+      `SELECT m.session_id, m.time_created,
+              (SELECT p.data FROM part p WHERE p.message_id = m.id ORDER BY p.time_created ASC LIMIT 1) AS first_part
+       FROM message m
+       WHERE m.data LIKE '%"role"%' AND json_valid(m.data) AND json_extract(m.data, '$.role') = 'user'
+       ORDER BY m.time_created DESC`,
+    )
+    .all();
+  for (const row of rows) {
+    const sessionId = String(row.session_id);
+    if (map.has(sessionId)) continue;
+    let text = "";
+    try {
+      const part = JSON.parse(row.first_part);
+      const item = extractTextFromItem(part);
+      text = item === null ? "" : item;
+    } catch {
+      continue; // 坏行/无 part：跳过
+    }
+    if (isInjectedUserTurn(text)) continue;
+    map.set(sessionId, typeof row.time_created === "number" ? row.time_created : null);
+  }
+  return map;
+}
+
 function scanOpencodeSessions(dbPath) {
   if (!sqliteStorePresent(dbPath)) return [];
   const db = openSqliteReadOnly(dbPath);
@@ -2308,17 +2629,26 @@ function scanOpencodeSessions(dbPath) {
       }
     }
     rows.sort((a, b) => (b.time_updated ?? 0) - (a.time_updated ?? 0));
-    return rows.map((row) =>
-      makeMeta({
+    // v2 优先、1.x 兜底——与 loadOpencodeMessages 的回退结构同构：升级半途的
+    // 会话两边都有行，v2 有结论就不再看旧表。
+    const v2PromptMap = sqliteTableExists(db, "session_message") ? userPromptMapFromV2(db) : null;
+    const legacyPromptMap = sqliteTableExists(db, "message") ? userPromptMapFromLegacy(db) : null;
+    return rows.map((row) => {
+      const id = String(row.id);
+      const lastPromptAt = v2PromptMap !== null && v2PromptMap.has(id)
+        ? v2PromptMap.get(id)
+        : (legacyPromptMap !== null ? legacyPromptMap.get(id) ?? null : null);
+      return makeMeta({
         endpoint: "opencode",
-        id: String(row.id),
+        id,
         title: typeof row.title === "string" && row.title.trim() !== "" ? truncateText(row.title, TITLE_MAX_CHARS) : null,
         project: typeof row.directory === "string" ? row.directory : null,
         file: `sqlite:${dbPath}#${row.id}`,
         createdAt: typeof row.time_created === "number" ? row.time_created : null,
         lastActive: typeof row.time_updated === "number" ? row.time_updated : null,
-      }),
-    );
+        lastPromptAt,
+      });
+    });
   } finally {
     db.close();
   }

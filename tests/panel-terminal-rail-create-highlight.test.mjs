@@ -46,6 +46,12 @@ function railSandbox({ createPending = null, sessions = { "t-old": OLD_TERMINAL 
     const sessDirName = (p) => String(p || "");
     const terminalRailRelTime = () => "3 分钟前";
     const terminalRailIsArchived = () => false;
+    // 行渲染的置顶/排序键依赖（2026-11-17 改造）：空清单＝未置顶未归档
+    const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+    const TERMINAL_RAIL_ICON_PIN = "";
+    const TERMINAL_RAIL_PIN_MARK = "";
+    ${extract("terminalRailRowUpdatedAt")}
+    ${extract("terminalRailIsPinned")}
     ${extract("terminalRailNormDir")}
     ${extract("terminalRailSameDir")}
     ${extract("terminalRailArchivedKey")}

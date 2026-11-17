@@ -83,8 +83,41 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+// 组序/行排序键/置顶改造（2026-11-17）后管线新增依赖：真函数按名抽出 + 置顶两枚
+// 图标常量。状态量不进这份（各沙盒自备），注入任何沙盒都安全（未调用的声明无副作用）。
+const railOrderPrelude = `
+  const TERMINAL_RAIL_ICON_PIN = "";
+  const TERMINAL_RAIL_PIN_MARK = "";
+  ${extractFn("terminalRailArchivedKey")}
+  ${extractFn("terminalRailRowUpdatedAt")}
+  ${extractFn("terminalRailCompareRowsByUpdate")}
+  ${extractFn("terminalRailSameDirList")}
+  ${extractFn("terminalRailIsPinned")}
+  ${extractFn("terminalRailApplyPinnedLeading")}
+  ${extractFn("terminalRailSortGroups")}
+`;
+// prefs 归一：老用例传两字段（archived/removedGroups），缺的组序/置顶字段补空——
+// isPinned 对 undefined 调 .some 会炸，宁可显式补 []。
+const railPrefsShape = (prefs) => ({ archived: [], removedGroups: [], groupOrder: [], pinned: [], ...prefs });
+
+// 组序预登记（回访用户口径）：沙盒默认按「清单早已落盘」跑渲染，组序首现登记
+// 的 POST 属组序用例的行为面，不混进归档/移除用例的 posts 断言。取序口径＝
+// groupSessions 的派生序（最近更新倒序），与管线渲染序一致。
+const railGroupsOf = (() => {
+  const fn = new Function(`
+    ${extractFn("terminalRailNormDir")}
+    function sessDirName(p) { return String(p || ""); }
+    ${railOrderPrelude}
+    ${extractFn("terminalRailGroupSessions")}
+    return terminalRailGroupSessions;
+  `)();
+  return (sessions) => fn(sessions).map((group) => group.key).filter(Boolean);
+})();
+
 // ── 渲染沙盒：renderTerminalRailHistory 及其全部依赖（照既有测试的同款桩） ──
 function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedAt = {}, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, apiImpl = async () => ({ ok: true }), createPending = null } = {}) {
+  const normPrefs = railPrefsShape(prefs);
+  if (!Array.isArray(prefs.groupOrder)) normPrefs.groupOrder = railGroupsOf(history && history.sessions);
   const list = { html: "", writes: 0 };
   Object.defineProperty(list, "innerHTML", {
     get: () => list.html,
@@ -156,6 +189,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailVisibleSessions")}
     ${extractFn("terminalRailSelfHealRemovedGroups")}
     ${extractFn("terminalRailRegroupRemoved")}
+    ${railOrderPrelude}
     ${extractFn("terminalRailPendingNewTerminals")}
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
@@ -190,14 +224,17 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
       pending: () => terminalRailSelectPending,
       setCreate: (value) => { terminalRailCreatePending = value; },
     };
-  `)(list, state, history, activeSession, prefs, removedAt, viewPrefs, apiImpl, createPending);
+  `)(list, state, history, activeSession, normPrefs, removedAt, viewPrefs, apiImpl, createPending);
   return { fn, list, state };
 }
 
-// 历史行渲染沙盒：只取行 HTML 生成函数本身（第二参 live = 开着终端或 null）
-function rowHtmlSandbox(prefs) {
-  const fn = new Function("session", "live", "activeId", "prefs", `
+// 历史行渲染沙盒：只取行 HTML 生成函数本身（第二参 live = 开着终端或 null）。
+// spinner 可覆写：默认空串桩只适合「槽内容无关」的用例；断言状态槽内容与
+// 置顶标记互斥时必须给真串（空串 falsy 会让 rowHtml 的 || 落到标记上）。
+function rowHtmlSandbox(prefs, { spinner = "" } = {}) {
+  const fn = new Function("session", "live", "activeId", "prefs", "spinner", `
     const terminalRailPrefs = prefs;
+    const TERMINAL_RAIL_SPINNER = spinner;
     const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
     const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
     function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
@@ -208,7 +245,7 @@ function rowHtmlSandbox(prefs) {
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailClaimedRowKeys")}
     ${extractFn("terminalRailIsArchived")}
-    const TERMINAL_RAIL_SPINNER = "";
+    ${railOrderPrelude}
     const TERMINAL_RAIL_DONE_DOT = "";
     const terminalDoneUnread = new Map();
     let terminalRailSelectPending = null;
@@ -217,7 +254,7 @@ function rowHtmlSandbox(prefs) {
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
     return terminalRailRowHtml;
-  `)(null, null, "t1", prefs);
+  `)(null, null, "t1", railPrefsShape(prefs), spinner);
   return fn;
 }
 
@@ -272,7 +309,7 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
       prefs: () => terminalRailPrefs,
       viewports: () => terminalViewports,
     };
-  `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs, openSessions, windowImpl, activeTerminalId);
+  `)(session, log, apiImpl ?? (async () => ({ ok: true })), railPrefsShape(prefs), viewPrefs, openSessions, windowImpl, activeTerminalId);
   return { fn, log };
 };
 
@@ -635,6 +672,8 @@ describe("S2 分组移除（finding 1b）", () => {
         const terminalRailPrefs = { archived: [], removedGroups: removed };
         ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailSameDir")}
+        ${extractFn("terminalRailRowUpdatedAt")}
+        ${extractFn("terminalRailCompareRowsByUpdate")}
         ${extractFn("terminalRailRegroupRemoved")}
         return terminalRailRegroupRemoved;
       `)(GROUPS, removedGroups);
@@ -1390,7 +1429,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
-        const terminalRailPrefs = { archived: [], removedGroups: [] };
+        const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
         ${extractFn("terminalRailSessionMap")}
@@ -1583,14 +1622,14 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
 describe("两段合并：live 内联 / 新会话兜底 / 无 agent 空树", () => {
   const LIVE = { id: "t-1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-1" } };
 
-  it("live 行内联进所属目录组，与普通行同按 lastActive 倒序（live 不插队）", () => {
+  it("live 行内联进所属目录组，与普通行同按最近更新倒序（live 不插队）", () => {
     const sandbox = renderSandbox({
       history: {
         endpoint: "kimi",
         sessions: [
-          { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 },
-          { id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "接入渠道", lastActive: 200 },
-          { id: "s-3", endpoint: "kimi", project: "C:\\dev\\beta", title: "排查掉线", lastActive: 300 },
+          { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastPromptAt: 100 },
+          { id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "接入渠道", lastPromptAt: 200 },
+          { id: "s-3", endpoint: "kimi", project: "C:\\dev\\beta", title: "排查掉线", lastPromptAt: 300 },
         ],
         fetchedAt: 1,
         error: null,
@@ -1599,7 +1638,7 @@ describe("两段合并：live 内联 / 新会话兜底 / 无 agent 空树", () =
     });
     sandbox.fn.render("kimi");
     const order = [...sandbox.list.html.matchAll(/data-rail-term-resume="([^"]+)"/g)].map((m) => m[1]);
-    assert.deepEqual(order, ["s-3", "s-2", "s-1"], "组间按最近活跃、组内同按最近活跃（live 的 s-1 虽开着也不提前）");
+    assert.deepEqual(order, ["s-3", "s-2", "s-1"], "组间按派生最近更新、组内同键（live 的 s-1 虽开着也不提前）");
     assert.ok(sandbox.list.html.includes("is-live"), "s-1 行带 live 标记");
     assert.equal((sandbox.list.html.match(/is-live/g) || []).length, 1, "只有 resume 两键对得上的那条是 live");
   });
@@ -1814,7 +1853,8 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       const terminalRailCollapsedGroups = new Set();
       function saveTerminalRailCollapsedGroups() {}
       const terminalRailWatermarks = new Map();
-      const terminalRailPrefs = { archived: [], removedGroups: [] };
+      const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: ["C:\\dev\\alpha"], pinned: [] };
+      ${railOrderPrelude}
       const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
       const terminalRailRemovedAt = {};
       const terminalRailSelfHealFailed = new Set();
@@ -1989,6 +2029,8 @@ describe("选中态跟随聚焦", () => {
       function sessRelTime() { return "1 分钟"; }
       function terminalRailRelTime() { return "1 分钟"; }
       function terminalRailIsArchived() { return false; }
+      const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+      ${railOrderPrelude}
       function esc(v) { return String(v); }
       function escapeHtml(v) { return String(v || ""); }
       const TERMINAL_RAIL_SPINNER = "";
@@ -2170,14 +2212,16 @@ describe("段头搜索", () => {
 
   describe("匹配与结果（vm 真跑）", () => {
     const SESSIONS = [
-      { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 },
-      { id: "s-2", endpoint: "kimi", project: "C:\\dev\\beta", title: "Alpha 接入渠道", lastActive: 300 },
-      { id: "s-3", endpoint: "kimi", project: null, title: "排查掉线", lastActive: 200 },
+      { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastPromptAt: 100 },
+      { id: "s-2", endpoint: "kimi", project: "C:\\dev\\beta", title: "Alpha 接入渠道", lastPromptAt: 300 },
+      { id: "s-3", endpoint: "kimi", project: null, title: "排查掉线", lastPromptAt: 200 },
     ];
     const run = (query, sessions = SESSIONS) => {
       const fn = new Function("sessions", "query", `
         ${extractFn("sessDirName")}
         function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+        ${extractFn("terminalRailRowUpdatedAt")}
+        ${extractFn("terminalRailCompareRowsByUpdate")}
         ${extractFn("terminalRailSearchMatches")}
         return terminalRailSearchMatches;
       `)(sessions, query);
@@ -2447,12 +2491,12 @@ describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
       assert.deepEqual(box.prefs().sessionOrder.kimi, ["b", "a", "c", "d"], "a 移到 c 之前");
     });
 
-    it("行 draggable＝非归档；组行不拖（组是目录派生、无清单可持久化）", () => {
+    it("行 draggable＝非归档；组头可拖（组序清单的写入口）", () => {
       const render = extractFn("terminalRailRowHtml");
       assert.ok(/draggable/.test(render), "会话行带 draggable（手序的唯一来源）");
       const s = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
       const headHtml = s.slice(s.indexOf("rail-term-group-head"), s.indexOf("rail-term-group-slot"));
-      assert.ok(!headHtml.includes("draggable"), "组行不搬拖拽");
+      assert.ok(headHtml.includes('draggable="true"'), "组头带拖拽（组序＝持久清单，组头拖拽是它的唯一写入口）");
       // 归档行不可拖（draggable＝非空白且非归档）
       const rowFn = new Function("session", "live", "activeId", "prefs", `
         const terminalRailPrefs = prefs;
@@ -2465,6 +2509,7 @@ describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
         function escapeHtml(v) { return String(v || ""); }
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
+        ${railOrderPrelude}
         const TERMINAL_RAIL_SPINNER = "";
         const TERMINAL_RAIL_DONE_DOT = "";
         const terminalDoneUnread = new Map();
@@ -2474,7 +2519,7 @@ describe("视图选项三组（分组/排序+行拖拽/筛选）", () => {
     ${extractFn("terminalRailPendingFreshActive")}
     ${extractFn("terminalRailPendingFreshArmed")}
         return terminalRailRowHtml;
-      `)(null, null, "t1", { archived: [{ endpoint: "kimi", id: "s-9" }], removedGroups: [] });
+      `)(null, null, "t1", railPrefsShape({ archived: [{ endpoint: "kimi", id: "s-9" }] }));
       const archivedRow = rowFn({ id: "s-9", endpoint: "kimi", title: "t", lastActive: 1 }, null, "t1");
       assert.ok(!archivedRow.includes("draggable"), "归档行不可拖");
       const plainRow = rowFn({ id: "s-1", endpoint: "kimi", title: "t", lastActive: 1 }, null, "t1");
@@ -3700,8 +3745,10 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
       return String(a || "").replace(/\\+/g, "/").replace(/\\/+$/, "").toLowerCase()
         === String(b || "").replace(/\\+/g, "/").replace(/\\/+$/, "").toLowerCase();
     }
-    function terminalRailIsArchived() { return false; }
-    const TERMINAL_RAIL_SPINNER = "";
+      function terminalRailIsArchived() { return false; }
+      const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+      ${railOrderPrelude}
+      const TERMINAL_RAIL_SPINNER = "";
     const TERMINAL_RAIL_DONE_DOT = "";
     function esc(v) { return String(v); }
     function escapeHtml(v) { return String(v || ""); }
@@ -4052,8 +4099,8 @@ describe("归档/撤销动效（FLIP）＋toast 引导钮", () => {
       // 150ms 等待余量偏薄，负载抖动会提前断言）——记下回调与延迟值，测试里手动放行。
       const setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
       let terminalRailPrefs = mode === "archive"
-        ? { archived: [], removedGroups: [] }
-        : { archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: [] };
+        ? { archived: [], removedGroups: [], groupOrder: [], pinned: [] }
+        : { archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: [], groupOrder: [], pinned: [] };
       let terminalRailHistory = { endpoint: "kimi", sessions, fetchedAt: 1, error: null };
       let terminalRailFlipMode = "instant";
       const terminalRailMotionArmed = armed;
@@ -4642,7 +4689,7 @@ describe("视口化验收（页签＝视口）", () => {
       // 归档真跑状态（2026-11-10 页签 1→5 修复）：terminalRailArchiveSession 的
       // 读写面与 runArchive 同一组，缺省空史（不归档的用例碰不到）。
       let terminalRailHistory = state.railHistory;
-      let terminalRailPrefs = { archived: [], removedGroups: [] };
+      let terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
       let terminalRailFlipMode = "instant";
       const terminalRailMotionArmed = false;
       let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
@@ -6824,3 +6871,126 @@ describe("2026-11-17 键入 origin 自报（sendTerminalInput）", () => {
 });
 
 
+
+describe("会话置顶", () => {
+  // 置顶/取消置顶交互沙盒：本地态、POST、失败回退——归档交互沙盒（runArchive）
+  // 的同款纪律：乐观更新先行、失败回退并提示。
+  const runPin = (prefs, apiImpl) => {
+    const log = { posts: [], toasts: [], renders: 0, flipModes: [] };
+    const fn = new Function("prefs", "log", "apiImpl", `
+      let terminalRailPrefs = prefs;
+      let terminalRailFlipMode = "";
+      function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
+      function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
+      function panelError(err, fallback) { return fallback; }
+      function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); }
+      function terminalRailAgentId() { return "kimi"; }
+      ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailPinSession")}
+      ${extractFn("terminalRailUnpinSession")}
+      return {
+        pin: (session) => terminalRailPinSession(session),
+        unpin: (session) => terminalRailUnpinSession(session),
+        prefs: () => terminalRailPrefs,
+      };
+    `)(railPrefsShape(prefs), log, apiImpl ?? (async () => ({ ok: true })));
+    return { fn, log };
+  };
+  const SESSION = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", project: "C:\\dev\\alpha" };
+
+  it("置顶：本地前插（最近置顶在前）+ POST 落盘；重复置顶/已归档/键不全一律 no-op", () => {
+    const { fn, log } = runPin({ pinned: [{ endpoint: "kimi", id: "s-0" }] });
+    fn.pin(SESSION);
+    assert.deepEqual(fn.prefs().pinned, [{ endpoint: "kimi", id: "s-1" }, { endpoint: "kimi", id: "s-0" }], "前插（最近置顶在最前）");
+    assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/pin", body: { endpoint: "kimi", id: "s-1" } }], "POST 落盘一次");
+    assert.equal(log.renders, 1, "当拍重渲一次");
+    assert.equal(log.flipModes[0], "instant", "前置跳变是 resetKey：瞬时落位");
+    assert.deepEqual(log.toasts, [], "置顶是轻动作：成功无 toast（行已当拍前置）");
+
+    fn.pin(SESSION);
+    assert.equal(log.posts.length, 1, "重复置顶 no-op（不重发）");
+
+    const guarded = runPin({ archived: [{ endpoint: "kimi", id: "s-2" }] });
+    guarded.fn.pin({ endpoint: "kimi", id: "s-2" });
+    assert.equal(guarded.log.posts.length, 0, "已归档拒置顶（兜底，前端不给入口的二次防线）");
+    guarded.fn.pin({ id: "s-3" });
+    assert.equal(guarded.log.posts.length, 0, "键不全（缺 endpoint）no-op");
+    guarded.fn.unpin({ id: "s-3" });
+    assert.equal(guarded.log.posts.length, 0, "取消置顶同样要求全键");
+  });
+
+  it("置顶落盘失败：回退本地态 + 错误提示，不假装置顶成功", async () => {
+    const { fn, log } = runPin({}, async () => { throw new Error("boom"); });
+    // 落盘是 fire-and-forget 的 catch：先同步发生乐观前置，等微任务后断回退
+    fn.pin(SESSION);
+    assert.equal(log.renders, 1, "前置渲染已发生");
+    await flush();
+    assert.deepEqual(fn.prefs().pinned, [], "回退本地态");
+    assert.deepEqual(log.toasts, [{ msg: "置顶未能保存，请重试", isErr: true }], "错误提示逐字");
+  });
+
+  it("取消置顶：出清单 + POST；失败回退保名次（splice 回原位）", async () => {
+    const { fn, log } = runPin({ pinned: [{ endpoint: "kimi", id: "s-0" }, { endpoint: "kimi", id: "s-1" }] });
+    fn.unpin(SESSION);
+    assert.deepEqual(fn.prefs().pinned, [{ endpoint: "kimi", id: "s-0" }], "出清单");
+    assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/unpin", body: { endpoint: "kimi", id: "s-1" } }], "POST 落盘");
+
+    const failing = runPin({ pinned: [{ endpoint: "kimi", id: "s-0" }, { endpoint: "kimi", id: "s-1" }] }, async () => { throw new Error("boom"); });
+    failing.fn.unpin(SESSION);
+    await flush();
+    assert.deepEqual(failing.fn.prefs().pinned, [{ endpoint: "kimi", id: "s-0" }, { endpoint: "kimi", id: "s-1" }], "失败回退：置顶段内名次不丢（最近置顶在前）");
+    assert.deepEqual(failing.log.toasts, [{ msg: "取消置顶未能保存，请重试", isErr: true }], "取消失败提示逐字");
+  });
+
+  it("归档即摘置顶：本地镜像同拍摘（与后端同一份写）", async () => {
+    // 走 runArchive：置态互斥收进归档那条链，不另开第二条写路径
+    const { fn, log } = runArchive(SESSION, { prefs: { archived: [], pinned: [{ endpoint: "kimi", id: "s-1" }] } });
+    fn.archive();
+    await flush();
+    assert.deepEqual(fn.prefs().pinned, [], "归档同拍摘置顶");
+    assert.ok(log.posts.some((p) => p.path === "/api/terminal/rail/archive"), "归档 POST 在场（互斥由同一笔写承担）");
+    assert.ok(!log.posts.some((p) => p.path === "/api/terminal/rail/unpin"), "不另发取消置顶");
+  });
+
+  it("行 markup：置顶行带标记与取消置顶钮；普通行带置顶钮；归档行不渲染置顶钮", () => {
+    const pinned = rowHtmlSandbox({ pinned: [{ endpoint: "kimi", id: "s-1" }] });
+    const row = pinned(SESSION, null, "t-9");
+    assert.ok(row.includes("is-pinned"), "置顶行类名");
+    assert.ok(row.includes('class="rail-term-pinmark"') && row.includes('title="已置顶"'), "状态槽空闲时置顶标记（title「已置顶」）");
+    assert.ok(row.includes('data-rail-term-unpin="s-1"') && row.includes('title="取消置顶"'), "取消置顶钮（title「取消置顶」）");
+    assert.ok(!row.includes("data-rail-term-pin="), "不带置顶钮（互斥）");
+
+    // working live 行：常驻槽被转圈占用——行内只画最高优先级一态，标记让位
+    // （spinner 桩必须给真串：空串 falsy 会让 rowHtml 的 || 落到置顶标记上）
+    const withSpinner = rowHtmlSandbox(
+      { pinned: [{ endpoint: "kimi", id: "s-1" }] },
+      { spinner: '<span class="rail-term-spinner">SPINNER-STUB</span>' },
+    );
+    const working = withSpinner(SESSION, { id: "t-1", status: "working" }, "t-1");
+    assert.ok(working.includes("SPINNER-STUB"), "转圈在常驻槽（前提自证）");
+    assert.ok(!working.includes("rail-term-pinmark"), "转圈优先，置顶标记让位");
+
+    const plain = rowHtmlSandbox({})(SESSION, null, "t-9");
+    assert.ok(plain.includes('data-rail-term-pin="s-1"') && plain.includes('title="置顶会话"'), "普通行置顶钮（title「置顶会话」）");
+    assert.ok(!plain.includes("is-pinned") && !plain.includes("rail-term-pinmark"), "未置顶无标记");
+
+    const archived = rowHtmlSandbox({ archived: [{ endpoint: "kimi", id: "s-1" }] })(SESSION, null, "t-9");
+    assert.ok(!archived.includes("data-rail-term-pin") && !archived.includes("data-rail-term-unpin"), "归档行不渲染置顶钮（互斥）");
+  });
+
+  it("文案与样式：三句批准文案逐字；置顶钮 hover 显隐 0ms 硬切（同归档钮形制）", () => {
+    const body = panelJs.slice(panelJs.indexOf("终端会话栏：终端视图下的左栏换血内容"), panelJs.indexOf("function initSkillsTab"));
+    for (const copy of ["置顶会话", "取消置顶", "已置顶"]) {
+      assert.ok(body.includes(`"${copy}"`), `批准文案「${copy}」在册`);
+    }
+    assert.ok(body.includes('"置顶未能保存，请重试"') && body.includes('"取消置顶未能保存，请重试"'), "失败兜底两句逐字");
+    const pinRule = cssRule(".rail-term-row-pin {");
+    assert.ok(pinRule.includes("display: none"), "置顶钮默认隐（hover 才出现）");
+    assert.ok(!pinRule.includes("transition"), "0ms 硬切（栏内运动纪律）");
+    const pinHover = cssRule(".rail-term-row-history:hover .rail-term-row-pin {");
+    assert.ok(pinHover.includes("display: inline-flex"), "hover 出钮（同归档钮形制）");
+    assert.ok(cssRule(".rail-term-pinmark {").includes("var(--text-4)"), "置顶标记 caption 级灰（色档走 token）");
+    assert.ok(cssRule(".rail-term-row-pin.is-on {").includes("var(--accent)"), "在位置顶钮取主题 accent");
+    assert.ok(cssRule(".rail-term-row-history.is-pinned .rail-term-row-title {").includes("var(--text)"), "置顶行标题升一级文字色（强调不抢选中态的底）");
+  });
+});
