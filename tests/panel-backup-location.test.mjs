@@ -6,8 +6,9 @@ import vm from "node:vm";
 // 「配置备份」卡：控制器从 panel.js 原文摘出来跑，元素按 panel.html 真实存在的
 // id 建。位置部分只管三件事——读当前路径、换目录（服务端迁移历史备份）、恢复默认；
 // 落点是否真的搬了由 backup-location.test.mjs 在临时目录里验。备份文件部分：
-// 列表渲染（行结构＝名称等宽＋时间·大小次行＋行内删除钮）、空态、删除确认弹窗
-// 全流程；列表数据的真实来源（listBackups/deleteBackup）同样在临时目录里验。
+// 列表渲染（行结构＝名称等宽＋时间·大小次行＋右侧动作位：pre-import 行多「恢复」
+// 文字钮，两族都有行内删除图标钮）、空态、删除/恢复确认弹窗全流程；列表数据的
+// 真实来源（listBackups/deleteBackup/restoreBackup）同样在临时目录里验。
 
 const source = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../panel-ui/panel.html", import.meta.url), "utf8");
@@ -17,6 +18,8 @@ const IDS = [
   "dataBackupList", "dataBackupListEmpty",
   "dataBackupDeleteModal", "dataBackupDeleteName",
   "dataBackupDeleteConfirm", "dataBackupDeleteCancel", "dataBackupDeleteClose",
+  "dataBackupRestoreModal", "dataBackupRestoreName",
+  "dataBackupRestoreConfirm", "dataBackupRestoreCancel", "dataBackupRestoreClose",
 ];
 
 class El {
@@ -84,6 +87,7 @@ function harness(respond) {
     rows: () => nodes.get("dataBackupList").children,
     emptyShown: () => !nodes.get("dataBackupListEmpty").hidden,
     delModalOpen: () => nodes.get("dataBackupDeleteModal").classList.contains("show"),
+    restoreModalOpen: () => nodes.get("dataBackupRestoreModal").classList.contains("show"),
   };
 }
 
@@ -93,7 +97,7 @@ const settle = async (h) => { for (let i = 0; i < 4; i += 1) await tick(); retur
 test("markup 有这些 id，控制器接管按钮，初始不写路径", () => {
   for (const id of IDS) assert.ok(html.includes(`id="${id}"`), `panel.html 缺 #${id}`);
   const h = harness(() => ({ ok: true }));
-  for (const id of ["dataBackupOpenBtn", "dataBackupPickBtn", "dataBackupResetBtn", "dataBackupDeleteConfirm", "dataBackupDeleteCancel", "dataBackupDeleteClose"]) {
+  for (const id of ["dataBackupOpenBtn", "dataBackupPickBtn", "dataBackupResetBtn", "dataBackupDeleteConfirm", "dataBackupDeleteCancel", "dataBackupDeleteClose", "dataBackupRestoreConfirm", "dataBackupRestoreCancel", "dataBackupRestoreClose"]) {
     assert.equal(typeof h.get(id).onclick, "function", `#${id} 应被控制器接管`);
   }
   assert.equal(h.get("dataBackupResetBtn").hidden, true, "默认位置下不显示恢复默认");
@@ -102,6 +106,7 @@ test("markup 有这些 id，控制器接管按钮，初始不写路径", () => {
   assert.equal(h.emptyShown(), false, "空态初值 hidden：还没读过列表时不该抢话");
   assert.match(html, /id="dataBackupListEmpty" hidden>暂无备份</, "空态文案初值写在 markup 里");
   assert.equal(h.delModalOpen(), false, "删除弹窗初始不开");
+  assert.equal(h.restoreModalOpen(), false, "恢复弹窗初始不开");
 });
 
 test("进子页现读路径与默认态，恢复默认按钮随 isDefault 显隐", async () => {
@@ -214,22 +219,27 @@ const withList = (items) => ({ path }) => {
   return { ok: true };
 };
 
-test("备份文件列表：行＝名称等宽＋时间·大小次行＋行内删除钮，空态收起", async () => {
+test("备份文件列表：行＝名称等宽＋时间·大小次行＋右侧动作位，pre-import 行多「恢复」文字钮，空态收起", async () => {
   const h = harness(withList(ITEMS));
   h.controller.enter();
   await settle(h);
   assert.equal(h.rows().length, 2);
   assert.equal(h.emptyShown(), false, "有备份时不显示空态");
-  const [first] = h.rows();
-  const [main, del] = first.children;
+  const [first, second] = h.rows();
+  const [main, restore, del] = first.children;
   assert.equal(main.children[0].className, "data-backup-name");
   assert.equal(main.children[0].textContent, "pre-import-20261116-101500");
   assert.match(main.children[1].textContent, /· 1\.5 KB/, "次行＝时间 · 大小");
+  assert.equal(restore.className, "btn btn-mini data-backup-restore");
+  assert.equal(restore.textContent, "恢复", "pre-import 行有「恢复」文字钮（定稿）");
   assert.equal(del.className, "data-backup-del");
   assert.equal(del.getAttribute("aria-label"), "删除备份", "行内删除钮是定稿 aria-label");
   assert.equal(del.textContent, "", "纯图标钮，零新增可见文案");
   assert.match(del.innerHTML, /<svg/, "图标用 svg");
-  assert.equal(h.rows()[1].children[0].children[1].textContent.includes("2.0 MB"), true, "MB 档格式化");
+  // byok 行：按端点的部分文件无回滚语义，不出恢复钮。
+  assert.equal(second.children.length, 2, "byok 行只有删除钮");
+  assert.equal(second.children[1].className, "data-backup-del");
+  assert.equal(second.children[0].children[1].textContent.includes("2.0 MB"), true, "MB 档格式化");
 });
 
 test("备份文件列表：空列表揭开空态「暂无备份」", async () => {
@@ -244,7 +254,7 @@ test("删除备份：行内钮唤起确认弹窗，确认后删除、toast、列
   const h = harness(withList(ITEMS));
   h.controller.enter();
   await settle(h);
-  h.rows()[0].children[1].onclick();
+  h.rows()[0].children.at(-1).onclick();
   assert.equal(h.delModalOpen(), true);
   assert.equal(h.get("dataBackupDeleteName").textContent, "pre-import-20261116-101500", "弹窗展示正在删除的对象");
   h.get("dataBackupDeleteConfirm").onclick();
@@ -264,7 +274,7 @@ test("删除备份：取消/关闭不发请求，弹窗收起", async () => {
     const h = harness(withList(ITEMS));
     h.controller.enter();
     await settle(h);
-    h.rows()[1].children[1].onclick();
+    h.rows()[1].children.at(-1).onclick();
     assert.equal(h.delModalOpen(), true);
     h.get(closer).onclick();
     assert.equal(h.delModalOpen(), false);
@@ -281,7 +291,7 @@ test("删除备份：服务端拒绝时弹窗留着，toast 带服务端原文",
   });
   h.controller.enter();
   await settle(h);
-  h.rows()[0].children[1].onclick();
+  h.rows()[0].children.at(-1).onclick();
   h.get("dataBackupDeleteConfirm").onclick();
   await settle(h);
   assert.equal(h.delModalOpen(), true, "失败不关弹窗，用户可再看一眼");
@@ -295,4 +305,71 @@ test("删除确认弹窗文案为定稿逐字：标题/正文/按钮", () => {
   assert.ok(modal.includes("该备份文件将被永久删除，无法撤销。"), "正文逐字");
   assert.ok(modal.includes('id="dataBackupDeleteConfirm">删除</button>'), "确认钮「删除」");
   assert.ok(modal.includes('id="dataBackupDeleteCancel">取消</button>'), "取消钮「取消」");
+});
+
+// ── 备份文件恢复 ─────────────────────────────────────────
+
+test("恢复备份：pre-import 行内文字钮唤起确认弹窗，确认后恢复、toast、列表重拉", async () => {
+  const h = harness(({ path }) => {
+    if (path === "/api/backups") return { ok: true, path: "C:\\backups", isDefault: true };
+    if (path === "/api/backups/list") return { ok: true, items: ITEMS };
+    if (path === "/api/backups/restore") return { ok: true, safetyName: "pre-import-20261116-113000" };
+    return { ok: true };
+  });
+  h.controller.enter();
+  await settle(h);
+  h.rows()[0].children[1].onclick();
+  assert.equal(h.restoreModalOpen(), true);
+  assert.equal(h.get("dataBackupRestoreName").textContent, "pre-import-20261116-101500", "弹窗展示正在恢复的对象");
+  h.get("dataBackupRestoreConfirm").onclick();
+  assert.equal(h.get("dataBackupRestoreConfirm").disabled, true, "在途禁用确认钮");
+  assert.equal(h.get("dataBackupRestoreCancel").disabled, true, "在途禁用取消钮");
+  await settle(h);
+  assert.deepEqual(h.calls.map((c) => `${c.method} ${c.path}`),
+    ["GET /api/backups", "GET /api/backups/list", "POST /api/backups/restore", "GET /api/backups/list"],
+    "恢复成功后重拉列表（新安全备份会出现）");
+  assert.equal(JSON.stringify(h.calls[2].body), JSON.stringify({ name: "pre-import-20261116-101500" }), "请求体只带备份名");
+  assert.equal(h.restoreModalOpen(), false, "成功后弹窗收起");
+  assert.equal(h.toasts.at(-1).message, "已恢复备份", "恢复 toast 为定稿文案");
+  assert.equal(h.toasts.at(-1).isErr, false);
+  assert.equal(h.get("dataBackupRestoreConfirm").disabled, false, "落定后按钮回到可点");
+});
+
+test("恢复备份：取消/关闭不发请求，弹窗收起", async () => {
+  for (const closer of ["dataBackupRestoreCancel", "dataBackupRestoreClose"]) {
+    const h = harness(withList(ITEMS));
+    h.controller.enter();
+    await settle(h);
+    h.rows()[0].children[1].onclick();
+    assert.equal(h.restoreModalOpen(), true);
+    h.get(closer).onclick();
+    assert.equal(h.restoreModalOpen(), false);
+    assert.equal(h.calls.filter((c) => c.path === "/api/backups/restore").length, 0, `${closer} 不发恢复请求`);
+  }
+});
+
+test("恢复备份：服务端拒绝时弹窗留着，toast 带「恢复失败」前缀与服务端原文", async () => {
+  const h = harness(({ path }) => {
+    if (path === "/api/backups") return { ok: true, path: "C:\\backups", isDefault: true };
+    if (path === "/api/backups/list") return { ok: true, items: ITEMS };
+    if (path === "/api/backups/restore") return { ok: false, error: "备份不存在" };
+    return { ok: true };
+  });
+  h.controller.enter();
+  await settle(h);
+  h.rows()[0].children[1].onclick();
+  h.get("dataBackupRestoreConfirm").onclick();
+  await settle(h);
+  assert.equal(h.restoreModalOpen(), true, "失败不关弹窗，用户可再看一眼");
+  assert.equal(h.toasts.at(-1).message, "恢复失败：备份不存在", "「恢复失败」前缀＋服务端原文透传");
+  assert.equal(h.toasts.at(-1).isErr, true);
+  assert.equal(h.get("dataBackupRestoreConfirm").disabled, false, "失败后按钮回到可点，可重试");
+});
+
+test("恢复确认弹窗文案为定稿逐字：标题/正文/按钮", () => {
+  const modal = html.slice(html.indexOf('id="dataBackupRestoreModal"'), html.indexOf('id="dataBackupRestoreModal"') + 1600);
+  assert.ok(modal.includes(">恢复备份</h3>"), "标题「恢复备份」");
+  assert.ok(modal.includes("恢复将用该备份覆盖当前配置，覆盖前会自动备份当前配置。"), "正文逐字");
+  assert.ok(modal.includes('id="dataBackupRestoreConfirm">恢复</button>'), "确认钮「恢复」");
+  assert.ok(modal.includes('id="dataBackupRestoreCancel">取消</button>'), "取消钮「取消」");
 });

@@ -4952,9 +4952,10 @@ export function createPanelRouter({
       }
     }
 
-    // ── 备份位置（高级选项 tab 的「备份位置」卡）────────────────────────
-    // 只做三件事：选目录、换目录（连历史备份一起迁移）、恢复默认。「打开文件夹」
-    // 只认当前备份根，不接受界面传路径，避免变成任意目录打开的口子。业务失败
+    // ── 备份位置与备份文件（高级选项 tab 的「配置备份」卡）────────────────
+    // 位置只做三件事：选目录、换目录（连历史备份一起迁移）、恢复默认；「打开文件夹」
+    // 只认当前备份根，不接受界面传路径，避免变成任意目录打开的口子。备份文件的
+    // 删除与恢复同样只认锚定匹配的名字，恢复走数据面的整份快照写回。业务失败
     // 一律 200 + { ok:false, error }，与数据搬迁同一口径。
     if (path.startsWith("/panel/api/backups/") && method === "POST") {
       try {
@@ -4984,6 +4985,13 @@ export function createPanelRouter({
         if (path === "/panel/api/backups/delete") {
           const result = deleteBackup(relayRoot, body.name);
           return sendJson(res, 200, result.ok ? { ok: true } : { ok: false, error: result.error });
+        }
+        // 备份恢复（配置回滚）：只认 pre-import 整份快照，写回前服务端先对当前
+        // 状态留一份安全备份（数据面见 data-bundle.mjs restoreBackup）。
+        if (path === "/panel/api/backups/restore") {
+          if (!dataBundleService) dataBundleService = createDataBundleService({ base });
+          const result = await dataBundleService.restoreBackup({ name: body.name });
+          return sendJson(res, 200, result.ok ? { ok: true, safetyName: result.safetyName } : { ok: false, error: result.error });
         }
         return sendJson(res, 404, { ok: false, error: "not found" });
       } catch (err) {

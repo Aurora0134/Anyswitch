@@ -239,4 +239,59 @@ describe("panel backup location routes", () => {
       assert.equal(blocked.res.statusCode, 403);
     } finally { m.cleanup(); }
   });
+
+  it("POST /restore：写回备份内容并先留安全备份，回 safetyName；byok 名被拒", async () => {
+    const m = machine();
+    try {
+      const localAppData = join(m.root, "localappdata");
+      const root = join(localAppData, "Anyswitch");
+      const backupsDir = join(root, "backups");
+      const backupDir = join(backupsDir, "pre-import-20261031-120000");
+      const alphaStore = {
+        version: 2,
+        providers: { alpha: { displayName: "alpha", baseURL: "https://alpha.example/v1", protocol: "openai-compatible", credentialFile: "alpha.dpapi", models: {} } },
+        pools: {},
+        routingChains: {},
+      };
+      mkdirSync(backupDir, { recursive: true });
+      writeFileSync(join(backupDir, "store.json"), JSON.stringify(alphaStore, null, 2) + "\n", "utf8");
+      writeFileSync(join(backupDir, "manifest.json"),
+        JSON.stringify({ backupId: "20261031-120000", createdAt: "2026-10-31T04:00:00.000Z", saved: ["store.json"] }), "utf8");
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "store.json"), JSON.stringify({ version: 2, providers: {}, pools: {}, routingChains: {} }, null, 2) + "\n", "utf8");
+
+      // base 注入临时 LOCALAPPDATA：惰性建的 data-bundle 服务整棵数据根都在沙箱里。
+      const router = createPanelRouter({
+        storePaths: { root },
+        base: { LOCALAPPDATA: localAppData },
+        logger: null,
+        metricsCollector: null,
+        fetchRelayAgents: async () => null,
+      });
+      const restored = fakeReqRes("/panel/api/backups/restore", "POST", { name: "pre-import-20261031-120000" });
+      await router.handle(restored.req, restored.res);
+      assert.equal(restored.res.statusCode, 200);
+      assert.equal(restored.json().ok, true, restored.json().error);
+      assert.match(restored.json().safetyName, /^pre-import-\d{8}-\d{6}$/);
+      assert.deepEqual(JSON.parse(readFileSync(join(root, "store.json"), "utf8")), alphaStore, "备份内容已写回");
+      assert.equal(existsSync(join(backupsDir, restored.json().safetyName, "store.json")), true, "安全备份已落盘");
+      assert.equal(existsSync(join(backupDir, "store.json")), true, "被恢复的备份原样保留");
+
+      const refused = fakeReqRes("/panel/api/backups/restore", "POST", { name: "byok-import-20261031-120000" });
+      await router.handle(refused.req, refused.res);
+      assert.equal(refused.res.statusCode, 200, "业务失败走 200");
+      assert.equal(refused.json().ok, false);
+      assert.match(refused.json().error, /备份名不可用/);
+    } finally { m.cleanup(); }
+  });
+
+  it("恢复端点同样受面板变更守卫保护（缺请求头 = 403）", async () => {
+    const m = machine();
+    try {
+      const router = routerAt(m.root);
+      const blocked = fakeReqRes("/panel/api/backups/restore", "POST", { name: "pre-import-20261031-120000" }, { "x-anyswitch-panel": "" });
+      await router.handle(blocked.req, blocked.res);
+      assert.equal(blocked.res.statusCode, 403);
+    } finally { m.cleanup(); }
+  });
 });

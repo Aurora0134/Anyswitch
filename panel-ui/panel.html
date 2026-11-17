@@ -2964,6 +2964,28 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </div>
 
+<!-- 备份文件恢复确认（与删除弹窗同一 .modal-overlay 体系）：仅 pre-import 行的
+     文字钮唤起——manifest 驱动的整份快照才有回滚语义，byok 行不出恢复钮。
+     标题/正文/按钮为 2026-11-17 用户逐字定稿；文件名是数据不是文案。 -->
+<div class="modal-overlay" id="dataBackupRestoreModal">
+  <div class="modal-card" style="max-width:440px;" role="dialog" aria-modal="true" aria-labelledby="dataBackupRestoreTitle">
+    <div class="modal-head">
+      <h3 id="dataBackupRestoreTitle">恢复备份</h3>
+      <button class="modal-close-btn" id="dataBackupRestoreClose" aria-label="关闭">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="sess-dlg-target"><span class="t2" id="dataBackupRestoreName"></span></div>
+      <div class="sess-dlg-desc">恢复将用该备份覆盖当前配置，覆盖前会自动备份当前配置。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="dataBackupRestoreCancel">取消</button>
+      <button class="btn btn-primary" id="dataBackupRestoreConfirm">恢复</button>
+    </div>
+  </div>
+</div>
+
 <!-- 渠道刷新：本轮差异弹窗（「查看差异」小字唤起；左右分栏按单元分组列新增/移除模型，失败渠道单列一区） -->
 <div class="modal-overlay diff-modal-overlay" id="storeDiffMask">
   <div class="modal-card" role="dialog" aria-modal="true">
