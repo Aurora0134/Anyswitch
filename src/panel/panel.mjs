@@ -788,10 +788,21 @@ function normalizeTerminalHostStatus(data) {
 // mounts the same router and streams its own logger natively — starting the
 // bridge there would subscribe the relay to its own log endpoint and
 // amplify every entry into an infinite loop.
+//
+// 首连与重连不对称（审计 A3）：首连用 ?live=1 不拿历史——面板进程刚起时把中继侧
+// 500 条存量倒灌进本进程总线，只会与各自落盘文件里的旧账重复。首连之后的重连
+// 改要全量历史并按 (ts, level, message) 去重：中继重启窗口里的启动段（listening、
+// 初始同步、terminal host 结果）只存在于那次历史里，不要就永远缺这一段；而中继
+// 没重启、只是连接断了一下时，重放的全是桥过的旧条目，去重簿整条滤掉，界面无感。
 export function startRelayLogBridge(logger, relayRoot) {
   let stopped = false;
   let controller = null;
   let retryTimer = null;
+  let hasConnected = false;
+  // 去重簿覆盖中继侧 500 条环形缓冲的一轮全量重放，留一倍余量；Set 按插入序
+  // 迭代，超容淘汰最旧一枚。同键判重 = 同一条日志（时间戳到毫秒＋级别＋全文）。
+  const BRIDGED_KEY_CAP = 1000;
+  const bridgedKeys = new Set();
 
   function scheduleRetry() {
     if (stopped) return;
@@ -813,16 +824,20 @@ export function startRelayLogBridge(logger, relayRoot) {
     }
     controller = new AbortController();
     try {
-      // live=1: entries already bridged into this bus must not re-arrive as
-      // duplicates whenever the relay restarts and this bridge reconnects.
-      const response = await fetch(`http://127.0.0.1:${RELAY_PORT}/api/internal/logs?live=1`, {
-        headers: { authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      });
+      const response = await fetch(
+        hasConnected
+          ? `http://127.0.0.1:${RELAY_PORT}/api/internal/logs`
+          : `http://127.0.0.1:${RELAY_PORT}/api/internal/logs?live=1`,
+        {
+          headers: { authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        },
+      );
       if (!response.ok || !response.body) {
         scheduleRetry();
         return;
       }
+      hasConnected = true;
       // Re-publish relay entries through this process's bus: log() writes to
       // this sink AND fans out to the panel's SSE subscribers.
       const reader = response.body.getReader();
@@ -841,6 +856,14 @@ export function startRelayLogBridge(logger, relayRoot) {
           try {
             const entry = JSON.parse(line.slice(5).trim());
             if (entry && entry.level && entry.message) {
+              // 重连重放里已经桥过的条目不再进总线：内容本就收敛，再放行只会让
+              // 面板窗口与落盘文件各多一列重复行。
+              const key = `${entry.ts}|${entry.level}|${entry.message}`;
+              if (bridgedKeys.has(key)) continue;
+              bridgedKeys.add(key);
+              if (bridgedKeys.size > BRIDGED_KEY_CAP) {
+                bridgedKeys.delete(bridgedKeys.keys().next().value);
+              }
               // 级别只取字段。中继自 0.6.x 起不再把级别写进消息文本，但升级过程中
               // 面板可能先重启、对面还是旧进程，旧格式的消息自带 "[level] " 前缀；
               // 原样透传会让窗口里出现两个级别标签，所以这里剥掉一个前导级别标记。

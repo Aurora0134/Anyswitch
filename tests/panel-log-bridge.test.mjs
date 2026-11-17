@@ -2,16 +2,18 @@
 // entries into the panel-host's logger so the 实时输出 window shows relay-side
 // events (keep-alive retries, stream faults) again after the process split.
 //
-// The bridge hardcodes its target — http://127.0.0.1:47821/api/internal/logs?live=1
-// with a Bearer token read from the data root — so these tests fake fetch at
+// The bridge hardcodes its target — http://127.0.0.1:47821/api/internal/logs
+// (?live=1 on the first connect, full replay + dedup on reconnects) with a
+// Bearer token read from the data root — so these tests fake fetch at
 // the global boundary: the fake records the outgoing request (pinning the URL,
 // live=1 and token contract) and answers with hand-built SSE frames. That
 // covers the bridge-side logic: the request contract, SSE frame parsing, level
-// handling, the legacy "[level] " prefix strip, retry-on-unreachable and
-// stop() teardown. The relay-side endpoint itself (token auth, history + live
-// streaming, live=1 skip-replay) is exercised against the real server in
-// openai-server.test.mjs ("streams relay log entries over /api/internal/logs
-// with token auth" and "skips history replay for /api/internal/logs?live=1").
+// handling, the legacy "[level] " prefix strip, retry-on-unreachable,
+// reconnect replay dedup and stop() teardown. The relay-side endpoint itself
+// (token auth, history + live streaming, live=1 skip-replay) is exercised
+// against the real server in openai-server.test.mjs ("streams relay log
+// entries over /api/internal/logs with token auth" and "skips history replay
+// for /api/internal/logs?live=1").
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -150,6 +152,69 @@ describe("relay log bridge", () => {
       assert.equal(received.length, 1, "the legacy frame still bridges");
       assert.equal(received[0].level, "warn", "the level comes from the field, never the text");
       assert.equal(received[0].message, "legacy prefixed entry", "the stale level tag is stripped once");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // A3：首连 ?live=1（不把中继侧存量倒灌进新起的面板总线）；重连改要全量历史
+  // 并按 (ts, level, message) 去重——中继重启窗口里的启动段只存在于那次历史里，
+  // 而没重启的纯断线重连，重放帧全是桥过的旧条目，必须整条滤掉。
+  it("reconnects ask for full history and dedup it: the restart-gap startup segment lands, replayed entries do not re-bridge", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const encoder = new TextEncoder();
+    const requests = [];
+    let attempt = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (url, init) => {
+      attempt += 1;
+      requests.push(url);
+      if (attempt === 1) {
+        // 首连：一条实时条目后流立即收尾（模拟中继重启把连接掐断）。close 必须
+        // 同步排进 start——本用例的 setTimeout 已被 mock，用它关流永远不会触发。
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ts: 1, level: "info", message: "old line" })}\n\n`));
+            controller.close();
+          },
+        });
+        return Promise.resolve(new Response(stream, { status: 200 }));
+      }
+      // 重连：全量重放（含已桥过的 old line）＋重启窗口里才产生的新行；此后保持
+      // 挂起，直到 stop() 中止。
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ts: 1, level: "info", message: "old line" })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ ts: 2, level: "info", message: "relay listening again" })}\n\n`));
+          init?.signal?.addEventListener("abort", () => {
+            try { controller.close(); } catch { /* already closed */ }
+          });
+        },
+      });
+      return Promise.resolve(new Response(stream, { status: 200 }));
+    };
+
+    const panelLogger = createLogger({ sink: () => {} });
+    const received = [];
+    const unsubscribe = panelLogger.subscribe((entry) => received.push(entry.message));
+
+    const root = mkTestDir("anyswitch-bridge-reconnect-");
+    try {
+      loadOrGenerateToken(root);
+      const stop = startRelayLogBridge(panelLogger, root);
+      await flush(); // 首连取流、读到 done、排上 5s 重连计时器
+      assert.deepEqual(received, ["old line"], "首连只桥到实时条目");
+      t.mock.timers.tick(5000);
+      await flush(); // 重连发生、重放帧走完解析与去重
+      stop();
+      unsubscribe();
+
+      assert.equal(requests.length, 2, "首连一次、重连一次");
+      assert.equal(requests[0], "http://127.0.0.1:47821/api/internal/logs?live=1", "首连仍不拿历史");
+      assert.equal(requests[1], "http://127.0.0.1:47821/api/internal/logs", "重连改要全量历史，重启窗口的启动段才有处可补");
+      assert.deepEqual(received, ["old line", "relay listening again"],
+        "重放里已桥过的条目被去重簿滤掉，只有间隙新行进总线");
     } finally {
       globalThis.fetch = originalFetch;
       rmSync(root, { recursive: true, force: true });
