@@ -117,10 +117,12 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
-  // 统一在跑判据（2026-11-05）的两个纯函数依赖：视口纯函数按名抽出后模块级符号
+  // 统一在跑判据（2026-11-05/11-17）的四个纯函数依赖：视口纯函数按名抽出后模块级符号
   // 不跟着来，随源补上；屏尾判据依赖 xterm 实例，桩里没有时由生产实现自己降级跳过。
   ${panelFnSrc("terminalBusyByOutput")}
   ${panelFnSrc("terminalCommandRunning")}
+  ${panelFnSrc("terminalSubmitWindowFresh")}
+  ${panelFnSrc("terminalRequestInFlight")}
   ${names.map(panelFnSrc).join("\n")}
 `;
 // 回放突发合并器的阈值常量：沙箱按函数名切源码，常量不在其中，单独取出注入——
@@ -132,6 +134,13 @@ const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET
     return found;
   })
   .join("\n");
+// 键入自报 origin 的应答形状常量：sendTerminalInput 抽出后模块级常量不跟着来，
+// 同款取产线原句注入——改形状时沙箱跟着走。
+const terminalInputAutoReplyConst = (() => {
+  const found = panelJs.match(/^[ \t]*const TERMINAL_INPUT_AUTO_REPLY = .*$/m)?.[0];
+  assert.ok(found, "TERMINAL_INPUT_AUTO_REPLY 可从 panel.js 取到");
+  return found;
+})();
 // 闲剪（缓冲软顶回落）的阈值常量与跟随护栏的窗口常量：同款从源码取样注入——
 // 测试不抄数字，改阈值时行为钉跟着变（如闲剪落位钉 4500 按软顶 5000 折算）。
 const terminalIdleTrimConsts = ["TERMINAL_SCROLLBACK_SOFT_CAP", "TERMINAL_IDLE_TRIM_MS", "TERMINAL_IDLE_TRIM_MIN_OVERAGE", "TERMINAL_IDLE_TRIM_SETTLE_MS", "TERMINAL_IDLE_TRIM_MAX_MS"]
@@ -9793,7 +9802,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(res.statusCode, 200);
     const body = json();
     assert.equal(body.sessions.length, 1);
-    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null });
+    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null, requestsInFlight: 0 });
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
@@ -9951,7 +9960,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json().sessions[0].agent,
-      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null });
+      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null, requestsInFlight: 0 });
   });
 
   it("检测喂给中断（relay 挂）时列表照常返回纯外壳会话", async () => {
@@ -10976,6 +10985,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       // 整屏重建的接线桩：只记账不真重连（本组只验「半块丢弃 + 请求重建」这一段）。
       const requestTerminalFrameRebuild = (session, term) => { state.rebuilds.push({ id: session?.id, term }); };
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -11219,6 +11229,7 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
     const writes = [];
     const sandbox = new Function("clock", "writes", `
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
       const setTimeout = clock.setTimeout;
       const clearTimeout = clock.clearTimeout;
       ${bodies}
@@ -11380,6 +11391,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -11529,8 +11541,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(termA.keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true }), false, "Ctrl+Enter 从 xterm 求值摘出（内核只会折叠成 CR）");
     assert.equal(termA.keyEventHandler({ type: "keydown", key: "Enter", shiftKey: true }), false, "Shift+Enter 同样接管");
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
     ], "换行定投 LF 字节（opencode 与 Claude Code 的 ctrl+j 换行语义），不是 CR");
 
     // 真机漏点：keydown 摘出后内核还会吃 keypress，Shift+Enter 在那里被补折叠成 CR，
@@ -11538,8 +11550,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", shiftKey: true, keyCode: 13, charCode: 13 }), false, "Shift+Enter 的 keypress 一并摘出");
     assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", ctrlKey: true, keyCode: 13, charCode: 13 }), false, "Ctrl+Enter 的 keypress 一并摘出");
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
     ], "一次按键只有一个换行字节：keypress 不重复投");
 
     sandbox.connect(backendSession("sess-b"));
@@ -13565,6 +13577,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
       const host = { clientWidth: 1200, clientHeight: 600 };
