@@ -41,6 +41,10 @@ export const DEFAULT_TAR = "C:\\Windows\\System32\\tar.exe";
 export const TICKET_TTL_MS = 15 * 60 * 1000;
 
 const CONFIG_FILES = ["store.json", "settings.json", "prompts.json", "skills.json"];
+// 恢复只认 pre-import 整份快照（byok-import 是按端点的部分文件，无回滚语义）；
+// saved[] 只可能装着这两类条目，清单里出现别的名字即不可信，整单拒绝。
+const RESTORE_NAME_RE = /^pre-import-\d{8}-\d{6}$/;
+const RESTORE_SAVED_ENTRIES = new Set([...CONFIG_FILES, "credentials/"]);
 // Skills 主仓库本身就是个 git 仓库：.git 既不是「人写的配置」，git 对象又是只读
 // 文件，回拷到已有目录会撞 Access denied。打包与落盘两端都按名字整段跳过。
 const SKIP_NAMES = new Set([".git"]);
@@ -442,6 +446,26 @@ export function createDataBundleService({
     };
   }
 
+  // 当前配置的整份快照：导入落定与备份恢复共用同一写入路径——两者都是在覆盖
+  // 当前配置之前先留一份可回滚的 pre-import 备份。saved[] 只记真实在盘的条目，
+  // manifest 与导出包同文件名、不同形状（备份版只有 backupId/createdAt/saved）。
+  function writePreImportBackup() {
+    const backupId = stamp(now());
+    const backupDir = join(backupRootFn(), `pre-import-${backupId}`);
+    const saved = [];
+    mkdirSync(backupDir, { recursive: true });
+    for (const name of CONFIG_FILES) {
+      const src = name === "settings.json" ? settingsPath : name === "prompts.json" ? promptsJsonPath : name === "skills.json" ? skillsConfigPath(base) : paths.storeFile;
+      if (existsSync(src)) { cpSync(src, join(backupDir, name)); saved.push(name); }
+    }
+    if (existsSync(paths.credentialsDir)) {
+      cpSync(paths.credentialsDir, join(backupDir, "credentials"), { recursive: true });
+      saved.push("credentials/");
+    }
+    writeFileSync(join(backupDir, MANIFEST_NAME), JSON.stringify({ backupId, createdAt: new Date(now()).toISOString(), saved }, null, 2) + "\n", "utf8");
+    return { backupId, backupDir, saved };
+  }
+
   // ── 导入落定 ─────────────────────────────────────────────
   // skillsMode 由界面在确认弹窗里选定："repo"（已配仓库，同名覆盖）/ "default"
   // （未配过仓库时的默认落点 ~/.agents/skills）/ "custom"（自选位置，路径随
@@ -468,19 +492,7 @@ export function createDataBundleService({
       const externalRefs = findExternalCredentialRefs(store, entries.map((entry) => entry?.credentialFile));
       if (externalRefs.length) return { ok: false, error: "导入包校验未通过" };
 
-      const backupId = stamp(now());
-      const backupDir = join(backupRootFn(), `pre-import-${backupId}`);
-      const saved = [];
-      mkdirSync(backupDir, { recursive: true });
-      for (const name of CONFIG_FILES) {
-        const src = name === "settings.json" ? settingsPath : name === "prompts.json" ? promptsJsonPath : name === "skills.json" ? skillsConfigPath(base) : paths.storeFile;
-        if (existsSync(src)) { cpSync(src, join(backupDir, name)); saved.push(name); }
-      }
-      if (existsSync(paths.credentialsDir)) {
-        cpSync(paths.credentialsDir, join(backupDir, "credentials"), { recursive: true });
-        saved.push("credentials/");
-      }
-      writeFileSync(join(backupDir, MANIFEST_NAME), JSON.stringify({ backupId, createdAt: new Date(now()).toISOString(), saved }, null, 2) + "\n", "utf8");
+      const { backupId, backupDir } = writePreImportBackup();
 
       const written = writeStore(store, { paths });
       if (!written.ok) {
@@ -569,6 +581,77 @@ export function createDataBundleService({
     }
   }
 
+  // ── 备份恢复（配置回滚）──────────────────────────────────
+  // 只认 pre-import 备份：那是 manifest 驱动的整份快照，才有回滚语义；
+  // byok-import 是按端点的部分文件，名字锚定直接拒。顺序与导入落定同口径——
+  // 先把备份内容整份预检（任何一项不过就一个字节不动），再对当前状态留安全
+  // 备份（与导入前备份同一写入路径），最后按 manifest saved[] 写回。
+  function restoreBackup({ name } = {}) {
+    if (typeof name !== "string" || !RESTORE_NAME_RE.test(name)) {
+      return { ok: false, error: "备份名不可用" };
+    }
+    const dir = join(backupRootFn(), name);
+    if (!existsSync(dir)) return { ok: false, error: "备份不存在" };
+
+    const manifestText = readTextIfExists(join(dir, MANIFEST_NAME));
+    if (manifestText === null) return { ok: false, error: "备份缺 manifest.json，无法恢复" };
+    let manifest;
+    try {
+      manifest = JSON.parse(manifestText);
+    } catch {
+      return { ok: false, error: "备份的 manifest.json 不是合法 JSON" };
+    }
+    const saved = manifest?.saved;
+    if (!Array.isArray(saved) || saved.length === 0 || saved.some((entry) => !RESTORE_SAVED_ENTRIES.has(entry))) {
+      return { ok: false, error: "备份清单不完整，无法恢复" };
+    }
+
+    // 预检：saved[] 点名的每一份都要真实在盘、内容可用；store 是主干，过与导入
+    // 同一道 schema 门。任何一项不过，整单拒绝在安全备份之前，当前数据未动。
+    const texts = new Map();
+    for (const file of CONFIG_FILES) {
+      if (!saved.includes(file)) continue;
+      const text = readTextIfExists(join(dir, file));
+      if (text === null) return { ok: false, error: `备份缺 ${file}，无法恢复` };
+      texts.set(file, text);
+    }
+    let restoredStore = null;
+    if (texts.has("store.json")) {
+      try {
+        restoredStore = JSON.parse(texts.get("store.json"));
+      } catch {
+        return { ok: false, error: "备份的 store.json 不是合法 JSON" };
+      }
+      const valid = validateStore(restoredStore);
+      if (!valid.valid || restoredStore.version !== 2) {
+        return { ok: false, error: "备份里的渠道配置不合法，无法恢复" };
+      }
+    }
+    const withCredentials = saved.includes("credentials/");
+    if (withCredentials && !existsSync(join(dir, "credentials"))) {
+      return { ok: false, error: "备份缺 credentials/，无法恢复" };
+    }
+
+    const safety = writePreImportBackup();
+
+    if (restoredStore) {
+      const written = writeStore(restoredStore, { paths });
+      if (!written.ok) {
+        return { ok: false, error: `渠道配置写入被拒（${written.reason}），当前数据未改动；安全备份在 ${safety.backupDir}` };
+      }
+    }
+    for (const file of ["settings.json", "prompts.json", "skills.json"]) {
+      if (!texts.has(file)) continue;
+      const target = file === "settings.json" ? settingsPath : file === "prompts.json" ? promptsJsonPath : skillsConfigPath(base);
+      atomicWriteFile(target, texts.get(file));
+    }
+    if (withCredentials) {
+      mkdirSync(paths.credentialsDir, { recursive: true });
+      copyTree(join(dir, "credentials"), paths.credentialsDir);
+    }
+    return { ok: true, safetyName: `pre-import-${safety.backupId}` };
+  }
+
   // 面板宿主退出时调用（见 panel-host.mjs 的 shutdown）：把还攥着明文密钥内存副本
   // 与暂存目录的票据一次清掉。进程不退出，弃用的票据就靠 sweepExpiredTickets 扫。
   function dropAllTickets() {
@@ -576,7 +659,7 @@ export function createDataBundleService({
     tickets.clear();
   }
 
-  return { exportBundle, previewBundle, applyBundle, inspectBundle, dropAllTickets, paths };
+  return { exportBundle, previewBundle, applyBundle, restoreBackup, inspectBundle, dropAllTickets, paths };
 }
 
 function rmSafe(dir) {
