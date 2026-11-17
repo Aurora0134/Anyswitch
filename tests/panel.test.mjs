@@ -194,6 +194,42 @@ describe("panel router relay control + pull-mode agents", () => {
     assert.equal(entries.length, 0);
   });
 
+  // A8：超长行不再被 400 无声拒收（发送方是 fire-and-forget 的 reportMaskedPanelError，
+  // 拒收即丢行）。截断到 2000 字并在尾部留痕，级别校验维持原样。
+  it("POST /panel/api/logs/ingest truncates an over-length message with a tail marker instead of rejecting it", async () => {
+    const entries = [];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: { info: (m) => entries.push(m), warn: (m) => entries.push(m), error: (m) => entries.push(m) },
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+    });
+    const longMessage = `[面板] 导出未完成（服务端原文：${"x".repeat(2500)})`;
+    const { req, res, json } = fakeReqRes("/panel/api/logs/ingest", "POST", { level: "warn", message: longMessage });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().ok, true);
+    assert.equal(entries.length, 1);
+    const logged = entries[0];
+    assert.equal(logged.length, 2000 + ` … [truncated, original ${longMessage.length} chars]`.length);
+    assert.ok(logged.startsWith("[面板] 导出未完成（服务端原文："), "前缀原样保留，能与界面兜底对上号");
+    assert.ok(logged.endsWith(` … [truncated, original ${longMessage.length} chars]`), "尾部留截断痕迹与原文长度");
+  });
+
+  it("POST /panel/api/logs/ingest still rejects an empty message as bad request", async () => {
+    const entries = [];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: { info: (m) => entries.push(m), warn: (m) => entries.push(m), error: (m) => entries.push(m) },
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+    });
+    const { req, res } = fakeReqRes("/panel/api/logs/ingest", "POST", { level: "warn", message: "" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(entries.length, 0);
+  });
+
   it("POST /panel/api/logs/clear resets the logger buffer (真清空)", async () => {
     const { createLogger } = await import("../src/shared/logger.mjs");
     const logger = createLogger({ sink: () => {} });

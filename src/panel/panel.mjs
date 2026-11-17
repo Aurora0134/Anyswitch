@@ -3440,6 +3440,13 @@ export function createPanelRouter({
   // invisible in the panel's 实时输出. The entry re-enters this logger's bus
   // (sink + SSE fan-out), so bridged viewers see it like any resident-relay
   // entry. Strict level validation: a garbage level must 400, never log.
+  //
+  // An over-length message is truncated with a tail marker, never rejected: the
+  // main sender is reportMaskedPanelError in panel.js, whose whole purpose is
+  // landing a folded server original (an HTML error page runs long), and its
+  // fire-and-forget .catch swallows a 400 — the line would vanish without a
+  // trace (audit A8).
+  const INGEST_MESSAGE_MAX = 2000;
   async function handleLogIngest(req, res) {
     if (!logger) {
       sendJson(res, 200, { ok: true });
@@ -3453,11 +3460,14 @@ export function createPanelRouter({
         sendJson(res, 400, { ok: false, error: "level must be info, warn or error" });
         return;
       }
-      if (typeof message !== "string" || message.length === 0 || message.length > 2000) {
-        sendJson(res, 400, { ok: false, error: "message must be a non-empty string of at most 2000 chars" });
+      if (typeof message !== "string" || message.length === 0) {
+        sendJson(res, 400, { ok: false, error: "message must be a non-empty string" });
         return;
       }
-      logger[level](message);
+      const logged = message.length > INGEST_MESSAGE_MAX
+        ? `${message.slice(0, INGEST_MESSAGE_MAX)} … [truncated, original ${message.length} chars]`
+        : message;
+      logger[level](logged);
       sendJson(res, 200, { ok: true });
     } catch (err) {
       sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
