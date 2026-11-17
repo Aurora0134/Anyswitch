@@ -3637,8 +3637,11 @@ async function api(method, path, body) {
   // 恢复默认都走同一条迁移——服务端先整份复制再删源，目标有同名项就整次拒绝，
   // 所以失败时源目录一个字节不动，文案才能直说「未做任何改动」。
   // 列表展示写入前的两族备份（pre-import/byok-import），行结构：名称等宽、
-  // 时间·大小次行、右侧行内删除钮；删除走确认弹窗（复用 .modal-overlay），
-  // 成功后重拉列表。恢复备份不在此卡（后续工作），行结构已预留动作位。
+  // 时间·大小次行、右侧动作位。删除走确认弹窗（复用 .modal-overlay），成功后
+  // 重拉列表。恢复仅 pre-import 行有钮——manifest 驱动的整份快照才有回滚语义；
+  // 确认后服务端先对当前配置留安全备份再写回，成功 toast 后重拉列表（新安全
+  // 备份会出现在列表里）。两个弹窗同构：行内钮唤起、确认/取消在途禁用、失败
+  // 不关弹窗。
   function createBackupLocationController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback }) {
     const get = (id) => doc.getElementById(id);
     const pathLine = get("dataBackupPath");
@@ -3652,7 +3655,12 @@ async function api(method, path, body) {
     const delConfirm = get("dataBackupDeleteConfirm");
     const delCancel = get("dataBackupDeleteCancel");
     const delClose = get("dataBackupDeleteClose");
-    if (!pathLine || !openBtn || !pickBtn || !resetBtn || !listEl || !emptyEl || !delModal || !delName || !delConfirm || !delCancel || !delClose) return { enter() {}, leave() {}, refresh() {} };
+    const restoreModal = get("dataBackupRestoreModal");
+    const restoreName = get("dataBackupRestoreName");
+    const restoreConfirm = get("dataBackupRestoreConfirm");
+    const restoreCancel = get("dataBackupRestoreCancel");
+    const restoreClose = get("dataBackupRestoreClose");
+    if (!pathLine || !openBtn || !pickBtn || !resetBtn || !listEl || !emptyEl || !delModal || !delName || !delConfirm || !delCancel || !delClose || !restoreModal || !restoreName || !restoreConfirm || !restoreCancel || !restoreClose) return { enter() {}, leave() {}, refresh() {} };
 
     let busy = false;
     const render = (path, isDefault) => {
@@ -3712,6 +3720,40 @@ async function api(method, path, body) {
       }
     }
 
+    // 恢复与删除同构：行内钮唤起确认弹窗，在途禁用确认/取消，失败不关弹窗、
+    // toast 带服务端原文；成功后 toast 定稿文案并重拉列表（安全备份会入列）。
+    let pendingRestore = null;
+    let restoring = false;
+    function openRestore(name) {
+      pendingRestore = name;
+      restoreName.textContent = name;
+      restoreModal.classList.add("show");
+    }
+    function closeRestore() {
+      if (restoring) return;
+      pendingRestore = null;
+      restoreModal.classList.remove("show");
+    }
+    async function confirmRestore() {
+      if (!pendingRestore || restoring) return;
+      restoring = true;
+      restoreConfirm.disabled = true;
+      restoreCancel.disabled = true;
+      try {
+        await request("POST", "/api/backups/restore", { name: pendingRestore });
+        pendingRestore = null;
+        restoreModal.classList.remove("show");
+        notify("已恢复备份", false);
+        loadList();
+      } catch (err) {
+        notify(`恢复失败：${errorText(err, "未知原因")}`, true);
+      } finally {
+        restoring = false;
+        restoreConfirm.disabled = false;
+        restoreCancel.disabled = false;
+      }
+    }
+
     function renderList(items) {
       listEl.replaceChildren();
       emptyEl.hidden = items.length > 0;
@@ -3728,13 +3770,21 @@ async function api(method, path, body) {
         meta.textContent = [timeText(item.createdAt), sizeText(item.sizeBytes)].filter(Boolean).join(" · ");
         main.appendChild(name);
         main.appendChild(meta);
+        row.appendChild(main);
+        if (item.kind === "pre-import") {
+          const restore = doc.createElement("button");
+          restore.type = "button";
+          restore.className = "btn btn-mini data-backup-restore";
+          restore.textContent = "恢复";
+          restore.onclick = () => openRestore(String(item.name ?? ""));
+          row.appendChild(restore);
+        }
         const del = doc.createElement("button");
         del.type = "button";
         del.className = "data-backup-del";
         del.setAttribute("aria-label", "删除备份");
         del.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
         del.onclick = () => openDelete(String(item.name ?? ""));
-        row.appendChild(main);
         row.appendChild(del);
         listEl.appendChild(row);
       }
@@ -3808,6 +3858,9 @@ async function api(method, path, body) {
     delConfirm.onclick = confirmDelete;
     delCancel.onclick = closeDelete;
     delClose.onclick = closeDelete;
+    restoreConfirm.onclick = confirmRestore;
+    restoreCancel.onclick = closeRestore;
+    restoreClose.onclick = closeRestore;
     return {
       // 进子页现读：本机文件可能被别处改过，不吃页面加载时的旧值。
       enter() { load(); loadList(); },
