@@ -3082,14 +3082,40 @@ async function api(method, path, body) {
     logExpanded = expanded;
     // 入口无条件清交接态：中途切到 reduced-motion 或连点展收，都不留半程残影。
     if (root) root.removeAttribute("data-motion");
+    // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
+    if (expanded && root && body) {
+      const first = body.children[0];
+      const computed = first && typeof getComputedStyle === "function" ? getComputedStyle(first) : null;
+      // 行距＝卡的实际使用高度＋下边距。offsetHeight 取整，与视口靠亚像素累加排出来
+      // 的真实行距差半到一个像素，摊开期叠卡还看得见时逐行露错位；computed height 给
+      // 的是 border-box 的亚像素使用值（实测 66.375 对 offsetHeight 66），取不到才退回。
+      const exact = computed ? parseFloat(computed.height) : NaN;
+      const raw = Number.isFinite(exact) && exact > 0 ? exact : (first ? first.offsetHeight : 0);
+      const mb = computed ? parseFloat(computed.marginBottom) || 0 : 0;
+      const step = Math.round((raw + mb) * 1000) / 1000;
+      if (step > 0) root.style.setProperty("--ll-step-expanded", step + "px");
+    }
+    // 展开视口高＝内容驱动、上限 320、下限不低于收起态舞台高（--ll-card-h＋两个 22px
+    // 步长，与 .live-log-stage 收起式同源）：内容充足时与旧 320px 同视野，空日志展开
+    // 不撑空白（2026-11-17 需求「即便没有内容也会把卡高展开到视口高度」；同日回归
+    // 报障「视口异常缩小」——上一版两态绑死同高，阅读面塌成一条缝）。量在翻转
+    // data-state 之前、按收起态量：展开态独有的 22px 底垫补进量值（＋22），收起态舞台
+    // 是 scrollHeight 的地板，行数不足两条时多出的余量落在下限内无感。只在展开那拍
+    // 量——阅读中 pane 不随新条目动（与旧 320 同语义），收起再展开按当下内容重定。
+    // 同任务内先写变量再翻态：高度过渡从收起高直奔终值，CSS 的 320 兜底不落帧。
+    if (expanded && root && body) {
+      const cardH = parseFloat(root.dataset.llCardH || "") || 49;
+      const viewH = Math.round(Math.min(320, Math.max(cardH + 44, body.scrollHeight + 22)));
+      root.style.setProperty("--ll-view-h", viewH + "px");
+    }
     // 重新展开一律回到最新并恢复跟随：第一屏就是最新消息，接着上次的阅读位
     // 会让人以为日志没在更新。
     if (expanded) {
       followLogs = true;
       if (body) body.scrollTop = 0;
     }
-    // 两阶段：data-motion 期间叠卡保持不透明与视口交叉淡化，到位后才交接；展收不再
-    // 改舞台高（卡高两态同值），淡出不再被自身吃掉。reduced-motion 直接落稳态。
+    // 两阶段：data-motion 期间叠卡摊开并保持不透明、与视口交叉淡化，舞台同拍长高
+    // （--ll-view-h）；到位后才交接。reduced-motion 直接落稳态。
     if (root && !reduced) root.setAttribute("data-motion", expanded ? "expanding" : "collapsing");
     if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
     const toggle = $("logToggle");
