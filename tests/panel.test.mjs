@@ -18382,16 +18382,15 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
   });
 
-  it("CSS 钉住顶部基准与两阶段交接：卡高自适应舞台、展收同高、交接期叠卡可见", () => {
+  it("CSS 钉住顶部基准与两阶段交接：卡高自适应舞台、摊开期叠卡可见、行距量值驱动", () => {
     assert.ok(/\.live-log-stage \{[^}]*height: calc\(var\(--ll-card-h\) \+ var\(--ll-step\) \* 2\);[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
-    assert.ok(!/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height:/.test(panelCss), "展开态不另钉一版舞台高：展收同高，底缘卡顶不跳，空日志展开不撑空白");
-    assert.ok(!/--ll-step-expanded/.test(panelCss), "行距兜底变量退役：舞台不再长高，摊开放间距会把第三张卡挤出舞台");
-    assert.ok(!/\.live-log\[data-state="expanded"\] \{ --ll-step:/.test(panelCss), "展开态不改叠卡间距/景深档：间距留在收起值，两态同一套退层参数");
-    assert.ok(!/\.live-log\[data-motion="expanding"\] \{ --ll-step:/.test(panelCss), "摊开期也不放大间距");
-    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚，不随高度过渡被拽");
+    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height: var\(--ll-view-h, 320px\); \}/.test(panelCss), "展开态舞台高交给 --ll-view-h（setLogExpanded 按内容量值写入，320 只是无卡兜底）：内容充足与旧视野同档，空日志不撑空白（2026-11-17 两轮报障裁决）");
+    assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(panelCss), "收起错位 22px（够露出整行 meta）、展开行距兜底 55px：摊开动画件随展开视口高一并复活");
+    assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1;/.test(panelCss), "展开行距由量值驱动");
+    assert.ok(/\.live-log\[data-motion="expanding"\] \{ --ll-step: var\(--ll-step-expanded\); \}/.test(panelCss), "摊开期间距放大与舞台长高同拍");
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚，随舞台长高不被拽");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*height: 76px;/.test(panelCss), "卡高内容驱动，与视口卡同形");
     assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*transform-origin: 50% 0;/.test(panelCss), "缩放基准在顶边");
-    assert.ok(/--ll-step: 22px;/.test(panelCss), "收起错位 22px（够露出整行 meta）");
     assert.ok(!/--ll-step: 78px/.test(panelCss), "旧硬编码行距已撤");
     assert.ok(/\.live-log-viewport \{[^}]*overflow-anchor: none;/.test(panelCss), "新消息从顶部插入不吃滚动锚定");
     assert.ok(/\.live-log\[data-motion="expanding"\] \.live-log-stack \{ opacity: 1; pointer-events: none; z-index: 2; \}/.test(panelCss), "摊开期叠卡可见、让出点击并压在视口之上");
@@ -18432,6 +18431,13 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{[^}]*bottom: 0; height: 20px;/.test(panelCss), "底部常驻 20px 半透明卡顶缘");
   });
 
+  it("底缘横线只在稳态淡入：展收动效期间不可见，永不随舞台滑动", () => {
+    const lip = panelCss.match(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{([^}]*)\}/)?.[1] ?? "";
+    assert.ok(/animation: ll-lip-in 200ms var\(--ease-out\) 300ms both;/.test(lip), "300ms 延迟淡入盖过高度过渡 220ms＋交接 60ms：舞台停止前横线保持 0——它锚在舞台底缘，舞台在动的任何一拍它跟着走，就是报障的「打底横线跟着一起跳」（2026-11-17 两轮裁决）");
+    assert.ok(/@keyframes ll-lip-in \{ from \{ opacity: 0; \} \}/.test(panelCss), "淡入从 0 起：延迟期与淡入前半段不可见，收起那拍选择器整条退场（content 不过渡）先于一切动画");
+    assert.ok(/opacity: var\(--ll-lip-o, 0\.55\);/.test(lip), "终值仍走透明度变量：wallpaper 置 0 的既有口径不变");
+  });
+
   it("CSS 钉住浮出→逐层退远→退到远处淡出的完整动效链", () => {
     assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="0"\] \{ transform: translateY\(0\) scale\(1\); opacity: 1; z-index: 3;/.test(panelCss));
     assert.ok(/\.live-log-stack \.live-log-msg\[data-slot="1"\] \{ transform: translateY\(var\(--ll-step\)\) scale\(var\(--ll-scale-1\)\); opacity: var\(--ll-opacity-1\); z-index: 2; \}/.test(panelCss), "中层向下错位并按层缩放");
@@ -18468,9 +18474,10 @@ describe("看板运行日志：无框消息提示式双态流", () => {
 
   it("CSS 钉住叠卡景深与卡面层界：三档参数、虚化只落文字、两态同一套皮", () => {
     const rootBlock = panelCss.match(/\.live-log \{([\s\S]*?)\}/)?.[1] ?? "";
-    assert.ok(/--ll-step: 22px;/.test(rootBlock) && /--ll-scale-1: 0\.96; --ll-scale-2: 0\.92;/.test(rootBlock) && /--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;/.test(rootBlock) && /--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(rootBlock), "叠卡逐层缩小、虚化、变淡，两态同一套档");
+    const expandedBlock = panelCss.match(/\.live-log\[data-state="expanded"\] \{([\s\S]*?)\}/)?.[1] ?? "";
+    assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(rootBlock) && /--ll-scale-1: 0\.96; --ll-scale-2: 0\.92;/.test(rootBlock) && /--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;/.test(rootBlock) && /--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(rootBlock), "收起态逐层缩小、虚化、变淡");
     assert.ok(/--ll-retreat-delay: 45ms;/.test(rootBlock), "后层退远的 stagger 在册");
-    assert.ok(!/\.live-log\[data-state="expanded"\] \{ --ll-step:/.test(panelCss), "展开态不再重置景深档：展收同高同距，叠卡参数一用到底");
+    assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1; --ll-scale-2: 1;/.test(expandedBlock) && /--ll-blur-1: 0px; --ll-blur-2: 0px;/.test(expandedBlock) && /--ll-opacity-1: 1; --ll-opacity-2: 1;/.test(expandedBlock), "展开态间距放大到行距、景深归位（摊开终态与视口行重合）");
     assert.ok(/\.live-log-stack \.live-log-meta,\s*\.live-log-stack \.live-log-text \{ filter: blur\(0px\); transition: filter 220ms var\(--ease-out\); \}/.test(panelCss), "卡内文字可过渡虚化");
     assert.ok(/filter: blur\(var\(--ll-blur-1\)\);/.test(panelCss) && /filter: blur\(var\(--ll-blur-2\)\);/.test(panelCss), "两层分别取虚化档");
     assert.ok(/transition-delay: var\(--ll-retreat-delay\);/.test(panelCss), "景深三档同拍、后层整体延后");
@@ -18492,17 +18499,25 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(panelCss.indexOf(".live-log-stack:hover .live-log-msg") > panelCss.indexOf(".live-log-stack .live-log-msg.is-leaving {"), "悬停排在槽位/入场/离场之后：同特异性靠源序取胜，不被后来的状态规则静默压死");
   });
 
-  it("展收不写行距变量：舞台高一由内容驱动，两态同值", () => {
+  it("展开行距取亚像素卡高、展开视口高按内容封顶：有内容不塌、空日志不撑", () => {
     const { sandbox, els } = makeSandbox();
     for (let i = 1; i <= 3; i++) sandbox.appendLog({ level: "info", message: "q" + i });
-    els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
-    sandbox.appendLog({ level: "info", message: "q4" });
+    els.logBody.children[0].offsetHeight = 66;
+    els.logBody.children[0]._computedHeight = "66.4px";
+    els.logBody.scrollHeight = 1380;
     sandbox.setLogExpanded(true);
+    assert.equal(els.liveLog.style["--ll-step-expanded"], "72.4px", "行距＝实测卡高（亚像素）＋下边距，不取整成 72");
     assert.equal(els.liveLog.dataset.state, "expanded");
-    assert.equal(els.liveLog.style["--ll-step-expanded"], undefined, "展开不再量视口行距写变量：舞台不随展收长高，间距放大已退役");
-    assert.equal(els.liveLog.style["--ll-card-h"], "49px", "卡高仍由内容写入，舞台高只剩这一个来源");
+    assert.equal(els.liveLog.style["--ll-view-h"], "320px", "内容过线封顶 320：与旧展开视野同档（2026-11-17「视口异常缩小」回归裁决）");
     sandbox.setLogExpanded(false);
-    assert.equal(els.liveLog.style["--ll-step-expanded"], undefined, "收回同样不写行距变量");
+    els.logBody.scrollHeight = 130;
+    sandbox.setLogExpanded(true);
+    assert.equal(els.liveLog.style["--ll-view-h"], "152px", "内容不足上限按内容定高：130＋展开态 22px 底垫，高于收起地板");
+    sandbox.setLogExpanded(false);
+    const fresh = makeSandbox();
+    fresh.sandbox.setLogExpanded(true);
+    assert.equal(fresh.els.liveLog.style["--ll-view-h"], "93px", "空日志展开不撑空白：49 兜底卡高＋两个 22px 步长，与收起态同高（11-17 需求「即便没有内容也会把卡高展开到视口高度」）");
+    assert.equal(fresh.els.liveLog.style["--ll-step-expanded"], undefined, "无卡可量不写行距，兜底 55px 留给 CSS");
   });
 
   class FakeClassList {
@@ -18834,10 +18849,11 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(oldest.dataset.slot, "leaving", "离场卡退出槽位序列，不与补位卡争同一层");
     flush(160);
 
+    els.logBody.children[0].offsetHeight = 49;
     sandbox.setLogExpanded(true);
     assert.equal(els.liveLog.dataset.state, "expanded");
     assert.equal(els.liveLog.getAttribute("data-motion"), "expanding", "摊开期叠卡留在可见层");
-    assert.equal(els.liveLog.style["--ll-step-expanded"], undefined, "展收不量行距：叠卡间距留在收起值，不随展收放大");
+    assert.equal(els.liveLog.style["--ll-step-expanded"], "55px", "展开行距量自视口首卡：高 49 + 视口卡下边距 6（夹具注缝与 panel.css 的 6px 同源）");
     flush(219);
     assert.equal(els.liveLog.getAttribute("data-motion"), "expanding", "摊开窗内（≤219ms）不提前交接：计时窗缩短即红");
     flush(220);
@@ -18872,7 +18888,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/scrollTop = 0/.test(viewSrc) && !/scrollTop = body\.scrollHeight/.test(viewSrc), "视口归顶、不再贴底");
     assert.ok(/overflow-anchor: none/.test(panelCss), "顶部插入禁用滚动锚定");
     assert.ok(/setAttribute\("data-clearing", "1"\)/.test(panelJs) && /removeAttribute\("data-clearing"\)/.test(panelJs), "清空整批淡出档与收尾成组");
-    assert.ok(!/--ll-step-expanded/.test(panelJs), "脚本不再量行距写变量：展收同高，间距放大整套退役");
+    assert.ok(/--ll-step-expanded/.test(panelJs), "展开行距由脚本量值写入");
     assert.ok(/body\.insertBefore\(node, ref\)/.test(viewSrc) && !/for \(const node of ordered\) body\.appendChild/.test(viewSrc), "视口增量重排，只插错位节点");
     assert.equal((setSrc.match(/"handoff"/g) ?? []).length, 1, "收起刻意硬切：只有展开摊开到位才走一次 handoff");
     assert.ok(/if \(root\) root\.removeAttribute\("data-motion"\);/.test(setSrc), "展收入口无条件清交接态，中途切 reduce 不留残影");
@@ -19272,8 +19288,8 @@ describe("壁纸域运行日志卡实底＋底缘条退场＋主题页外部预�
     assert.ok(panelCss.includes(':root[data-style="wallpaper"] .live-log { --ll-opacity-1: 1; --ll-opacity-2: 1; }'),
       "wallpaper 域退层两档归 1（整卡 opacity 会把卡面带字跟壁纸混洗，退层小字实测掉到 3:1 上下）");
     assert.ok(/--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(panelCss), "基座退层档原样保留，其他皮肤不变淡");
-    assert.equal((panelCss.match(/--ll-opacity-1: /g) ?? []).length, 2,
-      "退层档定义仅两处：基座、壁纸覆盖（消费端 var() 不计入；展开归位随展收同高退役）");
+    assert.equal((panelCss.match(/--ll-opacity-1: /g) ?? []).length, 3,
+      "退层档定义仅三处：基座、展开归位（摊开终态与视口行重合）、壁纸覆盖（消费端 var() 不计入）");
   });
 
   it("标题行垫底：wallpaper 域 .live-log-bar 补卡面同款垫底成条，基座仍无框无底", () => {
