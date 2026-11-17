@@ -549,6 +549,85 @@ export function writeDshSettingsWithBackup(filePath, data, yaml) {
   return { ok: true, unchanged: false, backupPath };
 }
 
+// ~/.dsh/.credentials.yaml 的 refs.ANYSWITCH_RELAY_TOKEN 是 2026-09-30 手工接入时
+// 落下的静态代次令牌：dsh 家里的 profile 早已改走 headers 路线（见
+// buildDshProviderEntry 的注释），但这份引用仍留在 dsh 自己解析的凭据仓里，轮换
+// 退役后就是一枚死代——任何解析 refs 的路径都会拿它去打 401。同步面顺手把它重指
+// 现行令牌，与 profile headers 同一节拍保鲜。凭据仓还压着 dsh 自家的 records
+// （deepseek 登录凭据等），所以只换那一行、其余逐字节保留；键不存在不凭空造
+// （仓归 dsh 管），文件解析不动就不覆写。
+export async function writeDshCredentialsRef(token, dshHome) {
+  // 无令牌＝没有可保鲜的目标值：native 回退启动（本机 relay 不可用）读不到令牌，
+  // 与 buildDshProviderEntry 不写空头同一姿态——跳过而非报失败，免得每次原生
+  // 启动都喊狼来了。
+  if (typeof token !== "string" || token.length === 0) {
+    return { ok: true, unchanged: true, reason: "relay token unavailable" };
+  }
+  const filePath = join(dshHome, ".credentials.yaml");
+  let text;
+  try {
+    text = readFileSync(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      // ~/.dsh 没有凭据仓（dsh 未装/没登录过）＝没有要保鲜的引用，正常跳过。
+      return { ok: true, unchanged: true, notInstalled: true };
+    }
+    return { ok: false, reason: `dsh credentials unreadable: ${error.message}` };
+  }
+  const yaml = await getYamlModule();
+  let parsed;
+  try {
+    parsed = yaml.load(stripBom(text));
+  } catch {
+    return { ok: false, reason: `refusing to overwrite unparseable dsh credentials: ${filePath}` };
+  }
+  const current = parsed?.refs?.ANYSWITCH_RELAY_TOKEN;
+  if (current === undefined) {
+    return { ok: true, unchanged: true, reason: "no anyswitch relay token ref in dsh credentials" };
+  }
+  if (current === token) {
+    return { ok: true, unchanged: true };
+  }
+
+  // 行级拼接：整仓 yaml.dump 会重排 dsh 自家 records 的引号/键序，所以只重写
+  // 命中的那一行，BOM、CRLF、行尾换行状态原样保留。
+  const hadBom = text.charCodeAt(0) === 0xfeff;
+  const lines = stripBom(text).split("\n");
+  // `.` 不吞 \r（CRLF 行尾），`\r?` 兜住它，LF/CRLF 两式同一正则可命中。
+  const keyLine = /^([ \t]+)ANYSWITCH_RELAY_TOKEN:.*\r?$/;
+  const hits = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (keyLine.test(lines[i])) hits.push(i);
+  }
+  if (hits.length !== 1) {
+    return { ok: false, reason: `expected exactly one indented ANYSWITCH_RELAY_TOKEN line in dsh credentials, found ${hits.length}: ${filePath}` };
+  }
+  const line = lines[hits[0]];
+  const indent = keyLine.exec(line)[1];
+  const hadCr = line.endsWith("\r");
+  lines[hits[0]] = `${indent}ANYSWITCH_RELAY_TOKEN: ${token}${hadCr ? "\r" : ""}`;
+  const next = (hadBom ? "\uFEFF" : "") + lines.join("\n");
+  // 落盘前复检：行级拼接可能没换到 refs 下真正的那个键（同名键嵌在别处时），
+  // 复检解析结果仍不是现行令牌就不写，宁可失败也不把猜错的东西写进 dsh 的凭据仓。
+  let reparsed;
+  try {
+    reparsed = yaml.load(stripBom(next));
+  } catch {
+    reparsed = null;
+  }
+  if (reparsed?.refs?.ANYSWITCH_RELAY_TOKEN !== token) {
+    return { ok: false, reason: `credentials token ref splice did not land under refs: ${filePath}` };
+  }
+
+  const dir = dirname(filePath);
+  const backupPath = join(dir, `credentials.backup.${timestamp()}.yaml`);
+  copyFileSync(filePath, backupPath);
+  atomicWriteFile(filePath, next);
+  // 与 settings.backup 同款：凭据副本带令牌，滚动 keep=5 封顶。
+  pruneBackups(dir, "credentials.backup.");
+  return { ok: true, unchanged: false, backupPath };
+}
+
 export { extractManagedProviders };
 
 export function validateDshSettings(settings) {

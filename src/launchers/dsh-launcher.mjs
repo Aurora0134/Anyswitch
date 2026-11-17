@@ -11,7 +11,7 @@ import { createLogger } from "../shared/logger.mjs";
 import { createPanelRouter } from "../panel/panel.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
-import { writeDshProfilePatches } from "./dsh-merge-config.mjs";
+import { writeDshProfilePatches, writeDshCredentialsRef } from "./dsh-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "../catalog/reasoning-fallback.mjs";
 import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
@@ -82,7 +82,22 @@ export async function writeDshConfig(store, port, token, sidecarRoot, settingsPa
   const dshHome = dirname(settingsPath);
   const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
   const includeEfforts = effortsEnabled ?? effortSupplementEnabled(sidecarRoot);
-  return writeDshProfilePatches(store, port, token, sidecarRoot, dshHome, catalog, includeEfforts, knowledge);
+  const patches = await writeDshProfilePatches(store, port, token, sidecarRoot, dshHome, catalog, includeEfforts, knowledge);
+  // 同一节拍顺手保鲜 ~/.dsh/.credentials.yaml 的静态代次引用（轮换退役敞口，
+  // 见 writeDshCredentialsRef 的注释）。两条结果取更差的一方：凭据仓解析不动
+  // 不能被 profile 的成功盖掉，反之亦然；只有凭据仓改写时才把 unchanged 翻掉。
+  const credentials = await writeDshCredentialsRef(token, dshHome);
+  if (credentials.ok && credentials.unchanged) return patches;
+  if (!credentials.ok) {
+    if (!patches.ok) {
+      return { ...patches, reason: `${patches.reason ?? "dsh profile patches failed"}; ${credentials.reason}` };
+    }
+    return credentials;
+  }
+  if (patches.ok && patches.unchanged) {
+    return { ...patches, unchanged: false, reason: "dsh credentials token ref refreshed" };
+  }
+  return patches;
 }
 
 import { resolveDshExecutable } from "../agents/agent-discovery.mjs";
