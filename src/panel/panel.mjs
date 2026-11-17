@@ -3656,11 +3656,30 @@ export function createPanelRouter({
     return [...plain, ...merged].sort((a, b) => rowTotal(b) - rowTotal(a));
   }
 
+  // Last successful relay stability pull: { at, snap }. A failed pull (relay
+  // restart window / 1500ms budget timeout / token-rotation race) must not be
+  // answered from this process's own collector in panel-host form — it sees no
+  // traffic and never loads the sidecar, so its stability tracker is always
+  // empty, and the previous behavior turned "pull failed" into an ok-shaped
+  // models:[] that the frontend rendered as real "no calls in 8h" (2026-11-17
+  // report: board status card + channel-row availability blanked together).
+  // The 8h rolling window tolerates far wider staleness than the agents' 5s:
+  // one 10-minute bucket keeps a blip invisible without masking a real outage.
+  // Beyond the window the local collector path stays (relay-host / per-launch
+  // forms DO have real data there); a stale frame carries stale: true.
+  const PULLED_STABILITY_STALE_MAX_MS = 10 * 60 * 1000;
+  let lastPulledStability = null;
+
   async function handleModelStability(res) {
     const token = relayPullToken();
     const pulled = await fetchRelayStability(relayRoot, token);
     if (pulled) {
+      lastPulledStability = { at: Date.now(), snap: pulled };
       return sendJson(res, 200, { ok: true, ...pulled, models: annotateStabilityModels(pulled.models) });
+    }
+    if (lastPulledStability && Date.now() - lastPulledStability.at <= PULLED_STABILITY_STALE_MAX_MS) {
+      const snap = lastPulledStability.snap;
+      return sendJson(res, 200, { ok: true, ...snap, stale: true, models: annotateStabilityModels(snap.models) });
     }
     if (!metricsCollector?.getModelStability) {
       sendJson(res, 200, { ok: true, window: "8h", buckets: 48, models: [] });
@@ -3675,13 +3694,23 @@ export function createPanelRouter({
   }
 
   // 监测页「当前落在第几跳/退避剩余重试时间」:proxy the resident relay's
-  // merged route-chain runtime. Relay down -> empty map (no local source:
-  // chain state only exists inside relay handler processes).
+  // merged route-chain runtime. Pull failure (no local source: chain state only
+  // exists inside relay handler processes) serves the last pull for a short
+  // window — a restart resets the relay's chain state anyway, so the window only
+  // has to cover the restart gap itself, and the relay's own post-restart
+  // answer (even an emptier one) is the new truth. Beyond it, an empty map.
+  const PULLED_CHAIN_RUNTIME_STALE_MAX_MS = 60 * 1000;
+  let lastPulledChainRuntime = null;
+
   async function handleRouteChainRuntime(res) {
     const token = relayPullToken();
     const pulled = await fetchRelayChainRuntime(relayRoot, token);
     if (pulled) {
+      lastPulledChainRuntime = { at: Date.now(), payload: pulled };
       return sendJson(res, 200, { ok: true, endpoints: pulled.endpoints });
+    }
+    if (lastPulledChainRuntime && Date.now() - lastPulledChainRuntime.at <= PULLED_CHAIN_RUNTIME_STALE_MAX_MS) {
+      return sendJson(res, 200, { ok: true, endpoints: lastPulledChainRuntime.payload.endpoints, stale: true });
     }
     sendJson(res, 200, { ok: true, endpoints: {} });
   }

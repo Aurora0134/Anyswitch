@@ -506,6 +506,34 @@ describe("panel router relay control + pull-mode agents", () => {
     assert.equal(json().models[0].status, "red");
   });
 
+  it("GET /panel/api/model-stability keeps serving the last pull across a relay blip", async () => {
+    // 2026-11-17 报障：relay 重启窗/1.5s 预算超时/token 轮换竞态里，panel-host
+    // 形态的本地收集器不经流量不读盘、stability 恒空，把「拉不到」答成「近 8h
+    // 没调用」——看板状态检测卡与渠道页成功率同时清屏，刷新才恢复。拉取失败
+    // 先续上次成功快照，不发成功形态的空 models。
+    const pulled = { window: "8h", buckets: 48, models: [{ model: "glm-4.7", provider: "bigmodel", total: 12, successRate: 99, status: "green", cells: [] }] };
+    let answer = pulled;
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null,
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayStability: async () => answer,
+    });
+    const first = fakeReqRes("/panel/api/model-stability", "GET");
+    await router.handle(first.req, first.res);
+    assert.equal(first.json().models.length, 1);
+
+    answer = null; // relay 瞬时不可达：重启窗 / 超时 / 401 任一形态
+    const second = fakeReqRes("/panel/api/model-stability", "GET");
+    await router.handle(second.req, second.res);
+    assert.equal(second.res.statusCode, 200);
+    assert.equal(second.json().ok, true);
+    assert.equal(second.json().models.length, 1, "陈旧快照顶上，不发成功形态的空 models");
+    assert.equal(second.json().models[0].model, "glm-4.7");
+    assert.equal(second.json().stale, true);
+  });
+
   // 状态检测号池富化：池 id 行 → poolName；成员 id 行 → poolName + memberName；
   // 无关渠道行原样透传。pulled 与本地 collector 两条路径都过同一富化。
   function poolStoreEnv(models, { pulled = true } = {}) {
@@ -2787,6 +2815,34 @@ describe("panel router route-chain runtime", () => {
     assert.equal(res.statusCode, 200);
     assert.equal(json().ok, true);
     assert.deepEqual(json().endpoints, {});
+  });
+
+  it("GET /panel/api/route-chain/runtime keeps serving the last pull across a relay blip", async () => {
+    // 同族缺陷（2026-11-17 报障横向）：拉取失败答 ok:true + 空 map，路由链卡
+    // 「当前跳」闪空。陈旧窗只需盖过重启窗本身——relay 起来后它的链状态就是
+    // 新真值（重启会清链内状态），宽留会顶掉真值。
+    const pulled = {
+      endpoints: {
+        zcode: { current: { node: "chan-b", model: "model-b" }, since: 1700000000000, retryIntervalMs: 300000 },
+      },
+    };
+    let answer = pulled;
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, metricsCollector: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayChainRuntime: async () => answer,
+    });
+    const first = fakeReqRes("/panel/api/route-chain/runtime", "GET");
+    await router.handle(first.req, first.res);
+    assert.deepEqual(first.json().endpoints.zcode, pulled.endpoints.zcode);
+
+    answer = null; // relay 瞬时不可达
+    const second = fakeReqRes("/panel/api/route-chain/runtime", "GET");
+    await router.handle(second.req, second.res);
+    assert.equal(second.json().ok, true);
+    assert.deepEqual(second.json().endpoints.zcode, pulled.endpoints.zcode, "陈旧快照顶上，不发空 map");
+    assert.equal(second.json().stale, true);
   });
 });
 
