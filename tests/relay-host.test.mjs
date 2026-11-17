@@ -1369,7 +1369,8 @@ test("常驻装配的 token 轮换接线：到期轮换换发代际、重同步�
 test("常驻装配的运行日志活闸门热读：开关关掉逐行丢弃，改回立即恢复落盘", async () => {
   const h = residentAssemblyHarness({
     settings: { loggingEnabled: false },
-    // 池首成员 503：非流式扇出的 failover warn 是可按需触发的日志行。
+    // 池首成员 503、次成员兜底成功：非流式扇出的结局总结行（方案甲收口后
+    // failover 中途行已移除，恢复时只打这一条）是可按需触发的日志行。
     behaviors: {
       "res-p1": () => ({ ok: false, status: 503, body: { error: { message: "upstream 503" } } }),
     },
@@ -1389,13 +1390,13 @@ test("常驻装配的运行日志活闸门热读：开关关掉逐行丢弃，�
 
     await warnNeedsGateOn();
     assert.ok(existsSync(h.logPath), "日志文件随装配创建（tee 流）");
-    assert.equal(readFileSync(h.logPath, "utf8").includes("failing over to the next member"), false,
-      "开关关掉时 failover warn 被活闸门整条丢弃");
+    assert.equal(readFileSync(h.logPath, "utf8").includes("recovered after failover res-p1→res-p2"), false,
+      "开关关掉时结局总结行被活闸门整条丢弃");
 
-    // 热读：settings.json 改回开启（不重启），下一条 failover warn 落盘。
+    // 热读：settings.json 改回开启（不重启），下一条结局总结行落盘。
     writeFileSync(h.settingsPath, JSON.stringify({ loggingEnabled: true }));
     await warnNeedsGateOn();
-    assert.ok(readFileSync(h.logPath, "utf8").includes("failing over to the next member"),
+    assert.ok(readFileSync(h.logPath, "utf8").includes("recovered after failover res-p1→res-p2"),
       "开关改回后同一条日志路径立即恢复落盘");
   } finally {
     await result.close();

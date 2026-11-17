@@ -1073,9 +1073,20 @@ export function createOpenAIRelayServer(deps) {
                 memberPlan.noteFailure?.(member.memberId);
                 if (isLastMember) break;
                 tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
-                deps.logger?.warn?.(`${planLabel}: member${logIdentitySegment(member, { originalBody: body })} returned ${result.status}; failing over to the next member`);
               } finally {
                 memberPlan.endMember?.(member.memberId);
+              }
+            }
+            // 结局收口（方案甲·按请求收口）：非流式 failover 的中途行不再逐条
+            // 打，请求终结时按结局留唯一一条——恢复带接力链与末位成员身份，
+            // 全灭带链与末位状态；首试即过（单成员）保持零行。tracker 的逐次
+            // 计数不受影响。
+            if (attemptedMembers > 1) {
+              const chain = memberPlan.members.slice(0, attemptedMembers).map((m) => m.memberId).join("→");
+              if (result.status < 400) {
+                deps.logger?.info?.(`${planLabel}: recovered after failover ${chain}${logIdentitySegment(memberPlan.members[attemptedMembers - 1], { originalBody: body })}`);
+              } else {
+                deps.logger?.warn?.(`${planLabel}: failed after failover ${chain} (last: status ${result.status})`);
               }
             }
           } else {
@@ -1428,9 +1439,20 @@ export function createOpenAIRelayServer(deps) {
                 memberPlan.noteFailure?.(member.memberId);
                 if (isLastMember) break;
                 tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
-                deps.logger?.warn?.(`${planLabel}: member${logIdentitySegment(member, { originalBody: body })} returned ${result.status}; failing over to the next member`);
               } finally {
                 memberPlan.endMember?.(member.memberId);
+              }
+            }
+            // 结局收口（方案甲·按请求收口）：非流式 failover 的中途行不再逐条
+            // 打，请求终结时按结局留唯一一条——恢复带接力链与末位成员身份，
+            // 全灭带链与末位状态；首试即过（单成员）保持零行。tracker 的逐次
+            // 计数不受影响。
+            if (attemptedMembers > 1) {
+              const chain = memberPlan.members.slice(0, attemptedMembers).map((m) => m.memberId).join("→");
+              if (result.status < 400) {
+                deps.logger?.info?.(`${planLabel}: recovered after failover ${chain}${logIdentitySegment(memberPlan.members[attemptedMembers - 1], { originalBody: body })}`);
+              } else {
+                deps.logger?.warn?.(`${planLabel}: failed after failover ${chain} (last: status ${result.status})`);
               }
             }
           } else {
