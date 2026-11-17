@@ -623,6 +623,7 @@ export function createOpenAIHandler(deps) {
       modelId,
       members: routing.ordered.map(({ memberId, provider }) => ({
         memberId,
+        model: modelId,
         call: (options = {}) => attemptChatCompletion(memberId, provider, body, options),
       })),
       noteSuccess: (memberId, ttftMs) => routing.noteSuccess(memberId, ttftMs),
@@ -718,6 +719,7 @@ export function createOpenAIHandler(deps) {
         const memberId = uniqueMemberId(memberMeta, expanded.providerId, entry.model);
         members.push({
           memberId,
+          model: entry.model,
           memberNoun: "chain node",
           call: (options = {}) => attemptChatCompletion(
             expanded.providerId, provider, { ...body, model: entry.model }, options,
@@ -733,6 +735,7 @@ export function createOpenAIHandler(deps) {
           const flatId = uniqueMemberId(memberMeta, `${expanded.poolId}/${poolMemberId}`, entry.model);
           members.push({
             memberId: flatId,
+            model: entry.model,
             memberNoun: "pool member",
             call: (options = {}) => attemptChatCompletion(
               poolMemberId, provider, { ...body, model: entry.model }, options,

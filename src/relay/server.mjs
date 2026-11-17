@@ -217,6 +217,7 @@ export function createRelayServer(deps) {
                   // members.
                   callUpstreams: memberPlan.members.map((member) => ({
                     memberId: member.memberId,
+                    model: member.model,
                     memberNoun: member.memberNoun,
                     call: (options) => member.call({ signal: abortController.signal, ...options }),
                   })),

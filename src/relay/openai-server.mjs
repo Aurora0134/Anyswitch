@@ -2,7 +2,7 @@ import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
 import { parseOpenAIPath, buildOpenAIPath, AGENT_SEGMENT_SEPARATOR } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
-import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel, appendFailoverContext } from "./stream-pipe.mjs";
+import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel, appendFailoverContext, logIdentitySegment } from "./stream-pipe.mjs";
 import { translateResponsesRequest } from "./responses-translate.mjs";
 import { validateStore } from "../store/store-schema.mjs";
 import { isPoolFailoverStatus } from "../channels/pool-routing.mjs";
@@ -1028,6 +1028,7 @@ export function createOpenAIRelayServer(deps) {
                     // members.
                     callUpstreams: memberPlan.members.map((member) => ({
                       memberId: member.memberId,
+                      model: member.model,
                       memberNoun: member.memberNoun,
                       call: (options) => member.call({ signal: abortController.signal, ...options }),
                     })),
@@ -1072,7 +1073,7 @@ export function createOpenAIRelayServer(deps) {
                 memberPlan.noteFailure?.(member.memberId);
                 if (isLastMember) break;
                 tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
-                deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
+                deps.logger?.warn?.(`${planLabel}: member${logIdentitySegment(member, { originalBody: body })} returned ${result.status}; failing over to the next member`);
               } finally {
                 memberPlan.endMember?.(member.memberId);
               }
@@ -1222,6 +1223,7 @@ export function createOpenAIRelayServer(deps) {
               ? {
                   callUpstreams: memberPlan.members.map((member) => ({
                     memberId: member.memberId,
+                    model: member.model,
                     memberNoun: member.memberNoun,
                     call: (options) => member.call({ signal: abortController.signal, ...options }),
                   })),
@@ -1381,6 +1383,7 @@ export function createOpenAIRelayServer(deps) {
                     // members.
                     callUpstreams: memberPlan.members.map((member) => ({
                       memberId: member.memberId,
+                      model: member.model,
                       memberNoun: member.memberNoun,
                       call: (options) => member.call({ signal: abortController.signal, ...options }),
                     })),
@@ -1425,7 +1428,7 @@ export function createOpenAIRelayServer(deps) {
                 memberPlan.noteFailure?.(member.memberId);
                 if (isLastMember) break;
                 tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
-                deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
+                deps.logger?.warn?.(`${planLabel}: member${logIdentitySegment(member, { originalBody: body })} returned ${result.status}; failing over to the next member`);
               } finally {
                 memberPlan.endMember?.(member.memberId);
               }
