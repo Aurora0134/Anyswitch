@@ -3509,7 +3509,7 @@ export function createPanelRouter({
     // 级别过滤只发生在这一个出口。写入侧照旧全量：日志文件与环形缓冲都不因用户选了
     // 高级别而少一行，档案是排障时唯一的凭据。逐帧现读闸门，是为了让已经打开的其它
     // 窗口不必重连就不再收到低于门槛的新行；它们屏幕上已经显示出去的旧行，随客户端
-    // 25 行上限自然滚掉。清空帧没有 level，判定一律放行——它不是日志。
+    // 500 条上限自然滚掉。清空帧没有 level，判定一律放行——它不是日志。
     const writeEntryFrame = (entry) => {
       if (!logLevelAllows(entry.level, logLevelGate())) return;
       res.write(`data: ${JSON.stringify(entry)}\n\n`);
