@@ -409,24 +409,37 @@ function readHeadTailLines(path, headN, tailN) {
 // 提醒）不推进该键。
 //
 // 提取是倒向分块扫描：从文件尾按 64KB 块往头读，找到最近的用户行即停
-// （谓词由各家 adapter 提供，与其 loadMessages 的用户判定同源）。浅命中只
-// 读一两个块；深 miss（agent 长跑把提问推远，实测分布在 450KB–2MB）才会把
-// 2MB 预算读满——预算按「最多读多少」定，不按「一定读多少」定。窗口外的
-// 旧提问靠 (size, mtime) memo 保住旧值——用户行只会追加、时间戳单调，找不
-// 到新值时沿用上轮结论，排序键只前进不回跳。首扫窗口内没有用户行时回落
-// null（调用方再回落 createdAt）：宁可低估，不猜。
+// （谓词由各家 adapter 提供，与其 loadMessages 的用户判定同源）。≤2MB 的
+// 文件整份都是窗——逐行解析，行为与深扫引入前逐字节同源（既有的小文件
+// 测试钉住这条路径）。>2MB 的文件旧 2MB 尾窗会把头部的提问扫丢：kimi 单
+// 个 wire.jsonl 实测到 134.5MB，agent 长跑把唯一一问推出窗外，而 kimi 没有
+// createdAt 可回落，排序键归零、行沉到分组底——所以大文件升级为整份倒扫，
+// 配 hint 预筛压成本：谓词成立时行字节必含的完整 JSON 字面量（如 "user"，
+// 引号字面量不会误配 "user_message" 这类值；机器写盘不转义 ASCII → 字节
+// indexOf 即精确）。无命中的块连行都不切；命中的块里逐行再过一次 needle，
+// 过了才 JSON.parse——预筛只挡「绝无用户行」的块，误命中只损失一次解析，
+// 绝不漏报。倒扫语义不变：超集窗口里最先从尾侧遇到的仍是同一条最新用户
+// 行，深扫结果恒 ≥ 旧窗结果。预算按「最多读多少」定：小文件 2MB 分界、
+// 大文件 512MB IO 护栏封顶，超护栏的异常巨物保持旧行为（窗内 miss → null
+// → memo 回落）。护栏内整份扫完仍没有用户行时回落 null（调用方再回落
+// createdAt）：宁可低估，不猜。
 // ---------------------------------------------------------------------------
 
 const LAST_PROMPT_SCAN_BYTES = 2 * 1024 * 1024;
 const LAST_PROMPT_CHUNK_BYTES = 64 * 1024;
+// 深扫单文件 IO 护栏。真实分布里最大的单 transcript（kimi wire.jsonl）在
+// 134.5MB，护栏挡的是异常巨物（错挂/损坏的文件），防一轮扫描被一个文件
+// 拖死；预筛让护栏内的整扫也只是字节 indexOf 的成本。
+const LAST_PROMPT_DEEP_MAX_BYTES = 512 * 1024 * 1024;
 
 // path → { size, mtimeMs, at }。扫描跑在常驻 worker 里，memo 跨轮存活：
 // 30s TTL 的列表刷新里大部分文件 (size, mtime) 未变 → 零读盘。
 const LAST_PROMPT_MEMO = new Map();
 
 // userLineTime(value)：一行 JSONL 的「用户提问时间」毫秒值；非用户行、注入
-// 行、坏行一律返回 null。
-function lastUserPromptAt(path, userLineTime) {
+// 行、坏行一律返回 null。hints：该谓词成立时行字节必含的 JSON 字面量数组，
+// 只在 >2MB 的深扫里使用（见节注释）。
+function lastUserPromptAt(path, userLineTime, hints) {
   let stats;
   try {
     stats = statSync(path);
@@ -440,7 +453,7 @@ function lastUserPromptAt(path, userLineTime) {
   try {
     const fd = openSync(path, "r");
     try {
-      at = scanLastUserPromptBackward(fd, stats.size, userLineTime) ?? at;
+      at = scanLastUserPromptBackward(fd, stats.size, userLineTime, hints) ?? at;
     } finally {
       closeSync(fd);
     }
@@ -455,26 +468,44 @@ function lastUserPromptAt(path, userLineTime) {
 // 字节序列内部，所以字节级切行是精确的；块边界骑着的半行以原始字节留到下
 // 一（更老的）块拼头，多字节字符跨块也能整字还原。读满预算（或读到文件
 // 头）都没命中时返回 null。
-function scanLastUserPromptBackward(fd, size, userLineTime) {
+//
+// size ≤ 2MB 或调用方未给 hints：needles 为空，全行 JSON.parse——与深扫
+// 引入前的行为逐字节同源。size > 2MB 且带 hints：预筛启用，预算换用 IO
+// 护栏（见节注释）。
+function scanLastUserPromptBackward(fd, size, userLineTime, hints) {
+  const deep = size > LAST_PROMPT_SCAN_BYTES && Array.isArray(hints) && hints.length > 0;
+  const needles = deep ? hints.map((hint) => Buffer.from(hint, "utf8")) : null;
+  const budget = deep ? LAST_PROMPT_DEEP_MAX_BYTES : LAST_PROMPT_SCAN_BYTES;
   const buf = Buffer.alloc(LAST_PROMPT_CHUNK_BYTES);
   // pending：窗口最老边界上那行不完整行的已读半截（较新侧），等更老的块补头。
   let pending = Buffer.alloc(0);
   let pos = size;
   let scanned = 0;
-  while (pos > 0 && scanned < LAST_PROMPT_SCAN_BYTES) {
-    const want = Math.min(LAST_PROMPT_CHUNK_BYTES, pos, LAST_PROMPT_SCAN_BYTES - scanned);
+  while (pos > 0 && scanned < budget) {
+    const want = Math.min(LAST_PROMPT_CHUNK_BYTES, pos, budget - scanned);
     pos -= want;
     scanned += want;
     const n = readSync(fd, buf, 0, want, pos);
     if (n < want) break; // 常规文件不会部分读；真出现＝IO 异常，停扫沿用旧值
     const combined = Buffer.concat([buf.subarray(0, n), pending]);
+    // 块级预筛：整块（含 pending）没有任何 needle 字节 → 块内不存在谓词能
+    // 命中的行，连行都不切。左边界首个换行前的半行照旧滚进 pending——那
+    // 截的头在更老的块里，拼完整了自然会过筛。
+    if (needles !== null && !needles.some((needle) => combined.includes(needle))) {
+      const nl = combined.indexOf(0x0a);
+      pending = nl === -1 ? combined : combined.subarray(0, nl);
+      continue;
+    }
     // 从最新侧往老找换行：两个相邻换行之间的字节段是一行完整行。首段以
     // combined 末端（＝文件尾）收口——最后一条行天然完整。
     let lineEnd = combined.length;
     for (let i = combined.length - 1; i >= 0; i--) {
       if (combined[i] !== 0x0a) continue;
-      const trimmed = combined.subarray(i + 1, lineEnd).toString("utf8").trim();
+      const lineBytes = combined.subarray(i + 1, lineEnd);
       lineEnd = i;
+      // 行级预筛：行字节没有 needle → 谓词不可能命中，解析都省掉。
+      if (needles !== null && !needles.some((needle) => lineBytes.includes(needle))) continue;
+      const trimmed = lineBytes.toString("utf8").trim();
       if (trimmed === "") continue;
       let value;
       try {
@@ -490,13 +521,15 @@ function scanLastUserPromptBackward(fd, size, userLineTime) {
   }
   // 读到文件头（pos===0）时 pending 就是首行——完整行，补查一次。
   if (pos === 0 && pending.length > 0) {
-    const trimmed = pending.toString("utf8").trim();
-    if (trimmed !== "") {
-      try {
-        const ts = userLineTime(JSON.parse(trimmed));
-        if (ts !== null) return ts;
-      } catch {
-        // 首行坏——与坏行同处置
+    if (needles === null || needles.some((needle) => pending.includes(needle))) {
+      const trimmed = pending.toString("utf8").trim();
+      if (trimmed !== "") {
+        try {
+          const ts = userLineTime(JSON.parse(trimmed));
+          if (ts !== null) return ts;
+        } catch {
+          // 首行坏——与坏行同处置
+        }
       }
     }
   }
@@ -693,7 +726,9 @@ function createClaudeAdapter(roots) {
 
   // 行级用户判据：与 parseSession 的标题判据同源（type/message.role 双形态），
   // 再叠上「对话目录」同款注入过滤——整块工具结果的 user 记录、命令回显与
-  // 系统提醒都不算提问。
+  // 系统提醒都不算提问。hint：两种形态的行都必带 "user" 字面量（type 值或
+  // role 值），深扫预筛用。
+  const CLAUDE_USER_LINE_HINTS = ['"user"'];
   function claudeUserLineTime(value) {
     const isUser = value.type === "user" || (value.message && value.message.role === "user");
     if (!isUser || !value.message) return null;
@@ -808,7 +843,7 @@ function createClaudeAdapter(roots) {
       file: path,
       createdAt,
       lastActive,
-      lastPromptAt: lastUserPromptAt(path, claudeUserLineTime),
+      lastPromptAt: lastUserPromptAt(path, claudeUserLineTime, CLAUDE_USER_LINE_HINTS),
     });
   }
 
@@ -923,7 +958,10 @@ function createKimiAdapter(roots) {
   }
 
   // 行级用户判据：与 firstPrompt 同一双事件形态 + 同一道 system-reminder 过滤
-  // ——「最后一条用户事件」与「第一条用户事件」必须是同一把尺。
+  // ——「最后一条用户事件」与「第一条用户事件」必须是同一把尺。hint：两种
+  // 事件形态分别必带 "prompt.accepted" / "user" 字面量（kimi 单文件可到
+  // 134.5MB，深扫预筛主要就是给它压成本）。
+  const KIMI_USER_LINE_HINTS = ['"prompt.accepted"', '"user"'];
   function kimiUserLineTime(value) {
     let text = null;
     if (value.type === "prompt.accepted") {
@@ -989,6 +1027,7 @@ function createKimiAdapter(roots) {
               lastPromptAt: lastUserPromptAt(
                 join(entry.sessionDir, "agents", "main", "wire.jsonl"),
                 kimiUserLineTime,
+                KIMI_USER_LINE_HINTS,
               ),
             }),
           );
@@ -1356,7 +1395,8 @@ function createDshAdapter(roots) {
 
 function createPiAdapter(roots) {
   // 行级用户判据：与 loadMessages 同一形态（type=message + role=user），注入
-  // 过滤与「对话目录」共用一份名单。
+  // 过滤与「对话目录」共用一份名单。hint：role 值必带 "user" 字面量。
+  const PI_USER_LINE_HINTS = ['"user"'];
   function piUserLineTime(value) {
     if (value.type !== "message" || !value.message || value.message.role !== "user") return null;
     if (allToolResultBlocks(value.message.content)) return null;
@@ -1417,7 +1457,7 @@ function createPiAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
-      lastPromptAt: lastUserPromptAt(path, piUserLineTime),
+      lastPromptAt: lastUserPromptAt(path, piUserLineTime, PI_USER_LINE_HINTS),
     });
   }
 
@@ -1476,7 +1516,8 @@ function createPiAdapter(roots) {
 function createQoderAdapter(roots) {
   // 行级用户判据：qoder 与 claude 同为 Anthropic 形状，type=user 单形态（其
   // parse 只认 type）；整块工具结果的 user 记录与注入文本同「对话目录」口径
-  // 一并排除。
+  // 一并排除。hint：type 值必带 "user" 字面量。
+  const QODER_USER_LINE_HINTS = ['"user"'];
   function qoderUserLineTime(value) {
     if (value.type !== "user" || !value.message) return null;
     if (allToolResultBlocks(value.message.content)) return null;
@@ -1546,7 +1587,7 @@ function createQoderAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
-      lastPromptAt: lastUserPromptAt(path, qoderUserLineTime),
+      lastPromptAt: lastUserPromptAt(path, qoderUserLineTime, QODER_USER_LINE_HINTS),
     });
   }
 
@@ -1671,7 +1712,10 @@ function codexMessage(value) {
 }
 
 // 行级用户判据：直接复用 codexMessage——合成信封（AGENTS.md 前导 / 环境块）
-// 与空文本在它体内已经排除，剩下的 user 即真人提问。
+// 与空文本在它体内已经排除，剩下的 user 即真人提问。hint：response_item 形
+// 态必带 "user" 字面量（payload.role 值），event_msg 形态必带
+// "user_message"（payload.type 值）——两个 needle 任一命中即过筛。
+const CODEX_USER_LINE_HINTS = ['"user"', '"user_message"'];
 function codexUserLineTime(value) {
   const message = codexMessage(value);
   if (message === null || message.role !== "user") return null;
@@ -1779,7 +1823,7 @@ function createCodexAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
-      lastPromptAt: lastUserPromptAt(path, codexUserLineTime),
+      lastPromptAt: lastUserPromptAt(path, codexUserLineTime, CODEX_USER_LINE_HINTS),
     });
   }
 
@@ -1868,7 +1912,9 @@ function grokSessionUpdate(value) {
 }
 
 // 行级用户判据：user_message_chunk 与 loadMessages 的用户轮同源（倒扫命中的
-// 是最后一轮的尾块，同轮各块时间戳几乎相同）；空块不算。
+// 是最后一轮的尾块，同轮各块时间戳几乎相同）；空块不算。hint：裸形态与 ACP
+// 信封形态都必带 "user_message_chunk" 字面量（sessionUpdate 值）。
+const GROK_USER_LINE_HINTS = ['"user_message_chunk"'];
 function grokUserLineTime(value) {
   const update = grokSessionUpdate(value);
   if (update === null || update.sessionUpdate !== "user_message_chunk") return null;
@@ -1922,7 +1968,7 @@ function createGrokAdapter(roots) {
       file: sessionDir,
       createdAt,
       lastActive: parseTimestampMs(summary.updated_at) ?? createdAt,
-      lastPromptAt: lastUserPromptAt(join(sessionDir, "updates.jsonl"), grokUserLineTime),
+      lastPromptAt: lastUserPromptAt(join(sessionDir, "updates.jsonl"), grokUserLineTime, GROK_USER_LINE_HINTS),
     });
   }
 
@@ -2085,7 +2131,9 @@ function readLastAiTitle(path) {
 // 行级用户判据：workbuddyMessage 的 user 行 + 全量注入名单过滤。标题路径的
 // firstUserMessage 只挡 client 注入的整块上下文（isInjectedUserBlock），排序键
 // 这里必须更严——task-notification / 命令回显这类机器文本同样不推进键，否则
-// 长跑会话的排序键会被通知行一路推着走。
+// 长跑会话的排序键会被通知行一路推着走。hint：role 值（message.role 或顶层
+// value.role）必带 "user" 字面量。
+const WORKBUDDY_USER_LINE_HINTS = ['"user"'];
 function workbuddyUserLineTime(value) {
   const message = workbuddyMessage(value);
   if (message === null || message.role !== "user") return null;
@@ -2199,7 +2247,7 @@ function createWorkbuddyAdapter(roots) {
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
-      lastPromptAt: lastUserPromptAt(path, workbuddyUserLineTime),
+      lastPromptAt: lastUserPromptAt(path, workbuddyUserLineTime, WORKBUDDY_USER_LINE_HINTS),
     });
   }
 

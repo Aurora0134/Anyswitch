@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
@@ -1360,7 +1360,9 @@ test("workbuddy: ai-title 标题、首条用户消息摘要、cwd 与会话 id �
 // --- lastPromptAt（最近用户提问时间）------------------------------------------
 // 排序键语义：只有用户真的发消息才前进；agent 输出、工具结果、注入提醒一律
 // 不推。各家谓词与其 loadMessages 的用户判定同源，memo 保证未变化文件零读
-// 盘、追加新提问时键前进不回跳。
+// 盘、追加新提问时键前进不回跳。深扫（>2MB）：hint 预筛把无用户块的解析
+// 成本压到字节 indexOf，提问被推出旧 2MB 窗也能整份倒扫取回——kimi 没有
+// createdAt 可回落，提问丢了排序键就归零、行沉到组底（本 bug 的原样）。
 
 test("claude: lastPromptAt 取最后一条真实用户行，注入与工具结果行不推进", async () => {
   const root = makeTmp();
@@ -1392,26 +1394,53 @@ test("claude: lastPromptAt 取最后一条真实用户行，注入与工具结�
   assert.equal(after.sessions[0].lastPromptAt, Date.parse("2026-09-01T11:00:00.000Z"), "新提问把键推进到新行时间");
 });
 
-test("claude: 提问被挤出尾窗（>2MB 工具输出）时回落 null，不误报", async () => {
-  const root = makeTmp();
-  // 首行用户提问（满足列表门槛），其后 2.1MB 的助手/工具行把提问推出窗口。
-  const filler = JSON.stringify({
+// 深扫回归：首行用户提问 + >2MB 无用户填充——提问在旧 2MB 窗外，深扫必须
+// 整份倒扫把真实提问时间取回（kimi 没有 createdAt 回落，丢提问＝行沉组底）。
+// 填充行带不带 hint 命中都测：助手的 "user" 字面量不存在（claude 填充是
+// type:"assistant"），预筛应整块跳过；块内混入含字面量的行时预筛放行、
+// 谓词把关。
+function claudeDeepFiller(extra = {}) {
+  return JSON.stringify({
     type: "assistant",
     message: { role: "assistant", content: "工具输出".repeat(90) },
     timestamp: "2026-09-01T11:00:00.000Z",
     cwd: "C:\\work\\myproj",
     sessionId: "sess-deep",
+    ...extra,
   });
+}
+
+test("claude: 提问被挤出旧 2MB 尾窗时深扫取回真实提问时间", async () => {
+  const root = makeTmp();
+  const filler = claudeDeepFiller();
   const lines = [
     claudeLine({ message: { role: "user", content: "唯一一问" }, timestamp: "2026-09-01T10:00:00.000Z", sessionId: "sess-deep" }),
   ];
-  // 按行数预计算堆满 2MB+（首问在窗口外，窗口内全是无用户行的填充）。
+  // 按行数预计算堆满 2MB+（首问在旧窗口外，窗口内全是无用户行的填充）。
   const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
   for (let i = 0; i < need; i++) lines.push(filler);
   writeClaudeSession(root, "C--work-myproj", "sess-deep.jsonl", lines);
   const { sessions } = await claudeScanner(root).scanAll();
   assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].lastPromptAt, null, "窗外提问不硬造键（调用方回落 createdAt）");
+  assert.equal(sessions[0].lastPromptAt, Date.parse("2026-09-01T10:00:00.000Z"), "深扫取回窗外首问时间，不再回落 null");
+});
+
+// 预筛的把关面：块内出现含 "user" 字面量但非用户行的填充（如助手行引用了
+// 单词 "user"），预筛放行整块、谓词仍返回 null——文件里没有任何真实提问时
+// 键照旧落 null，绝不因字面量出现而硬造。
+test("claude: 深扫字面量误命中不硬造键，无真实提问仍回落 null", async () => {
+  const root = makeTmp();
+  // 填充行的文本里带 "user" 字面量（content 是字符串，谓词判 type 不匹配）。
+  const filler = claudeDeepFiller({
+    message: { role: "assistant", content: "assistant 谈论 user 的内容输出".repeat(6) },
+  });
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  const lines = [];
+  for (let i = 0; i < need; i++) lines.push(filler);
+  writeClaudeSession(root, "C--work-myproj", "sess-deep2.jsonl", lines);
+  const { sessions } = await claudeScanner(root).scanAll();
+  // 无真实提问行 → 会话根本不进列表（列表门槛要求首条真实用户消息）。
+  assert.equal(sessions.length, 0);
 });
 
 test("kimi: lastPromptAt 是最近的 prompt.accepted，system-reminder 注入不推进", async () => {
@@ -1439,6 +1468,161 @@ test("kimi: lastPromptAt 是最近的 prompt.accepted，system-reminder 注入�
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].lastPromptAt, 1788000004000, "取最近一次用户输入，不是最后的写盘时间");
   // lastActive 走 wire mtime（既有口径），这里的提问时间戳是从事件行里读的。
+});
+
+// 深扫（>2MB）分端点回归：各家真实存储里单文件可以长到几十上百 MB
+// （kimi 实测 134.5MB），旧 2MB 尾窗读不到旧提问；kimi 又没有 createdAt
+// 可回落，键归零、行沉到组底。深扫必须整份倒扫把首问时间取回。
+// 每家的填充行都按其真实「无用户行」形态构造，确保预筛跳过的正是生产里
+// 会大量出现的行形。
+test("kimi: 首问被推出旧 2MB 尾窗时深扫取回提问时间（>2MB wire.jsonl）", async () => {
+  const root = makeTmp();
+  const sessionDir = join(root, "sessions", "wd_x", "session_deep");
+  mkdirSync(join(sessionDir, "agents", "main"), { recursive: true });
+  const filler = JSON.stringify({
+    type: "context.append_loop_event",
+    event: { type: "content.part", part: { type: "text", text: "agent 回答内容".repeat(30) } },
+    time: 1788000005000,
+  });
+  const lines = [JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "唯一一问" }], time: 1788000001000 })];
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) lines.push(filler);
+  writeFileSync(join(sessionDir, "agents", "main", "wire.jsonl"), lines.join("\n") + "\n", "utf8");
+  writeFileSync(
+    join(root, "session_index.jsonl"),
+    JSON.stringify({ sessionId: "session_deep", sessionDir, workDir: "C:\\work\\kimi-deep" }) + "\n",
+    "utf8",
+  );
+  const { sessions } = await testScanner({ kimi: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000001000, "深扫取回窗外首问时间，行不再沉底");
+});
+
+test("pi: 首问被推出旧 2MB 尾窗时深扫取回提问时间（>2MB 单文件）", async () => {
+  const root = makeTmp();
+  const dir = join(root, "--C-work-pideep--");
+  mkdirSync(dir, { recursive: true });
+  const filler = JSON.stringify({
+    type: "message",
+    id: "m-fill",
+    timestamp: "2026-09-01T10:30:00.000Z",
+    message: { role: "assistant", content: [{ type: "text", text: "pi 长跑回答".repeat(60) }], timestamp: 1788000050000 },
+  });
+  const lines = [
+    JSON.stringify({
+      type: "session",
+      version: 3,
+      id: "019fdeep-0000-7d24-a26b-39732b7ce85b",
+      timestamp: "2026-09-01T10:00:00.000Z",
+      cwd: "C:\\work\\pideep",
+    }),
+    JSON.stringify({
+      type: "message",
+      id: "m-user",
+      timestamp: "2026-09-01T10:00:02.000Z",
+      message: { role: "user", content: [{ type: "text", text: "pi 唯一一问" }], timestamp: 1788000002000 },
+    }),
+  ];
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) lines.push(filler);
+  writeFileSync(join(dir, "2026-09-01T10-00-00-000Z_019fdeep.jsonl"), lines.join("\n") + "\n", "utf8");
+  const { sessions } = await testScanner({ pi: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000002000, "深扫取回窗外首问时间");
+});
+
+test("qoder: 首问被推出旧 2MB 尾窗时深扫取回提问时间（>2MB 单文件）", async () => {
+  const root = makeTmp();
+  const sessionId = "deepqod-46f7-4bc8-8e63-d216659bd48e";
+  const filler = JSON.stringify({
+    type: "assistant",
+    uuid: "a-fill",
+    timestamp: "2026-09-01T11:00:00.000Z",
+    message: { role: "assistant", content: [{ type: "text", text: "qoder 工具往返输出".repeat(30) }] },
+  });
+  const lines = [
+    JSON.stringify({ type: "workspace-directories", sessionId, directories: ["C:\\work\\qodeep"] }),
+    JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-01T01:13:50.000Z", message: { role: "user", content: [{ type: "text", text: "qoder 唯一一问" }] } }),
+  ];
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) lines.push(filler);
+  writeQoderSession(root, "C--work-qodeep", `${sessionId}.jsonl`, lines);
+  const { sessions } = await testScanner({ qoder: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, Date.parse("2026-09-01T01:13:50.000Z"), "深扫取回窗外首问时间");
+});
+
+test("codex: 首问被推出旧 2MB 尾窗时深扫取回提问时间（>2MB rollout）", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  const id = "019fdeep-0000-7d24-a26b-39732b7ce85b";
+  const filler = codexLine(
+    "response_item",
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "codex 长跑回答".repeat(60) }] },
+    "2026-09-01T10:30:00.000Z",
+  );
+  const lines = [
+    codexLine("session_meta", { id, timestamp: "2026-09-01T10:00:00.000Z", cwd: "C:\\work\\codeep" }),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "codex 唯一一问" }] }, "2026-09-01T10:00:02.000Z"),
+  ];
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) lines.push(filler);
+  writeCodexSession(root, join("2026", "09", "01"), `rollout-2026-09-01T10-00-00-${id}.jsonl`, lines);
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, Date.parse("2026-09-01T10:00:02.000Z"), "深扫取回窗外首问时间");
+});
+
+test("grok: 首问被推出旧 2MB 尾窗时深扫取回提问时间（>2MB updates.jsonl）", async () => {
+  const root = makeTmp();
+  const id = "019fdeep-6789-7abc-8def-0123456789ab";
+  const filler = JSON.stringify({
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "grok agent 长跑回答".repeat(60) },
+    ts: 1788000050000,
+  });
+  const updates = [
+    { sessionUpdate: "user_message_chunk", content: { type: "text", text: "grok 唯一一问" }, ts: 1788000001000 },
+  ];
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) updates.push(JSON.parse(filler));
+  const dir = writeGrokSession(root, "C%3A%5Cwork%5Cgrokdeep", id, {
+    summary: {
+      info: { session_id: id, cwd: "C:\\work\\grokdeep" },
+      generated_title: "深扫会话",
+      created_at: "2026-09-01T10:00:00.000Z",
+      updated_at: "2026-09-01T10:30:00.000Z",
+      num_messages: 5,
+    },
+    updates,
+  });
+  assert.ok(statSync(join(dir, "updates.jsonl")).size > 2 * 1024 * 1024, "fixture 保证真超旧窗");
+  const { sessions } = await testScanner({ grok: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000001000, "深扫取回窗外首问时间");
+});
+
+test("workbuddy: 首问被推出旧 2MB 尾窗时深扫取回提问时间（>2MB 单文件）", async () => {
+  const root = makeTmp();
+  const id = "0f4bdeep-1111-4a2b-8c3d-222233334444";
+  const filler = JSON.stringify({
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text: "workbuddy 长跑回答".repeat(60) }],
+    timestamp: 1788000050000,
+    cwd: WORKBUDDY_CWD,
+  });
+  const events = [
+    { type: "session-meta", sessionId: id, cwd: WORKBUDDY_CWD, timestamp: 1788000000000 },
+    workbuddyMessageEvent("user", "workbuddy 唯一一问", 1788000001000),
+  ];
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) events.push(JSON.parse(filler));
+  const file = writeWorkbuddySession(root, WORKBUDDY_PROJECT_DIR, id, events);
+  assert.ok(statSync(file).size > 2 * 1024 * 1024, "fixture 保证真超旧窗");
+  const { sessions } = await testScanner({ workbuddy: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000001000, "深扫取回窗外首问时间");
 });
 
 test("dsh: lastPromptAt 取帧链里最近的 user/message，后续响应批不推进", async () => {
