@@ -5,8 +5,9 @@ import { existsSync, mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, rea
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createTerminalHost, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, runTerminalHostEntry, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE, TERMINAL_SESSION_DIR } from "../src/terminal/terminal-host.mjs";
+import { createTerminalHost, createTerminalHostLogger, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, runTerminalHostEntry, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE, TERMINAL_SESSION_DIR } from "../src/terminal/terminal-host.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "../src/terminal/terminal-process-manager.mjs";
+import { formatLogStamp } from "../src/shared/logger.mjs";
 import { createScreenMirror } from "../src/terminal/terminal-screen.mjs";
 import { listenLoopback } from "../test-helpers/loopback.mjs";
 
@@ -3143,10 +3144,11 @@ test("宿主入口接线：故障处理器先装、SIGINT/SIGTERM 各走 close�
   const fakeHost = { port: 47901, close: async () => { closed.push("close"); } };
   const installCalls = [];
   const watchCalls = [];
+  const startHostCalls = [];
   const host = await runTerminalHostEntry({
     proc: fakeProc,
     env: { [TERMINAL_PARENT_PID_ENV]: "4242" },
-    startHost: async () => fakeHost,
+    startHost: async (options) => { startHostCalls.push(options); return fakeHost; },
     installFaultHandlers: (opts) => { installCalls.push(opts); return { dispose() {} }; },
     watchParent: (opts) => { watchCalls.push(opts); return null; },
     logPath: join("unused-root", "logs", "terminal-host.log"),
@@ -3166,12 +3168,18 @@ test("宿主入口接线：故障处理器先装、SIGINT/SIGTERM 各走 close�
   await watchCalls[0].onDead();
   assert.deepEqual(closed, ["close", "close", "close"]);
   assert.deepEqual(exits, [0, 0, 0]);
-  // tee 日志的启动锚点：排障靠它认这个进程代。
+  // 宿主 logger 由入口接线：宿主的 warn 家族（persist failed、session exited 等）全部
+  // 经它走「落盘封套＋面板转发」出口，不再旁路 console。
+  assert.equal(typeof startHostCalls[0]?.logger?.warn, "function",
+    "入口必须把 logger 接给 startHost——不接，宿主 warn 家族就回到无封套、不上屏的旧路");
+  // tee 日志的启动锚点：排障靠它认这个进程代。经默认 logger 落 stderr，
+  // [ts] [info] 封套与 relay-host.log 同格式（A9）。
   assert.equal(writes.length, 1);
-  assert.match(writes[0], /terminal host listening on 127\.0\.0\.1:47901 \(pid 31415\)/);
+  assert.match(writes[0], /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[info\] terminal host listening on 127\.0\.0\.1:47901 \(pid 31415\)\n$/,
+    "启动锚点带 [ts] [info] 封套落 stderr（tee 进 terminal-host.log）");
 });
 
-test("宿主入口接线：env 未带父 pid 时 watchdog 收到 NaN（单跑不受影响）；启动失败写 stderr 并 exit(1)", async () => {
+test("宿主入口接线：env 未带父 pid 时 watchdog 收到 NaN（单跑不受影响）；启动失败走宿主 logger 并 exit(1)", async () => {
   const writes = [];
   const exits = [];
   const watchCalls = [];
@@ -3188,6 +3196,12 @@ test("宿主入口接线：env 未带父 pid 时 watchdog 收到 NaN（单跑不
 
   const failWrites = [];
   const failExits = [];
+  const logged = [];
+  const recLogger = {
+    info: (m) => logged.push(["info", m]),
+    warn: (m) => logged.push(["warn", m]),
+    error: (m) => logged.push(["error", m]),
+  };
   await runTerminalHostEntry({
     proc: { pid: 1, stderr: { write: (line) => failWrites.push(line) }, on: () => {}, exit: (code) => failExits.push(code) },
     env: {},
@@ -3195,10 +3209,113 @@ test("宿主入口接线：env 未带父 pid 时 watchdog 收到 NaN（单跑不
     installFaultHandlers: () => ({ dispose() {} }),
     watchParent: () => null,
     logPath: "unused",
+    logger: recLogger,
   });
   assert.deepEqual(failExits, [1], "启动失败必须 exit(1)");
-  assert.equal(failWrites.length, 1);
-  assert.match(failWrites[0], /^\[terminal-host\] failed: /, "失败证据写 stderr（tee 进 terminal-host.log）");
+  assert.deepEqual(logged.map(([level]) => level), ["error"],
+    "启动失败走宿主 logger 的 error 级（默认实现再写 stderr 并转发面板，见 createTerminalHostLogger 用例）");
+  assert.match(logged[0][1], /^\[terminal-host\] failed: Error: synthetic boot failure/, "失败证据原文保留");
+  assert.equal(failWrites.length, 0, "入口不旁路 logger 直写 stderr");
+});
+
+// 宿主日志出口（A7/A9）：落盘封套与 relay-host.log 逐字同格式，warn/error 镜像到
+// 面板 ingest 上屏。封套期望用 formatLogStamp 自己算，不手拼、不涉时区。
+test("宿主日志出口：落盘行带 [ts] [level] 封套，warn/error 镜像面板 ingest，面板不在时静默丢弃", async () => {
+  const lines = [];
+  const posts = [];
+  const T = 1760000000000;
+  const logger = createTerminalHostLogger({
+    write: (line) => lines.push(line),
+    fetchFn: (url, init) => { posts.push({ url, init }); return Promise.resolve({ ok: true }); },
+    nowFn: () => T,
+  });
+
+  logger.info("terminal host listening on 127.0.0.1:47823 (pid 22300)");
+  assert.deepEqual(lines, [`[${formatLogStamp(T)}] [info] terminal host listening on 127.0.0.1:47823 (pid 22300)\n`],
+    "info 落盘行带封套——与既有 listening 行逐字节同形");
+  assert.equal(posts.length, 0, "info 不上面板：A7 只把 warn 家族接上屏，启动锚点仍是纯落盘行");
+
+  logger.warn("[terminal-host] state index persist failed: EPERM");
+  assert.deepEqual(lines[1], `[${formatLogStamp(T)}] [warn] [terminal-host] state index persist failed: EPERM\n`,
+    "warn 落盘行带 [ts] [warn] 封套（A9）");
+  assert.equal(posts.length, 1, "warn 镜像到面板 ingest（A7）");
+  assert.equal(posts[0].url, "http://127.0.0.1:47820/panel/api/logs/ingest");
+  assert.equal(posts[0].init.method, "POST");
+  assert.equal(posts[0].init.headers["x-anyswitch-panel"], "1", "ingest 鉴权头与 launcher 的转发器同款");
+  assert.equal(posts[0].init.headers.origin, "http://127.0.0.1:47820");
+  assert.deepEqual(JSON.parse(posts[0].init.body),
+    { level: "warn", message: "[terminal-host] state index persist failed: EPERM" },
+    "转发正文就是 ingest 的 {level, message} 形状，文本不再二次加工");
+
+  logger.error("[terminal-host] failed: boom");
+  assert.equal(posts.length, 2, "error 同样镜像");
+
+  // 面板不在/正重启：转发失败静默丢弃，落盘行不受影响（.catch 在调用当时就挂上，
+  // 不存在未处理 rejection 的窗口）。
+  const dropping = createTerminalHostLogger({
+    write: (line) => lines.push(line),
+    fetchFn: () => Promise.reject(new Error("panel down")),
+    nowFn: () => T,
+  });
+  dropping.warn("[terminal-host] session exited (id=x, code=1, msSinceSpawn=1, firstByte=true)");
+  assert.equal(lines.at(-1),
+    `[${formatLogStamp(T)}] [warn] [terminal-host] session exited (id=x, code=1, msSinceSpawn=1, firstByte=true)\n`,
+    "转发失败不碍落盘");
+});
+
+// 慢拍告警节流（B2）：稳定期每拍都超防抖窗，逐拍落行曾占 terminal-host.log 的 48%。
+// 照 logPenalty 手法：连续慢拍链只在第 2 拍落一行，slowPasses 计数一拍不少；断链
+// （一拍回到窗内）后重起的链再报一次。受控测量钟让「慢/快拍」不赌真实墙钟。
+test("落盘慢拍告警节流：连续第 2 拍才落一行，回到窗内断链重报", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-slowpass-"));
+  const { ptyModule } = capturingPtyModule();
+  const warns = [];
+  // persistPass 起止各读一次测量钟：elapsed 恒等于 passDuration。
+  let passDuration = 0;
+  let perfCall = 0;
+  const perfNowFn = () => { perfCall += 1; return perfCall % 2 === 1 ? 0 : passDuration; };
+  const host = createTerminalHost({
+    root, port: 0, ptyModule,
+    logger: { warn: (m) => warns.push(m) },
+    perfNowFn,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "慢拍", cwd: root, shell: "powershell", cols: 80, rows: 24 }),
+    }).then((r) => r.json());
+    const pty = host.sessions.get(created.id).pty;
+    await host.persistNow();
+    warns.length = 0;
+
+    const slowTick = async () => {
+      pty.dataListener("tick");
+      await host.persistNow();
+    };
+    // 连续慢拍链：第 1 拍静默，第 2 拍落一行，第 3 拍不追加。
+    passDuration = 300;
+    await slowTick();
+    await slowTick();
+    await slowTick();
+    const passLines = () => warns.filter((m) => m.includes("persist pass took"));
+    assert.equal(passLines().length, 1, "连续慢拍链只在第 2 拍落一行");
+    assert.equal(host.persistStats.slowPasses, 3, "节流只节日志：slowPasses 计数一拍不少");
+    // 断链（一拍回到防抖窗内）后重起：首拍静默，第 2 拍再报。
+    passDuration = 10;
+    await slowTick();
+    passDuration = 300;
+    await slowTick();
+    assert.equal(passLines().length, 1, "断链后重起的首拍不追加");
+    await slowTick();
+    assert.equal(passLines().length, 2, "断链重起的链在第 2 拍再落一行");
+    assert.match(passLines()[0], /^\[terminal-host\] persist pass took 300ms \(sessions=\d+, bytes=\d+, backlog=\d+\)$/,
+      "告警文案不变——节流只改频次，不改内容");
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // 真入口冒烟（真实进程、真实 isMain 判定，不用桩）。启动失败形态：数据根被同名文件

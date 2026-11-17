@@ -16,7 +16,7 @@ import { loadOrGenerateToken, createRelayTokenValidator } from "../launchers/pi-
 import { createScreenMirror } from "./terminal-screen.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
 import { probePidLiveness, getProcessCommandLineAsync } from "../relay/relay-process-manager.mjs";
-import { formatLogStamp } from "../shared/logger.mjs";
+import { createLogger, formatLogStamp } from "../shared/logger.mjs";
 
 export const TERMINAL_HOST_PORT = 47823;
 export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
@@ -79,6 +79,10 @@ const PERSIST_PASS_MAX_BYTES = 512 * 1024;
 // 全量冲净最多连跑几轮。它本来该一轮写完，多轮只用于收编「写期间新到的脏」；
 // 上限防的是输出永不停止时的活锁。
 const PERSIST_FULL_FLUSH_MAX_ROUNDS = 32;
+// 慢拍告警的节流（B2）：稳定期几乎每拍都超防抖窗（实测 259–637ms），逐拍落行曾占
+// terminal-host.log 的 48%。照 agent-metrics logPenalty 的手法——单次超窗是常态不
+// 报，一条连续慢拍链只在第 2 拍落一行（slowPasses 计数照走），链断开重起时再报。
+const PERSIST_SLOW_PASS_LOG_STREAK = 2;
 
 function json(res, status, body) {
   const text = JSON.stringify(body);
@@ -581,10 +585,10 @@ const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 该在哪天死」的决定权，关伪控制台只是给守规矩的进程一个优雅退出的机会，
 // 解耦进程必须由宿主亲手终结。杀失败（进程刚好自己退了、权限不够）只记日志
 // 不抛——关闭路径的语义是「尽力终结」，一个杀不动的进程不值得把 close 打成 500。
-function defaultKillTree(pid) {
+function defaultKillTree(pid, logger) {
   return new Promise((resolve) => {
     execFile("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true }, (error) => {
-      if (error) console.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
+      if (error) logger?.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
       resolve();
     });
   });
@@ -684,8 +688,9 @@ export function createTerminalHost({
   // （kimi 的 node 主进程）不会随它退——会话记录删了进程还活着，看板卡永远
   // 失去关闭入口。宿主是会话的拥有者，「进程死没死」不能外包给 node-pty 的
   // 内部行为：树杀直接对登记的 shell pid 动手，父子链不随控制台解耦而断。
-  // 测试注入记录桩，不动真进程。
-  killTreeFn = defaultKillTree,
+  // 测试注入记录桩，不动真进程。默认实现走宿主自己的 logger（落盘封套与面板
+  // 转发都挂在它上面），不直接写 console。
+  killTreeFn = (pid) => defaultKillTree(pid, logger),
   // 树杀前的误杀闸：pid 可被系统复用，「宁漏勿错」。复活判据复用 relay 的
   // 死活探针（原生 kill(0) + tasklist 交叉验证），测试注入布尔桩控制死活。
   isAliveFn = (pid) => probePidLiveness(pid) === "alive",
@@ -697,6 +702,10 @@ export function createTerminalHost({
   // 受控时钟后，跨 2s 静默门的判定不再靠真实 sleep 赌墙钟竞速。日志时刻照旧用
   // 真实墙钟——诊断面记录的是真实观察时刻，不该跟着测试时钟走。
   nowFn = Date.now,
+  // 单拍耗时的测量钟（仅观测：persistStats 与慢拍告警读它，不改任何行为）。
+  // 测试注入受控值，「连续慢拍才落日志」的节流才钉得住——真实 250ms+ 的单拍在
+  // 测试机上造不出来（写量太小）。
+  perfNowFn = () => performance.now(),
 } = {}) {
   const dataRoot = root || join(process.env.LOCALAPPDATA || process.cwd(), "Anyswitch");
   mkdirSync(dataRoot, { recursive: true });
@@ -876,6 +885,9 @@ export function createTerminalHost({
     };
   }
 
+  // 连续慢拍计数：见 PERSIST_SLOW_PASS_LOG_STREAK。一拍回到窗内即断链归零。
+  let consecutiveSlowPasses = 0;
+
   // 一轮落盘。
   //   full=false：防抖拍到的「有界单拍」，最多写 PERSIST_SESSION_WRITES_PER_PASS
   //   份会话文件、最多 PERSIST_PASS_MAX_BYTES 序列化字节，剩下的留在脏集合里等
@@ -892,7 +904,7 @@ export function createTerminalHost({
   //   序列化发生在 await 之前，写期间新到的输出块不在那份文本里，脏却被清了，
   //   于是那一块永久只活在内存里（关停前最后一块就直接丢）。索引同理。
   async function persistPass(full, only = null) {
-    const startedAt = performance.now();
+    const startedAt = perfNowFn();
     let ok = true;
     let written = 0;
     let bytes = 0;
@@ -1013,7 +1025,7 @@ export function createTerminalHost({
       ok = false;
       logger.warn?.(`[terminal-host] state persist failed: ${error.message}`);
     }
-    const elapsed = performance.now() - startedAt;
+    const elapsed = perfNowFn() - startedAt;
     persistStats.passes += 1;
     persistStats.lastPassMs = elapsed;
     if (elapsed > persistStats.maxPassMs) persistStats.maxPassMs = elapsed;
@@ -1023,9 +1035,16 @@ export function createTerminalHost({
     persistStats.backlog = dirtySessions.size;
     if (elapsed > PERSIST_DEBOUNCE_MS) {
       // 单笔超过防抖窗：旧实现里下一拍会叠上来、链无界积压。现在有界单拍加合并
-      // 请求把它挡在源头，这条日志是「该看这里了」的信号，不是失败。
+      // 请求把它挡在源头，这条日志是「该看这里了」的信号，不是失败。但它不再是
+      // 逐拍一行——稳定期每拍都超窗，逐行等于刷屏；一条连续慢拍链只在第 2 拍落
+      // 一行（见 PERSIST_SLOW_PASS_LOG_STREAK），失败的写仍在上面的 catch 里逐行。
       persistStats.slowPasses += 1;
-      logger.warn?.(`[terminal-host] persist pass took ${elapsed.toFixed(0)}ms (sessions=${written}, bytes=${bytes}, backlog=${dirtySessions.size})`);
+      consecutiveSlowPasses += 1;
+      if (consecutiveSlowPasses === PERSIST_SLOW_PASS_LOG_STREAK) {
+        logger.warn?.(`[terminal-host] persist pass took ${elapsed.toFixed(0)}ms (sessions=${written}, bytes=${bytes}, backlog=${dirtySessions.size})`);
+      }
+    } else {
+      consecutiveSlowPasses = 0;
     }
     return ok;
   }
@@ -2332,10 +2351,46 @@ export function watchParentProcess({
   return timer;
 }
 
+// 宿主进程自己的日志出口（2026-11-17，审计 A7/A9）。relay 把本进程的 stdout/stderr
+// tee 进 logs/terminal-host.log，原样落盘——落盘行的时间戳与级别封套只能在这里自己
+// 补：createLogger 的 `[ts] [level]` 与 relay-host.log 逐字同格式。warn/error 另发
+// 一份到面板 ingest（端点与鉴权头复刻 launcher.mjs 的 createForwardingLogger：面板
+// 把它落进自己的总线，SSE 扇出上屏）；面板没在听时静默丢弃——落盘是证据链，转发只
+// 是镜像，面板拿不到的下一次启动段另有 A3 的桥游标去管。
+const PANEL_LOG_INGEST_URL = "http://127.0.0.1:47820/panel/api/logs/ingest";
+
+export function createTerminalHostLogger({
+  write = (line) => process.stderr.write(line),
+  fetchFn = fetch,
+  ingestUrl = PANEL_LOG_INGEST_URL,
+  nowFn = Date.now,
+} = {}) {
+  const file = createLogger({ sink: write, now: nowFn });
+  const forward = (level, message) => {
+    fetchFn(ingestUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-anyswitch-panel": "1",
+        origin: "http://127.0.0.1:47820",
+      },
+      body: JSON.stringify({ level, message: String(message) }),
+    }).catch(() => {
+      // 面板 down 或正在重启——转发是尽力的，丢了不碍落盘。
+    });
+  };
+  return {
+    info: (m) => file.info(m),
+    warn: (m) => { file.warn(m); forward("warn", m); },
+    error: (m) => { file.error(m); forward("error", m); },
+  };
+}
+
 // 入口接线（isMain 块的本体，2026-11-15 从内联块抽出）。抽出只为把接线交给测试注入：
-// 四根线——故障处理器先装、SIGINT/SIGTERM 各走 close→exit(0)、env 里的父 pid 接到
-// 死亡契约、启动失败写 stderr 并 exit(1)——任何一根被删都该有红证。默认参数就是
-// 真实依赖，isMain 仍以无选项调用本函数：生产行为与副作用顺序与抽出前逐字节一致。
+// 五根线——故障处理器先装、宿主 logger 默认接到「落盘封套＋面板转发」的出口、
+// SIGINT/SIGTERM 各走 close→exit(0)、env 里的父 pid 接到死亡契约、启动失败记 error
+// 并 exit(1)——任何一根被删都该有红证。默认参数就是真实依赖，isMain 仍以无选项调用
+// 本函数。
 export function runTerminalHostEntry({
   proc = process,
   env = process.env,
@@ -2343,12 +2398,14 @@ export function runTerminalHostEntry({
   installFaultHandlers = installTerminalHostFaultHandlers,
   watchParent = watchParentProcess,
   logPath = join(APP_DIR, "logs", "terminal-host.log"),
+  logger = null,
 } = {}) {
+  const hostLogger = logger ?? createTerminalHostLogger({ write: (line) => proc.stderr.write(line) });
   installFaultHandlers({ logPath });
-  return startHost().then((host) => {
+  return startHost({ logger: hostLogger }).then((host) => {
     // Startup anchor for the tee'd log: every crash line after this one belongs
     // to this process incarnation.
-    proc.stderr.write(`[${formatLogStamp(Date.now())}] [info] terminal host listening on 127.0.0.1:${host.port} (pid ${proc.pid})\n`);
+    hostLogger.info(`terminal host listening on 127.0.0.1:${host.port} (pid ${proc.pid})`);
     proc.on("SIGINT", () => host.close().then(() => proc.exit(0)));
     proc.on("SIGTERM", () => host.close().then(() => proc.exit(0)));
     // Relay-owned mode: the parent relay pid arrives via env; when the relay
@@ -2361,7 +2418,7 @@ export function runTerminalHostEntry({
     });
     return host;
   }).catch((error) => {
-    proc.stderr.write(`[terminal-host] failed: ${error.stack || error}\n`);
+    hostLogger.error(`[terminal-host] failed: ${error.stack || error}`);
     proc.exit(1);
   });
 }
