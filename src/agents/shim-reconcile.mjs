@@ -71,6 +71,11 @@ const realFs = {
 // 族 resolver。codex 直用 agent-discovery 的执行体解析（含 npm shim 候选）；
 // 环境页自己的 resolveCodexShim 是它检测面的专属包装，不在此复用——本表只回
 // 答「CLI 在不在本机」，不关心桌面入口形态。
+//
+// 各 resolver 报「没装」的方式不同，下面 endpointInstalled 要把它们统一：
+// claude/opencode/pi/dsh/zcode/workbuddy/grok 一律把候选路径报出来（存在性
+// 由调用方判），codex 则在两种形态（npm shim 与原生 bin 目录）都不存在时抛
+// ENOENT。两种报法回答的是同一个问题：这个 CLI 在不在本机。
 const SPEC_RESOLVERS = {
   claude: resolveClaudeExecutable,
   codex: resolveCodexExecutable,
@@ -81,6 +86,41 @@ const SPEC_RESOLVERS = {
   workbuddy: resolveWorkbuddyExecutable,
   zcode: resolveZcodeExecutable,
 };
+
+/**
+ * 某个 CLI 在本机装没装。没装是正常状态，不用报错：本机没装 codex 的机器上，
+ * 这条判断应当安静地返回没装，不该把整轮对账打成失败。
+ *
+ * 两种情况，与 agentInstallState（agent-discovery）用同一套判断：
+ *   1. resolver 抛 ENOENT / ENOTDIR —— 没装的如实报法（codex 在 npm shim
+ *      与原生 bin 目录都不存在时如此，launcher 侧要的就是这条文案），算没装；
+ *   2. resolver 报出了候选路径 —— 候选文件要在磁盘上确实存在才算装。这张表
+ *      里多数 resolver 按约定只报位置（存在性由调用方判，claude/opencode/
+ *      grok/pi/dsh/zcode/workbuddy 都如此），磁盘上没有的候选一律算没装。
+ *
+ * 第 2 条对应模块自己写的契约：已接线且本机装了该 Agent，才留下 shim 脚本、
+ * PATH 条目与配置。少了它，一台什么都没装的机器上也会装出一整套 shim 脚本，
+ * 而脚本把命令指向 anyswitch 的 launcher，launcher 找不到真正的 CLI。
+ *
+ * 其余异常（环境变量写坏、磁盘读不动等）照旧抛给调用方的 catch 分支记 warn，
+ * 真实故障不跟着没装一起被吞掉。
+ *
+ * 没装的端点不装 shim 脚本；磁盘上还留着旧脚本的，按移除处理（移除分支在
+ * 对账主循环里，和安装走同一段代码）。
+ */
+function endpointInstalled(specId, base, fs) {
+  const resolve = SPEC_RESOLVERS[specId];
+  if (!resolve) return false;
+  let path;
+  try {
+    path = resolve(base);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return false;
+    throw error;
+  }
+  if (typeof path !== "string" || !path) return false;
+  return fs.existsSync(path);
+}
 
 /**
  * 端点此刻是否接线。渠道与虚拟模型是全体端点共享的（各 Agent 的配置同步写
@@ -140,7 +180,7 @@ export async function reconcileShims(deps = {}) {
     pathStore = createRegistryPathStore(),
     broadcastFn = createEnvironmentBroadcaster(),
     loadStoreFn = () => loadStore(storePaths()),
-    isEndpointInstalled = (specId, base) => SPEC_RESOLVERS[specId]?.(base) != null,
+    isEndpointInstalled = (specId, base) => endpointInstalled(specId, base, fs),
     log = () => {},
   } = deps;
 
