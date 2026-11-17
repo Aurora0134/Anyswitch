@@ -3000,21 +3000,32 @@ async function api(method, path, body) {
         clearLogAppearing(node);
         node.remove();
         if (logStackNodes.get(id) === node) logStackNodes.delete(id);
+        // 离场卡摘除后补测一次：它若是在册最高卡，舞台这时才该收紧；彼时它已不在
+        // 第三层占位，收紧没有卡可裁（收紧前它参与测量撑着舞台，见 syncLogCardHeight）。
+        syncLogCardHeight();
       }, LOG_ANIM_MS);
       logStackLeaving.set(id, timer);
     }
     // 新消息顶部浮现：与旧卡退层同族 transition。rAF 合批内一次到多条、两态
     // 交接进行中、reduced-motion 或看板入场阶梯期，都直接按终态落位，不逐条补播。
     if (!logExpanded && fresh.length === 1 && !motion && !reduced && !logBoardEnterQuiet()) playLogAppearing(fresh[0]);
-    // 舞台高度跟卡高走：卡高内容驱动，窄窗下卡变高时三层仍各露一个完整步长。
-    // 取非离场卡的最大布局高，避免某一条只有一行时舞台被压矮；只在量值变化时写
-    // 变量，避免每帧都触发一次样式重算。
+    syncLogCardHeight();
+  }
+
+  // 舞台高度跟卡高走：卡高内容驱动，窄窗下卡变高时三层仍各露一个完整步长。
+  // 取叠卡内全部在册卡的最大布局高——含离场卡：它仍以 scale 0.9 占着第三层淡出，
+  // 提前把它排除出测量，舞台会在它消失前就缩到它底下，底卡下端被 overflow 裁掉。
+  // 只在量值变化时写变量，避免每帧都触发一次样式重算；隐藏期（切到别的页，看板
+  // display:none）卡高量到 0，守卫挡住不写，陈旧值留给布局观测器来校正。
+  function syncLogCardHeight() {
+    const stack = $("logStack");
+    const root = $("liveLog");
+    if (!stack || !root) return;
     let cardH = 0;
     for (const node of stack.children) {
-      if (node.classList.contains("is-leaving")) continue;
       if (node.offsetHeight > cardH) cardH = node.offsetHeight;
     }
-    if (cardH > 0 && root && root.dataset.llCardH !== String(cardH)) {
+    if (cardH > 0 && root.dataset.llCardH !== String(cardH)) {
       root.dataset.llCardH = String(cardH);
       root.style.setProperty("--ll-card-h", cardH + "px");
     }
@@ -3032,6 +3043,25 @@ async function api(method, path, body) {
     if (root.dataset.llGutter === String(gutter)) return;
     root.dataset.llGutter = String(gutter);
     root.style.setProperty("--ll-gutter", gutter + "px");
+  }
+
+  // 卡高与槽宽的测量不能只挂在「有新条目」上（2026-11-17 实测：切到终端页再切回，
+  // 隐藏期到来的两行卡让陈旧 --ll-card-h 偏小 17px，舞台 overflow:hidden 把叠卡最底下
+  // 那张卡的下端裁掉 12px，直到下一条日志才自愈）。这里把复测接到布局变化上：切回
+  // 看板（display:none→block，叠卡盒子 0→实际值必触发）、跨 1107px 断点、DPI/缩放
+  // 全覆盖。隐藏期盒子为 0，直接返回——两个同步函数各自的守卫也是第二道防线，
+  // 都不会把陈旧值擦掉。观测叠卡层：卡高由它的子元素决定，它的盒子随舞台与栏宽变。
+  let logLayoutObserver = null;
+  function setupLogLayoutObserver() {
+    if (logLayoutObserver || typeof ResizeObserver !== "function") return;
+    const stack = $("logStack");
+    if (!stack) return;
+    logLayoutObserver = new ResizeObserver(() => {
+      if (!stack.offsetHeight) return;
+      syncLogCardHeight();
+      syncLogGutter();
+    });
+    logLayoutObserver.observe(stack);
   }
 
   function renderLogFeed() {
@@ -3201,6 +3231,9 @@ async function api(method, path, body) {
   // 所以不影响首屏；读不到就按默认开——日志是排障时唯一的凭据，一次读失败不该把它
   // 静默关掉。问的途中用户已经在设置页切过开关，就以那次为准，不被这次结果盖回。
   async function startLogStream() {
+    // 布局观测只挂一次：舞台高度与槽宽的复测接到布局变化上（切页回来、跨断点、
+    // DPI 缩放），与滚动跟随同批——反复切日志开关不会越积越多份观测。
+    setupLogLayoutObserver();
     // 滚动跟随只挂一次：贴顶时自动跟随新日志，下翻查看旧日志即暂停，回到顶部自动
     // 恢复。挂在开与关之外，反复切开关不会越积越多份监听。
     const body = $("logBody");
