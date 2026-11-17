@@ -8753,6 +8753,7 @@ describe("设置项「运行日志」", () => {
        function applyLoggingEnabled(v) { loggingEnabled = v; order.push("apply:" + v); if (v) connectLogStream(); }
        function applyLogLevel(v) { logLevel = v; order.push("level:" + v); }
        function connectLogStream() { order.push("connect"); }
+       function setupLogLayoutObserver() {}
        ${source[0]}
        return {
          start: startLogStream,
@@ -18586,6 +18587,12 @@ describe("看板运行日志：无框消息提示式双态流", () => {
 
   function makeSandbox() {
     FakeEventSource.instances = [];
+    const roInstances = [];
+    class FakeResizeObserver {
+      constructor(cb) { this.cb = cb; roInstances.push(this); }
+      observe() {}
+      disconnect() {}
+    }
     const ids = ["liveLogCard", "liveLog", "liveLogTitle", "logToggle", "logBody", "logStack", "clearLog", "logLevelRows", "logLevelSelect"];
     const els = Object.fromEntries(ids.map((id) => [id, new FakeElement("div")]));
     els.liveLog.dataset.state = "collapsed";
@@ -18623,7 +18630,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     };
     const block = panelJs.match(/\/\/ 实时 SSE 日志流[\s\S]*?\n  \/\/ 开机自启/)[0].replace(/\n  \/\/ 开机自启$/, "");
     const factory = new Function(
-      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE", "matchMedia", "getComputedStyle",
+      "document", "$", "escapeHtml", "api", "requestAnimationFrame", "setTimeout", "clearTimeout", "EventSource", "API_BASE", "matchMedia", "getComputedStyle", "ResizeObserver",
       `let es = null;
        ${block}
        return {
@@ -18649,9 +18656,10 @@ describe("看板运行日志：无框消息提示式双态流", () => {
         // 真实浏览器给的是亚像素使用值；空串代表桩不提供，走 rect/offsetHeight 退回。
         height: node && node._computedHeight ? node._computedHeight : "",
       }),
+      FakeResizeObserver,
     );
     return {
-      sandbox, els, flush, apiCalls, flushFrames,
+      sandbox, els, flush, apiCalls, flushFrames, roInstances,
       setFrameMode: (mode) => { frameMode = mode; },
       setReduced: (v) => { reduced = !!v; },
       frameCount: () => frames.length,
@@ -18906,6 +18914,86 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(els.liveLog.style["--ll-gutter"], "16px", "展收那拍先同步，量到的行距可信");
     assert.ok(/function syncLogGutter\(\)/.test(panelJs), "槽宽同步函数在册");
     assert.ok(/renderLogFeed\(\) \{\s*syncLogGutter\(\);/.test(panelJs), "每次渲染先同步槽宽");
+  });
+
+  it("布局变化后舞台高度自校正：切走期间卡变高不再陈旧裁底卡", async () => {
+    const { sandbox, els, flush, roInstances } = makeSandbox();
+    await sandbox.startLogStream();
+    assert.equal(roInstances.length, 1, "日志区挂了布局观测器");
+    // 看板可见：两条单行卡（49px）铺底，第三条到达时走一次条目路径测量
+    // （桩不会因改 offsetHeight 自动重渲，铺底后必须再来一条才测得到）
+    sandbox.appendLog({ level: "info", message: "k1" });
+    sandbox.appendLog({ level: "info", message: "k2" });
+    els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
+    sandbox.appendLog({ level: "info", message: "k3" });
+    assert.equal(els.liveLog.style["--ll-card-h"], "49px", "条目路径照旧量卡高");
+    // 切到别的页：看板 display:none，叠卡 offsetHeight 全 0。隐藏期间到来的两行卡
+    // 量不到高——陈旧值必须留着（擦成 0 舞台会掉到 44px，那才是真裁）
+    els.logStack.offsetHeight = 0;
+    els.logStack.children.forEach((n) => { n.offsetHeight = 0; });
+    sandbox.appendLog({ level: "warn", message: "tall-a" });
+    sandbox.appendLog({ level: "warn", message: "tall-b" });
+    flush(200);
+    assert.equal(els.liveLog.style["--ll-card-h"], "49px", "隐藏期量到 0，守卫挡住不写");
+    // 切回看板：卡已是两行（66px）——布局观测器触发复测，舞台跟上去。
+    // 少了这一拍，舞台停在 93 而 slot2 卡底边在 105，下端被 overflow 裁掉 12px。
+    els.logStack.offsetHeight = 110;
+    els.logStack.children.forEach((n) => { n.offsetHeight = 66; });
+    roInstances[0].cb();
+    assert.equal(els.liveLog.style["--ll-card-h"], "66px", "恢复可见即复测：不陈旧就不会裁底卡");
+  });
+
+  it("离场卡参与卡高测量：最高卡淡出期间舞台不缩，底卡下端不被裁", () => {
+    const { sandbox, els } = makeSandbox();
+    // 最旧一张两行（66px）最高，两条新的单行（49px）；卡高随铺底同拍设好，
+    // 第三条到达即完成一次条目路径测量（桩不自动重渲）
+    sandbox.appendLog({ level: "info", message: "old-tall" });
+    sandbox.appendLog({ level: "info", message: "new-1" });
+    const setH = (msg, h) => {
+      els.logStack.children.find((c) => c.innerHTML.includes(msg)).offsetHeight = h;
+    };
+    setH("old-tall", 66); setH("new-1", 49);
+    sandbox.appendLog({ level: "info", message: "new-2" });
+    setH("new-2", 49);
+    assert.equal(els.liveLog.style["--ll-card-h"], "66px", "最高卡在册，舞台 110");
+    // 新单行到达：old-tall 离场。它仍以 scale 0.9 占着第三层淡出——若排除出测量，
+    // 舞台立刻缩到 93，离场卡底边（44+0.9×66≈103）被 overflow 裁掉。
+    sandbox.appendLog({ level: "info", message: "new-3" });
+    setH("new-3", 49);
+    assert.equal(els.liveLog.style["--ll-card-h"], "66px", "离场卡仍参与 max：淡出期间舞台不缩");
+    const leaving = els.logStack.children.find((c) => c.classList.contains("is-leaving"));
+    assert.ok(leaving && leaving.innerHTML.includes("old-tall"), "最高卡进入离场档");
+  });
+
+  it("离场卡摘除后补测：舞台随最高卡离场收紧，无卡可裁", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    sandbox.appendLog({ level: "info", message: "old-tall" });
+    sandbox.appendLog({ level: "info", message: "new-1" });
+    sandbox.appendLog({ level: "info", message: "new-2" });
+    const setH = (msg, h) => {
+      els.logStack.children.find((c) => c.innerHTML.includes(msg)).offsetHeight = h;
+    };
+    setH("new-2", 49); setH("new-1", 49); setH("old-tall", 66);
+    sandbox.appendLog({ level: "info", message: "new-3" });
+    setH("new-3", 49);
+    assert.equal(els.liveLog.style["--ll-card-h"], "66px");
+    flush(200); // 离场计时器到点：摘卡＋补测
+    assert.ok(!els.logStack.children.some((c) => c.innerHTML.includes("old-tall")), "离场卡已摘除");
+    assert.equal(els.liveLog.style["--ll-card-h"], "49px", "摘除后补测：舞台收紧到剩余卡高");
+  });
+
+  it("舞台卡高测量独立成函数并接上布局观测：不随条目陈旧（源码钉）", () => {
+    const syncSrc = panelJs.match(/function syncLogCardHeight\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    const stackSrc = panelJs.match(/function renderLogStack\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    const startSrc = panelJs.match(/async function startLogStream\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    assert.ok(syncSrc && stackSrc && startSrc, "三个相关函数可取到源码");
+    assert.ok(/syncLogCardHeight\(\);/.test(stackSrc), "renderLogStack 改调测量函数，条目路径不变");
+    assert.ok(!/is-leaving/.test(syncSrc), "测量不再跳过离场卡：淡出期间舞台不缩到它底下");
+    assert.ok(/cardH > 0/.test(syncSrc), "隐藏期（卡高量到 0）守卫仍在，不擦陈旧值");
+    assert.ok(/node\.remove\(\);[\s\S]{0,220}syncLogCardHeight\(\);/.test(panelJs), "离场卡摘除后补测一次");
+    assert.ok(/new ResizeObserver\(/.test(panelJs) && /observe\(stack\)/.test(panelJs), "布局观测器盯着叠卡层");
+    assert.ok(/if \(!stack\.offsetHeight\) return;/.test(panelJs), "隐藏期（尺寸 0）直接返回：不擦两个测量变量的陈旧值");
+    assert.ok(/setupLogLayoutObserver\(\);/.test(startSrc), "建流时挂观测器，与滚动跟随同批");
   });
 
   it("清空批次退出槽位序列，新消息独占顶层", () => {
