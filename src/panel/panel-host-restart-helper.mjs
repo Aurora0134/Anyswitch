@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { probePanel, waitForPanelReady } from "./panel-launcher.mjs";
+import { formatLogStamp } from "../shared/logger.mjs";
 
 const PANEL_PORT = 47820;
 // How long to wait for the dying host to release the port. Generous because a
@@ -43,8 +44,10 @@ const DEFAULT_READY_POLL_MS = 100;
 //   probe()          -> Promise<boolean>, is a panel answering on 47820?
 //   spawnPanelHost() -> detached spawn of panel-host.mjs; throws on failure
 //   sleep(ms)        -> promise delay
-//   log(line)        -> message sink; the real wiring writes stderr, which the
-//                       spawner redirects to logs/panel-host-restart.log
+//   log(line)        -> message sink; the real wiring wraps each line in the
+//                       [ts] [level] envelope (restartLogLine) and writes
+//                       stderr, which the spawner redirects to
+//                       logs/panel-host-restart.log
 // Returns an exit code: 0 = a panel is serving again; 1 = we bailed, and the
 // caller's own recovery poll will surface the failure to the user.
 export async function runPanelHostRestartHelper({
@@ -106,6 +109,13 @@ const PANEL_HOST_SCRIPT = join(here, "panel-host.mjs");
 // desktop shortcut.
 export const RESTART_LOG_PATH = join(here, "../../logs", "panel-host-restart.log");
 
+// 落盘行与 relay-host.log 同一格式（[ts] [level] 封套）：这份文件按时间线读，
+// 裸行无法把多次重启排出先后。本地时区戳与 logger.mjs 的约定一致——文件是
+// 拿来对着用户的「大概几点坏的」读的。
+export function restartLogLine(message, { ts = Date.now(), level = "info" } = {}) {
+  return `[${formatLogStamp(ts)}] [${level}] ${message}\n`;
+}
+
 function realSpawnPanelHost() {
   // Same shape as panel-launcher's realSpawnPanelHost: detached + windowsHide
   // (background server, no console), stdio ignored, unref so we can exit.
@@ -161,7 +171,7 @@ export function spawnPanelHostRestartHelper({
   }
 }
 
-export async function main({ log = (line) => process.stderr.write(`${line}\n`) } = {}) {
+export async function main({ log = (line) => process.stderr.write(restartLogLine(line)) } = {}) {
   return runPanelHostRestartHelper({
     probe: () => probePanel(PANEL_PORT),
     spawnPanelHost: realSpawnPanelHost,
@@ -190,7 +200,7 @@ if (isEntryModule(process.argv[1], import.meta.url)) {
   main().then(
     (code) => process.exit(code),
     (error) => {
-      process.stderr.write(`panel-host restart helper failed: ${error.message}\n`);
+      process.stderr.write(restartLogLine(`panel-host restart helper failed: ${error.message}`, { level: "error" }));
       process.exit(1);
     },
   );

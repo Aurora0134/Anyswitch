@@ -5,8 +5,23 @@ import { join } from "node:path";
 import {
   runPanelHostRestartHelper,
   spawnPanelHostRestartHelper,
+  restartLogLine,
 } from "../src/panel/panel-host-restart-helper.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
+
+describe("restartLogLine 落盘封套（A10）", () => {
+  it("每行带 [ts] [level] 前缀与换行，与 relay-host.log 同一格式", () => {
+    assert.match(
+      restartLogLine("panel host is back up", { ts: 0 }),
+      /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[info\] panel host is back up\n$/,
+      "本地时区戳＋级别封套，多次重启在文件里能排出先后",
+    );
+    assert.match(
+      restartLogLine("panel-host restart helper failed: boom", { ts: 0, level: "error" }),
+      /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[error\] panel-host restart helper failed: boom\n$/,
+    );
+  });
+});
 
 // Deterministic clock: every probe() tick advances by a fixed step, so the
 // helper's release/ready deadlines are reached without real waiting.
