@@ -13648,11 +13648,11 @@ async function api(method, path, body) {
   // 历史会话缓存：{ endpoint, sessions, fetchedAt, error }。只装当前 agent 那一份——
   // 换 agent 即整份作废重拉，不做多端点缓存（用户拍板「跟随」而非「浏览」）。
   let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
-  // 视图状态：归档清单 + 已移除分组目录清单。进终端视图时从面板后端拉一次
-  // （GET /api/terminal/rail/prefs），之后的动作本地先生效、POST 落盘。落在面板侧，
-  // 与 terminal-host 就绪与否无关——降级/未就绪时归档照样可用（归档
-  // 是持久化集合，不是宿主能力）。
-  let terminalRailPrefs = { archived: [], removedGroups: [] };
+  // 视图状态：归档清单 + 已移除分组目录清单 + 分组显示顺序 + 会话置顶清单。
+  // 进终端视图时从面板后端拉一次（GET /api/terminal/rail/prefs），之后的动作
+  // 本地先生效、POST 落盘。落在面板侧，与 terminal-host 就绪与否无关——降级/
+  // 未就绪时归档照样可用（归档是持久化集合，不是宿主能力）。
+  let terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
   // 移除时刻：目录归一化键 → 移除时的毫秒时间戳，落 localStorage。后端清单
   // 只存目录拼写，没有时间轴；而「移除持久＋新会话自愈」必须知道移除发生在哪一刻，
   // 才能判「这条会话是移除之后新来的」。纯视图状态（与视图偏好同层），不进面板后端。
@@ -13736,6 +13736,12 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_ICON_ARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>';
   // 取消归档钮（归档行的第三恢复入口）：归档盒 + 向上的箭头（出盒即还原）
   const TERMINAL_RAIL_ICON_UNARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/><polyline points="12 11 12 7"/><polyline points="9 10 12 7 15 10"/></svg>';
+  // 置顶钮（hover 出现，与归档钮同排）：图钉形（针杆 + 横帽 + 顶珠），13px 与
+  // 归档钮同槽同描边风；已置顶行同一枚图钉换「取消置顶」语义（title 区分）。
+  const TERMINAL_RAIL_ICON_PIN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-2.89-1.45A2 2 0 0 1 14 11.76V6h1a2 2 0 0 0 0-4H9a2 2 0 0 0 0 4h1v5.76a2 2 0 0 1-1.11 1.79l-2.89 1.45A2 2 0 0 0 5 15.24Z"/></svg>';
+  // 置顶标记（行首常驻槽的空闲态）：同一枚图钉缩到 11px、走三级文字色——
+  // 转圈/绿点占槽时置顶标记让位（working/done 的信息量优先），转空闲即回来。
+  const TERMINAL_RAIL_PIN_MARK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-2.89-1.45A2 2 0 0 1 14 11.76V6h1a2 2 0 0 0 0-4H9a2 2 0 0 0 0 4h1v5.76a2 2 0 0 1-1.11 1.79l-2.89 1.45A2 2 0 0 0 5 15.24Z"/></svg>';
   // 组头 ⋯ 钮与 ⊕ 钮（feather more-horizontal / plus）：16px 槽，与行内归档/关闭叉
   // 同一描边风。⋯ 不设 title/aria-label——批准文案清单里没有它的标签，按栏内关闭
   // 叉的既有形制（aria-hidden 装饰图标）处理，标签文案留待清单补录。
@@ -13837,8 +13843,13 @@ async function api(method, path, body) {
     const out = [];
     for (const bucket of groups.values()) {
       const rows = bucket.rows;
-      rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
-      out.push({ key: bucket.key, label: bucket.key ? sessDirName(bucket.key) : "未分组", rows, latest: rows[0].lastActive || 0 });
+      rows.sort(terminalRailCompareRowsByUpdate);
+      out.push({
+        key: bucket.key,
+        label: bucket.key ? sessDirName(bucket.key) : "未分组",
+        rows,
+        latest: rows.length ? terminalRailRowUpdatedAt(rows[0]) : 0,
+      });
     }
     out.sort((a, b) => {
       if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
@@ -13937,10 +13948,10 @@ async function api(method, path, body) {
     }
     const ungrouped = groups.find((row) => row.key === "");
     if (ungrouped) {
-      // 迁进来的行按最近活跃重排（恢复分组时同样按最近活跃归组，不记原索引——
-      // 派生分组本就该按活跃序）
-      ungrouped.rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
-      ungrouped.latest = ungrouped.rows.length ? ungrouped.rows[0].lastActive || 0 : 0;
+      // 迁进来的行按排序键重排（恢复分组时同样按键归组，不记原索引——
+      // 派生分组本就该按「最近更新」序）
+      ungrouped.rows.sort(terminalRailCompareRowsByUpdate);
+      ungrouped.latest = ungrouped.rows.length ? terminalRailRowUpdatedAt(ungrouped.rows[0]) : 0;
     }
     return groups.filter((group) => group.key === "" || group.rows.length > 0);
   }
@@ -13951,6 +13962,122 @@ async function api(method, path, body) {
     const endpoint = session && typeof session.endpoint === "string" ? session.endpoint : "";
     const id = session && typeof session.id === "string" ? session.id : "";
     return endpoint && id ? `${endpoint}\u0000${id}` : "";
+  }
+
+  // 行排序键＝max(createdAt, lastPromptAt)：「最近更新」只被用户发消息推进
+  // （lastPromptAt 由扫描器从各家存档提取，见 session-scan.mjs 的字段契约）。
+  // lastActive 被 agent 输出、工具结果同样推进，拿它排「最近更新」等于「agent
+  // 自己跑也置顶」——正是本轮要消掉的形态。并列按 id 字典序：同一批行每次
+  // 渲染同序，不闪跳。
+  function terminalRailRowUpdatedAt(session) {
+    const created = Number(session && session.createdAt) || 0;
+    const prompted = Number(session && session.lastPromptAt) || 0;
+    return Math.max(created, prompted);
+  }
+
+  function terminalRailCompareRowsByUpdate(a, b) {
+    const diff = terminalRailRowUpdatedAt(b) - terminalRailRowUpdatedAt(a);
+    if (diff !== 0) return diff;
+    const left = String(a && a.id);
+    const right = String(b && b.id);
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+
+  // 分组显示顺序＝持久清单（terminal-rail.json 的 groupOrder）。会话活跃与否
+  // 不再挪组：清单外的目录按首现序进最顶（首现即登记进清单），已知目录按
+  // 清单序，未分组恒垫底。落盘是合并式：本帧可见组按本帧序，不可见组（别的
+  // agent 的目录、暂被归档滤掉的）保序垫到清单尾——切 agent 不洗别人家的序，
+  // 切回来还在原相对位置。
+  function terminalRailSortGroups(groups, { persist = true } = {}) {
+    const order = Array.isArray(terminalRailPrefs.groupOrder) ? terminalRailPrefs.groupOrder : [];
+    const rankOf = new Map();
+    order.forEach((dir, index) => {
+      const key = terminalRailNormDir(dir);
+      if (key) rankOf.set(key, index);
+    });
+    const byKey = new Map();
+    for (const group of groups) {
+      const key = group.key ? terminalRailNormDir(group.key) : "";
+      if (key) byKey.set(key, group);
+    }
+    const placed = new Set();
+    const out = [];
+    for (const group of groups) {
+      const key = group.key ? terminalRailNormDir(group.key) : "";
+      if (!key || rankOf.has(key)) continue;
+      out.push(group);
+      placed.add(key);
+    }
+    const known = [...rankOf.keys()].sort((a, b) => rankOf.get(a) - rankOf.get(b));
+    for (const key of known) {
+      const group = byKey.get(key);
+      if (!group || placed.has(key)) continue;
+      out.push(group);
+      placed.add(key);
+    }
+    for (const [key, group] of byKey) {
+      if (placed.has(key)) continue;
+      out.push(group); // 防御：清单漏记的已知组，按派生序补位
+      placed.add(key);
+    }
+    const ungrouped = groups.find((row) => !row.key);
+    const result = ungrouped ? [...out, ungrouped] : out;
+    if (persist) {
+      const visible = result.filter((row) => row.key).map((row) => row.key);
+      const visibleSet = new Set(visible.map((dir) => terminalRailNormDir(dir)));
+      const nextOrder = [...visible, ...order.filter((dir) => !visibleSet.has(terminalRailNormDir(dir)))];
+      if (!terminalRailSameDirList(nextOrder, order)) {
+        terminalRailPrefs.groupOrder = nextOrder;
+        api("POST", "/api/terminal/rail/group-order", { order: nextOrder }).catch(() => {
+          // 落盘失败：本会话保留本地序（下次组成变化会再试），刷新回盘面序。
+        });
+      }
+    }
+    return result;
+  }
+
+  // 清单序比较：逐条归一化键对齐（拼写差异不算变序）。
+  function terminalRailSameDirList(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((dir, index) => terminalRailNormDir(dir) === terminalRailNormDir(b[index]));
+  }
+
+  // 置顶键同归档键口径：endpoint＋会话 id 双键。
+  function terminalRailIsPinned(session) {
+    const key = terminalRailArchivedKey(session);
+    return !!key && terminalRailPrefs.pinned.some((row) => terminalRailArchivedKey(row) === key);
+  }
+
+  // 拖拽门控用的 id 版判据：行 id 回查会话表拿全键（置顶/非置顶两段隔离）。
+  function terminalRailRowPinnedById(id) {
+    const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+    return session ? terminalRailIsPinned(session) : false;
+  }
+
+  // 置顶前置：任何排序模式下置顶行都排在所属分组最前（单列表＝全部行最前）。
+  // 段内序——「最近更新」模式按置顶先后（最近置顶在最前），「手动排序」沿
+  // 手序名次（置顶段内拖拽改的就是名次）。调用方先把 rows 按模式排好，这里
+  // 只做前置分拆；取消置顶回原位＝分拆消失后行回到模式序里的自然位。
+  function terminalRailApplyPinnedLeading(groups) {
+    if (!Array.isArray(terminalRailPrefs.pinned) || !terminalRailPrefs.pinned.length) return groups;
+    for (const group of groups) {
+      if (!Array.isArray(group.rows) || !group.rows.length) continue;
+      const seen = new Set();
+      let pins = null;
+      for (const entry of terminalRailPrefs.pinned) {
+        const key = terminalRailArchivedKey(entry);
+        if (!key || seen.has(key)) continue;
+        const row = group.rows.find((item) => terminalRailArchivedKey(item) === key);
+        if (!row) continue;
+        seen.add(key);
+        if (pins === null) pins = [];
+        pins.push(row);
+      }
+      if (pins === null) continue;
+      const rest = group.rows.filter((row) => !seen.has(terminalRailArchivedKey(row)));
+      group.rows = [...pins, ...rest];
+    }
+    return groups;
   }
 
   function terminalRailIsArchived(session) {
@@ -14117,7 +14244,7 @@ async function api(method, path, body) {
       const title = sessTitle(session).toLowerCase();
       const dir = typeof session.project === "string" ? sessDirName(session.project).toLowerCase() : "";
       return title.includes(q) || dir.includes(q);
-    }).sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+    }).sort(terminalRailCompareRowsByUpdate);
   }
 
   function openTerminalRailSearch() {
@@ -14344,7 +14471,8 @@ async function api(method, path, body) {
     return out;
   }
 
-  // 手动排序渲染：组内行按 sessionOrder[agentId] 的名次排，榜上无名回落到最近活跃。
+  // 手动排序渲染：组内行按 sessionOrder[agentId] 的名次排，榜上无名回落到
+  // 「最近更新」键（与 updated 模式同一把尺，模式间来回切不换尺）。
   function terminalRailApplyManualOrder(groups) {
     const order = terminalRailViewPrefs.sessionOrder[terminalRailAgentId()];
     if (!Array.isArray(order)) return groups;
@@ -14353,7 +14481,7 @@ async function api(method, path, body) {
       group.rows.sort((a, b) => {
         const ra = rank.has(a.id) ? rank.get(a.id) : Number.MAX_SAFE_INTEGER;
         const rb = rank.has(b.id) ? rank.get(b.id) : Number.MAX_SAFE_INTEGER;
-        return (ra - rb) || (b.lastActive || 0) - (a.lastActive || 0);
+        return (ra - rb) || terminalRailCompareRowsByUpdate(a, b);
       });
     }
     return groups;
@@ -14488,17 +14616,23 @@ async function api(method, path, body) {
   }
 
   // 树行 HTML：live 行带状态点 + 关闭叉 + 归档钮；非 live 行只带
-  // 归档钮；归档行（筛选 show 态内联）灰字 + 取消归档钮。live 属性带终端 id——
+  // 归档钮；归档行（筛选 show 态内联）灰字 + 取消归档钮。置顶行带置顶标记
+  // （状态槽空闲时显示）＋hover 出置顶/取消置顶钮。live 属性带终端 id——
   // 点击委托据此分支（聚焦终端 vs 走续接两分支）。
   function terminalRailRowHtml(session, live, activeId, opts) {
     const title = sessTitle(session);
-    const time = session.lastActive ? terminalRailRelTime(session.lastActive) : "";
+    // 显示时间＝排序键（「最近更新」语义：用户最近一次提问/创建，不是 agent
+    // 最近一次写盘）——排序与显示同一把尺，行不会「排在上、时间显示在下」。
+    const updatedAt = terminalRailRowUpdatedAt(session);
+    const time = updatedAt ? terminalRailRelTime(updatedAt) : "";
     const archived = terminalRailIsArchived(session);
+    const pinned = !archived && terminalRailIsPinned(session);
     const result = !!(opts && opts.result);
     const cls = ["rail-term-row", "rail-term-row-history"];
     if (result) cls.push("rail-term-row-result");
     if (live) cls.push("is-live");
     if (archived) cls.push("is-archived");
+    if (pinned) cls.push("is-pinned");
     // 选中判据：pending 存在时只看 pending 是否命中本行——点下一条的瞬间
     // 旧活跃行立刻失亮（pending 优先于 live 派生，一屏至多一条选中）；无 pending
     // 维持原 live 派生。读模块状态位而非 DOM-only 切类名：1s 轮询全树重铺会冲掉
@@ -14516,18 +14650,23 @@ async function api(method, path, body) {
     // 任何图标；exited 无专门呈现，随空槽自然成立，行点击续接/复活语义不变）。槽宽
     // 恒定，图标出现/消失/互换都不动标题文字起点；行 8+16+8 与组头 8+16+8 同式，
     // 标题与组头文字严格同 x。
-    const dot = terminalRailStateSlotHtml(live, activeId);
+    const dot = terminalRailStateSlotHtml(live, activeId)
+      || (pinned ? `<span class="rail-term-pinmark" title="已置顶" aria-label="已置顶">${TERMINAL_RAIL_PIN_MARK}</span>` : "");
     const closeBtn = live
       ? `<span class="rail-term-row-close" data-rail-term-close="${esc(live.id)}" aria-hidden="true">×</span>`
       : "";
     const dirMeta = result && typeof session.project === "string" && session.project
       ? `<span class="rail-term-row-dir">${escapeHtml(sessDirName(session.project))}</span>`
       : "";
+    // 置态互斥：归档行只出取消归档（互斥由动作层兜底）；置顶钮排在归档钮前。
     const action = archived
       ? `<span class="rail-term-row-unarchive" data-rail-term-unarchive="${esc(session.id)}" title="取消归档" aria-label="取消归档">${TERMINAL_RAIL_ICON_UNARCHIVE}</span>`
-      : `<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
+      : `${pinned
+        ? `<span class="rail-term-row-pin is-on" data-rail-term-unpin="${esc(session.id)}" title="取消置顶" aria-label="取消置顶">${TERMINAL_RAIL_ICON_PIN}</span>`
+        : `<span class="rail-term-row-pin" data-rail-term-pin="${esc(session.id)}" title="置顶会话" aria-label="置顶会话">${TERMINAL_RAIL_ICON_PIN}</span>`}<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
     // 会话行可拖（手序的唯一来源）；归档行不可拖（draggable＝非空白且
-    // 非归档行）。组行不拖——组是目录派生、无清单可持久化。
+    // 非归档行）。置顶/非置顶行都各自可拖——跨段互换由 drop 门控拦（见 drop
+    // 委托），拖拽面不缩。
     const draggable = archived ? "" : ` draggable="true"`;
     return `
       <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""}${draggable} title="${esc(title)}">
@@ -14597,18 +14736,23 @@ async function api(method, path, body) {
     if (terminalRailViewPrefs.archivedFilter === "only") {
       groups = groups.filter((group) => group.key === "" || group.rows.length > 0);
     }
+    // 分组显示顺序（持久清单）。落盘守卫两条：列表没落地（空表不是事实，不能
+    // 拿它洗清单）；「仅显示已归档」是残缺视野（可见组缩水，按它落盘会把别家
+    // 组全挤到清单尾）。
+    const orderPersistable = loaded && terminalRailViewPrefs.archivedFilter !== "only";
+    groups = terminalRailSortGroups(groups, { persist: orderPersistable });
     // 分组方式三态：单列表＝无组平铺（key 空串的伪组，不渲组头）；
     // 按工作区树＝目录祖先嵌套＋缩进；按工作区＝平铺目录组（默认）。
     const flat = terminalRailViewPrefs.groupBy === "flat";
     if (flat) {
       const rows = [];
       for (const group of groups) rows.push(...group.rows);
-      rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
-      groups = [{ key: "", label: "会话", rows, latest: rows.length ? rows[0].lastActive || 0 : 0, flat: true }];
+      rows.sort(terminalRailCompareRowsByUpdate);
+      groups = [{ key: "", label: "会话", rows, latest: rows.length ? terminalRailRowUpdatedAt(rows[0]) : 0, flat: true }];
     } else if (terminalRailViewPrefs.groupBy === "workspace-tree") {
       groups = terminalRailNestGroups(groups);
     }
-    // 手动排序：组内行按手序排（榜上无名回落到最近活跃）
+    // 手动排序：组内行按手序排（榜上无名回落到「最近更新」键）
     if (terminalRailViewPrefs.orderBy === "manual") terminalRailApplyManualOrder(groups);
     // 全新终端兜底行：按 cwd 找所属组，没有就为它建组（目录被用户移除过
     // 的除外——那种目录的会话都进「未分组」，兜底行同命运）。
@@ -14623,15 +14767,18 @@ async function api(method, path, body) {
       if (!group && !removed && !flat) {
         group = { key: entry.cwd, label: sessDirName(entry.cwd), rows: [], latest: entry.createdAt, depth: 0 };
         groups.push(group);
-        groups.sort((a, b) => {
-          if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
-          return (b.latest - a.latest) || String(a.label).localeCompare(String(b.label));
-        });
+        // 兜底组的定位走同一条组序规则（已知目录回清单位、新目录进最顶），但不
+        // 落盘：目录还没扫出会话，等真组出现时再登记——终端没聊就死了不会留下
+        // 空目录条目。
+        groups = terminalRailSortGroups(groups, { persist: false });
       }
       if (!group) continue;
       if (!group.pending) group.pending = [];
       group.pending.push(entry);
     }
+    // 置顶前置（任何排序模式、含单列表全局序）：排在模式排序之后——段内序已定，
+    // 这里只把置顶行分拆到段首。
+    terminalRailApplyPinnedLeading(groups);
     // live 映射：行 → 开着终端（resume 两键）。selected 由渲染时的活跃终端定。
     // 阳性身份找不到时回落推导（terminalRailDerivedLiveRows）：绑定未落地窗口里
     // 真行照常进组渲染，缺的是 live 标记——推导行不改变行集合，只把标记补上。
@@ -14678,7 +14825,8 @@ async function api(method, path, body) {
       // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
       // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
       // 没有目录身份，这些都不给。组头本身仍是整行可点的折叠开关。
-      // 树模式缩进 8+depth×12px；单列表模式不渲组头。
+      // 有目录身份的组头可拖（组序的唯一来源；拖到另一组头前落位，见下方
+      // 拖拽委托）；单列表模式不渲组头、组序无拖拽面。树模式缩进 8+depth×12px。
       const current = group.key !== "" && group.key === activeGroup;
       const indent = group.depth ? ` style="padding-inline-start: ${8 + group.depth * 12}px"` : "";
       const headActions = group.key
@@ -14690,7 +14838,7 @@ async function api(method, path, body) {
       if (!group.flat) {
         parts.push(`
       <div class="rail-term-group${collapsed ? "" : " is-open"}">
-        <div class="rail-term-group-head" data-rail-term-group-head="${esc(group.key || TERMINAL_RAIL_UNGROUPED_HEAD)}"${indent}>
+        <div class="rail-term-group-head" data-rail-term-group-head="${esc(group.key || TERMINAL_RAIL_UNGROUPED_HEAD)}"${group.key ? ` draggable="true"` : ""}${indent}>
           <button type="button" class="rail-term-group-toggle" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
             <span class="rail-term-group-slot">
               <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
@@ -15656,6 +15804,9 @@ async function api(method, path, body) {
       if (typeof renderTerminalRail === "function") renderTerminalRail();
     }
     terminalRailPrefs.archived.push(entry);
+    // 归档即摘置顶（与后端同一份写里的互斥）：本地镜像同拍摘，刷新回来两态
+    // 一致；取消归档不回置（互斥是单向的——恢复归位即回模式序）。
+    terminalRailPrefs.pinned = terminalRailPrefs.pinned.filter((row) => terminalRailArchivedKey(row) !== key);
     terminalRailRerenderExitFlip();
     api("POST", "/api/terminal/rail/archive", entry)
       .then(() => {
@@ -15679,8 +15830,8 @@ async function api(method, path, body) {
       });
   }
 
-  // 取消归档：从清单移除即回到原分组原位置——底层列表从没被改动，组内按最近活跃
-  // 的排序天然还原。无 toast（
+  // 取消归档：从清单移除即回到原分组原位置——底层列表从没被改动，组内按「最近
+  // 更新」键的排序天然还原。无 toast（
   // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。动效＝
   // 归档的镜像：行淡入回槽、下方行落回、水位线让位的回填行克隆淡出。
   function terminalRailUnarchiveSession(endpoint, id) {
@@ -15693,6 +15844,44 @@ async function api(method, path, body) {
         terminalRailPrefs.archived.push({ endpoint, id });
         renderTerminalRailHistory(terminalRailAgentId());
         toast(panelError(error, "取消归档未能保存，请重试"), true);
+      });
+  }
+
+  // 置顶：持久化集合（最近置顶在最前）＋行前置（任何排序模式）。与归档互斥：
+  // 归档行不出置顶钮（后端同判据兜底拒写），归档动作同拍摘置顶（见
+  // terminalRailArchiveSession）。本地先生效再落盘（同归档的乐观纪律），
+  // 失败回退并提示。置顶是轻动作：无确认、无 toast（行已当拍前置，反馈在眼前）。
+  function terminalRailPinSession(session) {
+    const key = terminalRailArchivedKey(session);
+    if (!key) return;
+    if (terminalRailPrefs.archived.some((row) => terminalRailArchivedKey(row) === key)) return;
+    if (terminalRailPrefs.pinned.some((row) => terminalRailArchivedKey(row) === key)) return;
+    terminalRailPrefs.pinned.unshift({ endpoint: session.endpoint, id: session.id });
+    terminalRailFlipMode = "instant"; // 前置跳变是 resetKey：瞬时落位
+    renderTerminalRailHistory(terminalRailAgentId());
+    api("POST", "/api/terminal/rail/pin", { endpoint: session.endpoint, id: session.id })
+      .catch((error) => {
+        terminalRailPrefs.pinned = terminalRailPrefs.pinned.filter((row) => terminalRailArchivedKey(row) !== key);
+        renderTerminalRailHistory(terminalRailAgentId());
+        toast(panelError(error, "置顶未能保存，请重试"), true);
+      });
+  }
+
+  // 取消置顶：行回到模式序里的自然位（清单移除即回）。回退时 splice 回原位——
+  // 置顶段内的名次（最近置顶在前）不因一次失败的取消而丢失。
+  function terminalRailUnpinSession(session) {
+    const key = terminalRailArchivedKey(session);
+    if (!key) return;
+    const index = terminalRailPrefs.pinned.findIndex((row) => terminalRailArchivedKey(row) === key);
+    if (index < 0) return;
+    const [removed] = terminalRailPrefs.pinned.splice(index, 1);
+    terminalRailFlipMode = "instant";
+    renderTerminalRailHistory(terminalRailAgentId());
+    api("POST", "/api/terminal/rail/unpin", { endpoint: session.endpoint, id: session.id })
+      .catch((error) => {
+        terminalRailPrefs.pinned.splice(Math.min(index, terminalRailPrefs.pinned.length), 0, removed);
+        renderTerminalRailHistory(terminalRailAgentId());
+        toast(panelError(error, "取消置顶未能保存，请重试"), true);
       });
   }
 
@@ -15931,6 +16120,8 @@ async function api(method, path, body) {
         terminalRailPrefs = {
           archived: Array.isArray(data && data.archived) ? data.archived : [],
           removedGroups: Array.isArray(data && data.removedGroups) ? data.removedGroups : [],
+          groupOrder: Array.isArray(data && data.groupOrder) ? data.groupOrder : [],
+          pinned: Array.isArray(data && data.pinned) ? data.pinned : [],
         };
         // 自愈的时间轴补齐：盘上有清单条目、本地却没有移除时刻的（早先
         // 落盘的老数据，或换了浏览器 profile），按「此刻」记一笔——此后该目录再来的
@@ -16022,6 +16213,23 @@ async function api(method, path, body) {
         if (session) terminalRailUnarchiveSession(session.endpoint, session.id);
         return;
       }
+      // 置顶/取消置顶钮：同归档钮的位次纪律——排在行点击（resume）之前，钮是
+      // 行按钮的子元素，排后面会被行点击整个抢走。身份按行 id 回查会话表
+      // （endpoint＋id 双键才指得准，同归档）。
+      const pin = target.closest("[data-rail-term-pin]");
+      if (pin) {
+        const id = pin.getAttribute("data-rail-term-pin");
+        const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+        if (session) terminalRailPinSession(session);
+        return;
+      }
+      const unpin = target.closest("[data-rail-term-unpin]");
+      if (unpin) {
+        const id = unpin.getAttribute("data-rail-term-unpin");
+        const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+        if (session) terminalRailUnpinSession(session);
+        return;
+      }
       const menuBtn = target.closest("[data-rail-term-group-menu]");
       if (menuBtn) {
         toggleTerminalRailGroupMenu(menuBtn.getAttribute("data-rail-term-group-menu"));
@@ -16105,41 +16313,113 @@ async function api(method, path, body) {
         else openTerminalRailViewMenu();
       });
     }
-    // 会话行拖拽（手序的唯一来源）：draggable 只在非归档行上；同列表内
-    // 移动（只允许同父级兄弟，组/平铺都是一个父）。落点＝目标行之前。
+    // 会话行/组头拖拽：行拖拽是行手序的唯一来源（draggable 只在非归档行上；同
+    // 列表内移动——只允许同父级兄弟，组/平铺都是一个父，落点＝目标行之前）；组头
+    // 拖拽是组序的唯一来源（拖到另一组头前落位）。两路各记各的 drag 键，落点互不
+    // 相接：行拖不落组头、组拖不落行（拖拽中另一路的 drag 键恒空，选择器天然分流）。
     let railDragId = "";
+    let railGroupDragKey = "";
+    // 组序重排：从当前 DOM 序读组键序列（树模式才有组头；未分组不在序列、恒垫
+    // 底），把 fromKey 摘出插到 toKey 之前。落盘是合并式：序列之外的目录（别的
+    // agent 的组、暂被滤掉的）保序垫尾——与 terminalRailSortGroups 同一合并口径，
+    // 切 agent 不洗别人家的序。这里改完本地清单后自己 POST（重渲时 sortGroups 的
+    // 落盘分支会因「清单已是终序」而幂等跳过，持久化只发这一笔）；序列没变返回
+    // false（不重渲不落盘）。
+    const terminalRailMoveGroupOrder = (fromKey, toKey) => {
+      const norm = terminalRailNormDir;
+      const keys = [];
+      dir.querySelectorAll("[data-rail-term-group-head]").forEach((head) => {
+        const value = head.getAttribute("data-rail-term-group-head") || "";
+        if (value && value !== TERMINAL_RAIL_UNGROUPED_HEAD) keys.push(value);
+      });
+      const fromIndex = keys.indexOf(fromKey);
+      const toIndex = keys.indexOf(toKey);
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return false;
+      keys.splice(fromIndex, 1);
+      const insertAt = keys.indexOf(toKey);
+      if (insertAt < 0) return false; // 防御：摘出后目标不在序列
+      keys.splice(insertAt, 0, fromKey);
+      const visibleSet = new Set(keys.map((raw) => norm(raw)));
+      const order = Array.isArray(terminalRailPrefs.groupOrder) ? terminalRailPrefs.groupOrder : [];
+      const nextOrder = [...keys, ...order.filter((raw) => !visibleSet.has(norm(raw)))];
+      if (terminalRailSameDirList(nextOrder, order)) return false;
+      terminalRailPrefs.groupOrder = nextOrder;
+      api("POST", "/api/terminal/rail/group-order", { order: nextOrder }).catch(() => {
+        // 落盘失败：本会话保留本地序（下次组成变化会再试），刷新回盘面序。
+      });
+      return true;
+    };
     dir.addEventListener("dragstart", (event) => {
-      const row = event.target && typeof event.target.closest === "function"
-        ? event.target.closest('[data-rail-term-resume][draggable="true"]')
+      const closest = event.target && typeof event.target.closest === "function"
+        ? event.target.closest.bind(event.target)
         : null;
-      if (!row) return;
-      railDragId = row.getAttribute("data-rail-term-resume") || "";
+      const row = closest ? closest('[data-rail-term-resume][draggable="true"]') : null;
+      if (row) {
+        railDragId = row.getAttribute("data-rail-term-resume") || "";
+        if (event.dataTransfer && typeof event.dataTransfer.setData === "function") {
+          event.dataTransfer.setData("text/plain", railDragId);
+        }
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+        return;
+      }
+      const head = closest ? closest('[data-rail-term-group-head][draggable="true"]') : null;
+      if (!head) return;
+      railGroupDragKey = head.getAttribute("data-rail-term-group-head") || "";
       if (event.dataTransfer && typeof event.dataTransfer.setData === "function") {
-        event.dataTransfer.setData("text/plain", railDragId);
+        event.dataTransfer.setData("text/plain", railGroupDragKey);
       }
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
     });
     dir.addEventListener("dragover", (event) => {
-      const row = event.target && typeof event.target.closest === "function"
-        ? event.target.closest('[data-rail-term-resume][draggable="true"]')
+      const closest = event.target && typeof event.target.closest === "function"
+        ? event.target.closest.bind(event.target)
         : null;
+      if (railGroupDragKey) {
+        const head = closest ? closest('[data-rail-term-group-head][draggable="true"]') : null;
+        if (head) {
+          event.preventDefault(); // 允许落在组头上（落自身＝无动作，见 drop）
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        }
+        return;
+      }
+      const row = closest ? closest('[data-rail-term-resume][draggable="true"]') : null;
       if (!row || !railDragId) return;
       event.preventDefault(); // 允许落在非归档行上
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
     });
     dir.addEventListener("drop", (event) => {
-      const row = event.target && typeof event.target.closest === "function"
-        ? event.target.closest('[data-rail-term-resume][draggable="true"]')
+      const closest = event.target && typeof event.target.closest === "function"
+        ? event.target.closest.bind(event.target)
         : null;
+      if (railGroupDragKey) {
+        const head = closest ? closest('[data-rail-term-group-head][draggable="true"]') : null;
+        const fromKey = railGroupDragKey;
+        railGroupDragKey = "";
+        if (!head) return;
+        event.preventDefault();
+        if (!terminalRailMoveGroupOrder(fromKey, head.getAttribute("data-rail-term-group-head") || "")) return;
+        terminalRailFlipMode = "instant"; // 拖拽落位是 resetKey：瞬时跳变
+        renderTerminalRailHistory(terminalRailAgentId());
+        return;
+      }
+      const row = closest ? closest('[data-rail-term-resume][draggable="true"]') : null;
       if (!row || !railDragId) return;
       event.preventDefault();
       const toId = row.getAttribute("data-rail-term-resume") || "";
+      // 置顶段隔离：置顶行只与置顶行换位、非置顶行只与非置顶行换位——置顶＝
+      // 「前置」是模式无关的结构位，跨段拖拽会把段结构拖坏（把置顶行拖进普通
+      // 段等于变相取消置顶、反向等于变相置顶，两条都绕过了置顶清单的持久化）。
+      // 拒绝即静默收场（清 dragId 不重渲：画面本来就没变）。
+      if (terminalRailRowPinnedById(railDragId) !== terminalRailRowPinnedById(toId)) {
+        railDragId = "";
+        return;
+      }
       terminalRailMoveInManualOrder(terminalRailAgentId(), railDragId, toId);
       railDragId = "";
       terminalRailFlipMode = "instant"; // 拖拽落位是 resetKey：瞬时跳变
       renderTerminalRailHistory(terminalRailAgentId());
     });
-    dir.addEventListener("dragend", () => { railDragId = ""; });
+    dir.addEventListener("dragend", () => { railDragId = ""; railGroupDragKey = ""; });
     // 栏底「返回」一颗钮两态共用（设置态与终端态互斥）：终端态回进入终端前的视图，
     // 设置态仍由 initSettingsView 绑的 exitSettings 承担。
     const back = $("railBackBtn");

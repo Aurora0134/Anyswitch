@@ -817,6 +817,16 @@
   .rail-term-row-archive { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
   .rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }
   .rail-term-row-history:hover .rail-term-row-time { display: none; }
+  /* 置顶钮：hover 才出现，0ms 硬切，与归档钮同形制（同一行尾动作区，时间让位）；
+     已置顶态的钮（取消置顶）取 accent，一眼区分在位与否。归档行不渲染本钮。 */
+  .rail-term-row-pin { flex: none; display: none; padding: 0 2px; color: var(--text-3); cursor: pointer; }
+  .rail-term-row-history:hover .rail-term-row-pin { display: inline-flex; }
+  .rail-term-row-pin.is-on { color: var(--accent); }
+  /* 置顶标记：置顶行状态槽空闲时占槽（working 转圈/done 绿点优先，行内只画
+     最高优先级一态），caption 级灰，语义由 title 承担；置顶行标题升一级文字色
+     做强调（不与选中态的 accent-soft 底打架）。 */
+  .rail-term-pinmark { color: var(--text-4); }
+  .rail-term-row-history.is-pinned .rail-term-row-title { color: var(--text); }
   /* live 行的取消归档钮：归档行在「全部会话」筛选下内联显示，hover 出 */
   .rail-term-row-unarchive { flex: none; display: none; padding: 0 2px; color: var(--text-3); cursor: pointer; }
   .rail-term-row-history.is-archived:hover .rail-term-row-unarchive { display: inline-flex; }

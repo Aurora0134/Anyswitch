@@ -1342,7 +1342,7 @@ test("workbuddy: ai-title 标题、首条用户消息摘要、cwd 与会话 id �
   assert.equal(meta.resumeCommand, `workbuddy --resume ${id}`, "resume 模板是新增的 shim 命令");
   assert.deepEqual(
     Object.keys(meta),
-    ["endpoint", "id", "title", "summary", "project", "cwd", "originator", "file", "createdAt", "lastActive", "resumeCommand"],
+    ["endpoint", "id", "title", "summary", "project", "cwd", "originator", "file", "createdAt", "lastActive", "lastPromptAt", "resumeCommand"],
     "makeMeta 的字段一个不少（originator 无来源时落 null，不自造）",
   );
 
@@ -1355,6 +1355,180 @@ test("workbuddy: ai-title 标题、首条用户消息摘要、cwd 与会话 id �
   );
   assert.equal(messages[0].ts, 1788000001000);
   assert.equal(messages[1].ts, 1788000004000);
+});
+
+// --- lastPromptAt（最近用户提问时间）------------------------------------------
+// 排序键语义：只有用户真的发消息才前进；agent 输出、工具结果、注入提醒一律
+// 不推。各家谓词与其 loadMessages 的用户判定同源，memo 保证未变化文件零读
+// 盘、追加新提问时键前进不回跳。
+
+test("claude: lastPromptAt 取最后一条真实用户行，注入与工具结果行不推进", async () => {
+  const root = makeTmp();
+  const file = writeClaudeSession(root, "C--work-myproj", "sess-lp.jsonl", [
+    claudeLine({ message: { role: "user", content: "第一问" }, timestamp: "2026-09-01T10:00:00.000Z", sessionId: "sess-lp" }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "答一" }, timestamp: "2026-09-01T10:01:00.000Z", cwd: "C:\\work\\myproj", sessionId: "sess-lp" }),
+    // 整块工具结果的 user 记录：机器输出，不推进键。
+    JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: "输出" }] }, timestamp: "2026-09-01T10:02:00.000Z", cwd: "C:\\work\\myproj", sessionId: "sess-lp" }),
+    // 注入提醒：不推进键。
+    JSON.stringify({ type: "user", message: { role: "user", content: "<system-reminder>注意</system-reminder>" }, timestamp: "2026-09-01T10:03:00.000Z", cwd: "C:\\work\\myproj", sessionId: "sess-lp" }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "答二" }, timestamp: "2026-09-01T10:04:00.000Z", cwd: "C:\\work\\myproj", sessionId: "sess-lp" }),
+    // 最后一条真实用户行才是键。
+    claudeLine({ message: { role: "user", content: "第二问" }, timestamp: "2026-09-01T10:05:00.000Z", sessionId: "sess-lp" }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "答三" }, timestamp: "2026-09-01T10:06:00.000Z", cwd: "C:\\work\\myproj", sessionId: "sess-lp" }),
+  ]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, Date.parse("2026-09-01T10:05:00.000Z"));
+  assert.equal(sessions[0].lastActive, Date.parse("2026-09-01T10:06:00.000Z"), "lastActive 仍由任何写盘推进");
+
+  // memo：文件未变 → 键稳定；追加新提问 → 键前进到新行。
+  const again = await claudeScanner(root).scanAll();
+  assert.equal(again.sessions[0].lastPromptAt, Date.parse("2026-09-01T10:05:00.000Z"), "未变化的文件键不漂移");
+  writeFileSync(file, [
+    readFileSync(file, "utf8"),
+    claudeLine({ message: { role: "user", content: "第三问" }, timestamp: "2026-09-01T11:00:00.000Z", sessionId: "sess-lp" }),
+  ].join(""), "utf8");
+  const after = await claudeScanner(root).scanAll();
+  assert.equal(after.sessions[0].lastPromptAt, Date.parse("2026-09-01T11:00:00.000Z"), "新提问把键推进到新行时间");
+});
+
+test("claude: 提问被挤出尾窗（>2MB 工具输出）时回落 null，不误报", async () => {
+  const root = makeTmp();
+  // 首行用户提问（满足列表门槛），其后 2.1MB 的助手/工具行把提问推出窗口。
+  const filler = JSON.stringify({
+    type: "assistant",
+    message: { role: "assistant", content: "工具输出".repeat(90) },
+    timestamp: "2026-09-01T11:00:00.000Z",
+    cwd: "C:\\work\\myproj",
+    sessionId: "sess-deep",
+  });
+  const lines = [
+    claudeLine({ message: { role: "user", content: "唯一一问" }, timestamp: "2026-09-01T10:00:00.000Z", sessionId: "sess-deep" }),
+  ];
+  // 按行数预计算堆满 2MB+（首问在窗口外，窗口内全是无用户行的填充）。
+  const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
+  for (let i = 0; i < need; i++) lines.push(filler);
+  writeClaudeSession(root, "C--work-myproj", "sess-deep.jsonl", lines);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, null, "窗外提问不硬造键（调用方回落 createdAt）");
+});
+
+test("kimi: lastPromptAt 是最近的 prompt.accepted，system-reminder 注入不推进", async () => {
+  const root = makeTmp();
+  const sessionDir = join(root, "sessions", "wd_x", "session_lp");
+  mkdirSync(join(sessionDir, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(sessionDir, "agents", "main", "wire.jsonl"),
+    [
+      JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "第一问" }], time: 1788000001000 }),
+      JSON.stringify({ type: "context.append_loop_event", event: { type: "tool.call", name: "Bash", args: {} }, time: 1788000002000 }),
+      // 注入的 user-role 追加行（system-reminder 包裹）：不推进键。
+      JSON.stringify({ type: "context.append_message", message: { role: "user", content: "<system-reminder>上下文</system-reminder>" }, time: 1788000003000 }),
+      JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "第二问" }], time: 1788000004000 }),
+      JSON.stringify({ type: "context.append_loop_event", event: { type: "content.part", part: { type: "text", text: "回答" } }, time: 1788000005000 }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "session_index.jsonl"),
+    JSON.stringify({ sessionId: "session_lp", sessionDir, workDir: "C:\\work\\kimi-lp" }) + "\n",
+    "utf8",
+  );
+  const { sessions } = await testScanner({ kimi: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000004000, "取最近一次用户输入，不是最后的写盘时间");
+  // lastActive 走 wire mtime（既有口径），这里的提问时间戳是从事件行里读的。
+});
+
+test("dsh: lastPromptAt 取帧链里最近的 user/message，后续响应批不推进", async () => {
+  const root = makeTmp();
+  const id = "aaaa1111-2222-3333-4444-555555555555";
+  writeDshSession(root, "--C-work-dshlp--", id, [
+    [dshHeader(id, "C:\\work\\dshlp")],
+    [{ type: "user/message", seq: 2, time: 1788000001000, data: { content: [{ type: "text", text: "第一问" }] } }],
+    [{ type: "assistant/message", seq: 3, time: 1788000002000, data: { message: { role: "assistant", content: [{ type: "text", text: "答" }] } } }],
+    [{ type: "user/message", seq: 4, time: 1788000003000, data: { content: [{ type: "text", text: "第二问" }] } }],
+    // 提问之后的响应/工具批不推进键。
+    [{ type: "tool/result", seq: 5, time: 1788000004000, data: { message: { role: "user", source: { kind: "tool" }, content: [{ type: "tool-result", content: [{ type: "text", text: "输出" }] }] } } }],
+    [{ type: "assistant/message", seq: 6, time: 1788000005000, data: { message: { role: "assistant", content: [{ type: "text", text: "收尾" }] } } }],
+  ]);
+  const { sessions } = await testScanner({ dsh: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000003000);
+  assert.equal(sessions[0].lastActive, 1788000005000);
+});
+
+test("dsh: 未压缩 session.jsonl 同样倒扫出最近 user/message", async () => {
+  const root = makeTmp();
+  const id = "bbbb1111-2222-3333-4444-555555555555";
+  writeDshSession(root, "--C-work-dshplain--", id, [
+    [dshHeader(id, "C:\\work\\dshplain")],
+    [{ type: "user/message", seq: 2, time: 1788000001000, data: { content: [{ type: "text", text: "问" }] } }],
+    [{ type: "assistant/message", seq: 3, time: 1788000002000, data: { message: { role: "assistant", content: [{ type: "text", text: "答" }] } } }],
+  ], { fileName: "session.jsonl" });
+  const { sessions } = await testScanner({ dsh: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000001000);
+});
+
+test("zcode: lastPromptAt 按 message.data.semantics.origin=real_user 聚合，注入行不算", async () => {
+  const root = makeTmp();
+  mkdirSync(join(root, "cli", "db"), { recursive: true });
+  const dbPath = join(root, "cli", "db", "db.sqlite");
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE session (id text primary key, directory text, title text, time_created integer, time_updated integer);
+    CREATE TABLE message (id text primary key, session_id text, time_created integer, time_updated integer, data text);
+  `);
+  db.prepare("INSERT INTO session VALUES ('s1', 'C:\\\\work\\\\zc', '会话一', 1788000000000, 1788000009000)").run();
+  db.prepare("INSERT INTO session VALUES ('s2', 'C:\\\\work\\\\zc', '只有注入的会话', 1788000100000, 1788000190000)").run();
+  const insertMessage = db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)");
+  // s1：真实提问 T1 → 注入（agent_runtime 余量提醒）T2 → 真实提问 T3 → 注入 T4。
+  insertMessage.run("m1", "s1", 1788000001000, 1788000001000, JSON.stringify({ role: "user", semantics: { origin: "real_user", kind: "user_prompt" } }));
+  insertMessage.run("m2", "s1", 1788000002000, 1788000002000, JSON.stringify({ role: "user", semantics: { origin: "agent_runtime" } }));
+  insertMessage.run("m3", "s1", 1788000003000, 1788000003000, JSON.stringify({ role: "user", semantics: { origin: "real_user", kind: "user_prompt" } }));
+  insertMessage.run("m4", "s1", 1788000004000, 1788000004000, JSON.stringify({ role: "user", semantics: { origin: "system" } }));
+  // s2：只有 agent_runtime 注入行——判不出提问，回落 null。
+  insertMessage.run("m5", "s2", 1788000100000, 1788000100000, JSON.stringify({ role: "user", semantics: { origin: "agent_runtime" } }));
+  db.close();
+  const { sessions } = await testScanner({ zcode: [root] }).scanAll();
+  const s1 = sessions.find((row) => row.id === "s1");
+  const s2 = sessions.find((row) => row.id === "s2");
+  assert.equal(s1.lastPromptAt, 1788000003000, "取 real_user 的 MAX，注入行不参与");
+  assert.equal(s1.lastActive, 1788000009000);
+  assert.equal(s2.lastPromptAt, null, "全注入会话不硬造键");
+});
+
+test("opencode: v2 用户行按注入名单过滤，1.x 兜底取首个 part 文本", async () => {
+  const root = makeTmp();
+  const dbPath = makeOpencodeV2Db(root);
+  const db = new DatabaseSync(dbPath);
+  // ses_both：v2 里有两条 user 行——注入行更晚，真实行在前；键取真实行。
+  db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)").run(
+    "sm_both_1", "ses_both", "user", 3, 1788000001000,
+    JSON.stringify({ text: "升级前会话里的真实提问" }),
+  );
+  db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)").run(
+    "sm_both_2", "ses_both", "user", 4, 1788000002000,
+    JSON.stringify({ text: "<system-reminder>注入</system-reminder>" }),
+  );
+  // sess_legacy_only：只在 1.x 表里有 user 消息，文本在 part 行——兜底路径。
+  db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+    "msg_legacy", "sess_legacy_only", 1788000000500, 1788000000500, JSON.stringify({ role: "user" }),
+  );
+  db.prepare("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
+    "part_legacy", "msg_legacy", "sess_legacy_only", 1788000000500, 1788000000500,
+    JSON.stringify({ type: "text", text: "旧表里的提问" }),
+  );
+  db.close();
+  const { sessions } = await testScanner({ opencode: [root] }).scanAll();
+  const both = sessions.find((row) => row.id === "ses_both");
+  const v2new = sessions.find((row) => row.id === "ses_v2new");
+  const legacyOnly = sessions.find((row) => row.id === "sess_legacy_only");
+  assert.equal(both.lastPromptAt, 1788000001000, "注入文本不推进键，取最近的真实行");
+  assert.equal(v2new.lastPromptAt, 1788000010000, "v2 行的 data.text 是真实提问");
+  assert.equal(legacyOnly.lastPromptAt, 1788000000500, "只在 1.x 表里的会话走 message/part 兜底");
 });
 
 test("workbuddy: 没有 ai-title 时回落到首条用户消息，再没有才用目录名", async () => {

@@ -80,6 +80,22 @@ const sliceBetween = (src, startAnchor, endAnchor) => {
   return src.slice(start, end);
 };
 
+// 组序/行排序键/置顶改造（2026-11-17）后，行渲染与树渲染管线新增的一批依赖。
+// 真函数按名抽出 + 置顶两枚图标常量，注入任何沙盒都安全（未被调用的声明无副作用）。
+// 状态量（terminalRailPrefs/api）不进这份——各沙盒的状态形状由用例自己定，共用
+// 声明会与沙盒内既有定义打架。
+const railOrderPrelude = `
+  const TERMINAL_RAIL_ICON_PIN = "";
+  const TERMINAL_RAIL_PIN_MARK = "";
+  ${extractFn("terminalRailArchivedKey")}
+  ${extractFn("terminalRailRowUpdatedAt")}
+  ${extractFn("terminalRailCompareRowsByUpdate")}
+  ${extractFn("terminalRailSameDirList")}
+  ${extractFn("terminalRailIsPinned")}
+  ${extractFn("terminalRailApplyPinnedLeading")}
+  ${extractFn("terminalRailSortGroups")}
+`;
+
 const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -352,39 +368,55 @@ describe("终端视图左栏换血", () => {
       const fn = new Function(`
         ${sessDirNameSrc}
         ${extractFn("terminalRailNormDir")}
+        ${railOrderPrelude}
         ${extractFn("terminalRailGroupSessions")}
         return terminalRailGroupSessions;
       `)();
       return fn;
     };
 
-    it("按 project 归组、无 project 落「未分组」、组序按最近活跃倒序且未分组沉底", () => {
+    it("按 project 归组、无 project 落「未分组」、组序按派生最近更新倒序且未分组沉底", () => {
       const groups = groupFn()([
-        { id: "a", project: "C:\\dev\\alpha", lastActive: 100 },
-        { id: "b", project: "C:\\dev\\beta", lastActive: 300 },
-        { id: "c", project: "C:\\dev\\alpha", lastActive: 200 },
-        { id: "d", project: null, lastActive: 900 },
-        { id: "e", project: "", lastActive: 800 },
+        { id: "a", project: "C:\\dev\\alpha", lastPromptAt: 100 },
+        { id: "b", project: "C:\\dev\\beta", lastPromptAt: 300 },
+        { id: "c", project: "C:\\dev\\alpha", lastPromptAt: 200 },
+        { id: "d", project: null, lastPromptAt: 900 },
+        { id: "e", project: "", lastPromptAt: 800 },
       ]);
       assert.deepEqual(groups.map((g) => g.label), ["beta", "alpha", "未分组"], "组头取目录短名，未分组沉底");
       assert.deepEqual(groups.map((g) => g.key), ["C:\\dev\\beta", "C:\\dev\\alpha", ""], "组键是完整 project 路径（组态/水位线都按它存）");
-      assert.deepEqual(groups[1].rows.map((r) => r.id), ["c", "a"], "组内按最近活跃倒序");
+      assert.deepEqual(groups[1].rows.map((r) => r.id), ["c", "a"], "组内按最近更新倒序");
       assert.deepEqual(groups[2].rows.map((r) => r.id), ["d", "e"], "空 project 与 null 同归未分组");
       assert.deepEqual(groupFn()([]), [], "空表不炸");
       assert.deepEqual(groupFn()(null), [], "非数组不炸");
     });
 
+    it("行排序键＝max(createdAt, lastPromptAt)：只有用户提问把行顶上去，agent 输出不推键", () => {
+      const groups = groupFn()([
+        // x 是最新被 agent 写盘的（lastActive 最大），但用户最后提问在 100——
+        // 它必须排在 y（提问 200）之下：lastActive 不参与排序键。
+        { id: "x", project: "C:\\dev\\alpha", createdAt: 50, lastPromptAt: 100, lastActive: 9999 },
+        { id: "y", project: "C:\\dev\\alpha", createdAt: 10, lastPromptAt: 200, lastActive: 210 },
+        // z 从没被用户提问过（缺 lastPromptAt）：键退化为 createdAt，老会话垫底。
+        { id: "z", project: "C:\\dev\\alpha", createdAt: 5, lastActive: 8888 },
+      ]);
+      assert.deepEqual(groups[0].rows.map((r) => r.id), ["y", "x", "z"], "提问新的在前、agent 输出不顶行、未提问退化为 createdAt");
+      // 键取双值的 max：createdAt 晚于 lastPromptAt 时（补录场景）以 createdAt 计。
+      const edged = groupFn()([{ id: "w", project: "C:\\dev\\alpha", createdAt: 500, lastPromptAt: 300 }]);
+      assert.equal(edged[0].latest, 500, "latest＝max(createdAt, lastPromptAt)");
+    });
+
     it("分组键归一化：同一目录的不同拼写只出一组，label 取最短拼写", () => {
       // 用户实测的病灶：同名目录因拼写不同裂成两个组（两个「ai4math」）。
       const groups = groupFn()([
-        { id: "a", project: "C:\\dev\\alpha", lastActive: 100 },
-        { id: "b", project: "C:/Dev/Alpha/", lastActive: 300 },
-        { id: "c", project: "C:\\DEV\\ALPHA\\", lastActive: 200 },
+        { id: "a", project: "C:\\dev\\alpha", lastPromptAt: 100 },
+        { id: "b", project: "C:/Dev/Alpha/", lastPromptAt: 300 },
+        { id: "c", project: "C:\\DEV\\ALPHA\\", lastPromptAt: 200 },
       ]);
       assert.equal(groups.length, 1, "三种拼写（斜杠/大小写/尾斜杠）只出一组");
       assert.equal(groups[0].key, "C:\\dev\\alpha", "组键取最短的那条原始拼写");
       assert.equal(groups[0].label, "alpha", "组头短名取自同一拼写");
-      assert.deepEqual(groups[0].rows.map((r) => r.id), ["b", "c", "a"], "组内仍按最近活跃倒序");
+      assert.deepEqual(groups[0].rows.map((r) => r.id), ["b", "c", "a"], "组内仍按最近更新倒序");
     });
 
     it("label 稳定：等长拼写按字典序定，和会话先后无关（不随活跃序漂）", () => {
@@ -427,6 +459,8 @@ describe("终端视图左栏换血", () => {
         function sessRelTime() { return "3 分钟前"; }
         function terminalRailRelTime() { return "3 分钟前"; }
         function terminalRailIsArchived() { return false; }
+        const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+        ${railOrderPrelude}
         function esc(v) { return String(v); }
         function escapeHtml(v) { return String(v || ""); }
         // 槽位接线用桩（markup 逐项由源码钉死测试负责）
@@ -488,6 +522,8 @@ describe("终端视图左栏换血", () => {
         function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
         function terminalRailRelTime() { return "3 分钟前"; }
         function terminalRailIsArchived() { return false; }
+        const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+        ${railOrderPrelude}
         function esc(v) { return String(v); }
         function escapeHtml(v) { return String(v || ""); }
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
@@ -553,7 +589,10 @@ describe("终端视图左栏换血", () => {
         const terminalRailCollapsedGroups = state.collapsed;
         function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
         const terminalRailWatermarks = new Map();
-        const terminalRailPrefs = { archived: [], removedGroups: [] };
+        const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+        // 组序落盘分支的 api 桩：本组用例只断 DOM 写入次数，落盘结果不作断言。
+        function api() { return Promise.resolve({ ok: true }); }
+        ${railOrderPrelude}
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
@@ -630,6 +669,90 @@ describe("终端视图左栏换血", () => {
     });
   });
 
+  describe("组序与置顶（vm 真跑）", () => {
+    // 排序/前置/门控三个纯函数共用一份沙盒：真函数按名抽出，api 走桩收账
+    // （落盘 POST 断「何时发/何时幂等跳过」），prefs/history 由用例注入。
+    const orderSandbox = (prefsValue, posts, historySessions = []) => new Function("prefsValue", "posts", "historySessions", `
+      const terminalRailPrefs = prefsValue;
+      const terminalRailHistory = { sessions: historySessions };
+      function api(method, path, body) { posts.push({ method, path, body }); return Promise.resolve({ ok: true }); }
+      ${extractFn("terminalRailNormDir")}
+      ${extractFn("terminalRailSameDirList")}
+      ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailIsPinned")}
+      ${extractFn("terminalRailRowPinnedById")}
+      ${extractFn("terminalRailApplyPinnedLeading")}
+      ${extractFn("terminalRailSortGroups")}
+      return {
+        sortGroups: terminalRailSortGroups,
+        applyPinned: terminalRailApplyPinnedLeading,
+        rowPinnedById: terminalRailRowPinnedById,
+      };
+    `)(prefsValue, posts, historySessions);
+
+    it("组序＝持久清单序：清单外的组进最顶（首现序）、已知组按清单、未分组恒垫底；会话活跃不挪组", () => {
+      const posts = [];
+      const prefs = { archived: [], removedGroups: [], groupOrder: ["C:\\dev\\beta", "C:\\dev\\gamma"], pinned: [] };
+      const groups = [
+        { key: "C:\\dev\\alpha", rows: [], latest: 5000 }, // 清单外（新组）——latest 最新也只进最顶
+        { key: "C:\\dev\\beta", rows: [], latest: 1 },
+        { key: "C:\\dev\\gamma", rows: [], latest: 9999 }, // 清单第 2——latest 最新不置顶
+        { key: "", label: "未分组", rows: [], latest: 99999 }, // 未分组恒垫底
+        { key: "C:\\dev\\delta", rows: [], latest: 2 }, // 清单外第二个：按首现序跟在 alpha 后
+      ];
+      const out = orderSandbox(prefs, posts).sortGroups(groups, { persist: true });
+      assert.deepEqual(out.map((g) => g.key), ["C:\\dev\\alpha", "C:\\dev\\delta", "C:\\dev\\beta", "C:\\dev\\gamma", ""], "未知组进最顶（首现序）、已知组按清单、未分组垫底——latest 全程不参与");
+      // 合并式落盘：本帧可见序在前（首现新组随之登记）、清单里本帧不可见的保序垫尾
+      assert.deepEqual(posts.map((p) => p.body.order), [["C:\\dev\\alpha", "C:\\dev\\delta", "C:\\dev\\beta", "C:\\dev\\gamma"]], "新组首现即登记进清单");
+    });
+
+    it("幂等与守卫：序没变不重发 POST；persist:false（兜底新组）不动清单不发请求", async () => {
+      const posts = [];
+      const prefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+      const groups = [{ key: "C:\\dev\\beta", rows: [], latest: 2 }, { key: "C:\\dev\\alpha", rows: [], latest: 1 }];
+      const sandbox = orderSandbox(prefs, posts);
+      sandbox.sortGroups(groups, { persist: true });
+      assert.equal(posts.length, 1, "首跑登记");
+      await Promise.resolve();
+      sandbox.sortGroups(groups, { persist: true }); // 清单已是终序 → 幂等跳过
+      assert.equal(posts.length, 1, "重跑不重发");
+
+      const quiet = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+      orderSandbox(quiet, posts).sortGroups([{ key: "C:\\dev\\alpha", rows: [], latest: 1 }], { persist: false });
+      assert.equal(posts.length, 1, "persist:false 不发请求");
+      assert.deepEqual(quiet.groupOrder, [], "清单不动（兜底组等真组出现再登记）");
+    });
+
+    it("置顶前置：pinned 清单序前置（最近置顶在最前）、其余保模式序；无置顶原样、flat 单组同款前置", () => {
+      const mkGroup = () => ({ key: "C:\\dev\\alpha", rows: [
+        { id: "s-1", endpoint: "kimi", lastPromptAt: 300 },
+        { id: "s-2", endpoint: "kimi", lastPromptAt: 200 },
+        { id: "s-3", endpoint: "kimi", lastPromptAt: 100 },
+      ] });
+      const pinned = [{ endpoint: "kimi", id: "s-2" }, { endpoint: "kimi", id: "s-1" }];
+      const out = orderSandbox({ archived: [], removedGroups: [], groupOrder: [], pinned }, []).applyPinned([mkGroup()]);
+      assert.deepEqual(out[0].rows.map((r) => r.id), ["s-2", "s-1", "s-3"], "置顶行按清单序前置（最近置顶在最前），其余保模式序");
+      const flat = orderSandbox({ archived: [], removedGroups: [], groupOrder: [], pinned }, []).applyPinned([{ key: "", flat: true, rows: [...mkGroup().rows] }]);
+      assert.deepEqual(flat[0].rows.map((r) => r.id), ["s-2", "s-1", "s-3"], "单列表伪组同样前置（全局置顶段）");
+      const untouched = orderSandbox({ archived: [], removedGroups: [], groupOrder: [], pinned: [] }, []).applyPinned([mkGroup()]);
+      assert.deepEqual(untouched[0].rows.map((r) => r.id), ["s-1", "s-2", "s-3"], "无置顶＝原模式序（取消置顶回原位）");
+      // 清单里指向不在本组的条目（别的 agent 的置顶）不影响本组
+      const foreign = orderSandbox({ archived: [], removedGroups: [], groupOrder: [], pinned: [{ endpoint: "claude", id: "x-1" }] }, []).applyPinned([mkGroup()]);
+      assert.deepEqual(foreign[0].rows.map((r) => r.id), ["s-1", "s-2", "s-3"], "外组置顶条目不误伤本组行序");
+    });
+
+    it("拖拽段隔离判据：行 id 回查置顶态（置顶/非置顶/未知 id 三档）", () => {
+      const prefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [{ endpoint: "kimi", id: "s-1" }] };
+      const sandbox = orderSandbox(prefs, [], [
+        { id: "s-1", endpoint: "kimi" },
+        { id: "s-2", endpoint: "kimi" },
+      ]);
+      assert.equal(sandbox.rowPinnedById("s-1"), true, "置顶行");
+      assert.equal(sandbox.rowPinnedById("s-2"), false, "非置顶行");
+      assert.equal(sandbox.rowPinnedById("s-404"), false, "未知 id 按非置顶（与拖拽门控的静默拒绝兼容）");
+    });
+  });
+
   describe("历史会话点击：续接两分支（vm 真跑）", () => {
     const runResume = (session, apiImpl) => {
       const log = { posts: [], toasts: [], renders: 0, active: null, rememberedCwd: [] };
@@ -651,7 +774,7 @@ describe("终端视图左栏换血", () => {
         function armTerminalBootingOverlay() {}
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
-        const terminalRailPrefs = { archived: [], removedGroups: [] };
+        const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
         function terminalCwdInitial() { return "C:\\\\Users\\\\fixture"; }
@@ -1021,6 +1144,8 @@ describe("终端视图左栏换血", () => {
       function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
       function terminalRailRelTime() { return "3 分钟前"; }
       function terminalRailIsArchived() { return false; }
+      const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+      ${railOrderPrelude}
       function esc(v) { return String(v); }
       function escapeHtml(v) { return String(v || ""); }
       const TERMINAL_RAIL_SPINNER = "";
@@ -1652,15 +1777,17 @@ describe("终端视图左栏换血", () => {
       assert.ok(render.includes("agentId ?"), "按有无 agent 聚焦分态");
     });
 
-    it("显式不做：选工作区钮 / 身份行 / 真删除会话 / 置顶 / 组行拖拽 / 快捷键 / v1", () => {
+    it("显式不做：选工作区钮 / 身份行 / 真删除会话 / 快捷键 / v1", () => {
       const railBlock = sliceBetween(panelJs, "终端会话栏：终端视图下的左栏换血内容", "function initSkillsTab");
       assert.ok(railBlock.length > 1000, "栏体代码段可取样");
-      for (const forbidden of ["marquee", "contextmenu", "快捷键", "terminalRailPin"]) {
+      for (const forbidden of ["marquee", "contextmenu", "快捷键"]) {
         assert.ok(!railBlock.includes(forbidden), `不做清单项「${forbidden}」不在栏体代码里`);
       }
-      // 会话行拖拽随「手动排序」照搬（手序的唯一来源）；组行不可拖（组是目录派生）
+      // 会话行拖拽＝行手序唯一来源；组头拖拽＝组序唯一来源（组序有持久清单，
+      // 见 rail store 的 groupOrder）——两个拖拽面随置顶/组序改造落地，行为面由
+      // 拖拽门控与组序用例覆盖，这里只锚组头确有拖拽属性。
       const groupHeadHtml = sliceBetween(railBlock, "rail-term-group-head", "rail-term-group-slot");
-      assert.ok(!groupHeadHtml.includes("draggable"), "组行不搬拖拽（我们的组无清单可持久化）");
+      assert.ok(groupHeadHtml.includes('draggable="true"'), "组头带拖拽（组序清单的写入口）");
       // 真删除会话文件不在栏体能力里（归档=标记+过滤，语义不变）
       assert.ok(!railBlock.includes("sessionDelete") && !railBlock.includes("deleteSession"), "栏体不碰真删除");
       // v1 旧版面板通路不碰：栏体全部锚 v2
@@ -1835,7 +1962,10 @@ describe("终端视图左栏换血", () => {
           const terminalRailCollapsedGroups = state.collapsed;
           function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
           const terminalRailWatermarks = new Map();
-          const terminalRailPrefs = { archived: [], removedGroups: [] };
+          const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+          // 组序落盘分支的 api 桩：本组用例只断 DOM 写入次数，落盘结果不作断言。
+          function api() { return Promise.resolve({ ok: true }); }
+          ${railOrderPrelude}
           const terminalRailPendingNew = new Map();
           const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
@@ -1953,7 +2083,10 @@ ${extractFn("terminalRailPendingRowHtml")}
         const terminalRailCollapsedGroups = state.collapsed;
         function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
         const terminalRailWatermarks = new Map();
-        const terminalRailPrefs = { archived: [], removedGroups: [] };
+        const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+        // 组序落盘分支的 api 桩：本组用例只断 DOM 写入次数，落盘结果不作断言。
+        function api() { return Promise.resolve({ ok: true }); }
+        ${railOrderPrelude}
         const terminalRailPendingNew = new Map();
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
@@ -2164,7 +2297,10 @@ describe("运行中转圈与水位线联动", () => {
     const terminalRailCollapsedGroups = state.collapsed;
     function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
     const terminalRailWatermarks = new Map();
-    const terminalRailPrefs = { archived: [], removedGroups: [] };
+    const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+    // 组序落盘分支的 api 桩：本组用例只断 DOM 写入次数，落盘结果不作断言。
+    function api() { return Promise.resolve({ ok: true }); }
+    ${railOrderPrelude}
     const terminalRailPendingNew = new Map();
     const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
@@ -2241,11 +2377,11 @@ describe("运行中转圈与水位线联动", () => {
   };
 
   it("水位线联动：运行中＋当前会话两档强制入可见段，不被藏进「展开其余 N」（vm 真跑）", () => {
-    // 10 条同目录会话（lastActive 递减，s10 最新）：基线水位 5 → s10..s6 可见；
+    // 10 条同目录会话（lastPromptAt 递减，s10 最新）：基线水位 5 → s10..s6 可见；
     // s2 运行中（第 9 新）、s3 是当前会话（第 8 新）——两档强制入可见段。
     const rows = [];
     for (let i = 10; i >= 1; i -= 1) {
-      rows.push({ id: `s${i}`, endpoint: "kimi", project: "C:\\dev\\alpha", title: `会话 ${i}`, lastActive: i * 100 });
+      rows.push({ id: `s${i}`, endpoint: "kimi", project: "C:\\dev\\alpha", title: `会话 ${i}`, lastPromptAt: i * 100 });
     }
     const history = { endpoint: "kimi", sessions: rows, fetchedAt: 1, error: null };
     const sessions = {
@@ -2339,7 +2475,10 @@ describe("live 推导（绑定未落地空窗）", () => {
     const terminalRailCollapsedGroups = state.collapsed;
     function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
     const terminalRailWatermarks = new Map();
-    const terminalRailPrefs = { archived: [], removedGroups: [] };
+    const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+    // 组序落盘分支的 api 桩：本组用例只断 DOM 写入次数，落盘结果不作断言。
+    function api() { return Promise.resolve({ ok: true }); }
+    ${railOrderPrelude}
     const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
@@ -2605,6 +2744,8 @@ describe("done（跑完未读）标记与绿点", () => {
       function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
       function terminalRailRelTime() { return "3 分钟"; }
       function terminalRailIsArchived() { return false; }
+      const terminalRailPrefs = { archived: [], removedGroups: [], groupOrder: [], pinned: [] };
+      ${railOrderPrelude}
       function esc(v) { return String(v); }
       function escapeHtml(v) { return String(v || ""); }
       const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
