@@ -1532,12 +1532,13 @@
 
   /* 运行日志：无框消息提示式双态流。消息卡自身即框，外层不套 panel-card。最新消息
      恒在顶部（收起叠卡与展开视口同一基准），旧卡依次向下错位并逐层退远；展开态
-     原位 320px 可滚视口、贴顶跟随。级别语义色取 --console-*；连接状态不上屏。
+     同高可滚视口、贴顶跟随——卡高内容驱动、两态同值，展收只换层不换高（底缘那
+     条卡顶不跟着跳）。级别语义色取 --console-*；连接状态不上屏。
      动效走 transform/opacity/height/filter，reduced-motion 由文件末尾通配规则停。 */
   .live-log-region { display: block; }
   .live-log {
     display: flex; flex-direction: column; gap: 8px;
-    --ll-step: 22px; --ll-step-expanded: 55px;
+    --ll-step: 22px;
     /* 恒留滚动条槽的实测宽度，由 syncLogGutter 写入；叠卡右缘据此让出同宽。 */
     --ll-gutter: 0px;
     --ll-card-h: 49px;
@@ -1547,13 +1548,6 @@
     --ll-retreat-delay: 45ms;
     /* 卡面那块提亮的底：卡与舞台底缘共用一处，改一处两边同变。 */
     --ll-face: color-mix(in srgb, var(--surface) 94%, white 6%);
-  }
-  /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与舞台长高同拍。
-     --ll-step-expanded 由 setLogExpanded 量视口首卡行距写入，55px 是无卡时兜底。 */
-  .live-log[data-state="expanded"] {
-    --ll-step: var(--ll-step-expanded); --ll-scale-1: 1; --ll-scale-2: 1;
-    --ll-blur-1: 0px; --ll-blur-2: 0px;
-    --ll-opacity-1: 1; --ll-opacity-2: 1;
   }
   .live-log-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px; }
   .live-log-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.01em; }
@@ -1571,16 +1565,17 @@
   .live-log-toggle svg { width: 14px; height: 14px; flex: none; transition: transform 220ms var(--ease-out); }
   .live-log[data-state="expanded"] .live-log-toggle svg { transform: rotate(180deg); }
   /* 舞台高度＝卡高＋两个步长：卡高内容驱动，窄窗卡变高时三层仍各露一个完整步长，
-     第三层不会只剩一条卡底边。--ll-card-h 由 renderLogStack 量非离场卡的最大布局
-     高写入，49px 是无卡时兜底；展开态仍钉 320px 视口。 */
+     第三层不会只剩一条卡底边。--ll-card-h 由 renderLogStack 量叠卡内最大布局高写
+     入，49px 是无卡时兜底。两态同值：展开不再另钉一版高度——展收若改高，底缘那
+     条常驻卡顶会跟着舞台边跳，且空日志展开也会撑出一屏空白（2026-11-17 用户报障
+     裁决）。高度过渡只留在内容变高上（新卡更高时舞台平滑跟上）。 */
   .live-log-stage {
     position: relative; overflow: hidden;
     height: calc(var(--ll-card-h) + var(--ll-step) * 2);
     transition: height 220ms var(--ease-out);
   }
-  .live-log[data-state="expanded"] .live-log-stage { height: 320px; }
-  /* 两层都随舞台长高：卡顶锚于 top:0，不再随高度过渡被拽（早期抽搐来自底锚＋层随
-     舞台长高）。舞台长出的空间正好承接叠卡向下摊开。 */
+  /* 两层都铺满整个舞台：卡顶锚于 top:0，不随任何高度过渡被拽（早期抽搐来自底锚＋
+     层随舞台长高）。高度不再随展收变化，叠卡也就地淡出淡入，不做间距摊开。 */
   .live-log-stack, .live-log-viewport { position: absolute; inset: 0; transition: opacity 220ms var(--ease-out); }
   .live-log-stack { cursor: pointer; padding: 0 2px; }
   /* 视口贴顶用瞬时快照：平滑滚动会在展开时追一个随高度变化的目标，再抖一下；
@@ -1595,10 +1590,10 @@
   /* 稳态可见性：收起只显叠卡，展开只显视口。 */
   .live-log[data-state="expanded"] .live-log-stack { opacity: 0; pointer-events: none; }
   .live-log[data-state="expanded"] .live-log-viewport { opacity: 1; pointer-events: auto; }
-  /* 摊开期视口从第一帧就在场并随 220ms 淡入：第 4 行起当场填住舞台下半段，不再
-     「满→空→突然满」。叠卡压在其上完成摊开，但放掉点击，展开中的卡内操作落到视口
-     那一层；到位后 handoff 只剩上层 60ms 淡出。收回仍走硬切（F6 口径）。 */
-  .live-log[data-motion="expanding"] { --ll-step: var(--ll-step-expanded); }
+  /* 摊开期视口从第一帧就在场并随 220ms 淡入，与叠卡交叉淡化；叠卡压在视口之上但
+     放掉点击，展开中的卡内操作落到视口那一层；到位后 handoff 只剩上层 60ms 淡出。
+     收回仍走硬切（F6 口径）。叠卡间距不随展收放大——舞台不再长高，放大的间距会把
+     第三张卡挤出固定高度的舞台（旧 55px 行距＋摊开动画随 320px 一并退役）。 */
   .live-log[data-motion="expanding"] .live-log-stack { opacity: 1; pointer-events: none; z-index: 2; }
   .live-log[data-motion="collapsing"] .live-log-stack { opacity: 1; pointer-events: auto; }
   .live-log[data-motion="collapsing"] .live-log-viewport { opacity: 0; pointer-events: none; }
@@ -2394,11 +2389,13 @@
   :root[data-ui-version="v2"][data-style="wallpaper"] .view-tabs.stats-subtabs {
     background: var(--surface-sunken); border-color: var(--border);
   }
-  /* 壁纸态运行日志卡：卡面改调不透明基色 --surface-opaque（--surface 带玻璃化 alpha，
-     卡面透出壁纸、字压图），提亮配方与基座同源只换底；展开态底缘条整根退场——实底下
-     那条半透明卡顶缘成了多余的一道。退层整卡 opacity 会把卡面带字跟壁纸混洗（实机实测
-     退层小字对比掉到 3:1 上下），壁纸域两档归 1，退层感由缩放+错位+描边层叠继续表达。 */
-  :root[data-style="wallpaper"] .live-log { --ll-face: color-mix(in srgb, var(--surface-opaque) 94%, white 6%); }
+  /* 壁纸态运行日志卡：卡面不再单改不透明基色——与左半区另外两卡（服务状态/状态
+     检测）同一层玻璃底（基座 --ll-face 的 94%/6% 提亮配方直接作用于 --surface 的
+     滑杆 alpha，约 0.76 不透明，与两卡的 0.75 同档），照片从卡面透出，不再是实色
+     深块（2026-11-17 用户报障「信息卡太黑」；11-14 的实底化决议（字压照片）由此
+     推翻，对比度取舍转由用户承担）。展开态底缘条整根退场——透底下那条半透明卡顶缘
+     成了多余的一道。退层整卡 opacity 会把卡面带字跟壁纸混洗（实机实测退层小字对比
+     掉到 3:1 上下），壁纸域两档归 1，退层感由缩放+错位+描边层叠继续表达。 */
   :root[data-style="wallpaper"] .live-log { --ll-lip-o: 0; }
   :root[data-style="wallpaper"] .live-log { --ll-opacity-1: 1; --ll-opacity-2: 1; }
   /* 标题行在壁纸域是无垫底的浅灰字压照片（实测 ~2:1）：补卡面同款垫底成条，

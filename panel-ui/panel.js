@@ -3047,32 +3047,19 @@ async function api(method, path, body) {
     if (logMotionTimer) { clearTimeout(logMotionTimer); logMotionTimer = null; }
     if (logMotionTail) { clearTimeout(logMotionTail); logMotionTail = null; }
     const reduced = logReducedMotion();
-    // 展开行距量自视口首卡，先同步槽宽，量到的卡高才是交接后真正的行距。
+    // 展收先同步槽宽：叠卡右缘让出的宽度与视口一致，交接时同一句话不重新换行。
     syncLogGutter();
     logExpanded = expanded;
     // 入口无条件清交接态：中途切到 reduced-motion 或连点展收，都不留半程残影。
     if (root) root.removeAttribute("data-motion");
-    // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
-    if (expanded && root && body) {
-      const first = body.children[0];
-      const computed = first && typeof getComputedStyle === "function" ? getComputedStyle(first) : null;
-      // 行距＝卡的实际使用高度＋下边距。offsetHeight 取整，与视口靠亚像素累加排出来
-      // 的真实行距差半到一个像素，摊开期叠卡还看得见时逐行露错位；computed height 给
-      // 的是 border-box 的亚像素使用值（实测 66.375 对 offsetHeight 66），取不到才退回。
-      const exact = computed ? parseFloat(computed.height) : NaN;
-      const raw = Number.isFinite(exact) && exact > 0 ? exact : (first ? first.offsetHeight : 0);
-      const mb = computed ? parseFloat(computed.marginBottom) || 0 : 0;
-      const step = Math.round((raw + mb) * 1000) / 1000;
-      if (step > 0) root.style.setProperty("--ll-step-expanded", step + "px");
-    }
     // 重新展开一律回到最新并恢复跟随：第一屏就是最新消息，接着上次的阅读位
     // 会让人以为日志没在更新。
     if (expanded) {
       followLogs = true;
       if (body) body.scrollTop = 0;
     }
-    // 两阶段：data-motion 期间叠卡保持不透明并完成摊开/收回，到位后才与视口交接；
-    // 摊开不再被自身淡出吃掉。reduced-motion 直接落稳态，不等动画计时。
+    // 两阶段：data-motion 期间叠卡保持不透明与视口交叉淡化，到位后才交接；展收不再
+    // 改舞台高（卡高两态同值），淡出不再被自身吃掉。reduced-motion 直接落稳态。
     if (root && !reduced) root.setAttribute("data-motion", expanded ? "expanding" : "collapsing");
     if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
     const toggle = $("logToggle");
