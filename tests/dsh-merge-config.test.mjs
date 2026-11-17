@@ -6,11 +6,12 @@ import {
   readSidecar,
   writeSidecar,
   writeDshProfilePatches,
+  writeDshCredentialsRef,
   getYamlModule,
   dshYamlSchema,
 } from "../src/launchers/dsh-merge-config.mjs";
 import { AUTO_CHANNEL_KEY } from "../src/launchers/merge-common.mjs";
-import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -1070,4 +1071,222 @@ test("a library dialect is written per model, not as a route default", () => {
   const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null, catalog);
   assert.deepEqual(entry._poke.models[0].compat, { thinkingFormat: "deepseek" });
   assert.equal(entry._poke.compat, undefined);
+});
+
+// ---- writeDshCredentialsRef（~/.dsh/.credentials.yaml 静态代次引用的保鲜）-------
+//
+// 夹具复刻真实凭据仓结构：version/refs/records 三段，records 里压着 dsh 自家
+// 登录凭据——改写必须逐字节绕开它们。ref 默认给与 TOKEN 不同的值，让「保鲜」
+// 路径真的走改写分支。
+function markDshCredentials(dir, refToken = "stale-generation-token", { lineEnding = "\n", bom = false } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const filePath = join(dir, ".credentials.yaml");
+  const body = [
+    "version: 1",
+    "refs:",
+    `  ANYSWITCH_RELAY_TOKEN: ${refToken}`,
+    "records:",
+    "  deepseek-account-platform/default:",
+    "    kind: grant",
+    "    payload:",
+    "      version: 1",
+    "      token: dsh-own-grant-secret",
+    "      issuer: https://platform.deepseek.com",
+    "",
+  ].join(lineEnding);
+  writeFileSync(filePath, (bom ? "\uFEFF" : "") + body, "utf8");
+  return filePath;
+}
+
+test("writeDshCredentialsRef refreshes the stale ref and leaves the rest byte for byte", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-credentials-refresh-");
+  try {
+    const filePath = markDshCredentials(dir);
+    const before = readFileSync(filePath, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, true);
+    assert.equal(res.unchanged, false);
+    const after = readFileSync(filePath, "utf8");
+    assert.equal(after, before.replace("stale-generation-token", TOKEN), "只换那一行，其余逐字节保留");
+    const parsed = yaml.load(after);
+    assert.equal(parsed.refs.ANYSWITCH_RELAY_TOKEN, TOKEN, "死代重指现行 token");
+    assert.equal(parsed.records["deepseek-account-platform/default"].payload.token, "dsh-own-grant-secret", "dsh 自家 records 不被动");
+    assert.ok(res.backupPath && existsSync(res.backupPath), "改写前留滚动备份");
+    assert.match(readFileSync(res.backupPath, "utf8"), /stale-generation-token/, "备份保留改写前的旧代次");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef is a no-op when the ref already holds the current token", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-current-");
+  try {
+    const filePath = markDshCredentials(dir, TOKEN);
+    const before = readFileSync(filePath, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.deepEqual(res, { ok: true, unchanged: true });
+    assert.equal(readFileSync(filePath, "utf8"), before, "文件不动");
+    assert.equal(readdirSync(dir).length, 1, "现行代次不产生备份副本");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef skips a missing credentials store without creating one", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-absent-");
+  try {
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, true);
+    assert.equal(res.unchanged, true);
+    assert.equal(res.notInstalled, true, "没有凭据仓＝没有要保鲜的引用");
+    assert.equal(existsSync(join(dir, ".credentials.yaml")), false, "不凭空建 dsh 的凭据仓");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef skips a store that never carried the anyswitch ref", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-noref-");
+  try {
+    const filePath = join(dir, ".credentials.yaml");
+    mkdirSync(dir, { recursive: true });
+    const body = "version: 1\nrecords:\n  deepseek-account-platform/default:\n    kind: grant\n";
+    writeFileSync(filePath, body, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, true);
+    assert.equal(res.unchanged, true);
+    assert.equal(res.reason, "no anyswitch relay token ref in dsh credentials", "键不归我们造");
+    assert.equal(readFileSync(filePath, "utf8"), body, "文件不动");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef refuses an unparseable credentials file", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-broken-");
+  try {
+    const filePath = join(dir, ".credentials.yaml");
+    mkdirSync(dir, { recursive: true });
+    const body = "version: 1\nrefs: [[ not yaml\n";
+    writeFileSync(filePath, body, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, false);
+    assert.match(res.reason, /unparseable/);
+    assert.equal(readFileSync(filePath, "utf8"), body, "解析不动就不覆写");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef refuses when the key line is duplicated across sections", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-credentials-dup-");
+  try {
+    const filePath = join(dir, ".credentials.yaml");
+    mkdirSync(dir, { recursive: true });
+    const body = [
+      "version: 1",
+      "refs:",
+      "  ANYSWITCH_RELAY_TOKEN: stale-a",
+      "records:",
+      "  other:",
+      "    ANYSWITCH_RELAY_TOKEN: stale-b",
+      "",
+    ].join("\n");
+    writeFileSync(filePath, body, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, false);
+    assert.match(res.reason, /found 2/);
+    assert.equal(readFileSync(filePath, "utf8"), body, "定位拿不准就不写");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef preserves CRLF and BOM byte shapes", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-crlf-");
+  try {
+    const filePath = markDshCredentials(dir, "stale-generation-token", { lineEnding: "\r\n", bom: true });
+    const before = readFileSync(filePath, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, true);
+    assert.equal(res.unchanged, false);
+    const after = readFileSync(filePath, "utf8");
+    assert.equal(after, before.replace("stale-generation-token", TOKEN), "BOM 与 CRLF 原样保留");
+    assert.ok(after.startsWith("\uFEFF"), "BOM 不丢");
+    assert.ok(after.includes("version: 1\r\n"), "其余行仍走 CRLF");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef fails closed when the matching line is not the refs entry", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-credentials-decoy-");
+  try {
+    const filePath = join(dir, ".credentials.yaml");
+    mkdirSync(dir, { recursive: true });
+    // refs 走流式写法（行内），唯一可命中的缩进行是 records 里的同名诱饵键：
+    // 行级拼接会换错地方，复检发现 refs 下的值没变就必须拒绝落盘。
+    const body = [
+      "version: 1",
+      "refs: {ANYSWITCH_RELAY_TOKEN: stale-flow}",
+      "records:",
+      "  decoy:",
+      "    ANYSWITCH_RELAY_TOKEN: nested-decoy",
+      "",
+    ].join("\n");
+    writeFileSync(filePath, body, "utf8");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, false);
+    assert.match(res.reason, /did not land under refs/);
+    assert.equal(readFileSync(filePath, "utf8"), body, "换错行的结果不落盘");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef skips without a token so native launches stay quiet", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-notoken-");
+  try {
+    markDshCredentials(dir);
+    const res = await writeDshCredentialsRef(undefined, dir);
+    assert.equal(res.ok, true);
+    assert.equal(res.unchanged, true);
+    assert.match(res.reason, /relay token unavailable/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshCredentialsRef prunes rolling backups to the newest five", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-credentials-prune-");
+  try {
+    markDshCredentials(dir);
+    // 六枚预置旧备份：滚存上限 5，最旧的一枚应在本次改写后被清走。
+    const stamps = ["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05", "2026-11-06"];
+    for (const stamp of stamps) {
+      writeFileSync(join(dir, `credentials.backup.${stamp}T00-00-00-000Z.yaml`), "old copy\n", "utf8");
+    }
+    const oldest = join(dir, "credentials.backup.2026-11-01T00-00-00-000Z.yaml");
+    const res = await writeDshCredentialsRef(TOKEN, dir);
+    assert.equal(res.ok, true);
+    const backups = readdirSync(dir).filter((name) => name.startsWith("credentials.backup."));
+    assert.equal(backups.length, 5, "含本次新备份共 5 份封顶");
+    assert.equal(existsSync(oldest), false, "最旧副本被滚出");
+    assert.ok(existsSync(res.backupPath), "本次备份在");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -303,3 +303,73 @@ test("writeDshConfig writes every existing profile and clears them after the las
   }
 });
 
+// writeDshConfig 顺手保鲜 ~/.dsh/.credentials.yaml 的静态代次引用（折叠面）：
+// 凭据仓与 profile 面互不遮蔽——任一面失败都要浮上来，仅凭据仓改写也要翻掉
+// unchanged。夹具结构同 dsh-merge-config.test.mjs 的 markDshCredentials，records
+// 段压着 dsh 自家凭据。
+function markDshCredentials(dir, refToken = "stale-generation-token") {
+  const filePath = join(dir, ".credentials.yaml");
+  writeFileSync(filePath, [
+    "version: 1",
+    "refs:",
+    `  ANYSWITCH_RELAY_TOKEN: ${refToken}`,
+    "records:",
+    "  deepseek-account-platform/default:",
+    "    kind: grant",
+    "",
+  ].join("\n"), "utf8");
+  return filePath;
+}
+
+test("writeDshConfig flips unchanged when only the credentials ref was refreshed", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-write-cred-");
+  try {
+    const credPath = markDshCredentials(dir);
+    // 空 store：profile 面本来就是「无可写」跳过，凭据仓的改写必须独立可见。
+    const result = await writeDshConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, "settings.yaml"));
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, false, "仅凭据仓改写也把 unchanged 翻掉");
+    assert.equal(result.reason, "dsh credentials token ref refreshed");
+    assert.match(readFileSync(credPath, "utf8"), /ANYSWITCH_RELAY_TOKEN: tok/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshConfig surfaces a credentials failure that profile patch success must not mask", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-write-cred-fail-");
+  try {
+    mkdirSync(join(dir, "profiles", "dsh-tui"), { recursive: true });
+    const credPath = join(dir, ".credentials.yaml");
+    const broken = "version: 1\nrefs: [[ not yaml\n";
+    writeFileSync(credPath, broken, "utf8");
+    const result = await writeDshConfig(dshChannelStore(), 47821, "tok", dir, join(dir, "settings.yaml"));
+    assert.equal(result.ok, false, "凭据仓解析不动不能被 profile 成功盖掉");
+    assert.match(result.reason, /unparseable dsh credentials/);
+    assert.equal(readFileSync(credPath, "utf8"), broken, "坏文件不覆写");
+    assert.ok(existsSync(join(dir, "profiles", "dsh-tui", "cordis.patch.yml")), "profile 面照常同步");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshConfig combines reasons when both the patches and the credentials fail", async (t) => {
+  if ((await requireYamlModule(t)) === null) return;
+  const dir = mkTestDir("dsh-write-both-fail-");
+  try {
+    const profiles = join(dir, "profiles", "dsh-tui");
+    mkdirSync(profiles, { recursive: true });
+    // 坏 patch 取「可解析但不是条目数组」的形态（Unparseable 路径）；纯语法错
+    // 会以 YAMLException 直抛，那是另一条边界，不归本用例。
+    writeFileSync(join(profiles, "cordis.patch.yml"), "theme: dark\n", "utf8");
+    writeFileSync(join(dir, ".credentials.yaml"), "version: 1\nrefs: [[ not yaml\n", "utf8");
+    const result = await writeDshConfig(dshChannelStore(), 47821, "tok", dir, join(dir, "settings.yaml"));
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /every dsh profile patch is unparseable; refusing to overwrite unparseable dsh credentials/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

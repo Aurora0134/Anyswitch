@@ -108,6 +108,25 @@ function markClaude3pProfile(home, apiKey = "stale-generation-token") {
   return profilePath;
 }
 
+// dsh 凭据仓夹具：~/.dsh/.credentials.yaml 带 refs.ANYSWITCH_RELAY_TOKEN 死代引用，
+// records 段压着 dsh 自家凭据（改写必须逐字节绕开）。默认给与同步 token 不同的
+// 值，让「保鲜」路径真的走改写分支。
+function markDshCredentials(home, refToken = "stale-generation-token") {
+  const dir = join(home.USERPROFILE, ".dsh");
+  mkdirSync(dir, { recursive: true });
+  const filePath = join(dir, ".credentials.yaml");
+  writeFileSync(filePath, [
+    "version: 1",
+    "refs:",
+    `  ANYSWITCH_RELAY_TOKEN: ${refToken}`,
+    "records:",
+    "  deepseek-account-platform/default:",
+    "    kind: grant",
+    "",
+  ].join("\n"), "utf8");
+  return filePath;
+}
+
 describe("agent-sync", () => {
   let tmpRoot;
 
@@ -1000,6 +1019,23 @@ describe("agent-sync 未安装端点闸门", () => {
     const summary = buildSyncSummary(res);
     assert.ok(!summary.synced.includes("claude"), "不进成功名单");
     assert.ok(!summary.failed.includes("claude"), "不进失败名单");
+  });
+
+  it("dsh 凭据仓的静态代次引用随同步保鲜：死代重指现行 token，其余逐字节保留", async () => {
+    installAgentShapes({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
+    const credPath = markDshCredentials({ USERPROFILE: tmpRoot });
+    const body = readFileSync(credPath, "utf8");
+    const res = await syncAllAgentConfigs(homeOpts());
+    assert.equal(res.results.dsh.ok, true);
+    assert.equal(res.results.dsh.unchanged, false, "凭据仓改写把 unchanged 翻掉");
+    assert.equal(res.results.dsh.reason, "dsh credentials token ref refreshed", "reason 指认改写面");
+    const after = readFileSync(credPath, "utf8");
+    assert.equal(after, body.replace("stale-generation-token", "test-token"), "只换那一行，records 逐字节保留");
+    const backups = readdirSync(join(tmpRoot, ".dsh")).filter((name) => name.startsWith("credentials.backup."));
+    assert.equal(backups.length, 1, "留一枚滚动备份");
+    assert.match(readFileSync(join(tmpRoot, ".dsh", backups[0]), "utf8"), /stale-generation-token/, "备份保留旧代次");
+    const summary = buildSyncSummary(res);
+    assert.ok(summary.synced.includes("dsh"), "进成功名单");
   });
 });
 
