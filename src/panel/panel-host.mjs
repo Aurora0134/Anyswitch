@@ -17,9 +17,10 @@
 
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
+import { realpathSync, appendFileSync, mkdirSync, statSync, renameSync, existsSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createPanelRouter, startRelayLogBridge } from "./panel.mjs";
-import { createLogger } from "../shared/logger.mjs";
+import { createLogger, formatLogStamp } from "../shared/logger.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { storePaths } from "../store/store-io.mjs";
 import { loadSettings, defaultSettingsPath, createLoggingEnabledGate } from "../relay/relay-settings.mjs";
@@ -43,9 +44,9 @@ export function createPanelServer(options = {}) {
   const paths = options.paths ?? storePaths();
   // 运行日志开关：闸门每次调用现读 settings.json（不按 mtime 缓存——同刻度的连写会
   // 骗过 mtime，见 relay-settings.mjs 的 createSettingGate），关掉后下一次写入即停，
-  // 不需要重启面板。面板自己的记录只活在内存环形缓冲里（stderr 无人接收），所以
-  // 关掉这一处就等于把实时输出整条链路关掉——中继条目经桥、各端点条目经 ingest
-  // 都汇入同一个 logger。
+  // 不需要重启面板。中继条目经桥、各端点条目经 ingest 都汇入这同一个 logger；sink、
+  // 环形缓冲、SSE 分发三条出路都过这道闸，所以关掉这一处，面板窗口与落盘文件
+  // （stderr tee 进 logs/panel-host.log，见 startPanelHost 顶部）同停。
   const logger = options.logger ?? createLogger({
     sink: (line) => process.stderr.write(line),
     isEnabled: options.isLoggingEnabled ?? createLoggingEnabledGate(options.settingsFile ?? defaultSettingsPath()),
@@ -153,7 +154,90 @@ export async function discoverTerminalBackend(root, { ensureFn = ensureTerminalH
   }
 }
 
+// ── 落盘（logs/panel-host.log）────────────────────────────────────────────
+// 与 relay-host.mjs 同款三件套，就地实现而不跨域 import：把 ../relay/relay-host.mjs
+// 引进面板进程会连带拉起整条 relay 依赖图（openai-server、agent-metrics……）。
+// 格式来源是 shared/logger 的 format()（[ts] [level] msg），两份文件逐行同构。
+
+// Startup-only rotation, same deal as relay-host.log: once the file crosses the
+// threshold, rename it to .old (overwriting the previous one). Never rotate
+// while running — this process appends through the tee below, and a Windows
+// rename of an in-use file would fail.
+const LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024;
+
+export function rotateLogIfNeeded(logPath, thresholdBytes = LOG_ROTATE_THRESHOLD_BYTES) {
+  let size;
+  try {
+    size = statSync(logPath).size;
+  } catch {
+    return false; // no log yet — nothing to rotate
+  }
+  if (size <= thresholdBytes) return false;
+  const oldPath = `${logPath}.old`;
+  try {
+    if (existsSync(oldPath)) unlinkSync(oldPath);
+  } catch {
+    /* previous .old locked; the rename below surfaces that */
+  }
+  try {
+    renameSync(logPath, oldPath);
+    return true;
+  } catch {
+    return false; // a log that cannot rotate must never block panel startup
+  }
+}
+
+// Tee stderr into the log file so control-plane operations and failures leave a
+// trace even though the process is windowless (its stderr goes nowhere else).
+// logger's sink already writes to process.stderr; this layers a file capture
+// underneath without changing that path. Returns a restore function — only
+// tests use it; the resident host keeps the tee for its whole lifetime.
+export function teeStderrToFile(logPath) {
+  mkdirSync(dirname(logPath), { recursive: true });
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, encoding, callback) => {
+    try {
+      appendFileSync(logPath, chunk, typeof encoding === "string" ? encoding : "utf8");
+    } catch {
+      /* the log file must never block stderr */
+    }
+    return origWrite(chunk, encoding, callback);
+  };
+  return () => {
+    process.stderr.write = origWrite;
+  };
+}
+
+// Crash trail, same shape as relay-host's appendCrashLog: a windowless process
+// that dies of an uncaught fault otherwise vanishes without a line. Stamped
+// with the same local wall-clock format as the logger lines beside it.
+function appendCrashLog(logPath, label, detail) {
+  try {
+    appendFileSync(logPath, `[${formatLogStamp(Date.now())}] [${label}] ${detail?.stack ?? detail}\n`, "utf8");
+  } catch {
+    /* the crash path gets exactly one shot and must not die on its own evidence */
+  }
+}
+
+function installCrashLog(logPath) {
+  process.on("uncaughtException", (err) => {
+    appendCrashLog(logPath, "uncaughtException", err);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    // Log-only, deliberately: a stray rejection must not take down the control
+    // panel and orphan every open settings/terminal session.
+    appendCrashLog(logPath, "unhandledRejection", reason);
+  });
+}
+
 export async function startPanelHost(options = {}) {
+  // logPath 是纯测试注入口：装配测试把 stderr tee 与崩溃记录引进临时沙箱，
+  // 默认仍是安装树下的 logs/panel-host.log（生产路径不变）。
+  const logPath = options.logPath ?? join(APP_DIR, "logs", "panel-host.log");
+  rotateLogIfNeeded(logPath);
+  teeStderrToFile(logPath);
+  installCrashLog(logPath);
   // 垫片对账真实现默认在此注入（createPanelServer 与路由器的默认都是不注入
   // 即不触发——测试安全边界，注入语义见 panel.mjs）。
   const reconcileShimsFn = options.reconcileShimsFn ?? reconcileShims;
