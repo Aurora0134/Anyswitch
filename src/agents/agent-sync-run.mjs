@@ -67,7 +67,9 @@ async function main() {
     logger.warn(`sync finished with failures: ${summary.failed.join(", ")}`);
     process.exit(0);
   }
-  logger.info("all agent configurations synced");
+  // 全员成功的落行已并入 syncAllAgentConfigs 末尾的合并计数行（逐端点
+  // 「synced」+ 本行曾让一轮 store 变更刷约 10 行同义复读）；本轮没有端点
+  // 写盘时一行都不落——成功是无新闻。
   process.exit(0);
 }
 

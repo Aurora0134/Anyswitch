@@ -117,13 +117,13 @@ function relativeHomeFailure(configPath) {
 }
 
 // 未安装端点的跳过结果（判定见 agent-discovery.mjs 的 agentInstallState）：ok 真
-// ——同步本身没有失败；unchanged 真——没写盘，让端点块自己的「没写就不记日志」
-// 分支保持安静；notInstalled 标记让 buildSyncSummary 不把它算进 synced/failed
+// ——同步本身没有失败；unchanged 真——没写盘，不占用结尾的合并计数行；
+// notInstalled 标记让 buildSyncSummary 不把它算进 synced/failed
 // 任何一边。字段名不能叫 skipped：grok/workbuddy 写手结果里的 skipped 是按模型
 // 的跳过清单（数组，可为空），同名不同义会在摘要里把成功端点挤出名单。
 // 这里负责留一行运行日志：运行日志是「为什么我的端点没被更新」唯一的可见面。
 function skippedEndpointResult(name, logger) {
-  logger?.info?.(`${name} config sync skipped: ${name} is not installed on this machine`);
+  logger?.info?.(`config sync skipped: ${name} is not installed on this machine`);
   return { ok: true, unchanged: true, notInstalled: true };
 }
 
@@ -173,8 +173,6 @@ export async function syncAllAgentConfigs({
     results.zcode = zResult;
     if (!zResult.ok) {
       logger?.warn?.(`zcode config.json not updated: ${zResult.reason ?? "unknown"}`);
-    } else if (!zResult.unchanged) {
-      logger?.info?.("zcode config.json synced");
     }
   } catch (err) {
     results.zcode = { ok: false, error: err.message };
@@ -193,8 +191,6 @@ export async function syncAllAgentConfigs({
     results.dsh = dshResult;
     if (!dshResult.ok) {
       logger?.warn?.(`dsh profile patch not updated: ${dshResult.reason ?? "unknown"}`);
-    } else if (!dshResult.unchanged) {
-      logger?.info?.("dsh profile patches synced");
     }
   } catch (err) {
     results.dsh = { ok: false, error: err.message };
@@ -212,8 +208,6 @@ export async function syncAllAgentConfigs({
     results.pi = piResult;
     if (!piResult.ok) {
       logger?.warn?.(`pi models.json not updated: ${piResult.reason ?? "unknown"}`);
-    } else if (!piResult.unchanged) {
-      logger?.info?.("pi models.json synced");
     }
   } catch (err) {
     results.pi = { ok: false, error: err.message };
@@ -231,8 +225,6 @@ export async function syncAllAgentConfigs({
     results.kimi = kimiResult;
     if (!kimiResult.ok) {
       logger?.warn?.(`kimi config.toml not updated: ${kimiResult.reason ?? "unknown"}`);
-    } else if (!kimiResult.unchanged) {
-      logger?.info?.("kimi config.toml synced");
     }
     // The per-model level list is written either way; this only reports that
     // kimi's own global switch stayed out of Anyswitch's hands.
@@ -257,8 +249,6 @@ export async function syncAllAgentConfigs({
     results.qoder = qoderResult;
     if (!qoderResult.ok) {
       logger?.warn?.(`qoder settings.json not updated: ${qoderResult.reason ?? "unknown"}`);
-    } else if (!qoderResult.unchanged) {
-      logger?.info?.("qoder settings.json synced");
     }
   } catch (err) {
     results.qoder = { ok: false, error: err.message };
@@ -276,11 +266,9 @@ export async function syncAllAgentConfigs({
     results.codex = codexResult;
     if (!codexResult.ok) {
       logger?.warn?.(`codex config.toml not updated: ${codexResult.reason ?? "unknown"}`);
-    } else if (!codexResult.unchanged) {
-      logger?.info?.("codex config.toml synced");
     }
     // 目录整份重写时单独记一条：只换模型不改配置文本的情况下 unchanged 为真，
-    // 上面的闸门会把这一次的目录更新整个吞掉。
+    // 结尾的合并计数行不算它，没有这条目录更新就整次静默。
     const catalogLine = codexCatalogLogMessage(codexResult.catalog);
     if (catalogLine) logger?.info?.(catalogLine);
   } catch (err) {
@@ -299,8 +287,6 @@ export async function syncAllAgentConfigs({
     results.opencode = ocResult;
     if (!ocResult.ok) {
       logger?.warn?.(`opencode.json not updated: ${ocResult.reason ?? "unknown"}`);
-    } else if (!ocResult.unchanged) {
-      logger?.info?.("opencode.json synced");
     }
   } catch (err) {
     results.opencode = { ok: false, error: err.message };
@@ -318,8 +304,6 @@ export async function syncAllAgentConfigs({
     results.grok = grokResult;
     if (!grokResult.ok) {
       logger?.warn?.(`grok config.toml not updated: ${grokResult.reason ?? "unknown"}`);
-    } else if (!grokResult.unchanged) {
-      logger?.info?.("grok config.toml synced");
     }
   } catch (err) {
     results.grok = { ok: false, error: err.message };
@@ -339,8 +323,6 @@ export async function syncAllAgentConfigs({
     results.workbuddy = workbuddyResult;
     if (!workbuddyResult.ok) {
       logger?.warn?.(`workbuddy models.json not updated: ${workbuddyResult.reason ?? "unknown"}`);
-    } else if (!workbuddyResult.unchanged) {
-      logger?.info?.("workbuddy models.json synced");
     }
   } catch (err) {
     results.workbuddy = { ok: false, error: err.message };
@@ -361,8 +343,6 @@ export async function syncAllAgentConfigs({
     results.claude = cdResult;
     if (!cdResult.ok) {
       logger?.warn?.(`claude 3p profile not updated: ${cdResult.reason ?? "unknown"}`);
-    } else if (!cdResult.unchanged) {
-      logger?.info?.("claude 3p profile credential synced");
     }
   } catch (err) {
     results.claude = { ok: false, error: err.message };
@@ -377,6 +357,18 @@ export async function syncAllAgentConfigs({
     if (results[name] !== null) continue;
     results[name] = { ok: false, reason: `sync writer did not run for "${name}"` };
     logger?.error?.(`syncAllAgentConfigs: "${name}" is listed in AGENT_ENDPOINTS but no writer ran for it`);
+  }
+
+  // 成功合并成一条计数行：逐端点的「已同步」曾让一轮 store 变更刷约 10 行
+  // info，而成功是无新闻——本轮真正写盘的端点收成一行（带名单），没动过的
+  // 端点与未安装跳过不占数；失败仍走各自的逐端点 warn/error。一轮下来没有
+  // 任何端点写盘时整行省略。
+  const updated = AGENT_ENDPOINTS.filter((name) => {
+    const r = results[name];
+    return r?.ok === true && r.unchanged !== true && r.notInstalled !== true;
+  });
+  if (updated.length > 0) {
+    logger?.info?.(`agent config sync: ${updated.length} endpoint${updated.length === 1 ? "" : "s"} updated (${updated.join(", ")})`);
   }
 
   return { ok: true, results };

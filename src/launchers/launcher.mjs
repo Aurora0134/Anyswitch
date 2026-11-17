@@ -299,24 +299,12 @@ function realSpawnClaude({ env, args, onPid = () => {} }) {
 // them through the panel's logger bus, so keep-alive retries and stream
 // faults appear in the 实时输出 window next to the resident relay's entries.
 // Best-effort like the metrics reporter — never break the relay over a
-// logging failure.
-const PANEL_INGEST_URL = "http://127.0.0.1:47820/panel/api/logs/ingest";
+// logging failure. 转发实现住在 shared/logger.mjs（zcode/dsh 启动器与看门狗
+// 共用同一份），这里只留 fetchFn 注入缝。
+import { createPanelForwardingLogger } from "../shared/logger.mjs";
 
 function createForwardingLogger(fetchFn = fetch) {
-  const forward = (level) => (message) => {
-    fetchFn(PANEL_INGEST_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-anyswitch-panel": "1",
-        origin: "http://127.0.0.1:47820",
-      },
-      body: JSON.stringify({ level, message: String(message) }),
-    }).catch(() => {
-      // Panel down or starting — logging is best-effort, drop the entry.
-    });
-  };
-  return { info: forward("info"), warn: forward("warn"), error: forward("error") };
+  return createPanelForwardingLogger({ fetchFn });
 }
 
 // deps 是测试注入缝：生产调用只传 argv（乃至零参），每一个键缺省时都落到

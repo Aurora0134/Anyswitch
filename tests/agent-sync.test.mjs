@@ -255,6 +255,46 @@ describe("agent-sync", () => {
     assert.equal("availableModels" in workbuddy, false, "既有文件没有该键就不创建");
   });
 
+  it("成功合并成一条计数行：逐端点 synced 行不再逐条刷（B3）", async () => {
+    const store = {
+      version: 2,
+      providers: {
+        alpha: {
+          displayName: "Alpha",
+          baseURL: "https://alpha.invalid/v1",
+          protocol: "openai-compatible",
+          credentialFile: "alpha.dpapi",
+          models: { "model-1": { contextWindow: 4096 } },
+        },
+      },
+    };
+    const lines = { info: [], warn: [], error: [] };
+    const logger = { info: (m) => lines.info.push(m), warn: (m) => lines.warn.push(m), error: (m) => lines.error.push(m) };
+    const base = { USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot };
+
+    const res = await syncAllAgentConfigs({ store, port: 47821, token: "test-token", root: tmpRoot, logger, base });
+    assert.equal(res.ok, true);
+    // 计数行的数字与名单必须由真实写盘面（results）驱动，而不是手抄的期望。
+    const updated = AGENT_ENDPOINTS.filter(
+      (n) => res.results[n]?.ok === true && res.results[n].unchanged !== true && res.results[n].notInstalled !== true,
+    );
+    assert.ok(updated.length > 0, "夹具下确有端点写盘");
+    const countLines = lines.info.filter((m) => m.startsWith("agent config sync: "));
+    assert.deepEqual(countLines, [`agent config sync: ${updated.length} endpoints updated (${updated.join(", ")})`],
+      "一轮同步只落一条成功计数行，且数字与名单逐字对得上");
+    for (const m of lines.info) {
+      assert.doesNotMatch(m, /\bsynced\b/i, "逐端点成功行已消除");
+    }
+
+    // 第二轮同内容同步：全部 unchanged，计数行整行省略（成功是无新闻）。
+    lines.info.length = 0;
+    lines.warn.length = 0;
+    const second = await syncAllAgentConfigs({ store, port: 47821, token: "test-token", root: tmpRoot, logger, base });
+    assert.equal(second.ok, true);
+    assert.equal(lines.info.filter((m) => m.startsWith("agent config sync: ")).length, 0,
+      "没有端点写盘时一行都不落");
+  });
+
   it("createStoreWatcher triggers callback when store.json changes", async () => {
     const storeFile = join(tmpRoot, "store.json");
     writeFileSync(storeFile, JSON.stringify({ version: 2, providers: {} }), "utf8");
@@ -954,6 +994,21 @@ describe("agent-sync 未安装端点闸门", () => {
     for (const dir of [".zcode", ".dsh", ".pi", ".kimi-code", ".qoder", ".codex", ".config", ".grok", ".workbuddy", "Claude-3p"]) {
       assert.equal(existsSync(join(tmpRoot, dir)), false, `${dir} 不被凭空创建`);
     }
+  });
+
+  it("跳过行不再行内复读端点名（B4），全跳过轮不落计数行", async () => {
+    const lines = [];
+    const logger = { info: (m) => lines.push(m), warn: () => {}, error: () => {} };
+    const res = await syncAllAgentConfigs({ ...homeOpts(), logger });
+    assert.equal(res.ok, true);
+    const skips = lines.filter((m) => m.includes("is not installed on this machine"));
+    assert.equal(skips.length, AGENT_ENDPOINTS.length, "每个未装端点各留一行");
+    for (const name of AGENT_ENDPOINTS) {
+      assert.ok(skips.includes(`config sync skipped: ${name} is not installed on this machine`),
+        `${name} 的跳过行是新格式（名只出现一次）`);
+    }
+    assert.equal(lines.filter((m) => m.startsWith("agent config sync: ")).length, 0,
+      "全部跳过时没有写盘，计数行整行省略");
   });
 
   it("卸载残留不被刷新：既有配置一字不动", async () => {
