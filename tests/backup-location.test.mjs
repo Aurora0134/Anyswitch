@@ -469,3 +469,134 @@ test("deleteBackup：删掉指定备份目录；锚定外的名字与不存在�
     assert.equal(deleteBackup(m.root, "byok-import-20261031-120000").error, "备份不存在");
   } finally { m.cleanup(); }
 });
+
+// ── 备份恢复（配置回滚，数据面在 data-bundle.mjs restoreBackup）──────────────
+// 恢复是导入的逆操作：同一服务、同一份备份目录约定。全部在临时目录里跑，
+// 不注入 now——安全备份名由返回值带回，存在性按名断言即可。
+
+function restoreRig() {
+  const sandbox = mkdtempSync(join(tmpdir(), "anyswitch-restore-"));
+  const localAppData = join(sandbox, "localappdata");
+  const root = join(localAppData, "Anyswitch");
+  const paths = storePaths(root);
+  ensureLayout(paths);
+  const service = createDataBundleService({ base: { LOCALAPPDATA: localAppData }, homeDir: join(sandbox, "home") });
+  return { sandbox, root, paths, service, cleanup: () => rmSync(sandbox, { recursive: true, force: true }) };
+}
+
+// 五件齐的备份目录：4 份配置 json＋credentials/＋manifest.json（saved 记全五件）。
+function seedSnapshot(dir, { storeId, followAgent, presets, repoPath, credential }) {
+  seed(dir, {
+    "store.json": JSON.stringify(bundleStore(storeId), null, 2) + "\n",
+    "settings.json": JSON.stringify({ followAgent }) + "\n",
+    "prompts.json": JSON.stringify({ presets }) + "\n",
+    "skills.json": JSON.stringify({ repoPath }) + "\n",
+    "manifest.json": JSON.stringify({
+      backupId: basename(dir).replace(/^pre-import-/, ""),
+      createdAt: "2026-10-31T04:00:00.000Z",
+      saved: ["store.json", "settings.json", "prompts.json", "skills.json", "credentials/"],
+    }),
+  });
+  seed(join(dir, "credentials"), { [`${storeId}.dpapi`]: credential });
+}
+
+test("restoreBackup：按 manifest 写回，写回前对当前配置留安全备份（落用户改过的备份位置）", () => {
+  const rig = restoreRig();
+  try {
+    const { root, paths, service } = rig;
+    // 当前配置：beta 渠道＋设置/提示词/skills 各一份＋一枚凭据。
+    assert.equal(writeStore(bundleStore("beta"), { paths }).ok, true);
+    writeFileSync(join(root, "settings.json"), JSON.stringify({ followAgent: true }) + "\n", "utf8");
+    writeFileSync(join(root, "prompts.json"), JSON.stringify({ presets: [{ id: "p2" }] }) + "\n", "utf8");
+    writeFileSync(join(root, "skills.json"), JSON.stringify({ repoPath: "D:\\new-skills" }) + "\n", "utf8");
+    writeFileSync(join(paths.credentialsDir, "beta.dpapi"), "enc:sk-beta", "utf8");
+
+    // 备份：alpha 快照，放在用户改过的备份位置——恢复必须读同一本机记录。
+    const customRoot = join(rig.sandbox, "moved-backups");
+    writeFileSync(join(root, BACKUP_ROOT_FILE), JSON.stringify({ root: customRoot }) + "\n", "utf8");
+    const backupDir = join(customRoot, "pre-import-20261031-120000");
+    const backupStoreText = JSON.stringify(bundleStore("alpha"), null, 2) + "\n";
+    seedSnapshot(backupDir, { storeId: "alpha", followAgent: false, presets: [], repoPath: "C:\\old-skills", credential: "enc:sk-alpha" });
+
+    const done = service.restoreBackup({ name: "pre-import-20261031-120000" });
+    assert.equal(done.ok, true, done.error);
+    assert.match(done.safetyName, /^pre-import-\d{8}-\d{6}$/);
+    assert.notEqual(done.safetyName, "pre-import-20261031-120000", "安全备份与被恢复的备份同名即自我覆盖");
+
+    // 写回：store 过 writeStore（格式化重写），其余三份按备份原样文本，凭据回拷。
+    assert.deepEqual(JSON.parse(readFileSync(paths.storeFile, "utf8")), bundleStore("alpha"));
+    assert.equal(readFileSync(join(root, "settings.json"), "utf8"), JSON.stringify({ followAgent: false }) + "\n");
+    assert.equal(readFileSync(join(root, "prompts.json"), "utf8"), JSON.stringify({ presets: [] }) + "\n");
+    assert.equal(readFileSync(join(root, "skills.json"), "utf8"), JSON.stringify({ repoPath: "C:\\old-skills" }) + "\n");
+    assert.equal(readFileSync(join(paths.credentialsDir, "alpha.dpapi"), "utf8"), "enc:sk-alpha");
+    assert.equal(readFileSync(join(paths.credentialsDir, "beta.dpapi"), "utf8"), "enc:sk-beta",
+      "恢复是叠加写回：备份外的既有凭据不删（无引用的残留文件无害，删了反而是数据损失）");
+
+    // 安全备份：装的是恢复前那一刻的当前配置，五件齐，落同一备份位置。
+    const safetyDir = join(customRoot, done.safetyName);
+    const safetyManifest = JSON.parse(readFileSync(join(safetyDir, "manifest.json"), "utf8"));
+    for (const name of ["store.json", "settings.json", "prompts.json", "skills.json", "credentials/"]) {
+      assert.ok(safetyManifest.saved.includes(name), `安全备份 manifest.saved 应含 ${name}`);
+    }
+    assert.deepEqual(JSON.parse(readFileSync(join(safetyDir, "store.json"), "utf8")), bundleStore("beta"));
+    assert.equal(readFileSync(join(safetyDir, "settings.json"), "utf8"), JSON.stringify({ followAgent: true }) + "\n");
+    assert.equal(readFileSync(join(safetyDir, "credentials", "beta.dpapi"), "utf8"), "enc:sk-beta");
+
+    // 被恢复的备份原样保留（还能再恢复一次）。
+    assert.equal(readFileSync(join(backupDir, "store.json"), "utf8"), backupStoreText);
+  } finally { rig.cleanup(); }
+});
+
+test("restoreBackup：byok 与锚定外的名字一律拒，当前配置一个字节不动", () => {
+  const rig = restoreRig();
+  try {
+    const { root, paths, service } = rig;
+    assert.equal(writeStore(bundleStore("beta"), { paths }).ok, true);
+    const before = readFileSync(paths.storeFile, "utf8");
+    const backupsDir = join(root, "backups");
+    seed(join(backupsDir, "byok-import-20261031-120000", "kimi"), { "config.toml": "x" });
+
+    for (const bad of ["byok-import-20261031-120000", "pre-import-1", "pre-import-20261031120000", "pre-import-20261031-1200000", "../backups", "pre-import-20261031-120000/x", "", 42, null, undefined]) {
+      const refused = service.restoreBackup({ name: bad });
+      assert.equal(refused.ok, false, `应拒绝：${bad}`);
+      assert.equal(refused.error, "备份名不可用");
+    }
+    assert.equal(service.restoreBackup({ name: "pre-import-20261031-120000" }).error, "备份不存在");
+    assert.equal(service.restoreBackup().error, "备份名不可用", "缺入参同样拒");
+
+    assert.equal(readFileSync(paths.storeFile, "utf8"), before, "拒绝路径当前配置不动");
+    assert.deepEqual(readdirSync(backupsDir), ["byok-import-20261031-120000"], "拒绝路径不留安全备份");
+  } finally { rig.cleanup(); }
+});
+
+test("restoreBackup：备份内容预检不过就整单拒绝——安全备份都不留，当前配置不动", () => {
+  const rig = restoreRig();
+  try {
+    const { root, paths, service } = rig;
+    assert.equal(writeStore(bundleStore("beta"), { paths }).ok, true);
+    const before = readFileSync(paths.storeFile, "utf8");
+    const backupsDir = join(root, "backups");
+    const validManifest = { backupId: "20261031-120000", createdAt: "2026-10-31T04:00:00.000Z", saved: ["store.json", "settings.json"] };
+    const validStore = JSON.stringify(bundleStore("alpha"), null, 2) + "\n";
+    const cases = [
+      ["缺 manifest.json", {}, null],
+      ["manifest 坏 JSON", { "store.json": validStore, "manifest.json": "{ 不是 JSON" }, "备份的 manifest.json 不是合法 JSON"],
+      ["saved 不是数组", { "store.json": validStore, "manifest.json": JSON.stringify({ backupId: "x", saved: "store.json" }) }, "备份清单不完整，无法恢复"],
+      ["saved 含未知条目", { "store.json": validStore, "manifest.json": JSON.stringify({ ...validManifest, saved: ["store.json", "etc/passwd"] }) }, "备份清单不完整，无法恢复"],
+      ["saved 点名但文件缺失", { "store.json": validStore, "manifest.json": JSON.stringify(validManifest) }, "备份缺 settings.json，无法恢复"],
+      ["store.json 坏 JSON", { "store.json": "{ 不是 JSON", "manifest.json": JSON.stringify({ ...validManifest, saved: ["store.json"] }) }, "备份的 store.json 不是合法 JSON"],
+      ["store 不合法", { "store.json": JSON.stringify({ version: 1, providers: {} }), "manifest.json": JSON.stringify({ ...validManifest, saved: ["store.json"] }) }, "备份里的渠道配置不合法，无法恢复"],
+    ];
+    cases.forEach(([label, files, error], i) => {
+      const name = `pre-import-2026103${i}-12000${i}`;
+      seed(join(backupsDir, name), files);
+      const refused = service.restoreBackup({ name });
+      assert.equal(refused.ok, false, `${label} 应拒绝`);
+      if (error !== null) assert.equal(refused.error, error, label);
+      else assert.match(refused.error, /manifest\.json/, label);
+      rmSync(join(backupsDir, name), { recursive: true, force: true });
+      assert.deepEqual(readdirSync(backupsDir), [], `${label}：安全备份都不留`);
+      assert.equal(readFileSync(paths.storeFile, "utf8"), before, `${label}：当前配置不动`);
+    });
+  } finally { rig.cleanup(); }
+});
