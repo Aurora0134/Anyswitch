@@ -119,7 +119,7 @@ function explicitInstanceId(headers) {
 // 归一，读 scanProcesses 缓存，不在请求热路径上新增 spawn）：launcher 注入的
 // "<cwd基名>-<launcher pid>" 折入规范的 "<agentId>-<客户端 pid>"；socket 兜底
 // 本已规范，归一对它是恒等映射。
-function instanceIdForRequest(req, agentId, deps, preSocketPid) {
+function instanceIdForRequest(req, agentId, deps) {
   const id = agentId ?? "";
   // 会话头优先于一切：opencode、workbuddy 与 zcode 的实例身份只能是会话粒度
   // （见 opencodeSessionInstanceId / workbuddySessionInstanceId /
@@ -151,7 +151,7 @@ function instanceIdForRequest(req, agentId, deps, preSocketPid) {
     const explicit = explicitInstanceId(req.headers);
     if (explicit !== null) return explicit;
   }
-  return instanceIdFromSocket(req, id, deps, preSocketPid);
+  return instanceIdFromSocket(req, id, deps);
 }
 
 // codex 会话粒度的实例身份正源。codex 核心客户端（GUI app-server 与 CLI 共用）
@@ -931,20 +931,13 @@ export function createOpenAIRelayServer(deps) {
         const parsedRoute = parseOpenAIPath(routePath);
         const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
         if (openaiAgentId === null) logUnattributedRequest(deps, "openai chat", req, body?.model);
-        // 提交窗在途桥（2026-11-17）：连接属主 pid 随 meta 捎带给 collector 的
-        // per-pid 在途计数（与 wbClientPid 同款通道）。无会话头端点的请求起手
-        // netstat 未命中时只落聚合桶、终端实例行 count=0——这一笔让终端杀前判据
-        // 仍看得到「这个 CLI 有请求没回」。查不出不捎带，collector 侧走迟到绑定
-        // 补记；background 与 <agent>-sess- 身份由 collector 侧排除。同一 socket
-        // 只反查一次：身份合成的兜底档复用这笔（preSocketPid）。
-        const requestClientPid = openaiAgentId === null ? null : socketFallbackClientPid(req, openaiAgentId, deps);
         // 无归属的请求连实例身份也不携带：journal 行与桶都不该留半个身份。
-        const requestInstanceId = openaiAgentId === null ? null : instanceIdForRequest(req, openaiAgentId, deps, requestClientPid);
+        const requestInstanceId = openaiAgentId === null ? null : instanceIdForRequest(req, openaiAgentId, deps);
         // WB 头通道身份是会话粒度（x-conversation-id），解析不出属主 pid；子代理
         // 会话行注册表永远缺席，徽标与存活判定都靠「扛流量的引擎 pid」锚。头通
         // 道命中与否都反查一次连接属主并随 meta 捎带（socket 兜底形身份与它同
         // 值，无冲突）；查不出（netstat 未命中）不捎带，collector 侧按无锚处理。
-        const wbClientPid = openaiAgentId === "workbuddy" ? requestClientPid : null;
+        const wbClientPid = openaiAgentId === "workbuddy" ? socketFallbackClientPid(req, openaiAgentId, deps) : null;
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : chatMatch[1],
           model: body?.model,
@@ -953,7 +946,6 @@ export function createOpenAIRelayServer(deps) {
           instanceId: requestInstanceId,
           surfacePid: zcodeSurfacePidForRequest(req, requestInstanceId, deps),
           workbuddyClientPid: wbClientPid ?? undefined,
-          clientPid: requestClientPid ?? undefined,
           stream: body.stream === true,
           path: "openai",
         });
@@ -1160,15 +1152,8 @@ export function createOpenAIRelayServer(deps) {
         // 只用于归属：翻译层字段白名单不含它，绝不透给上游。
         const sessionInstanceId = codexBackground || openaiAgentId !== "codex" ? null : codexSessionInstanceId(body);
         const chatBody = { ...translateResponsesRequest(body), stream: true };
-        // 提交窗在途桥（2026-11-17）：同 chat 路由的 clientPid 捎带（见彼处注）。
-        // codex 后台流量按隔离口径连 pid 也不捎带——collector 侧本就排除，这里
-        // 连反查都省掉。同一 socket 只反查一次：身份合成的兜底档复用这笔
-        // （preSocketPid）。
-        const requestClientPid = codexBackground || openaiAgentId === null
-          ? null
-          : socketFallbackClientPid(req, openaiAgentId, deps);
         // 同 chat 路由：无归属即无实例身份。
-        const requestInstanceId = codexBackground || openaiAgentId === null ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps, requestClientPid));
+        const requestInstanceId = codexBackground || openaiAgentId === null ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps));
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : responsesMatch[1],
           model: chatBody?.model,
@@ -1176,7 +1161,6 @@ export function createOpenAIRelayServer(deps) {
           agentId: openaiAgentId,
           instanceId: requestInstanceId,
           surfacePid: zcodeSurfacePidForRequest(req, requestInstanceId, deps),
-          clientPid: requestClientPid ?? undefined,
           stream: true,
           path: "openai",
           background: codexBackground,
@@ -1302,13 +1286,9 @@ export function createOpenAIRelayServer(deps) {
         await anthropicHandler.normalizeInboundModel(req.headers, body);
         await anthropicHandler.planTierEntryMessages(req.headers, body, agentId);
 
-        // 提交窗在途桥（2026-11-17）：同 chat 路由的 clientPid 捎带（见彼处注）；
-        // claude 后台流量按隔离口径连 pid 都不捎带。同一 socket 只反查一次：身份
-        // 合成的兜底档复用这笔（preSocketPid）。
-        const requestClientPid = claudeBackground || agentId === null ? null : socketFallbackClientPid(req, agentId, deps);
         // 同 openai 路由：无归属即无实例身份。会话键供智能分流的会话亲和使用，
         // 须在号池/链规划之前算好（只依赖 agentId 与后台标记，与规划无涉）。
-        const requestInstanceId = agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps, requestClientPid);
+        const requestInstanceId = agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps);
 
         // Chain routing (自动路由): body.model === "auto" walks the
         // requesting agent's route chain and takes priority over pool
@@ -1347,7 +1327,6 @@ export function createOpenAIRelayServer(deps) {
           agentId,
           instanceId: requestInstanceId,
           surfacePid: zcodeSurfacePidForRequest(req, requestInstanceId, deps),
-          clientPid: requestClientPid ?? undefined,
           stream: body.stream === true,
           path: "anthropic",
           background: claudeBackground,

@@ -542,10 +542,6 @@ function snapshot(session) {
     // spawnedAt＝最近一次进程出生（孵化豁免窗的锚点——内切/复活保记录换进程，
     // createdAt 不动，只有它跟着每次 spawn 走）。
     lastInputAt: session.lastInputAt,
-    // 提交窗锚点（2026-11-17）：最近一次「人敲的」键入时刻（xterm 自动应答不算，
-    // 面板杀前判据的提交窗吃它）。契约字段名不可改；老宿主快照没有这个字段，前端
-    // 按缺位走原口径（无窗可开）。不落盘，与 lastInputAt 同取舍。
-    ...(session.lastUserInputAt !== undefined ? { lastUserInputAt: session.lastUserInputAt } : {}),
     spawnedAt: session.spawnedAt,
     cols: session.cols,
     rows: session.rows,
@@ -2090,14 +2086,6 @@ export function createTerminalHost({
         // 在打字」误归因成「agent 在跑」）——改记 lastInputAt，面板的键入抑制窗
         // 拿它当锚点。不落盘：它是分秒级信号，恢复后的老会话按缺省（无抑制）走。
         session.lastInputAt = Date.now();
-        // 提交窗锚点（2026-11-17）：只认「人敲的字」。xterm 对 TUI 查询（DSR/DA/
-        // CPR）与 DECSET 1004 焦点报告的自动应答与用户键入同走这条 POST、也刷
-        // lastInputAt（键入抑制／回收器防线按原语义继续吃它）；面板按应答字节
-        // 形状自报 origin:"auto-reply"，这类输入不刷 lastUserInputAt——提交窗若
-        // 也吃自动应答，「TUI 活着」会常态顶热 5s 窗、判据退化成保活一切。origin
-        // 缺省（老面板／未知来源）按 user——倒向多保。不落盘（与 lastInputAt
-        // 同取舍）。
-        if (body.origin !== "auto-reply") session.lastUserInputAt = session.lastInputAt;
         return json(res, 200, { ok: true });
       }
       if (action === "resize" && req.method === "POST") {

@@ -56,10 +56,8 @@ export function socketFallbackClientPid(req, agentId, deps) {
   return pid;
 }
 
-export function instanceIdFromSocket(req, agentId, deps, preSocketPid) {
-  // preSocketPid：调用方在同一请求里已反查过的连接属主 pid（查过即不再重查
-  // ——同一快照内结果恒等，重查是纯浪费；undefined 才表示调用方没查）。
-  const pid = preSocketPid !== undefined ? preSocketPid : socketFallbackClientPid(req, agentId, deps);
+export function instanceIdFromSocket(req, agentId, deps) {
+  const pid = socketFallbackClientPid(req, agentId, deps);
   if (pid === null) return null;
   return sanitizeInstanceId(`${agentId}-${pid}`) ?? null;
 }
@@ -77,14 +75,9 @@ export function bindLateSocketInstance(req, agentId, deps, tracker, options = {}
   let unsub = () => {};
   const stop = () => { unsub(); };
   const tryAttach = () => {
-    const pid = socketFallbackClientPid(req, agentId, deps);
-    const id = instanceIdFromSocket(req, agentId, deps, pid);
+    const id = instanceIdFromSocket(req, agentId, deps);
     if (id === null) return;
     tracker.attachInstance(id);
-    // 提交窗在途桥的迟到 pid 补记（2026-11-17）：身份与 pid 同源同拍——身份能
-    // 合成时 pid 必然在手，一并交给 tracker（无此方法的旧 tracker 安全跳过；
-    // collector 侧按入账资格复核，开始侧已入账的幂等跳过）。
-    if (pid !== null) tracker.attachClientPid?.(pid);
     stop();
   };
   unsub = deps.socketOwner.onRefresh(tryAttach);

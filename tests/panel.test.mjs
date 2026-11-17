@@ -117,12 +117,10 @@ const viewportPrelude = (names = VIEWPORT_FNS) => `
   let terminalViewportsLoaded = false;
   let terminalViewportsSavedJson = "";
   const TERMINAL_VIEWPORTS_KEY = "panel-terminal-viewports";
-  // 统一在跑判据（2026-11-05/11-17）的四个纯函数依赖：视口纯函数按名抽出后模块级符号
+  // 统一在跑判据（2026-11-05）的两个纯函数依赖：视口纯函数按名抽出后模块级符号
   // 不跟着来，随源补上；屏尾判据依赖 xterm 实例，桩里没有时由生产实现自己降级跳过。
   ${panelFnSrc("terminalBusyByOutput")}
   ${panelFnSrc("terminalCommandRunning")}
-  ${panelFnSrc("terminalSubmitWindowFresh")}
-  ${panelFnSrc("terminalRequestInFlight")}
   ${names.map(panelFnSrc).join("\n")}
 `;
 // 回放突发合并器的阈值常量：沙箱按函数名切源码，常量不在其中，单独取出注入——
@@ -134,13 +132,6 @@ const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET
     return found;
   })
   .join("\n");
-// 键入自报 origin 的应答形状常量：sendTerminalInput 抽出后模块级常量不跟着来，
-// 同款取产线原句注入——改形状时沙箱跟着走。
-const terminalInputAutoReplyConst = (() => {
-  const found = panelJs.match(/^[ \t]*const TERMINAL_INPUT_AUTO_REPLY = .*$/m)?.[0];
-  assert.ok(found, "TERMINAL_INPUT_AUTO_REPLY 可从 panel.js 取到");
-  return found;
-})();
 // 闲剪（缓冲软顶回落）的阈值常量与跟随护栏的窗口常量：同款从源码取样注入——
 // 测试不抄数字，改阈值时行为钉跟着变（如闲剪落位钉 4500 按软顶 5000 折算）。
 const terminalIdleTrimConsts = ["TERMINAL_SCROLLBACK_SOFT_CAP", "TERMINAL_IDLE_TRIM_MS", "TERMINAL_IDLE_TRIM_MIN_OVERAGE", "TERMINAL_IDLE_TRIM_SETTLE_MS", "TERMINAL_IDLE_TRIM_MAX_MS"]
@@ -9803,7 +9794,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(res.statusCode, 200);
     const body = json();
     assert.equal(body.sessions.length, 1);
-    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null, requestsInFlight: 0 });
+    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null });
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
@@ -9961,7 +9952,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json().sessions[0].agent,
-      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null, requestsInFlight: 0 });
+      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284", busy: null });
   });
 
   it("检测喂给中断（relay 挂）时列表照常返回纯外壳会话", async () => {
@@ -10986,7 +10977,6 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       // 整屏重建的接线桩：只记账不真重连（本组只验「半块丢弃 + 请求重建」这一段）。
       const requestTerminalFrameRebuild = (session, term) => { state.rebuilds.push({ id: session?.id, term }); };
       ${terminalBurstConsts}
-      ${terminalInputAutoReplyConst}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -11230,7 +11220,6 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
     const writes = [];
     const sandbox = new Function("clock", "writes", `
       ${terminalBurstConsts}
-      ${terminalInputAutoReplyConst}
       const setTimeout = clock.setTimeout;
       const clearTimeout = clock.clearTimeout;
       ${bodies}
@@ -11392,7 +11381,6 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
-      ${terminalInputAutoReplyConst}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -11542,8 +11530,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(termA.keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true }), false, "Ctrl+Enter 从 xterm 求值摘出（内核只会折叠成 CR）");
     assert.equal(termA.keyEventHandler({ type: "keydown", key: "Enter", shiftKey: true }), false, "Shift+Enter 同样接管");
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
     ], "换行定投 LF 字节（opencode 与 Claude Code 的 ctrl+j 换行语义），不是 CR");
 
     // 真机漏点：keydown 摘出后内核还会吃 keypress，Shift+Enter 在那里被补折叠成 CR，
@@ -11551,8 +11539,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", shiftKey: true, keyCode: 13, charCode: 13 }), false, "Shift+Enter 的 keypress 一并摘出");
     assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", ctrlKey: true, keyCode: 13, charCode: 13 }), false, "Ctrl+Enter 的 keypress 一并摘出");
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
-      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n", origin: "user" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
     ], "一次按键只有一个换行字节：keypress 不重复投");
 
     sandbox.connect(backendSession("sess-b"));
@@ -13578,7 +13566,6 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
-      ${terminalInputAutoReplyConst}
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
       const host = { clientWidth: 1200, clientHeight: 600 };
@@ -18395,17 +18382,18 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
   });
 
-  it("CSS 钉住顶部基准与两阶段交接：卡高自适应舞台、摊开期叠卡可见、行距量值驱动", () => {
+  it("CSS 钉住顶部基准与两阶段交接：卡高自适应舞台、展收同高、交接期叠卡可见", () => {
     assert.ok(/\.live-log-stage \{[^}]*height: calc\(var\(--ll-card-h\) \+ var\(--ll-step\) \* 2\);[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
-    assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height: 320px; \}/.test(panelCss));
-    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚，随舞台长高不被拽");
+    assert.ok(!/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height:/.test(panelCss), "展开态不另钉一版舞台高：展收同高，底缘卡顶不跳，空日志展开不撑空白");
+    assert.ok(!/--ll-step-expanded/.test(panelCss), "行距兜底变量退役：舞台不再长高，摊开放间距会把第三张卡挤出舞台");
+    assert.ok(!/\.live-log\[data-state="expanded"\] \{ --ll-step:/.test(panelCss), "展开态不改叠卡间距/景深档：间距留在收起值，两态同一套退层参数");
+    assert.ok(!/\.live-log\[data-motion="expanding"\] \{ --ll-step:/.test(panelCss), "摊开期也不放大间距");
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚，不随高度过渡被拽");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*height: 76px;/.test(panelCss), "卡高内容驱动，与视口卡同形");
     assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*transform-origin: 50% 0;/.test(panelCss), "缩放基准在顶边");
-    assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(panelCss), "收起错位 22px（够露出整行 meta）、展开行距兜底 55px");
-    assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1;/.test(panelCss), "展开行距由量值驱动");
+    assert.ok(/--ll-step: 22px;/.test(panelCss), "收起错位 22px（够露出整行 meta）");
     assert.ok(!/--ll-step: 78px/.test(panelCss), "旧硬编码行距已撤");
     assert.ok(/\.live-log-viewport \{[^}]*overflow-anchor: none;/.test(panelCss), "新消息从顶部插入不吃滚动锚定");
-    assert.ok(/\.live-log\[data-motion="expanding"\] \{ --ll-step: var\(--ll-step-expanded\); \}/.test(panelCss));
     assert.ok(/\.live-log\[data-motion="expanding"\] \.live-log-stack \{ opacity: 1; pointer-events: none; z-index: 2; \}/.test(panelCss), "摊开期叠卡可见、让出点击并压在视口之上");
     assert.ok(/\.live-log\[data-motion="collapsing"\] \.live-log-stack \{ opacity: 1; pointer-events: auto; \}/.test(panelCss), "收回期叠卡保持可见可点");
     assert.ok(panelCss.includes('.live-log[data-motion="handoff"] .live-log-stack,\n  .live-log[data-motion="handoff"] .live-log-viewport { transition: opacity 60ms var(--ease-out); }'), "到位后只做 60ms 交叉淡化");
@@ -18480,10 +18468,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
 
   it("CSS 钉住叠卡景深与卡面层界：三档参数、虚化只落文字、两态同一套皮", () => {
     const rootBlock = panelCss.match(/\.live-log \{([\s\S]*?)\}/)?.[1] ?? "";
-    const expandedBlock = panelCss.match(/\.live-log\[data-state="expanded"\] \{([\s\S]*?)\}/)?.[1] ?? "";
-    assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(rootBlock) && /--ll-scale-1: 0\.96; --ll-scale-2: 0\.92;/.test(rootBlock) && /--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;/.test(rootBlock) && /--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(rootBlock), "收起态逐层缩小、虚化、变淡");
+    assert.ok(/--ll-step: 22px;/.test(rootBlock) && /--ll-scale-1: 0\.96; --ll-scale-2: 0\.92;/.test(rootBlock) && /--ll-blur-1: 0\.4px; --ll-blur-2: 0\.8px;/.test(rootBlock) && /--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(rootBlock), "叠卡逐层缩小、虚化、变淡，两态同一套档");
     assert.ok(/--ll-retreat-delay: 45ms;/.test(rootBlock), "后层退远的 stagger 在册");
-    assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1; --ll-scale-2: 1;/.test(expandedBlock) && /--ll-blur-1: 0px; --ll-blur-2: 0px;/.test(expandedBlock) && /--ll-opacity-1: 1; --ll-opacity-2: 1;/.test(expandedBlock), "展开态间距放大到行距、景深归位");
+    assert.ok(!/\.live-log\[data-state="expanded"\] \{ --ll-step:/.test(panelCss), "展开态不再重置景深档：展收同高同距，叠卡参数一用到底");
     assert.ok(/\.live-log-stack \.live-log-meta,\s*\.live-log-stack \.live-log-text \{ filter: blur\(0px\); transition: filter 220ms var\(--ease-out\); \}/.test(panelCss), "卡内文字可过渡虚化");
     assert.ok(/filter: blur\(var\(--ll-blur-1\)\);/.test(panelCss) && /filter: blur\(var\(--ll-blur-2\)\);/.test(panelCss), "两层分别取虚化档");
     assert.ok(/transition-delay: var\(--ll-retreat-delay\);/.test(panelCss), "景深三档同拍、后层整体延后");
@@ -18505,14 +18492,17 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(panelCss.indexOf(".live-log-stack:hover .live-log-msg") > panelCss.indexOf(".live-log-stack .live-log-msg.is-leaving {"), "悬停排在槽位/入场/离场之后：同特异性靠源序取胜，不被后来的状态规则静默压死");
   });
 
-  it("展开行距取亚像素卡高：叠卡与视口逐行不错位", () => {
+  it("展收不写行距变量：舞台高一由内容驱动，两态同值", () => {
     const { sandbox, els } = makeSandbox();
     for (let i = 1; i <= 3; i++) sandbox.appendLog({ level: "info", message: "q" + i });
-    els.logBody.children[0].offsetHeight = 66;
-    els.logBody.children[0]._computedHeight = "66.4px";
+    els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
+    sandbox.appendLog({ level: "info", message: "q4" });
     sandbox.setLogExpanded(true);
-    assert.equal(els.liveLog.style["--ll-step-expanded"], "72.4px", "行距＝实测卡高（亚像素）＋下边距，不取整成 72");
     assert.equal(els.liveLog.dataset.state, "expanded");
+    assert.equal(els.liveLog.style["--ll-step-expanded"], undefined, "展开不再量视口行距写变量：舞台不随展收长高，间距放大已退役");
+    assert.equal(els.liveLog.style["--ll-card-h"], "49px", "卡高仍由内容写入，舞台高只剩这一个来源");
+    sandbox.setLogExpanded(false);
+    assert.equal(els.liveLog.style["--ll-step-expanded"], undefined, "收回同样不写行距变量");
   });
 
   class FakeClassList {
@@ -18844,11 +18834,10 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(oldest.dataset.slot, "leaving", "离场卡退出槽位序列，不与补位卡争同一层");
     flush(160);
 
-    els.logBody.children[0].offsetHeight = 49;
     sandbox.setLogExpanded(true);
     assert.equal(els.liveLog.dataset.state, "expanded");
     assert.equal(els.liveLog.getAttribute("data-motion"), "expanding", "摊开期叠卡留在可见层");
-    assert.equal(els.liveLog.style["--ll-step-expanded"], "55px", "展开行距量自视口首卡：高 49 + 视口卡下边距 6（夹具注缝与 panel.css 的 6px 同源）");
+    assert.equal(els.liveLog.style["--ll-step-expanded"], undefined, "展收不量行距：叠卡间距留在收起值，不随展收放大");
     flush(219);
     assert.equal(els.liveLog.getAttribute("data-motion"), "expanding", "摊开窗内（≤219ms）不提前交接：计时窗缩短即红");
     flush(220);
@@ -18883,7 +18872,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/scrollTop = 0/.test(viewSrc) && !/scrollTop = body\.scrollHeight/.test(viewSrc), "视口归顶、不再贴底");
     assert.ok(/overflow-anchor: none/.test(panelCss), "顶部插入禁用滚动锚定");
     assert.ok(/setAttribute\("data-clearing", "1"\)/.test(panelJs) && /removeAttribute\("data-clearing"\)/.test(panelJs), "清空整批淡出档与收尾成组");
-    assert.ok(/--ll-step-expanded/.test(panelJs), "展开行距由脚本量值写入");
+    assert.ok(!/--ll-step-expanded/.test(panelJs), "脚本不再量行距写变量：展收同高，间距放大整套退役");
     assert.ok(/body\.insertBefore\(node, ref\)/.test(viewSrc) && !/for \(const node of ordered\) body\.appendChild/.test(viewSrc), "视口增量重排，只插错位节点");
     assert.equal((setSrc.match(/"handoff"/g) ?? []).length, 1, "收起刻意硬切：只有展开摊开到位才走一次 handoff");
     assert.ok(/if \(root\) root\.removeAttribute\("data-motion"\);/.test(setSrc), "展收入口无条件清交接态，中途切 reduce 不留残影");
@@ -18911,7 +18900,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     sandbox.appendLog({ level: "info", message: "gutter-b" });
     assert.equal(els.liveLog.style["--ll-gutter"], "16px", "换成宽滚动条的平台也跟上");
     sandbox.setLogExpanded(true);
-    assert.equal(els.liveLog.style["--ll-gutter"], "16px", "展收那拍先同步，量到的行距可信");
+    assert.equal(els.liveLog.style["--ll-gutter"], "16px", "展收那拍先同步槽宽，两层交接不错行");
     assert.ok(/function syncLogGutter\(\)/.test(panelJs), "槽宽同步函数在册");
     assert.ok(/renderLogFeed\(\) \{\s*syncLogGutter\(\);/.test(panelJs), "每次渲染先同步槽宽");
   });
@@ -19262,13 +19251,12 @@ describe("看板运行日志：无框消息提示式双态流", () => {
 });
 
 describe("壁纸域运行日志卡实底＋底缘条退场＋主题页外部预览壁纸垫底", () => {
-  it("卡面实底化：wallpaper 域 --ll-face 改调不透明基色 token，基座定义与其他皮肤不动", () => {
-    assert.ok(panelCss.includes(':root[data-style="wallpaper"] .live-log { --ll-face: color-mix(in srgb, var(--surface-opaque) 94%, white 6%); }'),
-      "wallpaper 域卡面底改取 --surface-opaque（--surface 带玻璃化 alpha，字会压上透出的壁纸）");
+  it("卡面对齐左栏两卡：wallpaper 域不再覆盖 --ll-face，卡面与另外两卡同一层玻璃底", () => {
+    assert.ok(!/:root\[data-style="wallpaper"\] \.live-log \{ --ll-face:/.test(panelCss),
+      "wallpaper 域不再把卡面改调不透明基色：2026-11-17 用户报障「信息卡太黑」，卡面回到 --surface 的滑杆 alpha（约 0.76），与服务状态/状态检测两卡的 0.75 同档，11-14 实底化决议由此推翻");
     assert.equal((panelCss.match(/--ll-face: color-mix\(in srgb, var\(--surface\) 94%, white 6%\);/g) ?? []).length, 1,
-      "基座卡面底仍唯一一处定义，且不被覆盖规则顶成第二处");
-    assert.equal((panelCss.match(/:root\[data-style="wallpaper"\] \.live-log \{ --ll-face:/g) ?? []).length, 1,
-      "wallpaper 域卡面覆盖规则唯一");
+      "基座卡面底仍唯一一处定义，全主题共用");
+    assert.ok(!/--surface-opaque/.test(panelCss), "卡面不再消费 --surface-opaque（引擎仍导出该 token，供其他面使用）");
   });
 
   it("底缘条透明度变量化：基座读 var(--ll-lip-o, 0.55)，wallpaper 域置 0，::after 规则仍唯一", () => {
@@ -19280,12 +19268,12 @@ describe("壁纸域运行日志卡实底＋底缘条退场＋主题页外部预�
     assert.equal((panelCss.match(/\.live-log-stage::after/g) ?? []).length, 1, "底缘条 ::after 规则仍唯一，不靠新增选择器压层叠");
   });
 
-  it("退层不再变淡：wallpaper 域退层整卡透明度两档归 1，基座 0.86/0.72 与展开归位不动", () => {
+  it("退层不再变淡：wallpaper 域退层整卡透明度两档归 1，基座 0.86/0.72 一用到底", () => {
     assert.ok(panelCss.includes(':root[data-style="wallpaper"] .live-log { --ll-opacity-1: 1; --ll-opacity-2: 1; }'),
       "wallpaper 域退层两档归 1（整卡 opacity 会把卡面带字跟壁纸混洗，退层小字实测掉到 3:1 上下）");
     assert.ok(/--ll-opacity-1: 0\.86; --ll-opacity-2: 0\.72;/.test(panelCss), "基座退层档原样保留，其他皮肤不变淡");
-    assert.equal((panelCss.match(/--ll-opacity-1: /g) ?? []).length, 3,
-      "退层档定义仅三处：基座、展开归位、壁纸覆盖（消费端 var() 不计入）");
+    assert.equal((panelCss.match(/--ll-opacity-1: /g) ?? []).length, 2,
+      "退层档定义仅两处：基座、壁纸覆盖（消费端 var() 不计入；展开归位随展收同高退役）");
   });
 
   it("标题行垫底：wallpaper 域 .live-log-bar 补卡面同款垫底成条，基座仍无框无底", () => {

@@ -1507,9 +1507,8 @@ describe("createAgentMetricsCollector", () => {
       const feed = collector.getDetectedClientProcesses();
       const qoderEntries = feed.filter((proc) => proc.agentId === "qoder");
       assert.equal(qoderEntries.length, 1);
-      const { busy, requestsInFlight, ...qoderRest } = qoderEntries[0];
+      const { busy, ...qoderRest } = qoderEntries[0];
       assert.deepEqual(qoderRest, { agentId: "qoder", pid: 10284, ancestors: [19560, 23828] });
-      assert.equal(requestsInFlight, 0, "夹具无请求：在途计数为零");
       // 底下的 --internal-sites-mcp 助手是本体常驻派生的自家人（前缀豁免），
       // 不是用户命令：判无活命令。修前按「逐字相同」判它是在跑证据，qoder 终端
       // 会永远换不了内容。
@@ -1599,9 +1598,8 @@ describe("createAgentMetricsCollector", () => {
       const feed = collector.getDetectedClientProcesses();
       const entries = feed.filter((proc) => proc.agentId === "opencode");
       assert.equal(entries.length, 1, "serve 子进程不进 detected feed");
-      const { busy, requestsInFlight, ...ocRest } = entries[0];
+      const { busy, ...ocRest } = entries[0];
       assert.deepEqual(ocRest, { agentId: "opencode", pid: 14788, ancestors: [18868, 18580] });
-      assert.equal(requestsInFlight, 0, "夹具无请求：在途计数为零");
       // serve --service 是本体可执行＋一段参数的常驻助手（前缀豁免），不是用户
       // 命令：判无活命令。修前按「逐字相同」判它是在跑证据，opencode 终端会永远
       // 换不了内容。
@@ -5014,9 +5012,8 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
 
     const dshFeed = collector.getDetectedClientProcesses().filter((p) => p.agentId === "dsh");
     assert.equal(dshFeed.length, 1, "终端归属面只报引擎子进程");
-    const { busy, requestsInFlight, ...dshRest } = dshFeed[0];
+    const { busy, ...dshRest } = dshFeed[0];
     assert.deepEqual(dshRest, { agentId: "dsh", pid: 5101, ancestors: [5100, 99] });
-    assert.equal(requestsInFlight, 0, "夹具无请求：在途计数为零");
     assert.equal(busy, false, "这张夹具里引擎底下没有活命令");
   });
 
@@ -8696,14 +8693,12 @@ describe("terminal attribution feed (getDetectedClientProcesses)", () => {
     assert.equal(feed.length, 2, "ChatGPT 桌面壳不是引擎，不进检测面");
     const codexEntry = feed.find((p) => p.agentId === "codex");
     // busy 是「锚 pid 之下有没有活命令」判据：这张夹具里两条引擎都是光杆。
-    const { busy: codexBusy, requestsInFlight: codexInFlight, ...codexRest } = codexEntry;
+    const { busy: codexBusy, ...codexRest } = codexEntry;
     assert.deepEqual(codexRest, { agentId: "codex", pid: 6100, ancestors: [8888, 9000] });
-    assert.equal(codexInFlight, 0, "夹具无请求：在途计数为零");
     assert.equal(codexBusy, false, "光杆引擎判无活命令");
     const kimiEntry = feed.find((p) => p.agentId === "kimi");
-    const { busy: kimiBusy, requestsInFlight: kimiInFlight, ...kimiRest } = kimiEntry;
+    const { busy: kimiBusy, ...kimiRest } = kimiEntry;
     assert.deepEqual(kimiRest, { agentId: "kimi", pid: 4321, ancestors: [8888, 9000] });
-    assert.equal(kimiInFlight, 0, "夹具无请求：在途计数为零");
     assert.equal(kimiBusy, false);
     assert.equal(feed.some((p) => p.pid === 6200), false);
   });
@@ -10066,101 +10061,5 @@ describe("qoder dual-edition image buckets and the card edition field", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-// ── 2026-11-17 提交窗在途桥：per-pid 非 background 在途计数 ──
-// requestsInFlight 随 getDetectedClientProcesses 下发（terminal-attribution 透传
-// 到 session.agent，面板杀判据消费）。计数生命周期是本组钉子：开始侧记 pid、
-// 结束侧按开始时记录的 pid 递减（不重查）、迟到绑定补记、绑定失败不入账、
-// 连续在途超 30 分钟强制清零且锁到归零（须下降沿重臂）、collector 重建归零；
-// background 请求与 <agent>-sess- 会话身份不入账（会话行本就是终端可绑的归属）。
-describe("requestsInFlight per-pid 计数（提交窗在途桥）", () => {
-  const KIMI_PID = 4321; // PS_KIMI_SCAN 里的 kimi 客户端 pid（cmd 壳 8888 之下）
-  const PS_KIMI_SCAN = [
-    String.raw`4321,8888,node.exe,C:\Tools\node.exe C:\x\node_modules\@moonshot-ai\kimi-code\dist\main.mjs`,
-    String.raw`8888,23828,cmd.exe,C:\Windows\system32\cmd.exe`,
-  ].join("\r\n") + "\r\n";
-  const makeCollector = (opts = {}) => testCollector({
-    execFn: (cmd, _opts, cb) => cb(null, PS_KIMI_SCAN),
-    ...opts,
-  });
-  const inflight = async (collector) => {
-    await collector.scanProcesses();
-    const row = collector.getDetectedClientProcesses().find((p) => p.pid === KIMI_PID);
-    assert.ok(row, "kimi 客户端 pid 在检测面（夹具自证）");
-    return row.requestsInFlight;
-  };
-
-  it("开始有 pid → 同 pid 叠加、结束按记录 pid 递减归零", async () => {
-    const collector = makeCollector();
-    const t1 = collector.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    assert.equal(await inflight(collector), 1, "在途 1");
-    const t2 = collector.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    assert.equal(await inflight(collector), 2, "同 pid 叠加");
-    t1.recordEnd({ status: 200 });
-    assert.equal(await inflight(collector), 1, "结束递减");
-    t2.recordEnd({ status: 200 });
-    assert.equal(await inflight(collector), 0, "归零");
-  });
-
-  it("结束侧不重查属主：按开始时记录的 pid 递减（keep-alive 换属主不泄漏）", async () => {
-    const collector = makeCollector();
-    const tA = collector.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    const tB = collector.startRequest({ agentId: "kimi", model: "m", clientPid: 5500 }); // 「换属主」后的新连接
-    tA.recordEnd({ status: 200 });
-    assert.equal(await inflight(collector), 0, "A 按开始 pid 归零——若结束侧重查属主（此刻在 5500），A 的账永不回收");
-    tB.recordEnd({ status: 200 });
-  });
-
-  it("迟到绑定：起手无 pid 不入账，attachClientPid 后补记并正常递减", async () => {
-    const collector = makeCollector();
-    const t = collector.startRequest({ agentId: "kimi", model: "m" });
-    assert.equal(await inflight(collector), 0, "起手未命中不入账（宁少保）");
-    t.attachClientPid?.(KIMI_PID);
-    assert.equal(await inflight(collector), 1, "迟到 pid 补记");
-    t.recordEnd({ status: 200 });
-    assert.equal(await inflight(collector), 0);
-  });
-
-  it("结束后的迟到 pid 不入账（迟到信号不复活已结算的请求）", async () => {
-    const collector = makeCollector();
-    const t = collector.startRequest({ agentId: "kimi", model: "m" });
-    t.recordEnd({ status: 200 });
-    t.attachClientPid?.(KIMI_PID);
-    assert.equal(await inflight(collector), 0);
-  });
-
-  it("background 请求与 <agent>-sess- 会话身份不入 pid 账", async () => {
-    const collector = makeCollector();
-    const bg = collector.startRequest({ agentId: "codex", model: "m", background: true, clientPid: KIMI_PID });
-    const sess = collector.startRequest({ agentId: "opencode", model: "m", instanceId: "opencode-sess-abc", clientPid: 5500 });
-    assert.equal(await inflight(collector), 0, "引擎自发流量不得误标用户会话在途；会话行端点本有归属、无缺口");
-    bg.recordEnd({ status: 200 });
-    sess.recordEnd({ status: 200 });
-  });
-
-  it("连续在途超 30 分钟 → 强制清零且锁到归零，归零后新在途重臂", async () => {
-    let now = 1_000_000;
-    const collector = makeCollector({ nowFn: () => now });
-    const t1 = collector.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    assert.equal(await inflight(collector), 1);
-    now += 31 * 60 * 1000;
-    assert.equal(await inflight(collector), 0, "30 分钟无下降沿：强制清零（防计数泄漏把终端焊死在「在跑」）");
-    const t2 = collector.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    assert.equal(await inflight(collector), 0, "锁到归零：归零前新请求不点亮");
-    t1.recordEnd({ status: 200 });
-    t2.recordEnd({ status: 200 });
-    const t3 = collector.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    assert.equal(await inflight(collector), 1, "见过下降沿后重臂：新在途照常点亮");
-    t3.recordEnd({ status: 200 });
-  });
-
-  it("collector 重建（relay 重启）→ 计数从零：在途 TCP 随连接断，新请求重新计数", async () => {
-    const first = makeCollector();
-    const t = first.startRequest({ agentId: "kimi", model: "m", clientPid: KIMI_PID });
-    t.recordEnd({ status: 200 });
-    const second = makeCollector();
-    assert.equal(await inflight(second), 0, "新 collector 无存量账");
   });
 });
