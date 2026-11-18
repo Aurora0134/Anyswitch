@@ -249,11 +249,11 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
   });
 
   it("(d) client walks away during keep-alive backoff: aborted, no phantom 502 fault", async () => {
-    // 用日志观察取代固定 15ms 睡眠抢占：relay 在进退避睡眠前必发
-    // "keep-alive: retrying"（同一同步块内先记日志再 sleep），看到日志再中止
-    // 就必然落在睡眠窗口之内——分支被真正执行，不再赌时序。退避取 5000ms，
-    // 截止线 2000ms 夹在两者之间：中止截断睡眠时请求毫秒级收尾；截断失守时
-    // 要等满 5000ms，截止线变红。
+    // 同步点挂 deps.computeRetryDelay 注入缝：relay 进退避睡眠前必在同一同步
+    // 块内先算退避再 sleep，回调触发即证明睡眠已开启（中途的 retrying 日志行
+    // 已随方案甲「按请求收口」移除，注入缝是仅剩的确定性观测点）。退避取
+    // 5000ms，截止线 2000ms 夹在两者之间：中止截断睡眠时请求毫秒级收尾；
+    // 截断失守时要等满 5000ms，截止线变红。
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -266,32 +266,26 @@ describe("client disconnect detection (ask-user pause false-502 fix)", () => {
         ]),
       };
     };
-    const warns = [];
-    const logger = {
-      warn: (message) => warns.push(String(message)),
-      error: (message) => warns.push(String(message)),
-      info: () => {},
-    };
+    let backoffEntered;
+    const backoffGate = new Promise((resolve) => { backoffEntered = resolve; });
     const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
     const deps = {
       ...createMockDeps({ upstreamFetch, metricsCollector: collector }),
-      logger,
       getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 5000 }),
+      computeRetryDelay: (backoff) => {
+        backoffEntered();
+        return backoff;
+      },
     };
 
     await withServer(deps, async (port) => {
       const ac = new AbortController();
       const resPromise = postChatStream(port, ac.signal);
-      // 等到「进入退避」的日志出现——这是睡眠已开启的确定性信号。
+      // 等到「进入退避」的回调触发——这是睡眠已开启的确定性信号。
       await Promise.race([
-        new Promise((resolve, reject) => {
-          const poll = setInterval(() => {
-            if (warns.some((m) => m.includes("keep-alive: retrying"))) {
-              clearInterval(poll);
-              resolve();
-            }
-          }, 5);
-          const t = setTimeout(() => { clearInterval(poll); reject(new Error("relay never entered the keep-alive backoff — fixture broken")); }, 10000);
+        backoffGate,
+        new Promise((_, reject) => {
+          const t = setTimeout(() => reject(new Error("relay never entered the keep-alive backoff — fixture broken")), 10000);
           t.unref?.();
         }),
       ]);

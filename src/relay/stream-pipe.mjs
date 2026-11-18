@@ -69,6 +69,17 @@ export function logIdentitySegment(member, { agentId = null, originalBody = null
   return ` [${id ?? "?"} · ${model ?? "?"}]`;
 }
 
+// 结局总结行（方案甲·按请求收口）的细节段：重试次数与接力链只在这里拼一次，
+// 三个通道共用。chain 是成员 id 序列（单成员时没有接力可讲）；retries 是全链
+// 重试总数（续接与重试共用同一份预算，一并计入）。两者皆无（首试即过）返回
+// 空串——那种结局本就不打总结行。
+export function attemptTrailDetail({ retries = 0, chain = [] } = {}) {
+  const parts = [];
+  if (chain.length > 1) parts.push(`failover ${chain.join("→")}`);
+  if (retries > 0) parts.push(`${retries} ${retries === 1 ? "retry" : "retries"}`);
+  return parts.length > 0 ? ` after ${parts.join(", ")}` : "";
+}
+
 // 一次续接只报告「这一段」产出的内容；下一次发往上游的请求必须带上客户端至
 // 今为止看到的全部输出，否则第二次续接只会把最后一段拼进 messages——模型会从
 // 半截处重新开始，而不是接着写。文本直接相连（上一段正是断在字中），工具调用
@@ -566,23 +577,28 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
 //                                        request-shaped status (shouldFailover
 //                                        false) nor after the client walked
 //                                        away.
-//   memberNoun                        -> failover-log noun fallback (default
-//                                        "pool member"); callUpstreams entries
-//                                        may carry their own — chain plans tag
-//                                        bare channel nodes "chain node".
+//   memberNoun                        -> noun once used by the per-hop failover
+//                                        log line; the request-level collapse
+//                                        removed that line, so it currently has
+//                                        no consumer (retained in the member
+//                                        descriptor shape)
 //   pipe(result, keepAliveConfig)     -> forward result.stream; outcome object
 //   onCallError(err)                  -> upstream call threw: recordEnd + 500
 //   onTerminalResult(result, member?) -> status >= 400 or non-stream terminal
-//   onSettled(outcome, attempt, identity)
+//   onSettled(outcome, attempt, identity, settleCtx)
 //                                   -> non-retryable pipe outcome; identity is
 //                                        this member's logIdentitySegment
 //                                        result ("" when neither side is
-//                                        known)
+//                                        known); settleCtx = { retries, chain }
+//                                        carries the request-level trail so the
+//                                        one end-of-request summary line can
+//                                        name the retry count / relay chain
 //   exhaustedMessage(lastOutcome, retryCtx) -> definitive 502 message;
 //                                        retryCtx = { mode, maxRetries,
-//                                        attemptsUsed } lets the wording tell
-//                                        a spent retry budget from a never-
-//                                        configured one
+//                                        attemptsUsed, chain } lets the wording
+//                                        tell a spent retry budget from a never-
+//                                        configured one; chain is the relay
+//                                        chain member ids for the summary line
 //   onExhaustedLog(message, lastOutcome, retryCtx, identity) (optional)
 //   sendExhausted(message, lastOutcome)
 //   logLabel                          -> "request" / "anthropic request" / ...
@@ -628,13 +644,22 @@ export async function runStreamWithKeepAlive(res, channel) {
   let resumeState = null;
   let lastAttemptedMember = null;
   let attemptedMembers = 0;
+  // 请求级轨迹（方案甲·按请求收口）：成员序列 + 每成员尝试次数。中途的重试/
+  // 续接/failover 不再逐条打日志，全部收进这份内存轨迹；请求终结时按结局拼
+  // 唯一一条总结行（恢复含重试次数/接力链，耗尽/全灭带接力链），随后整份
+  // 丢弃。tracker 的逐次计数不受影响，照常在每个尝试点记。
+  const trail = [];
+  let trailEntry = null;
+  const chainIds = () => trail.map((entry) => entry.id);
+  const totalRetries = () => trail.reduce((sum, entry) => sum + Math.max(0, entry.attempts - 1), 0);
 
   // A member's definitive failure before the last member: count the failed
-  // attempt against the actual member and log the failover, then advance.
+  // attempt against the actual member, then advance. The per-hop log line this
+  // used to emit is gone — the trail above carries the hop into the
+  // end-of-request summary line instead.
   const noteMemberFailover = (member, reason, usage) => {
     channel.onMemberFault?.(member, reason);
     tracker?.recordRetry?.({ reason, memberId: member.memberId ?? undefined, usage });
-    logger?.warn?.(`keep-alive: ${logLabel} failing over from ${member.memberNoun ?? channel.memberNoun ?? "pool member"}${identityOf(member)} (${reason})`);
   };
 
   for (let memberIndex = 0; memberIndex < callUpstreams.length; memberIndex += 1) {
@@ -642,6 +667,8 @@ export async function runStreamWithKeepAlive(res, channel) {
     lastAttemptedMember = member;
     attemptedMembers += 1;
     const identity = identityOf(member);
+    trailEntry = { id: member.memberId ?? agentId ?? "?", attempts: 0 };
+    trail.push(trailEntry);
     // 智能分流的在途计数：成员开始承接本请求时 +1，无论成功/失败/中止/切换
     // 哪条出口都在 finally 里 -1。关闭智能分流时钩子为 undefined，空操作。
     channel.onMemberBegin?.(member);
@@ -656,6 +683,7 @@ export async function runStreamWithKeepAlive(res, channel) {
 
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         attemptsUsed = attempt + 1;
+        trailEntry.attempts = attempt + 1;
         if (abortController.signal.aborted || res.writableEnded) {
           // Race guard: the abort can land between backoff sleep resolving and
           // this check. With the fault latch deferred, this return must still
@@ -685,9 +713,9 @@ export async function runStreamWithKeepAlive(res, channel) {
             // Transient upstream fault (e.g. a Cloudflare 522 when the provider's
             // origin hiccups). Nothing has been committed to the client response
             // on this attempt yet, so retry silently — a one-shot 5xx is exactly
-            // the kind of blip a single retry absorbs.
+            // the kind of blip a single retry absorbs. Log-silent too: the hop
+            // only lands in the trail, reported by the end-of-request summary.
             tracker?.recordRetry?.({ reason: `upstream_${result.status}`, attempt: attempt + 1, usage: result.body?.usage, memberId: member.memberId ?? undefined });
-            logger?.warn?.(`keep-alive: retrying ${logLabel}${identity} (upstream status ${result.status}, attempt ${attempt + 1}/${maxRetries})`);
             try {
               await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
             } catch {
@@ -717,6 +745,17 @@ export async function runStreamWithKeepAlive(res, channel) {
             // this member did fail the request, so it counts the same way.
             channel.onMemberFault?.(member, `upstream_${result.status}`);
           }
+          // 结局收口（方案甲）：非流式成功/状态终局也是请求结局，与管道结局同
+          // 口径——恢复含重试次数/接力链，全灭带链与末位状态；首试即过
+          // （detail 为空）保持零行。
+          const settleDetail = attemptTrailDetail({ retries: totalRetries(), chain: chainIds() });
+          if (settleDetail) {
+            if (result.status < 400) {
+              logger?.info?.(`keep-alive: ${logLabel}${identity} recovered${settleDetail}`);
+            } else {
+              logger?.warn?.(`keep-alive: ${logLabel}${identity} failed${settleDetail} (last: upstream status ${result.status})`);
+            }
+          }
           channel.onTerminalResult(appendFailoverContext(result, memberIndex + 1), member);
           return;
         }
@@ -731,7 +770,7 @@ export async function runStreamWithKeepAlive(res, channel) {
           // Success or already committed/aborted/terminal. A committed stream
           // (real content bytes written) never fails over to another member.
           if (outcome.outcome === "ok") channel.onMemberSuccess?.(member);
-          channel.onSettled(outcome, attempt, identity);
+          channel.onSettled(outcome, attempt, identity, { retries: totalRetries(), chain: chainIds() });
           return;
         }
 
@@ -749,7 +788,6 @@ export async function runStreamWithKeepAlive(res, channel) {
           };
           if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
             tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
-            logger?.warn?.(`keep-alive: resuming ${logLabel}${identity} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
             try {
               await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
             } catch {
@@ -779,7 +817,6 @@ export async function runStreamWithKeepAlive(res, channel) {
         // recovering) invisible to the panel. Latch once, at exhaustion below.
         if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
           tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
-          logger?.warn?.(`keep-alive: retrying ${logLabel}${identity} (${outcome.reason}, attempt ${attempt + 1}/${maxRetries})`);
           try {
             await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
           } catch {
@@ -819,7 +856,7 @@ export async function runStreamWithKeepAlive(res, channel) {
   }
   const lastMember = lastAttemptedMember;
   const lastIdentity = identityOf(lastMember);
-  const retryCtx = { mode: keepAliveConfig?.mode ?? "on", maxRetries, attemptsUsed };
+  const retryCtx = { mode: keepAliveConfig?.mode ?? "on", maxRetries, attemptsUsed, chain: chainIds() };
   // A resume that exhausted its budget ends the turn with the same 502 a
   // never-resumed cut would have carried — the client saw the partial output,
   // and the error frame tells it the rest never came. Each attempt past the
@@ -928,10 +965,13 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
         sendJson(res, result.status, result.body);
       }
     },
-    onSettled: (outcome, attempt, identity = "") => {
-      if (attempt > 0 && outcome.outcome === "ok") {
-        tracker?.noteKeepAliveRecovery?.();
-        logger?.info?.(`keep-alive: request${identity} recovered on attempt ${attempt + 1}`);
+    onSettled: (outcome, attempt, identity = "", settleCtx = null) => {
+      if (outcome.outcome === "ok") {
+        // 面板计数口径不变：只有本成员真实重试过才算恢复。日志按请求级轨迹
+        // 收口——跨成员 failover 后末位一次通过也算恢复，同样留一条总结行。
+        if (attempt > 0) tracker?.noteKeepAliveRecovery?.();
+        const detail = attemptTrailDetail(settleCtx ?? {});
+        if (detail) logger?.info?.(`keep-alive: request${identity} recovered${detail}`);
       }
       if (outcome.outcome === "terminal" && outcome.error) {
         logger?.warn?.(`request${identity} stream fault after content was delivered: ${outcome.error}`);
@@ -955,7 +995,8 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
       const head = (retryCtx?.attemptsUsed ?? 1) > 1
         ? "keep-alive: exhausted"
         : "keep-alive: empty upstream (no retry configured)";
-      logger?.warn?.(`${head}${identity} (${lastOutcome?.reason ?? "empty_stream"}): ${message}`);
+      const chain = (retryCtx?.chain?.length ?? 0) > 1 ? `, chain ${retryCtx.chain.join("→")}` : "";
+      logger?.warn?.(`${head}${identity} (${lastOutcome?.reason ?? "empty_stream"}${chain}): ${message}`);
     },
     sendExhausted: (message, lastOutcome) => {
       // Once content has been delivered the SSE headers are long gone, so the
@@ -1056,13 +1097,14 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
         sendJson(res, result.status, result.body);
       }
     },
-    onSettled: (outcome, attempt, identity = "") => {
+    onSettled: (outcome, attempt, identity = "", settleCtx = null) => {
       if (outcome.outcome === "ok") {
         tracker?.recordEnd?.({ usage: outcome.usage });
-        if (attempt > 0) {
-          tracker?.noteKeepAliveRecovery?.();
-          logger?.info?.(`keep-alive: responses request${identity} recovered on attempt ${attempt + 1}`);
-        }
+        // 面板计数口径不变：只有本成员真实重试过才算恢复。日志按请求级轨迹
+        // 收口——跨成员 failover 后末位一次通过也算恢复，同样留一条总结行。
+        if (attempt > 0) tracker?.noteKeepAliveRecovery?.();
+        const detail = attemptTrailDetail(settleCtx ?? {});
+        if (detail) logger?.info?.(`keep-alive: responses request${identity} recovered${detail}`);
       } else if (outcome.clientAborted) {
         tracker?.recordEnd?.({ aborted: true, usage: outcome.usage });
       } else {
@@ -1090,7 +1132,8 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
       const head = (retryCtx?.attemptsUsed ?? 1) > 1
         ? "keep-alive: exhausted"
         : "keep-alive: empty upstream (no retry configured)";
-      logger?.warn?.(`${head}${identity} (${lastOutcome?.reason ?? "empty_stream"}): ${message}`);
+      const chain = (retryCtx?.chain?.length ?? 0) > 1 ? `, chain ${retryCtx.chain.join("→")}` : "";
+      logger?.warn?.(`${head}${identity} (${lastOutcome?.reason ?? "empty_stream"}${chain}): ${message}`);
     },
     sendExhausted: (message, lastOutcome) => {
       if (res.headersSent) {
@@ -1184,13 +1227,14 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ag
         sendJson(res, result.status, result.body);
       }
     },
-    onSettled: (outcome, attempt, identity = "") => {
+    onSettled: (outcome, attempt, identity = "", settleCtx = null) => {
       if (outcome.outcome === "ok") {
         tracker?.recordEnd?.({ usage: outcome.usage });
-        if (attempt > 0) {
-          tracker?.noteKeepAliveRecovery?.();
-          logger?.info?.(`keep-alive: ${logLabel}${identity} recovered on attempt ${attempt + 1}`);
-        }
+        // 面板计数口径不变：只有本成员真实重试过才算恢复。日志按请求级轨迹
+        // 收口——跨成员 failover 后末位一次通过也算恢复，同样留一条总结行。
+        if (attempt > 0) tracker?.noteKeepAliveRecovery?.();
+        const detail = attemptTrailDetail(settleCtx ?? {});
+        if (detail) logger?.info?.(`keep-alive: ${logLabel}${identity} recovered${detail}`);
       } else if (outcome.clientAborted) {
         tracker?.recordEnd?.({ aborted: true, usage: outcome.usage });
       } else {
@@ -1204,7 +1248,8 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ag
       const head = (retryCtx?.attemptsUsed ?? 1) > 1
         ? `${name} relay: keep-alive exhausted`
         : `${name} relay: keep-alive empty upstream (no retry configured)`;
-      logger?.warn?.(`${head}${identity} (${lastOutcome?.reason ?? "empty_stream"}): ${message}`);
+      const chain = (retryCtx?.chain?.length ?? 0) > 1 ? `, chain ${retryCtx.chain.join("→")}` : "";
+      logger?.warn?.(`${head}${identity} (${lastOutcome?.reason ?? "empty_stream"}${chain}): ${message}`);
     },
     sendExhausted: (message, lastOutcome) => {
       // A spent resume budget still reports the upstream-incomplete code: the
