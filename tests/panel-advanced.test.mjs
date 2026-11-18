@@ -191,11 +191,11 @@ test("合并大卡结构：导出/导入并成「配置迁移」，按钮收进�
   assert.ok(exportRow.indexOf('id="dataExportStatus"') < exportRow.indexOf('id="dataExportBtn"'), "状态行在钮之前");
   const importRow = html.slice(html.indexOf('id="dataImportSummary"'), html.indexOf('id="dataImportPickBtn"'));
   assert.ok(importRow.includes("导入 zip 配置包，写入前自动备份当前配置。"), "导入行说明为定稿文案");
-  // 高级选项区四卡：更新通道、号池分流逻辑、配置迁移、配置备份。
+  // 高级选项区四卡：更新通道、号池路由逻辑、配置迁移、配置备份。
   const section = html.slice(html.indexOf('id="settingsPanelAdvanced"'), html.indexOf('id="terminalView"'));
   const titles = [...section.matchAll(/<h2 class="card-title">[\s\S]*?<\/h2>/g)].map((m) => m[0]);
   assert.equal(titles.length, 4, "高级选项区四张卡");
-  for (const t of ["更新通道", "号池分流逻辑", "配置迁移", "配置备份"]) {
+  for (const t of ["更新通道", "号池路由逻辑", "配置迁移", "配置备份"]) {
     assert.ok(titles.some((x) => x.includes(t)), `缺卡：${t}`);
   }
 });
@@ -555,59 +555,106 @@ test("导入成功经 onImportApplied 通知备份卡刷新列表；失败不通
   assert.match(source, /onImportApplied: \(\) => backupLocation\.refresh\(\)/, "装配处接线");
 });
 
-// 号池分流逻辑卡：智能分流开关。文案为对稿定稿（仅描述开启态、中性、不披露机制），
-// 开关即改即存，中继每请求现读。这里钉住 markup 文案 ↔ 开关 id ↔ onchange 接线三者一致。
-test("号池分流逻辑卡：定稿文案逐字落盘，开关 id 稳定，不披露机制", () => {
-  assert.ok(html.includes("号池分流逻辑"), "卡头");
-  const title = html.indexOf('<div class="modal-item-title">智能分流</div>');
-  assert.ok(title > 0, "开关项标题存在");
-  const item = html.slice(
-    html.lastIndexOf('<div class="modal-item">', title),
-    html.indexOf("</label>", title) + "</label>".length,
-  );
-  assert.ok(item.includes('<label class="toggle">'), "沿用全局开关控件");
-  assert.ok(item.includes('id="poolLoadBalancingToggle"'), "开关有稳定 id 供读写");
-  assert.ok(item.includes("开启后，号池内的请求将智能分流给多个成员承接，同一会话的请求优先留在同一成员"), "定稿说明句");
-  // 说明只摆开启态效果，不暴露并发/优质率/权重/熔断等机制本体。
+// 号池路由逻辑卡：双选文字钮「退避｜分流」（2026-11-18 裁决，取代旧「智能分流」
+// 开关）。文案为对稿定稿（只描述当前选中模式、中性、不披露机制），即改即存，
+// 中继每请求现读。这里钉住 markup 文案 ↔ 双选钮 id ↔ 保存/回显接线一致。
+test("号池路由逻辑卡：定稿文案逐字落盘，双选钮结构，不披露机制", () => {
+  assert.ok(html.includes("号池路由逻辑"), "卡头");
+  assert.ok(!html.includes("poolLoadBalancingToggle"), "旧开关退场");
+  const seg = html.indexOf('id="poolRoutingSeg"');
+  assert.ok(seg > 0, "双选钮有稳定 id 供读写");
+  const item = html.slice(html.lastIndexOf('<div class="modal-item">', seg), html.indexOf("<!-- 配置迁移", seg));
+  assert.ok(item.includes('class="seg-switch"'), "沿用「UI版本」同款双选控件");
+  assert.ok(item.includes('data-pool-routing-choice="backoff" role="radio" aria-checked="true">退避</button>'), "退避在左且为默认选中");
+  assert.ok(item.includes('data-pool-routing-choice="balance" role="radio" aria-checked="false">分流</button>'), "分流在右");
+  assert.ok(item.includes('id="poolRoutingDesc">号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员</div>'), "退避定稿说明句为 markup 初值");
+  assert.ok(!item.includes("modal-item-title"), "行标题退场，卡头即栏目名");
+  // 说明只摆当前模式效果，不暴露并发/优质率/权重/熔断等机制本体。
   assert.ok(!/并发|优质率|权重|熔断|滑动窗|TTFT|首字|负载|粘性/.test(item), "不向用户暴露实现细节");
 });
 
-test("智能分流开关：切换 POST 该设置，以服务端回读值为准，toast 用定稿文案", async () => {
-  const match = source.match(/poolLoadBalancingToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
-  assert.ok(match, "onchange 处理器在 panel.js 里");
-  const makeToggle = (checked) => ({ checked, setAttribute() {}, removeAttribute() {} });
-  const run = (toggle, api, toasts, settingsSaving) => new Function(
-    "poolLoadBalancingToggle", "settingsSaving", "api", "toast", "panelError",
-    `let settingsLoadGen = 0; ${match[0]} return poolLoadBalancingToggle.onchange();`,
-  )(toggle, settingsSaving, api, (m) => toasts.push(m), (e, fallback) => fallback);
-
-  // 开启
-  const onCalls = [];
-  const onToasts = [];
-  const onSaving = { poolLoadBalancing: false };
-  await run(makeToggle(true), async (method, path, body) => {
-    onCalls.push({ method, path, body });
-    return { ok: true, settings: { poolLoadBalancing: true } };
-  }, onToasts, onSaving);
-  assert.deepEqual(onCalls, [{ method: "POST", path: "/api/settings", body: { poolLoadBalancing: true } }]);
-  assert.deepEqual(onToasts, ["已开启智能分流"]);
-  assert.equal(onSaving.poolLoadBalancing, false, "保存标记必须复位");
-
-  // 关闭
-  const offToasts = [];
-  await run(makeToggle(false), async () => ({ ok: true, settings: { poolLoadBalancing: false } }), offToasts, { poolLoadBalancing: false });
-  assert.deepEqual(offToasts, ["已关闭智能分流"]);
-
-  // 保存失败：回滚开关态并报失败 toast
-  const failToggle = makeToggle(true);
-  const failToasts = [];
-  await run(failToggle, async () => ({ ok: false }), failToasts, { poolLoadBalancing: false });
-  assert.equal(failToggle.checked, false, "失败回滚到切换前");
-  assert.deepEqual(failToasts, ["设置保存失败"]);
+test("号池路由说明：两句定稿逐字在档，说明句与选中态经同一口切换", () => {
+  const block = source.match(/const POOL_ROUTING_DESC = \{[\s\S]*?function applyPoolRouting\(enabled\) \{[\s\S]*?\n    \}/);
+  assert.ok(block, "定稿常量与回显函数在 panel.js 里");
+  assert.ok(block[0].includes("号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员"), "退避定稿句");
+  assert.ok(block[0].includes("号池内的请求将分流给多个成员承接，同一会话的请求优先留在同一成员"), "分流定稿句");
+  const makeBtn = (choice) => ({ dataset: { poolRoutingChoice: choice }, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } });
+  const run = (enabled) => {
+    const btns = [makeBtn("backoff"), makeBtn("balance")];
+    const desc = { textContent: "" };
+    const state = new Function("poolRoutingSegBtns", "poolRoutingDesc",
+      `${block[0]} applyPoolRouting(${enabled}); return { text: poolRoutingDesc.textContent, checked: poolRoutingSegBtns.map((b) => b.attrs["aria-checked"]), enabled: poolRoutingEnabled };`)(btns, desc);
+    return state;
+  };
+  const on = run(true);
+  assert.equal(on.text, "号池内的请求将分流给多个成员承接，同一会话的请求优先留在同一成员");
+  assert.deepEqual(on.checked, ["false", "true"], "分流选中");
+  assert.equal(on.enabled, true);
+  const off = run(false);
+  assert.equal(off.text, "号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员");
+  assert.deepEqual(off.checked, ["true", "false"], "退避选中");
+  assert.equal(off.enabled, false);
 });
 
-test("智能分流开关：回显接线存在，保存中不被轮询盖回", () => {
-  assert.ok(source.includes('const poolLoadBalancingToggle = $("poolLoadBalancingToggle");'), "声明取 id");
+test("号池路由双选：点选 POST 该设置，以服务端回读值为准，成功无 toast", async () => {
+  const match = source.match(/async function savePoolRouting\(next\) \{[\s\S]*?\n    \}/);
+  assert.ok(match, "保存函数在 panel.js 里");
+  const run = (next, api, toasts, applied, settingsSaving) => {
+    const segAttrs = {};
+    const p = new Function(
+      "poolRoutingSeg", "applyPoolRouting", "settingsSaving", "api", "toast", "panelError",
+      `let settingsLoadGen = 0; ${match[0]} return savePoolRouting(${next});`,
+    )({ setAttribute(k, v) { segAttrs[k] = v; }, removeAttribute(k) { delete segAttrs[k]; } },
+      (v) => applied.push(v), settingsSaving, api, (m) => toasts.push(m), (e, fallback) => fallback);
+    return p.then(() => segAttrs);
+  };
+
+  // 切到分流：乐观先行、服务端确认后落定，全程无成功 toast
+  const onCalls = [];
+  const onToasts = [];
+  const onApplied = [];
+  const onSaving = { poolLoadBalancing: false };
+  const onAttrs = await run(true, async (method, path, body) => {
+    onCalls.push({ method, path, body });
+    assert.equal(onSaving.poolLoadBalancing, true, "请求在途时忙标记立起");
+    return { ok: true, settings: { poolLoadBalancing: true } };
+  }, onToasts, onApplied, onSaving);
+  assert.deepEqual(onCalls, [{ method: "POST", path: "/api/settings", body: { poolLoadBalancing: true } }]);
+  assert.deepEqual(onApplied, [true, true]);
+  assert.deepEqual(onToasts, [], "成功无 toast（选中项高亮即反馈）");
+  assert.equal(onSaving.poolLoadBalancing, false, "保存标记必须复位");
+  assert.deepEqual(onAttrs, {}, "aria-busy 必须摘掉");
+
+  // 服务端回读值与点选不一致时以回读为准
+  const echoApplied = [];
+  await run(true, async () => ({ ok: true, settings: { poolLoadBalancing: false } }), [], echoApplied, { poolLoadBalancing: false });
+  assert.deepEqual(echoApplied, [true, false], "以服务端回读值为准");
+
+  // 保存失败：回滚选中态并报失败 toast
+  const failToasts = [];
+  const failApplied = [];
+  await run(true, async () => ({ ok: false }), failToasts, failApplied, { poolLoadBalancing: false });
+  assert.deepEqual(failApplied, [true, false], "失败回滚到点选前");
+  assert.deepEqual(failToasts, ["设置保存失败"]);
+
+  // 请求异常：同样回滚＋报错
+  const errToasts = [];
+  const errApplied = [];
+  await run(true, async () => { throw new Error("boom"); }, errToasts, errApplied, { poolLoadBalancing: false });
+  assert.deepEqual(errApplied, [true, false]);
+  assert.deepEqual(errToasts, ["请求失败"]);
+
+  // 保存中再点：忽略，不发请求
+  const busyCalls = [];
+  const busyApplied = [];
+  await run(true, async () => { busyCalls.push(1); return { ok: true }; }, [], busyApplied, { poolLoadBalancing: true });
+  assert.deepEqual(busyCalls, []);
+  assert.deepEqual(busyApplied, []);
+});
+
+test("号池路由：回显接线存在，保存中不被轮询盖回", () => {
+  assert.ok(source.includes('const poolRoutingSeg = $("poolRoutingSeg");'), "声明取 id");
   assert.ok(source.includes("settingsSaving.poolLoadBalancing"), "纳入保存忙标记");
-  assert.ok(source.includes('!settingsSaving.poolLoadBalancing && poolLoadBalancingToggle && d.settings && typeof d.settings.poolLoadBalancing === "boolean"'), "回显守忙标记");
+  assert.ok(source.includes('!settingsSaving.poolLoadBalancing && poolRoutingSeg && d.settings && typeof d.settings.poolLoadBalancing === "boolean"'), "回显守忙标记");
+  assert.ok(source.includes("applyPoolRouting(d.settings.poolLoadBalancing)"), "回显走统一切换口");
 });

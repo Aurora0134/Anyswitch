@@ -5347,7 +5347,23 @@ async function api(method, path, body) {
     const credentialCacheToggle = $("credentialCacheToggle");
     const autoDownloadUpdatesToggle = $("autoDownloadUpdatesToggle");
     const bleedingEdgeToggle = $("bleedingEdgeToggle");
-    const poolLoadBalancingToggle = $("poolLoadBalancingToggle");
+    const poolRoutingSeg = $("poolRoutingSeg");
+    const poolRoutingDesc = $("poolRoutingDesc");
+    const poolRoutingSegBtns = poolRoutingSeg ? Array.from(poolRoutingSeg.querySelectorAll("[data-pool-routing-choice]")) : [];
+    // 两句定稿（2026-11-18 裁决）：只描述当前选中模式的效果，无句末句号。
+    const POOL_ROUTING_DESC = {
+      backoff: "号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员",
+      balance: "号池内的请求将分流给多个成员承接，同一会话的请求优先留在同一成员",
+    };
+    let poolRoutingEnabled = false;
+    // 选中态与说明句唯一的切换口：载入回显、点选、失败回滚都走这里，两者不各说各话。
+    function applyPoolRouting(enabled) {
+      poolRoutingEnabled = enabled === true;
+      for (const b of poolRoutingSegBtns) {
+        b.setAttribute("aria-checked", String((b.dataset.poolRoutingChoice === "balance") === poolRoutingEnabled));
+      }
+      if (poolRoutingDesc) poolRoutingDesc.textContent = poolRoutingEnabled ? POOL_ROUTING_DESC.balance : POOL_ROUTING_DESC.backoff;
+    }
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
@@ -5667,9 +5683,9 @@ async function api(method, path, body) {
         if (!settingsSaving.bleedingEdge && bleedingEdgeToggle && d.settings && typeof d.settings.bleedingEdgeMode === "boolean") {
           bleedingEdgeToggle.checked = d.settings.bleedingEdgeMode;
         }
-        // 号池智能分流开关：保存中不被轮询回灌盖回。
-        if (!settingsSaving.poolLoadBalancing && poolLoadBalancingToggle && d.settings && typeof d.settings.poolLoadBalancing === "boolean") {
-          poolLoadBalancingToggle.checked = d.settings.poolLoadBalancing;
+        // 号池路由双选：保存中不被轮询回灌盖回；选中态与说明句经同一口切换。
+        if (!settingsSaving.poolLoadBalancing && poolRoutingSeg && d.settings && typeof d.settings.poolLoadBalancing === "boolean") {
+          applyPoolRouting(d.settings.poolLoadBalancing);
         }
         // 运行日志开关：回灌时把左侧那块运行日志的显隐一并跟上，免得设置页与看板
         // 各说各话。
@@ -6274,34 +6290,37 @@ async function api(method, path, body) {
       };
     }
 
-    // 号池智能分流：即改即存的布尔开关，中继每请求现读，改完下一请求即生效。
-    if (poolLoadBalancingToggle) {
-      poolLoadBalancingToggle.onchange = async () => {
-        if (settingsSaving.poolLoadBalancing) {
-          poolLoadBalancingToggle.checked = !poolLoadBalancingToggle.checked;
-          return;
+    // 号池路由双选：即改即存（布尔字段不变），中继每请求现读，改完下一请求即生效。
+    // 无成功 toast（2026-11-18 裁决）：选中项高亮当帧移动即反馈，同「UI版本」；
+    // 失败回滚选中态＋报错 toast。点已选中项与保存中的点击都忽略。
+    async function savePoolRouting(next) {
+      if (settingsSaving.poolLoadBalancing) return;
+      settingsSaving.poolLoadBalancing = true;
+      settingsLoadGen += 1;
+      poolRoutingSeg.setAttribute("aria-busy", "true");
+      applyPoolRouting(next);
+      try {
+        const d = await api("POST", "/api/settings", { poolLoadBalancing: next });
+        if (!d.ok) {
+          applyPoolRouting(!next);
+          toast("设置保存失败", true);
+        } else {
+          const saved = d.settings?.poolLoadBalancing;
+          applyPoolRouting(typeof saved === "boolean" ? saved : next);
         }
-        const next = poolLoadBalancingToggle.checked;
-        settingsSaving.poolLoadBalancing = true;
-        settingsLoadGen += 1;
-        poolLoadBalancingToggle.setAttribute("aria-busy", "true");
-        try {
-          const d = await api("POST", "/api/settings", { poolLoadBalancing: next });
-          if (!d.ok) {
-            poolLoadBalancingToggle.checked = !next;
-            toast("设置保存失败", true);
-          } else {
-            const saved = d.settings?.poolLoadBalancing;
-            if (typeof saved === "boolean") poolLoadBalancingToggle.checked = saved;
-            toast(next ? "已开启智能分流" : "已关闭智能分流");
-          }
-        } catch (e) {
-          poolLoadBalancingToggle.checked = !next;
-          toast(panelError(e, "请求失败"), true);
-        } finally {
-          settingsSaving.poolLoadBalancing = false;
-          poolLoadBalancingToggle.removeAttribute("aria-busy");
-        }
+      } catch (e) {
+        applyPoolRouting(!next);
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        settingsSaving.poolLoadBalancing = false;
+        poolRoutingSeg.removeAttribute("aria-busy");
+      }
+    }
+    for (const b of poolRoutingSegBtns) {
+      b.onclick = () => {
+        const next = b.dataset.poolRoutingChoice === "balance";
+        if (next === poolRoutingEnabled) return;
+        savePoolRouting(next);
       };
     }
 
