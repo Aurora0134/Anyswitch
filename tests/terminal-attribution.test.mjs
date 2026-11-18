@@ -23,7 +23,7 @@ describe("attributeTerminalSessions", () => {
       [{ agentId: "kimi", pid: 4321, ancestors: [8888, 9000] }],
       [{ id: "kimi", name: "Kimi Code", instances: [{ id: "kimi-4321" }] }],
     );
-    assert.deepEqual(out[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null });
+    assert.deepEqual(out[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321", busy: null, requestsInFlight: 0 });
     assert.equal(baseSession.agent, undefined, "input sessions are never mutated");
   });
 
@@ -57,7 +57,7 @@ describe("attributeTerminalSessions", () => {
       [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
       [{ id: "claude", name: "Claude Code", sessions: [{ id: "claude-4321" }] }],
     );
-    assert.deepEqual(out[0].agent, { endpointId: "claude", name: "Claude Code", pid: 4321, instanceId: "claude-4321", busy: null });
+    assert.deepEqual(out[0].agent, { endpointId: "claude", name: "Claude Code", pid: 4321, instanceId: "claude-4321", busy: null, requestsInFlight: 0 });
   });
 
   it("does not bind aggregate session rows (zcode-global and friends have no pid tail)", () => {
@@ -66,7 +66,7 @@ describe("attributeTerminalSessions", () => {
       [{ agentId: "zcode", pid: 4321, ancestors: [8888] }],
       [{ id: "zcode", name: "ZCode", sessions: [{ id: "zcode-global" }] }],
     );
-    assert.deepEqual(out[0].agent, { endpointId: "zcode", name: "ZCode", pid: 4321, instanceId: null, busy: null });
+    assert.deepEqual(out[0].agent, { endpointId: "zcode", name: "ZCode", pid: 4321, instanceId: null, busy: null, requestsInFlight: 0 });
   });
 
   it("claude attribution stays unbound while the sessions bucket is absent", () => {
@@ -75,7 +75,7 @@ describe("attributeTerminalSessions", () => {
       [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
       [{ id: "claude", name: "Claude Code" }],
     );
-    assert.deepEqual(out[0].agent, { endpointId: "claude", name: "Claude Code", pid: 4321, instanceId: null, busy: null });
+    assert.deepEqual(out[0].agent, { endpointId: "claude", name: "Claude Code", pid: 4321, instanceId: null, busy: null, requestsInFlight: 0 });
   });
 
   it("attributes before instance binding (codex has no placeholder rows pre-traffic)", () => {
@@ -84,7 +84,7 @@ describe("attributeTerminalSessions", () => {
       [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
       [{ id: "codex", name: "Codex", instances: [] }],
     );
-    assert.deepEqual(out[0].agent, { endpointId: "codex", name: "Codex", pid: 6100, instanceId: null, busy: null });
+    assert.deepEqual(out[0].agent, { endpointId: "codex", name: "Codex", pid: 6100, instanceId: null, busy: null, requestsInFlight: 0 });
   });
 
   // 进程树忙判据随归属下发：relay 用切换守卫同一个谓词算「这个 agent 的进程树里
@@ -345,6 +345,7 @@ describe("attributeTerminalSessions", () => {
         pid: 6100,
         instanceId: null,
         busy: null,
+        requestsInFlight: 0,
       }, "feed 只在自家端点的行集里挑，别的端点连猜都不猜");
     });
 
@@ -389,6 +390,7 @@ describe("attributeTerminalSessions", () => {
         pid: 2960,
         instanceId: "opencode-2960",
         busy: null,
+        requestsInFlight: 0,
       });
     });
   });
@@ -399,7 +401,7 @@ describe("attributeTerminalSessions", () => {
       [{ agentId: "kimi", pid: 4321, ancestors: [8888] }],
       null,
     );
-    assert.deepEqual(out[0].agent, { endpointId: "kimi", name: "kimi", pid: 4321, instanceId: null, busy: null });
+    assert.deepEqual(out[0].agent, { endpointId: "kimi", name: "kimi", pid: 4321, instanceId: null, busy: null, requestsInFlight: 0 });
   });
 
   it("leaves sessions without a numeric shell pid untouched", () => {
@@ -563,6 +565,7 @@ describe("attributeTerminalSessions", () => {
         pid: 6400,
         instanceId: null,
         busy: null,
+        requestsInFlight: 0,
       }, "没有 pid 形行可退：无 feed 即无绑定");
     });
   });
@@ -691,5 +694,31 @@ describe("filterTerminalRequestRows (instanceIds set filter)", () => {
   it("junk entries in instanceIds are ignored", () => {
     const out = filterTerminalRequestRows(rows, { agentId: "claude", instanceIds: ["", "claude-5555", 7] });
     assert.deepEqual(out.map((r) => r.ts), [2]);
+  });
+});
+
+// ── 2026-11-17 提交窗在途桥：requestsInFlight 透传 ──
+// relay 的 detected 行按连接属主 pid 记的非 background 在途请求数随归属透传到
+// session.agent（与 busy 同通道），面板杀判据消费（不进展示面）。老 relay 的
+// detected 行没有该字段 → 0（判据回落既有信号）。
+describe("requestsInFlight 透传（提交窗在途桥）", () => {
+  const baseSession = { id: "t1", label: "新终端", shell: "powershell", pid: 8888, status: "running" };
+
+  it("detected 行带 requestsInFlight → session.agent.requestsInFlight 原值透传", () => {
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "kimi", pid: 4321, ancestors: [8888], busy: null, requestsInFlight: 2 }],
+      [{ id: "kimi", name: "Kimi Code", instances: [{ id: "kimi-4321" }] }],
+    );
+    assert.equal(out[0].agent.requestsInFlight, 2);
+  });
+
+  it("老 relay 的 detected 行缺字段 → 0（判据回落既有信号，不猜）", () => {
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "kimi", pid: 4321, ancestors: [8888], busy: null }],
+      [{ id: "kimi", name: "Kimi Code", instances: [{ id: "kimi-4321" }] }],
+    );
+    assert.equal(out[0].agent.requestsInFlight, 0);
   });
 });
