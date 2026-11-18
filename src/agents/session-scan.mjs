@@ -925,10 +925,20 @@ function createKimiAdapter(roots) {
     return entries;
   }
 
+  // 注入的 user-role 整块文本（kimi 形态）：system-reminder 包裹与后台任务
+  // 完成通知（<notification id="task:…:completed" … type="task.completed"
+  // source_kind="background_task">，2026-11-18 实测 72cc225d：20 条通知把
+  // lastPromptAt 抬到通知时刻、盖过早 3 小时的真实末问）都不是人打的字。
+  // 取标题（firstPrompt）与推进行键（kimiUserLineTime）必须同用这一把尺。
+  // 只匹配开头，正文里引用这些标签的真实提问不受影响。
+  function kimiInjectedUserText(text) {
+    return text.startsWith("<system-reminder") || text.startsWith("<notification");
+  }
+
   // Title candidate: first real user text in wire.jsonl. Two event shapes
   // carry it: "prompt.accepted" (interactive prompt) and user-role
-  // "context.append_message" (swarm/injected turns). Skip system-reminder
-  // wrappers — they are injected context, not the user's own words.
+  // "context.append_message" (swarm/injected turns). Skip injected wrappers
+  // (kimiInjectedUserText) — they are injected context, not the user's own words.
   function firstPrompt(sessionDir) {
     try {
       const wire = join(sessionDir, "agents", "main", "wire.jsonl");
@@ -949,7 +959,7 @@ function createKimiAdapter(roots) {
         ) {
           text = extractText(value.message.content).trim();
         }
-        if (text !== null && text !== "" && !text.startsWith("<system-reminder>")) return text;
+        if (text !== null && text !== "" && !kimiInjectedUserText(text)) return text;
       }
     } catch {
       // no wire.jsonl or unreadable — title falls back to workDir basename
@@ -957,10 +967,10 @@ function createKimiAdapter(roots) {
     return null;
   }
 
-  // 行级用户判据：与 firstPrompt 同一双事件形态 + 同一道 system-reminder 过滤
-  // ——「最后一条用户事件」与「第一条用户事件」必须是同一把尺。hint：两种
-  // 事件形态分别必带 "prompt.accepted" / "user" 字面量（kimi 单文件可到
-  // 134.5MB，深扫预筛主要就是给它压成本）。
+  // 行级用户判据：与 firstPrompt 同一双事件形态 + 同一道注入滤尺
+  // （kimiInjectedUserText）——「最后一条用户事件」与「第一条用户事件」必须
+  // 是同一把尺。hint：两种事件形态分别必带 "prompt.accepted" / "user" 字面量
+  // （kimi 单文件可到 134.5MB，深扫预筛主要就是给它压成本）。
   const KIMI_USER_LINE_HINTS = ['"prompt.accepted"', '"user"'];
   function kimiUserLineTime(value) {
     let text = null;
@@ -969,7 +979,7 @@ function createKimiAdapter(roots) {
     } else if (value.type === "context.append_message" && value.message && value.message.role === "user") {
       text = extractText(value.message.content);
     }
-    if (text === null || text.trim() === "" || text.startsWith("<system-reminder>")) return null;
+    if (text === null || text.trim() === "" || kimiInjectedUserText(text)) return null;
     return parseTimestampMs(value.time);
   }
 
