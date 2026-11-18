@@ -194,6 +194,42 @@ describe("panel router relay control + pull-mode agents", () => {
     assert.equal(entries.length, 0);
   });
 
+  // A8：超长行不再被 400 无声拒收（发送方是 fire-and-forget 的 reportMaskedPanelError，
+  // 拒收即丢行）。截断到 2000 字并在尾部留痕，级别校验维持原样。
+  it("POST /panel/api/logs/ingest truncates an over-length message with a tail marker instead of rejecting it", async () => {
+    const entries = [];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: { info: (m) => entries.push(m), warn: (m) => entries.push(m), error: (m) => entries.push(m) },
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+    });
+    const longMessage = `[面板] 导出未完成（服务端原文：${"x".repeat(2500)})`;
+    const { req, res, json } = fakeReqRes("/panel/api/logs/ingest", "POST", { level: "warn", message: longMessage });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().ok, true);
+    assert.equal(entries.length, 1);
+    const logged = entries[0];
+    assert.equal(logged.length, 2000 + ` … [truncated, original ${longMessage.length} chars]`.length);
+    assert.ok(logged.startsWith("[面板] 导出未完成（服务端原文："), "前缀原样保留，能与界面兜底对上号");
+    assert.ok(logged.endsWith(` … [truncated, original ${longMessage.length} chars]`), "尾部留截断痕迹与原文长度");
+  });
+
+  it("POST /panel/api/logs/ingest still rejects an empty message as bad request", async () => {
+    const entries = [];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: { info: (m) => entries.push(m), warn: (m) => entries.push(m), error: (m) => entries.push(m) },
+      metricsCollector: null,
+      fetchRelayAgents: async () => null,
+    });
+    const { req, res } = fakeReqRes("/panel/api/logs/ingest", "POST", { level: "warn", message: "" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(entries.length, 0);
+  });
+
   it("POST /panel/api/logs/clear resets the logger buffer (真清空)", async () => {
     const { createLogger } = await import("../src/shared/logger.mjs");
     const logger = createLogger({ sink: () => {} });
@@ -18654,7 +18690,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
       observe() {}
       disconnect() {}
     }
-    const ids = ["liveLogCard", "liveLog", "liveLogTitle", "logToggle", "logBody", "logStack", "clearLog", "logLevelRows", "logLevelSelect"];
+    const ids = ["liveLogCard", "liveLog", "liveLogTitle", "logToggle", "logBody", "logStack", "clearLog", "logLevelRows", "logLevelSelect", "logLimitNote"];
     const els = Object.fromEntries(ids.map((id) => [id, new FakeElement("div")]));
     els.liveLog.dataset.state = "collapsed";
     els.logToggle.setAttribute("aria-expanded", "false");
@@ -18858,29 +18894,29 @@ describe("看板运行日志：无框消息提示式双态流", () => {
       if (!wasAttached) node.offsetHeight = 40;
       return result;
     };
-    for (let i = 0; i < 25; i++) sandbox.appendLog({ level: "info", message: `old-${i}` });
+    for (let i = 0; i < 500; i++) sandbox.appendLog({ level: "info", message: `old-${i}` });
     flushFrames();
     body.scrollTop = 400;
     body.dispatch("scroll");
     const reading = body.children[10];
     assert.equal(reading.offsetTop, 400);
-    assert.equal(sandbox.entries.length, 25);
+    assert.equal(sandbox.entries.length, 500);
     sandbox.appendLog({ level: "info", message: "new-at-cap" });
     flushFrames();
-    assert.equal(sandbox.entries.length, 25);
+    assert.equal(sandbox.entries.length, 500);
     assert.equal(body.scrollHeight, 1000, "inserted and removed rows have equal heights");
     assert.ok(body.children.includes(reading), "the row being read was not the evicted oldest row");
     assert.equal(reading.offsetTop, 440, "the old reading row is pushed down by the insertion");
     assert.equal(body.scrollTop, 440, "the old reading row keeps its viewport position");
   });
 
-  it("最近批次保持 25 条；清空淡出旧批，淡出期间到达的新消息不被误清", () => {
+  it("最近批次保持 500 条（与服务端环形缓冲同容量）；清空淡出旧批，淡出期间到达的新消息不被误清", () => {
     const { sandbox, els, flush } = makeSandbox();
-    for (let i = 0; i < 30; i++) sandbox.appendLog({ level: "info", message: "cap" + i });
+    for (let i = 0; i < 530; i++) sandbox.appendLog({ level: "info", message: "cap" + i });
     flush(200);
-    assert.equal(sandbox.entries.length, 25);
-    assert.equal(els.logBody.children.length, 25);
-    assert.ok(els.logBody.children[0].innerHTML.includes("cap29"), "最新一批在视口顶部");
+    assert.equal(sandbox.entries.length, 500);
+    assert.equal(els.logBody.children.length, 500);
+    assert.ok(els.logBody.children[0].innerHTML.includes("cap529"), "最新一批在视口顶部");
 
     sandbox.handleLogEntry({ type: "clear" });
     assert.ok(sandbox.entries.every((e) => e.fading), "旧批整体进入淡出");
@@ -18891,6 +18927,51 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(els.logBody.children[0].innerHTML.includes("after-clear"));
     assert.equal(els.logStack.children.length, 1);
     assert.equal(els.logStack.children[0].dataset.slot, "0");
+  });
+
+  // C2：EventSource 自动重连时服务端把缓冲整列重放一遍，帧与首连逐字相同。
+  // 去重簿按 (ts, level, message) 认旧，重放帧不再进场——整列不重渲、动效不重播。
+  it("重连重放的旧帧按 (ts, level, message) 去重：模型层与 DOM 都不翻倍", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    for (let i = 1; i <= 3; i++) sandbox.appendLog({ level: "info", message: "m" + i, ts: i });
+    flush(200);
+    assert.equal(sandbox.entries.length, 3);
+    // 模拟自动重连后的整列重放：同键帧整条跳过。
+    for (let i = 1; i <= 3; i++) sandbox.appendLog({ level: "info", message: "m" + i, ts: i });
+    flush(200);
+    assert.equal(sandbox.entries.length, 3, "重放帧不重复进模型层");
+    assert.equal(els.logBody.children.length, 3, "重放帧不重渲");
+    // 断线间隙真正的新行照常进场。
+    sandbox.appendLog({ level: "warn", message: "gap", ts: 4 });
+    flush(200);
+    assert.equal(sandbox.entries.length, 4);
+    assert.ok(els.logBody.children[0].innerHTML.includes("gap"), "新行在视口顶部");
+  });
+
+  it("清空帧重置去重簿：之后同键行能重新进场", () => {
+    const { sandbox, flush } = makeSandbox();
+    sandbox.appendLog({ level: "info", message: "x", ts: 1 });
+    flush(200);
+    sandbox.handleLogEntry({ type: "clear" });
+    flush(200);
+    assert.equal(sandbox.entries.length, 0, "清空批淡出后模型层已空");
+    sandbox.appendLog({ level: "info", message: "x", ts: 1 });
+    flush(200);
+    assert.equal(sandbox.entries.length, 1, "清空后同键行重新进场（去重簿随清空重置）");
+  });
+
+  // C1：500 条上限之外的裁掉不再静默——展开视口底部的提示行揭开出并带条数。
+  it("超出上限的裁掉在视口底部留痕：无裁不亮、有裁带条数", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    for (let i = 0; i < 500; i++) sandbox.appendLog({ level: "info", message: "row-" + i, ts: i });
+    flush(200);
+    assert.equal(sandbox.entries.length, 500, "满 500 条尚未裁掉");
+    assert.equal(els.logLimitNote.hidden, true, "没裁掉就不亮提示");
+    for (let i = 0; i < 7; i++) sandbox.appendLog({ level: "info", message: "over-" + i, ts: 500 + i });
+    flush(200);
+    assert.equal(sandbox.entries.length, 500);
+    assert.equal(els.logLimitNote.hidden, false, "有裁掉即揭开");
+    assert.equal(els.logLimitNote.textContent, "还有 7 条更早的日志未显示，已写入日志文件");
   });
 
   it("视口与叠卡同为最新在顶；展开行距量自首卡，两阶段交接按 220/60ms 落定", () => {

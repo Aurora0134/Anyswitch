@@ -4,7 +4,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPanelServer, discoverTerminalBackend } from "../src/panel/panel-host.mjs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createPanelServer, discoverTerminalBackend, rotateLogIfNeeded, teeStderrToFile } from "../src/panel/panel-host.mjs";
+import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 function recordingLogger() {
   const warnings = [];
@@ -116,4 +119,46 @@ test("createPanelServer 启动即预热技能补齐（漏接线则 catchUp 计�
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.equal(catchUps, 1, "启动即一次技能补齐");
+});
+
+// ── A6：panel-host 日志落盘（logs/panel-host.log）──────────────────────────
+// 三件套与 relay-host 同款：启动轮转（超阈值改名 .old）、stderr tee（窗口进程
+// 的 stderr 没有别人接收，不落盘则进程一退全蒸发）、崩溃留痕。这里逐件钉行为。
+
+test("rotateLogIfNeeded leaves a small log untouched, rotates an oversized one, and ignores a missing one", () => {
+  const dir = mkTestDir("anyswitch-ph-rotate-");
+  try {
+    const small = join(dir, "small.log");
+    writeFileSync(small, "small\n", "utf8");
+    assert.equal(rotateLogIfNeeded(small, 1024), false);
+    assert.equal(existsSync(`${small}.old`), false);
+
+    const big = join(dir, "big.log");
+    writeFileSync(big, "x".repeat(2048), "utf8");
+    assert.equal(rotateLogIfNeeded(big, 1024), true);
+    assert.equal(existsSync(big), false, "the live log is renamed away");
+    assert.equal(readFileSync(`${big}.old`, "utf8"), "x".repeat(2048));
+
+    const missing = join(dir, "missing.log");
+    assert.equal(rotateLogIfNeeded(missing, 1024), false);
+    assert.equal(existsSync(`${missing}.old`), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("teeStderrToFile mirrors stderr lines into the log file until restored", () => {
+  const dir = mkTestDir("anyswitch-ph-tee-");
+  try {
+    const logPath = join(dir, "panel-host.log");
+    const restore = teeStderrToFile(logPath);
+    process.stderr.write("[test] panel-host tee probe\n");
+    restore();
+    process.stderr.write("[test] panel-host tee after-restore\n");
+    const text = readFileSync(logPath, "utf8");
+    assert.ok(text.includes("[test] panel-host tee probe"), "tee 期间 stderr 行落盘");
+    assert.ok(!text.includes("after-restore"), "restore 后不再写文件");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

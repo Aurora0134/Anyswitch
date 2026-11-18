@@ -1683,6 +1683,9 @@
   .live-log-viewport .live-log-msg { margin-bottom: 6px; transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out); }
   .live-log-viewport .live-log-msg.is-appearing { opacity: 0; transform: translateY(-8px); }
   .live-log-viewport .live-log-msg.is-leaving { opacity: 0; transform: translateY(8px); }
+  /* 裁掉留痕行：不是消息卡，不参与两层交接与逐条动效——一行小字常驻视口最旧端，
+     有裁掉才揭开（markup 初值 hidden）。 */
+  .live-log-limit { margin: 2px 2px 0; padding: 2px 4px 0; font-size: 11px; line-height: 1.4; color: var(--text-4); text-align: center; }
   /* 视口卡默认也截 2 行（与堆叠一致），一屏看更多条；超行卡才出现卡内展开钮。卡内
      展开与区域开关解耦：is-open 只解除本卡截断，实测高度过渡露全文（line-clamp 不可
      过渡，height 由 panel.js#setLogCardOpen 量值驱动）。 */

@@ -2739,7 +2739,9 @@ async function api(method, path, body) {
   }
 
   // 实时 SSE 日志流
-  const LOG_LINE_CAP = 25;
+  // 模型层上限与服务端环形缓冲同容量（logger.mjs DEFAULT_CAPACITY=500）：重连重放
+  // 一轮最多 500 条，客户端留得住服务端还留着的每一行；更早的完整档案在日志文件里。
+  const LOG_LINE_CAP = 500;
   const LOG_STACK_SIZE = 3;
   let followLogs = true;
   // 运行日志开关的当前值。null = 还没问出来，此时不覆盖界面。
@@ -2749,6 +2751,15 @@ async function api(method, path, body) {
   let logExpanded = false;
   let logEntries = [];
   let logEntrySeq = 0;
+  // SSE 重连整列重放的去重簿（C2）：EventSource 自动重连时服务端把缓冲全量重放
+  // 一遍，帧与首连时逐字相同，按 (ts, level, message) 认旧——重放帧不再进场，
+  // 整列不再重渲、入场动效不再重播。容量盖过一轮全量重放（500）留余量；Set 按
+  // 插入序迭代，超容淘汰最旧一枚。清空帧、换级别、关开关都会重置它：那些路径下
+  // 服务端缓冲已清或门槛已换，重放回来的行必须能重新进场。
+  const LOG_SEEN_CAP = 600;
+  const logSeenKeys = new Set();
+  // 被 LOG_LINE_CAP 裁掉的行计数，上屏在展开视口底部的提示行（不静默消失）。
+  let logDroppedCount = 0;
   let logRenderQueued = false;
   const logViewportNodes = new Map();
   const logStackNodes = new Map();
@@ -2951,6 +2962,22 @@ async function api(method, path, body) {
       body.scrollTop = Math.max(0, previousScrollTop + insertedHeight);
     }
     if (logExpanded && followLogs) body.scrollTop = 0;
+    syncLogLimitNote();
+  }
+
+  // 超出 LOG_LINE_CAP 被裁掉的行在展开视口底部留一行静态提示（markup 初值
+  // hidden，无动画、不参与两层交接）——旧行去哪了在这里有据可查，不静默消失。
+  // 提示行是 logBody 的常驻末位子节点：renderLogViewport 的归位循环只搬条目卡，
+  // 它始终留在最旧端。
+  function syncLogLimitNote() {
+    const note = $("logLimitNote");
+    if (!note) return;
+    if (logDroppedCount > 0) {
+      note.textContent = `还有 ${logDroppedCount} 条更早的日志未显示，已写入日志文件`;
+      note.hidden = false;
+    } else {
+      note.hidden = true;
+    }
   }
 
   function renderLogStack() {
@@ -3153,6 +3180,9 @@ async function api(method, path, body) {
   function resetLogFeed() {
     logEntries = [];
     followLogs = true;
+    logSeenKeys.clear();
+    logDroppedCount = 0;
+    syncLogLimitNote();
     const root = $("liveLog");
     if (root) { root.removeAttribute("data-clearing"); root.removeAttribute("data-motion"); }
     if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
@@ -3170,6 +3200,12 @@ async function api(method, path, body) {
   function fadeClearLogFeed() {
     const root = $("liveLog");
     const reduced = logReducedMotion();
+    // 清空是新一轮的开始：去重簿与裁掉计数一并归零——换级别重连后的全量重放
+    // 必须能重新进场（服务端缓冲还在，只是按新门槛筛过），清空帧路径下重放为空，
+    // 归零也无害。
+    logSeenKeys.clear();
+    logDroppedCount = 0;
+    syncLogLimitNote();
     for (const entry of logEntries) entry.fading = true;
     if (logFadeTimer) { clearTimeout(logFadeTimer); logFadeTimer = null; }
     for (const timer of logStackLeaving.values()) clearTimeout(timer);
@@ -3308,15 +3344,26 @@ async function api(method, path, body) {
 
   function appendLog(entry) {
     const level = entry && entry.level ? String(entry.level) : "info";
+    const ts = entry && entry.ts;
+    const message = entry && entry.message != null ? String(entry.message) : "";
+    // 重连重放的旧帧整条跳过：内容本就收敛，再进场只会整列重渲＋入场动效重播。
+    const key = `${ts}|${level}|${message}`;
+    if (logSeenKeys.has(key)) return;
+    logSeenKeys.add(key);
+    if (logSeenKeys.size > LOG_SEEN_CAP) logSeenKeys.delete(logSeenKeys.keys().next().value);
     logEntries.push({
       id: ++logEntrySeq,
       level,
-      ts: entry && entry.ts,
-      message: entry && entry.message != null ? String(entry.message) : "",
+      ts,
+      message,
       fading: false,
     });
-    // 条数上限：只保留最新 LOG_LINE_CAP 条，页面长开也不会无限堆积 DOM。
-    while (logEntries.length > LOG_LINE_CAP) logEntries.shift();
+    // 条数上限：只保留最新 LOG_LINE_CAP 条，页面长开也不会无限堆积 DOM。裁掉
+    // 的行计数留痕（展开视口底部的提示行），不静默消失。
+    while (logEntries.length > LOG_LINE_CAP) {
+      logEntries.shift();
+      logDroppedCount += 1;
+    }
     queueLogRender();
   }
 
