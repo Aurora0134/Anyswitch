@@ -829,11 +829,19 @@ export async function runStreamWithKeepAlive(res, channel) {
   // outcome in the first place.
   const resumeAttempts = Math.max(0, attemptsUsed - 1);
   if (lastOutcome?.outcome === "resume" && resumeAttempts > 0) {
+    // An upstream_error_event resume carries the gateway's own message in its
+    // verdict error — the one place the real cause (the gateway's Chinese fault
+    // text) is recorded. The generic resume-exhausted wording must not bury
+    // it: the client, the journal row and the panel log all read this frame.
+    const upstreamDetail =
+      lastOutcome.reason === "upstream_error_event" && lastOutcome.error?.error?.message
+        ? `（上游流内报错：${lastOutcome.error.error.message}）`
+        : "";
     lastOutcome = {
       ...lastOutcome,
       error: openAIError(
         "api_error",
-        `上游响应在输出中途中断，续接 ${resumeAttempts} 次仍未完成，内容可能不完整`,
+        `上游响应在输出中途中断，续接 ${resumeAttempts} 次仍未完成，内容可能不完整${upstreamDetail}`,
         UPSTREAM_INCOMPLETE_CODE,
       ),
     };

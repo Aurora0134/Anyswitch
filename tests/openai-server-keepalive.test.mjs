@@ -1106,3 +1106,149 @@ describe("keep-alive resume (mid-response truncation, on tier)", () => {
     });
   });
 });
+
+describe("in-stream gateway error events (gateway fault frame inside the SSE stream)", () => {
+  // Production: 2026-11-17 — a gateway's upstream died mid-generation and the
+  // gateway terminated the SSE stream with a data line {"error":{...}}
+  // (Chinese message, no numeric code). The guard forwarded it verbatim once
+  // content was committed; the client's SDK failed on the frame and closed
+  // the connection, so the keep-alive loop only ever saw a client abort. See
+  // openai-stream-guard.test.mjs "in-stream error payload" for the guard-level
+  // classification these server-level cases ride on.
+  const gatewayErrorFrame =
+    'data: {"error":{"message":"服务暂时不可用。 原因：上游服务、网络链路或代理返回异常响应。","type":"new_api_error"}}\n\n';
+
+  it("(G1) on tier: a gateway error frame mid-generation is resumed; the raw frame never reaches the client", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        // The incident form: content, then the gateway's error frame, then a
+        // clean [DONE]. Pre-fix this verdicted "pass" and the turn silently
+        // ended mid-answer for the client.
+        return {
+          ok: true,
+          status: 200,
+          body: sseStream([
+            'data: {"id":"1","choices":[{"delta":{"content":"partial answ"}}]}\n\n',
+            gatewayErrorFrame,
+            "data: [DONE]\n\n",
+          ]),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"2","choices":[{"delta":{"content":"full answer"}}]}\n\n',
+          'data: {"id":"2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const collector = createIsolatedCollector();
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+      metricsCollector: collector,
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("partial answ"), "the first segment reaches the client as it streams");
+      assert.ok(text.includes("full answer"), "the resumed segment is appended");
+      assert.ok(!text.includes('"new_api_error"'), "the gateway's raw error frame must never reach the client");
+      assert.ok(!text.includes('"error"'), "a resumed turn carries no error frame");
+      assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1, "exactly one terminator");
+      assert.equal(callCount, 2, "one resume");
+
+      const status = await collector.getAgentsStatus();
+      const zcode = status.find((a) => a.id === "zcode");
+      assert.equal(zcode.metrics.keepAlive.retries, 1);
+      assert.equal(zcode.metrics.keepAlive.recoveries, 1);
+      assert.equal(zcode.errorActive, false, "a recovered resume latches no fault");
+    });
+  });
+
+  it("(G2) repeated gateway error frames exhaust the budget; the terminal frame carries 502 and the gateway's message, not its raw shape", async () => {
+    const upstreamFetch = async () => ({
+      ok: true,
+      status: 200,
+      body: sseStream([
+        'data: {"id":"1","choices":[{"delta":{"content":"partial answ"}}]}\n\n',
+        gatewayErrorFrame,
+      ]),
+    });
+
+    const collector = createIsolatedCollector();
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+      metricsCollector: collector,
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200, "content was already streaming; the error must ride SSE");
+      const text = await res.text();
+      assert.ok(text.includes("partial answ"), "the first segment legitimately reached the client");
+      assert.ok(!text.includes('"new_api_error"'), "the raw gateway frame shape never rides the wire");
+      assert.ok(!/\ndata: \[DONE\]/.test(text), "no bare [DONE] terminator line may ride along");
+      const errorPayload = JSON.parse(
+        text.split("\n").find((line) => line.startsWith("data:") && line.includes('"error"')).slice(5),
+      );
+      assert.equal(errorPayload.error.code, 502, "the terminal frame names the upstream-incomplete code");
+      assert.ok(errorPayload.error.message.includes("服务暂时不可用"), "the gateway's message survives into the terminal frame");
+      assert.equal(errorPayload.error.type, "api_error", "the terminal frame speaks the relay's error vocabulary");
+
+      const status = await collector.getAgentsStatus();
+      const zcode = status.find((a) => a.id === "zcode");
+      assert.equal(zcode.errorActive, true, "exhaustion must latch the panel fault");
+      assert.equal(zcode.metrics.keepAlive.exhausted, 1);
+    });
+  });
+
+  it("(G3) a gateway error frame before any content is retried and recovered", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return { ok: true, status: 200, body: sseStream([gatewayErrorFrame, "data: [DONE]\n\n"]) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"2","choices":[{"delta":{"content":"recovered text"}}]}\n\n',
+          'data: {"id":"2","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const collector = createIsolatedCollector();
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, mode: "on", maxRetries: 1, backoffMs: 10 }),
+      metricsCollector: collector,
+    });
+
+    await withServer(deps, async (port) => {
+      const res = await postChat(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("recovered text"), "the retried attempt's payload reaches the client");
+      assert.ok(!text.includes('"error"'), "an absorbed pre-content fault leaves no error frame");
+      assert.equal(callCount, 2);
+
+      const status = await collector.getAgentsStatus();
+      const zcode = status.find((a) => a.id === "zcode");
+      assert.equal(zcode.metrics.keepAlive.retries, 1);
+      assert.equal(zcode.metrics.keepAlive.recoveries, 1);
+      assert.equal(zcode.errorActive, false);
+    });
+  });
+});

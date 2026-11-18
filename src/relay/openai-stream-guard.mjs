@@ -30,6 +30,15 @@
 // legible error event and latch a fault instead of letting the client
 // treat partial output as complete.
 //
+// In-stream error frames: a gateway whose own upstream dies mid-generation
+// may abort a 200 SSE stream with a `data: {"error":{...}}` line instead of
+// a completion (observed in production: a Chinese message with no numeric code). The
+// frame is dropped on sight — forwarded verbatim it fails the client's turn
+// before the keep-alive loop can react — and the verdict names
+// upstream_error_event: reject while holding (clean retry), error with
+// truncated=true after content (resume), so the existing keep-alive budget
+// absorbs it exactly like any other mid-stream cut.
+//
 // Chunk-envelope repair: grok's ChatCompletionChunk struct requires id,
 // created and model on EVERY data chunk and aborts the whole turn
 // (is_retryable=false, session dead until /new) when any is absent. The
@@ -125,6 +134,31 @@ function looksLikeJsonObjectOrArray(payload) {
   if (!payload) return false;
   const c = payload[0];
   return c === "{" || c === "[";
+}
+
+// A data line whose payload is an in-stream error frame — the shape gateways
+// (`observed: a one-api-style gateway` does this) use to abort a 200 SSE stream mid-generation when their
+// own upstream dies: `{"error":{"message":...}}`, no `choices`. Forwarded
+// verbatim it kills the client's turn before the keep-alive loop can react
+// (a 2026-11-17 production incident: the client's SDK failed on the frame and
+// closed the connection, leaving the relay with nothing but a client abort),
+// so the guard drops the frame on sight and the verdict classifies the turn
+// as a fault the keep-alive budget can absorb. A chunk that also carries
+// real `choices` is content, not an error frame.
+function extractUpstreamError(parsed) {
+  if (Array.isArray(parsed?.choices) && parsed.choices.length > 0) return null;
+  const err = parsed?.error;
+  if (err === null || err === undefined) return null;
+  if (typeof err === "string") {
+    return err.length > 0 ? { message: err, code: null } : null;
+  }
+  if (typeof err !== "object") return null;
+  const message = typeof err.message === "string" && err.message.length > 0 ? err.message : null;
+  if (message === null) return null;
+  const code = typeof err.code === "number"
+    ? err.code
+    : (typeof err.code === "string" && err.code.length > 0 ? err.code : null);
+  return { message, code };
 }
 
 // Payload of a `data:` line (line keeps its trailing newline), or null when
@@ -253,6 +287,12 @@ export class OpenAIStreamGuard {
     this.droppedOpenCall = null;
     this.sawDone = false; // a [DONE] terminator line was seen
     this.sawFinishReason = false; // a choice carried a finish_reason
+    // An in-stream error frame was seen before the turn legitimately
+    // terminated (finish_reason); its payload feeds the verdict's error.
+    // A frame arriving after finish_reason is post-completion noise: the
+    // client already holds a complete answer, so it is dropped unmarked.
+    this.sawUpstreamError = false;
+    this.upstreamError = null; // { message, code } from the first error frame
     this.sawContent = false; // some text/reasoning was proven mid-stream
     this.sawText = false; // the stream carried actual answer text
     this.sawReasoning = false; // the stream carried reasoning/thinking text
@@ -316,6 +356,19 @@ export class OpenAIStreamGuard {
     if (parsed === null || typeof parsed !== "object") {
       // A JSON scalar is equally unproving; hold it too.
       return this.holdOrEmit(line);
+    }
+
+    const upstreamError = extractUpstreamError(parsed);
+    if (upstreamError !== null) {
+      // Dropped, never forwarded: the client's SDK fails the whole turn on
+      // this frame (and closes the connection) before the keep-alive loop
+      // could classify anything. The blank separator that follows passes
+      // through as a harmless event boundary, same as a malformed JSON line.
+      if (!this.sawFinishReason) {
+        this.sawUpstreamError = true;
+        if (this.upstreamError === null) this.upstreamError = upstreamError;
+      }
+      return "";
     }
 
     this.trackToolCalls(parsed);
@@ -634,6 +687,17 @@ export class OpenAIStreamGuard {
     return false;
   }
 
+  // The verdict's three-slot error for an in-stream gateway error: the
+  // gateway's message survives (it is what the exhaustion wording and the
+  // client's terminal frame will say), a numeric code of its own is kept,
+  // and an uncoded error rides the upstream-incomplete default so downstream
+  // agents that retry on a status code can recognise the fault.
+  upstreamErrorVerdict() {
+    const message = this.upstreamError?.message ?? "上游在流内返回了错误事件，内容可能不完整";
+    const code = this.upstreamError?.code ?? UPSTREAM_INCOMPLETE_CODE;
+    return streamError(message, code);
+  }
+
   // The shadow copy the resume path turns into a continuation request.
   // Everything the client has already seen (forwarded text and reasoning)
   // plus every completed tool call (released to the client when it closed)
@@ -669,6 +733,14 @@ export class OpenAIStreamGuard {
       // call), so a turn still holding here never proved anything — a true
       // empty stream, calls that never gained an id/name, or nothing but
       // unproving lines (keep-alive pings, malformed JSON chunks).
+      if (this.sawUpstreamError) {
+        return {
+          action: "reject",
+          reason: "upstream_error_event",
+          truncated: true,
+          error: this.upstreamErrorVerdict(),
+        };
+      }
       if (this.hasIncompleteToolCall()) {
         return { action: "reject", reason: "incomplete_tool_call", error: toolCallError() };
       }
@@ -692,6 +764,24 @@ export class OpenAIStreamGuard {
         };
       }
       return { action: "empty", tail };
+    }
+    if (this.sawUpstreamError) {
+      // The gateway aborted the generation with an in-stream error frame —
+      // content already delivered was cut short, so this is the same fault
+      // class as a mid-word cut: truncated, resume-eligible on the on tier.
+      // The error frame itself was dropped on sight; the verdict's error is
+      // the relay's structured replacement, so a spent budget ends the turn
+      // with a legible frame (upstream message, upstream-incomplete code)
+      // instead of the raw gateway bytes.
+      const error = this.upstreamErrorVerdict();
+      return {
+        action: "error",
+        reason: "upstream_error_event",
+        truncated: true,
+        error,
+        errorLine: streamErrorLine(error.error.message, error.error.code),
+        tail,
+      };
     }
     if (this.hasIncompleteToolCall()) {
       return { action: "error", reason: "incomplete_tool_call", errorLine: toolCallErrorLine() };

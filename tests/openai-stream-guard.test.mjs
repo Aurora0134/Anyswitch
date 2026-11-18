@@ -411,6 +411,91 @@ describe("malformed JSON chunk", () => {
   });
 });
 
+describe("in-stream error payload (gateway fault frame inside the SSE stream)", () => {
+  // Production: 2026-11-17, glm-5.3 via an OpenAI-compatible gateway — the gateway's upstream died
+  // mid-generation and the stream was terminated with a data line shaped
+  // {"error":{...}} (Chinese message, no numeric code) instead of a proper
+  // completion. The guard only ever read `choices`, so the frame was
+  // forwarded verbatim once content had been committed: the client's SDK
+  // failed on it (reason unknown, non-retryable) and tore the connection
+  // down before the keep-alive loop could classify anything — the relay saw
+  // only a client abort: no retry, no fault latch, no journal row. With a
+  // trailing [DONE] the verdict was outright "pass". The frame is now
+  // intercepted on sight: it never reaches the client, and the verdict names
+  // upstream_error_event so the pipe retries/resumes like any other fault.
+  const gatewayErrorFrame =
+    'data: {"error":{"message":"服务暂时不可用。 原因：上游服务、网络链路或代理返回异常响应。","type":"new_api_error"}}\n\n';
+
+  it("post-content error frame with a clean [DONE] is a truncation, not a pass; the frame never reaches the client", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"partial answ"}}]}\n\n',
+      gatewayErrorFrame,
+      "data: [DONE]\n\n",
+    ]);
+    assert.ok(emitted.includes("partial answ"), "already-delivered content must survive");
+    assert.equal(emitted.includes("服务暂时不可用"), false, "the error frame must not be forwarded verbatim mid-stream");
+
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "error");
+    assert.equal(verdict.reason, "upstream_error_event");
+    assert.equal(verdict.truncated, true);
+    assert.ok(verdict.error.error.message.includes("服务暂时不可用"), "the verdict carries the gateway's message for the exhaustion wording");
+    assert.equal(verdict.error.error.code, 502, "an uncoded gateway error rides the upstream-incomplete code");
+    assert.ok(verdict.errorLine.includes('"code":502'), "the terminal frame replaces [DONE]");
+    assert.equal((emitted + verdict.errorLine).includes("[DONE]"), false, "a faulty stream must not look like a normal completion");
+  });
+
+  it("post-content error frame with a bare EOF is upstream_error_event, not the generic mid-word truncation", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"partial answ"}}]}\n\n',
+      gatewayErrorFrame,
+    ]);
+    assert.equal(emitted.includes("服务暂时不可用"), false, "the error frame must not be forwarded");
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "error");
+    assert.equal(verdict.reason, "upstream_error_event");
+    assert.equal(verdict.truncated, true);
+  });
+
+  it("an error-only stream before any content is a reject: retryable, nothing forwarded", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [gatewayErrorFrame, "data: [DONE]\n\n"]);
+    assert.equal(emitted, "", "nothing may be forwarded while the verdict is unknown");
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "reject");
+    assert.equal(verdict.reason, "upstream_error_event");
+    assert.ok(verdict.error.error.message.includes("服务暂时不可用"));
+  });
+
+  it("a gateway error that carries its own numeric code keeps it", () => {
+    const guard = new OpenAIStreamGuard();
+    pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n',
+      'data: {"error":{"message":"rate limited","code":429}}\n\n',
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.reason, "upstream_error_event");
+    assert.equal(verdict.error.error.code, 429, "a coded gateway error keeps its own code");
+  });
+
+  it("an error frame arriving after finish_reason is post-completion noise: dropped, verdict stays pass", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"full answer"}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: {"error":{"message":"服务暂时不可用。"}}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    assert.ok(emitted.includes("full answer"));
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    assert.equal((emitted + (verdict.tail || "")).includes("服务暂时不可用"), false, "post-completion noise is dropped, not forwarded");
+    assert.ok((emitted + (verdict.tail || "")).includes("[DONE]"), "a completed turn still terminates normally");
+  });
+});
+
 describe("tool-call delta normalization (upstream repeats empty strings on continuation frames)", () => {
   function parseFrames(text) {
     const out = [];
