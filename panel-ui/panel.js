@@ -10085,6 +10085,18 @@ async function api(method, path, body) {
     }
   }
 
+  // xterm 自动应答的字节形状（人类键入记账的判据）：CPR（ESC[行;列R）、
+  // DA 应答（ESC[?…c／ESC[>…c／ESC[=…c）、DSR 应答（ESC[0n）、焦点报告
+  // （ESC[I／ESC[O）。方向键/功能键同为转义序列但终结符不同（A–D、H/F、~
+  // 与 SS3 的 ESC O 字母），不落进这个集合；判不准按人类键入记（倒向多记）。
+  const TERMINAL_INPUT_AUTO_REPLY = /^\x1b\[(?:[0-9;]*[Rn]|[?=>]?[0-9;]*c|[IO])$/;
+
+  // 人类键入记账：会话栏追赶的滞后判据锚点（见 terminalRailRowKeyLagsInput）。
+  // sendTerminalInput 是键入唯一出口，xterm 对 TUI 查询与焦点报告的自动应答
+  // 同走这里，按上面的形状判据剔除，只记人敲的字。不进服务端、不落盘：刷新
+  // 页面即清零，清零后滞后判据退回静默。
+  const terminalUserInputAt = new Map();
+
   // 键入的唯一出口。进程已退（服务端 409 session_exited）时不复活：退出可能
   // 本就是应当发生的结果（用户主动退出、拒绝信任目录等），键入自动复活只会把
   // 会话推进「退出→自动重启→再退出」的循环。这里只把前端状态同步成 exited、
@@ -10094,6 +10106,8 @@ async function api(method, path, body) {
     if (sessionId === null || sessionId === undefined) return Promise.resolve(false);
     // 键入即读：往这个终端打字＝看着它，done（跑完未读）标记当场清。
     terminalDoneUnread.delete(sessionId);
+    // 人类键入记账（见上）：自动应答字节按形状剔除，照发不误。
+    if (!TERMINAL_INPUT_AUTO_REPLY.test(data)) terminalUserInputAt.set(sessionId, Date.now());
     const path = `/api/terminal/sessions/${encodeURIComponent(sessionId)}/input`;
     const session = terminalSessionFor(sessionId);
     return api("POST", path, { data })
@@ -15230,9 +15244,27 @@ async function api(method, path, body) {
   // 轮询」的收敛不再按发数计数，改跟用户动作：最后一次键入后 60s 内保持武装（首条
   // prompt 的 Enter 本身就是键入，提交那一拍必然在窗内），之后静音、再键入即重新
   // 武装——「agent 不落存档」的怪形态同样最多多扫两三拍就静音。
+  //
+  // 2026-11-18 扩展：阳性归属成立的终端也可能要补——行在屏上、行键还没见到这次
+  // 提问（续接旧会话连续提问，行序键停在旧值、正在使用的行钉在分组底部）。判据
+  // 与收敛见 terminalRailRowKeyLagsInput 头注。
   const TERMINAL_RAIL_CATCHUP_MIN_MS = 20 * 1000;
   const TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS = 60 * 1000;
+  // 行键滞后判定的时钟余量：行键是存档里的提问时间戳，键入记账是前端墙钟，同机
+  // 不同进程，留 1s 吸收写盘与取数的固有延迟，防止「键已跟上」被误判成滞后。
+  const TERMINAL_RAIL_CATCHUP_KEY_LAG_SLACK_MS = 1000;
   let terminalRailCatchUpAt = 0;
+  // 行键滞后（2026-11-18 会话行沉分组底报障的残余根因）：历史列表进页即冻结，
+  // 行序键（用户最后提问时刻）只在整表重取时刷新，续接旧会话后无论发多少条新
+  // 提问，行键要等下一次进页/换 agent 才回写。判据＝行键落后于这台终端最近的
+  // 人类键入（terminalUserInputAt，只记人敲的字——TUI 渲染期的 DSR/CPR 应答
+  // 同走键入出口并刷新 lastInputAt，拿 lastInputAt 判滞后会让追赶退化成 20s
+  // 轮询）。收敛双保险：补扫把新提问落进行键后判据即消失；60s 无人类键入即静音。
+  function terminalRailRowKeyLagsInput(row, typedAt) {
+    if (!Number.isFinite(typedAt) || typedAt <= 0) return false;
+    if (Date.now() - typedAt >= TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS) return false;
+    return terminalRailRowUpdatedAt(row) < typedAt - TERMINAL_RAIL_CATCHUP_KEY_LAG_SLACK_MS;
+  }
   function maybeCatchUpTerminalRailHistory() {
     if (terminalRailFetchInFlight || !terminalBackendReady) return;
     if (Date.now() - terminalRailCatchUpAt < TERMINAL_RAIL_CATCHUP_MIN_MS) return;
@@ -15246,14 +15278,17 @@ async function api(method, path, body) {
       if (!Number.isFinite(state.lastInputAt) || state.lastInputAt <= 0) return false;
       if (now - state.lastInputAt >= TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS) return false;
       // 阳性归属：绑定身份按 endpoint＋id 精确匹配；续接身份按 id（历史列表本就
-      // 只装当前 agent 的行）。两者都不成立＝行可能还没上屏，武装。
+      // 只装当前 agent 的行）。归属不成立＝行可能还没上屏，武装；归属成立还要看
+      // 行键有没有跟上最近的人类键入，跟不上＝列表还没见到这次提问，同样武装。
       if (session.boundConversation) {
         const bound = session.boundConversation;
-        return !terminalRailHistory.sessions.some((row) =>
+        const row = terminalRailHistory.sessions.find((row) =>
           row && row.endpoint === bound.endpoint && row.id === bound.id);
+        return !row || terminalRailRowKeyLagsInput(row, terminalUserInputAt.get(session.id));
       }
       if (session.resume) {
-        return !terminalRailHistory.sessions.some((row) => row && row.id === session.resume.id);
+        const row = terminalRailHistory.sessions.find((row) => row && row.id === session.resume.id);
+        return !row || terminalRailRowKeyLagsInput(row, terminalUserInputAt.get(session.id));
       }
       return true;
     });

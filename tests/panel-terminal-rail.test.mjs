@@ -1658,6 +1658,8 @@ describe("终端视图左栏换血", () => {
         "追赶路径有最小间隔闸与在飞去重（不能把扫盘挂成轮询）");
       assert.ok(catchUp.includes("TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS"),
         "收敛跟键入新鲜度走（60s 静默即停，替代旧的 5 发无进展收敛）");
+      assert.ok(catchUp.includes("terminalRailRowKeyLagsInput"),
+        "阳性归属成立还要看行键有没有跟上键入：键滞后＝列表还没见到这次提问，同样补扫（2026-11-18 会话行沉分组底残余根因）");
       assert.ok(poll.includes("maybeCatchUpTerminalRailHistory()"), "轮询收尾问一次「有没有终端的会话行还没上屏」");
       assert.ok(extractFn("enterTerminalRail").includes("renderTerminalRail()"), "进页即渲一帧（不必等轮询）");
       // D4：段头刷新钮已砍（用户拍板只留搜索/视图选项）——手动重取入口随之消失，
@@ -2783,6 +2785,8 @@ describe("done（跑完未读）标记与绿点", () => {
     const sendAt = panelJs.indexOf("function sendTerminalInput");
     const sendBlock = panelJs.slice(sendAt, sendAt + 700);
     assert.ok(sendBlock.includes("terminalDoneUnread.delete(sessionId)"), "键入即读：sendTerminalInput 清标");
+    assert.ok(sendBlock.includes("terminalUserInputAt.set(sessionId, Date.now()"),
+      "人类键入记账：sendTerminalInput 给会话栏追赶的滞后判据记锚点（自动应答字节按形状剔除，见 actions 文件真跑用例）");
     // 关页签那一路的真身是 terminalCloseTerminalNow（terminalCloseTerminal 只剩确认，
     // 实体与页签 ×、左栏 live 行 × 共用），它用 terminalId 逐表清；不能锚
     // 「terminalHollowStreak.delete(id);」的首次出现——那落在 pruneTerminalHollowStreak

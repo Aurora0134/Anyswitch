@@ -4458,9 +4458,9 @@ describe("终端页内新建会话：历史列表追赶", () => {
 
   // 真跑 maybeCatchUpTerminalRailHistory + terminalRailPendingNewTerminals（含
   // 它内部的「已被接替」判据与阳性占用排除集）。
-  const catchUpSandbox = ({ sessions, history, catchUpAt = 0, inFlight = false, ready = true }) => {
+  const catchUpSandbox = ({ sessions, history, catchUpAt = 0, inFlight = false, ready = true, userInput = {} }) => {
     const calls = [];
-    const fn = new Function("sessions", "history", "catchUpAt0", "inFlight", "ready", "calls", `
+    const fn = new Function("sessions", "history", "catchUpAt0", "inFlight", "ready", "userInput", "calls", `
       const terminalBackendReady = ready;
       const terminalBackendSessions = sessions;
       let activeTerminalPreviewId = "t-a";
@@ -4468,6 +4468,8 @@ describe("终端页内新建会话：历史列表追赶", () => {
       let terminalRailCatchUpAt = catchUpAt0;
       const TERMINAL_RAIL_CATCHUP_MIN_MS = 20000;
       const TERMINAL_RAIL_CATCHUP_INPUT_ARM_MS = 60000;
+      const TERMINAL_RAIL_CATCHUP_KEY_LAG_SLACK_MS = 1000;
+      const terminalUserInputAt = new Map(Object.entries(userInput));
       const terminalRailSelectPending = null;
       const terminalRailHistory = history;
       function refreshTerminalRailHistory(opts) { calls.push(opts); return Promise.resolve(); }
@@ -4480,18 +4482,20 @@ describe("终端页内新建会话：历史列表追赶", () => {
       ${extractFn("terminalRailAgentId")}
       ${extractFn("terminalRailPendingFreshArmed")}
       ${extractFn("terminalRailPendingNewTerminals")}
+      ${extractFn("terminalRailRowUpdatedAt")}
+      ${extractFn("terminalRailRowKeyLagsInput")}
       ${extractFn("maybeCatchUpTerminalRailHistory")}
       return {
         run: () => maybeCatchUpTerminalRailHistory(),
         catchUpAt: () => terminalRailCatchUpAt,
         pending: () => terminalRailPendingNewTerminals(),
       };
-    `)(sessions, history, catchUpAt, inFlight, ready, calls);
+    `)(sessions, history, catchUpAt, inFlight, ready, userInput, calls);
     return { fn, calls };
   };
 
   const HIST = (rows) => ({ endpoint: "dsh", sessions: rows, fetchedAt: 1, error: null });
-  const ROW = (id, lastActive) => ({ endpoint: "dsh", id, title: id, project: "C:\\dev\\alpha", lastActive, file: `F:\\${id}.jsonl` });
+  const ROW = (id, lastActive, over = {}) => ({ endpoint: "dsh", id, title: id, project: "C:\\dev\\alpha", lastActive, file: `F:\\${id}.jsonl`, ...over });
   const TERM = (over = {}) => ({
     id: "t-a", cwd: "C:\\dev\\alpha", agentId: "dsh", agent: { endpointId: "dsh" }, agentName: "dsh",
     resume: null, status: "idle", label: "dsh",
@@ -4605,6 +4609,91 @@ describe("终端页内新建会话：历史列表追赶", () => {
   it("追赶挂在 1s 归属轮询收尾（数据路径，不是渲染路径）", () => {
     assert.ok(extractFn("pollTerminalSessions").includes("maybeCatchUpTerminalRailHistory()"),
       "轮询每拍问一次「有没有终端的会话行还没上屏」");
+  });
+
+  it("续接的旧会话行键滞后于人类键入 → 补拉（2026-11-18 会话行沉分组底的残余根因回归钉）", () => {
+    // 行序键＝用户最后提问时刻，历史列表进页即冻结：续接旧会话连续提问时键停在
+    // 旧值，正在使用的行钉在分组底部。修前判据只管「行还没上屏」，行在屏上就
+    // 静默，行键永远等不到回写。
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), resume: { endpoint: "dsh", id: "c-9" } } },
+      history: HIST([ROW("c-9", 5000, { lastPromptAt: 5000 })]),
+      userInput: { "t-a": Date.now() - 1000 },
+    });
+    fn.run();
+    assert.deepEqual(calls, [{ endpoint: "dsh", force: true }], "行在屏上但键停在旧值：补一发让新提问落键");
+  });
+
+  it("绑定的会话行键滞后同样补拉（两种阳性身份同一判据）", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), boundConversation: { endpoint: "dsh", id: "c-1" } } },
+      history: HIST([ROW("c-1", 5000, { lastPromptAt: 5000 })]),
+      userInput: { "t-a": Date.now() - 1000 },
+    });
+    fn.run();
+    assert.deepEqual(calls, [{ endpoint: "dsh", force: true }], "键滞后＝列表还没见到这次提问，绑定身份不豁免");
+  });
+
+  it("补扫把新提问落键后不再点火（收敛：键跟上键入即静音）", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), resume: { endpoint: "dsh", id: "c-9" } } },
+      history: HIST([ROW("c-9", 5000, { lastPromptAt: Date.now() - 1000 })]),
+      userInput: { "t-a": Date.now() - 1000 },
+    });
+    fn.run();
+    assert.deepEqual(calls, [], "行键已等于最近键入：无滞后可判");
+  });
+
+  it("滞后判据只认人类键入：自动应答刷着 lastInputAt 也不点火", () => {
+    // TUI 渲染期的 DSR/DA/CPR 应答与用户键入同走键入出口、同样刷新 lastInputAt。
+    // 拿 lastInputAt 判滞后，agent 出字期间追赶会退化成 20s 轮询。键入记账
+    // （terminalUserInputAt）只记人敲的字：没有记账就没有滞后。
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), resume: { endpoint: "dsh", id: "c-9" } } },
+      history: HIST([ROW("c-9", 5000, { lastPromptAt: 5000 })]),
+    });
+    fn.run();
+    assert.deepEqual(calls, [], "无人类键入记账：行键再旧、lastInputAt 再新鲜也不补");
+  });
+
+  it("人类键入超 60s 静默不补（滞后判据沿用键入武装窗的收敛纪律）", () => {
+    const { fn, calls } = catchUpSandbox({
+      sessions: { "t-a": { ...TERM({ lastInputAt: Date.now() - 1000 }), resume: { endpoint: "dsh", id: "c-9" } } },
+      history: HIST([ROW("c-9", 5000, { lastPromptAt: 5000 })]),
+      userInput: { "t-a": Date.now() - 120000 },
+    });
+    fn.run();
+    assert.deepEqual(calls, [], "最后一次人类键入超 60s：静音");
+  });
+
+  it("键入记账：人类字节记时刻、自动应答字节不记（滞后判据的锚点，过滤不拦截投递）", async () => {
+    const posts = [];
+    const autoReplyConst = panelJs.match(/const TERMINAL_INPUT_AUTO_REPLY = [^\n]+/)?.[0];
+    assert.ok(autoReplyConst, "TERMINAL_INPUT_AUTO_REPLY 形状判据在 panel.js 里");
+    const api = (method, path, body) => { posts.push(body); return Promise.resolve(); };
+    const fn = new Function("api", "console", `
+      const terminalDoneUnread = new Set(["t-a"]);
+      const terminalUserInputAt = new Map();
+      function terminalSessionFor() { return null; }
+      ${autoReplyConst}
+      ${extractFn("sendTerminalInput")}
+      return {
+        run: (id, data) => sendTerminalInput(id, data),
+        userInputAt: (id) => terminalUserInputAt.get(id),
+        doneCleared: () => !terminalDoneUnread.has("t-a"),
+      };
+    `)(api, console);
+    const before = Date.now();
+    await fn.run("t-a", "hello world");
+    const stamp = fn.userInputAt("t-a");
+    assert.ok(Number.isFinite(stamp) && stamp >= before && stamp <= Date.now(), "人类字节记下键入时刻");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await fn.run("t-a", "\x1b[24;80R");
+    assert.equal(fn.userInputAt("t-a"), stamp, "CPR 应答不刷记账");
+    await fn.run("t-a", "\x1b[?1;2c");
+    assert.equal(fn.userInputAt("t-a"), stamp, "DA 应答不刷记账");
+    assert.ok(fn.doneCleared(), "键入即读口径不受影响");
+    assert.deepEqual(posts.map((p) => p.data), ["hello world", "\x1b[24;80R", "\x1b[?1;2c"], "三笔照发（形状过滤只影响记账）");
   });
 });
 
