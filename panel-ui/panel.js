@@ -572,6 +572,20 @@ async function api(method, path, body) {
       return;
     }
     if (currentView === "terminal") {
+      const retained = terminalHiddenBacklog;
+      if (terminalEventSource?.readyState === 1 && terminalXterm && terminalStreamWrite
+          && terminalBoundSessionId === activeTerminalPreviewId && !terminalReplayFramePending
+          && !terminalGeometryRealignPending && !terminalGeometryReplayDrop
+          && (!retained || (!retained.overflow && retained.bytes <= TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES))) {
+        terminalHiddenBacklog = null;
+        // 同一条流内，先写隐藏前等候的输出，再写隐藏期的增量。两者都保留同步帧边界。
+        if (retained?.chunks.length) {
+          flushTerminalBurst();
+          terminalStreamWrite(retained.chunks.join(""));
+        }
+        void pollTerminalSessions();
+        return;
+      }
       // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。画面重建排在
       // 这拍数据之后——生死判定（terminalSessionShouldRevive）要用宿主现值，拿
       // 隐藏前的旧「running」去判会把死于重启的会话漏成死屏干等。轮询早退（未
@@ -10179,24 +10193,22 @@ async function api(method, path, body) {
   // 就是用户看到的「从对话头部出现、随后飞速滚到底」。同一段字节攒成一次写只落
   // 两帧且一次到底，两者的差别只在这里。
   //
-  // 判据与边界：单帧 ≥16KB 才进入突发模式（正常流式输出是几十到几百字节的碎块，
-  // 零延迟直通，手感不变）。突发内继续累积，三种情况落屏——静默 80ms（合并后帧间
-  // 间隔塌缩到毫秒级，这个窗口只用来兜住主线程抖动）、从突发开始算 700ms（持续
-  // 洪峰不能无限期不画）、累计 2MB（再大就不是「一次重放」而是长任务，先落屏）。
+  // 小块实时输出直通；大块输出最多等 32ms 静默或 64ms 总时长。短历史回放仍能
+  // 合并，持续输出不再等完整段结束。2Mi 字符是单批的额外冲刷门槛。
   //
   // 为什么在客户端而不是服务端：服务端不知道渲染节奏。把服务端合帧窗口从 16ms 拉到
   // 50ms 实测只能把 7 帧降到 2 帧、仍然会跳，而且拖慢所有实时输出。
   //
   // 与同步合帧（writeStreamChunk）的层次：本层在外、合帧层在内，冲刷与小帧都经
-  // terminalStreamWrite 进合帧层、由它唯一写 term——若本层直写 term，80ms 冲刷会
+  // terminalStreamWrite 进合帧层、由它唯一写 term——若本层直写 term，突发冲刷会
   // 抢在合帧层 400ms 兜底之前落屏，攒着的旧字节反排到新字节后面写花屏。连接关闭
   // 后 streamWrite 为空，冲刷回退直写（此时写的是已 dispose 的旧 term，本就该兜底）。
   //
   // 落屏不自己调 scrollToBottom：跟随底只有一个写者（installTerminalFollowBottomGuard
   // 的 onWriteParsed 锚定），这里再加一个就是两个写者打架。
   const TERMINAL_BURST_ENTER_BYTES = 16 * 1024;
-  const TERMINAL_BURST_QUIET_MS = 80;
-  const TERMINAL_BURST_MAX_HOLD_MS = 700;
+  const TERMINAL_BURST_QUIET_MS = 32;
+  const TERMINAL_BURST_MAX_HOLD_MS = 64;
   const TERMINAL_BURST_MAX_BYTES = 2 * 1024 * 1024;
 
   function flushTerminalBurst() {
@@ -12063,6 +12075,8 @@ async function api(method, path, body) {
   // deferScreen:true —— live 行快路径（terminalRailActivateSession）专用口径：
   // 停放/建流/fit 整组延后双 rAF，让栏体高亮当拍先渲（见下方分支内注释）。
   function renderTerminalPreviewSession({ revive = true, deferScreen = false, force = false } = {}) {
+    // 同会话早退、同步换屏和空态也会取代上一轮延后的换屏。
+    const screenSeq = typeof terminalScreenSeq === "number" ? ++terminalScreenSeq : null;
     // 左栏终端会话栏先渲：它与终端屏的就绪三态无关（降级/零会话时栏体照常可用——
     // 「新建终端」自带就绪闸，历史会话按当前 agent 取）。切页签 / 新建 / 关闭 /
     // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境；try 护连接
@@ -12117,10 +12131,9 @@ async function api(method, path, body) {
       // 「旧画面停放成像素垫片、新画面就绪再揭幕」（92f6ced/b285e3d 立下的机制），
       // 拆开就会有一帧没有垫片的空屏。令牌保连点：醒来发现已不是自己这一帧
       // （用户又点了别的），旧帧整组退场不执行。
-      terminalScreenSeq += 1;
-      const screenSeq = terminalScreenSeq;
       const runDeferredScreen = () => {
-        if (terminalScreenSeq !== screenSeq) return;
+        if (screenSeq !== null && terminalScreenSeq !== screenSeq) return;
+        if (activeTerminalPreviewId !== session.id || $("terminalView")?.hidden) return;
         if (typeof parkTerminalScreen === "function") parkTerminalScreen(session);
         connectTerminalStream(session, { revive });
         // 同上：后台切回的交接单也跟到延后的这一拍，别让快路径绕过落位。
@@ -15756,6 +15769,11 @@ async function api(method, path, body) {
     if (!resume && typeof terminalRailArmCreate === "function") terminalRailArmCreate({ endpoint: agentId, cwd });
     // 点击当拍擦屏并挂加载态：补读两拍、/switch 或 agent-sessions 的 spawn 都还在后面，
     // 这一整段屏上不再留上一条会话的画面。typeof 闸护单测桩环境。
+    // 手开 shell 的同进程命令可能没有进程树信号。只读取本会话，并在拆屏前保留这一票。
+    const screenWasBusy = typeof terminalManualShellBusy === "function"
+      && typeof terminalXterm !== "undefined" && !!terminalXterm
+      && (typeof terminalBoundSessionId === "undefined" || terminalBoundSessionId === active.id)
+      && terminalManualShellBusy(active);
     if (typeof enterTerminalSwitchLoading === "function") enterTerminalSwitchLoading();
     try {
       // 未使用的 agent 终端不能被就地 /switch（2026-11-03 A4）：它还没有任何对话身份
@@ -15773,8 +15791,10 @@ async function api(method, path, body) {
       let agents = null;
       let hostRead = null;
       try {
-        agents = await api("GET", "/api/agents");
-        hostRead = await api("GET", `/api/terminal/sessions/${encodeURIComponent(active.id)}`);
+        [agents, hostRead] = await Promise.all([
+          api("GET", "/api/agents"),
+          api("GET", `/api/terminal/sessions/${encodeURIComponent(active.id)}`),
+        ]);
       } catch {
         if (typeof terminalSwitchLog === "function") terminalSwitchLog("keep-alive", { reason: "reread-failed", terminal: active.id, stage: "fetch" });
         return terminalRailKeepAliveSwitch({ agentId, cwd, resume });
@@ -15790,7 +15810,7 @@ async function api(method, path, body) {
       // 屏尾护栏，判不准倒向在跑；与切走回收、关闭确认同源。手开终端的屏尾判据已并入
       // 其中——进程树看不见同进程 cmdlet（Start-Sleep / 循环 / 写文件），屏尾不在提示符
       // 就当还在跑（2026-11-03 A1：静默长命令期间内切被整树 terminate，切回来找不回）。
-      const working = !exited && terminalSessionRunning(active);
+      const working = !exited && (screenWasBusy || terminalSessionRunning(active));
       // 旧终端在跑：留后台保活、不杀；目标终端挂进当前视口，页签数不变。
       if (working) {
         // 判忙保活附命中信号清单（working 位/在途请求/agent.busy/输出窗/屏尾）：

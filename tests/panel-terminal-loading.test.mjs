@@ -1916,7 +1916,7 @@ describe("T12 内切切换态：点击当拍擦屏，等待整段收进加载态
     const shellCreate = decide.indexOf("return createAgentTerminal(");
     assert.ok(shellCreate > 0, "空壳分支的创建调用在源码里");
     assert.ok(enters[0] < shellCreate, "空壳分支：进入排在创建调用之前");
-    const probe = decide.indexOf('await api("GET", "/api/agents")');
+    const probe = decide.indexOf('api("GET", "/api/agents")');
     const post = decide.indexOf("/switch`");
     assert.ok(probe > 0 && post > 0);
     assert.ok(enters[1] < probe && enters[1] < post, "主分支：进入在补读与换绑请求之前");

@@ -3685,6 +3685,7 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
     const terminalHollowStreak = new Map();
     function terminalCloseTerminal() { return true; }
     function armTerminalBootingOverlay() {}
+    function enterTerminalSwitchLoading() { terminalXterm = null; }
     function api(method, path, body) {
       log.gets.push({ method, path });
       if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
@@ -3836,6 +3837,23 @@ describe("进程树忙判据（agent.busy）进 working 口径与内切判定门
     backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 60_000 },
   };
 
+  it("续接并行读取两份状态，任一未返回都不换绑", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: () => gate, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    const hostStarted = log.gets.some(({ method, path }) => method === "GET" && path === "/api/terminal/sessions/t-a");
+    assert.equal(log.switchBodies.length, 0);
+    release(AGENTS_IDLE);
+    await flush();
+    assert.equal(hostStarted, true, "Agent 请求挂起期间，宿主请求已经发出");
+    assert.equal(log.switchBodies.length, 1);
+  });
   it("回合内树里有活命令：判 working 并保护性新开（不再让守卫单打独斗后静默转新开）", async () => {
     const { fn, log } = runSwitch({
       sessions: { "t-a": BUSY_SESSION }, activeId: "t-a",
@@ -6609,7 +6627,8 @@ describe("2026-11-05 kimi 切走误杀回归（0 请求 + 正在输出）", () =
 
   it("源码契约：切走回收／内切准入／关闭确认三处共用同一判据，不许各自退回旧口径", () => {
     assert.ok(extractFn("terminalViewportRetire").includes("terminalSessionRunning(session)"), "切走回收");
-    assert.ok(extractFn("terminalRailSwitchOrCreateCore").includes("!exited && terminalSessionRunning(active)"), "内切准入");
+    assert.match(extractFn("terminalRailSwitchOrCreateCore"), /!exited && [(]screenWasBusy [|][|] terminalSessionRunning[(]active[)][)]/,
+      "内切仍用统一判据，补上拆屏前的已知忙态");
     assert.ok(extractFn("terminalCloseTerminal").includes("!!session && terminalSessionRunning(session)"), "关闭确认");
   });
 });
@@ -6785,6 +6804,9 @@ describe("同会话流短路（关非活跃页签不再整拆重建）", () => {
       let activeTerminalPreviewId = "t1";
       let terminalBoundSessionId = null;
       let terminalEventSource = null;
+      let terminalScreenSeq = 0;
+      const frames = [];
+      const requestAnimationFrame = (callback) => frames.push(callback);
       const currentView = "board";
       const document = { querySelector: () => null, hidden: false };
       function $(id) { return null; }
@@ -6799,6 +6821,7 @@ describe("同会话流短路（关非活跃页签不再整拆重建）", () => {
         bind: (id) => { terminalBoundSessionId = id; },
         stream: (on) => { terminalEventSource = on ? {} : null; },
         show: (id) => { activeTerminalPreviewId = id; },
+        flushFrames: () => { while (frames.length) frames.shift()(); },
       };
     `)(log);
     return { sandbox, log };
@@ -6816,6 +6839,18 @@ describe("同会话流短路（关非活跃页签不再整拆重建）", () => {
     assert.deepEqual(log.connects, [], "同会话流健在：park/建流/fit 整组跳过");
     sandbox.render({ deferScreen: true });
     assert.deepEqual(log.connects, [], "deferScreen 路径同样短路（帧队列里也没有重建）");
+  });
+
+  it("快速切回已经显示的会话，不能重新绑定被取消的目标", () => {
+    const { sandbox, log } = screenSandbox();
+    sandbox.bind("t1");
+    sandbox.stream(true);
+    sandbox.show("t2");
+    sandbox.render({ deferScreen: true });
+    sandbox.show("t1");
+    sandbox.render({ deferScreen: true });
+    sandbox.flushFrames();
+    assert.deepEqual(log.connects, [], "继续使用 t1 的现有输入与输出流");
   });
 
   it("换了会话或流已拆：照旧重建", () => {

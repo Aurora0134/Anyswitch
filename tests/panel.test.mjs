@@ -11022,7 +11022,8 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
     assert.ok(emitReplay.includes("session.screen.toReplay()"), "回放取自宿主渲染镜像的 toReplay()");
     assert.equal((stream.match(/emitReplay\(\)/g) || []).length, 2,
       "两条路径（有积压 drain 完 / 无积压直接）各一个调用点，任一连接只走其中一条");
-    assert.ok(stream.includes("if (done) emitReplay();"), "分轮 drain 只在排空后调用一次，不重发回放");
+    assert.ok(emitReplay.indexOf("event: snapshot") < emitReplay.indexOf("event: data"),
+      "快照在回放前发出，两者使用同一次已排空的镜像");
     const absorb = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
     assert.ok(absorb && !absorb.includes("把全量缓冲以 data 帧从头回放到当前"),
       "前端注释已订正，不再把单帧回放写成全量缓冲重放");
@@ -11381,6 +11382,17 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
     assert.deepEqual(writes, [], "每次新帧都重置静默计时");
     clock.advance(1);
     assert.equal(writes.length, 1, "最后一帧之后静默满窗口才落屏");
+  });
+
+  it("持续大块输出每 64 毫秒至少提交一次，且字节不乱序", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    const chunks = Array.from({ length: 9 }, (_, i) => big(20 * 1024, String(i)));
+    for (const chunk of chunks) {
+      sandbox.push(chunk);
+      clock.advance(24);
+    }
+    assert.equal(writes.length, 3);
+    assert.equal(writes.join(""), chunks.join(""));
   });
 
   it("硬上限：持续洪峰不会无限期不画，到点强制落屏", () => {
@@ -13230,23 +13242,31 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
 
   function run(view, hidden, opts = {}) {
     const state = { view, calls: [] };
-    new Function("state", "document", `
+    new Function("state", "document", "opts", `
       function refreshStatus() { state.calls.push("refreshStatus"); return Promise.resolve(); }
       function refreshAgents() { state.calls.push("refreshAgents"); }
       function refreshModelStability() { state.calls.push("refreshModelStability"); }
       function refreshStatsState() { state.calls.push("refreshStatsState"); }
-      function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); return Promise.resolve(); }
+      function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); return opts.poll ?? Promise.resolve(); }
       function renderTerminalPreviewSession(o) { state.calls.push("renderPreview:revive=" + (o && o.revive) + (o && o.force ? ":force" : "")); }
       function syncTerminalDataStream() { state.calls.push("syncTerminalDataStream"); }
       function queueTerminalChunk() { state.calls.push("queueTerminalChunk"); }
       function boardVisible() { return state.view === "board"; }
       let currentView = state.view;
       let terminalVisibilityWasHidden = false;
-      let terminalXterm = null;
+      const activeTerminalPreviewId = "a";
+      const terminalBoundSessionId = opts.healthy ? "a" : null;
+      const terminalEventSource = opts.healthy ? { readyState: 1 } : null;
+      const terminalReplayFramePending = false;
+      const terminalGeometryRealignPending = false;
+      const terminalGeometryReplayDrop = false;
+      const terminalXterm = opts.healthy ? {} : null;
+      const flushTerminalBurst = () => {};
+      const terminalStreamWrite = (text) => state.calls.push("write:" + text);
       let terminalHiddenBacklog = ${JSON.stringify(opts.backlog ?? null)};
       const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = 2 * 1024 * 1024;
       ${handlerBody}
-    `)(state, { hidden });
+    `)(state, { hidden }, opts);
     return state.calls;
   }
 
@@ -13262,6 +13282,17 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
     assert.deepEqual(calls, [
       "syncTerminalDataStream", "refreshStatus", "pollTerminalSessions", "renderPreview:revive=false",
     ]);
+  });
+
+  it("健康会话切回前台时不等归属请求，按顺序回灌一次", async () => {
+    let release;
+    const poll = new Promise((resolve) => { release = resolve; });
+    const calls = run("terminal", false, { healthy: true, poll, backlog: { chunks: ["old", "new"], bytes: 6 } });
+    assert.deepEqual(calls.filter((entry) => entry.startsWith("write:")), ["write:oldnew"]);
+    release();
+    await poll;
+    await Promise.resolve();
+    assert.equal(calls.filter((entry) => entry.startsWith("write:") || entry.startsWith("renderPreview")).length, 1);
   });
 
   it("零积压切回终端页：不穿透健存闸（零重建路径，2026-11-16 用户裁决 A）", async () => {
