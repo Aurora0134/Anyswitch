@@ -2549,9 +2549,9 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「高级选项」：四张卡，依次为更新通道、号池分流逻辑、配置迁移、配置备份
+    <!-- 「高级选项」：四张卡，依次为更新通道、号池路由逻辑、配置迁移、配置备份
          （2026-11-16 用户裁决：导出/导入合为「配置迁移」，备份位置/备份文件合为
-         「配置备份」）。更新通道与号池分流逻辑整卡一行 .modal-item；两张合并大卡
+         「配置备份」）。更新通道与号池路由逻辑整卡一行 .modal-item；两张合并大卡
          卡头不放动作钮，按钮收进各自行内右侧，卡体 gap:0 让 .modal-item 的分隔线
          自然衔接。状态行是「结果」型文案（§六.5）：markup 里即空且 hidden，功能
          发生时由控制器揭开，离开子页复位回收；状态色调走 data-tone，与
@@ -2581,25 +2581,26 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
-      <!-- 号池分流逻辑：关=粘性路由（最后成功成员优先，失败才降级）；开=智能分流
-           （按成员负载与优质率主动分摊，同一会话优先留在同一成员）。即改即生效。 -->
+      <!-- 号池路由逻辑：退避=按号池顺序分发、最近成功成员优先、连续失败才顺延；
+           分流=按成员负载与优质率主动分摊，同一会话优先留在同一成员。双选文字钮
+           （.seg-switch 与「UI版本」同构），即改即生效；说明句随选中项切换，
+           始终只描述当前模式，两句定稿见 panel.js 的 POOL_ROUTING_DESC。 -->
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
-            号池分流逻辑
+            号池路由逻辑
           </h2>
         </div>
         <div class="card-body">
           <div class="modal-item">
             <div>
-              <div class="modal-item-title">智能分流</div>
-              <div class="modal-item-desc">开启后，号池内的请求将智能分流给多个成员承接，同一会话的请求优先留在同一成员</div>
+              <div class="modal-item-desc" id="poolRoutingDesc">号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员</div>
             </div>
-            <label class="toggle">
-              <input type="checkbox" id="poolLoadBalancingToggle">
-              <span class="slider"></span>
-            </label>
+            <div class="seg-switch" id="poolRoutingSeg" role="radiogroup" aria-label="号池路由逻辑">
+              <button type="button" class="seg-switch-btn" data-pool-routing-choice="backoff" role="radio" aria-checked="true">退避</button>
+              <button type="button" class="seg-switch-btn" data-pool-routing-choice="balance" role="radio" aria-checked="false">分流</button>
+            </div>
           </div>
         </div>
       </div>
