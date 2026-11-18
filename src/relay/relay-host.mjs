@@ -567,11 +567,14 @@ function createResidentDeps(options = {}) {
   // back to no journal (the collector treats it as absent).
   let usageJournal = null;
   try {
-    usageJournal = createUsageJournal({ dir: join(root, "usage") });
+    // A4 闭环：journal 与收集器的旁路告警（落盘失败、ps 探针楔住、DSH 孤进程
+    // 收割）注入本进程 logger——[ts] [level] 封套、落 relay-host.log、上面板
+    // 总线，不再裸写 stderr。两者缺省都退回 console，其他调用方行为不变。
+    usageJournal = createUsageJournal({ dir: join(root, "usage"), logger });
   } catch (error) {
     logger.warn?.(`usage journal unavailable; continuing without it: ${error.message}`);
   }
-  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ persistRoot: root, journal: usageJournal });
+  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ persistRoot: root, journal: usageJournal, logger });
   // 启动预热：等第一笔请求才建 zcode 父子映射会留下冷窗口，重启后正在跑的
   // workflow / subagent 会先铸成独立实例。这里按一次流量打标并触发首轮扫描，
   // 异步进行，不阻塞 relay 监听。
@@ -823,7 +826,8 @@ export async function startResidentRelay(options = {}) {
     storeFile: paths.storeFile,
     logger,
     onStoreChange: async () => {
-      logger.info("store.json changed; re-syncing agent configurations");
+      // B5 收口：store 变更本身不再单发首报行——成功路径由子进程 mirror 出来
+      // 的合并计数行承载，失败路径由下面的 error 行承载，同一事件只报一次。
       const syncResult = await spawnAgentSyncFn({ port, logger });
       // 同启动同步：结果落 sync-status.json 供面板上屏（详见上方注释）。
       try {

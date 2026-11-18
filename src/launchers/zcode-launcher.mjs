@@ -7,7 +7,7 @@ import { createProductionDeps } from "./launch.mjs";
 import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore, storePaths } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
-import { createLogger } from "../shared/logger.mjs";
+import { createLogger, createPanelForwardingLogger } from "../shared/logger.mjs";
 import { createPanelRouter } from "../panel/panel.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
@@ -52,9 +52,9 @@ function createOpenAIProductionDeps(options = {}) {
   // still lands in the stats journal when the resident relay is down.
   let usageJournal = null;
   try {
-    usageJournal = createUsageJournal({ dir: join(root, "usage") });
+    usageJournal = createUsageJournal({ dir: join(root, "usage"), logger });
   } catch { usageJournal = null; }
-  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ journal: usageJournal });
+  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ journal: usageJournal, logger });
   return {
     token: loadOrGenerateToken(root),
     loadStore: claudeDeps.loadStore,
@@ -387,7 +387,10 @@ function realSpawnZcode({ env, args }) {
 
 export async function main(argv = process.argv.slice(2)) {
   const code = await runZcodeLauncher({
-    startRelay: () => startOpenAIRelay(),
+    // 回退中继（居民中继宕机时本进程接管）没有自己的日志文件：日志行转发给
+    // 面板 ingest（47820），重试/故障才进得了面板「运行日志」（Claude 启动器
+    // 同款转发，见 shared/logger.mjs 的 createPanelForwardingLogger）。
+    startRelay: () => startOpenAIRelay({ logger: createPanelForwardingLogger() }),
     writeConfig: (store, port, token, sidecarRoot) => writeZcodeConfig(store, port, token, sidecarRoot),
     spawnZcode: realSpawnZcode,
     isZcodeRunning: realIsZcodeRunning,

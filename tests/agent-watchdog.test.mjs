@@ -8,10 +8,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, existsSync, mkdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
+import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, spawnWatchdog, createWatchdogLogger, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
 import { createAgentWatcher, DEFAULT_INTERVAL_MS } from "../src/agents/agent-watcher.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -435,4 +435,94 @@ test("窗口常量真的接进 startWatchdogHost 自建的收集器，watcher �
   } finally {
     await host.close();
   }
+});
+
+// --- A1: 看门狗日志面（落盘 + 面板转发）与 spawn fd 重定向 ---------------------
+
+test("createWatchdogLogger lands an enveloped line on disk AND forwards it to the panel ingest", () => {
+  const dir = mkTestDir("anyswitch-wd-log-");
+  const logPath = join(dir, "logs", "watchdog.log");
+  const posts = [];
+  const logger = createWatchdogLogger({
+    logPath,
+    fetchFn: (url, init) => { posts.push({ url, init }); return Promise.resolve(); },
+  });
+  logger.warn("followAgent: relay degraded for 63s; restarting it (attempt 2/3, next earliest in 120s)");
+  const text = readFileSync(logPath, "utf8");
+  assert.match(text, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[warn\] followAgent: relay degraded for 63s; restarting it \(attempt 2\/3, next earliest in 120s\)\n$/,
+    "落盘行必须带 [ts] [level] 封套（与 relay-host.log 同格式）");
+  assert.equal(posts.length, 1, "同一行必须转发面板 ingest");
+  assert.deepEqual(JSON.parse(posts[0].init.body), {
+    level: "warn",
+    message: "followAgent: relay degraded for 63s; restarting it (attempt 2/3, next earliest in 120s)",
+  });
+  assert.equal(posts[0].init.headers["x-anyswitch-panel"], "1");
+});
+
+test("createWatchdogLogger honours the 运行日志 gate on both channels", () => {
+  const dir = mkTestDir("anyswitch-wd-gate-");
+  const logPath = join(dir, "watchdog.log");
+  let posts = 0;
+  const logger = createWatchdogLogger({
+    logPath,
+    isEnabled: () => false,
+    fetchFn: () => { posts += 1; return Promise.resolve(); },
+  });
+  logger.info("must not land anywhere");
+  assert.equal(existsSync(logPath), false, "开关关掉时落盘一起停");
+  assert.equal(posts, 0, "开关关掉时转发一起停");
+});
+
+test("spawnWatchdog tees child stdout/stderr into the log file via an fd and closes the parent copy", async () => {
+  const { envRoot } = makeWatchdogRoot();
+  const dir = mkTestDir("anyswitch-wd-spawn-");
+  const logPath = join(dir, "watchdog.log");
+  let spawnCall = null;
+  let probes = 0;
+  const result = await spawnWatchdog({ LOCALAPPDATA: envRoot }, {
+    logPath,
+    probe: async () => (++probes === 1 ? false : true), // 拉起前不在跑，拉起后即应答
+    spawnFn: (cmd, args, options) => {
+      spawnCall = { cmd, args, options };
+      return { pid: 4242, unref() {} };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.reused, false);
+  assert.ok(spawnCall, "probe 报不在跑时必须真 spawn");
+  assert.ok(Array.isArray(spawnCall.options.stdio), "stdio 必须是指定 fd 的三元组");
+  assert.equal(spawnCall.options.stdio[0], "ignore");
+  assert.equal(typeof spawnCall.options.stdio[1], "number", "stdout 接日志 fd");
+  assert.equal(spawnCall.options.stdio[2], spawnCall.options.stdio[1], "stderr 共享同一日志 fd");
+  assert.throws(() => writeSync(spawnCall.options.stdio[1], "x"), "父进程那份 fd 必须关掉（句柄已随 spawn 过继）");
+});
+
+test("spawnWatchdog falls back to stdio ignore when the log file cannot be opened", async () => {
+  const { envRoot } = makeWatchdogRoot();
+  const blocker = join(mkTestDir("anyswitch-wd-spawn-blocked-"), "blocked");
+  writeFileSync(blocker, "i am a file, not a dir");
+  let spawnCall = null;
+  let probes = 0;
+  const result = await spawnWatchdog({ LOCALAPPDATA: envRoot }, {
+    logPath: join(blocker, "watchdog.log"),
+    probe: async () => (++probes === 1 ? false : true),
+    spawnFn: (cmd, args, options) => {
+      spawnCall = { options };
+      return { pid: 4343, unref() {} };
+    },
+  });
+  assert.equal(result.ok, true, "日志文件打不开不得挡住拉起");
+  assert.equal(spawnCall.options.stdio, "ignore", "打不开就退回旧行为");
+});
+
+test("spawnWatchdog short-circuits on a live watchdog without touching the disk", async () => {
+  const { envRoot } = makeWatchdogRoot();
+  let spawns = 0;
+  const result = await spawnWatchdog({ LOCALAPPDATA: envRoot }, {
+    logPath: join(mkTestDir("anyswitch-wd-reused-"), "watchdog.log"),
+    probe: async () => true,
+    spawnFn: () => { spawns += 1; throw new Error("must not spawn"); },
+  });
+  assert.deepEqual(result, { ok: true, reused: true });
+  assert.equal(spawns, 0);
 });

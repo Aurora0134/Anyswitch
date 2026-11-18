@@ -332,7 +332,9 @@ export function createProductionDeps({
   // (appendFileSync 'a' on Windows), so concurrent writers are line-safe.
   let usageJournal = null;
   try {
-    usageJournal = createUsageJournal({ dir: join(paths.root, "usage") });
+    // logger 缺省（null）时 journal 内部退回 console，既有行为不变；Claude
+    // 启动器注入转发 logger 时，落盘失败告警随之进面板总线。
+    usageJournal = createUsageJournal({ dir: join(paths.root, "usage"), logger });
   } catch {
     usageJournal = null;
   }
@@ -340,6 +342,7 @@ export function createProductionDeps({
     reportUrl: `http://127.0.0.1:${DEFAULT_RELAY_PORT}/panel/api/session/report`,
     journal: usageJournal,
     agentId,
+    logger,
     ...(sessionReporterFetchFn ? { fetchFn: sessionReporterFetchFn } : {}),
   });
 

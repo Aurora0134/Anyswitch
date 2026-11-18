@@ -77,7 +77,11 @@ function num(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.now() }) {
+export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.now(), logger } = {}) {
+  // 落盘失败的告警出口：默认 console（既有调用方行为逐字节不变）；装配点注入
+  // 各自 logger 时，告警随之进入对应的总线/转发通道（[ts] [level] 封套由
+  // logger 承载，不再裸写 stderr）。
+  const log = logger ?? console;
   let lastCleanupDay = null;
 
   // Parse cache for read(): path -> { mtimeMs, size, lines }. Validated by
@@ -147,7 +151,7 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
         try {
           rmSync(join(dir, name), { force: true });
         } catch (error) {
-          console.warn(`[usage-journal] cleanup failed for ${name}: ${error.message}`);
+          log?.warn?.(`[usage-journal] cleanup failed for ${name}: ${error.message}`);
         }
       }
     }
@@ -163,7 +167,7 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
       mkdirSync(dir, { recursive: true });
       appendFileSync(fileFor(kind, dayKey(now())), `${JSON.stringify(entry)}\n`, { flag: "a" });
     } catch (error) {
-      console.warn(`[usage-journal] append ${kind} failed: ${error.message}`);
+      log?.warn?.(`[usage-journal] append ${kind} failed: ${error.message}`);
     }
   }
 

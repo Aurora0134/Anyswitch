@@ -5,7 +5,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createLogger, formatLogStamp, logLevelAllows, LOG_LEVEL_ORDER } from "../src/shared/logger.mjs";
+import { createLogger, formatLogStamp, logLevelAllows, LOG_LEVEL_ORDER, createPanelForwardingLogger, PANEL_LOG_INGEST_URL } from "../src/shared/logger.mjs";
 
 // 2026-09-28 14:42:16, built from LOCAL parts because the stamp is deliberately
 // local wall-clock (it gets read next to a user's "it broke around 3pm"). Deriving
@@ -122,5 +122,37 @@ describe("level order for a viewer's minimum-level filter", () => {
     assert.equal(logLevelAllows(undefined, "error"), true, "控制帧没有 level，必须放行");
     assert.equal(logLevelAllows("info", "bogus"), true);
     assert.equal(logLevelAllows("info", undefined), true);
+  });
+});
+
+describe("createPanelForwardingLogger", () => {
+  it("POSTs level + message to the panel ingest endpoint with the panel headers", () => {
+    const calls = [];
+    const logger = createPanelForwardingLogger({ fetchFn: (url, init) => { calls.push({ url, init }); return Promise.resolve(); } });
+    logger.warn("relay degraded");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, PANEL_LOG_INGEST_URL);
+    assert.equal(calls[0].init.method, "POST");
+    assert.equal(calls[0].init.headers["x-anyswitch-panel"], "1");
+    assert.equal(calls[0].init.headers.origin, "http://127.0.0.1:47820");
+    assert.deepEqual(JSON.parse(calls[0].init.body), { level: "warn", message: "relay degraded" });
+  });
+
+  it("stringifies non-string messages and derives the origin from the url", () => {
+    const calls = [];
+    const logger = createPanelForwardingLogger({
+      fetchFn: (url, init) => { calls.push({ url, init }); return Promise.resolve(); },
+      url: "http://127.0.0.1:9999/panel/api/logs/ingest",
+    });
+    logger.info(42);
+    assert.deepEqual(JSON.parse(calls[0].init.body), { level: "info", message: "42" });
+    assert.equal(calls[0].init.headers.origin, "http://127.0.0.1:9999");
+  });
+
+  it("swallows a rejected fetch — logging must never break the caller", async () => {
+    const logger = createPanelForwardingLogger({ fetchFn: () => Promise.reject(new Error("panel down")) });
+    logger.error("boom");
+    // 拒绝发生在微任务里：等一拍确认没有 unhandledRejection 逃出去。
+    await new Promise((r) => setTimeout(r, 10));
   });
 });

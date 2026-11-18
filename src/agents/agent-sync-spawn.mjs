@@ -17,14 +17,18 @@ import { SYNC_RESULT_PREFIX } from "./agent-sync.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 export const AGENT_SYNC_RUN_SCRIPT = join(here, "agent-sync-run.mjs");
 
-// Resolves (never rejects) with { ok, code?, error?, stdout, stderr }.
+// Resolves (never rejects) with { ok, code?, error?, timeout?, stdout, stderr }.
 // ok === true only when the runner exited 0. stdout/stderr lines are mirrored
 // into the caller's logger so both resident processes' log views see them.
-export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000 }) {
+// timeout === true marks the 120s 超时分支：超时被 SIGTERM 掐掉的子进程在 close
+// 事件里同样报 code null，没有这个标记的话「超时」与「崩溃」会压成同一句
+// runner exit null；error 文案由这里直接给出，呈现处（relay-host / 面板路由）
+// 的模板原样渲染即可。
+export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000, spawnFn = spawn }) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(process.execPath, [AGENT_SYNC_RUN_SCRIPT, "--port", String(port)], {
+      child = spawnFn(process.execPath, [AGENT_SYNC_RUN_SCRIPT, "--port", String(port)], {
         stdio: ["ignore", "pipe", "pipe"],
         env: process.env,
         // The resident relay/panel run windowless (silent-start.vbs); never
@@ -45,7 +49,9 @@ export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000 }) {
       stderr += chunk;
     });
 
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         child.kill("SIGTERM");
       } catch {
@@ -67,6 +73,10 @@ export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000 }) {
       // 是最需要被看到的一类。
       for (const line of humanLines(stdout)) logger?.info?.(line);
       for (const line of humanLines(stderr)) logger?.warn?.(line);
+      if (timedOut) {
+        resolve({ ok: false, code, timeout: true, error: `runner timed out after ${Math.round(timeoutMs / 1000)}s`, stdout, stderr });
+        return;
+      }
       resolve({ ok: code === 0, code, stdout, stderr });
     });
   });

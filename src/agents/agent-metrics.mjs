@@ -2202,7 +2202,7 @@ function pruneStaleAggregateFaults(state, nowFn, ttlMs) {
 // resolveJournalInstanceId：写账那一刻再过一次实例身份映射（只对常驻 collector
 // 提供）。请求开始时父子映射可能还没就绪，而请求结束时通常已经就绪——账本与
 // 看板必须同源，否则冷窗口的请求会永久留下一把查不到母行的子会话键。
-function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId, onTransition = null, resolveJournalInstanceId = null) {
+function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId, onTransition = null, resolveJournalInstanceId = null, logger = console) {
   const startTime = nowFn();
   // 后台请求（codex 引擎/GUI 自发流量——记忆整理、guardian、预热、线程标题/
   // 摘要生成等，由 openai-server 的分类器打上 meta.background）与全部展示面
@@ -2640,7 +2640,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
               : {}),
           });
         } catch (error) {
-          console.warn(`[agent-metrics] usage journal append failed: ${error.message}`);
+          logger?.warn?.(`[agent-metrics] usage journal append failed: ${error.message}`);
         }
       }
     },
@@ -2904,6 +2904,8 @@ function createPersistentPsProbe({
   queryText,
   timeoutMs = PS_PROBE_TIMEOUT_MS,
   optionalTimeoutMs = PS_PROBE_OPTIONAL_TIMEOUT_MS,
+  // 探针告警的出口：默认 console；收集器被装配点注入 logger 时随之上总线。
+  logger = console,
 }) {
   let child = null;
   let stdoutBuf = "";
@@ -2931,7 +2933,7 @@ function createPersistentPsProbe({
     // 连续超时才有报道价值：单次抖动是常态。一条连胜链只在第 2 次时落一行
     // （计数继续走，日志不刷屏）；链断开重起时会再报一次。
     if (stats.consecutiveTimeouts === 2) {
-      console.warn(`[agent-metrics] ps probe wedged: ${stats.consecutiveTimeouts} timeouts in a row `
+      logger?.warn?.(`[agent-metrics] ps probe wedged: ${stats.consecutiveTimeouts} timeouts in a row `
         + `(scan=${stats.scanTimeouts} optional=${stats.optionalTimeouts} childKills=${stats.childKills} spawns=${stats.spawns})`);
     }
   }
@@ -3094,11 +3096,16 @@ function createPersistentPsProbe({
 export function createAgentMetricsCollector(options = {}) {
   const execFn = options.execFn ?? exec;
   const nowFn = options.nowFn ?? Date.now;
+  // 旁路告警（journal 落盘失败、ps 探针楔住、DSH 孤进程收割）的出口：默认
+  // console（既有行为逐字节不变）；装配点注入 logger 时进对应总线，封套由
+  // logger 承载。
+  const logger = options.logger ?? console;
   const psProbe = createPersistentPsProbe({
     spawnFn: options.spawnFn ?? spawn,
     queryText: PS_PROCESS_SCAN_QUERY,
     timeoutMs: options.psProbeTimeoutMs ?? PS_PROBE_TIMEOUT_MS,
     optionalTimeoutMs: options.psProbeOptionalTimeoutMs ?? PS_PROBE_OPTIONAL_TIMEOUT_MS,
+    logger,
   });
   let sparkWindowPoints = parseSparkWindowPoints(options.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS);
   const recentSampleWindow = options.recentSampleWindow ?? RECENT_SAMPLE_WINDOW;
@@ -3241,7 +3248,7 @@ export function createAgentMetricsCollector(options = {}) {
         // the next scan will not list it either.
         continue;
       }
-      console.warn(`[agent-metrics] reaped DSH TUI process ${pid}: terminal closed, process stayed`);
+      logger?.warn?.(`[agent-metrics] reaped DSH TUI process ${pid}: terminal closed, process stayed`);
     }
   }
 
@@ -4617,7 +4624,7 @@ export function createAgentMetricsCollector(options = {}) {
       ? { ...meta, instanceId: normalized.id }
       : meta;
     const primary = trackAggregateRequest(targetState, effMeta, nowFn, recentSampleWindow, stability, journal, bucketAgentId,
-      (count) => publishActivity(bucketAgentId, null, count), resolveZcodeParentRowId);
+      (count) => publishActivity(bucketAgentId, null, count), resolveZcodeParentRowId, logger);
     // A request start already moved totalRequests/activeRequests: mark the
     // snapshot dirty so a restart mid-turn still carries the start forward.
     markMetricsDirty();
@@ -6729,7 +6736,10 @@ function normalizeUsageTokens(usage) {
   };
 }
 
-export function createSessionReporter({ token = null, reportUrl, journal = null, nowFn = Date.now, fetchFn = fetch, agentId = "claude", heartbeatIntervalMs = SESSION_REPORTER_HEARTBEAT_MS }) {
+export function createSessionReporter({ token = null, reportUrl, journal = null, nowFn = Date.now, fetchFn = fetch, agentId = "claude", heartbeatIntervalMs = SESSION_REPORTER_HEARTBEAT_MS, logger = null }) {
+  // 旁路告警出口：默认 console（既有调用方行为不变）；装配点把 per-launch
+  // relay 的转发 logger 接进来时，告警随之上总线。
+  const log = logger ?? console;
   let sessionToken = token;
   let claudePid = null;
   const state = {
@@ -7130,7 +7140,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
           path: typeof ctx.meta?.path === "string" ? ctx.meta.path : "anthropic",
         });
       } catch (journalError) {
-        console.warn(`[session-reporter] usage journal append failed: ${journalError.message}`);
+        log?.warn?.(`[session-reporter] usage journal append failed: ${journalError.message}`);
       }
     }
 

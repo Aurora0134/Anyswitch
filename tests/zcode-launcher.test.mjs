@@ -615,3 +615,15 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
     }
   });
 });
+
+// A2 接线锚点：main() 的回退中继必须接面板转发 logger——回退中继没有自己的
+// 日志文件，不接则重试/故障行只写自己 stderr，面板上不可见。runZcodeLauncher 的
+// 行为由注入缝覆盖，这里钉的是 main() 里那一行接线本身（与 relay-port-consistency
+// 的源文本锚点同手法）。
+it("main() wires the fallback relay's logger to the panel ingest forwarder", () => {
+  const src = readFileSync(new URL("../src/launchers/zcode-launcher.mjs", import.meta.url), "utf8");
+  assert.ok(
+    src.includes("startOpenAIRelay({ logger: createPanelForwardingLogger() })"),
+    "zcode main() 的回退中继 logger 必须转发面板 ingest",
+  );
+});

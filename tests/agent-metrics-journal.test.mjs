@@ -260,6 +260,25 @@ describe("usage journal wiring", () => {
     const stab = collector.getModelStability();
     assert.equal(stab.models[0].successRate, 100);
   });
+
+  it("routes the journal-append failure warn to an injected logger (A4)", () => {
+    let t = 1000;
+    const warnings = [];
+    const collector = testCollector({
+      nowFn: () => t,
+      logger: { warn: (m) => warnings.push(m) },
+      journal: {
+        appendRequest: () => {
+          throw new Error("disk on fire");
+        },
+      },
+    });
+    const req = collector.startRequest({ providerId: "p1", model: "m1" });
+    t = 1200;
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    assert.deepEqual(warnings, ["[agent-metrics] usage journal append failed: disk on fire"],
+      "旁路 console.warn 改走注入 logger，文案不变");
+  });
 });
 
 describe("usage journal roundtrip through a real journal dir", () => {

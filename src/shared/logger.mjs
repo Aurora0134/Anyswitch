@@ -22,6 +22,31 @@
 
 const DEFAULT_CAPACITY = 500;
 
+// 面板日志总线的 ingest 端点（面板宿主 47820）。没有自己日志文件的短命进程
+// （一次性 launcher 的回退中继、独立看门狗）把日志行 POST 到这里，由面板的
+// logger 总线再发布——行才进得了面板「运行日志」。
+export const PANEL_LOG_INGEST_URL = "http://127.0.0.1:47820/panel/api/logs/ingest";
+
+// 转发 logger：每行原样 POST 给面板 ingest。Best-effort——面板没起或拒收就丢，
+// 绝不因为日志转发弄坏主流程；调用方需要留痕时自己另配落盘通道。
+export function createPanelForwardingLogger({ fetchFn = fetch, url = PANEL_LOG_INGEST_URL } = {}) {
+  const origin = new URL(url).origin;
+  const forward = (level) => (message) => {
+    fetchFn(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-anyswitch-panel": "1",
+        origin,
+      },
+      body: JSON.stringify({ level, message: String(message) }),
+    }).catch(() => {
+      // Panel down or starting — logging is best-effort, drop the entry.
+    });
+  };
+  return { info: forward("info"), warn: forward("warn"), error: forward("error") };
+}
+
 // The level vocabulary this bus knows, ranked so "at least WARN" can be answered
 // honestly. Never compare level strings: alphabetically that orders error < info
 // < warn, which would rank the noisiest level as the most urgent.

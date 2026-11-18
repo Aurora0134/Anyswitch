@@ -197,6 +197,27 @@ test("append failure warns but never throws back at the caller", () => {
   assert.ok(warned >= 2, "each failed append must warn");
 });
 
+test("append failure routes the warn to an injected logger instead of console", () => {
+  const blocker = join(tempDir(), "blocked");
+  writeFileSync(blocker, "i am a file, not a dir");
+  const warnings = [];
+  const journal = createUsageJournal({
+    dir: join(blocker, "usage"),
+    logger: { warn: (m) => warnings.push(m) },
+  });
+  const originalWarn = console.warn;
+  let consoleWarned = 0;
+  console.warn = () => { consoleWarned += 1; };
+  try {
+    journal.appendRequest({ ts: 1 });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(warnings.length, 1, "注入 logger 后告警走注入通道");
+  assert.match(warnings[0], /^\[usage-journal\] append requests failed: /);
+  assert.equal(consoleWarned, 0, "注入 logger 后不再旁路 console");
+});
+
 test("read parse cache invalidates after append (read → append → read)", () => {
   const dir = tempDir();
   const journal = createUsageJournal({ dir });
