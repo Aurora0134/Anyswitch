@@ -11,7 +11,6 @@ const GITFILE_PREFIX = "gitdir: ";
 // Durable object store lives OUTSIDE the data dir, as a sibling named after the product.
 export const ANCHOR_PARENT_NAME = "Anyswitch-git";
 export const ANCHOR_DIR_NAME = "objects";
-export const ANCHOR_SEAL_NAME = "objects.sealed";
 
 export function defaultLocalAppData(env = process.env) {
   return env.LOCALAPPDATA ?? join(env.USERPROFILE ?? "", "AppData", "Local");
@@ -23,10 +22,6 @@ export function defaultAnchorParent(env = process.env) {
 
 export function defaultAnchorDir(env = process.env) {
   return join(defaultAnchorParent(env), ANCHOR_DIR_NAME);
-}
-
-export function defaultSealedDir(env = process.env) {
-  return join(defaultAnchorParent(env), ANCHOR_SEAL_NAME);
 }
 
 /** Previous sibling location — repair script migrates this; hosts do not. */
