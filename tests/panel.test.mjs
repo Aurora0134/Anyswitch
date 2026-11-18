@@ -132,6 +132,10 @@ const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET
     return found;
   })
   .join("\n");
+// 键入唯一出口的新依赖（2026-11-18 人类键入记账）：形状判据是正则字面量，字符
+// 类里的 ; 会截断 [^;]+，按行取样；记账表是运行时状态，各沙箱自建空表。
+const terminalInputAutoReplyConst = panelJs.match(/const TERMINAL_INPUT_AUTO_REPLY = [^\n]+/)?.[0];
+assert.ok(terminalInputAutoReplyConst, "TERMINAL_INPUT_AUTO_REPLY 可从 panel.js 取到");
 // 闲剪（缓冲软顶回落）的阈值常量与跟随护栏的窗口常量：同款从源码取样注入——
 // 测试不抄数字，改阈值时行为钉跟着变（如闲剪落位钉 4500 按软顶 5000 折算）。
 const terminalIdleTrimConsts = ["TERMINAL_SCROLLBACK_SOFT_CAP", "TERMINAL_IDLE_TRIM_MS", "TERMINAL_IDLE_TRIM_MIN_OVERAGE", "TERMINAL_IDLE_TRIM_SETTLE_MS", "TERMINAL_IDLE_TRIM_MAX_MS"]
@@ -11069,6 +11073,8 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       // 整屏重建的接线桩：只记账不真重连（本组只验「半块丢弃 + 请求重建」这一段）。
       const requestTerminalFrameRebuild = (session, term) => { state.rebuilds.push({ id: session?.id, term }); };
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
+      const terminalUserInputAt = new Map();
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -11473,6 +11479,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
+      const terminalUserInputAt = new Map();
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -13658,6 +13666,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       ${terminalBurstConsts}
+      ${terminalInputAutoReplyConst}
+      const terminalUserInputAt = new Map();
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
       const host = { clientWidth: 1200, clientHeight: 600 };
