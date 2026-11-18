@@ -1470,6 +1470,101 @@ test("kimi: lastPromptAt 是最近的 prompt.accepted，system-reminder 注入�
   // lastActive 走 wire mtime（既有口径），这里的提问时间戳是从事件行里读的。
 });
 
+// kimi 后台任务完成通知（<notification id="task:…:completed" type="task.completed"
+// source_kind="background_task">）同样以 user 角色的 context.append_message 落盘。
+// 它与 system-reminder 同属注入、不同标签：不滤则被当「末次用户提问」推进行键
+// （实测 72cc225d：20 条通知、末条把键抬到通知时刻，真实末问早 3 小时被盖过）。
+test("kimi: lastPromptAt 不被 <notification> 后台任务通知推进", async () => {
+  const root = makeTmp();
+  const sessionDir = join(root, "sessions", "wd_x", "session_ntf");
+  mkdirSync(join(sessionDir, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(sessionDir, "agents", "main", "wire.jsonl"),
+    [
+      JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "真实提问" }], time: 1788000001000 }),
+      JSON.stringify({ type: "context.append_loop_event", event: { type: "content.part", part: { type: "text", text: "回答" } }, time: 1788000002000 }),
+      // 后台任务完成通知（user 角色注入）：不推进键。
+      JSON.stringify({
+        type: "context.append_message",
+        message: {
+          role: "user",
+          content: '<notification id="task:agent-x:completed" category="task" type="task.completed" source_kind="background_task">done</notification>',
+        },
+        time: 1788000003000,
+      }),
+      // 通知之后只剩 system-reminder 提醒：同样被滤，键停在真实提问。
+      JSON.stringify({
+        type: "context.append_message",
+        message: { role: "user", content: "<system-reminder>The TodoWrite tool hasn't been used recently.</system-reminder>" },
+        time: 1788000004000,
+      }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "session_index.jsonl"),
+    JSON.stringify({ sessionId: "session_ntf", sessionDir, workDir: "C:\\work\\kimi-ntf" }) + "\n",
+    "utf8",
+  );
+  const { sessions } = await testScanner({ kimi: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].lastPromptAt, 1788000001000, "后台任务通知不推进键，键停在真实提问");
+});
+
+// 与 lastPromptAt 同一把尺（firstPrompt 的取标题与「无真人文本不进列表」门槛）：
+// 通知块不当标题；只有通知、没有任何真人文本的会话不是对话，不进列表。
+test("kimi: <notification> 通知不当标题，纯通知会话不进列表", async () => {
+  const root = makeTmp();
+  // 会话一：首条 user 文本是通知，其后才有真人提问——标题取真人提问。
+  const dir1 = join(root, "sessions", "wd_a", "session_t1");
+  mkdirSync(join(dir1, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(dir1, "agents", "main", "wire.jsonl"),
+    [
+      JSON.stringify({
+        type: "context.append_message",
+        message: {
+          role: "user",
+          content: '<notification id="task:agent-y:completed" category="task" type="task.completed" source_kind="background_task">done</notification>',
+        },
+        time: 1788000001000,
+      }),
+      JSON.stringify({ type: "context.append_message", message: { role: "user", content: "把部署修好" }, time: 1788000002000 }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  // 会话二：只有通知，没有任何真人文本。
+  const dir2 = join(root, "sessions", "wd_b", "session_t2");
+  mkdirSync(join(dir2, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(dir2, "agents", "main", "wire.jsonl"),
+    [
+      JSON.stringify({
+        type: "context.append_message",
+        message: {
+          role: "user",
+          content: '<notification id="task:agent-z:completed" category="task" type="task.completed" source_kind="background_task">done</notification>',
+        },
+        time: 1788000003000,
+      }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "session_index.jsonl"),
+    [
+      JSON.stringify({ sessionId: "session_t1", sessionDir: dir1, workDir: "C:\\work\\kimi-a" }),
+      JSON.stringify({ sessionId: "session_t2", sessionDir: dir2, workDir: "C:\\work\\kimi-b" }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  const { sessions } = await testScanner({ kimi: [root] }).scanAll();
+  assert.equal(sessions.length, 1, "纯通知会话不是对话，不进列表");
+  assert.equal(sessions[0].id, "session_t1");
+  assert.equal(sessions[0].title, "把部署修好", "标题取真人提问，不取通知块");
+  assert.equal(sessions[0].lastPromptAt, 1788000002000, "行级判据与取标题同一把尺");
+});
+
 // 深扫（>2MB）分端点回归：各家真实存储里单文件可以长到几十上百 MB
 // （kimi 实测 134.5MB），旧 2MB 尾窗读不到旧提问；kimi 又没有 createdAt
 // 可回落，键归零、行沉到组底。深扫必须整份倒扫把首问时间取回。
