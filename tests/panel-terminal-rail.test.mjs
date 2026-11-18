@@ -1696,7 +1696,8 @@ describe("终端视图左栏换血", () => {
       assert.ok(branch.indexOf("parkTerminalScreen(session);") < branch.indexOf("connectTerminalStream(session, { revive });"),
         "停放排在建流之前：92f6ced 垫片次序，park 与 connect 成对延后");
       assert.ok(branch.includes('if (currentView === "terminal") scheduleTerminalFit();'), "fit 同组延后");
-      assert.ok(branch.includes("if (terminalScreenSeq !== screenSeq) return;"), "帧令牌：连点时旧帧醒来即退场");
+      assert.ok(branch.includes("terminalScreenSeq !== screenSeq) return;"), "帧令牌：连点时旧帧醒来即退场");
+      assert.ok(branch.includes("activeTerminalPreviewId !== session.id"), "换屏前再核对当前选择");
       // 非 defer 路径保持同步直排（panel-terminal-loading 的切换入口断言同款字面）
       assert.ok(render.includes("if (typeof parkTerminalScreen === \"function\") parkTerminalScreen(session);\n    connectTerminalStream(session, { revive });"),
         "默认路径原样：停放→建流同步直排");

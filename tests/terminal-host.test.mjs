@@ -918,6 +918,47 @@ test("② SSE data 帧合帧：一个窗口多块合一帧、多连接各自独�
   }
 });
 
+test("SSE 缩短异步小回显的等待，保持旧输出和退出帧的顺序", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-echo-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} }, sseCoalesceWindowMs: 1000 });
+  const port = await listen(host);
+  const endpoint = "http://127.0.0.1:" + port + "/terminal/sessions";
+  const post = (url, body) => fetch(url, { method: "POST", headers: headers(host), body: JSON.stringify(body) });
+  const controller = new AbortController();
+  try {
+    const { id } = await post(endpoint, { cwd: root, shell: "powershell" }).then((r) => r.json());
+    const { pty } = calls[0];
+    pty.write = (data) => pty.writeLog.push(data); // 回显只能来自稍后的 PTY 数据
+    const response = await fetch(endpoint + "/" + id + "/stream", { headers: headers(host), signal: controller.signal });
+    const collector = startSseCollector(response);
+    const input = (data, origin) => post(endpoint + "/" + id + "/input", { data, origin });
+
+    assert.equal((await input("auto-input", "auto-reply")).status, 200);
+    pty.dataListener("background;");
+    assert.equal(await waitForSseFrame(collector, "data", { timeoutMs: 30 }), false,
+      "自动应答和后台输出仍沿用普通的合帧窗口");
+
+    assert.equal((await input("k", "user")).status, 200);
+    assert.deepEqual(pty.writeLog, ["auto-input", "k"]);
+    assert.deepEqual(collector.frames.map((frame) => frame.event), ["snapshot"], "PTY 尚未回显，宿主不应合成本地回显");
+    await new Promise((resolve) => setImmediate(() => { pty.dataListener("PTY-k"); resolve(); }));
+    assert.ok(await waitForSseFrame(collector, "data", { timeoutMs: 200 }),
+      "PTY 小回显不应等待原来的 1000ms 窗口");
+
+    pty.dataListener(";last");
+    pty.kill();
+    assert.ok(await waitForSseFrame(collector, "exit"));
+    assert.deepEqual(collector.frames.map((frame) => frame.event), ["snapshot", "data", "data", "exit"]);
+    assert.deepEqual(collector.frames.filter((frame) => frame.event === "data").map((frame) => JSON.parse(frame.data)),
+      ["background;PTY-k", ";last"]);
+  } finally {
+    controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ②-b exit 顺序：窗口拉大到永不到点，pending 只能靠 exit 的前置冲净出来——
 // 最后一屏排在退出帧之前，帧序不能倒。整段在同一个 tick 内完成，零时钟依赖。
 test("② SSE exit 先冲净 pending 再发 exit 帧：最后一屏不丢、帧序不倒", async () => {
@@ -4104,6 +4145,49 @@ test("大块输出经 emit 的同步耗时受限，续排后镜像仍完整", as
     assert.equal(session.screen.info().pendingChars, 0, "续排结束后不得残留待解析字节");
     assert.ok(session.screen.info().historyLines > 0, "续排后历史必须已经生成");
   } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resize 保留旧输出的列宽，且不在一轮内同步排空镜像", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-resize-slices-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const endpoint = `http://127.0.0.1:${port}/terminal/sessions`;
+  const post = (url, body) => fetch(url, { method: "POST", headers: headers(host), body: JSON.stringify(body) });
+  const controller = new AbortController();
+  try {
+    const { id } = await post(endpoint, { cwd: root, shell: "powershell", cols: 40, rows: 6 }).then((r) => r.json());
+    const { pty } = calls[0];
+    const { screen } = host.sessions.get(id);
+    // 固定前置状态，避免 HTTP 请求在 onData 自动续排后才到达。旧尺寸下第 70 列应夹到第 40 列。
+    const payload = "\n".repeat(256 * 1024) + "\x1b[1;70HZ";
+    assert.equal(screen.writeSliced(payload, 0.001).done, false);
+    let pendingOnNextTurn;
+    let stream;
+    pty.resize = (cols, rows) => {
+      FakePty.prototype.resize.call(pty, cols, rows);
+      pty.dataListener("\x1b[2;70HN"); // resize 后的输出已有第 70 列可写
+      pendingOnNextTurn = new Promise((resolve) => setImmediate(() => resolve(screen.info().pendingChars)));
+      stream = fetch(`${endpoint}/${id}/stream`, { headers: headers(host), signal: controller.signal });
+    };
+
+    const response = await post(`${endpoint}/${id}/resize`, { cols: 80, rows: 6 });
+    assert.equal(response.status, 200);
+    const persisted = createScreenMirror({ cols: 80, rows: 6 });
+    persisted.loadSnapshot(readSessionRecord(host, id).screen);
+    assert.deepEqual(persisted.screenLines().slice(0, 2), [" ".repeat(39) + "Z", " ".repeat(69) + "N"]);
+    assert.ok(await pendingOnNextTurn > 0, "处理 resize 与序列化时应让出循环，积压应在后续轮次解析");
+
+    const collector = startSseCollector(await stream);
+    assert.ok(await waitForSseFrame(collector, "data", { timeoutMs: 3000 }));
+    assert.deepEqual(collector.frames.map((frame) => frame.event), ["snapshot", "data"]);
+    assert.equal(JSON.parse(collector.frames[0].data).screenCols, 80, "snapshot 必须描述回放使用的列宽");
+    assert.equal(JSON.parse(collector.frames[1].data), persisted.toReplay(), "回放包含 resize 前后完整且保序的绘制");
+  } finally {
+    controller.abort();
     await host.close();
     rmSync(root, { recursive: true, force: true });
   }

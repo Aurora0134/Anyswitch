@@ -62,6 +62,11 @@ const FIRST_FRAME_WARN_MS = 5000;
 // 定时器。窗口是给「TUI 把一帧拆成好几个小块」省帧数用的，不是给一次粘贴一大
 // 屏白添延迟用的——大块输出攒在缓冲里只会推迟它到达浏览器的时间。
 const SSE_PENDING_FLUSH_BYTES = 32 * 1024;
+// 只给短用户输入后的第一段 PTY 小输出加速；普通输出仍留足一帧的合帧时间。
+const SSE_ECHO_COALESCE_MS = 2;
+const SSE_ECHO_WAIT_MS = 80;
+const SSE_ECHO_INPUT_MAX_CHARS = 32;
+const SSE_ECHO_OUTPUT_MAX_BYTES = 1024;
 // 落盘防抖窗口：一个窗口内的多块输出合成一拍写。
 const PERSIST_DEBOUNCE_MS = 250;
 // 单拍最多写几份会话文件、最多写多少（**序列化后**）字节。防抖拍到的写是「有界
@@ -945,6 +950,11 @@ export function createTerminalHost({
       if (only) {
         for (const session of only) {
           if (!dirtySessions.has(session)) continue;
+          // 序列化会排空镜像；先让宿主的续排按预算处理，不在 resize 等请求内同步冲完。
+          while (session.screen?.hasPendingWork?.()) {
+            scheduleMirrorDrain(session);
+            await new Promise((resolve) => setImmediate(resolve));
+          }
           const item = consider(session);
           if (item) batch.push(item);
         }
@@ -957,6 +967,12 @@ export function createTerminalHost({
             if (!full && batch.length >= PERSIST_SESSION_WRITES_PER_PASS) break;
             if (!full && batchBytes >= PERSIST_PASS_MAX_BYTES) break;
           }
+          while (session.screen?.hasPendingWork?.()) {
+            scheduleMirrorDrain(session);
+            if (!full) break; // 防抖拍不要让一条积压会话挡住其他记录。
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          if (session.screen?.hasPendingWork?.()) continue;
           const item = consider(session);
           if (!item) continue;
           batch.push(item);
@@ -1504,7 +1520,7 @@ export function createTerminalHost({
     }
   }
 
-  function emit(session, chunk) {
+  function emit(session, chunk, fromPty = false) {
     // 关停闸：close() 一进去就置真，此后到达的输出**整块丢弃**（不进字节窗、不进
     // 镜像、不置脏）。理由：close() 承诺「返回时盘上是整份状态」，而 PTY 在宿主
     // 进程退出前仍在出字；只要还往字节窗里收，全量冲净就永远追不上（实测 6 会话
@@ -1520,8 +1536,14 @@ export function createTerminalHost({
     const text = scanned.text;
     // 整块都是已应答的询问：没有可转发、可记录的内容，也不算一次活动。
     if (!text) return;
+    const bytes = chunkBytes(text);
+    let smallEcho = false;
+    if (fromPty && session.echoUntil) {
+      smallEcho = bytes <= SSE_ECHO_OUTPUT_MAX_BYTES && performance.now() <= session.echoUntil;
+      session.echoUntil = 0;
+    }
     session.buffer.push(text);
-    session.bufferBytes += chunkBytes(text);
+    session.bufferBytes += bytes;
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     feedMirror(session, text);
     session.lastActiveAt = nowFn();
@@ -1533,7 +1555,7 @@ export function createTerminalHost({
     // 会话的脏标，250ms 防抖到点的那一拍只重写它自己那份文件——别的会话空闲与
     // 否不再影响这个会话的单拍成本。
     markSessionDirty(session);
-    for (const listener of session.listeners) listener(text);
+    for (const listener of session.listeners) listener(text, smallEcho);
     schedulePersist();
   }
 
@@ -1639,7 +1661,7 @@ export function createTerminalHost({
         firstByteAt = Date.now();
         clearTimeout(firstFrameTimer);
       }
-      emit(session, data);
+      emit(session, data, true);
     });
     child.onExit(({ exitCode }) => {
       // 这一代进程已经结束：无论是不是当前代，都把它从待杀清单里摘掉——死 pid
@@ -1792,6 +1814,7 @@ export function createTerminalHost({
     // 幽灵询问，一并清零。新 agent 起来后自会再问一遍（OSC 11 / 996n / 2031h）。
     session.themeNotify = false;
     session.queryScanner = null;
+    session.echoUntil = 0;
     // An agent launch replaces the shell spec entirely (the cmd /c wrapper is
     // already in the launch args); a plain shell session behaves exactly as
     // before. The env delta is merged over this process's environment with
@@ -1839,6 +1862,7 @@ export function createTerminalHost({
     let pendingChunks = [];
     let pendingBytes = 0;
     let flushTimer = null;
+    let flushAt = 0;
     const writeDataFrame = (text) => res.write(`event: data\ndata: ${JSON.stringify(text)}\n\n`);
     const flushPending = () => {
       if (flushTimer) {
@@ -1851,7 +1875,7 @@ export function createTerminalHost({
       pendingBytes = 0;
       writeDataFrame(merged);
     };
-    const listener = (chunk) => {
+    const listener = (chunk, smallEcho) => {
       if (chunk === null) {
         flushPending();
         res.write("event: exit\ndata: {}\n\n");
@@ -1864,10 +1888,15 @@ export function createTerminalHost({
         flushPending();
         return;
       }
-      if (!flushTimer) {
-        flushTimer = setTimeout(flushPending, coalesceWindowMs);
-        flushTimer.unref?.();
-      }
+      if (flushTimer && !smallEcho) return;
+      const delay = smallEcho ? Math.min(coalesceWindowMs, SSE_ECHO_COALESCE_MS) : coalesceWindowMs;
+      const deadline = performance.now() + delay;
+      if (flushTimer && deadline >= flushAt) return;
+      // 保留同一个缓冲，连同此前的输出保序发出；只提前定时器，不旁路发帧。
+      if (flushTimer) clearTimeout(flushTimer);
+      flushAt = deadline;
+      flushTimer = setTimeout(flushPending, delay);
+      flushTimer.unref?.();
     };
     session.listeners.add(listener);
     const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15000);
@@ -1889,7 +1918,6 @@ export function createTerminalHost({
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
-    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`);
     // Replay comes from the rendered mirror: an absolutely positioned repaint plus
     // the rows that scrolled away, so it is correct regardless of where the raw
     // window's head fell and it restores a scrollable scrollback. The raw byte path
@@ -1897,12 +1925,12 @@ export function createTerminalHost({
     // a state file written before the mirror existed) — degraded, never dead.
     //
     // 镜像可能还有没解析完的积压（切片解析在续排）。这里不能一口气同步排空：一次
-    // resume 之后的积压排空要几十毫秒，而建连本来就不该把事件循环按住——那正是
-    // 本次改动要消除的卡顿形态。改成按预算分几轮排空再发回放帧：客户端先拿到
-    // snapshot，回放帧晚几轮到达，语义不变（帧序仍是 snapshot → 回放 → 实时）。
+    // resume 之后的积压排空要几十毫秒。先发响应头，按预算分几轮排空再发 snapshot
+    // 和回放；两帧必须取同一尺寸，避免等待中的 resize 让回放沿用过时的坐标系。
     // 监听器在回放发出后才挂上，因此这期间到达的实时块只进 buffer 与镜像，不会
     // 既被回放覆盖又被单独转发一遍。
     const emitReplay = () => {
+      res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`);
       let rendered = "";
       try {
         rendered = session.screen && session.screen.info().consumedBytes > 0 ? session.screen.toReplay() : "";
@@ -1915,19 +1943,17 @@ export function createTerminalHost({
       if (replay) res.write(`event: data\ndata: ${JSON.stringify(replay)}\n\n`);
       attachStream(session, res);
     };
-    if (session.screen && session.screen.info().pendingChars > 0) {
-      const pump = () => {
-        if (res.writableEnded) return; // 人已走：别再为这条连接排空镜像
-        let done = true;
-        try {
-          done = session.screen.drain(MIRROR_SLICE_MS).done;
-        } catch (error) {
-          skipMirrorChunk(session, error);
-        }
-        if (done) emitReplay();
-        else setImmediate(pump);
+    if (session.screen?.hasPendingWork?.()) {
+      res.flushHeaders();
+      const afterDrain = () => {
+        if (res.destroyed || res.writableEnded) return;
+        if (session.screen?.hasPendingWork?.()) {
+          scheduleMirrorDrain(session);
+          setImmediate(afterDrain);
+        } else emitReplay();
       };
-      setImmediate(pump);
+      scheduleMirrorDrain(session);
+      setImmediate(afterDrain);
       return;
     }
     emitReplay();
@@ -2104,7 +2130,16 @@ export function createTerminalHost({
         const body = await readBody(req);
         if (typeof body.data !== "string" || body.data.length > 64 * 1024) return json(res, 400, { error: "invalid_input" });
         if (!session.pty) return json(res, 409, { error: "session_exited" });
-        session.pty?.write(body.data);
+        if (body.origin !== "auto-reply") {
+          session.echoUntil = body.data.length > 0 && body.data.length <= SSE_ECHO_INPUT_MAX_CHARS
+            ? performance.now() + SSE_ECHO_WAIT_MS : 0;
+        }
+        try {
+          session.pty.write(body.data);
+        } catch (error) {
+          if (body.origin !== "auto-reply") session.echoUntil = 0;
+          throw error;
+        }
         // 键入不再刷新 lastActiveAt（PTY 回显会走 emit 把它顶进活跃窗，把「用户
         // 在打字」误归因成「agent 在跑」）——改记 lastInputAt，面板的键入抑制窗
         // 拿它当锚点。不落盘：它是分秒级信号，恢复后的老会话按缺省（无抑制）走。
@@ -2146,7 +2181,10 @@ export function createTerminalHost({
         if (stampedResizeEcho) session.lastResizeAt = nowFn();
         try {
           if (!session.screen) session.screen = createScreenMirror({ cols, rows });
-          else session.screen.resize(cols, rows);
+          else {
+            session.screen.resize(cols, rows);
+            if (session.screen.hasPendingWork?.()) scheduleMirrorDrain(session);
+          }
         } catch (error) {
           logger.warn?.(`[terminal-host] screen mirror resize skipped (${session.id}): ${error.message}`);
         }

@@ -430,6 +430,9 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 待解析输入：切片解析可能在中途停下，未消化的字节留在这里等下一轮。
   let pending = "";
   let pendingOffset = 0;
+  // 尺寸变更是顺序标记，之后收到的字节攒在该标记后面。
+  const pendingResizes = [];
+  let resizeBacklog = false;
   // 跨块未完成的转义序列（见 consumeEscape 的 INCOMPLETE）。
   let carry = "";
   // toReplay 结果缓存：一次整屏重绘要 15–20ms，而每次 attach 都会调一次。
@@ -1354,6 +1357,11 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   // 待解析输入入队：上一轮留下的未完成转义序列排在最前面，顺序天然保序。
   function queueInput(input) {
+    const tail = pendingResizes.at(-1);
+    if (tail) {
+      tail.input += input;
+      return;
+    }
     const prefix = carry;
     carry = "";
     if (pendingOffset >= pending.length) {
@@ -1366,15 +1374,13 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   // 解析到预算为止。done=true 表示这一轮没有剩余工作（已排空，或尾部是一个
   // 还在等后续字节的转义序列）；done=false 表示预算用尽、调用方应尽快再调一次。
-  function drain(budgetMs) {
+  function drainInput(deadline) {
     if (pendingOffset >= pending.length) {
       pending = "";
       pendingOffset = 0;
       return { done: true, pendingChars: 0 };
     }
     const backlog = pending.length - pendingOffset;
-    // 积压超过上限就整段同步排空：这是内存兜底，正常速率下永不触发。
-    const deadline = budgetMs > 0 && backlog <= TERMINAL_PENDING_MAX ? nowMs() + budgetMs : 0;
     const start = pendingOffset;
     const result = parseInto(pending, start, deadline);
     if (result.index > start) replayCache = null;
@@ -1396,6 +1402,45 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       return { done: true, pendingChars: 0 };
     }
     return { done: false, pendingChars: backlog - (result.index - start) };
+  }
+
+  function pendingChars() {
+    return carry.length + Math.max(0, pending.length - pendingOffset)
+      + pendingResizes.reduce((sum, next) => sum + next.input.length, 0);
+  }
+
+  function hasPendingWork() {
+    return pendingOffset < pending.length || pendingResizes.length > 0;
+  }
+
+  function drain(budgetMs) {
+    // 保留普通输出的内存兜底；有 resize 标记时不能借它同步冲完两侧的积压。
+    const deadline = budgetMs > 0 && (resizeBacklog || pendingChars() <= TERMINAL_PENDING_MAX)
+      ? nowMs() + budgetMs : 0;
+    for (;;) {
+      const inputWasPending = pendingOffset < pending.length;
+      const result = drainInput(deadline);
+      if (!result.done || pendingResizes.length === 0) {
+        if (result.done) resizeBacklog = false;
+        return { done: result.done, pendingChars: pendingChars() };
+      }
+      // 重排本身已有开销。先结束解析切片，再单独让下一轮应用标记。
+      if (budgetMs > 0 && inputWasPending) return { done: false, pendingChars: pendingChars() };
+      const { cols, rows, input } = pendingResizes.shift();
+      applyResize(cols, rows);
+      // 未完成的转义序列在下一批字节到达时继续，尺寸变化不截断字节流。
+      if (input) {
+        pending = carry + input;
+        carry = "";
+      }
+      if (budgetMs > 0 && hasPendingWork()) return { done: false, pendingChars: pendingChars() };
+    }
+  }
+
+  function applyResize(cols, rows) {
+    if (cols === width && rows === height) return;
+    rebuild(cols, rows);
+    replayCache = null;
   }
 
   function write(input) {
@@ -1420,6 +1465,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 丢弃待解析字节：解析出错时调用，宁可少画这一段，也不能让偏移和字节流脱节后
   // 把后续所有输出都画错位。
   function discardPending() {
+    pendingResizes.length = 0;
+    resizeBacklog = false;
     pending = "";
     pendingOffset = 0;
     carry = "";
@@ -1596,10 +1643,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     }
     if (snap.inAlt === true && altSaved) inAlt = true;
     consumedBytes = Number(snap.consumedBytes) || 0;
-    pending = "";
-    pendingOffset = 0;
-    carry = "";
-    replayCache = null;
+    discardPending();
     return true;
   }
 
@@ -1698,15 +1742,22 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     drain,
     flush,
     discardPending,
+    hasPendingWork,
     toReplay,
     serializeSnapshot,
     loadSnapshot,
     resize(nextCols, nextRows) {
       const cols = Math.max(1, nextCols | 0);
       const rows = Math.max(1, nextRows | 0);
-      if (cols === width && rows === height) return;
-      rebuild(cols, rows);
-      replayCache = null;
+      if (!hasPendingWork()) {
+        applyResize(cols, rows);
+        return;
+      }
+      const tail = pendingResizes.at(-1);
+      if (tail && tail.cols === cols && tail.rows === rows) return;
+      // 两次 resize 之间没有输出也可能改变折行，仍按原序重排。
+      pendingResizes.push({ cols, rows, input: "" });
+      resizeBacklog = true;
     },
     // Test/diagnostic surface: the rendered picture as plain lines.
     screenLines() {
@@ -1767,7 +1818,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       // restartHygiene 里都会调，而排空一整批积压是几十毫秒的同步工作——那正是
       // 本次改动要消除的卡顿形态。consumedBytes 在入队时就已累加，因此这里读到的
       // 值天然对应当前字节流；需要「解析后的画面状态」的调用方自己先 flush()。
-      return { cols: width, rows: height, row, col, historyLines: history.length, historyBytes: historyTotal, consumedBytes, inAlt, cursorVisible, pendingChars: carry.length + Math.max(0, pending.length - pendingOffset) };
+      return { cols: width, rows: height, row, col, historyLines: history.length, historyBytes: historyTotal, consumedBytes, inAlt, cursorVisible, pendingChars: pendingChars() };
     },
   };
 }
