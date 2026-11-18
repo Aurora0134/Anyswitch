@@ -12938,7 +12938,7 @@ describe("虚拟终端底部自动对齐", () => {
       "新条目位列「从上次中断的地方继续」之后（同一个小窗内并列追加）");
   });
 
-  function alignSandbox() {
+  function alignSandbox({ lines = { 519: "history above the overflow" } } = {}) {
     const fnSrc = alignSrc("installTerminalBottomAlign", /function installTerminalBottomAlign\(term\) \{[\s\S]*?\n  \}/);
     const intentSrc = alignSrc("TERMINAL_SCROLL_INTENT_MS", /const TERMINAL_SCROLL_INTENT_MS = \d+;/);
     const bandSrc = alignSrc("TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX", /const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = \d+;/);
@@ -12960,8 +12960,10 @@ describe("虚拟终端底部自动对齐", () => {
       const els = {};
       function $(id) { return els[id] || null; }
       function terminalBottomAlignEnabled() { return state.alignOn; }
+      ${extractFn("trimTerminalOuterBand")}
       ${fnSrc}
       // 对齐状态在模块级平铺单值上；经访问器镜成 column 形状，用例写法不变。
+      let terminalStaleScreen = null;
       let terminalImeHold = null;
       let terminalBottomAlignIntentAt = 0;
       let terminalBottomAlignTrimFrame = null;
@@ -12982,10 +12984,20 @@ describe("虚拟终端底部自动对齐", () => {
       get() { return scrollTopValue; },
       set(v) { writes.push(v); scrollTopValue = v; },
     });
+    screen.clientTop = 2;
+    screen.getBoundingClientRect = () => ({ top: 60 });
+    const renderer = { getBoundingClientRect: () => ({ top: 80 - screen.scrollTop, height: 840 }) };
+    root.querySelector = (selector) => selector === ".xterm-screen" ? renderer : null;
+    screen.contains = (element) => element === root;
     sandbox.els.terminalScreen = screen;
     sandbox.els.terminalView = { get hidden() { return state.viewHidden; } };
     const term = {
       element: root,
+      rows: 30,
+      buffer: { active: {
+        viewportY: 500, baseY: 500, length: 530,
+        getLine: (y) => ({ isWrapped: y === 523, translateToString: () => lines[y] ?? "" }),
+      } },
       scrollToBottom() { state.scrollToBottomCount = (state.scrollToBottomCount || 0) + 1; },
       scrollToLines() { state.scrollToLinesCount = (state.scrollToLinesCount || 0) + 1; },
     };
@@ -13012,6 +13024,17 @@ describe("虚拟终端底部自动对齐", () => {
     assert.equal(screen.dataset.bottomAlignTrim, "300", "调试属性记下被吃的带高");
     assert.equal(state.scrollToBottomCount, undefined, "不调 scrollToBottom");
     assert.equal(state.scrollToLinesCount, undefined, "不调 scrollToLines");
+  });
+
+  it("上滚收掉可裁的部分，保留溢出区域里重复的折行文字", () => {
+    const { root, screen, writes, flush } = alignSandbox({ lines: { 522: "repeated", 523: "repeated" } });
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    // 渲染区在归零时从 y=80 开始，最后一行是第 24 个 28px 格，外层裁切线在 y=662。
+    assert.equal(screen.scrollTop, 90, "最后一个折行的底缘恰好留在可视区");
+    screen.fire("scroll");
+    flush();
+    assert.deepEqual(writes, [90], "后续滚动事件不会继续裁字");
   });
 
   it("无空带不动：scrollHeight==clientHeight 时上滚零写；行高取整残余（<阈值）同样不动", () => {
