@@ -8740,17 +8740,45 @@ async function api(method, path, body) {
   const TERMINAL_FOREGROUND_RESTORE_SETTLE_MS = 150;
   const TERMINAL_FOREGROUND_RESTORE_MAX_MS = 2500;
 
-  // 外层空白带唯一合法停靠位是 0：这个盒子的滚动能力只用于接住渲染层旧高度溢出，
-  // 终端自己的历史滚动在内层 .xterm-viewport。带开关闸的用户意图版见
-  // installTerminalBottomAlign；这里是回前台事务的强制版，两者不共用判据。
-  function trimTerminalOuterBand() {
-    const screen = $("terminalScreen");
-    if (!screen) return;
+  // 回前台和用户上滚共用裁切下限，只裁掉当前 xterm 画面末行以下的空白。
+  function trimTerminalOuterBand(screen = $("terminalScreen"), term = terminalXterm) {
+    if (!screen || screen.clientHeight <= 0) return;
     const gap = screen.scrollHeight - screen.clientHeight;
-    if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX) return; // 无带 / 行高取整残余
-    if (screen.scrollTop <= 0) return;                    // 幂等闸：已在停靠位零写
+    const scrollTop = screen.scrollTop;
+    if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX || scrollTop <= 0) return;
+
+    // 垫片仍挂在屏内且可测量时按旧画面量，揭幕后按新实例量。
+    const measure = (candidate) => {
+      const root = candidate?.element;
+      if (!root || !screen.contains(root)) return null;
+      return root.querySelector(".xterm-screen")?.getBoundingClientRect();
+    };
+    let visibleTerm = terminalStaleScreen?.done ? null : terminalStaleScreen?.term;
+    let renderRect = measure(visibleTerm);
+    if (!(renderRect?.height > 0)) {
+      visibleTerm = term;
+      renderRect = measure(term);
+    }
+    const buffer = visibleTerm?.buffer?.active;
+    const rows = visibleTerm?.rows;
+    if (!buffer || !(rows > 0) || !(renderRect?.height > 0)) return;
+
+    const clipBottom = screen.getBoundingClientRect().top + screen.clientTop + screen.clientHeight;
+    const rowHeight = renderRect.height / rows;
+    const topAtRest = renderRect.top + scrollTop;
+    const { viewportY } = buffer;
+    let target = 0;
+    for (let y = Math.min(buffer.length, viewportY + rows) - 1; y >= viewportY; y -= 1) {
+      const line = buffer.getLine(y);
+      if (!line?.translateToString(true).trim()) continue;
+      // 折行按物理行计数；相同文字也可能占两行。
+      const lastRowBottom = topAtRest + (y - viewportY + 1) * rowHeight;
+      target = Math.max(0, Math.ceil(lastRowBottom - clipBottom));
+      break;
+    }
+    if (target >= scrollTop) return;
     screen.dataset.bottomAlignTrim = String(gap);
-    screen.scrollTop = 0;
+    screen.scrollTop = target;
   }
 
   // 进后台：拆流前把屏面状态抄进交接单。parkTerminalScreen 会把旧实例从模块级引用上
@@ -9540,15 +9568,10 @@ async function api(method, path, body) {
 
   // 底部自动对齐（设置 terminalBottomAutoAlign，缺省关）：窗口收放等尺寸错配期，xterm
   // 渲染层旧高度溢出宿主盒、被外层 .terminal-screen 的 overflow:auto 接住，形成底部可
-  // 滚入的空白带（CDP 取证：收窗期实测 263–353px 可滚余量，寿命跟随错配期而非瞬态；
-  // 内层 .xterm-viewport 全程贴底恒等，空白不在 buffer 层）。开启后用户上滚翻看历史
-  // （wheel 上滚 / Shift+PageUp，与跳顶护栏同一 term root capture 事件面，不在
-  // .terminal-screen 上另挂 wheel）即把外层 scrollTop 收 0 吃掉带子；外层滚动事件流内
-  // 带意图时效窗同做收带（滚动事件无标记，裸信会把布局抖动误判成用户意图）。动作只写
-  // 外层 scrollTop，不写 .xterm-viewport、不调 scrollToBottom/scrollToLines——缓冲层
-  // 的空白带（/ 指令表收起形态）由护栏的地板承接：不自动折回，随用户上滚逐拍吃掉，
-  // 两条通路各管一层。外层
-  // 自然停靠位即 0（带收掉后滚动链终点 = 内容底），「再滚回底部恰好对齐」自动成立。
+  // 滚入的区域（CDP 取证：收窗期实测 263–353px 可滚余量，寿命跟随错配期而非瞬态）。
+  // 开启后用户上滚翻看历史（wheel 上滚 / Shift+PageUp，与跳顶护栏共用 term root
+  // capture 事件面）时收掉外层可裁的空白。外层滚动事件只在上滚意图时效窗内触发收带，
+  // 避免把布局抖动误判成用户意图。这里仅写外层 scrollTop；缓冲层空白由护栏的地板处理。
   const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = 4;
   function installTerminalBottomAlign(term) {
     const root = term.element;
@@ -9561,11 +9584,7 @@ async function api(method, path, body) {
       if (!terminalBottomAlignEnabled()) return;
       if (terminalImeHold) return;             // 组字期不动几何
       if ($("terminalView")?.hidden) return;  // 隐藏期不量不动
-      const gap = screen.scrollHeight - screen.clientHeight;
-      if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX) return;  // 无带/行高取整残余不动
-      if (screen.scrollTop <= 0) return;                     // 幂等闸：已在停靠位零写
-      screen.dataset.bottomAlignTrim = String(gap);          // 调试属性（取证用）
-      screen.scrollTop = 0;
+      trimTerminalOuterBand(screen, term);
     };
     const scheduleTrim = () => {
       if (terminalBottomAlignTrimFrame !== null) return;

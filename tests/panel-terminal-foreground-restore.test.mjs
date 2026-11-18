@@ -44,7 +44,7 @@ function makeClock(start = 100000) {
 
 // 交接单四个真身 + 共享常量的最小桩世界。所有模块级量以访问器暴露，用例可换实例、
 // 换会话、换视图、推进时钟，读到的就是产线那份源码里的同一批变量。
-function handoffWorld() {
+function handoffWorld({ lines = { 5515: "visible history", 6029: "below the xterm viewport" } } = {}) {
   const bodies = [
     "trimTerminalOuterBand",
     "captureTerminalForegroundFrame",
@@ -54,15 +54,24 @@ function handoffWorld() {
   const clock = makeClock();
   const state = { view: "terminal", viewHidden: false, writes: [], restoreCalls: [], disposed: 0 };
   const screen = { scrollHeight: 1000, clientHeight: 600, dataset: {}, writes: [] };
-  let screenScrollTop = 406.7;
+  let screenScrollTop = 399.7;
   Object.defineProperty(screen, "scrollTop", {
     get() { return screenScrollTop; },
     set(v) { screen.writes.push(v); screenScrollTop = v; },
   });
+  screen.clientTop = 2;
+  screen.getBoundingClientRect = () => ({ top: 40 });
+  const renderer = { getBoundingClientRect: () => ({ top: 64.25 - screen.scrollTop, height: 960 }) };
+  const root = { querySelector: (selector) => selector === ".xterm-screen" ? renderer : null };
+  screen.contains = (element) => element === root;
   const writeHandlers = [];
   const term = {
+    element: root,
     rows: 30,
-    buffer: { active: { type: "normal", hasScrollback: true, viewportY: 5500, baseY: 6000, length: 6030 } },
+    buffer: { active: {
+      type: "normal", hasScrollback: true, viewportY: 5500, baseY: 6000, length: 6030,
+      getLine: (y) => ({ isWrapped: y === 5526, translateToString: () => lines[y] ?? "" }),
+    } },
     onWriteParsed(cb) {
       writeHandlers.push(cb);
       return { dispose() { state.disposed += 1; } };
@@ -223,7 +232,7 @@ describe("后台切回屏面交接：真跑", () => {
     const w = handoffWorld();
     w.sandbox.capture();
     w.sandbox.resume();
-    assert.deepEqual(w.screen.writes, [0], "406.7px 的带被收掉，恰好一笔");
+    assert.deepEqual(w.screen.writes, [0], "纯空白带收回原位，恰好一笔");
     assert.equal(w.screen.scrollTop, 0, "回到自然停靠位");
     assert.equal(w.screen.dataset.bottomAlignTrim, "400", "调试属性记下被吃的带高");
     assert.equal(w.sandbox.pending, true, "交接单排给紧随其后的重建");
@@ -237,6 +246,30 @@ describe("后台切回屏面交接：真跑", () => {
     w.sandbox.trim();
     assert.equal(w.screen.writes.length, afterReset, "行高取整残余（2px）不动");
     assert.equal(w.screen.scrollTop, 2);
+  });
+
+  it("回前台保留溢出区域里的折行文字", () => {
+    const w = handoffWorld({ lines: { 5525: "repeated", 5526: "repeated", 6029: "below the xterm viewport" } });
+    w.sandbox.capture();
+    w.sandbox.resume();
+    // 最后可渲染的文字行底缘在归零时为 y=928.25，外层裁切线在 y=642。
+    assert.equal(w.screen.scrollTop, 287, "收带后整个末行仍可见，小数像素向上取整");
+  });
+
+  it("回前台时只有旧画面可见，保留旧画面末行", () => {
+    const w = handoffWorld({ lines: { 5526: "visible old frame" } });
+    w.sandbox.capture();
+    w.stale.term = w.term;
+    w.sandbox.xterm = null;
+    w.sandbox.resume();
+    assert.equal(w.screen.scrollTop, 287, "新实例未建时按仍可见的旧画面收带");
+  });
+
+  it("旧画面已离开屏面时，仍按可见的新画面收带", () => {
+    const w = handoffWorld();
+    w.stale.term = { ...w.term, element: { ...w.term.element } };
+    w.sandbox.resume();
+    assert.equal(w.screen.scrollTop, 0, "已分离的旧画面不妨碍收掉新画面的纯空白带");
   });
 
   it("非终端页回前台：交接单作废，pending 不外溢到下一次无关重建", () => {
