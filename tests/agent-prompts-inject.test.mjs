@@ -211,7 +211,7 @@ describe("agent-prompts-inject block rendering and application", () => {
 
   // 双区域版（契约：intl=~/.qoder、cn=~/.qoder-cn 结构同构）：注入对每个
   // 已识别在装的数据根各写一份；识别按数据根目录在盘判定。
-  it("qoder 双区域版：双装双写、仅 CN 在装只写 CN 根", () => {
+  it("qoder 双区域版：双装双写、重复同步幂等", () => {
     const { injector, homeDir } = makeInjector();
     const intlTarget = join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md");
     const cnTarget = join(homeDir, ".qoder-cn", "rules", "anyswitch-managed-prompts.md");
