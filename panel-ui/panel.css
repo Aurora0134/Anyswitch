@@ -4085,7 +4085,9 @@
   .logs-range-live { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--text-2); cursor: pointer; user-select: none; }
   .logs-range-live input { accent-color: var(--accent); }
   .logs-range-error { font-size: 12px; line-height: 18px; color: var(--danger); }
-  .logs-range-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: auto; }
+  /* 操作行：取消与确认两钮等分撑满整行，左侧不留空位；高度与通用 .btn 一致 */
+  .logs-range-actions { display: flex; gap: 8px; margin-top: auto; }
+  .logs-range-actions .btn { flex: 1 1 0%; justify-content: center; min-width: 0; height: 32px; padding: 0 12px; }
   .logs-calendar { min-width: 0; }
   .logs-calendar-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 8px; }
   .logs-calendar-head .btn { min-width: 32px; padding-inline: 5px; font-size: 16px; }
