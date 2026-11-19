@@ -446,7 +446,8 @@ test("main() wires every machine-touching dep to its real implementation", async
 test("main() forwards argv verbatim and reports the session end", async () => {
   // main 的依赖注入缝只服务测试：grokArgs 被静默吞掉时静态接线检查看不出来，
   // 这里用真实 main 调用把 argv 跟队与上报顺序钉住。全程零真实 relay、零真实
-  // spawn，落盘路径全部钉在夹具 base 上。
+  // spawn、零真实落盘：main() 不透传 base，base 派生路径落在真实 process.env，
+  // 零落盘靠 writeConfig/loadStore/loadToken/createTracker 全为桩。
   const deps = recordingDeps();
   const code = await main(["exec"], {
     startRelay: async () => ({
@@ -466,7 +467,6 @@ test("main() forwards argv verbatim and reports the session end", async () => {
     },
     probeRelay: deps.probeRelay,
     log: deps.log,
-    base: FAKE_BASE,
   });
   assert.equal(code, 0);
   assert.deepEqual(deps.spawned.args, ["exec"], "argv must reach the child verbatim");

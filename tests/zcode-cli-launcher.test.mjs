@@ -364,7 +364,6 @@ describe("runZcodeCliLauncher", () => {
       probeRelay: async () => false,
       resolveExecutable: () => ENTRY,
       resolveBuiltinConfig: () => BUNDLED_BUILTIN,
-      base: {},
     });
     assert.equal(code, 2, "child exit code passes through main");
     assert.deepEqual(spawned[0], ["-p", "hi"], "argv must reach the CLI child verbatim");

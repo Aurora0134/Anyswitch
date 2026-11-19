@@ -263,7 +263,9 @@ test("realSpawnWorkbuddy runs node with the CLI entry first and the argv verbati
 test("main() passes argv through verbatim and reports the session end", async () => {
   // main 的依赖注入缝只服务测试：args 被静默吞掉时 runWorkbuddyLauncher 单测
   // 看不出来，这里用真实 main 调用把 argv 跟队与上报顺序钉住。零真实进程、
-  // 零真实 relay、零真实落盘（writeConfig 是桩，node/cli 解析钉在夹具上）。
+  // 零真实 relay、零真实落盘（writeConfig/spawnWorkbuddy 是桩，node 解析经
+  // resolveNode 桩钉住）。main() 不透传 base——cli/sidecar/models 等 base
+  // 派生路径落在真实 process.env 上，本用例不断言这些路径。
   const deps = recordingDeps({
     startRelay: async () => ({ port: RELAY_PORT, token: "per-launch-token", close: async () => {} }),
     resolveNode: () => "C:\\node\\node.exe",
