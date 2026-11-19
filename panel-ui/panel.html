@@ -1922,29 +1922,45 @@ if (window.panelStartupController) panelStartupPlay();
     <!-- 请求日志子页：筛选行 + 明细表 + 分页条（行点击就地展开详情；空态/错误态由 JS 渲染进 tbody） -->
     <div id="statsLogsPane" hidden>
       <div class="logs-filters">
-        <button type="button" class="logs-sel logs-range-trigger" id="logRangeFilter" popovertarget="logsRangePicker" aria-haspopup="dialog" aria-expanded="false" aria-labelledby="logsRangeTitle logsRangeLabel">
+        <button type="button" class="logs-sel logs-range-trigger" id="logRangeFilter" popovertarget="logsRangePicker" aria-haspopup="dialog" aria-expanded="false" aria-labelledby="logsRangeLabel">
           <span id="logsRangeLabel">今天</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
-        <div class="logs-range-picker" id="logsRangePicker" popover="auto" role="dialog" aria-labelledby="logsRangeTitle">
-          <h3 id="logsRangeTitle">时间范围</h3>
+        <div class="logs-range-picker" id="logsRangePicker" popover="auto" role="dialog" aria-label="时间范围">
           <div class="logs-range-presets">
-            <button type="button" class="btn btn-mini" aria-pressed="true" data-log-range="today">今天</button>
-            <button type="button" class="btn btn-mini" aria-pressed="false" data-log-range="1d">近 24 小时</button>
-            <button type="button" class="btn btn-mini" aria-pressed="false" data-log-range="7d">近 7 天</button>
-            <button type="button" class="btn btn-mini" aria-pressed="false" data-log-range="14d">近 14 天</button>
-            <button type="button" class="btn btn-mini" aria-pressed="false" data-log-range="30d">近 30 天</button>
-            <button type="button" class="btn btn-mini" aria-pressed="false" data-log-range="all">全部</button>
+            <button type="button" class="logs-range-preset" aria-pressed="true" data-log-range="today">今天</button>
+            <button type="button" class="logs-range-preset" aria-pressed="false" data-log-range="1d">近 24 小时</button>
+            <button type="button" class="logs-range-preset" aria-pressed="false" data-log-range="7d">近 7 天</button>
+            <button type="button" class="logs-range-preset" aria-pressed="false" data-log-range="14d">近 14 天</button>
+            <button type="button" class="logs-range-preset" aria-pressed="false" data-log-range="30d">近 30 天</button>
+            <button type="button" class="logs-range-preset" aria-pressed="false" data-log-range="all">全部</button>
           </div>
-          <div class="logs-range-custom">
+          <div class="logs-range-layout">
             <div class="logs-range-fields">
-              <label>开始时间<input type="datetime-local" id="logsRangeStart" step="60" required></label>
-              <label>结束时间<input type="datetime-local" id="logsRangeEnd" step="60" required></label>
+              <p class="logs-range-hint">支持日期与时间</p>
+              <div class="logs-range-field" id="logsRangeStartCard">
+                <div class="logs-range-field-label">开始时间</div>
+                <div class="logs-range-field-controls">
+                  <input type="date" id="logsRangeStartDate" aria-label="开始日期">
+                  <input type="time" id="logsRangeStartTime" step="60" aria-label="开始时间">
+                </div>
+              </div>
+              <div class="logs-range-field" id="logsRangeEndCard">
+                <div class="logs-range-field-label">结束时间</div>
+                <div class="logs-range-field-controls">
+                  <input type="date" id="logsRangeEndDate" aria-label="结束日期">
+                  <input type="time" id="logsRangeEndTime" step="60" aria-label="结束时间">
+                </div>
+              </div>
               <label class="logs-range-live"><input type="checkbox" id="logsRangeLive">结束时间跟随当前时刻</label>
               <div class="logs-range-error" id="logsRangeError" role="alert" hidden></div>
-              <div class="logs-range-actions"><button type="button" class="btn btn-mini" id="logsRangeCancel">取消</button><button type="button" class="btn btn-mini btn-primary" id="logsRangeApply">确认</button></div>
+              <div class="logs-range-actions"><button type="button" id="logsRangeCancel">取消</button><button type="button" id="logsRangeApply">确定</button></div>
             </div>
             <div class="logs-calendar">
-              <div class="logs-calendar-head"><button type="button" class="btn btn-mini" id="logsCalendarPrev" aria-label="上个月">‹</button><button type="button" class="logs-calendar-month" id="logsCalendarToday" title="返回本月"></button><button type="button" class="btn btn-mini" id="logsCalendarNext" aria-label="下个月">›</button></div>
+              <div class="logs-calendar-head">
+                <button type="button" class="logs-calendar-nav" id="logsCalendarPrev" aria-label="上个月"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+                <button type="button" class="logs-calendar-month" id="logsCalendarToday" title="返回本月"></button>
+                <button type="button" class="logs-calendar-nav" id="logsCalendarNext" aria-label="下个月"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
+              </div>
               <div class="logs-calendar-weekdays" id="logsCalendarWeekdays"></div>
               <div class="logs-calendar-days" id="logsCalendarDays" role="group" aria-label="日期"></div>
             </div>

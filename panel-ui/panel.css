@@ -1160,7 +1160,7 @@
     :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .rail-collapse-btn.icon-btn { width: 24px; height: 24px; }
   }
 
-  /* ── 阶段 2 材质修正 ②：v2 明暗关系交换（cc-switch 参照：亮色 栏灰<内容白，暗色
+  /* ── 阶段 2 材质修正 ②：v2 明暗关系交换（亮色 栏灰<内容白，暗色
      内容抬亮一档、栏再压暗）。对调 = 既有 token 互换位：内容区底 body 用 --surface、
      栏底用 --bg-page——亮暗同一条规则（token 随亮暗自动换值），v1 零变化。terminal-
      view 与主题预览镜像视口同步换（切页不跳变；镜像演示的是新明暗关系，不换就是在
@@ -2199,8 +2199,7 @@
   .data-backup-path { font-family: var(--font-mono); }
   /* 备份位置行的三颗动作钮收进行内右侧，窄处允许折行 */
   .data-backup-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; flex: none; }
-  /* 备份文件段：段头＋限高滚动列表。行结构参照 cc-switch 的 BackupListSection——
-     左列名称等宽、时间·大小次行，右侧动作位：pre-import 行多一颗「恢复」文字钮
+  /* 备份文件段：段头＋限高滚动列表。行结构＝左列名称等宽、时间·大小次行，右侧动作位：pre-import 行多一颗「恢复」文字钮
      （btn-mini 复用），其后是纯图标删除钮（aria-label「删除备份」）；byok 行只有
      删除钮。空态一行小字，初值写在 markup 里。 */
   .data-backup-section { padding-top: 12px; border-top: 1px solid var(--divider); }
@@ -4059,34 +4058,89 @@
   /* 筛选行：筛选项与日期范围按钮横排，窄屏折行 */
   .logs-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .logs-range-trigger { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
-  .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 14px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: 0 12px 36px rgba(0,0,0,.2); }
+  /* 时间范围弹窗：宽 620、内距 12、圆角 10。表面/选中/操作/文字色在弹窗内自成一套（--rp-*），
+     亮暗两段各定义一次，不随皮肤换色。 */
+  .logs-range-picker {
+    --rp-card: #ffffff; --rp-subtle: #efeff2; --rp-selected: #e4e4ea;
+    --rp-border: hsl(240 10.2% 90.4%); --rp-border-strong: #cfcfd6;
+    --rp-text-1: #18181b; --rp-text-2: #52525b; --rp-text-3: #65656e;
+    --rp-action: #f97316; --rp-action-hover: #ea620a; --rp-danger: #b91c1c;
+    --rp-shadow: 0 4px 12px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.06);
+    position: fixed; inset: auto; margin: 0; padding: 12px;
+    width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto;
+    container-type: inline-size;
+    border: 1px solid var(--rp-border); border-radius: 10px; background: var(--rp-card); color: var(--rp-text-1);
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: var(--rp-shadow);
+  }
   .logs-range-picker:popover-open { display: block; }
-  .logs-range-picker h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
-  .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-  .logs-range-presets [aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-  .logs-range-custom { display: grid; grid-template-columns: minmax(220px, .9fr) minmax(245px, 1.1fr); gap: 14px; margin-top: 12px; }
-  .logs-range-fields { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  .logs-range-fields > label:not(.logs-range-live) { display: grid; gap: 4px; color: var(--text-3); font-size: 11px; }
-  .logs-range-fields input[type="datetime-local"] { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-sunken); color: var(--text); color-scheme: light dark; font: 12px var(--font-mono); }
-  .logs-range-live { display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 11.5px; }
-  .logs-range-live input { accent-color: var(--accent); }
-  .logs-range-error { color: var(--danger); font-size: 11.5px; }
-  .logs-range-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: auto; }
-  .logs-calendar { min-width: 0; }
-  .logs-calendar-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 8px; }
-  .logs-calendar-head .btn { min-width: 32px; padding-inline: 5px; font-size: 16px; }
-  .logs-calendar-month { min-width: 0; border: 0; background: transparent; color: var(--text); font-family: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
-  .logs-calendar-weekdays, .logs-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; }
-  .logs-calendar-weekdays { color: var(--text-3); font-size: 11px; }
-  .logs-calendar-weekdays span { padding: 4px 0; }
-  .logs-calendar-days { gap: 2px; }
-  .logs-calendar-day { aspect-ratio: 1; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: 12px var(--font-mono); cursor: pointer; }
-  .logs-calendar-day:hover { background: var(--surface-hover); }
-  .logs-calendar-day[data-outside="true"] { color: var(--text-4); }
-  .logs-calendar-day[data-in-range="true"] { background: var(--accent-soft); }
-  .logs-calendar-day[data-endpoint="true"] { background: var(--accent); color: #fff; }
-  .logs-calendar-day[aria-current="date"] { outline: 1px solid var(--border-strong); outline-offset: -1px; }
-  @media (max-width: 600px) { .logs-range-custom { grid-template-columns: 1fr; } .logs-range-picker { padding: 11px; } }
+  .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--rp-border); }
+  .logs-range-preset { appearance: none; height: 28px; padding: 0 10px; border: 1px solid var(--rp-border-strong); border-radius: 6px; background: var(--rp-card); color: var(--rp-text-1); font: 500 13px/1 var(--font-sans); cursor: pointer; transition: background-color 150ms, border-color 150ms; }
+  .logs-range-preset:hover { background: var(--rp-subtle); }
+  .logs-range-preset[aria-pressed="true"] { border-color: var(--rp-text-1); background: var(--rp-selected); font-weight: 600; }
+  /* 分栏断点看弹窗自身实宽（容器查询），不看视口：弹窗被 100vw-32px 夹窄时保持纵排，日历不被挤出屏 */
+  .logs-range-layout { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+  .logs-range-fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  @container (min-width: 500px) {
+    .logs-range-layout { flex-direction: row; }
+    .logs-range-fields { width: 250px; flex: none; }
+    .logs-calendar { min-width: 0; flex: 1 1 0%; }
+  }
+  .logs-range-hint { margin: 0; font-size: 12px; line-height: 18px; color: var(--rp-text-2); }
+  .logs-range-field { padding: 8px 12px; border: 1px solid var(--rp-border); border-radius: 10px; cursor: pointer; transition: border-color 150ms, box-shadow 150ms, background-color 150ms, opacity 150ms; }
+  .logs-range-field[data-active="true"] { border-color: var(--rp-action); box-shadow: 0 0 0 1px var(--rp-action); background: var(--rp-card); }
+  .logs-range-field[data-live-end="true"] { border-color: var(--rp-border); background: var(--rp-subtle); opacity: 0.5; cursor: not-allowed; }
+  .logs-range-field-label { margin-bottom: 6px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.05em; color: var(--rp-text-2); }
+  .logs-range-field-controls { display: flex; align-items: center; gap: 6px; }
+  .logs-range-field-controls input { appearance: none; height: 28px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--rp-text-1); color-scheme: inherit; font: 400 13px/20px var(--font-sans); }
+  .logs-range-field-controls input[type="date"] { flex: 1 1 0%; }
+  .logs-range-field-controls input[type="time"] { flex: none; width: 90px; }
+  .logs-range-field[data-live-end="true"] .logs-range-field-controls input { pointer-events: none; }
+  .logs-range-live { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--rp-text-2); cursor: pointer; user-select: none; }
+  .logs-range-live input { appearance: none; -webkit-appearance: none; flex: none; display: inline-grid; place-content: center; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--rp-border-strong); border-radius: 4px; background: var(--rp-card); cursor: pointer; transition: background-color 150ms, border-color 150ms; }
+  .logs-range-live input::before { content: ""; width: 10px; height: 10px; background-color: #ffffff; transform: scale(0); transition: transform 120ms ease-out; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat; }
+  .logs-range-live input:checked { background-color: var(--rp-action); border-color: var(--rp-action); }
+  .logs-range-live input:checked::before { transform: scale(1); }
+  .logs-range-live input:hover:not(:checked) { border-color: var(--rp-text-3); }
+  .logs-range-live input:focus-visible { outline: 2px solid var(--rp-action); outline-offset: 2px; }
+  .logs-range-error { font-size: 12px; line-height: 18px; color: var(--rp-danger); }
+  .logs-range-actions { display: flex; gap: 8px; padding-top: 4px; }
+  .logs-range-actions button { appearance: none; flex: 1 1 0%; height: 28px; border: 1px solid transparent; border-radius: 6px; font: 500 13px/1 var(--font-sans); cursor: pointer; transition: background-color 150ms; }
+  #logsRangeCancel { background: transparent; color: var(--rp-text-1); }
+  #logsRangeCancel:hover { background: var(--rp-subtle); }
+  #logsRangeApply { background: var(--rp-action); color: #ffffff; font-weight: 600; }
+  #logsRangeApply:hover { background: var(--rp-action-hover); }
+  .logs-calendar { padding: 10px; border: 1px solid var(--rp-border); border-radius: 10px; background: var(--rp-subtle); }
+  .logs-calendar-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
+  .logs-calendar-nav { appearance: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--rp-text-2); cursor: pointer; transition: background-color 150ms, color 150ms; }
+  .logs-calendar-nav:hover { background: var(--rp-subtle); color: var(--rp-text-1); }
+  .logs-calendar-month { min-width: 0; border: 0; background: transparent; color: var(--rp-text-1); font: 500 13px/20px var(--font-sans); cursor: pointer; transition: color 150ms; }
+  .logs-calendar-month:hover { color: var(--rp-text-2); }
+  .logs-calendar-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin-bottom: 2px; text-align: center; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--rp-text-2); }
+  .logs-calendar-weekdays span { padding: 2px 0; }
+  .logs-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; }
+  .logs-calendar-day { appearance: none; position: relative; height: 28px; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--rp-text-1); font: 400 12px/18px var(--font-sans); cursor: pointer; transition: background-color 150ms, color 150ms, box-shadow 150ms, opacity 150ms; }
+  .logs-calendar-day:hover { background: var(--rp-subtle); }
+  .logs-calendar-day[data-outside="true"] { color: var(--rp-text-3); }
+  .logs-calendar-day[data-out-of-bounds="true"] { color: var(--rp-text-3); opacity: 0.4; cursor: not-allowed; }
+  .logs-calendar-day[data-in-range="true"] { background: var(--rp-selected); color: var(--rp-text-1); }
+  .logs-calendar-day[data-endpoint="true"] { background: var(--rp-action); color: #ffffff; font-weight: 500; }
+  .logs-calendar-day[aria-current="date"]:not([data-endpoint="true"]) { box-shadow: 0 0 0 1px var(--rp-border-strong); }
+  :root[data-theme="dark"] .logs-range-picker {
+    --rp-card: #2e2e33; --rp-subtle: #26262a; --rp-selected: #313136;
+    --rp-border: hsl(240 5.3% 25.7%); --rp-border-strong: #4a4a52;
+    --rp-text-1: #e4e4e7; --rp-text-2: #ababb3; --rp-text-3: #9a9aa2;
+    --rp-action: #ea580c; --rp-action-hover: #f06d1f; --rp-danger: #fca5a5;
+    --rp-shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]):not([data-theme="dark"]) .logs-range-picker {
+      --rp-card: #2e2e33; --rp-subtle: #26262a; --rp-selected: #313136;
+      --rp-border: hsl(240 5.3% 25.7%); --rp-border-strong: #4a4a52;
+      --rp-text-1: #e4e4e7; --rp-text-2: #ababb3; --rp-text-3: #9a9aa2;
+      --rp-action: #ea580c; --rp-action-hover: #f06d1f; --rp-danger: #fca5a5;
+      --rp-shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+    }
+  }
   /* 来源/渠道/模型三列居中（表头与单元格同轴；详情/状态行是首列 colspan，不受影响） */
   .logs-table th:nth-child(2), .logs-table td:nth-child(2),
   .logs-table th:nth-child(3), .logs-table td:nth-child(3),
