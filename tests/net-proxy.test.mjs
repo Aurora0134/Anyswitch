@@ -44,12 +44,18 @@ it("resolveHttpProxy falls back to git config, tries the install path on ENOENT,
   // ProgramFiles 派生的完整路径——候选写成 bin 变体、派生段或缺省值写错都会红。
   assert.deepEqual(calls, ["git", join("C:\\Program Files", "Git", "cmd", "git.exe")]);
 
-  // 键缺席（退出码 1，error 但非 ENOENT）即定论「未配置」，不再试下一个候选。
+  // 键缺席（退出码 1，error 但非 ENOENT）即定论「未配置」，不再试下一个候选：
+  // 调用清单钉住后半句——若实现改为 exit 1 也换腿，安装位 git.exe 会再被问到。
+  const exit1Calls = [];
   const absent = await resolveHttpProxy({
     env: {},
-    spawnFn: gitSpawn((_file, _args, callback) => callback(Object.assign(new Error("exit 1"), { code: 1 }), "", "")),
+    spawnFn: gitSpawn((file, _args, callback) => {
+      exit1Calls.push(file);
+      callback(Object.assign(new Error("exit 1"), { code: 1 }), "", "");
+    }),
   });
   assert.equal(absent, null);
+  assert.deepEqual(exit1Calls, ["git"], "exit 1 即定论未配置，不再试下一个候选");
 
   // env 里的值不合法（如 socks5）不挡路，继续落到 git 配置。
   const viaGit = await resolveHttpProxy({
