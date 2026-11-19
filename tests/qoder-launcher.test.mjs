@@ -606,9 +606,11 @@ test("realSpawnQoder never lets a throwing onSpawned hook fail the launch", asyn
   }
 });
 
-test("realSpawnQoder spawns the CN dispatcher when the CN edition is installed, without the CDP flag", async () => {
-  // CN 在装（QODER_CN_EXECUTABLE 覆盖等价于 CN 指纹命中）时拉起 CN 入口；CN 自研
-  // 工作台没有对应的 renderer store，--remote-debugging-port 不该透传给 CN CLI。
+test("realSpawnQoder spawns the CN CLI executable when the CN edition is installed, without the CDP flag", async () => {
+  // CN 在装（QODER_CN_EXECUTABLE 覆盖等价于 CN 指纹命中）时按官方序本体解析
+  // 拉起 CN CLI（resolveQoderCnCliLaunchExecutable），不经 ~/.qoder-cn/entry
+  // 的 qodercn.cmd 调度器；CN 自研工作台没有对应的 renderer store，
+  // --remote-debugging-port 不该透传给 CN CLI。
   const dir = mkTestDir("qoder-spawn-cn-");
   try {
     const outFile = join(dir, "argv.txt");

@@ -351,7 +351,9 @@ describe("anthropic 通道的 per-endpoint 抗截断开关（agentId 接线）",
     assert.equal(off.calls, 1, "端点开关关掉后保活预算归零：不得重试");
 
     // 名单外（claude）的请求继承主开关：同一条空流重试并恢复。身份必须按
-    // 请求归属判定取——写死或恒置 null 时这个场景不可能重试。
+    // 请求归属判定取——写死(kimi) 时本场景被 kimi 端点开关压灭（502 不重试，
+    // 上两条断言变红）；恒置 null 只会退回主开关继承、本场景照常重试，该
+    // 变异由上面第一场景兜住（off 变 200/重试即红）。
     const inheriting = await runEmptyStreamScenario({ kimi: { enabled: false } }, { "x-agent-id": "claude" });
     assert.equal(inheriting.status, 200);
     assert.ok(inheriting.text.includes("recovered on retry"));

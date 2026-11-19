@@ -467,7 +467,9 @@ describe("validatePersonalProviderConfig", () => {
         },
       },
     });
-    // 空串与非字符串都触发不了跳过：白名单与 enabled 类型检查照常拒写。
+    // 空串与非字符串都触发不了跳过。config 里的 providerId 键本身就在白名
+    // 单外，三条断言的拒写全部来自这条白名单检查；enabled 类型检查在带
+    // providerId 键的形状下永远不可达，由上一用例不带该键的形状覆盖。
     assert.equal(validatePersonalProviderConfig(withRule({ providerId: "", bogus: 1 })).valid, false);
     assert.equal(validatePersonalProviderConfig(withRule({ providerId: 42, bogus: 1 })).valid, false);
     assert.equal(validatePersonalProviderConfig(withRule({ providerId: "", enabled: "yes" })).valid, false);
