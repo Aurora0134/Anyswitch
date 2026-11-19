@@ -59,13 +59,14 @@ test("discoverTerminalBackend swallows a throwing probe so panel startup never b
 
 // 接线兜底用例：createPanelServer 必须在启动时调 prewarmPromptsBackfill——
 // 注入文件唯一写入触发面原本是预设变更，漏掉这行接线则启动回填失效（面板
-// 重启后注入文件仍不落盘）。三条预热腿的全部依赖来源都注入 mock：注入回填
-// （environmentService/promptsService）、冷扫（environmentService/sessionScanService）
-// 与 watchdog 快照（isWatchdogAutostartEnabledFn/probeWatchdogFn）。后两条腿不注入
-// 时直建 server 的测试会真的起 worker 扫全机会话存档、真的跑 reg.exe/PowerShell
-// 探针（panel-host.mjs 的透传缝是为此开的）；断言打到注入桩上＝预热确实走注入面，
-// 没有偷跑真探测。
-test("createPanelServer 启动即预热三条腿：注入回填 resync 一次、冷扫扫一次、watchdog 探一轮，全部走注入桩", async () => {
+// 重启后注入文件仍不落盘）。四条预热腿的全部依赖来源都注入 mock：注入回填
+// （environmentService/promptsService）、冷扫（environmentService/sessionScanService）、
+// watchdog 快照（isWatchdogAutostartEnabledFn/probeWatchdogFn）与技能补齐
+// （environmentService/skillsService）。未注入的腿直建 server 的测试会真的起
+// worker 扫全机会话存档、真的跑 reg.exe/PowerShell 探针、真读真实 skills.json
+// 真扫技能仓（panel-host.mjs 的透传缝是为此开的）；断言打到注入桩上＝预热确实
+// 走注入面，没有偷跑真探测。
+test("createPanelServer 启动即预热四条腿：注入回填 resync 一次、冷扫扫一次、watchdog 探一轮、技能补齐 catchUp 一次，全部走注入桩", async () => {
   let getStateCalls = 0;
   const env = {
     getState: async () => {
@@ -78,11 +79,14 @@ test("createPanelServer 启动即预热三条腿：注入回填 resync 一次、
   let scanAlls = 0;
   const sessionScanService = { scanAll: async () => { scanAlls += 1; return []; } };
   let autostartProbes = 0, watchdogProbes = 0;
+  let catchUps = 0;
+  const skillsService = { catchUp: async () => { catchUps += 1; return { ok: true, created: [], skipped: [] }; } };
   createPanelServer({
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     environmentService: env,
     promptsService,
     sessionScanService,
+    skillsService,
     isWatchdogAutostartEnabledFn: async () => { autostartProbes += 1; return false; },
     probeWatchdogFn: async () => { watchdogProbes += 1; return false; },
   });
@@ -96,15 +100,21 @@ test("createPanelServer 启动即预热三条腿：注入回填 resync 一次、
   await waitFor(() => getStateCalls);
   await waitFor(() => scanAlls);
   await waitFor(() => autostartProbes);
+  await waitFor(() => catchUps);
   assert.equal(resyncs, 1, "启动即一次注入回填");
   assert.ok(getStateCalls >= 1, "冷扫预热消费注入的环境检测（不触真检测）");
   assert.equal(scanAlls, 1, "冷扫预热把会话首扫提前一拍：走注入的扫描服务");
   assert.equal(autostartProbes, 1, "watchdog 预热探一轮自启状态：走注入桩，不跑真 reg.exe");
   assert.equal(watchdogProbes, 1, "watchdog 预热探一轮存活：走注入桩，不跑真探测");
+  assert.equal(catchUps, 1, "技能补齐预热走注入桩，不读真实 skills.json、不扫真实技能仓");
 });
 
 // 技能面同一接线纪律：junction 唯一的写入触发面是面板部署，漏掉这行接线则
-// 后装的区域版根 / 从没部署过的 Agent 在用户手点之前永远没有技能。
+// 后装的区域版根 / 从没部署过的 Agent 在用户手点之前永远没有技能。四条预热腿
+// createPanelServer 都无条件跑，本用例只断言技能腿的接线（其余三腿由上面的
+// 用例钉住），但夹具必须同样注满桩——漏注哪条哪条就真跑：真 PowerShell 自启
+// 探针、真 127.0.0.1:47822 存活探测、真 worker 全机会话扫描、真写用户根的
+// 注入文件（~/.claude/CLAUDE.md 一族），正是文件头纪律注释明令避免的形态。
 test("createPanelServer 启动即预热技能补齐（漏接线则 catchUp 计数为 0）", async () => {
   const env = { getState: async () => ({ clients: [{ id: "claude", installations: [{ status: "found" }] }] }) };
   let catchUps = 0;
@@ -113,6 +123,12 @@ test("createPanelServer 启动即预热技能补齐（漏接线则 catchUp 计�
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     environmentService: env,
     skillsService,
+    // 其余三腿纯隔离桩（不断言次数）：只为让本用例的预热全部落在桩上、零真实
+    // 路径副作用，接线断言面归上面的四腿用例。
+    promptsService: { resync: () => {} },
+    sessionScanService: { scanAll: async () => [] },
+    isWatchdogAutostartEnabledFn: async () => false,
+    probeWatchdogFn: async () => false,
   });
   const deadline = Date.now() + 100;
   while (catchUps === 0 && Date.now() < deadline) {
