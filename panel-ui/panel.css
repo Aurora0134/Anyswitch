@@ -4050,7 +4050,7 @@
   /* 筛选行：筛选项与日期范围按钮横排，窄屏折行 */
   .logs-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .logs-range-trigger { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
-  .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 14px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); box-shadow: 0 12px 36px rgba(0,0,0,.2); }
+  .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 14px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: 0 12px 36px rgba(0,0,0,.2); }
   .logs-range-picker:popover-open { display: block; }
   .logs-range-picker h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
   .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }

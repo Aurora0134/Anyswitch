@@ -24629,18 +24629,27 @@ async function api(method, path, body) {
       const d = new Date(startTs); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1); logsCalendarField = "start";
       $("logsRangeError").hidden = true; syncLogRangePicker();
     });
+    let logsPickerHeight = 0;
     const placePicker = () => {
       if (!picker.matches(":popover-open")) return;
       const r = trigger.getBoundingClientRect();
       const width = Math.min(620, window.innerWidth - 32);
-      const height = picker.offsetHeight;
+      if (picker.offsetHeight) logsPickerHeight = picker.offsetHeight;
+      const height = picker.offsetHeight || logsPickerHeight;
       picker.style.left = Math.max(16, Math.min(r.left, window.innerWidth - width - 16)) + "px";
       picker.style.top = Math.max(16, Math.min(r.bottom + 6, window.innerHeight - height - 16)) + "px";
     };
+    // 开窗前先按触发器矩形与上次实测高度预算位置：首帧即落在最终位置附近，
+    // 避免先画在左上角再跳位；开窗后 rAF 用本次实测高度精修一次（内容换月高度可能变）。
+    const prePlacePicker = () => {
+      const r = trigger.getBoundingClientRect();
+      const width = Math.min(620, window.innerWidth - 32);
+      picker.style.left = Math.max(16, Math.min(r.left, window.innerWidth - width - 16)) + "px";
+      picker.style.top = Math.max(16, Math.min(r.bottom + 6, window.innerHeight - logsPickerHeight - 16)) + "px";
+    };
     picker.addEventListener("beforetoggle", (event) => {
       if (event.newState !== "open") return;
-      picker.style.left = "16px";
-      picker.style.top = "16px";
+      prePlacePicker();
     });
     picker.addEventListener("toggle", (event) => { if (event.newState === "open") requestAnimationFrame(placePicker); });
     window.addEventListener("resize", placePicker);
