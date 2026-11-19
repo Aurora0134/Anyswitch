@@ -4080,6 +4080,12 @@
   .logs-table tbody tr.logs-row.logs-row-new > td { animation: logsRowNew 1200ms ease-in 300ms backwards; }
   @keyframes logsRowEnter { from { opacity: 0; } }
   @keyframes logsRowNew { from { box-shadow: inset 0 0 0 100vmax var(--accent-soft); } to { box-shadow: inset 0 0 0 100vmax transparent; } }
+  /* 旧行滑位：行集变化（前面插了新行，或范围裁剪让行集收缩）时，既有行从上一屏
+     的旧位置滑到新位置。起帧位移由 JS 按重建前后实测顶点差写进 --logs-row-shift
+     （行高不齐，不能按行数差估算），尾帧落回自然位置；纯位移无颜色量。
+     reduced-motion 下全局通配规则清零 animation，行直接落位。 */
+  .logs-table tbody tr.logs-row.logs-row-shift { animation: logsRowShift 320ms cubic-bezier(0.2, 0, 0, 1); }
+  @keyframes logsRowShift { from { transform: translateY(var(--logs-row-shift, 0px)); } to { transform: none; } }
   /* 单元格第二行小字（缓存 / 首字·t/s） */
   .logs-sub { display: block; font-size: 10.5px; color: var(--text-4); margin-top: 2px; }
   /* 用时三档染色：<15s 绿 / <60s 黄 / ≥60s 红 */

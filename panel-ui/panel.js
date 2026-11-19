@@ -24630,7 +24630,7 @@ async function api(method, path, body) {
   let logsTotal = 0; // 最近一次成功响应的总数（跳页钳制用）
   let logsCorrecting = false; // 深页超界自动回末页的一次性守卫（防循环）
   let logsLastSig = null; // 最近一次落地渲染的签名（loadLogs 同签名跳过重渲）
-  let logsShown = null; // 最近一次落地渲染的视图串与行键集（新行入场动画的判定基准）
+  let logsShown = null; // 最近一次落地渲染的视图串与行键序（新行入场与旧行滑位的判定基准）
   const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
   const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
 
@@ -25058,8 +25058,23 @@ async function api(method, path, body) {
   // 改范围）与首次加载返回 null，一行也不播。
   function logsEnterKeys(shown, view, page, keys) {
     if (!shown || shown.view !== view || page !== 1) return null;
-    const fresh = keys.filter((k) => !shown.keys.has(k));
+    const prev = new Set(shown.keys);
+    const fresh = keys.filter((k) => !prev.has(k));
     return fresh.length ? fresh : null;
+  }
+
+  // 旧行移位判定：与新行入场同一道闸（同视图＋第 1 页），既有行在新一屏里的位置
+  // 比上一屏变了（前面插了行，或行集收缩让行上移）就整行滑过去；返回行键→前后
+  // 索引差的映射，无一行移位返回 null。触发不要求同屏有新行：范围裁剪也会让旧行上移。
+  function logsShiftRows(shown, view, page, keys) {
+    if (!shown || shown.view !== view || page !== 1) return null;
+    const before = new Map(shown.keys.map((k, index) => [k, index]));
+    const shifts = new Map();
+    keys.forEach((k, index) => {
+      const from = before.get(k);
+      if (from !== undefined && from !== index) shifts.set(k, from - index);
+    });
+    return shifts.size ? shifts : null;
   }
 
   function renderLogs(res, view) {
@@ -25069,19 +25084,39 @@ async function api(method, path, body) {
     logsTotal = res.total || 0;
     if (!logsRows.length) {
       tbody.innerHTML = '<tr class="logs-state-row"><td colspan="7"><div class="empty-hint">该筛选条件下暂无请求记录</div></td></tr>';
-      logsShown = { view, keys: new Set() };
+      logsShown = { view, keys: [] };
       renderLogsPager(res);
       return;
     }
     const keys = logsRows.map(logsRowKey);
     const enter = logsEnterKeys(logsShown, view, res.page, keys);
-    logsShown = { view, keys: new Set(keys) };
+    const shifts = logsShiftRows(logsShown, view, res.page, keys);
+    logsShown = { view, keys };
+    // 旧行滑位的起帧要落回上一屏的旧位置：行高不齐（部分行带第二行小字），
+    // 不能按行数差估算，先记旧行顶点、重建后记新顶点，差值作起帧位移
+    let oldTops = null;
+    if (shifts) {
+      oldTops = new Map();
+      for (const tr of tbody.children) {
+        if (tr.classList.contains("logs-row")) oldTops.set(tr.getAttribute("data-logs-key"), tr.getBoundingClientRect().top);
+      }
+    }
     tbody.innerHTML = logsRows.map((r) => logsRowHtml(r)).join("");
     if (enter) {
       // 只给新来的行挂入场动画类；整幅重建的既有行不挂类，入场动画不重播
       const fresh = new Set(enter);
       for (const tr of tbody.children) {
         if (fresh.has(tr.getAttribute("data-logs-key"))) tr.classList.add("logs-row-new");
+      }
+    }
+    if (shifts) {
+      // 只给位置变了的旧行挂滑位动画类（新行不在 oldTops 里，天然不挂）；
+      // 起帧位移=旧顶点−新顶点，播完落回自然位置
+      for (const tr of tbody.children) {
+        const oldTop = oldTops.get(tr.getAttribute("data-logs-key"));
+        if (oldTop === undefined) continue;
+        tr.style.setProperty("--logs-row-shift", oldTop - tr.getBoundingClientRect().top + "px");
+        tr.classList.add("logs-row-shift");
       }
     }
     // 轮询重建后按行键恢复展开中的详情行

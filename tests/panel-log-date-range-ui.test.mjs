@@ -134,7 +134,7 @@ test("fresh log rows fade in under a fading accent tint only when the same view 
   const m = js.match(/function logsEnterKeys\(shown, view, page, keys\) \{([\s\S]*?)\n  \}/);
   assert.ok(m, "logsEnterKeys 在册");
   const fn = new Function(`return function logsEnterKeys(shown, view, page, keys) {${m[1]}\n  }`)();
-  const shown = { view: "v", keys: new Set(["a", "b"]) };
+  const shown = { view: "v", keys: ["a", "b"] };
   assert.deepEqual(fn(shown, "v", 1, ["c", "a", "b"]), ["c"], "同视图第 1 页只挑新键");
   assert.equal(fn(shown, "v", 1, ["a", "b"]), null, "同视图无新行不播");
   assert.equal(fn(shown, "v", 2, ["c"]), null, "非第 1 页不播");
@@ -144,6 +144,32 @@ test("fresh log rows fade in under a fading accent tint only when the same view 
   assert.ok(js.includes("const view = sp.toString();"));
   assert.ok(js.includes("logsEnterKeys(logsShown, view, res.page, keys)"));
   assert.ok(js.includes('tr.classList.add("logs-row-new")'));
+});
+
+test("existing log rows slide from their previous position only when the same view shifts rows", () => {
+  // 参数：320ms／cubic-bezier(0.2, 0, 0, 1)；起帧位移由 JS 写进变量，尾帧落回自然位置
+  assert.ok(css.includes(".logs-table tbody tr.logs-row.logs-row-shift { animation: logsRowShift 320ms cubic-bezier(0.2, 0, 0, 1); }"));
+  assert.ok(css.includes("@keyframes logsRowShift { from { transform: translateY(var(--logs-row-shift, 0px)); } to { transform: none; } }"));
+  // 纯位移无颜色量
+  const kf = css.split("@keyframes logsRowShift {")[1].split("\n")[0];
+  assert.doesNotMatch(kf, /var\(--accent|#[0-9a-f]{3,8}\b|rgba?\(/);
+  // 位移量按重建前后实测顶点差写入：旧行顶点必须先于重建记录
+  assert.ok(js.includes('tr.style.setProperty("--logs-row-shift",'));
+  assert.ok(js.indexOf("oldTops.set(") < js.indexOf("tbody.innerHTML = logsRows.map"));
+  assert.ok(js.includes('tr.classList.add("logs-row-shift")'));
+  // 判定逻辑：同视图＋第 1 页且前后索引变化才移位；其余一概 null
+  const m = js.match(/function logsShiftRows\(shown, view, page, keys\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, "logsShiftRows 在册");
+  const fn = new Function(`return function logsShiftRows(shown, view, page, keys) {${m[1]}\n  }`)();
+  const shown = { view: "v", keys: ["a", "b"] };
+  assert.deepEqual(fn(shown, "v", 1, ["c", "a", "b"]), new Map([["a", -1], ["b", -1]]), "前面插新行：旧行下移一位");
+  assert.deepEqual(fn({ view: "v", keys: ["x", "a", "b"] }, "v", 1, ["a", "b"]), new Map([["a", 1], ["b", 1]]), "行集收缩：旧行上移一位");
+  assert.equal(fn(shown, "v", 1, ["a", "b"]), null, "索引未变不移位");
+  assert.equal(fn(shown, "v", 2, ["c", "a", "b"]), null, "非第 1 页不移位");
+  assert.equal(fn(shown, "w", 1, ["c", "a", "b"]), null, "换视图不移位");
+  assert.equal(fn(null, "v", 1, ["c", "a", "b"]), null, "首次加载不移位");
+  // 移位动画同吃全局 reduced-motion 通配禁用规则（animation 清零后行直接落位）
+  assert.ok(css.includes("@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }"));
 });
 
 test("code comments do not name external products as the origin of implementation choices", () => {
