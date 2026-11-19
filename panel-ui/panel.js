@@ -3054,12 +3054,12 @@ async function api(method, path, body) {
 
   // Measure the bottom of the painted stack, including a card that is still leaving.
   function syncLogCardHeight() {
-    const stack = $("logStack"), root = $("liveLog"), depth = $("logDepth");
+    const stack = $("logStack"), root = $("liveLog");
     if (!stack || !root || (stack.getBoundingClientRect && !stack.offsetWidth)) return;
     const style = getComputedStyle(root);
-    const step = parseFloat(style.getPropertyValue?.("--ll-step")) || 18;
-    const scales = [1, parseFloat(style.getPropertyValue?.("--ll-scale-1")) || 0.97,
-      parseFloat(style.getPropertyValue?.("--ll-scale-2")) || 0.94];
+    const step = parseFloat(style.getPropertyValue?.("--ll-step")) || 22;
+    const scales = [1, parseFloat(style.getPropertyValue?.("--ll-scale-1")) || 0.95,
+      parseFloat(style.getPropertyValue?.("--ll-scale-2")) || 0.90];
     let bottom = 0;
     for (const node of stack.children) {
       const height = parseFloat(getComputedStyle(node).height) || node.offsetHeight;
@@ -3067,18 +3067,7 @@ async function api(method, path, body) {
       const slot = node.dataset.slot === "leaving" ? 2 : Number(node.dataset.slot);
       bottom = Math.max(bottom, slot * step + height * scales[slot]);
     }
-    const count = logEntries.filter(entry => !entry.fading).length;
-    const edges = Math.min(2, Math.max(0, count - LOG_STACK_SIZE));
-    if (depth) {
-      [...depth.children].forEach((edge, i) => {
-        edge.hidden = i >= edges;
-        edge.dataset.motionKey = "depth" + i;
-      });
-      const band = Math.min(bottom, 30);
-      root.style.setProperty("--ll-depth-h", band + "px");
-      root.style.setProperty("--ll-depth-top", (bottom - band) + "px");
-    }
-    root.style.setProperty("--ll-collapsed-h", (bottom ? bottom + [1, 6, 10][edges] : 0) + "px");
+    root.style.setProperty("--ll-collapsed-h", bottom + "px");
   }
 
   // 恒留滚动条槽的实测宽度写回根变量：叠卡右缘据此让出同宽，两层文字可用宽一致，
@@ -3181,30 +3170,27 @@ async function api(method, path, body) {
     const mix = (a, b, t) => a + (b - a) * t;
     const cards = [];
     const keys = [...new Set([...from.items.keys(), ...to.items.keys()])].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
-    const scrollSwap = ![...from.items.keys()].some(key => to.items.has(key) && !key.startsWith('depth'));
+    const scrollSwap = ![...from.items.keys()].some(key => to.items.has(key));
     const lastFrom = [...from.items.values()].sort((a, b) => b.y - a.y)[0];
     const lastTo = [...to.items.values()].sort((a, b) => b.y - a.y)[0];
     for (const [order, key] of keys.entries()) {
       let start = from.items.get(key), end = to.items.get(key);
-      const depth = key.startsWith('depth');
       const source = start ?? end;
       if (!start) {
-        start = { ...end, y: depth ? from.h : scrollSwap ? -end.h - 12 + end.y * 0.12
+        start = { ...end, y: scrollSwap ? -end.h - 12 + end.y * 0.12
           : from.h + Math.max(0, end.y - (lastFrom?.y ?? 0)) * 0.25 };
       }
       if (!end) {
-        end = { ...start, y: depth ? to.h : to.h + Math.max(0, start.y - (lastTo?.y ?? 0)) * 0.2 };
+        end = { ...start, y: to.h + Math.max(0, start.y - (lastTo?.y ?? 0)) * 0.2 };
       }
       const clone = source.node.cloneNode(true);
       clone.removeAttribute('id');
       clone.dataset.motionKey = key;
-      if (depth) clone.className = 'live-log-depth-edge';
-      else clone.classList.remove('is-appearing', 'is-leaving');
-      if (depth) clone.style.setProperty('--ll-edge-ink', key === 'depth0' ? '82%' : '60%');
-      Object.assign(clone.style, { left: '0', right: 'auto', top: '0', margin: '0', width: (depth ? source.w : source.baseW) + 'px',
-        zIndex: String(depth ? (key === 'depth0' ? 1 : 0) : order + 2) });
+      clone.classList.remove('is-appearing', 'is-leaving');
+      Object.assign(clone.style, { left: '0', right: 'auto', top: '0', margin: '0', width: source.baseW + 'px',
+        zIndex: String(order + 2) });
       const ink = [...clone.querySelectorAll('.live-log-meta, .live-log-text')];
-      cards.push({ clone, start, end, ink, width: depth ? source.w : source.baseW, delay: scrollSwap && !depth && !from.items.has(key) });
+      cards.push({ clone, start, end, ink, width: source.baseW, delay: scrollSwap && !from.items.has(key) });
     }
     layer.replaceChildren(...cards.map(card => card.clone));
     const run = logMotion = { root, stage, layer, frame: 0, timer: 0 };
@@ -3241,10 +3227,9 @@ async function api(method, path, body) {
     const stage = $('liveLogStage');
     const layer = $('logMotion');
     const toggle = $('logToggle');
-    const depth = $('logDepth');
     const ready = !!(stage?.getBoundingClientRect && layer && body && stack);
     const animate = ready && !immediate && !logReducedMotion() && !document.hidden && logExpanded !== expanded && stage.offsetWidth > 0;
-    const elements = state => state ? [...body.children] : [...depth.children, ...stack.children];
+    const elements = state => state ? [...body.children] : [...stack.children];
     const from = animate ? captureLogScene(stage, logMotion ? [...layer.children] : elements(logExpanded)) : null;
     if (logMotion) {
       if (from) {
