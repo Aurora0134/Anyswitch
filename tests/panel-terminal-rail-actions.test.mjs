@@ -686,7 +686,7 @@ describe("S2 分组移除（finding 1b）", () => {
       );
       assert.deepEqual(out.map((g) => g.key), ["", "C:\\dev\\beta"], "被移除组整组消失（它的行已迁走）");
       const ungrouped = out[0];
-      assert.deepEqual(ungrouped.rows.map((r) => r.id), ["a-1", "u-1"], "alpha 的行按最近活跃插进未分组（a-1 200? 不——100>50 排前）");
+      assert.deepEqual(ungrouped.rows.map((r) => r.id), ["a-1", "u-1"], "迁入的行按更新序重排（夹具 createdAt/lastPromptAt 均缺省、排序键同为 0，次序由 id 字典序兜底产生 a-1<u-1；lastActive 遗留字段不参与排序）");
       const beta = out.find((g) => g.key === "C:\\dev\\beta");
       assert.deepEqual(beta.rows.map((r) => r.id), ["b-1"], "没被移除的组原样");
     });
@@ -1195,10 +1195,18 @@ describe("组头三件（工作区行按钮）", () => {
       assert.equal(log.appended.length, 1, "卡挂在 body 下（portal 同款）");
       assert.ok(fn.hoverEl() === card, "在册引用指向卡（收场靠它）");
 
-      // 组键对不上（只在 beta 组里找 alpha）＝零行不出卡
+      // 组键对不上（只在 beta 组里找 alpha）：miss 分支的产线行为是组未命中
+      // 仍建卡、count 兜底为 0（panel.js 的 count 三元兜底行）——删掉该兜底
+      // （或改成提前 return 不出卡），下面的断言当场红。
       const miss = make({ groups: [{ key: "C:\\dev\\beta", rows: [{ id: "b-1" }], pending: [] }] });
-      const noCard = miss.fn.show({ getBoundingClientRect: () => ({ bottom: 0, right: 0 }) }, "C:\\dev\\alpha");
-      assert.equal(noCard, undefined, "组里没有这个目录：不出卡");
+      const missCard = miss.fn.show({ getBoundingClientRect: () => ({ bottom: 0, right: 0 }) }, "C:\\dev\\alpha") ?? miss.fn.hoverEl();
+      assert.ok(missCard, "组键未命中仍出卡（show 无返回值，用 hoverEl 在册引用断言）");
+      assert.deepEqual(missCard.children.map((row) => `${row.className}=${row.textContent}`), [
+        "rail-term-hover-name=alpha",
+        "rail-term-hover-path=C:\\dev\\alpha",
+        "rail-term-hover-count=0 个会话",
+      ], "miss 分支计数兜底 0（删掉 panel.js 的 count 兜底本断言红）");
+      assert.equal(miss.log.appended.length, 1, "miss 卡也挂 body（不出卡则本断言红）");
     });
 
     it("⋯ 菜单打开期间抑制 hover 卡（disabled: menuOpen）", () => {
