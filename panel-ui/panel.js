@@ -2780,17 +2780,12 @@ async function api(method, path, body) {
   const logStackLeaving = new Map();
   const logTextAnim = new WeakMap();
   let logFadeTimer = null;
-  // 两态交接单飞计时器：摊开/收回期由 data-motion 把叠卡留在可见层，到位后才交给
-  // 视口；反向切换先清掉上一轮，避免两个 motion 叠在一起。
-  let logMotionTimer = null;
-  let logMotionTail = null;
-  // 一条链上只留一组时长：单张挤出 140ms、入场兜底 120ms、整批清空 120ms、摊开/收回
-  // 220ms、交接 60ms，CSS 与这里的计时器同取这些值，不再各自写死数字。
+  let logMotion = null;
+  let logRenderDeferred = false;
   const LOG_ANIM_MS = 140;
   const LOG_APPEAR_FALLBACK_MS = 120;
   const LOG_CLEAR_MS = 120;
-  const LOG_MOTION_MS = 220;
-  const LOG_HANDOFF_MS = 60;
+  const LOG_MOTION_MS = 240;
   // 入场的帧无关兜底：后台页签 rAF 会被节流甚至冻结，只靠双重 rAF 摘类会让新卡
   // 停在起始态。Map 同时充当 token，供离场/清场时取消尚未执行的入场回调。
   const logAppearing = new Map();
@@ -2852,6 +2847,7 @@ async function api(method, path, body) {
     logRenderQueued = true;
     requestAnimationFrame(() => {
       logRenderQueued = false;
+      if (logMotion) { logRenderDeferred = true; return; }
       renderLogFeed();
     });
   }
@@ -2863,7 +2859,7 @@ async function api(method, path, body) {
     const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
     node.innerHTML = `<div class="live-log-meta"><span class="ts">${escapeHtml(ts)}</span><span class="lvl">${escapeHtml(entry.level.toUpperCase())}</span><button class="live-log-msg-fold" type="button" aria-expanded="false" aria-label="展开" title="展开"><span aria-hidden="true">▸</span></button></div><div class="live-log-text">${escapeHtml(entry.message)}</div>`;
     const fold = node.querySelector(".live-log-msg-fold");
-    if (fold) fold.onclick = (e) => { e.stopPropagation(); setLogCardOpen(node, !node.classList.contains("is-open")); };
+    if (fold) fold.onclick = (e) => { e.stopPropagation(); setLogCardOpen(node, fold.getAttribute("aria-expanded") !== "true"); };
     return node;
   }
 
@@ -2886,25 +2882,25 @@ async function api(method, path, body) {
       return;
     }
     if (!text) { node.classList.toggle("is-open", open); return; }
+    const from = text.getBoundingClientRect ? text.getBoundingClientRect().height : text.clientHeight;
     if (open) {
-      const fullH = text.scrollHeight, clampH = text.clientHeight;
+      const fullH = text.scrollHeight;
       node.classList.add("is-open");
-      animateLogTextHeight(text, clampH, fullH);
+      animateLogTextHeight(text, from, fullH);
     } else {
-      const fullH = text.clientHeight;
-      node.classList.remove("is-open");
-      text.style.height = "";
-      const clampH = text.clientHeight;
-      node.classList.add("is-open");
-      animateLogTextHeight(text, fullH, clampH, () => node.classList.remove("is-open"));
+      const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+      const clampH = Number.isFinite(lineHeight) ? lineHeight * 2 : 35;
+      animateLogTextHeight(text, from, clampH, () => node.classList.remove("is-open"));
     }
   }
 
   function animateLogTextHeight(text, fromH, toH, onDone) {
     const token = {};
     logTextAnim.set(text, token);
+    text.style.transition = "none";
     text.style.height = fromH + "px";
     void text.offsetHeight;
+    text.style.removeProperty("transition");
     text.style.height = toH + "px";
     setTimeout(() => {
       if (logTextAnim.get(text) !== token) return;
@@ -2912,6 +2908,12 @@ async function api(method, path, body) {
       logTextAnim.delete(text);
       if (onDone) onDone();
     }, 240);
+  }
+
+  function syncLogCardOverflow(node) {
+    if (node.hidden || node.classList.contains("is-open")) return;
+    const text = node.querySelector(".live-log-text");
+    node.classList.toggle("is-overflowing", !!text && text.scrollHeight > text.clientHeight + 1);
   }
 
   function renderLogViewport() {
@@ -2945,11 +2947,7 @@ async function api(method, path, body) {
       // 清空批次的卡只维持离场态，移除由清场计时器一次排完。
       if (entry.fading) { markLogLeaving(node); continue; }
       node.classList.remove("is-leaving");
-      // 超行检测只针对截断态：已展开的卡保留钮（供收起），不重测以免把全文高当截断高。
-      if (!node.classList.contains("is-open")) {
-        const text = node.querySelector(".live-log-text");
-        node.classList.toggle("is-overflowing", !!text && text.scrollHeight > text.clientHeight + 1);
-      }
+
     }
     let ref = body.firstChild;
     for (const node of ordered) {
@@ -2963,6 +2961,7 @@ async function api(method, path, body) {
         logViewportNodes.delete(id);
       }
     }
+    for (const node of ordered) syncLogCardOverflow(node);
     // 合批多条、两态交接期、reduced-motion 与看板入场阶梯期都不逐条补播入场，
     // 避免层层追赶或残影（阶梯期整块运行日志区正随卡一起浮入）。
     if (logExpanded && fresh.length === 1 && !motion && !reduced && !logBoardEnterQuiet()) playLogAppearing(fresh[0]);
@@ -3053,23 +3052,33 @@ async function api(method, path, body) {
     syncLogCardHeight();
   }
 
-  // 舞台高度跟卡高走：卡高内容驱动，窄窗下卡变高时三层仍各露一个完整步长。
-  // 取叠卡内全部在册卡的最大布局高——含离场卡：它仍以 scale 0.9 占着第三层淡出，
-  // 提前把它排除出测量，舞台会在它消失前就缩到它底下，底卡下端被 overflow 裁掉。
-  // 只在量值变化时写变量，避免每帧都触发一次样式重算；隐藏期（切到别的页，看板
-  // display:none）卡高量到 0，守卫挡住不写，陈旧值留给布局观测器来校正。
+  // Measure the bottom of the painted stack, including a card that is still leaving.
   function syncLogCardHeight() {
-    const stack = $("logStack");
-    const root = $("liveLog");
-    if (!stack || !root) return;
-    let cardH = 0;
+    const stack = $("logStack"), root = $("liveLog"), depth = $("logDepth");
+    if (!stack || !root || (stack.getBoundingClientRect && !stack.offsetWidth)) return;
+    const style = getComputedStyle(root);
+    const step = parseFloat(style.getPropertyValue?.("--ll-step")) || 18;
+    const scales = [1, parseFloat(style.getPropertyValue?.("--ll-scale-1")) || 0.97,
+      parseFloat(style.getPropertyValue?.("--ll-scale-2")) || 0.94];
+    let bottom = 0;
     for (const node of stack.children) {
-      if (node.offsetHeight > cardH) cardH = node.offsetHeight;
+      const height = parseFloat(getComputedStyle(node).height) || node.offsetHeight;
+      if (!height) continue;
+      const slot = node.dataset.slot === "leaving" ? 2 : Number(node.dataset.slot);
+      bottom = Math.max(bottom, slot * step + height * scales[slot]);
     }
-    if (cardH > 0 && root.dataset.llCardH !== String(cardH)) {
-      root.dataset.llCardH = String(cardH);
-      root.style.setProperty("--ll-card-h", cardH + "px");
+    const count = logEntries.filter(entry => !entry.fading).length;
+    const edges = Math.min(2, Math.max(0, count - LOG_STACK_SIZE));
+    if (depth) {
+      [...depth.children].forEach((edge, i) => {
+        edge.hidden = i >= edges;
+        edge.dataset.motionKey = "depth" + i;
+      });
+      const band = Math.min(bottom, 30);
+      root.style.setProperty("--ll-depth-h", band + "px");
+      root.style.setProperty("--ll-depth-top", (bottom - band) + "px");
     }
+    root.style.setProperty("--ll-collapsed-h", (bottom ? bottom + [1, 6, 10][edges] : 0) + "px");
   }
 
   // 恒留滚动条槽的实测宽度写回根变量：叠卡右缘据此让出同宽，两层文字可用宽一致，
@@ -3095,104 +3104,193 @@ async function api(method, path, body) {
   let logLayoutObserver = null;
   function setupLogLayoutObserver() {
     if (logLayoutObserver || typeof ResizeObserver !== "function") return;
-    const stack = $("logStack");
+    const stage = $("liveLogStage"), stack = $("logStack");
     if (!stack) return;
+    let width;
     logLayoutObserver = new ResizeObserver(() => {
-      if (!stack.offsetHeight) return;
-      syncLogCardHeight();
-      syncLogGutter();
+      const next = stage?.clientWidth ?? stack.offsetWidth;
+      if (width === next) return;
+      width = next;
+      if (!next) return;
+      finishLogMotion();
+      renderLogFeed();
     });
-    logLayoutObserver.observe(stack);
+    logLayoutObserver.observe(stage ?? stack);
   }
 
   function renderLogFeed() {
     syncLogGutter();
     renderLogViewport();
     renderLogStack();
+    const stage = $("liveLogStage");
+    if (logExpanded && stage?.offsetWidth) logViewHeight($("logBody"), stage, $("liveLog"));
   }
 
-  function setLogExpanded(expanded) {
-    const root = $("liveLog");
-    const body = $("logBody");
-    const stack = $("logStack");
-    if (logMotionTimer) { clearTimeout(logMotionTimer); logMotionTimer = null; }
-    if (logMotionTail) { clearTimeout(logMotionTail); logMotionTail = null; }
-    const reduced = logReducedMotion();
-    // 展收先同步槽宽：叠卡右缘让出的宽度与视口一致，交接时同一句话不重新换行。
+  function logViewHeight(body, stage, root) {
+    const rows = [...body.children].filter(node => !node.hidden && node.getBoundingClientRect);
+    const last = rows.at(-1);
+    const content = last ? last.getBoundingClientRect().bottom - stage.getBoundingClientRect().top
+      + body.scrollTop + (parseFloat(getComputedStyle(last).marginBottom) || 0) : 0;
+    root.toggleAttribute('data-overflow', content > 320);
+    root.style.setProperty('--ll-view-h', Math.min(320, Math.max(0, content)) + 'px');
+  }
+
+  function captureLogScene(stage, elements) {
+    const origin = stage.getBoundingClientRect();
+    const items = new Map();
+    for (const node of elements) {
+      if (node.hidden) continue;
+      const rect = node.getBoundingClientRect();
+      if (!rect.height || rect.bottom <= origin.top || rect.top >= origin.bottom) continue;
+      const key = node.dataset.motionKey ?? node.dataset.entryId ?? node.id;
+      const meta = node.querySelector('.live-log-meta');
+      const style = getComputedStyle(node);
+      items.set(key, {
+        node, x: rect.left - origin.left, y: rect.top - origin.top,
+        w: rect.width, h: rect.height, baseW: parseFloat(style.width) || rect.width,
+        blur: meta ? parseFloat(getComputedStyle(meta).filter.slice(5)) || 0 : 0,
+      });
+    }
+    const lip = Number(getComputedStyle(stage, "::after").opacity) || 0;
+    const fade = parseFloat(getComputedStyle(stage).getPropertyValue("--ll-fade")) || 0;
+    return { h: origin.height, items, lip, fade };
+  }
+
+  function finishLogMotion() {
+    if (!logMotion) return;
+    const { stage, root, layer, frame, timer } = logMotion;
+    logMotion = null;
+    cancelAnimationFrame(frame);
+    clearTimeout(timer);
+    layer.replaceChildren();
+    stage.style.removeProperty('height');
+    root.style.removeProperty('--ll-lip-progress');
+    root.style.removeProperty('--ll-fade');
+    // Commit the terminal height before the stable-state transition is enabled again.
+    void stage.offsetHeight;
+    root.removeAttribute('data-motion');
+    $('logBody').inert = !logExpanded;
+    $('logBody').tabIndex = logExpanded ? 0 : -1;
+    if (logRenderDeferred) {
+      logRenderDeferred = false;
+      queueLogRender();
+    }
+  }
+
+  function playLogMotion(root, stage, layer, from, to) {
+    const mix = (a, b, t) => a + (b - a) * t;
+    const cards = [];
+    const keys = [...new Set([...from.items.keys(), ...to.items.keys()])].sort((a, b) => (Number(a) || 0) - (Number(b) || 0));
+    const scrollSwap = ![...from.items.keys()].some(key => to.items.has(key) && !key.startsWith('depth'));
+    const lastFrom = [...from.items.values()].sort((a, b) => b.y - a.y)[0];
+    const lastTo = [...to.items.values()].sort((a, b) => b.y - a.y)[0];
+    for (const [order, key] of keys.entries()) {
+      let start = from.items.get(key), end = to.items.get(key);
+      const depth = key.startsWith('depth');
+      const source = start ?? end;
+      if (!start) {
+        start = { ...end, y: depth ? from.h : scrollSwap ? -end.h - 12 + end.y * 0.12
+          : from.h + Math.max(0, end.y - (lastFrom?.y ?? 0)) * 0.25 };
+      }
+      if (!end) {
+        end = { ...start, y: depth ? to.h : to.h + Math.max(0, start.y - (lastTo?.y ?? 0)) * 0.2 };
+      }
+      const clone = source.node.cloneNode(true);
+      clone.removeAttribute('id');
+      clone.dataset.motionKey = key;
+      if (depth) clone.className = 'live-log-depth-edge';
+      else clone.classList.remove('is-appearing', 'is-leaving');
+      if (depth) clone.style.setProperty('--ll-edge-ink', key === 'depth0' ? '82%' : '60%');
+      Object.assign(clone.style, { left: '0', right: 'auto', top: '0', margin: '0', width: (depth ? source.w : source.baseW) + 'px',
+        zIndex: String(depth ? (key === 'depth0' ? 1 : 0) : order + 2) });
+      const ink = [...clone.querySelectorAll('.live-log-meta, .live-log-text')];
+      cards.push({ clone, start, end, ink, width: depth ? source.w : source.baseW, delay: scrollSwap && !depth && !from.items.has(key) });
+    }
+    layer.replaceChildren(...cards.map(card => card.clone));
+    const run = logMotion = { root, stage, layer, frame: 0, timer: 0 };
+    const draw = t => {
+      const h = mix(from.h, to.h, t);
+      stage.style.height = h + 'px';
+      root.style.setProperty('--ll-lip-progress', String(mix(from.lip, to.lip, t)));
+      root.style.setProperty('--ll-fade', mix(from.fade, to.fade, t) + 'px');
+      for (const { clone, start, end, ink, width, delay } of cards) {
+        const scale = mix(start.w, end.w, t) / width;
+        const travel = delay ? Math.max(0, (t - 0.30) / 0.70) : t;
+        clone.style.transform = 'translate(' + mix(start.x, end.x, t) + 'px,' + mix(start.y, end.y, travel) + 'px) scale(' + scale + ')';
+        clone.style.height = mix(start.h, end.h, t) / scale + 'px';
+        for (const child of ink) child.style.filter = 'blur(' + mix(start.blur, end.blur, t) + 'px)';
+      }
+    };
+    draw(0);
+    const began = performance.now();
+    const tick = now => {
+      if (logMotion !== run) return;
+      const t = Math.max(0, Math.min(1, (now - began) / LOG_MOTION_MS));
+      if (t >= 1 || logReducedMotion()) { finishLogMotion(); return; }
+      draw(t * t * (3 - 2 * t));
+      run.frame = requestAnimationFrame(tick);
+    };
+    run.frame = requestAnimationFrame(tick);
+    run.timer = setTimeout(() => { if (logMotion === run) finishLogMotion(); }, LOG_MOTION_MS + 100);
+  }
+
+  function setLogExpanded(expanded, immediate = false) {
+    const root = $('liveLog');
+    const body = $('logBody');
+    const stack = $('logStack');
+    const stage = $('liveLogStage');
+    const layer = $('logMotion');
+    const toggle = $('logToggle');
+    const depth = $('logDepth');
+    const ready = !!(stage?.getBoundingClientRect && layer && body && stack);
+    const animate = ready && !immediate && !logReducedMotion() && !document.hidden && logExpanded !== expanded && stage.offsetWidth > 0;
+    const elements = state => state ? [...body.children] : [...depth.children, ...stack.children];
+    const from = animate ? captureLogScene(stage, logMotion ? [...layer.children] : elements(logExpanded)) : null;
+    if (logMotion) {
+      if (from) {
+        cancelAnimationFrame(logMotion.frame);
+        clearTimeout(logMotion.timer);
+        logMotion = null;
+      } else finishLogMotion();
+    }
     syncLogGutter();
     logExpanded = expanded;
-    // 入口无条件清交接态：中途切到 reduced-motion 或连点展收，都不留半程残影。
-    if (root) root.removeAttribute("data-motion");
-    // 摊开目标行距量自视口首卡（最新一条），让叠卡摊开终态与视口前三条重合。
-    if (expanded && root && body) {
-      const first = body.children[0];
-      const computed = first && typeof getComputedStyle === "function" ? getComputedStyle(first) : null;
-      // 行距＝卡的实际使用高度＋下边距。offsetHeight 取整，与视口靠亚像素累加排出来
-      // 的真实行距差半到一个像素，摊开期叠卡还看得见时逐行露错位；computed height 给
-      // 的是 border-box 的亚像素使用值（实测 66.375 对 offsetHeight 66），取不到才退回。
-      const exact = computed ? parseFloat(computed.height) : NaN;
-      const raw = Number.isFinite(exact) && exact > 0 ? exact : (first ? first.offsetHeight : 0);
-      const mb = computed ? parseFloat(computed.marginBottom) || 0 : 0;
-      const step = Math.round((raw + mb) * 1000) / 1000;
-      if (step > 0) root.style.setProperty("--ll-step-expanded", step + "px");
+    if (root) {
+      if (from) root.setAttribute('data-motion', expanded ? 'expanding' : 'collapsing');
+      root.dataset.state = expanded ? 'expanded' : 'collapsed';
     }
-    // 展开视口高＝内容驱动、上限 320、下限不低于收起态舞台高（--ll-card-h＋两个 22px
-    // 步长，与 .live-log-stage 收起式同源）：内容充足时与旧 320px 同视野，空日志展开
-    // 不撑空白（2026-11-17 需求「即便没有内容也会把卡高展开到视口高度」；同日回归
-    // 报障「视口异常缩小」——上一版两态绑死同高，阅读面塌成一条缝）。量在翻转
-    // data-state 之前、按收起态量：展开态独有的 22px 底垫补进量值（＋22），收起态舞台
-    // 是 scrollHeight 的地板，行数不足两条时多出的余量落在下限内无感。只在展开那拍
-    // 量——阅读中 pane 不随新条目动（与旧 320 同语义），收起再展开按当下内容重定。
-    // 同任务内先写变量再翻态：高度过渡从收起高直奔终值，CSS 的 320 兜底不落帧。
-    if (expanded && root && body) {
-      const cardH = parseFloat(root.dataset.llCardH || "") || 49;
-      const viewH = Math.round(Math.min(320, Math.max(cardH + 44, body.scrollHeight + 22)));
-      root.style.setProperty("--ll-view-h", viewH + "px");
-    }
-    // 重新展开一律回到最新并恢复跟随：第一屏就是最新消息，接着上次的阅读位
-    // 会让人以为日志没在更新。
     if (expanded) {
       followLogs = true;
       if (body) body.scrollTop = 0;
+      if (ready) logViewHeight(body, stage, root);
     }
-    // 两阶段：data-motion 期间叠卡摊开并保持不透明、与视口交叉淡化，舞台瞬落到位
-    // （--ll-view-h 同任务写入，展收高度不过渡、底缘全程不动，2026-11-19）；到位后
-    // 才交接。reduced-motion 直接落稳态。
-    if (root && !reduced) root.setAttribute("data-motion", expanded ? "expanding" : "collapsing");
-    if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
-    const toggle = $("logToggle");
     if (toggle) {
-      toggle.setAttribute("aria-expanded", String(expanded));
-      const label = toggle.querySelector(".live-log-toggle-text");
-      if (label) label.textContent = expanded ? "收起" : "展开";
+      toggle.setAttribute('aria-expanded', String(expanded));
+      const label = toggle.querySelector('.live-log-toggle-text');
+      if (label) label.textContent = expanded ? '收起' : '展开';
     }
-    if (body) body.tabIndex = expanded ? 0 : -1;
-    if (stack) stack.setAttribute("aria-hidden", String(expanded));
-    if (expanded) {
-      requestAnimationFrame(() => {
-        const viewport = $("logBody");
-        if (viewport) viewport.scrollTop = 0;
-      });
+    if (body) {
+      if ((!expanded || from) && body.contains?.(document.activeElement)) toggle?.focus();
+      body.inert = !expanded || !!from;
+      body.tabIndex = body.inert ? -1 : 0;
     }
-    if (root && !reduced) {
-      if (expanded) {
-        logMotionTimer = setTimeout(() => {
-          root.setAttribute("data-motion", "handoff");
-          logMotionTail = setTimeout(() => {
-            root.removeAttribute("data-motion");
-            logMotionTimer = null; logMotionTail = null;
-          }, LOG_HANDOFF_MS);
-        }, LOG_MOTION_MS);
-      } else {
-        logMotionTimer = setTimeout(() => {
-          root.removeAttribute("data-motion");
-          logMotionTimer = null;
-        }, LOG_MOTION_MS);
-      }
+    if (stack) stack.setAttribute('aria-hidden', String(expanded));
+    if (!from) return;
+    stage.style.removeProperty('height');
+    root.style.removeProperty('--ll-lip-progress');
+    root.style.removeProperty('--ll-fade');
+    const to = captureLogScene(stage, elements(expanded));
+    if (!from.items.size && !to.items.size && from.h === to.h) {
+      root.removeAttribute('data-motion');
+      body.inert = !expanded;
+      body.tabIndex = expanded ? 0 : -1;
+      return;
     }
+    playLogMotion(root, stage, layer, from, to);
   }
 
   function resetLogFeed() {
+    finishLogMotion();
     logEntries = [];
     followLogs = true;
     logSeenKeys.clear();
@@ -3209,10 +3307,12 @@ async function api(method, path, body) {
     logViewportNodes.clear();
     for (const node of logStackNodes.values()) node.remove();
     logStackNodes.clear();
-    setLogExpanded(false);
+    syncLogCardHeight();
+    setLogExpanded(false, true);
   }
 
   function fadeClearLogFeed() {
+    finishLogMotion();
     const root = $("liveLog");
     const reduced = logReducedMotion();
     // 清空是新一轮的开始：去重簿与裁掉计数一并归零——换级别重连后的全量重放
