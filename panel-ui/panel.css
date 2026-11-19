@@ -1549,7 +1549,8 @@
     /* 卡面那块提亮的底：卡与舞台底缘共用一处，改一处两边同变。 */
     --ll-face: color-mix(in srgb, var(--surface) 94%, white 6%);
   }
-  /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与舞台长高同拍。
+  /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与视口淡入同拍
+     （外框已瞬落，摊开在最终框内进行）。
      --ll-step-expanded 由 setLogExpanded 量视口首卡行距写入，55px 是无卡时兜底。
      （2026-11-17 回归修复：这组摊开件随展开视口高一并复活——上一版两态绑死同高，
      展开阅读面塌成一条缝、展收只剩交叉淡化，见 STATUS 同日条。） */
@@ -1578,15 +1579,26 @@
      入，49px 是无卡时兜底。展开态改由 --ll-view-h 接管（setLogExpanded 按内容量值
      写入：上限 320、下限不低于本式）——内容充足与旧 320px 视野同档，空日志展开
      不撑空白（2026-11-17 需求「即便没有内容也会把卡高展开到视口高度」；同日回归
-     报障「视口异常缩小」，两轮裁决见 STATUS）。高度过渡留在展收与内容变高两处。 */
+     报障「视口异常缩小」，两轮裁决见 STATUS）。
+     展收翻态高度瞬落（2026-11-19）：高度过渡动的就是底缘横线锚定的那条边，11-17
+     首轮报的「横线跟着一起跳」即它；当日修法＝横线 300ms 延迟躲开动效，躲出的空窗
+     ＝展开期底部 34px 渐隐带直铺近黑页面底色（同日报障「底部异常变黑」）。正解＝
+     外框直接到位（横线第一帧钉在最终位置、全程不动），动画交给框内叠卡摊开与视口
+     交叉淡化。高度过渡只留收起稳态的内容增长一路：新两行卡抬高 --ll-card-h 时平滑
+     跟上（:not([data-motion]) 把展收两拍挡在外面——收起拍 data-motion 先于
+     data-state 落、两条件都不满足，翻态同帧换值不带过渡；展开态不匹配收起选择器；
+     reduced-motion 由文件末尾通配规则一并停）。 */
   .live-log-stage {
     position: relative; overflow: hidden;
     height: calc(var(--ll-card-h) + var(--ll-step) * 2);
+    transition: none;
+  }
+  .live-log[data-state="collapsed"]:not([data-motion]) .live-log-stage {
     transition: height 220ms var(--ease-out);
   }
   .live-log[data-state="expanded"] .live-log-stage { height: var(--ll-view-h, 320px); }
-  /* 两层都铺满整个舞台：卡顶锚于 top:0，不随高度过渡被拽（早期抽搐来自底锚＋层随
-     舞台长高）。舞台长出的空间正好承接叠卡向下摊开。 */
+  /* 两层都铺满整个舞台：卡顶锚于 top:0，不被高度变化拽（早期抽搐来自底锚＋层随
+     舞台尺寸变）。外框瞬落后腾出的空间承接叠卡向下摊开。 */
   .live-log-stack, .live-log-viewport { position: absolute; inset: 0; transition: opacity 220ms var(--ease-out); }
   .live-log-stack { cursor: pointer; padding: 0 2px; }
   /* 视口贴顶用瞬时快照：平滑滚动会在展开时追一个随高度变化的目标，再抖一下；
@@ -1624,8 +1636,8 @@
   .live-log-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
   /* 展开态底部收口：视口末 34px 由内容自己渐隐，滚条槽那一列保持不透明（与
      .rail-term-scroll 同型双层 mask）；底部再垫 22px 让渐隐带不压住末行卡，舞台
-     底缘稳态落一条半透明卡顶（动效结束后 300ms 淡入，见下），末端不再是半张卡被
-     硬切，日志少时底部也有落点。 */
+     底缘落一条半透明卡顶（第一帧常驻，见下），末端不再是半张卡被硬切，日志少时
+     底部也有落点。 */
   .live-log[data-state="expanded"] .live-log-viewport {
     padding-bottom: 22px;
     -webkit-mask-image:
@@ -1648,14 +1660,11 @@
     background: var(--ll-face);
     border: 1px solid var(--border-strong); border-bottom: none;
     border-radius: var(--radius-md, 8px) var(--radius-md, 8px) 0 0;
-    animation: ll-lip-in 200ms var(--ease-out) 300ms both;
   }
-  /* 底缘横线只在稳态淡入：它锚在舞台底缘，舞台在动的任何一拍（展开长高 220ms、
-     交接 60ms、收回缩高）它跟着走，就是用户报的「打底横线跟着一起跳」。300ms 延迟
-     盖过整段展收动效，淡入从 0 起、落定后才见；收起那拍选择器整条退场（content
-     消失不过渡），比任何动画都快，永不随回缩滑动（2026-11-17 两轮报障裁决）。
-     reduced-motion 下文件末尾通配规则连本动画一并停：各拍本就瞬落，直接呈稳态。 */
-  @keyframes ll-lip-in { from { opacity: 0; } }
+  /* 底缘横线第一帧常驻（2026-11-19）：外框瞬落后底缘不再移动，横线无需任何时序
+     回避。11-17 的 300ms 延迟淡入是为躲高度过渡而设——空窗期 34px 渐隐带直铺
+     近黑页面底色，即同日报障的「展开中底部异常变黑」；随高度过渡一并退役。
+     收起拍选择器整条退场（content 消失不过渡）口径不变。 */
   /* 卡面是两层共用的一套皮，必须两态同值：全局暗色把卡面与描边的对比压得很低，
      单张可读、叠起来会糊成一片（方角弱影的皮肤尤甚），所以描边取 --border-strong、
      底混入少量白。这层皮一旦只补在叠卡态，展开那一拍就是「底没了」——收起与展开

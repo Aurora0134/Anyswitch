@@ -3155,8 +3155,9 @@ async function api(method, path, body) {
       followLogs = true;
       if (body) body.scrollTop = 0;
     }
-    // 两阶段：data-motion 期间叠卡摊开并保持不透明、与视口交叉淡化，舞台同拍长高
-    // （--ll-view-h）；到位后才交接。reduced-motion 直接落稳态。
+    // 两阶段：data-motion 期间叠卡摊开并保持不透明、与视口交叉淡化，舞台瞬落到位
+    // （--ll-view-h 同任务写入，展收高度不过渡、底缘全程不动，2026-11-19）；到位后
+    // 才交接。reduced-motion 直接落稳态。
     if (root && !reduced) root.setAttribute("data-motion", expanded ? "expanding" : "collapsing");
     if (root) root.dataset.state = expanded ? "expanded" : "collapsed";
     const toggle = $("logToggle");

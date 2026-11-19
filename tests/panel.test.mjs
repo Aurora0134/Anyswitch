@@ -18543,12 +18543,13 @@ describe("看板运行日志：无框消息提示式双态流", () => {
   });
 
   it("CSS 钉住顶部基准与两阶段交接：卡高自适应舞台、摊开期叠卡可见、行距量值驱动", () => {
-    assert.ok(/\.live-log-stage \{[^}]*height: calc\(var\(--ll-card-h\) \+ var\(--ll-step\) \* 2\);[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss));
+    assert.ok(/\.live-log-stage \{[^}]*height: calc\(var\(--ll-card-h\) \+ var\(--ll-step\) \* 2\);[^}]*transition: none;/.test(panelCss), "展收翻态舞台高度瞬落：高度过渡动的就是横线锚定的底缘那条边（11-17 首轮报的「跟着一起跳」），当时用横线 300ms 延迟躲它、躲出的空窗就是 2026-11-19 报障的展开期底部黑带；外框直接到位，动画交给框内摊开与交叉淡化");
+    assert.ok(/\.live-log\[data-state="collapsed"\]:not\(\[data-motion\]\) \.live-log-stage \{[^}]*transition: height 220ms var\(--ease-out\);/.test(panelCss), "高度过渡只留收起稳态的内容增长一路：新两行卡抬高 --ll-card-h 平滑跟上；展收两拍或带 data-motion 或已翻态，均瞬落；reduced-motion 由文件末尾通配规则一并停");
     assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage \{ height: var\(--ll-view-h, 320px\); \}/.test(panelCss), "展开态舞台高交给 --ll-view-h（setLogExpanded 按内容量值写入，320 只是无卡兜底）：内容充足与旧视野同档，空日志不撑空白（2026-11-17 两轮报障裁决）");
     assert.ok(/--ll-step: 22px; --ll-step-expanded: 55px;/.test(panelCss), "收起错位 22px（够露出整行 meta）、展开行距兜底 55px：摊开动画件随展开视口高一并复活");
     assert.ok(/--ll-step: var\(--ll-step-expanded\); --ll-scale-1: 1;/.test(panelCss), "展开行距由量值驱动");
-    assert.ok(/\.live-log\[data-motion="expanding"\] \{ --ll-step: var\(--ll-step-expanded\); \}/.test(panelCss), "摊开期间距放大与舞台长高同拍");
-    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚，随舞台长高不被拽");
+    assert.ok(/\.live-log\[data-motion="expanding"\] \{ --ll-step: var\(--ll-step-expanded\); \}/.test(panelCss), "摊开期间距放大与视口淡入同拍（外框已瞬落，摊开在最终框内进行）");
+    assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*top: 0; margin: 0;/.test(panelCss), "卡顶锚 top:0，不被任何高度变化拽动");
     assert.ok(!/\.live-log-stack \.live-log-msg \{[^}]*height: 76px;/.test(panelCss), "卡高内容驱动，与视口卡同形");
     assert.ok(/\.live-log-stack \.live-log-msg \{[^}]*transform-origin: 50% 0;/.test(panelCss), "缩放基准在顶边");
     assert.ok(!/--ll-step: 78px/.test(panelCss), "旧硬编码行距已撤");
@@ -18591,10 +18592,10 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{[^}]*bottom: 0; height: 20px;/.test(panelCss), "底部常驻 20px 半透明卡顶缘");
   });
 
-  it("底缘横线只在稳态淡入：展收动效期间不可见，永不随舞台滑动", () => {
+  it("底缘横线第一帧常驻：外框瞬落后无任何时序回避，动画退役", () => {
     const lip = panelCss.match(/\.live-log\[data-state="expanded"\] \.live-log-stage::after \{([^}]*)\}/)?.[1] ?? "";
-    assert.ok(/animation: ll-lip-in 200ms var\(--ease-out\) 300ms both;/.test(lip), "300ms 延迟淡入盖过高度过渡 220ms＋交接 60ms：舞台停止前横线保持 0——它锚在舞台底缘，舞台在动的任何一拍它跟着走，就是报障的「打底横线跟着一起跳」（2026-11-17 两轮裁决）");
-    assert.ok(/@keyframes ll-lip-in \{ from \{ opacity: 0; \} \}/.test(panelCss), "淡入从 0 起：延迟期与淡入前半段不可见，收起那拍选择器整条退场（content 不过渡）先于一切动画");
+    assert.ok(!/animation:/.test(lip), "横线不再带动画时序：11-17 的 300ms 延迟淡是为躲高度过渡而设，高度过渡已撤即失去存在理由；躲出的空窗（横线不在场，34px 渐隐带直铺近黑页面底色）就是 2026-11-19 报障的展开期底部黑带");
+    assert.ok(!/ll-lip-in/.test(panelCss), "keyframes 一并退役，不留死代码");
     assert.ok(/opacity: var\(--ll-lip-o, 0\.55\);/.test(lip), "终值仍走透明度变量：wallpaper 置 0 的既有口径不变");
   });
 
