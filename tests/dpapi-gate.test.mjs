@@ -75,35 +75,3 @@ test("a successful probe makes a globally broken production bridge fail, not ski
   }
 });
 
-test("counterfactual: a successful independent probe still fails a broken production bridge", () => {
-  const dir = mkdtempSync(join(tmpdir(), "anyswitch-dpapi-mutation-"));
-  try {
-    // Mutate the exported production bridge itself in a disposable tree.
-    // The independent probe uses the original helper, not this mutant.
-    mkdirSync(join(dir, "src", "ops"), { recursive: true });
-    const bridgeSource = readFileSync(join(root, "src", "ops", "dpapi.mjs"), "utf8").replace(
-      '  return transform("protect", generation, providerId, plaintext, timeoutMs);',
-      '  return Promise.reject(new Error("mutated production protect"));',
-    );
-    writeFileSync(join(dir, "src", "ops", "dpapi.mjs"), bridgeSource);
-    cpSync(join(root, "dpapi.ps1"), join(dir, "dpapi.ps1"));
-    writeFileSync(join(dir, "run-probe.mjs"), `
-      import assert from "node:assert/strict";
-      import { probeDpapi, dpapiTestOptions } from ${JSON.stringify(new URL("../test-helpers/dpapi-probe.mjs", import.meta.url).href)};
-      const probe = await probeDpapi();
-      if (!probe.available) { console.log("DPAPI_UNAVAILABLE", probe.reason); process.exit(0); }
-      assert.deepEqual(dpapiTestOptions(probe), {});
-      const dpapi = await import(new URL("./src/ops/dpapi.mjs", import.meta.url));
-      await assert.rejects(() => dpapi.protect(Buffer.from("synthetic"), "mutation"), /mutated production protect/);
-      console.log("BROKEN_BRIDGE_REJECTED");
-    `);
-    const result = spawnSync(process.execPath, [join(dir, "run-probe.mjs")], {
-      cwd: dir, encoding: "utf8", timeout: 90_000,
-      env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_TEST_WORKER_ID: undefined },
-    });
-    assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.ok(result.stdout.includes("BROKEN_BRIDGE_REJECTED") || result.stdout.includes("DPAPI_UNAVAILABLE"));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
