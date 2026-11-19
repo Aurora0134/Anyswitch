@@ -109,7 +109,10 @@ function writeFakeStore(root) {
 }
 
 // 托管条目的盘上形态：静态 token + "direct" 实例值，直启不崩；launcher 拉起前
-// 改写为本次启动值、退出后恢复静态值。runPiLauncher 与 main 两个 describe 共用。
+// 改写为本次启动值，退出后只写回 x-agent-instance 头、apiKey 留本次启动值
+// （restore 按 launch token 与静态值同源的设计不回写 token；夹具刻意把静态
+// token 与 launch token 分值，正是为了钉住"restore 不碰 apiKey"）。
+// runPiLauncher 与 main 两个 describe 共用。
 const managedModelsJson = () => ({
   providers: {
     _poke: {
@@ -448,7 +451,6 @@ describe("main", () => {
           return 3;
         },
         log: () => {},
-        base: { LOCALAPPDATA: storeRoot },
         modelsPath,
       });
       assert.equal(code, 3, "child exit code passes through main");

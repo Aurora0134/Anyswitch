@@ -4,10 +4,9 @@
 // one JSON object { "providers": [ids…] } — sorted, 2-space indent, trailing
 // newline, written atomically — and a fail-open read (missing or corrupt file
 // reads back as an empty managed list, because the sidecar is a cache of
-// "what we injected last time", never user data). Scope note: the fail-open
-// implementation guards JSON.parse only, so it covers unparseable text but
-// Scope note: missing files, unparseable text and parseable values that do
-// not match the sidecar shape all fail open to an empty managed list.
+// "what we injected last time", never user data). Scope note: missing files,
+// unparseable text and parseable values that do not match the sidecar shape
+// all fail open to an empty managed list.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";

@@ -3,8 +3,9 @@
 // 2026-11-01 分域重构把 *-launcher.mjs 搬进 src/launchers，规格表跟着改了，
 // 盘上手写的 shim 没改（zcode-cli / agy / zcode-app.vbs 三处指着已经不存在的
 // launcher）；而当时的测试只核了 grok 与 dsh 两条的渲染结果，于是「表里写了
-// launcher、盘上没有」照样全绿。这里把三条不变式钉住：未退休条目的 launcher
-// 必须在盘上、id/command/dir 不重复、渲染出的 shim 只认 src/launchers。
+// launcher、盘上没有」照样全绿。这里把四条不变式钉住：未退休条目的 launcher
+// 必须在盘上、id/command/dir 不重复、渲染出的 shim 只认 src/launchers、在册
+// id 与启动器一一对应（不共用、是入口模块、名字随 id）。
 
 import test from "node:test";
 import assert from "node:assert/strict";

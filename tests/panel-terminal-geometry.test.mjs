@@ -647,7 +647,7 @@ describe("resize POST 稳定闸：过期测量不进 PTY", () => {
     assert.deepEqual(world.state.posts.map((p) => p.body), [{ cols: 100, rows: 30 }], "闸只拦过期测量，不拦真对齐");
     assert.equal(result.cols, 100);
     assert.equal(result.rows, 30);
-    assert.equal(world.state.session.backendState.cols, 100, "落定回写 backendState（几何重对齐的回夹依赖它）");
+    assert.equal(world.state.session.backendState.cols, 100, "落定回写 backendState（fit 同值闸与重画等待判据依赖它，回夹读 POST 响应）");
     assert.equal(world.state.session.backendState.lastResizeAt, 12345, "回声戳随响应即达");
   });
 

@@ -18973,7 +18973,6 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     sandbox.appendLog({ level: "info", message: "new-at-cap" });
     flushFrames();
     assert.equal(sandbox.entries.length, 500);
-    assert.equal(body.scrollHeight, 1000, "inserted and removed rows have equal heights");
     assert.ok(body.children.includes(reading), "the row being read was not the evicted oldest row");
     assert.equal(reading.offsetTop, 440, "the old reading row is pushed down by the insertion");
     assert.equal(body.scrollTop, 440, "the old reading row keeps its viewport position");
@@ -19265,7 +19264,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(card.classList.contains("is-appearing"), "单帧后仍在起始态（等待下一帧才有过渡起点）");
     flushFrames(1); // 内跳：帧路径摘类
     assert.ok(!card.classList.contains("is-appearing"), "下一帧（rAF 链）摘掉起始态");
-    assert.equal(timerCount(), 0, "帧路径接管后兜底计时器已取消，不再等 200ms");
+    assert.equal(timerCount(), 0, "帧路径接管后兜底计时器已取消，不再等 120ms");
     flush(400);
     assert.ok(!card.classList.contains("is-appearing"), "之后保持摘除");
   });

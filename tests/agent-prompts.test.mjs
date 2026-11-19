@@ -61,8 +61,8 @@ describe("agent-prompts data plane", () => {
 
   it("enforces title/tag/content limits with 400 errors", () => {
     const { svc } = makeService();
-    // 内容上限的期望值硬编码 32768：上限本身就是产品承诺（面板提示与注入块
-    // 大小都按它算），期望值从生产常量生成等于常量漂移时测试跟着漂。
+    // 内容上限的期望值硬编码 32768：上限本身就是产品承诺（超限报错文案把
+    // 上限值带给用户），期望值从生产常量生成等于常量漂移时测试跟着漂。
     for (const fields of [
       { title: "", content: "x" },
       { title: "  ", content: "x" },

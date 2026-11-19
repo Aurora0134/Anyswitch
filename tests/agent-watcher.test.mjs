@@ -26,8 +26,9 @@ describe("follow-agent watcher 的 anyAgent 求和", () => {
 
   // 求和的十个键逐键钉住。只钉 WorkBuddy 时，任何一项从求和里消失（实现退化、
   // 端点改名、键拼写漂移）都不会红——只在那个端点跑的机器上 followAgent 静默
-  // 失灵：agent 明明在跑，relay 却不被拉起。键集与 src/agents/agent-watcher.mjs
-  // 的 anyAgent 求和一一对应，多出/漏掉的键都在这里爆红。
+  // 失灵：agent 明明在跑，relay 却不被拉起。守卫只对表内键成立：表里的键从
+  // 求和里消失（源码删键/改名，或表里多写求和不认的键）必在这里红；源码将来
+  // 新增第 11 个键时本表不会自动跟进，那个方向要靠手工补行。
   it("each of the ten endpoint keys alone is enough to auto-start the relay", async () => {
     for (const key of ["zcode", "claude", "opencode", "dsh", "pi", "kimi", "qoder", "codex", "grok", "workbuddy"]) {
       const calls = [];

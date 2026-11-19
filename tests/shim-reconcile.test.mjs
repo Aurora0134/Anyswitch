@@ -262,31 +262,6 @@ test("reconcile：共享 bin/ 部分在册——未要的命令清掉，目录�
   assert.equal(runner.pathStore.state.value, `${bin};C:\\Windows\\System32`, "共享目录条目恰一条");
 });
 
-test("reconcile：本机没装 codex 不告警——没装是正常状态", async (t) => {
-  const home = makeHome();
-  t.after(() => rmSync(home.home, { recursive: true, force: true }));
-  const logs = [];
-  // 走生产默认探针（不注入 isEndpointInstalled）：沙箱 env 里既没有 npm shim
-  // 也没有原生 bin 目录，codex 的执行体解析会抛 ENOENT。修复前这个异常一路
-  // 抛到每个 spec 的 catch 分支，被记成「reconcile failed for codex」的 warn。
-  // 用户看到的是「我根本没装 codex，anyswitch 却报故障」。
-  const report = await reconcileShims({
-    env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
-    pathStore: fakePathStore("C:\\Windows"),
-    broadcastFn: async () => {},
-    loadStoreFn: async () => ({ ok: true, store: wiredStore() }),
-    log: (level, message) => logs.push([level, message]),
-  });
-  assert.equal(report.ok, true);
-  assert.ok(
-    !logs.some(([level, message]) => level === "warn" && message.includes("codex")),
-    "没装 codex 不是故障，不告警",
-  );
-  assert.ok(!logs.some(([level]) => level === "warn"), "整轮对账无告警");
-  assert.ok(!report.installed.includes("codex"), "没装的端点不装 shim 脚本");
-  assert.ok(!existsSync(join(home.home, ".config", "anyswitch-bin", "bin-codex")), "codex 的 shim 目录不生成");
-});
-
 test("reconcile：没装 codex 时磁盘上旧的 shim 脚本照常移除", async (t) => {
   const home = makeHome();
   t.after(() => rmSync(home.home, { recursive: true, force: true }));
@@ -339,7 +314,10 @@ test("reconcile：CLI 没装的端点，一个 shim 脚本都不装", async (t) 
   // 走生产默认探针（不注入 isEndpointInstalled）：沙箱里 8 个端点的执行体在
   // 磁盘上都不存在。修复前探针只看「resolver 报不报得出路径」，于是八个端点
   // 全被判成装了，shim 脚本照装。脚本把命令指向 anyswitch 的 launcher，
-  // 而 launcher 找不到真正的 CLI。
+  // 而 launcher 找不到真正的 CLI；更早一版探针连执行体解析抛的 ENOENT 都
+  // 不吞，没装的端点被每个 spec 的 catch 分支记成「reconcile failed for
+  // codex」的 warn——「我根本没装 codex，anyswitch 却报故障」。没装是正常
+  // 状态：「不装 shim」与「不告警」在这里一起钉。
   const report = await reconcileShims({
     env: { ...home.env, APPDATA: join(home.home, "AppData", "Roaming") },
     pathStore: fakePathStore("C:\\Windows"),

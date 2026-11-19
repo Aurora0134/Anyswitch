@@ -177,8 +177,10 @@ test("--terminal-bg 随壁纸主色生成不透明六位 hex，不受 surfaceAlp
 });
 
 test("--surface-opaque 为 --surface 同源的不透明六位 hex，不随 surfaceAlpha 滑杆带 alpha", () => {
-  // 壁纸域实底卡面（运行日志卡）的调色基料：--surface 走玻璃化 alpha 会透出壁纸，
-  // 卡面垫底必须取混合后、上 alpha 前的那一份不透明基色。
+  // --surface 同源的不透明基色：--surface 走玻璃化 alpha 会透出壁纸，运行
+  // 日志卡面曾在 11-14 实底化决议里垫这层「混合后、上 alpha 前」的不透明基
+  // 色；该消费已于 2026-11-17 撤除（卡面回到 --surface 玻璃底），引擎仍导
+  // 出本 token 供其他面使用（见 panel.test.mjs 对应断言）。
   for (const fixture of [BLUE, GREEN, RED, PURPLE, TWO_TONE, WHITE_DOMINANT, NEAR_BLACK, GRAY, EMPTY]) {
     const theme = extractTheme(fixture);
     for (const mode of ["light", "dark"]) {

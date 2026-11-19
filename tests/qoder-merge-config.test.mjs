@@ -323,9 +323,15 @@ describe("mergeQoderSettings", () => {
     assert.ok(config.providers[managedConnectionId("poke-api")]);
   });
 
-  it("deletes stale managed connections left by a previous sync", () => {
+  it("sweeps managed-prefixed entries outside the current managed set", () => {
+    // 判据对齐源码删除分支（托管前缀 && 不在在册集）：上一轮在册、渠道已删
+    // 的 stale 条目与账本前移后从未在册的命名空间孤儿（2026-11-14 实机
+    // scnet-2 案的形态）在本单元同一分支收敛，红绿同步，不必分设用例。前
+    // 缀＝anys 托管命名空间，同步按前缀收敛、自愈不依赖账本完整；实机双根
+    // 形态（往 CN 根塞孤儿）由下方 CN 根自愈用例另行覆盖。
     const staleId = managedConnectionId("old-provider");
     const existing = {
+      enabledPlugins: { "qoder-context@qoderapp-bundler": true },
       providers: {
         [staleId]: {
           baseUrl: "http://127.0.0.1:1/openai/old/v1",
@@ -345,37 +351,7 @@ describe("mergeQoderSettings", () => {
     assert.equal(config.providers[staleId], undefined, "stale managed connection removed");
     assert.ok(config.providers["qoder-custom-user-built"], "user entry survives stale cleanup");
     assert.ok(config.providers[managedConnectionId("poke-api")], "current managed set injected");
-  });
-
-  it("sweeps namespace orphans that drifted out of sidecar bookkeeping", () => {
-    // 2026-11-14 实机 scnet-2 案的形态：条目带托管前缀，但渠道已删、账本
-    // （sidecar）也已前移——既不在账本在册集也不在当前渠道集。删除白名单若
-    // 只认这两个来源，这种条目没有任何代码路径会再碰它，永久残留。前缀＝
-    // anys 托管命名空间（stripQoder 卸载侧同款所有权口径），同步按前缀收敛，
-    // 自愈不依赖账本完整（账本丢/坏按设计 fail-open 成空集）。
-    const orphanId = managedConnectionId("scnet-2");
-    const existing = {
-      enabledPlugins: { "qoder-context@qoderapp-bundler": true },
-      providers: {
-        [orphanId]: {
-          baseUrl: "http://127.0.0.1:47821/openai/qoder~scnet-2/v1",
-          apiKey: "stale",
-          type: "openai-compatible",
-          protocol: "openai",
-          authType: "bearer",
-          displayName: "scnet-2",
-          model: "SCNet-Max",
-          models: [{ model: "SCNet-Max", displayName: "SCNet-Max", contextWindow: 128000, capabilities: { vision: false, thinking: { modes: [] } } }],
-        },
-        "qoder-custom-user-built": { displayName: "My Own", apiKey: "user-key", models: [{ model: "x" }] },
-      },
-    };
-    const managedProviders = extractManagedProviders(STORE);
-    const { config } = mergeQoderSettings(existing, managedProviders, PORT, TOKEN);
-    assert.equal(config.providers[orphanId], undefined, "脱离账本的命名空间孤儿被清");
-    assert.ok(config.providers["qoder-custom-user-built"], "用户 BYOK 原样保留");
     assert.deepEqual(config.enabledPlugins, { "qoder-context@qoderapp-bundler": true }, "其他字段分毫不动");
-    assert.ok(config.providers[managedConnectionId("poke-api")], "在册渠道照常写入");
   });
 
   it("replaces the current managed set wholesale on an idempotent re-sync", () => {

@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { EventEmitter } from "node:events";
-import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes, describeRelayStartupFailure, startResidentRelay } from "../src/relay/relay-host.mjs";
+import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes, describeRelayStartupFailure, startResidentRelay, RELAY_PORT } from "../src/relay/relay-host.mjs";
 import { createProductionDeps } from "../src/launchers/launch.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 import { storePaths } from "../src/store/store-io.mjs";
@@ -999,6 +999,54 @@ test("挂载路由的出站调用带当前代际：就绪探针与清场请求�
 // 真实工厂包一层、只覆写出网两键（upstreamFetch/loadCredential），装配透传的
 // loadStore/getKeepAliveConfig/getClaudeTierMapping/effortInjector 仍是真实工厂
 // 的产物。tokenRotationScheduleFn 默认换成捕获版：轮换检查回调交由用例驱动。
+// F37（审计 ③37）的预抽口：relayPort 无偏好（0）时不再透传 0 给生产
+// listenLoopback——那会走 listen(0) 端口抽签，抽中 undici 的 fetch 禁用端口表
+// （实测 ~0.13%/次）时本用例的全部 fetch 以 "bad port" 假红。routeHarness 自持
+// server，可直走共享夹具换口重试；assemblyHarness 的 server 在生产
+// createOpenAIRelayServer 手里，只能先抽后让：预抽一个 fetch 可用口、放抽、
+// 再以具体端口号经 options.relayPort 注入。抽中 RELAY_PORT（47821）重抽——
+// 装配绝不碰真机中继口。放抽与生产重绑之间有毫秒级窗口，极端撞车会走生产的
+// EADDRINUSE 探针拒绝、用例真红——概率远低于端口抽签本身。
+async function drawAssemblyPort() {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const drawn = await listenLoopback(createServer());
+    const port = drawn.port;
+    await drawn.close();
+    if (port !== RELAY_PORT) return port;
+  }
+  throw new Error("装配端口预抽连续 8 次落在 RELAY_PORT 上，放弃装配");
+}
+
+// F38（审计 ③38）的猴补收尾：startResidentRelay 每次调用都在进程级注册且不
+// 收尾——redirectStderrToFile 猴补 process.stderr.write（捕获上一层，链叠后
+// 先建用例的日志文件会持续接收后续用例的 stderr）、挂含 process.exit(1) 的
+// uncaughtException（把单用例失败放大成整文件中止）与 unhandledRejection，
+// 再挂 SIGINT/SIGTERM/exit 关停钩子；生产语义是常驻进程一启动到死，无可指责。
+// 测试进程是 node:test 的宿主，经不起六次累积：装配前快照、close（含启动失败
+// 路径）后还原。摘除只动快照之后新挂的处理器，既有监听（node:test 自身的、
+// test-helpers/tmp 的 exit 清扫）原样保留。
+function snapshotProcessHooks() {
+  return {
+    stderrWrite: process.stderr.write,
+    uncaughtException: process.listeners("uncaughtException"),
+    unhandledRejection: process.listeners("unhandledRejection"),
+    SIGINT: process.listeners("SIGINT"),
+    SIGTERM: process.listeners("SIGTERM"),
+    exit: process.listeners("exit"),
+  };
+}
+
+function restoreProcessHooks(snapshot) {
+  process.stderr.write = snapshot.stderrWrite;
+  for (const event of ["uncaughtException", "unhandledRejection", "SIGINT", "SIGTERM", "exit"]) {
+    for (const listener of process.listeners(event)) {
+      if (!snapshot[event].includes(listener)) {
+        process.removeListener(event, listener);
+      }
+    }
+  }
+}
+
 function assemblyHarness({ settings, relayPort = 0, store, createProductionDeps: depsFactory, seed } = {}) {
   const tmp = mkTestDir("anyswitch-rh-resident-");
   const base = { LOCALAPPDATA: tmp };
@@ -1040,26 +1088,50 @@ function assemblyHarness({ settings, relayPort = 0, store, createProductionDeps:
   const syncSpawns = [];
   let rotationCheck = null;
 
-  const ready = startResidentRelay({
-    base,
-    paths: storePaths(root),
-    logPath,
-    relayPort,
-    terminalSupervisor: supervisor,
-    spawnAgentSync: async ({ port }) => {
-      syncSpawns.push(port);
-      return { ok: true };
-    },
-    storeWatcher: { close() {} },
-    tokenRotationScheduleFn: (check) => {
-      rotationCheck = check;
-      return () => {};
-    },
-    createProductionDeps: depsFactory,
-    metricsCollector: { startRequest: () => null, noteZcodeSessionRequest() {}, persistMetricsSnapshot() {}, getAgentsStatus: async () => [], onActivity: () => () => {} },
-    socketOwner: { lookup: () => null, onRefresh: () => () => {} },
-    serviceHealth: { snapshot: () => ({ degraded: false, consecutiveFailures: 0 }), recordFailure() {}, recordSuccess() {} },
-  });
+  const ready = (async () => {
+    // F37（审计 ③37）：无偏好（0）不再透传——生产 listenLoopback 的 0 就是
+    // listen(0) 端口抽签；先经 drawAssemblyPort 预抽 fetch 可用口再注入，
+    // 显式给出的非零口原样透传。
+    const portToBind = relayPort > 0 ? relayPort : await drawAssemblyPort();
+    // F38（审计 ③38）：快照必须在 startResidentRelay 之前取，还原挂在包装后的
+    // close（装配用例全部在 finally 里 close）与下面的启动失败 catch 上。
+    const processHooks = snapshotProcessHooks();
+    try {
+      const result = await startResidentRelay({
+        base,
+        paths: storePaths(root),
+        logPath,
+        relayPort: portToBind,
+        terminalSupervisor: supervisor,
+        spawnAgentSync: async ({ port }) => {
+          syncSpawns.push(port);
+          return { ok: true };
+        },
+        storeWatcher: { close() {} },
+        tokenRotationScheduleFn: (check) => {
+          rotationCheck = check;
+          return () => {};
+        },
+        createProductionDeps: depsFactory,
+        metricsCollector: { startRequest: () => null, noteZcodeSessionRequest() {}, persistMetricsSnapshot() {}, getAgentsStatus: async () => [], onActivity: () => () => {} },
+        socketOwner: { lookup: () => null, onRefresh: () => () => {} },
+        serviceHealth: { snapshot: () => ({ degraded: false, consecutiveFailures: 0 }), recordFailure() {}, recordSuccess() {} },
+      });
+      return {
+        ...result,
+        close: async () => {
+          try {
+            await result.close();
+          } finally {
+            restoreProcessHooks(processHooks);
+          }
+        },
+      };
+    } catch (err) {
+      restoreProcessHooks(processHooks);
+      throw err;
+    }
+  })();
 
   return {
     root,

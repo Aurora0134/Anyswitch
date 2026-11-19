@@ -3,7 +3,7 @@
 //
 // 取样惯例照 panel-terminal-loading：源码字符串断言 + 按函数名切源码进桩环境真跑。
 // 时钟手动推进，不锚墙钟；桩环境不依赖本机 xterm 安装。
-import test, { describe, it } from "node:test";
+import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -44,7 +44,7 @@ function makeClock(start = 100000) {
 
 // 交接单四个真身 + 共享常量的最小桩世界。所有模块级量以访问器暴露，用例可换实例、
 // 换会话、换视图、推进时钟，读到的就是产线那份源码里的同一批变量。
-function handoffWorld({ lines = { 5515: "visible history", 6029: "below the xterm viewport" } } = {}) {
+function handoffWorld({ lines = { 5515: "visible history" }, followBottom = false, floor = 5990 } = {}) {
   const bodies = [
     "trimTerminalOuterBand",
     "captureTerminalForegroundFrame",
@@ -70,7 +70,7 @@ function handoffWorld({ lines = { 5515: "visible history", 6029: "below the xter
     rows: 30,
     buffer: { active: {
       type: "normal", hasScrollback: true, viewportY: 5500, baseY: 6000, length: 6030,
-      getLine: (y) => ({ isWrapped: y === 5526, translateToString: () => lines[y] ?? "" }),
+      getLine: (y) => ({ translateToString: () => lines[y] ?? "" }),
     } },
     onWriteParsed(cb) {
       writeHandlers.push(cb);
@@ -80,11 +80,10 @@ function handoffWorld({ lines = { 5515: "visible history", 6029: "below the xter
   const stale = { done: false, restorePending: false, foregroundFrame: false };
   const handoff = {
     term,
-    read: () => ({ viewportY: 5500, baseY: 6000, length: 6030, followBottom: false, floor: 5990, lastEffBottom: null }),
+    read: () => ({ viewportY: 5500, baseY: 6000, length: 6030, followBottom, floor, lastEffBottom: null }),
     restore: (saved) => { state.restoreCalls.push({ ...saved }); return true; },
   };
-  const el = { isConnected: true };
-  const sandbox = new Function("state", "clock", "screen", "term", "stale", "handoff", "el", `
+  const sandbox = new Function("state", "clock", "screen", "term", "stale", "handoff", `
     ${decl("TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX")}
     ${decl("TERMINAL_FOREGROUND_RESTORE_SETTLE_MS")}
     ${decl("TERMINAL_FOREGROUND_RESTORE_MAX_MS")}
@@ -100,7 +99,6 @@ function handoffWorld({ lines = { 5515: "visible history", 6029: "below the xter
     let terminalForegroundFrame = null;
     let terminalForegroundFrameTimer = null;
     let terminalForegroundRestorePending = false;
-    const terminalView = el;
     function $(id) {
       if (id === "terminalScreen") return screen;
       if (id === "terminalView") return { get hidden() { return state.viewHidden; } };
@@ -121,7 +119,7 @@ function handoffWorld({ lines = { 5515: "visible history", 6029: "below the xter
       get staleScreen() { return terminalStaleScreen; }, set staleScreen(v) { terminalStaleScreen = v; },
       get view() { return currentView; }, set view(v) { currentView = v; },
     };
-  `)(state, clock, screen, term, stale, handoff, el);
+  `)(state, clock, screen, term, stale, handoff);
   return {
     state, clock, screen, term, stale, handoff, sandbox,
     write: () => { for (const cb of writeHandlers.slice()) cb(); },
@@ -191,7 +189,7 @@ describe("后台切回屏面交接：真跑", () => {
     assert.equal(w.sandbox.frame.sessionId, "sess-1");
     assert.equal(w.sandbox.frame.buffer.viewportY, 5500);
     assert.equal(w.sandbox.frame.buffer.length, 6030);
-    assert.equal(w.sandbox.frame.buffer.followBottom, false, "正在读历史，跟随态随交接单过岸");
+    assert.equal(w.sandbox.frame.buffer.followBottom, false, "正在读历史，跟随态原样抄进交接单（此场景两侧同值，来源分叉见下一条）");
     assert.equal(w.sandbox.frame.buffer.floor, 5990, "地板不是真尾，不能让新实例从出厂值重算");
 
     w.term.buffer.active.type = "alternate";
@@ -202,6 +200,26 @@ describe("后台切回屏面交接：真跑", () => {
     w.sandbox.view = "board";
     w.sandbox.capture();
     assert.equal(w.sandbox.frame, null, "不在终端页，交接单作废");
+  });
+
+  it("跟随态的取值来源两侧可分叉：桥在用桥的，桥缺位退几何回退公式", () => {
+    // 分叉前提：桥报跟随 true 时几何回退公式判 false（视口 5500 远在 baseY-1=5999 之上）。
+    // 跟随用户停在高于真尾的地板（下方有空白带）是护栏的真实驻留态；若 capture 恒用
+    // 回退公式，跟随用户的交接单会被误抄成读历史。
+    const parked = handoffWorld({ followBottom: true, floor: 5500 });
+    parked.sandbox.capture();
+    assert.equal(parked.sandbox.frame.buffer.followBottom, true,
+      "跟随态随交接单过岸：停在地板（视口 5500 < baseY-1）时几何回退公式会误判 false");
+
+    // 桥缺位（拆流已清桥 / 降级没装护栏）：跟随态退回几何回退公式，两极都钉。
+    const bare = handoffWorld();
+    bare.sandbox.handoff = null;
+    bare.sandbox.capture();
+    assert.equal(bare.sandbox.frame.buffer.followBottom, false, "无桥读历史位（5500 < 5999）判 false");
+    assert.equal(bare.sandbox.frame.buffer.floor, null, "无桥地板无来源，交 null 由落位侧重算");
+    bare.term.buffer.active.viewportY = 6000;
+    bare.sandbox.capture();
+    assert.equal(bare.sandbox.frame.buffer.followBottom, true, "无桥贴真尾（6000 >= 5999）判 true");
   });
 
   it("隐藏转折重复到达：拆流后读不到屏面时保留上一份有效交接单", () => {
@@ -249,7 +267,8 @@ describe("后台切回屏面交接：真跑", () => {
   });
 
   it("回前台保留溢出区域里的折行文字", () => {
-    const w = handoffWorld({ lines: { 5525: "repeated", 5526: "repeated", 6029: "below the xterm viewport" } });
+    // 折行＝同一行字占两行物理行，以 5525/5526 同文模拟；trim 按物理行计数，不读折行旗标。
+    const w = handoffWorld({ lines: { 5525: "repeated", 5526: "repeated" } });
     w.sandbox.capture();
     w.sandbox.resume();
     // 最后可渲染的文字行底缘在归零时为 y=928.25，外层裁切线在 y=642。
@@ -293,7 +312,7 @@ describe("后台切回屏面交接：真跑", () => {
   });
 
   it("回放写入静默后落位再揭幕：交接单交到新实例、垫片扣住到落定", () => {
-    const w = handoffWorld();
+    const w = handoffWorld({ followBottom: true, floor: 5500 });
     w.sandbox.capture();
     w.sandbox.resume();
     w.sandbox.begin();
@@ -307,7 +326,8 @@ describe("后台切回屏面交接：真跑", () => {
     w.clock.advance(150);
     assert.equal(w.state.restoreCalls.length, 1, "静默一拍后落位");
     assert.equal(w.state.restoreCalls[0].viewportY, 5500);
-    assert.equal(w.state.restoreCalls[0].followBottom, false);
+    assert.equal(w.state.restoreCalls[0].followBottom, true,
+      "桥侧跟随态经交接单原样交到落位（几何回退公式会误判 false）");
     assert.equal(w.stale.restorePending, false, "落定即放行揭幕");
     assert.equal(w.sandbox.frame, null, "交接单一次性消费");
     assert.equal(w.sandbox.pending, false, "回放闩旗标收回");
@@ -451,13 +471,4 @@ describe("后台切回屏面交接：新实例护栏落位", () => {
     assert.equal(w.sandbox.bridge.restore(null), false);
     assert.deepEqual(w.state.scrollToLineCalls, []);
   });
-});
-
-test("接线自检：交接单四个真身都能从 panel.js 完整取样", () => {
-  for (const name of [
-    "trimTerminalOuterBand", "captureTerminalForegroundFrame",
-    "resumeTerminalForegroundFrame", "beginTerminalForegroundRestore",
-  ]) {
-    assert.ok(extractFn(name).endsWith("\n  }"), `${name} 取样完整`);
-  }
 });

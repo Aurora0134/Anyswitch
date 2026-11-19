@@ -909,6 +909,29 @@ describe("defaultSpawnPanelHost（默认面板拉起实现）", () => {
 });
 
 describe("runSelfUpdate · 默认接线（不注入 probePanelFn / spawnPanelHostFn）", () => {
+  // 清理竞态根治：defaultSpawnPanelHost 拉起的 panel-host 子进程以 appDir 为
+  // cwd，marker 落盘到子进程真正退出之间有拆栈窗口，Windows 拒删活进程 cwd
+  // 所在目录（EPERM/EBUSY），单发 rmSync 会间歇假红。子进程 detached + unref
+  // 且只有 pid 透出，测试侧拿不到退出句柄，故改为撞锁退避重删：panel-host.mjs
+  // 写完 marker 即退、无驻留，cwd 锁必然释放，重删在超时（200 次 × 50ms）内
+  // 必然成功——这是等子进程退出后清场，不是多跑碰运气。仅锁类错误重试，
+  // 其余错误照抛，保留真实失败信号。
+  async function rmAppDirAwaitChildExit(target) {
+    const lockCodes = new Set(["EPERM", "EBUSY", "ENOTEMPTY"]);
+    let lastErr;
+    for (let i = 0; i < 200; i += 1) {
+      try {
+        rmSync(target, { recursive: true, force: true });
+        return;
+      } catch (err) {
+        if (!lockCodes.has(err.code)) throw err;
+        lastErr = err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw lastErr;
+  }
+
   test("默认面板探测打 47820 的 app-info，默认面板拉起真的以 node 执行 panel-host.mjs", async () => {
     // 探测走 probePanelFn = (port) => probePanelAppInfo(port, fetchFn) 默认参数
     // （fetchFn 注入，不碰真端口）；拉起走 defaultSpawnPanelHost 真身——appDir
@@ -950,7 +973,7 @@ describe("runSelfUpdate · 默认接线（不注入 probePanelFn / spawnPanelHos
       assert.equal(existsSync(marker), true, "defaultSpawnPanelHost 真的以 node 执行了 panel-host.mjs（写标记即退的无害脚本）");
     } finally {
       cleanup();
-      rmSync(appDir, { recursive: true, force: true });
+      await rmAppDirAwaitChildExit(appDir);
     }
   });
 });

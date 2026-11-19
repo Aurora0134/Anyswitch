@@ -392,16 +392,17 @@ test("main() wires every machine-touching dep to its real implementation", async
 
 test("main() wires startRelay to the real relay starter: the native fallback carries the REAL relay failure", async () => {
   // 不注入 startRelay，让 main() 缺省接上的真实 startOpenAIRelay 真跑一次：
-  // 用户根整体重定向进空临时根（store 缺失），relay 必然在监听前失败，native
-  // 回退日志里必须出现真实失败原因。若 main 里的 startRelay 接线被删，runCodex
-  // Launcher 拿到 undefined，日志会变成 "startRelay is not a function"——这里红。
+  // 隔离靠把 process.env 的 LOCALAPPDATA/APPDATA/USERPROFILE 重定向进空临时根
+  // （main() 没有 base 注入缝，deps.base 进不了被测代码），store 探测必然落空，
+  // relay 必然在监听前失败，native 回退日志里必须出现真实失败原因。若 main 里
+  // 的 startRelay 接线被删，runCodexLauncher 拿到 undefined，日志会变成
+  // "startRelay is not a function"——这里红。
   // 全程零真实 relay（监听前就失败）、零真实 spawn、零真实凭据。
   const prevEnv = {};
   for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
     prevEnv[key] = process.env[key];
     process.env[key] = mkTestDir("codex-main-env-");
   }
-  const dir = mkTestDir("codex-main-native-");
   const logs = [];
   const calls = [];
   let spawnedEnv = null;
@@ -418,7 +419,6 @@ test("main() wires startRelay to the real relay starter: the native fallback car
         return 0;
       },
       log: (line) => logs.push(line),
-      base: { USERPROFILE: join(dir, "home"), LOCALAPPDATA: join(dir, "local") },
     });
     assert.equal(code, 0, "relay 起不来不拒绝启动：codex 照常 native 启动");
     assert.ok(
@@ -435,14 +435,14 @@ test("main() wires startRelay to the real relay starter: the native fallback car
       if (prevEnv[key] === undefined) delete process.env[key];
       else process.env[key] = prevEnv[key];
     }
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("main() forwards argv to the child, syncs through the writer and closes the relay", async () => {
   // main 的依赖注入缝只服务测试：argv 被静默吞掉（codexArgs 接错变量、丢参）
   // 时静态的接线检查看不出来，这里用真实 main 调用把它钉住。全程零真实
-  // relay、零真实 spawn，落盘路径全部钉在夹具上。
+  // relay、零真实 spawn；不碰真盘由 writeConfig/loadStore 全 mock 保证
+  // （main() 不转发 deps.base，夹具路径进不了被测代码）。
   const calls = [];
   let spawnedArgs = null;
   const code = await main(["exec", "--json"], {
@@ -461,7 +461,6 @@ test("main() forwards argv to the child, syncs through the writer and closes the
       spawnedArgs = args;
       return 4;
     },
-    base: FAKE_BASE,
   });
   assert.equal(code, 4, "child exit code passes through main");
   assert.deepEqual(spawnedArgs, ["exec", "--json"], "argv must reach the child verbatim");

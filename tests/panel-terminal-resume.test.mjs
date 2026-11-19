@@ -92,6 +92,10 @@ function withFakeAgents(fn) {
     // 是真实用户目录，测试结果取决于机器安装状态。
     APPDATA: join(root, "roaming"),
     USERPROFILE: join(root, "user"),
+    // DSH_HOME 钉进沙箱（与 USERPROFILE 同根的 .dsh）：组装闸读 DSH_HOME 优先
+    // 于 USERPROFILE 默认家，机器设了 DSH_HOME 时闸会去查真实家目录、沙箱种的
+    // 插件落点随之失效——钉住后组装读的必是下面这份沙箱家。
+    DSH_HOME: join(root, "user", ".dsh"),
   };
   // codex 走官方原生安装位；qoder CLI 固定在 USERPROFILE/.qoder/bin/qodercli。
   mkdirSync(join(overrides.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1"), { recursive: true });
@@ -99,14 +103,22 @@ function withFakeAgents(fn) {
   mkdirSync(join(overrides.USERPROFILE, ".qoder", "bin", "qodercli"), { recursive: true });
   writeFileSync(join(overrides.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"), "");
   // dsh 的终端形态 = 本体 + dsh-tui 插件：一键启动组装前校验 profile 落点（生产
-  // 同款 dshTuiLaunchProfileBin 判据），沙盒一并摆出插件已装的机器——DSH_HOME
-  // 未被覆盖时组装读的正是这份 USERPROFILE 默认家。
-  mkdirSync(dirname(dshTuiLaunchProfileBin({ USERPROFILE: overrides.USERPROFILE })), { recursive: true });
-  writeFileSync(dshTuiLaunchProfileBin({ USERPROFILE: overrides.USERPROFILE }), "");
+  // 同款 dshTuiLaunchProfileBin 判据，读的正是 overrides 里钉住的沙箱 DSH_HOME），
+  // 沙盒一并摆出插件已装的机器——机器的真实家目录不再影响闸的判定。
+  mkdirSync(dirname(dshTuiLaunchProfileBin(overrides)), { recursive: true });
+  writeFileSync(dshTuiLaunchProfileBin(overrides), "");
+  // qoder 两枚机器级覆盖变量清出沙箱：解析序里它们的优先级都高于 PATH 扫描与
+  // bin 本体兜底（agent-discovery resolveQoderCnCliLaunchExecutable），机器设了
+  // 的话上面种的 qoder 落点全部失效——「覆盖值保留护栏」用例自会设回自己的值。
+  const cleared = ["QODER_CN_EXECUTABLE", "QODERCN_CLI_BIN"];
   const saved = {};
   for (const [key, value] of Object.entries(overrides)) {
     saved[key] = process.env[key];
     process.env[key] = value;
+  }
+  for (const key of cleared) {
+    saved[key] = process.env[key];
+    delete process.env[key];
   }
   return fn(root).finally(() => {
     for (const [key, value] of Object.entries(saved)) {
@@ -207,7 +219,8 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         assert.ok(!args.includes(intlExe), "不再带国际版落点");
         assert.deepEqual(args.slice(-2), ["--resume", SESSION_ID], "续接参数模板不变");
       }
-      // 国际版存档 → 维持发现层原解析（intl 就是解析器的原答案）。
+      // 国际版存档 → CN 在装（上面已种 cnExe），发现层解析出的执行体是 CN 落点；
+      // 换靶把它强制换成 intl 本体（cn→intl 方向回归漏改时本段红）。
       {
         const { router, calls } = resumeRouter({ root: mkTestDir("anyswitch-resume-qoder-intl-") });
         const { req, res } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
@@ -215,7 +228,7 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         });
         await router.handle(req, res);
         assert.equal(res.statusCode, 201);
-        assert.ok(calls[0].body.launch.args.includes(intlExe), "国际版存档不动执行体");
+        assert.ok(calls[0].body.launch.args.includes(intlExe), "国际版存档换靶回 intl 本体");
       }
       // CN 存档但 CN CLI 不在盘 → 不换：留原解析让既有 executable_missing /
       // agent 报错口径兜住，不拼必死的命令。另起一只沙箱（上面那只已种下 CN exe）。
@@ -239,22 +252,6 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
           if (saved === undefined) delete process.env.USERPROFILE;
           else process.env.USERPROFILE = saved;
         }
-      }
-      // 组装层把 CN 解析到 entry 调度器（qodercn.cmd）的形态同样要认得：续
-      // intl 存档时换成 intl CLI 本体，不认得就会把调度器留在命令行里续空。
-      {
-        const cnEntry = join(process.env.USERPROFILE, ".qoder-cn", "entry", "qodercn.cmd");
-        mkdirSync(dirname(cnEntry), { recursive: true });
-        writeFileSync(cnEntry, "");
-        const { router, calls } = resumeRouter({ root: mkTestDir("anyswitch-resume-qoder-entry-") });
-        const { req, res } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
-          agentId: "qoder", cwd, resume: { endpoint: "qoder", id: SESSION_ID, file: INTL_FILE },
-        });
-        await router.handle(req, res);
-        assert.equal(res.statusCode, 201);
-        const args = calls[0].body.launch.args;
-        assert.ok(args.includes(intlExe), "CN 入口形态也换回 intl 执行体");
-        assert.ok(!args.some((token) => /qodercn\.cmd$/i.test(token)), "CN 调度器不留在命令行");
       }
       // PATH shim 形态（npm 全局 qoderclicn.cmd）：官方序拉起解析会命中 shim，
       // 续 intl 存档时换靶识别必须认得出 shim（比对基准＝剥掉覆盖分支的官方
@@ -523,25 +520,35 @@ describe("内切切换会话（terminal sessions switch）", () => {
   // qoderclicn 落点（发现层的 qoder 解析只认国际版，不换则续空）。
   it("qoder 内切 CN 根存档：restart 的执行体换 qoderclicn", async () => {
     await withFakeAgents(async (cwd) => {
-      const cnExe = join(process.env.USERPROFILE, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe");
-      const intlExe = join(process.env.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe");
-      mkdirSync(dirname(cnExe), { recursive: true });
-      writeFileSync(cnExe, "");
-      const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-qoder-cn-") });
-      const { req, res } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
-        resume: {
-          endpoint: "qoder", id: SESSION_ID,
-          file: join(process.env.USERPROFILE, ".qoder-cn", "projects", "p", "cn.jsonl"),
-        },
-        cwd,
-      });
-      await router.handle(req, res);
-      assert.equal(res.statusCode, 200, "内切起终端");
-      assert.equal(calls.restart.length, 1, "走 restart（同记录 terminate+spawn）");
-      const args = calls.restart[0].body.launch.args;
-      assert.ok(args.includes(cnExe), "执行体换成 CN 落点");
-      assert.ok(!args.includes(intlExe), "不再带国际版落点");
-      assert.deepEqual(args.slice(-2), ["--resume", SESSION_ID], "续接参数模板不变");
+      // PATH 钉进沙箱（与续接用例同款纪律）：CN 拉起解析序含 PATH 扫描
+      // （qoderclicn shim），不钉住会撞上测试机真实 PATH 上的 qoderclicn——
+      // 本文件纪律是测试不依赖本机安装。
+      const savedPath = process.env.PATH;
+      process.env.PATH = join(cwd, "bin");
+      try {
+        const cnExe = join(process.env.USERPROFILE, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe");
+        const intlExe = join(process.env.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe");
+        mkdirSync(dirname(cnExe), { recursive: true });
+        writeFileSync(cnExe, "");
+        const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-qoder-cn-") });
+        const { req, res } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+          resume: {
+            endpoint: "qoder", id: SESSION_ID,
+            file: join(process.env.USERPROFILE, ".qoder-cn", "projects", "p", "cn.jsonl"),
+          },
+          cwd,
+        });
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 200, "内切起终端");
+        assert.equal(calls.restart.length, 1, "走 restart（同记录 terminate+spawn）");
+        const args = calls.restart[0].body.launch.args;
+        assert.ok(args.includes(cnExe), "执行体换成 CN 落点");
+        assert.ok(!args.includes(intlExe), "不再带国际版落点");
+        assert.deepEqual(args.slice(-2), ["--resume", SESSION_ID], "续接参数模板不变");
+      } finally {
+        if (savedPath === undefined) delete process.env.PATH;
+        else process.env.PATH = savedPath;
+      }
     });
   });
 

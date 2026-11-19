@@ -436,15 +436,34 @@ test("getBoardState 触发 delete-journal 重放：响应不等事务，闸门�
 
 test("delete-journal 重放经默认 scheduleResume 与直调同序：重放不丢", async () => {
   // 默认装配（scheduleResume 同步直调）下行为不得变化：getBoardState 返回时
-  // 重放事务（全同步 fs）已跑完，残留凭据与 pending 当场清掉。
+  // 重放事务（全同步 fs）已跑完，残留凭据与 pending 当场清掉。用例名里的
+  // 「与直调同序」在这里是真的比出来的：同夹具另起一份，绕过 getBoardState
+  // 的 fire-and-forget 调度缝直接 await svc.resumeDeletions()，两条路径的
+  // 落盘终态必须逐位一致（completedAt 是结账时间戳，两条路径各自取当下时刻，
+  // 比对前剥掉）。只跑默认装配、无直调对照的旧形态与
+  // store-service.test.mjs 的 getBoardState 触发用例完全重复，已并入本对照。
+  const readJournal = (paths) => JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+  const settledShape = (paths) => ({
+    credential: existsSync(join(paths.credentialsDir, "prov.dpapi")),
+    pending: readJournal(paths).pending,
+    completed: readJournal(paths).completed.map(({ completedAt, ...entry }) => entry),
+  });
+
+  // 直调对照：不经 getBoardState 的调度缝，直接等事务本身返回。
+  const directPaths = journalFixture();
+  const direct = createStoreService({ paths: directPaths });
+  assert.deepEqual(await direct.resumeDeletions(), { resumed: ["prov"], failed: [] }, "直调事务完整重放");
+
   const paths = journalFixture();
   const svc = createStoreService({ paths });
 
   const board = await svc.getBoardState();
   assert.equal(board.ok, true);
   assert.equal("resumeResult" in board, false);
+  assert.deepEqual(settledShape(paths), settledShape(directPaths),
+    "经默认 scheduleResume 与直调的落盘终态一致：重放不丢");
   assert.equal(existsSync(join(paths.credentialsDir, "prov.dpapi")), false, "同步重放当场删掉残留凭据");
-  const journal = JSON.parse(readFileSync(join(paths.root, "delete-journal.json"), "utf8"));
+  const journal = readJournal(paths);
   assert.deepEqual(journal.pending, []);
   assert.deepEqual(journal.completed.map((e) => e.providerId), ["prov"]);
 });

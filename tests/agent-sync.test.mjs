@@ -63,7 +63,7 @@ function markInstallFile(path) {
 // homeDataRoots=false 不摆 qoder/grok 两枚安装指纹：它们的数据根就在 home 顶层
 // （~/.qoder、~/.grok），摆了会在夹具根顶层预建目录——「同步结果摘要」区的
 // 「home 缺失」用例靠 CWD 顶层清单前后 diff 观测落盘，预建即把这两端点的相对
-// 路径落盘从观测面里遮掉；该区要九端点全在装的用例改调 markHomeDataRootShapes。
+// 路径落盘从观测面里遮掉；该区要十端点全在装的用例改调 markHomeDataRootShapes。
 function installAgentShapes(home, { homeDataRoots = true } = {}) {
   const npm = join(home.APPDATA, "npm");
   markInstallFile(join(npm, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
@@ -878,7 +878,7 @@ describe("agent-sync 同步结果摘要", () => {
       assert.ok(entry.reason.length > 0, `${name} 的失败原因非空`);
     }
     const summary = buildSyncSummary(res);
-    assert.deepEqual([...summary.failed].sort(), [...AGENT_ENDPOINTS].sort(), "九个端点全进失败名单");
+    assert.deepEqual([...summary.failed].sort(), [...AGENT_ENDPOINTS].sort(), "十个端点全进失败名单");
     assert.deepEqual(summary.synced, [], "成功名单为空");
   });
 
@@ -980,7 +980,7 @@ describe("agent-sync 未安装端点闸门", () => {
     base: base(extra),
   });
 
-  it("空机器：九端点全部跳过，一个配置文件都不建", async () => {
+  it("空机器：十端点全部跳过，一个配置文件都不建", async () => {
     const res = await syncAllAgentConfigs(homeOpts());
     assert.equal(res.ok, true);
     for (const name of AGENT_ENDPOINTS) {

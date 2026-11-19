@@ -1875,10 +1875,15 @@ describe("probeRelay (root-endpoint identity check)", () => {
     const server = createServer(() => { /* 永不应答 */ });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
+      // 守卫 timer 落具名变量，race 收尾即清——超时分支缺位时照样炸，
+      // 但不能让每次跑这文件都白等它挂满 10s（同款先例见 leakTimer 清理）。
+      let settleTimer;
       const verdict = await Promise.race([
         probeRelayHealth(server.address().port),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("probe did not settle — the 2s timeout branch is missing")), 10000)),
-      ]);
+        new Promise((_, reject) => {
+          settleTimer = setTimeout(() => reject(new Error("probe did not settle — the 2s timeout branch is missing")), 10000);
+        }),
+      ]).finally(() => clearTimeout(settleTimer));
       assert.deepEqual(verdict, { serving: false, degraded: false, consecutiveFailures: 0, lastFailureKind: null },
         "挂起的监听方既不在服务也不算降级");
     } finally {

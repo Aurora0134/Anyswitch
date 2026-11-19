@@ -430,10 +430,14 @@ describe("qoder 双区域版 skills", () => {
   it("scanEndpoints 同名合并（国际版根优先），仅 CN 根的本地技能照常见于清单", async () => {
     const { home, repo, cleanup } = setupQoder();
     try {
+      // 两根的同名条目必须指向不同的 repo 技能，合并行的归属才可判别：
+      // 合并取先扫到的根（skillsDirs 国际版在前），skill-a 这行该带国际根的
+      // 指向；若合并顺序翻成 CN 根优先，repoSkill 会变成 skill-b，断言即红。
+      writeSkill(join(repo, "skill-b"), { name: "skill-b" });
       mkdirSync(qoderDir(home), { recursive: true });
       mkdirSync(qoderCnDir(home), { recursive: true });
       createJunction(join(qoderDir(home), "skill-a"), join(repo, "skill-a"));
-      createJunction(join(qoderCnDir(home), "skill-a"), join(repo, "skill-a"));
+      createJunction(join(qoderCnDir(home), "skill-a"), join(repo, "skill-b"));
       writeSkill(join(qoderCnDir(home), "cn-only"), { name: "cn-only" });
       const scanned = scanEndpoints(repo, { homeDir: home });
       const qoder = scanned.find((ep) => ep.id === "qoder");
@@ -442,7 +446,7 @@ describe("qoder 双区域版 skills", () => {
       assert.deepEqual(names, ["cn-only", "skill-a"]);
       const merged = qoder.entries.find((e) => e.name === "skill-a");
       assert.equal(merged.kind, "junction");
-      assert.equal(merged.repoSkill, "skill-a");
+      assert.equal(merged.repoSkill, "skill-a", "合并行取先扫到的国际版根（指向 repo/skill-a，而非 CN 根的 skill-b）");
       assert.equal(qoder.entries.filter((e) => e.name === "skill-a").length, 1, "同名不重复出行");
     } finally {
       cleanup();

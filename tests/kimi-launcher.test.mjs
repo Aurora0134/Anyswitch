@@ -412,21 +412,33 @@ describe("main() argv 接线", () => {
   it("relay 起不来时 argv 仍原样跟队（原生回落）", async () => {
     const spawned = [];
     const logs = [];
-    const code = await main(["-p", "hi"], {
-      startRelay: async () => {
-        throw new Error("the Anyswitch global store is not usable");
-      },
-      spawnKimi: async ({ env, args }) => {
-        spawned.push({ env, args });
-        return 0;
-      },
-      log: (line) => logs.push(line),
-      base: { PATH: "/usr/bin" },
-    });
-    assert.equal(code, 0);
-    assert.deepEqual(spawned[0].args, ["-p", "hi"]);
-    assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, undefined, "回落形态不注入");
-    assert.ok(logs.some((line) => line.includes("native configuration")));
+    // main() 没有 base 注入缝，回落 env 是真实 process.env 的副本——宿主
+    // shell 若已导出 ANTHROPIC_BASE_URL（anyswitch 注入型终端即会导出），
+    // 断言会随宿主环境假红。这里先删掉该变量，钉住「继承环境里没有它」的
+    // 前提，断言才专测回落路径自身不注入；跑完恢复原值，不漏给同进程
+    // 的其他用例。
+    const hadBaseUrl = "ANTHROPIC_BASE_URL" in process.env;
+    const savedBaseUrl = process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_BASE_URL;
+    try {
+      const code = await main(["-p", "hi"], {
+        startRelay: async () => {
+          throw new Error("the Anyswitch global store is not usable");
+        },
+        spawnKimi: async ({ env, args }) => {
+          spawned.push({ env, args });
+          return 0;
+        },
+        log: (line) => logs.push(line),
+        base: { PATH: "/usr/bin" },
+      });
+      assert.equal(code, 0);
+      assert.deepEqual(spawned[0].args, ["-p", "hi"]);
+      assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, undefined, "回落形态不注入");
+      assert.ok(logs.some((line) => line.includes("native configuration")));
+    } finally {
+      if (hadBaseUrl) process.env.ANTHROPIC_BASE_URL = savedBaseUrl;
+    }
   });
 });
 
