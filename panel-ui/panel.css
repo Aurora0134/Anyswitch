@@ -4033,6 +4033,21 @@
   .logs-range-field-controls input { appearance: none; height: 28px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); color-scheme: inherit; font: 400 13px/20px var(--font-sans); }
   .logs-range-field-controls input[type="date"] { flex: 1 1 0%; }
   .logs-range-field-controls input[type="time"] { flex: none; width: 90px; }
+  /* 日期 / 时间的原生指示器：Chromium 给 date 与 time 各画一套内置图形，日历铺满一格、时钟是细圆环，
+     外框尺寸与笔重都对不上。这里接管伪元素，两枚换成 24 网格 stroke 2 的线性图标（与面板其它图标同族），
+     同盒、同笔重、填色取 currentColor 随亮暗主题走。mask 只看 alpha 通道，故 SVG 里填白。 */
+  .logs-range-field-controls {
+    --logs-icon-calendar: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='18' rx='2'/><path d='M16 2v4M8 2v4M3 10h18'/></svg>");
+    --logs-icon-clock: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/></svg>");
+  }
+  .logs-range-field-controls input::-webkit-calendar-picker-indicator {
+    width: 16px; height: 16px; margin: 0 0 0 4px; padding: 0; background-color: currentColor; background-image: none;
+    -webkit-mask-repeat: no-repeat; -webkit-mask-position: center; -webkit-mask-size: 14px 14px;
+    mask-repeat: no-repeat; mask-position: center; mask-size: 14px 14px;
+    opacity: 0.9; cursor: pointer;
+  }
+  .logs-range-field-controls input[type="date"]::-webkit-calendar-picker-indicator { -webkit-mask-image: var(--logs-icon-calendar); mask-image: var(--logs-icon-calendar); }
+  .logs-range-field-controls input[type="time"]::-webkit-calendar-picker-indicator { -webkit-mask-image: var(--logs-icon-clock); mask-image: var(--logs-icon-clock); }
   .logs-range-field[data-live-end="true"] .logs-range-field-controls input { pointer-events: none; }
   .logs-range-live { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--text-2); cursor: pointer; user-select: none; }
   .logs-range-live input { accent-color: var(--accent); }
