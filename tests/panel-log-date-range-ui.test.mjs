@@ -66,6 +66,14 @@ test("calendar cells are flat 28px rows in a chromeless grid with 1px gutters", 
   assert.ok(js.includes('button.dataset.outOfBounds = "true"'));
 });
 
+test("confirm button keeps its accent fill on hover and brightens instead of dimming", () => {
+  // 通用 .btn:hover 会把底色换成面板悬停色，主按钮因此变暗；确认键单独守住主色底并叠提亮
+  const hover = css.split(".logs-range-actions .btn-primary:hover {")[1].split("}")[0];
+  assert.ok(hover.includes("background: var(--accent)"));
+  assert.ok(hover.includes("color: #fff"));
+  assert.ok(hover.includes("filter: brightness(1.12)"));
+});
+
 test("popover keeps 620px width and a 250px fields column beside the calendar", () => {
   const popover = css.split(".logs-range-picker {")[1].split("}")[0];
   assert.ok(popover.includes("width: min(620px, calc(100vw - 32px))"));

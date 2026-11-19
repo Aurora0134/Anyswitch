@@ -4088,6 +4088,8 @@
   /* 操作行：取消与确认两钮等分撑满整行，左侧不留空位；高度与通用 .btn 一致 */
   .logs-range-actions { display: flex; gap: 8px; margin-top: auto; }
   .logs-range-actions .btn { flex: 1 1 0%; justify-content: center; min-width: 0; height: 32px; padding: 0 12px; }
+  /* 确认键悬停：守住主色底与白字，只叠一层提亮——通用 .btn:hover 把底色换成面板悬停色，主按钮在默认皮肤下会因此变暗 */
+  .logs-range-actions .btn-primary:hover { background: var(--accent); border-color: var(--accent); color: #fff; filter: brightness(1.12); }
   .logs-calendar { min-width: 0; }
   .logs-calendar-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 8px; }
   .logs-calendar-head .btn { min-width: 32px; padding-inline: 5px; font-size: 16px; }
