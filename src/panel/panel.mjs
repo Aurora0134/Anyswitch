@@ -129,8 +129,10 @@ const SESSIONS_LIST_TTL_MS = 30_000;
 // 请求日志路由（/panel/api/stats/logs）的枚举与钳制口径：range 档位 → 含当天
 // 往前推的天数（all = 90 天 retention 窗口）；status 档位同时是 errKind 枚举
 // 子集（ok 单独映射 ok=true）；pageSize 白名单。非法值一律回落默认。
-const LOG_RANGES = ["today", "7d", "30d", "all"];
-const LOG_RANGE_BACK_DAYS = { today: 0, "7d": 6, "30d": 29, all: 89 };
+const LOG_RANGES = ["today", "1d", "7d", "14d", "30d", "all", "custom"];
+const LOG_MINUTE_MS = 60_000;
+const LOG_RANGE_BACK_DAYS = { today: 0, "7d": 6, "14d": 13, "30d": 29, all: 89 };
+const LOG_DAY_MS = 24 * 60 * 60 * 1000;
 const LOG_STATUSES = ["all", "ok", "http_429", "http_5xx", "http_4xx", "network", "timeout"];
 const LOG_PAGE_SIZES = [20, 50, 100];
 
@@ -4616,7 +4618,34 @@ export function createPanelRouter({
           const nowTs = Date.now();
           const todayKey = dayKey(nowTs);
           const [yy, mm, dd] = todayKey.split("-").map(Number);
-          const fromDay = dayKey(new Date(yy, mm - 1, dd - LOG_RANGE_BACK_DAYS[range]).getTime());
+          let fromTs, toTs;
+          if (range === "custom") {
+            const readMinute = (name) => {
+              const values = sp.getAll(name);
+              if (values.length !== 1 || !/^\d+$/.test(values[0])) return NaN;
+              const ts = Number(values[0]);
+              return Number.isSafeInteger(ts) && ts % LOG_MINUTE_MS === 0 ? ts : NaN;
+            };
+            fromTs = readMinute("startTs");
+            const liveEnd = sp.getAll("liveEnd");
+            if (Number.isFinite(fromTs) && fromTs <= nowTs) {
+              if (liveEnd.length === 1 && liveEnd[0] === "1" && !sp.has("endTs")) {
+                toTs = nowTs + 1;
+              } else if (liveEnd.length === 0) {
+                const endTs = readMinute("endTs");
+                if (endTs >= fromTs && endTs <= nowTs && endTs - fromTs <= 30 * LOG_DAY_MS) {
+                  toTs = endTs + LOG_MINUTE_MS;
+                }
+              }
+            }
+            if (toTs === undefined) return sendJson(res, 400, { ok: false, error: "invalid_custom_range" });
+          } else if (range === "1d") {
+            fromTs = nowTs - LOG_DAY_MS;
+            toTs = nowTs + 1;
+          } else {
+            fromTs = new Date(yy, mm - 1, dd - LOG_RANGE_BACK_DAYS[range]).getTime();
+            toTs = new Date(yy, mm - 1, dd + 1).getTime();
+          }
           const statusRaw = sp.get("status");
           const status = LOG_STATUSES.includes(statusRaw) ? statusRaw : "all";
           const sortRaw = sp.get("sort");
@@ -4632,8 +4661,10 @@ export function createPanelRouter({
             return v === null || v === "" ? undefined : v;
           };
           const result = usageJournalLazy().readRequestsLog({
-            fromDay,
-            toDay: todayKey,
+            fromDay: dayKey(fromTs),
+            toDay: dayKey(toTs - 1),
+            fromTs,
+            toTs,
             agentId: q("agent"),
             providerId: q("provider"),
             model: q("model"),

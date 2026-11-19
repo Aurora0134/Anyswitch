@@ -24547,13 +24547,149 @@ async function api(method, path, body) {
   const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
   const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
 
+  const LOG_RANGE_PRESETS = { today: "今天", "1d": "近 24 小时", "7d": "近 7 天", "14d": "近 14 天", "30d": "近 30 天", all: "全部" };
+  const LOG_RANGE_DAY_MS = 86_400_000;
+  let logsRangeDraft;
+  let logsCalendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  let logsCalendarField = "start";
+  let logsCalendarFocusTs;
+  function logDateTimeValue(ts) {
+    const d = new Date(ts), p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function logRangeLabel() {
+    if (logsState.range !== "custom") return LOG_RANGE_PRESETS[logsState.range] || LOG_RANGE_PRESETS.today;
+    const fmt = (ts) => new Date(ts).toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+    return fmt(logsState.startTs) + (logsState.liveEnd ? " 至今" : " - " + fmt(logsState.endTs));
+  }
+  function syncLogRangePicker() {
+    if (!logsRangeDraft) return;
+    const startInput = $("logsRangeStart"), endInput = $("logsRangeEnd"), live = $("logsRangeLive");
+    startInput.value = logDateTimeValue(logsRangeDraft.startTs);
+    endInput.value = logDateTimeValue(logsRangeDraft.endTs);
+    endInput.disabled = logsRangeDraft.liveEnd;
+    live.checked = logsRangeDraft.liveEnd;
+    $("logsCalendarToday").textContent = logsCalendarMonth.toLocaleDateString(undefined, { year: "numeric", month: "long" });
+    const weekdays = $("logsCalendarWeekdays"), days = $("logsCalendarDays");
+    weekdays.replaceChildren(...Array.from({ length: 7 }, (_, i) => {
+      const node = document.createElement("span");
+      node.textContent = new Intl.DateTimeFormat(undefined, { weekday: "narrow" }).format(new Date(2024, 0, 7 + i));
+      return node;
+    }));
+    const first = new Date(logsCalendarMonth.getFullYear(), logsCalendarMonth.getMonth(), 1);
+    const grid = new Date(first.getFullYear(), first.getMonth(), 1 - first.getDay());
+    const a = new Date(logsRangeDraft.startTs), b = new Date(logsRangeDraft.liveEnd ? Date.now() : logsRangeDraft.endTs);
+    const key = (d) => d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
+    days.replaceChildren(...Array.from({ length: 42 }, (_, i) => {
+      const d = new Date(grid.getFullYear(), grid.getMonth(), grid.getDate() + i), k = key(d);
+      const isStart = k === key(a), isEnd = k === key(b);
+      const inRange = d >= new Date(a.getFullYear(), a.getMonth(), a.getDate()) && d <= new Date(b.getFullYear(), b.getMonth(), b.getDate());
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "logs-calendar-day"; button.textContent = String(d.getDate());
+      button.setAttribute("aria-label", d.toLocaleDateString()); button.setAttribute("aria-pressed", String(isStart || isEnd));
+      if (isStart || isEnd) button.dataset.endpoint = "true";
+      if (inRange && !isStart && !isEnd) button.dataset.inRange = "true";
+      if (d.getMonth() !== logsCalendarMonth.getMonth()) button.dataset.outside = "true";
+      if (k === key(new Date())) button.setAttribute("aria-current", "date");
+      const dayTs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      button.dataset.dayTs = String(dayTs);
+      button.tabIndex = dayTs === logsCalendarFocusTs || (logsCalendarFocusTs == null && isStart) ? 0 : -1;
+      button.addEventListener("keydown", (event) => {
+        const delta = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[event.key];
+        if (delta === undefined) return;
+        event.preventDefault();
+        logsCalendarFocusTs = dayTs + delta * LOG_RANGE_DAY_MS;
+        const focusDate = new Date(logsCalendarFocusTs);
+        logsCalendarMonth = new Date(focusDate.getFullYear(), focusDate.getMonth(), 1);
+        syncLogRangePicker();
+        $("logsCalendarDays").querySelector(`[data-day-ts="${logsCalendarFocusTs}"]`)?.focus();
+      });
+      button.addEventListener("click", () => {
+        logsCalendarFocusTs = dayTs;
+        const old = new Date(logsRangeDraft[logsCalendarField + "Ts"]);
+        const next = new Date(d.getFullYear(), d.getMonth(), d.getDate(), old.getHours(), old.getMinutes()).getTime();
+        logsRangeDraft[logsCalendarField + "Ts"] = next;
+        if (logsCalendarField === "start") { if (next > logsRangeDraft.endTs) logsRangeDraft.endTs = next; logsCalendarField = "end"; }
+        else if (next < logsRangeDraft.startTs) { logsRangeDraft.startTs = next; }
+        $("logsRangeError").hidden = true; syncLogRangePicker();
+      });
+      return button;
+    }));
+  }
+  function initLogRangePicker() {
+    const picker = $("logsRangePicker"), trigger = $("logRangeFilter");
+    if (!picker || !trigger) return;
+    picker.addEventListener("toggle", (event) => {
+      const open = event.newState === "open";
+      trigger.setAttribute("aria-expanded", String(open));
+      for (const button of picker.querySelectorAll("[data-log-range]")) button.setAttribute("aria-pressed", String(button.dataset.logRange === logsState.range));
+      if (!open) return;
+      const now = Math.floor(Date.now() / 60_000) * 60_000, startTs = logsState.range === "custom" ? logsState.startTs : now - LOG_RANGE_DAY_MS;
+      logsRangeDraft = { startTs, endTs: logsState.range === "custom" && !logsState.liveEnd ? logsState.endTs : now, liveEnd: logsState.range === "custom" && logsState.liveEnd };
+      const d = new Date(startTs); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1); logsCalendarField = "start";
+      $("logsRangeError").hidden = true; syncLogRangePicker();
+    });
+    const placePicker = () => {
+      if (!picker.matches(":popover-open")) return;
+      const r = trigger.getBoundingClientRect();
+      const width = Math.min(620, window.innerWidth - 32);
+      const height = picker.offsetHeight;
+      picker.style.left = Math.max(16, Math.min(r.left, window.innerWidth - width - 16)) + "px";
+      picker.style.top = Math.max(16, Math.min(r.bottom + 6, window.innerHeight - height - 16)) + "px";
+    };
+    picker.addEventListener("beforetoggle", (event) => {
+      if (event.newState !== "open") return;
+      picker.style.left = "16px";
+      picker.style.top = "16px";
+    });
+    picker.addEventListener("toggle", (event) => { if (event.newState === "open") requestAnimationFrame(placePicker); });
+    window.addEventListener("resize", placePicker);
+    window.addEventListener("scroll", placePicker, true);
+    for (const button of picker.querySelectorAll("[data-log-range]")) button.addEventListener("click", () => {
+      logsState.range = button.dataset.logRange; logsState.page = 1; logsLastSig = null;
+      $("logsRangeLabel").textContent = logRangeLabel(); picker.hidePopover(); loadLogs();
+    });
+    for (const [id, field] of [["logsRangeStart", "start"], ["logsRangeEnd", "end"]]) {
+      const input = $(id);
+      input.addEventListener("focus", () => { logsCalendarField = field; });
+      input.addEventListener("change", () => {
+        logsCalendarField = field; logsRangeDraft[field + "Ts"] = new Date(input.value).getTime();
+        const d = new Date(logsRangeDraft[field + "Ts"]); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+        $("logsRangeError").hidden = true; syncLogRangePicker();
+      });
+    }
+    $("logsRangeLive").addEventListener("change", (e) => {
+      logsRangeDraft.liveEnd = e.target.checked;
+      if (!e.target.checked) logsRangeDraft.endTs = Math.floor(Date.now() / 60_000) * 60_000;
+      syncLogRangePicker();
+    });
+    $("logsCalendarPrev").addEventListener("click", () => { logsCalendarMonth.setMonth(logsCalendarMonth.getMonth() - 1); syncLogRangePicker(); });
+    $("logsCalendarNext").addEventListener("click", () => { logsCalendarMonth.setMonth(logsCalendarMonth.getMonth() + 1); syncLogRangePicker(); });
+    $("logsCalendarToday").addEventListener("click", () => { const d = new Date(); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1); syncLogRangePicker(); });
+    $("logsRangeCancel").addEventListener("click", () => picker.hidePopover());
+    $("logsRangeApply").addEventListener("click", () => {
+      const now = Math.floor(Date.now() / 60_000) * 60_000, end = logsRangeDraft.liveEnd ? now : logsRangeDraft.endTs;
+      const error = $("logsRangeError");
+      const startInput = $("logsRangeStart"), endInput = $("logsRangeEnd");
+      if (!startInput.value || (!logsRangeDraft.liveEnd && !endInput.value)
+        || !Number.isFinite(logsRangeDraft.startTs) || !Number.isFinite(end)) error.textContent = "自定义范围不能超过 30 天";
+      else if (logsRangeDraft.startTs > end) error.textContent = "开始时间不能晚于结束时间";
+      else if (end > now || (!logsRangeDraft.liveEnd && end - logsRangeDraft.startTs > 30 * LOG_RANGE_DAY_MS)) error.textContent = "自定义范围不能超过 30 天";
+      else error.textContent = "";
+      if (error.textContent) { error.hidden = false; return; }
+      logsState.range = "custom"; logsState.startTs = logsRangeDraft.startTs; logsState.endTs = logsRangeDraft.endTs; logsState.liveEnd = logsRangeDraft.liveEnd;
+      logsState.page = 1; logsLastSig = null; $("logsRangeLabel").textContent = logRangeLabel(); picker.hidePopover(); loadLogs();
+    });
+    $("logsRangeLabel").textContent = logRangeLabel();
+  }
+
   function initLogsPane() {
+    initLogRangePicker();
     // 筛选：任一变更 → 回第 1 页 → 立即重载
     const bindFilter = (id, key) => {
       const el = $(id);
       if (el) el.onchange = () => { logsState[key] = el.value; logsState.page = 1; loadLogs(); };
     };
-    bindFilter("logRangeFilter", "range");
     bindFilter("logAgentFilter", "agent");
     bindFilter("logProviderFilter", "provider");
     bindFilter("logModelFilter", "model");
@@ -24636,8 +24772,9 @@ async function api(method, path, body) {
   async function loadLogs() {
     // 竞态守卫（同 statsReqSeq 模式）：慢的旧响应后到丢弃，不覆盖新筛选的结果
     const seq = ++logsState.seq;
+    const requestRange = logsState.range;
     const sp = new URLSearchParams({
-      range: logsState.range,
+      range: requestRange,
       sort: logsState.sort,
       dir: logsState.dir,
       page: String(logsState.page),
@@ -24647,6 +24784,11 @@ async function api(method, path, body) {
     if (logsState.provider) sp.set("provider", logsState.provider);
     if (logsState.model) sp.set("model", logsState.model);
     if (logsState.status !== "all") sp.set("status", logsState.status);
+    if (requestRange === "custom") {
+      sp.set("startTs", String(logsState.startTs));
+      if (logsState.liveEnd) sp.set("liveEnd", "1");
+      else sp.set("endTs", String(logsState.endTs));
+    }
     try {
       const res = await api("GET", "/api/stats/logs?" + sp.toString());
       if (seq !== logsState.seq) return;
@@ -24664,7 +24806,9 @@ async function api(method, path, body) {
       // 即画面无变化——5s 轮询空转时 DOM 一概不动（分页条也在签名覆盖内）
       const rows = Array.isArray(res.rows) ? res.rows : [];
       const sig = [
-        res.total || 0, res.page, res.pageSize, logsState.sort, logsState.dir,
+        res.total || 0, res.page, res.pageSize, logsState.sort, logsState.dir, requestRange,
+        requestRange === "custom" ? logsState.startTs : "",
+        requestRange === "custom" ? (logsState.liveEnd ? "live" : logsState.endTs) : "",
         rows.length ? logsRowKey(rows[0]) : "",
         rows.length ? logsRowKey(rows[rows.length - 1]) : "",
         (res.facets?.agents || []).map((f) => f.id).join(","),
