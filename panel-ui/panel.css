@@ -4058,14 +4058,14 @@
   /* 筛选行：筛选项与日期范围按钮横排，窄屏折行 */
   .logs-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .logs-range-trigger { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
-  /* 时间范围弹窗：宽 620、内距 12、圆角 10。表面/选中/操作/文字色在弹窗内自成一套（--rp-*），
-     亮暗两段各定义一次，不随皮肤换色。 */
+  /* 时间范围弹窗：宽 620、内距 12、圆角 10。--rp-* 是引用全局主题令牌（--surface/--accent 等）的局部别名，
+     值随亮暗与各皮肤自动联动，弹窗内不单独维护色板。 */
   .logs-range-picker {
-    --rp-card: #ffffff; --rp-subtle: #efeff2; --rp-selected: #e4e4ea;
-    --rp-border: hsl(240 10.2% 90.4%); --rp-border-strong: #cfcfd6;
-    --rp-text-1: #18181b; --rp-text-2: #52525b; --rp-text-3: #65656e;
-    --rp-action: #f97316; --rp-action-hover: #ea620a; --rp-danger: #b91c1c;
-    --rp-shadow: 0 4px 12px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.06);
+    --rp-card: var(--surface); --rp-subtle: var(--surface-sunken); --rp-selected: var(--accent-soft);
+    --rp-border: var(--border); --rp-border-strong: var(--border-strong);
+    --rp-text-1: var(--text); --rp-text-2: var(--text-2); --rp-text-3: var(--text-3);
+    --rp-action: var(--accent); --rp-action-hover: color-mix(in srgb, var(--accent) 88%, #fff); --rp-danger: var(--danger);
+    --rp-shadow: var(--shadow-lg);
     position: fixed; inset: auto; margin: 0; padding: 12px;
     width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto;
     container-type: inline-size;
@@ -4076,7 +4076,7 @@
   .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--rp-border); }
   .logs-range-preset { appearance: none; height: 28px; padding: 0 10px; border: 1px solid var(--rp-border-strong); border-radius: 6px; background: var(--rp-card); color: var(--rp-text-1); font: 500 13px/1 var(--font-sans); cursor: pointer; transition: background-color 150ms, border-color 150ms; }
   .logs-range-preset:hover { background: var(--rp-subtle); }
-  .logs-range-preset[aria-pressed="true"] { border-color: var(--rp-text-1); background: var(--rp-selected); font-weight: 600; }
+  .logs-range-preset[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--rp-selected); font-weight: 600; }
   /* 分栏断点看弹窗自身实宽（容器查询），不看视口：弹窗被 100vw-32px 夹窄时保持纵排，日历不被挤出屏 */
   .logs-range-layout { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
   .logs-range-fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -4125,22 +4125,6 @@
   .logs-calendar-day[data-in-range="true"] { background: var(--rp-selected); color: var(--rp-text-1); }
   .logs-calendar-day[data-endpoint="true"] { background: var(--rp-action); color: #ffffff; font-weight: 500; }
   .logs-calendar-day[aria-current="date"]:not([data-endpoint="true"]) { box-shadow: 0 0 0 1px var(--rp-border-strong); }
-  :root[data-theme="dark"] .logs-range-picker {
-    --rp-card: #2e2e33; --rp-subtle: #26262a; --rp-selected: #313136;
-    --rp-border: hsl(240 5.3% 25.7%); --rp-border-strong: #4a4a52;
-    --rp-text-1: #e4e4e7; --rp-text-2: #ababb3; --rp-text-3: #9a9aa2;
-    --rp-action: #ea580c; --rp-action-hover: #f06d1f; --rp-danger: #fca5a5;
-    --rp-shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]):not([data-theme="dark"]) .logs-range-picker {
-      --rp-card: #2e2e33; --rp-subtle: #26262a; --rp-selected: #313136;
-      --rp-border: hsl(240 5.3% 25.7%); --rp-border-strong: #4a4a52;
-      --rp-text-1: #e4e4e7; --rp-text-2: #ababb3; --rp-text-3: #9a9aa2;
-      --rp-action: #ea580c; --rp-action-hover: #f06d1f; --rp-danger: #fca5a5;
-      --rp-shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
-    }
-  }
   /* 来源/渠道/模型三列居中（表头与单元格同轴；详情/状态行是首列 colspan，不受影响） */
   .logs-table th:nth-child(2), .logs-table td:nth-child(2),
   .logs-table th:nth-child(3), .logs-table td:nth-child(3),
