@@ -4058,25 +4058,25 @@
   /* 筛选行：筛选项与日期范围按钮横排，窄屏折行 */
   .logs-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .logs-range-trigger { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
-  /* 时间范围弹窗：宽 620、内距 14、圆角 6、边框取加粗档，浮层阴影 0 12px 36px；
+  /* 时间范围弹窗：宽 620、内距 10、圆角 6、边框取加粗档，浮层阴影 0 12px 36px；
      配色直接引用全局主题令牌，随亮暗与各皮肤联动。 */
-  .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 14px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; container-type: inline-size; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2); }
+  .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; container-type: inline-size; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2); }
   .logs-range-picker:popover-open { display: block; }
-  .logs-range-picker h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
-  .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .logs-range-picker h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
   .logs-range-presets [aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
   /* 分栏断点看弹窗自身实宽（容器查询），不看视口：弹窗被 100vw-32px 夹窄时保持纵排，日历不被挤出屏 */
-  .logs-range-layout { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
-  .logs-range-fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .logs-range-layout { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+  .logs-range-fields { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   @container (min-width: 500px) {
     .logs-range-layout { flex-direction: row; }
     .logs-range-fields { width: 250px; flex: none; }
     .logs-calendar { min-width: 0; flex: 1 1 0%; }
   }
-  .logs-range-field { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); cursor: pointer; transition: border-color 150ms, box-shadow 150ms, background-color 150ms, opacity 150ms; }
+  .logs-range-field { padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); cursor: pointer; transition: border-color 150ms, box-shadow 150ms, background-color 150ms, opacity 150ms; }
   .logs-range-field[data-active="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--surface); }
   .logs-range-field[data-live-end="true"] { border-color: var(--border); background: var(--surface-sunken); opacity: 0.5; cursor: not-allowed; }
-  .logs-range-field-label { margin-bottom: 6px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.05em; color: var(--text-2); }
+  .logs-range-field-label { margin-bottom: 4px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.02em; color: var(--text-2); }
   .logs-range-field-controls { display: flex; align-items: center; gap: 6px; }
   .logs-range-field-controls input { appearance: none; height: 28px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); color-scheme: inherit; font: 400 13px/20px var(--font-sans); }
   .logs-range-field-controls input[type="date"] { flex: 1 1 0%; }
@@ -4091,14 +4091,14 @@
   /* 确认键悬停：守住主色底与白字，只叠一层提亮——通用 .btn:hover 把底色换成面板悬停色，主按钮在默认皮肤下会因此变暗 */
   .logs-range-actions .btn-primary:hover { background: var(--accent); border-color: var(--accent); color: #fff; filter: brightness(1.12); }
   .logs-calendar { min-width: 0; }
-  .logs-calendar-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .logs-calendar-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 4px; }
   .logs-calendar-head .btn { min-width: 32px; padding-inline: 5px; font-size: 16px; }
   .logs-calendar-month { min-width: 0; border: 0; background: transparent; color: var(--text); font: 500 13px/20px var(--font-sans); cursor: pointer; transition: color 150ms; }
   .logs-calendar-month:hover { color: var(--text-2); }
   .logs-calendar-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin-bottom: 2px; text-align: center; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--text-2); }
   .logs-calendar-weekdays span { padding: 2px 0; }
   .logs-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; }
-  .logs-calendar-day { appearance: none; position: relative; height: 28px; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: 400 12px/18px var(--font-sans); cursor: pointer; transition: background-color 150ms, color 150ms, box-shadow 150ms, opacity 150ms; }
+  .logs-calendar-day { appearance: none; position: relative; height: 22px; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: 400 12px/18px var(--font-sans); cursor: pointer; transition: background-color 150ms, color 150ms, box-shadow 150ms, opacity 150ms; }
   .logs-calendar-day:hover { background: var(--surface-hover); }
   .logs-calendar-day[data-outside="true"] { color: var(--text-3); }
   .logs-calendar-day[data-out-of-bounds="true"] { color: var(--text-3); opacity: 0.4; cursor: not-allowed; }

@@ -52,12 +52,12 @@ test("custom range fields split each bound into date and time inputs on a select
   assert.match(js, /logsRangeDraft\.endTs = Math\.floor\(Date\.now\(\) \/ 60_000\) \* 60_000; logsCalendarField = "start";/);
 });
 
-test("calendar cells are flat 28px rows in a chromeless grid with 1px gutters", () => {
+test("calendar cells are flat 22px rows in a chromeless grid with 1px gutters", () => {
   assert.ok(css.includes(".logs-calendar { min-width: 0; }"));
   const grid = css.split(".logs-calendar-days {")[1].split("}")[0];
   assert.ok(grid.includes("gap: 1px"));
   const cell = css.split(".logs-calendar-day {")[1].split("}")[0];
-  assert.ok(cell.includes("height: 28px"));
+  assert.ok(cell.includes("height: 22px"));
   assert.doesNotMatch(cell, /aspect-ratio/);
   const endpoint = css.split('.logs-calendar-day[data-endpoint="true"] {')[1].split("}")[0];
   assert.ok(endpoint.includes("var(--accent)"));
@@ -78,12 +78,12 @@ test("popover keeps 620px width and a 250px fields column beside the calendar", 
   const popover = css.split(".logs-range-picker {")[1].split("}")[0];
   assert.ok(popover.includes("width: min(620px, calc(100vw - 32px))"));
   assert.ok(popover.includes("container-type: inline-size"));
-  assert.ok(popover.includes("padding: 14px"));
+  assert.ok(popover.includes("padding: 10px"));
   assert.ok(popover.includes("border: 1px solid var(--border-strong)"));
   assert.ok(popover.includes("border-radius: 6px"));
   assert.ok(popover.includes("box-shadow: 0 12px 36px"));
   assert.ok(css.includes("@container (min-width: 500px)"));
-  assert.ok(css.includes(".logs-range-layout { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }"));
+  assert.ok(css.includes(".logs-range-layout { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }"));
   assert.ok(css.includes(".logs-range-fields { width: 250px; flex: none; }"));
   assert.ok(css.includes(".logs-calendar { min-width: 0; flex: 1 1 0%; }"));
   const selected = css.split('.logs-range-presets [aria-pressed="true"] {')[1].split("}")[0];
