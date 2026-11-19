@@ -1538,26 +1538,14 @@
   .live-log-region { display: block; }
   .live-log {
     display: flex; flex-direction: column; gap: 8px;
-    --ll-step: 22px; --ll-step-expanded: 55px;
-    /* 恒留滚动条槽的实测宽度，由 syncLogGutter 写入；叠卡右缘据此让出同宽。 */
+    --ll-step: 18px;
     --ll-gutter: 0px;
-    --ll-card-h: 49px;
-    --ll-scale-1: 0.96; --ll-scale-2: 0.92;
-    --ll-blur-1: 0.4px; --ll-blur-2: 0.8px;
-    --ll-opacity-1: 0.86; --ll-opacity-2: 0.72;
+    --ll-collapsed-h: 0px;
+    --ll-view-h: 0px;
+    --ll-scale-1: 0.97; --ll-scale-2: 0.94;
+    --ll-blur-1: 0.28px; --ll-blur-2: 0.58px;
     --ll-retreat-delay: 45ms;
-    /* 卡面那块提亮的底：卡与舞台底缘共用一处，改一处两边同变。 */
     --ll-face: color-mix(in srgb, var(--surface) 94%, white 6%);
-  }
-  /* 展开＝错位间距放大到视口实际行距、缩放/虚化/透明度归位，与视口淡入同拍
-     （外框已瞬落，摊开在最终框内进行）。
-     --ll-step-expanded 由 setLogExpanded 量视口首卡行距写入，55px 是无卡时兜底。
-     （2026-11-17 回归修复：这组摊开件随展开视口高一并复活——上一版两态绑死同高，
-     展开阅读面塌成一条缝、展收只剩交叉淡化，见 STATUS 同日条。） */
-  .live-log[data-state="expanded"] {
-    --ll-step: var(--ll-step-expanded); --ll-scale-1: 1; --ll-scale-2: 1;
-    --ll-blur-1: 0px; --ll-blur-2: 0px;
-    --ll-opacity-1: 1; --ll-opacity-2: 1;
   }
   .live-log-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px; }
   .live-log-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.01em; }
@@ -1574,97 +1562,62 @@
   .log-clear-btn:hover, .live-log-toggle:hover { color: var(--text); background: var(--surface-hover); }
   .live-log-toggle svg { width: 14px; height: 14px; flex: none; transition: transform 220ms var(--ease-out); }
   .live-log[data-state="expanded"] .live-log-toggle svg { transform: rotate(180deg); }
-  /* 舞台高度＝卡高＋两个步长：卡高内容驱动，窄窗卡变高时三层仍各露一个完整步长，
-     第三层不会只剩一条卡底边。--ll-card-h 由 renderLogStack 量叠卡内最大布局高写
-     入，49px 是无卡时兜底。展开态改由 --ll-view-h 接管（setLogExpanded 按内容量值
-     写入：上限 320、下限不低于本式）——内容充足与旧 320px 视野同档，空日志展开
-     不撑空白（2026-11-17 需求「即便没有内容也会把卡高展开到视口高度」；同日回归
-     报障「视口异常缩小」，两轮裁决见 STATUS）。
-     展收翻态高度瞬落（2026-11-19）：高度过渡动的就是底缘横线锚定的那条边，11-17
-     首轮报的「横线跟着一起跳」即它；当日修法＝横线 300ms 延迟躲开动效，躲出的空窗
-     ＝展开期底部 34px 渐隐带直铺近黑页面底色（同日报障「底部异常变黑」）。正解＝
-     外框直接到位（横线第一帧钉在最终位置、全程不动），动画交给框内叠卡摊开与视口
-     交叉淡化。高度过渡只留收起稳态的内容增长一路：新两行卡抬高 --ll-card-h 时平滑
-     跟上（:not([data-motion]) 把展收两拍挡在外面——收起拍 data-motion 先于
-     data-state 落、两条件都不满足，翻态同帧换值不带过渡；展开态不匹配收起选择器；
-     reduced-motion 由文件末尾通配规则一并停）。 */
   .live-log-stage {
     position: relative; overflow: hidden;
-    height: calc(var(--ll-card-h) + var(--ll-step) * 2);
-    transition: none;
-  }
-  .live-log[data-state="collapsed"]:not([data-motion]) .live-log-stage {
+    height: var(--ll-collapsed-h);
     transition: height 220ms var(--ease-out);
   }
-  .live-log[data-state="expanded"] .live-log-stage { height: var(--ll-view-h, 320px); }
-  /* 两层都铺满整个舞台：卡顶锚于 top:0，不被高度变化拽（早期抽搐来自底锚＋层随
-     舞台尺寸变）。外框瞬落后腾出的空间承接叠卡向下摊开。 */
-  .live-log-stack, .live-log-viewport { position: absolute; inset: 0; transition: opacity 220ms var(--ease-out); }
-  .live-log-stack { cursor: pointer; padding: 0 2px; }
-  /* 视口贴顶用瞬时快照：平滑滚动会在展开时追一个随高度变化的目标，再抖一下；
-     overflow-anchor:none 防新消息从顶部插入时滚动锚定把阅读位推走。
-     scrollbar-gutter:stable 让槽位恒在布局里：日志少到不用滚时也不回收这段宽度，
-     叠卡右缘按同一实测宽度让出，两层文本宽永远一致，交接不会重新换行。 */
+  .live-log[data-state="expanded"] .live-log-stage { height: var(--ll-view-h); }
+  .live-log[data-motion] .live-log-stage { transition: none; }
+  .live-log-stack, .live-log-viewport, .live-log-motion, .live-log-depth { position: absolute; inset: 0; }
+  .live-log-stack { cursor: pointer; padding: 0 2px; z-index: 1; }
+  .live-log-depth { z-index: 0; }
   .live-log-viewport {
-    overflow-y: auto; padding: 0 2px; opacity: 0; pointer-events: none;
+    overflow-y: auto; padding: 0 2px; visibility: hidden;
     contain: layout; overflow-anchor: none; scrollbar-gutter: stable;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
-  /* 稳态可见性：收起只显叠卡，展开只显视口。 */
-  .live-log[data-state="expanded"] .live-log-stack { opacity: 0; pointer-events: none; }
-  .live-log[data-state="expanded"] .live-log-viewport { opacity: 1; pointer-events: auto; }
-  /* 摊开期视口从第一帧就在场并随 220ms 淡入：第 4 行起当场填住舞台下半段，不再
-     「满→空→突然满」。叠卡压在其上完成摊开，但放掉点击，展开中的卡内操作落到视口
-     那一层；到位后 handoff 只剩上层 60ms 淡出。收回仍走硬切（F6 口径）。 */
-  .live-log[data-motion="expanding"] { --ll-step: var(--ll-step-expanded); }
-  .live-log[data-motion="expanding"] .live-log-stack { opacity: 1; pointer-events: none; z-index: 2; }
-  .live-log[data-motion="collapsing"] .live-log-stack { opacity: 1; pointer-events: auto; }
-  .live-log[data-motion="collapsing"] .live-log-viewport { opacity: 0; pointer-events: none; }
-  .live-log[data-motion="collapsing"] .live-log-stack,
-  .live-log[data-motion="collapsing"] .live-log-viewport { transition: none; }
-  .live-log[data-motion="handoff"] .live-log-stack,
-  .live-log[data-motion="handoff"] .live-log-viewport { transition: opacity 60ms var(--ease-out); }
-  .live-log[data-motion="handoff"] .live-log-stack { opacity: 0; pointer-events: none; }
-  .live-log[data-motion="handoff"] .live-log-viewport { opacity: 1; pointer-events: auto; }
-  /* 两态交接期禁用退层 stagger，免得摊开被逐层延迟拖乱。 */
-  .live-log[data-motion] .live-log-stack .live-log-msg,
-  .live-log[data-motion] .live-log-stack .live-log-meta,
-  .live-log[data-motion] .live-log-stack .live-log-text { transition-delay: 0ms; }
+  .live-log[data-state="expanded"] .live-log-viewport { visibility: visible; }
+  .live-log[data-state="expanded"] :is(.live-log-stack, .live-log-depth),
+  .live-log[data-motion] :is(.live-log-stack, .live-log-depth, .live-log-viewport) { visibility: hidden; }
+  .live-log-motion, .live-log-depth { pointer-events: none; }
+  .live-log-motion { z-index: 2; }
+  .live-log-motion .live-log-msg, .live-log-motion .live-log-limit {
+    position: absolute; margin: 0; transform-origin: top left;
+  }
+  .live-log-depth span, .live-log-motion .live-log-depth-edge {
+    position: absolute; box-sizing: border-box;
+    left: var(--ll-inset); right: calc(var(--ll-inset) + var(--ll-gutter));
+    top: var(--ll-depth-top, 0px); height: calc(var(--ll-depth-h, 0px) + var(--ll-reveal));
+    background: var(--ll-face);
+    border: 1px solid color-mix(in srgb, var(--border-strong) var(--ll-edge-ink), transparent);
+    border-radius: var(--radius-md, 8px);
+  }
+  .live-log-depth span[hidden] { display: none; }
+  .live-log-depth span:first-child { --ll-inset: 7%; --ll-reveal: 5px; --ll-edge-ink: 82%; z-index: 1; }
+  .live-log-depth span:last-child { --ll-inset: 10%; --ll-reveal: 9px; --ll-edge-ink: 60%; }
   .live-log-viewport::-webkit-scrollbar { width: 8px; }
   .live-log-viewport::-webkit-scrollbar-track { background: transparent; }
   .live-log-viewport::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
   .live-log-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
-  /* 展开态底部收口：视口末 34px 由内容自己渐隐，滚条槽那一列保持不透明（与
-     .rail-term-scroll 同型双层 mask）；底部再垫 22px 让渐隐带不压住末行卡，舞台
-     底缘落一条半透明卡顶（第一帧常驻，见下），末端不再是半张卡被硬切，日志少时
-     底部也有落点。 */
-  .live-log[data-state="expanded"] .live-log-viewport {
-    padding-bottom: 22px;
-    -webkit-mask-image:
-      linear-gradient(to bottom, black calc(100% - 34px), transparent),
-      linear-gradient(black, black);
-    -webkit-mask-size: 100% 100%, calc(var(--ll-gutter) + 1px) 100%;
-    -webkit-mask-position: 0 0, right 0;
-    -webkit-mask-repeat: no-repeat;
-    mask-image:
-      linear-gradient(to bottom, black calc(100% - 34px), transparent),
-      linear-gradient(black, black);
+  .live-log[data-overflow][data-state="expanded"] { --ll-fade: 16px; }
+  .live-log[data-overflow][data-state="expanded"] .live-log-viewport { padding-bottom: 14px; }
+  .live-log[data-overflow][data-state="expanded"] .live-log-viewport,
+  .live-log[data-motion] .live-log-motion {
+    mask-image: linear-gradient(black calc(100% - var(--ll-fade, 0px)), transparent), linear-gradient(black, black);
     mask-size: 100% 100%, calc(var(--ll-gutter) + 1px) 100%;
     mask-position: 0 0, right 0;
     mask-repeat: no-repeat;
   }
-  .live-log[data-state="expanded"] .live-log-stage::after {
+  .live-log-stage::after {
     content: ""; position: absolute; z-index: 3; pointer-events: none;
-    left: 2px; right: calc(2px + var(--ll-gutter)); bottom: 0; height: 20px;
-    box-sizing: border-box; opacity: var(--ll-lip-o, 0.55);
+    left: 2px; right: calc(2px + var(--ll-gutter)); bottom: 0; height: 12px;
+    box-sizing: border-box; opacity: var(--ll-lip-progress, 0);
     background: var(--ll-face);
     border: 1px solid var(--border-strong); border-bottom: none;
     border-radius: var(--radius-md, 8px) var(--radius-md, 8px) 0 0;
   }
-  /* 底缘横线第一帧常驻（2026-11-19）：外框瞬落后底缘不再移动，横线无需任何时序
-     回避。11-17 的 300ms 延迟淡入是为躲高度过渡而设——空窗期 34px 渐隐带直铺
-     近黑页面底色，即同日报障的「展开中底部异常变黑」；随高度过渡一并退役。
-     收起拍选择器整条退场（content 消失不过渡）口径不变。 */
+  .live-log[data-overflow][data-state="expanded"] { --ll-lip-progress: var(--ll-lip-o, 0.38); }
   /* 卡面是两层共用的一套皮，必须两态同值：全局暗色把卡面与描边的对比压得很低，
      单张可读、叠起来会糊成一片（方角弱影的皮肤尤甚），所以描边取 --border-strong、
      底混入少量白。这层皮一旦只补在叠卡态，展开那一拍就是「底没了」——收起与展开
@@ -1702,7 +1655,8 @@
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     transition: height 220ms var(--ease-out);
   }
-  .live-log-viewport .live-log-msg.is-open .live-log-text { display: block; -webkit-line-clamp: unset; }
+  .live-log-motion .live-log-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  :is(.live-log-viewport, .live-log-motion) .live-log-msg.is-open .live-log-text { display: block; -webkit-line-clamp: unset; }
   /* 卡内展开钮沿用 Top5 列表的 ▸ caret 形，热区放大到 20px 方：仅超行卡显示，
      堆叠预览卡恒隐（点卡是展开区域）。 */
   .live-log-msg-fold {
@@ -1715,7 +1669,7 @@
   }
   .live-log-msg-fold:hover { color: var(--text-2); background: var(--surface-hover); }
   .live-log-msg.is-overflowing .live-log-msg-fold { display: inline-flex; }
-  .live-log-msg.is-open .live-log-msg-fold { transform: rotate(90deg); }
+  .live-log-msg-fold[aria-expanded="true"] { transform: rotate(90deg); }
   .live-log-stack .live-log-msg-fold { display: none; }
   /* 叠卡只定位置与退层过渡，卡面那套皮在 .live-log-msg 基座上两态共用。
      卡高内容驱动、与视口卡同为截 2 行，摊开终态才与视口前三条重合；左右按视口
@@ -1730,8 +1684,8 @@
   /* 退一层＝下移、缩小、变淡、文字虚化、降层级五件事同拍；后层再晚 45ms，读得出
      「新卡浮出→旧卡依次退远」的推进，而非四张卡同时各自过渡。 */
   .live-log-stack .live-log-msg[data-slot="0"] { transform: translateY(0) scale(1); opacity: 1; z-index: 3; }
-  .live-log-stack .live-log-msg[data-slot="1"] { transform: translateY(var(--ll-step)) scale(var(--ll-scale-1)); opacity: var(--ll-opacity-1); z-index: 2; }
-  .live-log-stack .live-log-msg[data-slot="2"] { transform: translateY(calc(var(--ll-step) * 2)) scale(var(--ll-scale-2)); opacity: var(--ll-opacity-2); z-index: 1; transition-delay: var(--ll-retreat-delay); }
+  .live-log-stack .live-log-msg[data-slot="1"] { transform: translateY(var(--ll-step)) scale(var(--ll-scale-1)); opacity: 1; z-index: 2; }
+  .live-log-stack .live-log-msg[data-slot="2"] { transform: translateY(calc(var(--ll-step) * 2)) scale(var(--ll-scale-2)); opacity: 1; z-index: 1; transition-delay: var(--ll-retreat-delay); }
   /* 虚化只落在卡内文字：卡框、描边与下缘高光保持锐利，否则补回来的层界又会被糊掉。 */
   .live-log-stack .live-log-meta,
   .live-log-stack .live-log-text { filter: blur(0px); transition: filter 220ms var(--ease-out); }
@@ -1774,7 +1728,6 @@
      悬停也不会被静默压死。展开态由 .live-log-viewport 的 pointer-events 接管，
      视口卡不可点，因此没有悬停——不给假的可点暗示。 */
   .live-log-stack:hover .live-log-msg {
-    background-color: color-mix(in srgb, var(--surface) 88%, white 12%);
     border-color: color-mix(in srgb, var(--border-strong) 75%, var(--text) 25%);
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 26%, transparent), var(--shadow-sm);
   }
@@ -2427,7 +2380,6 @@
      成了多余的一道。退层整卡 opacity 会把卡面带字跟壁纸混洗（实机实测退层小字对比
      掉到 3:1 上下），壁纸域两档归 1，退层感由缩放+错位+描边层叠继续表达。 */
   :root[data-style="wallpaper"] .live-log { --ll-lip-o: 0; }
-  :root[data-style="wallpaper"] .live-log { --ll-opacity-1: 1; --ll-opacity-2: 1; }
   /* 标题行在壁纸域是无垫底的浅灰字压照片（实测 ~2:1）：补卡面同款垫底成条，
      与「卡即框」同一套皮；margin 与叠卡层同宽，条缘与卡缘对齐。 */
   :root[data-style="wallpaper"] .live-log-bar {
