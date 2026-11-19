@@ -118,7 +118,7 @@ describe("壁纸主题静态接线", () => {
     assert.ok(!panelCss.includes("#wallpaperControls"), "旧从属区 CSS 门控已清");
   });
 
-  it("panel.js 接线：清单四项、「自定义...」开窗分支、主题/亮暗切换进控制器、xterm 透明开关按底色门控", () => {
+  it("panel.js 接线：清单五项、「自定义...」开窗分支、主题/亮暗切换进控制器、xterm 透明开关按底色门控", () => {
     assert.ok(panelJs.includes('const STYLES = ["default", "cyan", "aurora", "sepia", "wallpaper"];'), "STYLES 五项");
     assert.ok(/b\.dataset\.style === WALLPAPER_STYLE[\s\S]{0,200}?openModal\(\)/.test(panelJs),
       "「自定义...」点开配置窗口");

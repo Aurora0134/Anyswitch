@@ -8,9 +8,10 @@
 //   绑临时端口，node:http.request 覆写 Host（undici fetch 会静默丢弃 Host 覆写，
 //   上轮已证）：attacker.example 下读路由全 403 且响应体无合成秘密，真实环回
 //   Host 全 200。此即 rebinding 的服务端等效证明；浏览器侧 LNA/PNA 闸门不
-//   依赖、不测。不经 createPanelServer——它不透传 relay/终端宿主/watchdog 探
-//   针（透传清单见 panel-host.mjs），走它必真打 127.0.0.1:47821 与真实
-//   PowerShell，探针注入只能在路由器层完成。
+//   依赖、不测。不经 createPanelServer——它不透传 relay/终端宿主探针（透传
+//   清单见 panel-host.mjs），走它必真打 127.0.0.1:47821 与真实 PowerShell，
+//   relay/终端宿主探针注入只能在路由器层完成（watchdog 两探针虽透传，
+//   prewarm 建服期即跑）。
 //
 // env 沙箱先于 panel.mjs 的动态 import：session-scan 的 defaultScanner 在模块
 // 加载期按 HOME 固化各 adapter 的存档根，先 import 后改 env 会让活体腿的
@@ -230,8 +231,8 @@ describe("AUTH-1 · 路由级 Host 门（mock）", () => {
 // 生产路由（createPanelRouter，探针全注入）绑 127.0.0.1 临时端口，
 // node:http.request 显式覆写 Host。relay 健康、终端宿主状态、watchdog 注册
 // 表/进程探针全走注入桩：零真实网络、零 PowerShell。不经 createPanelServer
-// 的原因见文件头 ③——那四项探针它透传不过去，prewarm 还会在建服期就打真实
-// 探针。
+// 的原因见文件头 ③——relay/终端宿主那两类探针它透传不过去；watchdog 两探
+// 针虽透传，prewarm 建服期即跑。
 describe("AUTH-1 · 活体腿：生产路由＋Host 覆写", () => {
   it("attacker.example 读路由全 403 且无泄漏；真实环回 Host 全 200", async () => {
     const warnings = [];
