@@ -196,7 +196,9 @@ for (const slug of SLUGS) {
     // 三段身份逐段在册（计数 >=3 区分不了身份：sepia 块外实有 4 段，第 4 段是 --heat-*
     // 热力档位、与亮色段同为 :root[data-style=sepia] 顶层段，删掉任一暗色段后计数仍为
     // 3、原计数断言照绿）。亮色段与 --heat 段同形，靠 color-scheme: light 判别；显式
-    // 暗色段带显式 [data-theme="dark"] 条件；跟随系统暗色段在 @media 内且内容与之相同。
+    // 暗色段带显式 [data-theme="dark"] 条件；跟随系统暗色段在 @media 内、选择器钉到
+    // 契约形态（:not 排除显式 light/dark，只钉 @media 外壳的话改写形态照样全绿），
+    // 声明集还须与显式暗色段逐条相同（CONTRACT.md 三段模板：内容与 2) 完全相同）。
     const outsideTokens = rules.filter((r) => !r.chain.includes(scope.pre) && tokenRule(r));
     const plainRoot = (r) => r.chain.every((p) => !p.startsWith("@media"));
     const hasSeg = (pred, what) => {
@@ -207,8 +209,21 @@ for (const slug of SLUGS) {
       `亮色 token 段（:root[data-style="${slug}"] 顶层 + color-scheme: light）`);
     hasSeg((r) => plainRoot(r) && r.sel === `:root[data-style="${slug}"][data-theme="dark"]`,
       `显式暗色 token 段（:root[data-style="${slug}"][data-theme="dark"]）`);
-    hasSeg((r) => r.chain.some((p) => p.startsWith("@media (prefers-color-scheme: dark)")),
-      "跟随系统暗色 token 段（@media (prefers-color-scheme: dark) 内）");
+    hasSeg(
+      (r) => r.chain.some((p) => p.startsWith("@media (prefers-color-scheme: dark)")) &&
+        r.sel === `:root[data-style="${slug}"]:not([data-theme="light"]):not([data-theme="dark"])`,
+      `跟随系统暗色 token 段（@media (prefers-color-scheme: dark) 内，选择器 :not 排除显式 light/dark）`);
+    // 「内容与之相同」钉成断言：跟随系统暗色段的声明集与显式暗色段逐条相等
+    // （比对前按声明切分并归一空白——两段各自的注释文字允许不同）。
+    const declsOf = (body) => body.split(";").map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const explicitDark = outsideTokens.find(
+      (r) => plainRoot(r) && r.sel === `:root[data-style="${slug}"][data-theme="dark"]`);
+    const followSystem = outsideTokens.filter(
+      (r) => r.chain.some((p) => p.startsWith("@media (prefers-color-scheme: dark)")));
+    for (const r of followSystem) {
+      assert.deepEqual(declsOf(r.body), declsOf(explicitDark.body),
+        `${slug}.css:${r.line} 跟随系统暗色段的声明集与显式暗色段不一致（契约：内容与 2) 完全相同）`);
+    }
     // 块外允许的 @ 块：@keyframes（不能进 @scope）与承载 token 定义的 @media；
     // 其他 @ 块（例如把覆盖规则塞进 @media 却漏在外层）一律红。
     const atOutside = atBlocks.filter((b) => b.open < scope.open || b.open > scope.close)

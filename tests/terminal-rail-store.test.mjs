@@ -1,6 +1,6 @@
 // 终端会话栏视图状态：归档清单 + 已移除分组目录清单 + 分组显示顺序 + 会话置顶
 // 清单。三层断言：store 纯单测（清洗/归一化/幂等/落盘形状与重读）+ 路由级
-// （createPanelRouter 真跑七条端点，持久化跨router实例）+ 装配级
+// （createPanelRouter 真跑八条端点，持久化跨router实例）+ 装配级
 // （不注入 store 真跑 panel.mjs 的惰性装配分支，落点与跨实例加载）。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -273,7 +273,7 @@ describe("终端会话栏视图状态存储", () => {
     });
   });
 
-  describe("路由级：GET 全量 + POST 六个动作", () => {
+  describe("路由级：GET 全量 + POST 七个动作", () => {
     const withRouter = (fn) => {
       const root = mkTestDir("anyswitch-rail-route-");
       const store = createRailStore({ file: join(root, TERMINAL_RAIL_STORE_FILE) });
@@ -426,7 +426,7 @@ describe("终端会话栏视图状态存储", () => {
       assert.equal(call.res.statusCode, 200);
       assert.deepEqual(call.json().archived, [{ endpoint: "kimi", id: "s-1" }], "新实例从盘上惰性加载");
     });
-    // 七条路由的注册与 200/400 行为已由上面六条用例真跑覆盖（GET prefs +
+    // 八条路由的注册与 200/400 行为已由上面六条用例真跑覆盖（GET prefs +
     // archive/unarchive/pin/unpin/group-order/remove-group/restore-group 各自
     // 真发请求），不再保留 panel.mjs 源码子串/正则钉死——那类断言对等价改写
     // （改形制不改行为）会假红，对装配被拆（import 行即含标识符）又假绿。
