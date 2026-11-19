@@ -4,6 +4,7 @@ import test from "node:test";
 
 const html = readFileSync(new URL("../panel-ui/panel.html", import.meta.url), "utf8");
 const js = readFileSync(new URL("../panel-ui/panel.js", import.meta.url), "utf8");
+const css = readFileSync(new URL("../panel-ui/panel.css", import.meta.url), "utf8");
 
 test("request logs offer all six date presets without changing the overview controls", () => {
   const logs = html.split('id="statsLogsPane"')[1].split("</section>")[0];
@@ -26,4 +27,17 @@ test("request logs offer all six date presets without changing the overview cont
   assert.match(js, /requestRange === "custom"/);
   assert.ok(js.includes('sp.set("liveEnd", "1")'));
   assert.ok(js.includes("picker.hidePopover()"));
+});
+
+test("range popover opens in place and blurs the content behind it", () => {
+  // 首帧即按触发器矩形预定位：开窗前不允许先钉到左上角再跳位
+  assert.ok(js.includes("prePlacePicker"));
+  assert.ok(js.includes('picker.addEventListener("beforetoggle",'));
+  assert.ok(!js.includes('picker.style.left = "16px"'));
+  // 高度缓存：close 后再开用上次实测高度预算，开窗后 rAF 精修
+  assert.ok(js.includes("logsPickerHeight"));
+  // 玻璃模糊与面板既有玻璃面同构（双前缀）
+  const block = css.split(".logs-range-picker {")[1].split("}")[0];
+  assert.ok(block.includes("backdrop-filter: var(--glass-blur)"));
+  assert.ok(block.includes("-webkit-backdrop-filter: var(--glass-blur)"));
 });
