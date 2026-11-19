@@ -4004,6 +4004,16 @@
      配色直接引用全局主题令牌，随亮暗与各皮肤联动。 */
   .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; container-type: inline-size; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2); }
   .logs-range-picker:popover-open { display: block; }
+  /* 开合动画：开＝淡入＋自上 8px 滑入＋自 95% 放大到位，关＝淡出＋缩回 95%（无位移）。
+     display/overlay 是离散属性，普通过渡撑不起关闭动画：display 带 allow-discrete
+     才把 none 推迟到过渡收尾生效，overlay 带 allow-discrete 才让弹窗留在顶层播完
+     退场再让位；@starting-style 给「从 display:none 进场」的首帧定起点，开场过渡
+     才有 from 态。reduced-motion 下全局通配规则清零 transition，开合即时切换。 */
+  .logs-range-picker { opacity: 0; transform: scale(0.95); transition: opacity 150ms ease, transform 150ms ease, display 150ms ease allow-discrete, overlay 150ms ease allow-discrete; }
+  .logs-range-picker:popover-open { opacity: 1; transform: none; }
+  @starting-style {
+    .logs-range-picker:popover-open { opacity: 0; transform: translateY(-8px) scale(0.95); }
+  }
   .logs-range-picker h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
   .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
   .logs-range-presets [aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
@@ -4062,6 +4072,14 @@
   .logs-table tbody tr.logs-row-fail { background: var(--danger-soft); }
   .logs-table tbody tr.logs-row-fail:hover { background: var(--danger-soft); }
   .logs-table td.logs-cell-main { color: var(--text); }
+  /* 新行入场：只给新来的行挂 logs-row-new（判定见 panel.js 的 logsEnterKeys），
+     行体淡入，单元格叠一层主题色底高亮再渐隐——底色画在格子上（inset 大 spread
+     铺满格子），失败行的淡红底上也照显。既有行整幅重建不挂类，不重播。
+     reduced-motion 下全局通配规则清零 animation，行直接以基样式呈现。 */
+  .logs-table tbody tr.logs-row.logs-row-new { animation: logsRowEnter 240ms ease-out 160ms backwards; }
+  .logs-table tbody tr.logs-row.logs-row-new > td { animation: logsRowNew 1200ms ease-in 300ms backwards; }
+  @keyframes logsRowEnter { from { opacity: 0; } }
+  @keyframes logsRowNew { from { box-shadow: inset 0 0 0 100vmax var(--accent-soft); } to { box-shadow: inset 0 0 0 100vmax transparent; } }
   /* 单元格第二行小字（缓存 / 首字·t/s） */
   .logs-sub { display: block; font-size: 10.5px; color: var(--text-4); margin-top: 2px; }
   /* 用时三档染色：<15s 绿 / <60s 黄 / ≥60s 红 */

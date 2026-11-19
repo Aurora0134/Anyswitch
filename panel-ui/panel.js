@@ -24630,6 +24630,7 @@ async function api(method, path, body) {
   let logsTotal = 0; // 最近一次成功响应的总数（跳页钳制用）
   let logsCorrecting = false; // 深页超界自动回末页的一次性守卫（防循环）
   let logsLastSig = null; // 最近一次落地渲染的签名（loadLogs 同签名跳过重渲）
+  let logsShown = null; // 最近一次落地渲染的视图串与行键集（新行入场动画的判定基准）
   const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
   const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
 
@@ -24943,6 +24944,9 @@ async function api(method, path, body) {
       if (logsState.liveEnd) sp.set("liveEnd", "1");
       else sp.set("endTs", String(logsState.endTs));
     }
+    // 视图串＝本次请求参数集（页态/每页条数/筛选/排序/方向/范围全在内）：轮询与
+    // 手动刷新串不变，翻页、改筛选、改排序、改范围都换串——新行入场动画只认串不变的刷新
+    const view = sp.toString();
     try {
       const res = await api("GET", "/api/stats/logs?" + sp.toString());
       if (seq !== logsState.seq) return;
@@ -24971,7 +24975,7 @@ async function api(method, path, body) {
       ].join("|");
       if (sig === logsLastSig) return;
       logsLastSig = sig;
-      renderLogs(res);
+      renderLogs(res, view);
       refillLogsFilters(res.facets);
     } catch {
       if (seq !== logsState.seq) return;
@@ -25049,17 +25053,37 @@ async function api(method, path, body) {
     return (n / 1000).toFixed(1) + "s";
   }
 
-  function renderLogs(res) {
+  // 新行判定：与上一次落地渲染同一视图（同页态/每页条数/筛选/排序/范围）且落在
+  // 第 1 页时，行键不在上一次集合里的才算「新来的」；换视图（翻页、改筛选、改排序、
+  // 改范围）与首次加载返回 null，一行也不播。
+  function logsEnterKeys(shown, view, page, keys) {
+    if (!shown || shown.view !== view || page !== 1) return null;
+    const fresh = keys.filter((k) => !shown.keys.has(k));
+    return fresh.length ? fresh : null;
+  }
+
+  function renderLogs(res, view) {
     const tbody = $("logsTbody");
     if (!tbody) return;
     logsRows = Array.isArray(res.rows) ? res.rows : [];
     logsTotal = res.total || 0;
     if (!logsRows.length) {
       tbody.innerHTML = '<tr class="logs-state-row"><td colspan="7"><div class="empty-hint">该筛选条件下暂无请求记录</div></td></tr>';
+      logsShown = { view, keys: new Set() };
       renderLogsPager(res);
       return;
     }
+    const keys = logsRows.map(logsRowKey);
+    const enter = logsEnterKeys(logsShown, view, res.page, keys);
+    logsShown = { view, keys: new Set(keys) };
     tbody.innerHTML = logsRows.map((r) => logsRowHtml(r)).join("");
+    if (enter) {
+      // 只给新来的行挂入场动画类；整幅重建的既有行不挂类，入场动画不重播
+      const fresh = new Set(enter);
+      for (const tr of tbody.children) {
+        if (fresh.has(tr.getAttribute("data-logs-key"))) tr.classList.add("logs-row-new");
+      }
+    }
     // 轮询重建后按行键恢复展开中的详情行
     logsRows.forEach((r, i) => {
       if (logsExpanded.has(logsRowKey(r))) appendLogsDetail(tbody.children[i], r);

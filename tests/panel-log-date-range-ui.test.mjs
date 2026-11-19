@@ -104,6 +104,48 @@ test("range popover opens in place and blurs the content behind it", () => {
   assert.ok(block.includes("-webkit-backdrop-filter: var(--glass-blur)"));
 });
 
+test("range popover animates open with fade, slide and zoom, and closed with fade and zoom only", () => {
+  // 开＝淡入＋自上 8px 滑入＋自 95% 放大到位；关＝淡出＋缩回 95%，无位移
+  const closed = css.match(/\.logs-range-picker \{ opacity: 0; transform: scale\(0\.95\); transition: [^}]+\}/);
+  assert.ok(closed, "关闭归宿态（隐藏＋95% 缩放）在册");
+  assert.ok(closed[0].includes("opacity 150ms ease"));
+  assert.ok(closed[0].includes("transform 150ms ease"));
+  // display/overlay 是离散属性：带 allow-discrete 才把 none 推迟到过渡收尾生效、
+  // 让弹窗留在顶层播完关闭动画再让位
+  assert.ok(closed[0].includes("display 150ms ease allow-discrete"));
+  assert.ok(closed[0].includes("overlay 150ms ease allow-discrete"));
+  assert.ok(css.includes(".logs-range-picker:popover-open { opacity: 1; transform: none; }"));
+  // @starting-style 给从 display:none 进场的首帧定起点：开态的滑入位移只写在这里
+  const start = css.split("@starting-style {")[1].split("}")[0];
+  assert.ok(start.includes(".logs-range-picker:popover-open { opacity: 0; transform: translateY(-8px) scale(0.95);"));
+  // 开合动画吃全局 reduced-motion 通配禁用规则（transition 清零后即时切换）
+  assert.ok(css.includes("@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }"));
+});
+
+test("fresh log rows fade in under a fading accent tint only when the same view gains rows", () => {
+  // 入场类只挂在 .logs-row 上（空态/错误态/骨架行不挂）；高亮颜色走主题令牌，不落字面色
+  assert.ok(css.includes(".logs-table tbody tr.logs-row.logs-row-new"));
+  assert.ok(css.includes("animation: logsRowEnter 240ms ease-out 160ms backwards;"));
+  assert.ok(css.includes("animation: logsRowNew 1200ms ease-in 300ms backwards;"));
+  const shade = css.split("@keyframes logsRowNew {")[1].split("}")[0];
+  assert.ok(shade.includes("inset 0 0 0 100vmax var(--accent-soft)"));
+  assert.doesNotMatch(shade, /#[0-9a-f]{3,8}\b|rgba?\(/);
+  // 判定逻辑：同视图＋第 1 页才挑新键；翻页/换视图/首次加载一概不播
+  const m = js.match(/function logsEnterKeys\(shown, view, page, keys\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, "logsEnterKeys 在册");
+  const fn = new Function(`return function logsEnterKeys(shown, view, page, keys) {${m[1]}\n  }`)();
+  const shown = { view: "v", keys: new Set(["a", "b"]) };
+  assert.deepEqual(fn(shown, "v", 1, ["c", "a", "b"]), ["c"], "同视图第 1 页只挑新键");
+  assert.equal(fn(shown, "v", 1, ["a", "b"]), null, "同视图无新行不播");
+  assert.equal(fn(shown, "v", 2, ["c"]), null, "非第 1 页不播");
+  assert.equal(fn(shown, "w", 1, ["c"]), null, "换视图不播");
+  assert.equal(fn(null, "v", 1, ["c"]), null, "首次加载不播");
+  // 视图串＝本次请求参数集；renderLogs 只给新键行挂类
+  assert.ok(js.includes("const view = sp.toString();"));
+  assert.ok(js.includes("logsEnterKeys(logsShown, view, res.page, keys)"));
+  assert.ok(js.includes('tr.classList.add("logs-row-new")'));
+});
+
 test("code comments do not name external products as the origin of implementation choices", () => {
   const pattern = /cc[-_ .]?switch/i;
   const offenders = [];
