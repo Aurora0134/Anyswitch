@@ -1396,9 +1396,8 @@ test("claude: lastPromptAt 取最后一条真实用户行，注入与工具结�
 
 // 深扫回归：首行用户提问 + >2MB 无用户填充——提问在旧 2MB 窗外，深扫必须
 // 整份倒扫把真实提问时间取回（kimi 没有 createdAt 回落，丢提问＝行沉组底）。
-// 填充行带不带 hint 命中都测：助手的 "user" 字面量不存在（claude 填充是
-// type:"assistant"），预筛应整块跳过；块内混入含字面量的行时预筛放行、
-// 谓词把关。
+// 填充行带不带 hint 命中都测：assistant 填充行的字节里没有 "user" 字面量，
+// 预筛整块跳过；user 型机器行（命令回显）天然带字面量，预筛放行、谓词把关。
 function claudeDeepFiller(extra = {}) {
   return JSON.stringify({
     type: "assistant",
@@ -1425,22 +1424,39 @@ test("claude: 提问被挤出旧 2MB 尾窗时深扫取回真实提问时间", a
   assert.equal(sessions[0].lastPromptAt, Date.parse("2026-09-01T10:00:00.000Z"), "深扫取回窗外首问时间，不再回落 null");
 });
 
-// 预筛的把关面：块内出现含 "user" 字面量但非用户行的填充（如助手行引用了
-// 单词 "user"），预筛放行整块、谓词仍返回 null——文件里没有任何真实提问时
-// 键照旧落 null，绝不因字面量出现而硬造。
+// 预筛的把关面：needle 是带引号的 JSON 字面量 "user"，user 型机器行（命令
+// 回显、整块工具结果、系统提醒）经 "type"/"role" 值天然带命中——预筛放行
+// 这些块、逐行解析后由谓词判回 null。content 字符串里引用单词 user 的引号
+// 会被 JSON 序列化转义，字节上不构成命中；真要造误命中必须用 user 型行。
+// 夹具全填命令回显行（无任何真实提问），末尾 custom-title 过列表门槛，深扫
+// 在这份 >2MB 文件上真的执行：字面量逐块命中一次也不得硬造键。
 test("claude: 深扫字面量误命中不硬造键，无真实提问仍回落 null", async () => {
   const root = makeTmp();
-  // 填充行的文本里带 "user" 字面量（content 是字符串，谓词判 type 不匹配）。
-  const filler = claudeDeepFiller({
-    message: { role: "assistant", content: "assistant 谈论 user 的内容输出".repeat(6) },
+  // 命令回显行：type/role 值带 "user" 字面量（预筛放行），谓词按注入名单
+  // 判回 null，标题路径也排除它——firstUserMessage 全程为 null。
+  const filler = claudeLine({
+    message: {
+      role: "user",
+      content: "<command-name>/compact</command-name>\n<command-message>compact</command-message>".repeat(10),
+    },
+    timestamp: "2026-09-01T11:00:00.000Z",
+    sessionId: "sess-deep2",
   });
   const need = Math.ceil((2 * 1024 * 1024 + 128 * 1024) / (filler.length + 1)) + 2;
   const lines = [];
   for (let i = 0; i < need; i++) lines.push(filler);
+  // 无首条用户消息时列表门槛靠 custom-title 过（行在 tail 窗内），会话入列
+  // 后 lastPromptAt 的深扫才真正执行。
+  lines.push(JSON.stringify({ type: "custom-title", customTitle: "外部命名的会话" }));
   writeClaudeSession(root, "C--work-myproj", "sess-deep2.jsonl", lines);
   const { sessions } = await claudeScanner(root).scanAll();
-  // 无真实提问行 → 会话根本不进列表（列表门槛要求首条真实用户消息）。
-  assert.equal(sessions.length, 0);
+  assert.equal(sessions.length, 1, "custom-title 过列表门槛，会话入列后深扫路径才真正执行");
+  assert.equal(sessions[0].title, "外部命名的会话", "标题来自 custom-title——命令回显没被当成首条用户消息");
+  assert.equal(
+    sessions[0].lastPromptAt,
+    null,
+    '预筛放行了每个含 "user" 字面量的块，谓词把命令回显全部判为机器行，键照旧 null 不硬造',
+  );
 });
 
 test("kimi: lastPromptAt 是最近的 prompt.accepted，system-reminder 注入不推进", async () => {
