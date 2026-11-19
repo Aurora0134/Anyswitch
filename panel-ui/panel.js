@@ -24554,9 +24554,27 @@ async function api(method, path, body) {
   let logsCalendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   let logsCalendarField = "start";
   let logsCalendarFocusTs;
-  function logDateTimeValue(ts) {
+  function logDatePartValue(ts) {
     const d = new Date(ts), p = (n) => String(n).padStart(2, "0");
-    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  }
+  function logTimePartValue(ts) {
+    const d = new Date(ts), p = (n) => String(n).padStart(2, "0");
+    return p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  // 字段卡里日期、时间两个输入框合成一个时间戳：只改被编辑的那一半，另一半沿用现值；两框都空返回 null
+  function logDateTimeFromInputs(dateInput, timeInput, currentTs) {
+    const base = new Date(currentTs);
+    const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateInput.value || "");
+    const tm = /^(\d{2}):(\d{2})$/.exec(timeInput.value || "");
+    if (!dm && !tm) return null;
+    return new Date(
+      dm ? Number(dm[1]) : base.getFullYear(),
+      dm ? Number(dm[2]) - 1 : base.getMonth(),
+      dm ? Number(dm[3]) : base.getDate(),
+      tm ? Number(tm[1]) : base.getHours(),
+      tm ? Number(tm[2]) : base.getMinutes(),
+    ).getTime();
   }
   function logRangeLabel() {
     if (logsState.range !== "custom") return LOG_RANGE_PRESETS[logsState.range] || LOG_RANGE_PRESETS.today;
@@ -24565,11 +24583,16 @@ async function api(method, path, body) {
   }
   function syncLogRangePicker() {
     if (!logsRangeDraft) return;
-    const startInput = $("logsRangeStart"), endInput = $("logsRangeEnd"), live = $("logsRangeLive");
-    startInput.value = logDateTimeValue(logsRangeDraft.startTs);
-    endInput.value = logDateTimeValue(logsRangeDraft.endTs);
-    endInput.disabled = logsRangeDraft.liveEnd;
-    live.checked = logsRangeDraft.liveEnd;
+    $("logsRangeStartDate").value = logDatePartValue(logsRangeDraft.startTs);
+    $("logsRangeStartTime").value = logTimePartValue(logsRangeDraft.startTs);
+    $("logsRangeEndDate").value = logDatePartValue(logsRangeDraft.endTs);
+    $("logsRangeEndTime").value = logTimePartValue(logsRangeDraft.endTs);
+    $("logsRangeEndDate").disabled = logsRangeDraft.liveEnd;
+    $("logsRangeEndTime").disabled = logsRangeDraft.liveEnd;
+    $("logsRangeStartCard").dataset.active = String(logsCalendarField === "start");
+    $("logsRangeEndCard").dataset.active = String(logsCalendarField === "end" && !logsRangeDraft.liveEnd);
+    $("logsRangeEndCard").dataset.liveEnd = String(logsRangeDraft.liveEnd);
+    $("logsRangeLive").checked = logsRangeDraft.liveEnd;
     $("logsCalendarToday").textContent = logsCalendarMonth.toLocaleDateString(undefined, { year: "numeric", month: "long" });
     const weekdays = $("logsCalendarWeekdays"), days = $("logsCalendarDays");
     weekdays.replaceChildren(...Array.from({ length: 7 }, (_, i) => {
@@ -24581,6 +24604,7 @@ async function api(method, path, body) {
     const grid = new Date(first.getFullYear(), first.getMonth(), 1 - first.getDay());
     const a = new Date(logsRangeDraft.startTs), b = new Date(logsRangeDraft.liveEnd ? Date.now() : logsRangeDraft.endTs);
     const key = (d) => d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate();
+    const today = new Date(), todayStartTs = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
     days.replaceChildren(...Array.from({ length: 42 }, (_, i) => {
       const d = new Date(grid.getFullYear(), grid.getMonth(), grid.getDate() + i), k = key(d);
       const isStart = k === key(a), isEnd = k === key(b);
@@ -24591,8 +24615,10 @@ async function api(method, path, body) {
       if (isStart || isEnd) button.dataset.endpoint = "true";
       if (inRange && !isStart && !isEnd) button.dataset.inRange = "true";
       if (d.getMonth() !== logsCalendarMonth.getMonth()) button.dataset.outside = "true";
-      if (k === key(new Date())) button.setAttribute("aria-current", "date");
+      if (k === key(today)) button.setAttribute("aria-current", "date");
       const dayTs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      // 结束不晚于今天：未来的格子置灰禁点
+      if (dayTs > todayStartTs) { button.disabled = true; button.dataset.outOfBounds = "true"; }
       button.dataset.dayTs = String(dayTs);
       button.tabIndex = dayTs === logsCalendarFocusTs || (logsCalendarFocusTs == null && isStart) ? 0 : -1;
       button.addEventListener("keydown", (event) => {
@@ -24607,15 +24633,37 @@ async function api(method, path, body) {
       });
       button.addEventListener("click", () => {
         logsCalendarFocusTs = dayTs;
-        const old = new Date(logsRangeDraft[logsCalendarField + "Ts"]);
+        const field = logsRangeDraft.liveEnd ? "start" : logsCalendarField;
+        const old = new Date(logsRangeDraft[field + "Ts"]);
         const next = new Date(d.getFullYear(), d.getMonth(), d.getDate(), old.getHours(), old.getMinutes()).getTime();
-        logsRangeDraft[logsCalendarField + "Ts"] = next;
-        if (logsCalendarField === "start") { if (next > logsRangeDraft.endTs) logsRangeDraft.endTs = next; logsCalendarField = "end"; }
-        else if (next < logsRangeDraft.startTs) { logsRangeDraft.startTs = next; }
+        logsRangeDraft[field + "Ts"] = next;
+        if (!logsRangeDraft.liveEnd && field === "start") {
+          if (next > logsRangeDraft.endTs) logsRangeDraft.endTs = next;
+          logsCalendarField = "end";
+        } else if (!logsRangeDraft.liveEnd && field === "end" && next < logsRangeDraft.startTs) {
+          logsRangeDraft.startTs = next;
+        }
+        if (d.getMonth() !== logsCalendarMonth.getMonth() || d.getFullYear() !== logsCalendarMonth.getFullYear()) {
+          logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+        }
         $("logsRangeError").hidden = true; syncLogRangePicker();
       });
       return button;
     }));
+  }
+  // 开窗期结束时间跟随当前时刻：每秒刷输入框，跨日才整幅重画（重画会重建格子焦点）
+  let logsLiveEndTicker = 0;
+  function tickLogLiveEnd() {
+    if (!logsRangeDraft || !logsRangeDraft.liveEnd) return;
+    const prevDay = logDatePartValue(logsRangeDraft.endTs);
+    logsRangeDraft.endTs = Date.now();
+    $("logsRangeEndDate").value = logDatePartValue(logsRangeDraft.endTs);
+    $("logsRangeEndTime").value = logTimePartValue(logsRangeDraft.endTs);
+    if (logDatePartValue(logsRangeDraft.endTs) !== prevDay) syncLogRangePicker();
+  }
+  function setLogLiveEndTicker(on) {
+    if (logsLiveEndTicker) { clearInterval(logsLiveEndTicker); logsLiveEndTicker = 0; }
+    if (on) logsLiveEndTicker = setInterval(tickLogLiveEnd, 1000);
   }
   function initLogRangePicker() {
     const picker = $("logsRangePicker"), trigger = $("logRangeFilter");
@@ -24624,11 +24672,12 @@ async function api(method, path, body) {
       const open = event.newState === "open";
       trigger.setAttribute("aria-expanded", String(open));
       for (const button of picker.querySelectorAll("[data-log-range]")) button.setAttribute("aria-pressed", String(button.dataset.logRange === logsState.range));
-      if (!open) return;
+      if (!open) { setLogLiveEndTicker(false); return; }
       const now = Math.floor(Date.now() / 60_000) * 60_000, startTs = logsState.range === "custom" ? logsState.startTs : now - LOG_RANGE_DAY_MS;
       logsRangeDraft = { startTs, endTs: logsState.range === "custom" && !logsState.liveEnd ? logsState.endTs : now, liveEnd: logsState.range === "custom" && logsState.liveEnd };
       const d = new Date(startTs); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1); logsCalendarField = "start";
       $("logsRangeError").hidden = true; syncLogRangePicker();
+      setLogLiveEndTicker(logsRangeDraft.liveEnd);
     });
     let logsPickerHeight = 0;
     const placePicker = () => {
@@ -24659,18 +24708,29 @@ async function api(method, path, body) {
       logsState.range = button.dataset.logRange; logsState.page = 1; logsLastSig = null;
       $("logsRangeLabel").textContent = logRangeLabel(); picker.hidePopover(); loadLogs();
     });
-    for (const [id, field] of [["logsRangeStart", "start"], ["logsRangeEnd", "end"]]) {
-      const input = $(id);
-      input.addEventListener("focus", () => { logsCalendarField = field; });
-      input.addEventListener("change", () => {
-        logsCalendarField = field; logsRangeDraft[field + "Ts"] = new Date(input.value).getTime();
-        const d = new Date(logsRangeDraft[field + "Ts"]); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1);
-        $("logsRangeError").hidden = true; syncLogRangePicker();
-      });
+    for (const [field, cardId, dateId, timeId] of [["start", "logsRangeStartCard", "logsRangeStartDate", "logsRangeStartTime"], ["end", "logsRangeEndCard", "logsRangeEndDate", "logsRangeEndTime"]]) {
+      const card = $(cardId), dateInput = $(dateId), timeInput = $(timeId);
+      const endLive = () => field === "end" && logsRangeDraft.liveEnd;
+      const activate = () => { if (!endLive() && logsCalendarField !== field) { logsCalendarField = field; syncLogRangePicker(); } };
+      card.addEventListener("click", activate);
+      for (const input of [dateInput, timeInput]) {
+        input.addEventListener("focus", activate);
+        input.addEventListener("change", () => {
+          if (endLive()) return;
+          logsCalendarField = field;
+          const next = logDateTimeFromInputs(dateInput, timeInput, logsRangeDraft[field + "Ts"]);
+          if (next != null) {
+            logsRangeDraft[field + "Ts"] = next;
+            const d = new Date(next); logsCalendarMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+          }
+          $("logsRangeError").hidden = true; syncLogRangePicker();
+        });
+      }
     }
     $("logsRangeLive").addEventListener("change", (e) => {
       logsRangeDraft.liveEnd = e.target.checked;
-      if (!e.target.checked) logsRangeDraft.endTs = Math.floor(Date.now() / 60_000) * 60_000;
+      if (e.target.checked) { logsRangeDraft.endTs = Math.floor(Date.now() / 60_000) * 60_000; logsCalendarField = "start"; }
+      setLogLiveEndTicker(e.target.checked);
       syncLogRangePicker();
     });
     $("logsCalendarPrev").addEventListener("click", () => { logsCalendarMonth.setMonth(logsCalendarMonth.getMonth() - 1); syncLogRangePicker(); });
@@ -24680,14 +24740,13 @@ async function api(method, path, body) {
     $("logsRangeApply").addEventListener("click", () => {
       const now = Math.floor(Date.now() / 60_000) * 60_000, end = logsRangeDraft.liveEnd ? now : logsRangeDraft.endTs;
       const error = $("logsRangeError");
-      const startInput = $("logsRangeStart"), endInput = $("logsRangeEnd");
-      if (!startInput.value || (!logsRangeDraft.liveEnd && !endInput.value)
+      if (!$("logsRangeStartDate").value || (!logsRangeDraft.liveEnd && !$("logsRangeEndDate").value)
         || !Number.isFinite(logsRangeDraft.startTs) || !Number.isFinite(end)) error.textContent = "自定义范围不能超过 30 天";
       else if (logsRangeDraft.startTs > end) error.textContent = "开始时间不能晚于结束时间";
       else if (end > now || (!logsRangeDraft.liveEnd && end - logsRangeDraft.startTs > 30 * LOG_RANGE_DAY_MS)) error.textContent = "自定义范围不能超过 30 天";
       else error.textContent = "";
       if (error.textContent) { error.hidden = false; return; }
-      logsState.range = "custom"; logsState.startTs = logsRangeDraft.startTs; logsState.endTs = logsRangeDraft.endTs; logsState.liveEnd = logsRangeDraft.liveEnd;
+      logsState.range = "custom"; logsState.startTs = logsRangeDraft.startTs; logsState.endTs = end; logsState.liveEnd = logsRangeDraft.liveEnd;
       logsState.page = 1; logsLastSig = null; $("logsRangeLabel").textContent = logRangeLabel(); picker.hidePopover(); loadLogs();
     });
     $("logsRangeLabel").textContent = logRangeLabel();
