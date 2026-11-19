@@ -174,7 +174,7 @@ test("existing log rows slide from their previous position only when the same vi
 
 test("expanded detail rows ride along with their shifted parent row", () => {
   // 挂值在展开恢复之后：先有详情行，再随父行挂同值
-  assert.ok(js.indexOf("appendLogsDetail(tbody.children[i], r);") < js.indexOf('tbody.querySelectorAll("tr.logs-row-shift")'));
+  assert.ok(js.indexOf("appendLogsDetail(rowEls.get(key), r);") < js.indexOf('tbody.querySelectorAll("tr.logs-row-shift")'));
   // 行为：父行位移→紧邻详情行挂父行同值；父行无位移→详情行零动画；详情行不挂新行入场类
   const loop = js.match(/for \(const tr of tbody\.querySelectorAll\("tr\.logs-row-shift"\)\) \{([\s\S]*?)\n      \}/);
   assert.ok(loop, "详情行随行挂类循环在册");
@@ -201,7 +201,7 @@ test("expanded detail rows ride along with their shifted parent row", () => {
 test("row shift re-measures tops after detail rows return, so rows below an expanded row start from their old spot", () => {
   // 时序：详情行恢复先于新顶点采样（详情行是常规布局流兄弟行，插回来会把下方
   // 的行推下去）；旧行顶点仍先于重建记录
-  assert.ok(js.indexOf("appendLogsDetail(tbody.children[i], r);") < js.indexOf("oldTop - tr.getBoundingClientRect().top"));
+  assert.ok(js.indexOf("appendLogsDetail(rowEls.get(key), r);") < js.indexOf("oldTop - tr.getBoundingClientRect().top"));
   assert.ok(js.indexOf("oldTops.set(") < js.indexOf("tbody.innerHTML = logsRows.map"));
   // 差值语义（展开行下方行的算例：旧行顶点 80、恢复后新顶点 100 → 起帧偏移 −20px，
   // 该行自旧位置 80 向下滑到自然位 100）
@@ -222,6 +222,41 @@ test("row shift re-measures tops after detail rows return, so rows below an expa
   assert.deepEqual(below.applied, ["--logs-row-shift", "-20px"], "旧行顶点 80、新顶点 100：起帧偏移 −20px");
   assert.deepEqual(shifted.applied, ["--logs-row-shift", "-20px"]);
   assert.equal(detail.applied, null, "无行键（详情行）不进滑位挂类循环");
+});
+
+test("restored detail rows land right after their own parent row when several rows stay expanded", () => {
+  // 整幅重建＋详情行恢复段连原文一起执行：children 恒指同一数组、after 以 splice
+  // 落位，模拟 live 集合的索引漂移；多行同展时各详情行必须紧随其父行（边插边按
+  // 索引取父行，插回的详情行会把后续兄弟索引顶偏，第二条起挂错父行）
+  const seg = js.match(/(tbody\.innerHTML = logsRows\.map\(\(r\) => logsRowHtml\(r\)\)\.join\(""\);[\s\S]*?)\n    if \(shifts\) \{/);
+  assert.ok(seg, "整幅重建＋详情行恢复段在册");
+  const detailFn = js.match(/function appendLogsDetail\(tr, row\) \{([\s\S]*?)\n  \}/);
+  assert.ok(detailFn, "appendLogsDetail 在册");
+  const kids = [];
+  const mkEl = (key) => ({
+    key, className: "", cells: [], parentList: kids,
+    getAttribute: (name) => (name === "data-logs-key" ? key : null),
+    appendChild(c) { this.cells.push(c); },
+    after(el) { this.parentList.splice(this.parentList.indexOf(this) + 1, 0, el); },
+  });
+  const tbody = {
+    children: kids,
+    set innerHTML(html) {
+      kids.length = 0;
+      for (const m of html.matchAll(/data-logs-key="([^"]+)"/g)) kids.push(mkEl(m[1]));
+    },
+  };
+  const appendLogsDetail = new Function("document", "logsDetailHtml",
+    `return function appendLogsDetail(tr, row) {${detailFn[1]}\n  }`)(
+    { createElement: () => mkEl(null) },
+    (row) => row.key,
+  );
+  const run = new Function("tbody", "logsRows", "logsRowHtml", "enter", "logsExpanded", "logsRowKey", "appendLogsDetail", seg[1]);
+  const rows = [{ key: "a" }, { key: "b" }, { key: "c" }, { key: "d" }];
+  run(tbody, rows, (r) => `<tr class="logs-row" data-logs-key="${r.key}"></tr>`, null, new Set(["a", "b", "c"]), (r) => r.key, appendLogsDetail);
+  // 三行同展＋一行未展：a/b/c 各带一条紧随其父的详情行，d 不带
+  const shape = kids.map((el) => (el.className === "logs-detail-row" ? "det:" + el.cells[0].innerHTML : "row:" + el.key));
+  assert.deepEqual(shape, ["row:a", "det:a", "row:b", "det:b", "row:c", "det:c", "row:d"], "每条详情行挂在其正确父行后");
 });
 
 test("code comments do not name external products as the origin of implementation choices", () => {
