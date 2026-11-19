@@ -1926,6 +1926,7 @@ if (window.panelStartupController) panelStartupPlay();
           <span id="logsRangeLabel">今天</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
         <div class="logs-range-picker" id="logsRangePicker" popover="auto" role="dialog" aria-labelledby="logsRangeTitle">
+          <h3 id="logsRangeTitle">时间范围</h3>
           <div class="logs-range-presets">
             <button type="button" class="btn btn-mini" aria-pressed="true" data-log-range="today">今天</button>
             <button type="button" class="btn btn-mini" aria-pressed="false" data-log-range="1d">近 24 小时</button>
@@ -1936,21 +1937,8 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
           <div class="logs-range-custom">
             <div class="logs-range-fields">
-              <h3 id="logsRangeTitle">支持日期与时间</h3>
-              <div class="logs-range-field" data-range-field="start">
-                <label class="logs-range-field-label" for="logsRangeStartDate">开始时间</label>
-                <div class="logs-range-control">
-                  <input type="date" id="logsRangeStartDate" aria-label="开始日期" required>
-                  <input type="time" id="logsRangeStartTime" aria-label="开始时间" step="60" required>
-                </div>
-              </div>
-              <div class="logs-range-field" data-range-field="end">
-                <label class="logs-range-field-label" for="logsRangeEndDate">结束时间</label>
-                <div class="logs-range-control">
-                  <input type="date" id="logsRangeEndDate" aria-label="结束日期" required>
-                  <input type="time" id="logsRangeEndTime" aria-label="结束时间" step="60" required>
-                </div>
-              </div>
+              <label>开始时间<input type="datetime-local" id="logsRangeStart" step="60" required></label>
+              <label>结束时间<input type="datetime-local" id="logsRangeEnd" step="60" required></label>
               <label class="logs-range-live"><input type="checkbox" id="logsRangeLive">结束时间跟随当前时刻</label>
               <div class="logs-range-error" id="logsRangeError" role="alert" hidden></div>
               <div class="logs-range-actions"><button type="button" class="btn btn-mini" id="logsRangeCancel">取消</button><button type="button" class="btn btn-mini btn-primary" id="logsRangeApply">确认</button></div>
