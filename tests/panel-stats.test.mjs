@@ -138,9 +138,16 @@ describe("stats channel label wiring", () => {
   function labelHarness() {
     let now = 1000;
     let board = { ok: true, storeOk: true, providerNames: { chan: "旧名" }, poolNames: {} };
+    // 读取器是唯一注入点、永不替换：throwing 只切换「这一拍读取抛错」，board
+    // 重绑永远有读者。fail()/throwRead()/recover() 各自把 store 切到一种完整
+    // 状态——fail＝读取成功但板显式 storeOk:false，throwRead＝读取抛错，
+    // recover＝恢复健康读取。（旧夹具 throwRead 永久替换 getBoardState，其后
+    // 的 fail() 只重绑 board 而无任何读者，显式 storeOk:false 分支全程踩不到。）
+    let throwing = false;
     let reads = 0;
     const storeService = {
       getBoardState: async () => {
+        if (throwing) throw new Error("store unreadable");
         reads += 1;
         return board;
       },
@@ -166,9 +173,9 @@ describe("stats channel label wiring", () => {
       reads: () => reads,
       tick: (value) => { now = value; },
       rename: (name) => { board = { ok: true, storeOk: true, providerNames: { chan: name }, poolNames: {} }; },
-      fail: () => { board = { ok: true, storeOk: false, providerNames: {}, poolNames: {} }; },
-      throwRead: () => { storeService.getBoardState = async () => { throw new Error("store unreadable"); }; },
-      recover: () => { storeService.getBoardState = async () => { reads += 1; return board; }; },
+      fail: () => { throwing = false; board = { ok: true, storeOk: false, providerNames: {}, poolNames: {} }; },
+      throwRead: () => { throwing = true; },
+      recover: () => { throwing = false; },
     };
   }
 
@@ -186,6 +193,9 @@ describe("stats channel label wiring", () => {
     assert.equal(await h.getLabel(), "新名", "刷新异常保留旧映射");
     h.tick(1300);
     h.fail();
+    // fail() 把 store 切到「读取成功但板显式 storeOk:false」：与上一段的
+    // throw→catch 互为镜像，这一拍走的是 refreshStatsChannelLabels 的显式
+    // 失败分支——非空旧表保旧映射、不清空（删掉该分支，这里会清成裸 id "chan"）。
     assert.equal(await h.getLabel(), "新名", "显式 storeOk:false 也是失败，不能清空旧映射");
   });
 
@@ -194,8 +204,11 @@ describe("stats channel label wiring", () => {
     h.fail();
     assert.equal(await h.getLabel(), "chan");
     h.rename("恢复名");
-    h.tick(1100);
-    assert.equal(await h.getLabel(), "恢复名");
+    h.tick(1050);
+    // 首读显式 storeOk:false（空旧表）不缓存失败拍：at 留在 0，TTL 窗内的
+    // 下一拍（1050-1000=50<100）即可恢复。若失败拍被当有效快照缓存到
+    // at=1000，这里不会刷新，读到的仍是裸 id "chan"。
+    assert.equal(await h.getLabel(), "恢复名", "首读失败不缓存失败拍，TTL 窗内即恢复");
   });
 
   it("retries an initial thrown read immediately rather than caching the empty mapping", async () => {
@@ -205,7 +218,7 @@ describe("stats channel label wiring", () => {
     h.rename("恢复名");
     h.recover();
     assert.equal(await h.getLabel(), "恢复名");
-    assert.equal(h.reads(), 1, "only the recovered read reached the store");
+    assert.equal(h.reads(), 1, "only the recovered read returned a board");
   });
 });
 
