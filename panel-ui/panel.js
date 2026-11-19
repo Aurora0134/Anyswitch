@@ -24630,6 +24630,7 @@ async function api(method, path, body) {
   let logsTotal = 0; // 最近一次成功响应的总数（跳页钳制用）
   let logsCorrecting = false; // 深页超界自动回末页的一次性守卫（防循环）
   let logsLastSig = null; // 最近一次落地渲染的签名（loadLogs 同签名跳过重渲）
+  let logsShown = null; // 最近一次落地渲染的视图串与行键序（新行入场与旧行滑位的判定基准）
   const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
   const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
 
@@ -24943,6 +24944,9 @@ async function api(method, path, body) {
       if (logsState.liveEnd) sp.set("liveEnd", "1");
       else sp.set("endTs", String(logsState.endTs));
     }
+    // 视图串＝本次请求参数集（页态/每页条数/筛选/排序/方向/范围全在内）：轮询与
+    // 手动刷新串不变，翻页、改筛选、改排序、改范围都换串——新行入场动画只认串不变的刷新
+    const view = sp.toString();
     try {
       const res = await api("GET", "/api/stats/logs?" + sp.toString());
       if (seq !== logsState.seq) return;
@@ -24971,7 +24975,7 @@ async function api(method, path, body) {
       ].join("|");
       if (sig === logsLastSig) return;
       logsLastSig = sig;
-      renderLogs(res);
+      renderLogs(res, view);
       refillLogsFilters(res.facets);
     } catch {
       if (seq !== logsState.seq) return;
@@ -25049,21 +25053,87 @@ async function api(method, path, body) {
     return (n / 1000).toFixed(1) + "s";
   }
 
-  function renderLogs(res) {
+  // 新行判定：与上一次落地渲染同一视图（同页态/每页条数/筛选/排序/范围）且落在
+  // 第 1 页时，行键不在上一次集合里的才算「新来的」；换视图（翻页、改筛选、改排序、
+  // 改范围）与首次加载返回 null，一行也不播。
+  function logsEnterKeys(shown, view, page, keys) {
+    if (!shown || shown.view !== view || page !== 1) return null;
+    const prev = new Set(shown.keys);
+    const fresh = keys.filter((k) => !prev.has(k));
+    return fresh.length ? fresh : null;
+  }
+
+  // 旧行移位判定：与新行入场同一道闸（同视图＋第 1 页），既有行在新一屏里的位置
+  // 比上一屏变了（前面插了行，或行集收缩让行上移）就整行滑过去；返回行键→前后
+  // 索引差的映射，无一行移位返回 null。触发不要求同屏有新行：范围裁剪也会让旧行上移。
+  function logsShiftRows(shown, view, page, keys) {
+    if (!shown || shown.view !== view || page !== 1) return null;
+    const before = new Map(shown.keys.map((k, index) => [k, index]));
+    const shifts = new Map();
+    keys.forEach((k, index) => {
+      const from = before.get(k);
+      if (from !== undefined && from !== index) shifts.set(k, from - index);
+    });
+    return shifts.size ? shifts : null;
+  }
+
+  function renderLogs(res, view) {
     const tbody = $("logsTbody");
     if (!tbody) return;
     logsRows = Array.isArray(res.rows) ? res.rows : [];
     logsTotal = res.total || 0;
     if (!logsRows.length) {
       tbody.innerHTML = '<tr class="logs-state-row"><td colspan="7"><div class="empty-hint">该筛选条件下暂无请求记录</div></td></tr>';
+      logsShown = { view, keys: [] };
       renderLogsPager(res);
       return;
     }
+    const keys = logsRows.map(logsRowKey);
+    const enter = logsEnterKeys(logsShown, view, res.page, keys);
+    const shifts = logsShiftRows(logsShown, view, res.page, keys);
+    logsShown = { view, keys };
+    // 旧行滑位的起帧要落回上一屏的旧位置：行高不齐（部分行带第二行小字），
+    // 不能按行数差估算，先记旧行顶点；新顶点等详情行恢复完再测（见下），差值作起帧位移
+    let oldTops = null;
+    if (shifts) {
+      oldTops = new Map();
+      for (const tr of tbody.children) {
+        if (tr.classList.contains("logs-row")) oldTops.set(tr.getAttribute("data-logs-key"), tr.getBoundingClientRect().top);
+      }
+    }
     tbody.innerHTML = logsRows.map((r) => logsRowHtml(r)).join("");
-    // 轮询重建后按行键恢复展开中的详情行
+    if (enter) {
+      // 只给新来的行挂入场动画类；整幅重建的既有行不挂类，入场动画不重播
+      const fresh = new Set(enter);
+      for (const tr of tbody.children) {
+        if (fresh.has(tr.getAttribute("data-logs-key"))) tr.classList.add("logs-row-new");
+      }
+    }
+    // 轮询重建后按行键恢复展开中的详情行：必须先于滑位新顶点采样——详情行是常规
+    // 布局流的兄弟行，插回来会把下方的行推下去，恢复前采样会把这段推挤漏进位移
     logsRows.forEach((r, i) => {
       if (logsExpanded.has(logsRowKey(r))) appendLogsDetail(tbody.children[i], r);
     });
+    if (shifts) {
+      // 只给位置变了的旧行挂滑位动画类（新行不在 oldTops 里，天然不挂）；
+      // 起帧位移=旧顶点−新顶点（详情行已恢复、新顶点含其占位），播完落回自然位置
+      for (const tr of tbody.children) {
+        const oldTop = oldTops.get(tr.getAttribute("data-logs-key"));
+        if (oldTop === undefined) continue;
+        tr.style.setProperty("--logs-row-shift", oldTop - tr.getBoundingClientRect().top + "px");
+        tr.classList.add("logs-row-shift");
+      }
+      // 展开中的详情行随父行同位移：父行滑回旧位置的整段路上，详情行与其一体
+      // 移动、终位对齐；父行不位移（不在上面的挂类循环里）则详情行零动画。
+      // querySelectorAll 是静态列表，循环内给详情行挂的类不会进入本次遍历
+      for (const tr of tbody.querySelectorAll("tr.logs-row-shift")) {
+        const detail = tr.nextElementSibling;
+        if (detail && detail.classList.contains("logs-detail-row")) {
+          detail.style.setProperty("--logs-row-shift", tr.style.getPropertyValue("--logs-row-shift"));
+          detail.classList.add("logs-row-shift");
+        }
+      }
+    }
     renderLogsPager(res);
   }
 

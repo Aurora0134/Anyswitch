@@ -104,6 +104,126 @@ test("range popover opens in place and blurs the content behind it", () => {
   assert.ok(block.includes("-webkit-backdrop-filter: var(--glass-blur)"));
 });
 
+test("range popover animates open with fade, slide and zoom, and closed with fade and zoom only", () => {
+  // 开＝淡入＋自上 8px 滑入＋自 95% 放大到位；关＝淡出＋缩回 95%，无位移
+  const closed = css.match(/\.logs-range-picker \{ opacity: 0; transform: scale\(0\.95\); transition: [^}]+\}/);
+  assert.ok(closed, "关闭归宿态（隐藏＋95% 缩放）在册");
+  assert.ok(closed[0].includes("opacity 150ms ease"));
+  assert.ok(closed[0].includes("transform 150ms ease"));
+  // display/overlay 是离散属性：带 allow-discrete 才把 none 推迟到过渡收尾生效、
+  // 让弹窗留在顶层播完关闭动画再让位
+  assert.ok(closed[0].includes("display 150ms ease allow-discrete"));
+  assert.ok(closed[0].includes("overlay 150ms ease allow-discrete"));
+  assert.ok(css.includes(".logs-range-picker:popover-open { opacity: 1; transform: none; }"));
+  // @starting-style 给从 display:none 进场的首帧定起点：开态的滑入位移只写在这里
+  const start = css.split("@starting-style {")[1].split("}")[0];
+  assert.ok(start.includes(".logs-range-picker:popover-open { opacity: 0; transform: translateY(-8px) scale(0.95);"));
+  // 开合动画吃全局 reduced-motion 通配禁用规则（transition 清零后即时切换）
+  assert.ok(css.includes("@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }"));
+});
+
+test("fresh log rows fade in under a fading accent tint only when the same view gains rows", () => {
+  // 入场类只挂在 .logs-row 上（空态/错误态/骨架行不挂）；高亮颜色走主题令牌，不落字面色
+  assert.ok(css.includes(".logs-table tbody tr.logs-row.logs-row-new"));
+  assert.ok(css.includes("animation: logsRowEnter 240ms ease-out 160ms backwards;"));
+  assert.ok(css.includes("animation: logsRowNew 1200ms ease-in 300ms backwards;"));
+  const shade = css.split("@keyframes logsRowNew {")[1].split("}")[0];
+  assert.ok(shade.includes("inset 0 0 0 100vmax var(--accent-soft)"));
+  assert.doesNotMatch(shade, /#[0-9a-f]{3,8}\b|rgba?\(/);
+  // 判定逻辑：同视图＋第 1 页才挑新键；翻页/换视图/首次加载一概不播
+  const m = js.match(/function logsEnterKeys\(shown, view, page, keys\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, "logsEnterKeys 在册");
+  const fn = new Function(`return function logsEnterKeys(shown, view, page, keys) {${m[1]}\n  }`)();
+  const shown = { view: "v", keys: ["a", "b"] };
+  assert.deepEqual(fn(shown, "v", 1, ["c", "a", "b"]), ["c"], "同视图第 1 页只挑新键");
+  assert.equal(fn(shown, "v", 1, ["a", "b"]), null, "同视图无新行不播");
+  assert.equal(fn(shown, "v", 2, ["c"]), null, "非第 1 页不播");
+  assert.equal(fn(shown, "w", 1, ["c"]), null, "换视图不播");
+  assert.equal(fn(null, "v", 1, ["c"]), null, "首次加载不播");
+  // 视图串＝本次请求参数集；renderLogs 只给新键行挂类
+  assert.ok(js.includes("const view = sp.toString();"));
+  assert.ok(js.includes("logsEnterKeys(logsShown, view, res.page, keys)"));
+  assert.ok(js.includes('tr.classList.add("logs-row-new")'));
+});
+
+test("existing log rows slide from their previous position only when the same view shifts rows", () => {
+  // 参数：320ms／cubic-bezier(0.2, 0, 0, 1)；起帧位移由 JS 写进变量，尾帧落回自然位置
+  assert.ok(css.includes(".logs-table tbody tr.logs-row.logs-row-shift, .logs-table tbody tr.logs-detail-row.logs-row-shift { animation: logsRowShift 320ms cubic-bezier(0.2, 0, 0, 1); }"));
+  assert.ok(css.includes("@keyframes logsRowShift { from { transform: translateY(var(--logs-row-shift, 0px)); } to { transform: none; } }"));
+  // 纯位移无颜色量
+  const kf = css.split("@keyframes logsRowShift {")[1].split("\n")[0];
+  assert.doesNotMatch(kf, /var\(--accent|#[0-9a-f]{3,8}\b|rgba?\(/);
+  // 位移量按重建前后实测顶点差写入：旧行顶点必须先于重建记录
+  assert.ok(js.includes('tr.style.setProperty("--logs-row-shift",'));
+  assert.ok(js.indexOf("oldTops.set(") < js.indexOf("tbody.innerHTML = logsRows.map"));
+  assert.ok(js.includes('tr.classList.add("logs-row-shift")'));
+  // 判定逻辑：同视图＋第 1 页且前后索引变化才移位；其余一概 null
+  const m = js.match(/function logsShiftRows\(shown, view, page, keys\) \{([\s\S]*?)\n  \}/);
+  assert.ok(m, "logsShiftRows 在册");
+  const fn = new Function(`return function logsShiftRows(shown, view, page, keys) {${m[1]}\n  }`)();
+  const shown = { view: "v", keys: ["a", "b"] };
+  assert.deepEqual(fn(shown, "v", 1, ["c", "a", "b"]), new Map([["a", -1], ["b", -1]]), "前面插新行：旧行下移一位");
+  assert.deepEqual(fn({ view: "v", keys: ["x", "a", "b"] }, "v", 1, ["a", "b"]), new Map([["a", 1], ["b", 1]]), "行集收缩：旧行上移一位");
+  assert.equal(fn(shown, "v", 1, ["a", "b"]), null, "索引未变不移位");
+  assert.equal(fn(shown, "v", 2, ["c", "a", "b"]), null, "非第 1 页不移位");
+  assert.equal(fn(shown, "w", 1, ["c", "a", "b"]), null, "换视图不移位");
+  assert.equal(fn(null, "v", 1, ["c", "a", "b"]), null, "首次加载不移位");
+  // 移位动画同吃全局 reduced-motion 通配禁用规则（animation 清零后行直接落位）
+  assert.ok(css.includes("@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }"));
+});
+
+test("expanded detail rows ride along with their shifted parent row", () => {
+  // 挂值在展开恢复之后：先有详情行，再随父行挂同值
+  assert.ok(js.indexOf("appendLogsDetail(tbody.children[i], r);") < js.indexOf('tbody.querySelectorAll("tr.logs-row-shift")'));
+  // 行为：父行位移→紧邻详情行挂父行同值；父行无位移→详情行零动画；详情行不挂新行入场类
+  const loop = js.match(/for \(const tr of tbody\.querySelectorAll\("tr\.logs-row-shift"\)\) \{([\s\S]*?)\n      \}/);
+  assert.ok(loop, "详情行随行挂类循环在册");
+  const run = new Function("tbody", `for (const tr of tbody.querySelectorAll("tr.logs-row-shift")) {${loop[1]}\n      }`);
+  const mkRow = (classes, shiftVal, next) => {
+    const row = { classes, shiftVal, next, applied: null, added: [] };
+    row.classList = { contains: (c) => row.classes.includes(c), add: (c) => row.added.push(c) };
+    row.style = { getPropertyValue: () => row.shiftVal, setProperty: (k, v) => { row.applied = [k, v]; } };
+    row.nextElementSibling = next;
+    return row;
+  };
+  const shiftedDetail = mkRow(["logs-detail-row"], null, null);
+  const shiftedParent = mkRow(["logs-row", "logs-row-shift"], "-40px", shiftedDetail);
+  const stillDetail = mkRow(["logs-detail-row"], null, null);
+  mkRow(["logs-row"], null, stillDetail); // 父行未挂滑位类：不进 querySelectorAll 结果
+  run({ querySelectorAll: () => [shiftedParent] });
+  assert.deepEqual(shiftedDetail.applied, ["--logs-row-shift", "-40px"], "父行位移：详情行挂父行同值");
+  assert.deepEqual(shiftedDetail.added, ["logs-row-shift"], "详情行挂滑位类");
+  assert.equal(stillDetail.applied, null, "父行无位移：详情行零动画");
+  assert.equal(stillDetail.added.length, 0, "详情行不挂任何类");
+  assert.ok(!js.includes('detail.classList.add("logs-row-new")'), "详情行不挂新行入场类");
+});
+
+test("row shift re-measures tops after detail rows return, so rows below an expanded row start from their old spot", () => {
+  // 时序：详情行恢复先于新顶点采样（详情行是常规布局流兄弟行，插回来会把下方
+  // 的行推下去）；旧行顶点仍先于重建记录
+  assert.ok(js.indexOf("appendLogsDetail(tbody.children[i], r);") < js.indexOf("oldTop - tr.getBoundingClientRect().top"));
+  assert.ok(js.indexOf("oldTops.set(") < js.indexOf("tbody.innerHTML = logsRows.map"));
+  // 差值语义（展开行下方行的算例：旧行顶点 80、恢复后新顶点 100 → 起帧偏移 −20px，
+  // 该行自旧位置 80 向下滑到自然位 100）
+  const loop = js.match(/for \(const tr of tbody\.children\) \{\n        const oldTop = oldTops\.get\(tr\.getAttribute\("data-logs-key"\)\);\n        if \(oldTop === undefined\) continue;\n        tr\.style\.setProperty\("--logs-row-shift", oldTop - tr\.getBoundingClientRect\(\)\.top \+ "px"\);\n        tr\.classList\.add\("logs-row-shift"\);\n      \}/);
+  assert.ok(loop, "滑位挂类循环在册");
+  const mkRow = (key, top) => {
+    const row = { key, top, applied: null, added: [] };
+    row.getAttribute = () => row.key;
+    row.getBoundingClientRect = () => ({ top: row.top });
+    row.style = { setProperty: (k, v) => { row.applied = [k, v]; } };
+    row.classList = { add: (c) => row.added.push(c) };
+    return row;
+  };
+  const below = mkRow("c", 100);    // 展开行下方的行：恢复后新顶点 100
+  const shifted = mkRow("a", 20);   // 展开行自身：旧顶点 0、新顶点 20
+  const detail = mkRow(null, 40);   // 详情行：无行键，不进挂类循环
+  new Function("tbody", "oldTops", loop[0])({ children: [shifted, detail, below] }, new Map([["a", 0], ["c", 80]]));
+  assert.deepEqual(below.applied, ["--logs-row-shift", "-20px"], "旧行顶点 80、新顶点 100：起帧偏移 −20px");
+  assert.deepEqual(shifted.applied, ["--logs-row-shift", "-20px"]);
+  assert.equal(detail.applied, null, "无行键（详情行）不进滑位挂类循环");
+});
+
 test("code comments do not name external products as the origin of implementation choices", () => {
   const pattern = /cc[-_ .]?switch/i;
   const offenders = [];
