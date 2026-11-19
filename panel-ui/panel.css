@@ -4058,25 +4058,13 @@
   /* 筛选行：筛选项与日期范围按钮横排，窄屏折行 */
   .logs-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .logs-range-trigger { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
-  /* 时间范围弹窗：宽 620、内距 12、圆角 10。--rp-* 是引用全局主题令牌（--surface/--accent 等）的局部别名，
-     值随亮暗与各皮肤自动联动，弹窗内不单独维护色板。 */
-  .logs-range-picker {
-    --rp-card: var(--surface); --rp-subtle: var(--surface-sunken); --rp-selected: var(--accent-soft);
-    --rp-border: var(--border); --rp-border-strong: var(--border-strong);
-    --rp-text-1: var(--text); --rp-text-2: var(--text-2); --rp-text-3: var(--text-3);
-    --rp-action: var(--accent); --rp-action-hover: color-mix(in srgb, var(--accent) 88%, #fff); --rp-danger: var(--danger);
-    --rp-shadow: var(--shadow-lg);
-    position: fixed; inset: auto; margin: 0; padding: 12px;
-    width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto;
-    container-type: inline-size;
-    border: 1px solid var(--rp-border); border-radius: 10px; background: var(--rp-card); color: var(--rp-text-1);
-    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: var(--rp-shadow);
-  }
+  /* 时间范围弹窗：宽 620、内距 14、圆角 6、边框取加粗档，浮层阴影 0 12px 36px；
+     配色直接引用全局主题令牌，随亮暗与各皮肤联动。 */
+  .logs-range-picker { position: fixed; inset: auto; margin: 0; padding: 14px; width: min(620px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 32px)); overflow: auto; container-type: inline-size; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); box-shadow: 0 12px 36px rgba(0, 0, 0, 0.2); }
   .logs-range-picker:popover-open { display: block; }
-  .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--rp-border); }
-  .logs-range-preset { appearance: none; height: 28px; padding: 0 10px; border: 1px solid var(--rp-border-strong); border-radius: 6px; background: var(--rp-card); color: var(--rp-text-1); font: 500 13px/1 var(--font-sans); cursor: pointer; transition: background-color 150ms, border-color 150ms; }
-  .logs-range-preset:hover { background: var(--rp-subtle); }
-  .logs-range-preset[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--rp-selected); font-weight: 600; }
+  .logs-range-picker h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
+  .logs-range-presets { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .logs-range-presets [aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
   /* 分栏断点看弹窗自身实宽（容器查询），不看视口：弹窗被 100vw-32px 夹窄时保持纵排，日历不被挤出屏 */
   .logs-range-layout { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
   .logs-range-fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -4085,46 +4073,34 @@
     .logs-range-fields { width: 250px; flex: none; }
     .logs-calendar { min-width: 0; flex: 1 1 0%; }
   }
-  .logs-range-hint { margin: 0; font-size: 12px; line-height: 18px; color: var(--rp-text-2); }
-  .logs-range-field { padding: 8px 12px; border: 1px solid var(--rp-border); border-radius: 10px; cursor: pointer; transition: border-color 150ms, box-shadow 150ms, background-color 150ms, opacity 150ms; }
-  .logs-range-field[data-active="true"] { border-color: var(--rp-action); box-shadow: 0 0 0 1px var(--rp-action); background: var(--rp-card); }
-  .logs-range-field[data-live-end="true"] { border-color: var(--rp-border); background: var(--rp-subtle); opacity: 0.5; cursor: not-allowed; }
-  .logs-range-field-label { margin-bottom: 6px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.05em; color: var(--rp-text-2); }
+  .logs-range-field { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); cursor: pointer; transition: border-color 150ms, box-shadow 150ms, background-color 150ms, opacity 150ms; }
+  .logs-range-field[data-active="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--surface); }
+  .logs-range-field[data-live-end="true"] { border-color: var(--border); background: var(--surface-sunken); opacity: 0.5; cursor: not-allowed; }
+  .logs-range-field-label { margin-bottom: 6px; font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.05em; color: var(--text-2); }
   .logs-range-field-controls { display: flex; align-items: center; gap: 6px; }
-  .logs-range-field-controls input { appearance: none; height: 28px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--rp-text-1); color-scheme: inherit; font: 400 13px/20px var(--font-sans); }
+  .logs-range-field-controls input { appearance: none; height: 28px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); color-scheme: inherit; font: 400 13px/20px var(--font-sans); }
   .logs-range-field-controls input[type="date"] { flex: 1 1 0%; }
   .logs-range-field-controls input[type="time"] { flex: none; width: 90px; }
   .logs-range-field[data-live-end="true"] .logs-range-field-controls input { pointer-events: none; }
-  .logs-range-live { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--rp-text-2); cursor: pointer; user-select: none; }
-  .logs-range-live input { appearance: none; -webkit-appearance: none; flex: none; display: inline-grid; place-content: center; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--rp-border-strong); border-radius: 4px; background: var(--rp-card); cursor: pointer; transition: background-color 150ms, border-color 150ms; }
-  .logs-range-live input::before { content: ""; width: 10px; height: 10px; background-color: #ffffff; transform: scale(0); transition: transform 120ms ease-out; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat; }
-  .logs-range-live input:checked { background-color: var(--rp-action); border-color: var(--rp-action); }
-  .logs-range-live input:checked::before { transform: scale(1); }
-  .logs-range-live input:hover:not(:checked) { border-color: var(--rp-text-3); }
-  .logs-range-live input:focus-visible { outline: 2px solid var(--rp-action); outline-offset: 2px; }
-  .logs-range-error { font-size: 12px; line-height: 18px; color: var(--rp-danger); }
-  .logs-range-actions { display: flex; gap: 8px; padding-top: 4px; }
-  .logs-range-actions button { appearance: none; flex: 1 1 0%; height: 28px; border: 1px solid transparent; border-radius: 6px; font: 500 13px/1 var(--font-sans); cursor: pointer; transition: background-color 150ms; }
-  #logsRangeCancel { background: transparent; color: var(--rp-text-1); }
-  #logsRangeCancel:hover { background: var(--rp-subtle); }
-  #logsRangeApply { background: var(--rp-action); color: #ffffff; font-weight: 600; }
-  #logsRangeApply:hover { background: var(--rp-action-hover); }
-  .logs-calendar { padding: 10px; border: 1px solid var(--rp-border); border-radius: 10px; background: var(--rp-subtle); }
-  .logs-calendar-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
-  .logs-calendar-nav { appearance: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--rp-text-2); cursor: pointer; transition: background-color 150ms, color 150ms; }
-  .logs-calendar-nav:hover { background: var(--rp-subtle); color: var(--rp-text-1); }
-  .logs-calendar-month { min-width: 0; border: 0; background: transparent; color: var(--rp-text-1); font: 500 13px/20px var(--font-sans); cursor: pointer; transition: color 150ms; }
-  .logs-calendar-month:hover { color: var(--rp-text-2); }
-  .logs-calendar-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin-bottom: 2px; text-align: center; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--rp-text-2); }
+  .logs-range-live { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 18px; color: var(--text-2); cursor: pointer; user-select: none; }
+  .logs-range-live input { accent-color: var(--accent); }
+  .logs-range-error { font-size: 12px; line-height: 18px; color: var(--danger); }
+  .logs-range-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: auto; }
+  .logs-calendar { min-width: 0; }
+  .logs-calendar-head { display: grid; grid-template-columns: 32px 1fr 32px; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .logs-calendar-head .btn { min-width: 32px; padding-inline: 5px; font-size: 16px; }
+  .logs-calendar-month { min-width: 0; border: 0; background: transparent; color: var(--text); font: 500 13px/20px var(--font-sans); cursor: pointer; transition: color 150ms; }
+  .logs-calendar-month:hover { color: var(--text-2); }
+  .logs-calendar-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); margin-bottom: 2px; text-align: center; font-size: 11px; line-height: 16px; font-weight: 500; color: var(--text-2); }
   .logs-calendar-weekdays span { padding: 2px 0; }
   .logs-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; }
-  .logs-calendar-day { appearance: none; position: relative; height: 28px; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--rp-text-1); font: 400 12px/18px var(--font-sans); cursor: pointer; transition: background-color 150ms, color 150ms, box-shadow 150ms, opacity 150ms; }
-  .logs-calendar-day:hover { background: var(--rp-subtle); }
-  .logs-calendar-day[data-outside="true"] { color: var(--rp-text-3); }
-  .logs-calendar-day[data-out-of-bounds="true"] { color: var(--rp-text-3); opacity: 0.4; cursor: not-allowed; }
-  .logs-calendar-day[data-in-range="true"] { background: var(--rp-selected); color: var(--rp-text-1); }
-  .logs-calendar-day[data-endpoint="true"] { background: var(--rp-action); color: #ffffff; font-weight: 500; }
-  .logs-calendar-day[aria-current="date"]:not([data-endpoint="true"]) { box-shadow: 0 0 0 1px var(--rp-border-strong); }
+  .logs-calendar-day { appearance: none; position: relative; height: 28px; min-width: 0; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: 400 12px/18px var(--font-sans); cursor: pointer; transition: background-color 150ms, color 150ms, box-shadow 150ms, opacity 150ms; }
+  .logs-calendar-day:hover { background: var(--surface-hover); }
+  .logs-calendar-day[data-outside="true"] { color: var(--text-3); }
+  .logs-calendar-day[data-out-of-bounds="true"] { color: var(--text-3); opacity: 0.4; cursor: not-allowed; }
+  .logs-calendar-day[data-in-range="true"] { background: var(--accent-soft); color: var(--text); }
+  .logs-calendar-day[data-endpoint="true"] { background: var(--accent); color: #ffffff; font-weight: 500; }
+  .logs-calendar-day[aria-current="date"]:not([data-endpoint="true"]) { box-shadow: 0 0 0 1px var(--border-strong); }
   /* 来源/渠道/模型三列居中（表头与单元格同轴；详情/状态行是首列 colspan，不受影响） */
   .logs-table th:nth-child(2), .logs-table td:nth-child(2),
   .logs-table th:nth-child(3), .logs-table td:nth-child(3),
