@@ -13,7 +13,7 @@
 
 | 卡 | 口径 |
 |---|---|
-| 请求日志（子 tab） | journal requests 行**原样透传不聚合**，读侧装饰 providerLabel（channelLabel 解析）与 modelDisplay（剥 wire 前缀）。时间窗 today/7d/30d/all（all=90 天 retention 窗），本地自然日闭区间。失败行可带 errMsg（上游错误原文，截 200，R-22）。**取消请求不出现**（R-13 延伸）。 |
+| 请求日志（子 tab） | journal requests 行**原样透传不聚合**，读侧装饰 providerLabel（channelLabel 解析）与 modelDisplay（剥 wire 前缀）。时间窗 today/1d/7d/14d/30d/all/custom；1d 滚动 24 小时，7/14/30 天含当天，all=90 天 retention 窗；custom 为分钟级闭区间，结束端包含所选分钟，最长 30 天并可跟随当前时刻。本地日期/快捷天数范围按自然日边界。失败行可带 errMsg（上游错误原文，截 200，R-22）。**取消请求不出现**（R-13 延伸）。 |
 | 今日概览 | **本地自然日**，与 days seg 无关。请求数 / 总 tokens(prompt+completion) / 缓存命中率(cached/prompt) / 平均 TTFT(仅成功且 ttftMs>0) / 成功率（**不含用户取消**，abort 不落行）。 |
 | 90 天热力图 | 固定 90 天日轴（日历运算防 DST），tokens=prompt+completion，**只算 request 行**，零填充。 |
 | Token 趋势 | days=1 → 24×1h 本地整点桶；days=7 → 21×8h 桶（对齐本地 0/8/16 点）；末桶进行中。三口径：渠道=providerId / 端点=agentId / 模型=`providerId/model` 复合键。值=各桶 prompt+completion。 |
@@ -24,7 +24,7 @@
 
 布局：页头为「使用统计」标题 + 双子 tab（总览 | 请求日志，localStorage `panel-stats-subtab` 存档，默认总览）；总览即原有全部卡片。总览内：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。**双卡等高**（以 TTFT 卡为准，网格 stretch + 卡片纵向撑满，见 R-28）；卡内榜单不足固定行数（TTFT 5 / TPS 10）时尾部补虚线占位行；**就绪空态（数据已落地且该卡为空，见 R-29）为例外**，不等高、不补占位。**不可见不取数不渲染**（R-25）。
 
-子 tab：统计页分「总览 | 请求日志」（页头标题右侧，localStorage `panel-stats-subtab` 记忆，默认总览）。总览=本节上述全部卡片，原样保留。请求日志=journal 行级透传列表：`GET /panel/api/stats/logs` → usage-journal `readRequestsLog`，范围 today/7d/30d/all（含当天往前推 0/6/29/89 天，日历运算防 DST），筛选=来源/渠道/模型/状态，排序=时间/用时双向（表头点击），服务端分页 20/50/100，子 tab 激活且页面可见时 5s 轮询。渠道名读取时解析（R-16 同一解析器），模型显示名剥 wire 前缀（`stripWirePrefix`，与聚合层同一实现）。失败行整行淡红底，点击就地展开详情（错误信息/接口格式/流式/实例/请求模型/渠道 ID/精确时间）。
+子 tab：统计页分「总览 | 请求日志」（页头标题右侧，localStorage `panel-stats-subtab` 记忆，默认总览）。总览=本节上述全部卡片，原样保留。请求日志=journal 行级透传列表：`GET /panel/api/stats/logs` → usage-journal `readRequestsLog`，范围 today/1d/7d/14d/30d/all/custom（1d 滚动 24 小时；自然日范围分别回推 0/6/13/29/89 天，日历运算防 DST；custom 传起止分钟或实时结束标记），筛选=来源/渠道/模型/状态，排序=时间/用时双向（表头点击），服务端分页 20/50/100，子 tab 激活且页面可见时 5s 轮询。时间按钮打开日期范围弹层，含六种预设、分钟级起止时间、日历选择、范围校验与结束时间实时跟随。渠道名读取时解析（R-16 同一解析器），模型显示名剥 wire 前缀（`stripWirePrefix`，与聚合层同一实现）。失败行整行淡红底，点击就地展开详情（错误信息/接口格式/流式/实例/请求模型/渠道 ID/精确时间）。
 
 ## 2. 红线约束
 

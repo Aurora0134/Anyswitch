@@ -1,7 +1,7 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createPanelRouter } from "../src/panel/panel.mjs";
-import { dayKey } from "../src/shared/usage-journal.mjs";
+import { createUsageJournal, dayKey } from "../src/shared/usage-journal.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 // GET /panel/api/stats/logs（请求日志路由）：fakeReqRes + 注入 mock 模式与
@@ -72,13 +72,142 @@ function mockLogsJournal(result) {
 // 同一个 nowTs 同时喂 todayKey 和 generatedAt）。断言侧另取当前时间的话，跨
 // 本地午夜时「今天」会与请求时刻算出的不一致，用例假红。
 function expectedRange(range, atTs) {
-  const back = { today: 0, "7d": 6, "30d": 29, all: 89 }[range];
+  const back = { today: 0, "7d": 6, "14d": 13, "30d": 29, all: 89 }[range];
   const toDay = dayKey(atTs);
   const [y, m, d] = toDay.split("-").map(Number);
   return { fromDay: dayKey(new Date(y, m - 1, d - back).getTime()), toDay };
 }
 
+function realLogsRouter(t, nowTs) {
+  let writeTs = nowTs;
+  const clock = t.mock.method(Date, "now", () => nowTs);
+  const journal = createUsageJournal({ dir: mkTestDir("anys-panel-logs-usage-"), now: () => writeTs });
+  const router = logsRouter({ usageJournal: journal });
+  return {
+    setNow(ts) { clock.mock.mockImplementation(() => ts); },
+    append(ts, fields = {}) {
+      writeTs = ts;
+      journal.appendRequest({ ts, agentId: "kimi", providerId: "p1", model: "m1", ok: true, ...fields });
+    },
+    async get(params) {
+      const { req, res, json } = fakeReqRes("/panel/api/stats/logs?" + new URLSearchParams(params));
+      await router.handle(req, res);
+      return { status: res.statusCode, body: json() };
+    },
+  };
+}
+
 describe("panel router request-logs route", () => {
+  it("rolls 1d across midnight while today starts at local midnight", async (t) => {
+    const nowTs = new Date(2026, 0, 15, 0, 30).getTime();
+    const midnight = new Date(2026, 0, 15).getTime();
+    const startTs = nowTs - DAY_MS;
+    const logs = realLogsRouter(t, nowTs);
+    for (const ts of [startTs - 1, startTs, midnight - 1, midnight, nowTs]) logs.append(ts);
+
+    const rolling = await logs.get({ range: "1d" });
+    assert.equal(rolling.status, 200);
+    assert.equal(rolling.body.range, "1d");
+    assert.deepEqual(rolling.body.rows.map((r) => r.ts), [nowTs, midnight, midnight - 1, startTs]);
+
+    const today = await logs.get({ range: "today" });
+    assert.equal(today.status, 200);
+    assert.deepEqual(today.body.rows.map((r) => r.ts), [nowTs, midnight]);
+  });
+  it("includes the whole fixed end minute before building facets and paging", async (t) => {
+    const startTs = new Date(2026, 0, 14, 23, 59).getTime();
+    const endTs = new Date(2026, 0, 15, 0, 0).getTime();
+    const lastTs = endTs + 59_999;
+    const logs = realLogsRouter(t, new Date(2026, 0, 15, 0, 1).getTime());
+    logs.append(startTs - 1, { model: "early", durationMs: 110 });
+    for (let i = 0; i < 20; i++) logs.append(startTs + i, { durationMs: i });
+    logs.append(endTs, { model: "alternate", agentId: null, providerId: "p2", ok: false, errKind: "network" });
+    logs.append(lastTs, { durationMs: 100 });
+    logs.append(lastTs + 1, { model: "late", durationMs: 120 });
+    const params = { range: "custom", startTs, endTs, status: "ok", sort: "durationMs", dir: "desc" };
+
+    const first = await logs.get(params);
+    assert.equal(first.status, 200);
+    assert.equal(first.body.range, "custom");
+    assert.equal(first.body.total, 21);
+    assert.deepEqual(first.body.rows.map((r) => r.ts), [lastTs, ...Array.from({ length: 19 }, (_, i) => startTs + 19 - i)]);
+    assert.deepEqual(first.body.facets.agents.map((facet) => facet.id), [null, "kimi"]);
+    assert.deepEqual(first.body.facets.models.map((facet) => facet.raw), ["alternate", "m1"]);
+    assert.deepEqual(first.body.facets.providers.map((facet) => facet.id), ["p1", "p2"]);
+
+    const second = await logs.get({ ...params, page: 2 });
+    assert.equal(second.status, 200);
+    assert.equal(second.body.total, 21);
+    assert.deepEqual(second.body.rows.map((r) => r.ts), [startTs]);
+  });
+
+  it("validates fixed custom inputs at minute precision", async (t) => {
+    const endTs = new Date(2026, 0, 31, 12).getTime();
+    const startTs = endTs - 30 * DAY_MS;
+    const logs = realLogsRouter(t, endTs + 45_123);
+    const valid = { range: "custom", startTs, endTs };
+    assert.equal((await logs.get(valid)).status, 200, "exactly 30 days between minute starts");
+    assert.equal((await logs.get({ ...valid, startTs: endTs })).status, 200, "same minute");
+    assert.equal((await logs.get({ ...valid, startTs: 0, endTs: 0 })).status, 200, "retention limits results, not fixed historical inputs");
+
+    for (const params of [
+      { range: "custom" },
+      { range: "custom", startTs },
+      { ...valid, startTs: "" },
+      { ...valid, startTs: "+" + startTs },
+      { ...valid, startTs: "0x" + startTs.toString(16) },
+      { ...valid, startTs: "1e12" },
+      { ...valid, startTs: "9007199254740992" },
+      { ...valid, startTs: startTs + 1 },
+      { ...valid, endTs: endTs - 1 },
+      { ...valid, startTs: endTs, endTs: endTs - 60_000 },
+      { ...valid, startTs: startTs - 60_000 },
+      { ...valid, startTs: endTs, endTs: endTs + 60_000 },
+      { ...valid, liveEnd: 1 },
+      { ...valid, liveEnd: "" },
+      [...Object.entries(valid), ["startTs", startTs]],
+      [...Object.entries(valid), ["endTs", endTs]],
+    ]) {
+      const result = await logs.get(params);
+      assert.equal(result.status, 400, new URLSearchParams(params).toString());
+      assert.deepEqual(result.body, { ok: false, error: "invalid_custom_range" });
+    }
+  });
+
+  it("refreshes live custom through server now even after 30 days", async (t) => {
+    const startTs = new Date(2026, 0, 15, 23, 59).getTime();
+    const firstNow = startTs + 40_123;
+    const afterMidnight = startTs + 60_000;
+    const agedNow = startTs + 31 * DAY_MS + 45_123;
+    const logs = realLogsRouter(t, firstNow);
+    for (const ts of [startTs - 1, startTs, firstNow, afterMidnight, agedNow, agedNow + 1]) logs.append(ts);
+    const params = { range: "custom", startTs, liveEnd: 1 };
+
+    const first = await logs.get(params);
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.body.rows.map((r) => r.ts), [firstNow, startTs]);
+
+    logs.setNow(afterMidnight);
+    const next = await logs.get(params);
+    assert.equal(next.status, 200);
+    assert.deepEqual(next.body.rows.map((r) => r.ts), [afterMidnight, firstNow, startTs]);
+
+    logs.setNow(agedNow);
+    const aged = await logs.get(params);
+    assert.equal(aged.status, 200);
+    assert.equal(aged.body.generatedAt, agedNow);
+    assert.deepEqual(aged.body.rows.map((r) => r.ts), [agedNow, afterMidnight, firstNow, startTs]);
+
+    for (const invalid of [
+      { ...params, startTs: agedNow + 60_000 - agedNow % 60_000 },
+      { ...params, liveEnd: "true" },
+      { ...params, endTs: "" },
+      [...Object.entries(params), ["liveEnd", 1]],
+    ]) {
+      assert.equal((await logs.get(invalid)).status, 400);
+    }
+  });
+
   it("defaults: range=today, sort=ts desc, page=1, pageSize=20, no filters", async () => {
     const journal = mockLogsJournal();
     const router = logsRouter({ usageJournal: journal });
@@ -106,15 +235,15 @@ describe("panel router request-logs route", () => {
     assert.equal(arg.errKind, undefined);
   });
 
-  it("range=7d/30d/all map to closed day windows; bogus range falls back to today", async () => {
+  it("range=7d/14d/30d/all map to closed day windows; bogus range falls back to today", async () => {
     const journal = mockLogsJournal();
     const router = logsRouter({ usageJournal: journal });
     const seen = [];
-    for (const range of ["7d", "30d", "all", "bogus", "year"]) {
+    for (const range of ["7d", "14d", "30d", "all", "bogus", "year"]) {
       const { req, res, json } = fakeReqRes(`/panel/api/stats/logs?range=${range}`);
       await router.handle(req, res);
       assert.equal(res.statusCode, 200);
-      const expectKey = ["7d", "30d", "all"].includes(range) ? range : "today";
+      const expectKey = ["7d", "14d", "30d", "all"].includes(range) ? range : "today";
       assert.equal(json().range, expectKey, `range=${range} → ${expectKey}`);
       // generatedAt 是路由本次请求用的 nowTs，期望窗由它推算才不会跨午夜漂移
       seen.push([expectKey, json().generatedAt]);

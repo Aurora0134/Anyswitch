@@ -304,7 +304,7 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
   // 在仅时间过滤的行集上收集 distinct agentId（可含 null）/providerId/model，
   // 供筛选下拉回填——筛选项自身不会把自己从下拉里筛没。
   function readRequestsLog({
-    fromDay, toDay,
+    fromDay, toDay, fromTs, toTs,
     agentId, providerId, model, ok, errKind,
     sortBy = "ts", sortDir = "desc",
     page = 1, pageSize = 20,
@@ -337,12 +337,16 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
       days.reverse(); // 新→旧
     }
 
+    const hasTimeBounds = fromTs !== undefined || toTs !== undefined;
     const rangeRows = []; // 仅时间范围过滤（facets 的行集）
     const matched = [];   // 再叠加筛选条件后的全量匹配集
     for (const day of days) {
       const lines = readLinesCached(fileFor("requests", day));
       if (lines === null) continue; // file vanished between readdir and read
       for (const r of lines) {
+        if (hasTimeBounds && (!Number.isFinite(r?.ts)
+          || (fromTs !== undefined && r.ts < fromTs)
+          || (toTs !== undefined && r.ts >= toTs))) continue;
         rangeRows.push(r);
         if (agentId !== undefined && agentId !== null) {
           // 哨兵 "__none__" 匹配归属缺失（null/缺键）的行
