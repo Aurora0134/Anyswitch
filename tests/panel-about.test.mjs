@@ -151,7 +151,9 @@ const batchLabel = (count) => `全部更新 (${count})`;
 // 停留在过期的 9 客户端世界里自证。
 test("关于页夹具与生产契约对账：端点集合＝CLIENT_ENTRY_FORMS，可代管集合＝client-lifecycle 权威清单", () => {
   assert.deepEqual([...ids].sort(), [...Object.keys(CLIENT_ENTRY_FORMS)].sort(), "端点清单必须跟齐生产（缺 workbuddy 即失败）");
-  assert.deepEqual([...PANEL_UPDATABLE].sort(), [...Object.keys(CLIENT_PACKAGES), ...Object.keys(NATIVE_CLIENTS)].sort(), "可代管更新集合与 client-lifecycle 的权威清单一致");
+  // PANEL_UPDATABLE 就是用下面这对清单构造的，和构造源 deepEqual 恒真；真判别面在
+  // 「两份清单键无重叠」——键重叠时 Set 去重使集合基数小于两清单键数之和。
+  assert.equal(PANEL_UPDATABLE.size, Object.keys(CLIENT_PACKAGES).length + Object.keys(NATIVE_CLIENTS).length, "可代管集合基数＝两份权威清单键数之和（两清单键重叠即失败）");
   assert.equal(BATCH_COUNT_FULL, PANEL_UPDATABLE.size, "全量场景下每个可代管端点都有官方新版可升");
 });
 
