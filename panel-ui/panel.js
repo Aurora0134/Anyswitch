@@ -25110,10 +25110,16 @@ async function api(method, path, body) {
       }
     }
     // 轮询重建后按行键恢复展开中的详情行：必须先于滑位新顶点采样——详情行是常规
-    // 布局流的兄弟行，插回来会把下方的行推下去，恢复前采样会把这段推挤漏进位移
-    logsRows.forEach((r, i) => {
-      if (logsExpanded.has(logsRowKey(r))) appendLogsDetail(tbody.children[i], r);
-    });
+    // 布局流的兄弟行，插回来会把下方的行推下去，恢复前采样会把这段推挤漏进位移。
+    // tbody.children 是 live 集合，每插回一条详情行，后续兄弟的索引整体前移，边插
+    // 边按索引取父行，第二条起的详情行会挂到前面已插回的详情行后；父行元素先按
+    // 行键收齐再逐条插回，插回的先后不再影响各详情行的归属
+    const rowEls = new Map();
+    for (const tr of tbody.children) rowEls.set(tr.getAttribute("data-logs-key"), tr);
+    for (const r of logsRows) {
+      const key = logsRowKey(r);
+      if (logsExpanded.has(key)) appendLogsDetail(rowEls.get(key), r);
+    }
     if (shifts) {
       // 只给位置变了的旧行挂滑位动画类（新行不在 oldTops 里，天然不挂）；
       // 起帧位移=旧顶点−新顶点（详情行已恢复、新顶点含其占位），播完落回自然位置
