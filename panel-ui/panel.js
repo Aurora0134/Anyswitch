@@ -25093,7 +25093,7 @@ async function api(method, path, body) {
     const shifts = logsShiftRows(logsShown, view, res.page, keys);
     logsShown = { view, keys };
     // 旧行滑位的起帧要落回上一屏的旧位置：行高不齐（部分行带第二行小字），
-    // 不能按行数差估算，先记旧行顶点、重建后记新顶点，差值作起帧位移
+    // 不能按行数差估算，先记旧行顶点；新顶点等详情行恢复完再测（见下），差值作起帧位移
     let oldTops = null;
     if (shifts) {
       oldTops = new Map();
@@ -25109,20 +25109,31 @@ async function api(method, path, body) {
         if (fresh.has(tr.getAttribute("data-logs-key"))) tr.classList.add("logs-row-new");
       }
     }
+    // 轮询重建后按行键恢复展开中的详情行：必须先于滑位新顶点采样——详情行是常规
+    // 布局流的兄弟行，插回来会把下方的行推下去，恢复前采样会把这段推挤漏进位移
+    logsRows.forEach((r, i) => {
+      if (logsExpanded.has(logsRowKey(r))) appendLogsDetail(tbody.children[i], r);
+    });
     if (shifts) {
       // 只给位置变了的旧行挂滑位动画类（新行不在 oldTops 里，天然不挂）；
-      // 起帧位移=旧顶点−新顶点，播完落回自然位置
+      // 起帧位移=旧顶点−新顶点（详情行已恢复、新顶点含其占位），播完落回自然位置
       for (const tr of tbody.children) {
         const oldTop = oldTops.get(tr.getAttribute("data-logs-key"));
         if (oldTop === undefined) continue;
         tr.style.setProperty("--logs-row-shift", oldTop - tr.getBoundingClientRect().top + "px");
         tr.classList.add("logs-row-shift");
       }
+      // 展开中的详情行随父行同位移：父行滑回旧位置的整段路上，详情行与其一体
+      // 移动、终位对齐；父行不位移（不在上面的挂类循环里）则详情行零动画。
+      // querySelectorAll 是静态列表，循环内给详情行挂的类不会进入本次遍历
+      for (const tr of tbody.querySelectorAll("tr.logs-row-shift")) {
+        const detail = tr.nextElementSibling;
+        if (detail && detail.classList.contains("logs-detail-row")) {
+          detail.style.setProperty("--logs-row-shift", tr.style.getPropertyValue("--logs-row-shift"));
+          detail.classList.add("logs-row-shift");
+        }
+      }
     }
-    // 轮询重建后按行键恢复展开中的详情行
-    logsRows.forEach((r, i) => {
-      if (logsExpanded.has(logsRowKey(r))) appendLogsDetail(tbody.children[i], r);
-    });
     renderLogsPager(res);
   }
 
