@@ -1,8 +1,7 @@
 // Session scan data layer for the panel「会话管理」tab: on-demand scan of each
 // managed agent's on-disk session stores. No index, no DB of our own — the scan
-// itself is still stateless (cc-switch's session_manager pattern, translated to
-// Node): it holds nothing between calls and every call re-reads the agents'
-// files.
+// itself is still stateless: it holds nothing between calls and every call
+// re-reads the agents' files.
 //
 // 扫描执行位置（2026-10-26 起，「扫描离线程」）：这些 adapter 体内全是同步 fs
 // （readdirSync/statSync/readFileSync/readSync），async 外壳下没有任何 await 点，
@@ -89,12 +88,12 @@ import { DatabaseSync } from "node:sqlite";
 import { qoderEditionForPath } from "../launchers/qoder-merge-config.mjs";
 
 // ---------------------------------------------------------------------------
-// Shared constants & small helpers (translations of cc-switch providers/utils.rs)
+// Shared constants & small helpers
 // ---------------------------------------------------------------------------
 
-// Max chars for session titles, shared across adapters (cc-switch TITLE_MAX_CHARS).
+// Max chars for session titles, shared across adapters.
 const TITLE_MAX_CHARS = 80;
-// Summary preview cap on the list rows (cc-switch truncate_summary(.., 160)).
+// Summary preview cap on the list rows (160 characters).
 const SUMMARY_MAX_CHARS = 160;
 
 // Resume-command template table — the single place commands are assembled.
@@ -145,7 +144,7 @@ function resumeCommandFor(endpoint, meta) {
   return build ? build(meta) : "";
 }
 
-// cc-switch truncate_summary: trim, cap at maxChars, append "..." when cut.
+// Summary truncation: trim, cap at maxChars, append "..." when cut.
 function truncateText(text, maxChars) {
   const trimmed = String(text ?? "").trim();
   if (trimmed.length === 0) return "";
@@ -153,7 +152,7 @@ function truncateText(text, maxChars) {
   return [...trimmed].slice(0, maxChars).join("") + "...";
 }
 
-// cc-switch path_basename: last non-empty path segment, both separators.
+// Path basename: last non-empty path segment, both separators.
 function pathBasename(value) {
   const trimmed = String(value ?? "").trim().replace(/[/\\]+$/, "");
   if (!trimmed) return null;
@@ -161,7 +160,7 @@ function pathBasename(value) {
   return segments.length > 0 ? segments[segments.length - 1] : null;
 }
 
-// cc-switch parse_timestamp_to_ms: integer (ms if >1e12 else s) or RFC3339.
+// Timestamp parsing: integer (ms if >1e12 else s) or RFC3339.
 function parseTimestampMs(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     const n = Math.trunc(value);
@@ -174,7 +173,7 @@ function parseTimestampMs(value) {
   return null;
 }
 
-// cc-switch extract_text: string | content-block array | {text} object.
+// Text extraction: string | content-block array | {text} object.
 // tool_use/toolCall blocks render as "[Tool: <name>]".
 function extractText(content) {
   if (typeof content === "string") return content;
@@ -253,7 +252,7 @@ function allToolResultBlocks(content) {
 // nine endpoints (survey: claude 85 `<command-name>` + 82 `<local-command-stdout`
 // rows, zcode 223 TodoWrite nudges + 20 task notifications, codex 31 AGENTS.md
 // preludes, qoder/claude 44+25 interruption markers), plus the IDE prelude
-// cc-switch documents for Codex. Matched at the START on purpose: a real prompt
+// documents for Codex. Matched at the START on purpose: a real prompt
 // that merely quotes one of these tags stays a real prompt.
 const INJECTED_USER_TEXT_PREFIXES = Object.freeze([
   "<system-reminder",
@@ -339,7 +338,7 @@ function parseJsonl(text) {
   return out;
 }
 
-// cc-switch read_head_tail_lines: first headN + last tailN lines without
+// Head+tail line reads: first headN + last tailN lines without
 // reading the whole file when it is large. Small files (<16KB) are read once.
 // Uses fs.open + positioned reads so multi-MB transcripts stay cheap.
 // The head is read LINE BY LINE (not one 16KB split): a single JSONL row can
@@ -653,7 +652,7 @@ function collectJsonlFiles(root, { skipDirs = () => false, skipFiles = () => fal
 }
 
 // ---------------------------------------------------------------------------
-// Delete path safety (translation of cc-switch delete_session_with_roots):
+// Delete path safety:
 // canonicalize the candidate file and every existing root, then require the
 // file to live under one of the adapter's roots. Anything else is refused —
 // the path comes from the frontend and is not trusted.
@@ -713,11 +712,11 @@ function makeMeta({ endpoint, id, title = null, summary = null, project = null, 
 }
 
 // ---------------------------------------------------------------------------
-// claude — translation of cc-switch providers/claude.rs.
+// claude adapter.
 // Layout: ~/.claude/projects/<munged-cwd>/<sessionId>.jsonl (+ same-name
 // sidecar dir, subagents/, journal.jsonl). Head 30 / tail 30 local reads;
 // title priority custom-title > first real user message > dir basename.
-// (cc-switch uses head 10, but real sessions often carry 10+ lines of
+// (head 30 rather than a smaller window: real sessions often carry 10+ lines of
 // mode/permission/snapshot/command noise before the first real user message.)
 // ---------------------------------------------------------------------------
 
@@ -1400,7 +1399,7 @@ function createDshAdapter(roots) {
 // ---------------------------------------------------------------------------
 // pi — ~/.pi/agent/sessions/<munged-cwd>/<ts>_<uuid>.jsonl. First line is
 // {"type":"session","id",...,"cwd"}; messages are {"type":"message"} entries
-// wrapping {role, content}. Resume by exact file path (cc-switch pi.rs).
+// wrapping {role, content}. Resume by exact file path.
 // ---------------------------------------------------------------------------
 
 function createPiAdapter(roots) {
