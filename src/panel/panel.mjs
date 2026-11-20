@@ -58,7 +58,7 @@ import {
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker, resolveInstallRoot } from "../ops/app-self-update.mjs";
 import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault } from "../ops/app-git-identity.mjs";
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "../ops/version-check.mjs";
-import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner, readOpencodeBusy } from "../agents/session-scan.mjs";
+import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner, readOpencodeBusy, uniqueSessionRows } from "../agents/session-scan.mjs";
 import { createSessionScanOffload } from "../agents/session-scan-worker.mjs";
 import { TERMINAL_HOST_PORT } from "../terminal/terminal-process-manager.mjs";
 import { probeTerminalCommandTree as defaultProbeTerminalCommandTree, SWITCH_GUARD_PROBE_TIMEOUT_MS } from "../terminal/terminal-switch-guard.mjs";
@@ -412,9 +412,7 @@ function createSessionsListSnapshot(load, ttlMs) {
     // 的代价可接受（全量 TTL 兜底仍在）。约束三条：冷缓存（还没全量扫过）不并
     // ——半份快照会当「已扫过」服务下一拍非强制读；空表不并——scanEndpoint 对
     // 读盘失败与真空表一律降级空表，一次扫描抖动不该有抹掉该家全部行的权力；
-    // 墓碑行不复活——删除语义见 droppedKeys。并进来的行集在本地重排＋去重，
-    // 维持 scanAll 落快照的两道不变量（lastActive 倒序；endpoint＋id 去重保留
-    // 最近活跃那份——单家扫描不经 scanAll，同 id 双份不处理就会进快照）。
+    // 墓碑行不复活——删除语义见 droppedKeys。合并后沿用全量列表的排序和去重规则。
     // 在飞的全量扫描落地时会整体覆写快照（起扫早于行物化就把合并进来的行抹回
     // 去）——落地后补一次同样的替换，两种先后都收敛。
     mergeEndpoint(endpoint, sessions) {
@@ -429,16 +427,7 @@ function createSessionsListSnapshot(load, ttlMs) {
           if (droppedKeys.has(`${row.endpoint}\u0000${row.id}`)) continue;
           merged.push(row);
         }
-        merged.sort((a, b) => (b.lastActive ?? b.createdAt ?? 0) - (a.lastActive ?? a.createdAt ?? 0));
-        const seen = new Set();
-        const deduped = [];
-        for (const session of merged) {
-          const key = `${session?.endpoint}\u0000${session?.id}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          deduped.push(session);
-        }
-        snap = { at: Date.now(), value: { ...snap.value, sessions: deduped } };
+        snap = { at: Date.now(), value: { ...snap.value, sessions: uniqueSessionRows(merged) } };
       };
       apply();
       if (inFlight.p) inFlight.p.then(apply, () => {});
@@ -4571,7 +4560,7 @@ export function createPanelRouter({
         const endpointParam = url.searchParams.get("endpoint");
         if (endpointParam) {
           try {
-            const sessions = await svc.scanAgent(endpointParam);
+            const sessions = uniqueSessionRows(await svc.scanAgent(endpointParam));
             sessionsListSnapshotFor(svc).mergeEndpoint(endpointParam, sessions);
             return sendJson(res, 200, { sessions });
           } catch (err) {
