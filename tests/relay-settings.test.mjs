@@ -38,8 +38,9 @@ import {
   createCredentialCacheEnabledGate,
   parseAutoDownloadUpdates,
   DEFAULT_AUTO_DOWNLOAD_UPDATES,
-  parseBleedingEdgeMode,
-  DEFAULT_BLEEDING_EDGE_MODE,
+  UPDATE_CHANNELS,
+  DEFAULT_UPDATE_CHANNEL,
+  parseUpdateChannel,
   parsePoolLoadBalancing,
   DEFAULT_POOL_LOAD_BALANCING,
   loadSettings,
@@ -1033,28 +1034,67 @@ describe("credentialCacheEnabled", () => {
   });
 });
 
-describe("bleedingEdgeMode", () => {
-  it("defaults to off: only an explicit true turns it on", () => {
-    assert.equal(DEFAULT_BLEEDING_EDGE_MODE, false);
-    assert.equal(parseBleedingEdgeMode(undefined), false);
-    assert.equal(parseBleedingEdgeMode("true"), false);
-    assert.equal(parseBleedingEdgeMode(1), false);
-    assert.equal(parseBleedingEdgeMode(false), false);
-    assert.equal(parseBleedingEdgeMode(true), true);
+describe("updateChannel", () => {
+  it("defaults to stable: only stable/preview are channels, anything else folds to stable", () => {
+    assert.equal(DEFAULT_UPDATE_CHANNEL, "stable");
+    assert.deepEqual([...UPDATE_CHANNELS], ["stable", "preview"]);
+    assert.equal(parseUpdateChannel(undefined), "stable");
+    assert.equal(parseUpdateChannel("bleeding"), "stable");
+    assert.equal(parseUpdateChannel(true), "stable");
+    assert.equal(parseUpdateChannel("stable"), "stable");
+    assert.equal(parseUpdateChannel("preview"), "preview");
+  });
+
+  it("migrates the legacy bleedingEdgeMode bool: true→preview, false/missing/garbage→stable", () => {
+    assert.equal(parseUpdateChannel(undefined, true), "preview");
+    assert.equal(parseUpdateChannel(undefined, false), "stable");
+    assert.equal(parseUpdateChannel(undefined), "stable");
+    assert.equal(parseUpdateChannel(undefined, "true"), "stable");
   });
 
   it("round-trips through saveSettings and survives unrelated patches", () => {
-    const tmp = mkTestDir("anyswitch-bleeding-edge-");
+    const tmp = mkTestDir("anyswitch-update-channel-");
     const path = join(tmp, "settings.json");
     try {
-      assert.equal(loadSettings(path, {}).settings.bleedingEdgeMode, false, "先于该键存在的安装保持关闭");
-      const on = saveSettings(path, { bleedingEdgeMode: true }, {});
-      assert.equal(on.settings.bleedingEdgeMode, true);
-      assert.equal(loadSettings(path, {}).settings.bleedingEdgeMode, true);
+      assert.equal(loadSettings(path, {}).settings.updateChannel, "stable", "先于该键存在的安装默认 stable");
+      const preview = saveSettings(path, { updateChannel: "preview" }, {});
+      assert.equal(preview.settings.updateChannel, "preview");
+      assert.equal(loadSettings(path, {}).settings.updateChannel, "preview");
       const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
-      assert.equal(other.settings.bleedingEdgeMode, true, "改别的设置项不会把它挤掉");
-      const off = saveSettings(path, { bleedingEdgeMode: false }, {});
-      assert.equal(off.settings.bleedingEdgeMode, false);
+      assert.equal(other.settings.updateChannel, "preview", "改别的设置项不会把它挤掉");
+      const stable = saveSettings(path, { updateChannel: "stable" }, {});
+      assert.equal(stable.settings.updateChannel, "stable");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("saving a channel removes the legacy bleedingEdgeMode key from disk", () => {
+    const tmp = mkTestDir("anyswitch-channel-migrate-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ bleedingEdgeMode: true }), "utf8");
+      assert.equal(loadSettings(path, {}).settings.updateChannel, "preview", "旧 bleeding=true 读作 preview");
+      const saved = saveSettings(path, { updateChannel: "stable" }, {});
+      assert.equal(saved.settings.updateChannel, "stable");
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal("bleedingEdgeMode" in onDisk, false, "存新删旧：旧 bool 不留盘");
+      assert.equal(onDisk.updateChannel, "stable");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("an unrelated save also migrates a legacy file, so the old bool never outlives a save", () => {
+    const tmp = mkTestDir("anyswitch-channel-side-migrate-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ bleedingEdgeMode: true }), "utf8");
+      const saved = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(saved.settings.updateChannel, "preview");
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal("bleedingEdgeMode" in onDisk, false);
+      assert.equal(onDisk.updateChannel, "preview");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

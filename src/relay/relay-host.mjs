@@ -687,8 +687,14 @@ export function describeRelayStartupFailure(error, pid = process.pid) {
 
 export async function startResidentRelay(options = {}) {
   // logPath 是纯测试注入口：装配测试把 stderr tee 与崩溃记录引进临时沙箱，
-  // 默认仍是本模块旁的 logs/relay-host.log（生产路径不变）。
-  const logPath = options.logPath ?? join(__dirname, "../../logs", "relay-host.log");
+  // 默认落数据根 logs/relay-host.log（relayDataRoot——跨版本连续，2026-11-20
+  // 用户裁决：打包模型下清版本目录不能把日志带走；terminal-switch.log 早已
+  // 同款落数据根）。目录只在走默认路径时才建，测试注入口不受影响。
+  const defaultLogDir = join(relayDataRoot(options.base ?? process.env), "logs");
+  const logPath = options.logPath ?? join(defaultLogDir, "relay-host.log");
+  if (!options.logPath) {
+    try { mkdirSync(defaultLogDir, { recursive: true }); } catch { /* 落盘尽力而为 */ }
+  }
   rotateLogIfNeeded(logPath);
   const setFatalHook = redirectStderrToFile(logPath);
   // 运行日志开关的活闸门：中继拥有唯一持久化的日志文件，开关必须当场生效，否则
@@ -779,7 +785,9 @@ export async function startResidentRelay(options = {}) {
     manualStop: terminalHostManualStop,
     // The host is windowless; tee its stdout/stderr into a sibling log so a
     // native abort (node-pty/microsoft#951 style) leaves its last words on disk.
-    logPath: join(__dirname, "../../logs", "terminal-host.log"),
+    // 落数据根 logs/（与 relay-host.log 同目录，跨版本连续，2026-11-20 用户裁决；
+    // 目录由 terminal-host 侧的故障处理器自建）。
+    logPath: join(relayDataRoot(options.base ?? process.env), "logs", "terminal-host.log"),
   });
   mountTerminalHostRoutes(server, createTerminalHostRoutes({
     supervisor: terminalSupervisor,
@@ -936,7 +944,7 @@ if (isEntryModule(process.argv[1], import.meta.url)) {
       // 否则又回到「裸文本、多个实例共写一个文件」那种事后无从归因的状态。
       if (error?.loggedByRelayHost !== true) {
         const { label, detail } = describeRelayStartupFailure(error);
-        appendCrashLog(join(__dirname, "../../logs", "relay-host.log"), label, detail);
+        appendCrashLog(join(relayDataRoot(), "logs", "relay-host.log"), label, detail);
       }
       process.exit(1);
     },

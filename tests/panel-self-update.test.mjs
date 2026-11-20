@@ -15,15 +15,27 @@ const RUN_ID = "00000000-0000-4000-8000-000000000001";
 
 // 自更新登记是纯登记 + 拉起：worker 的实际执行在 app-self-update.test.mjs 里
 // 全注入覆盖，这里把 spawn 换成捕获桩，专注 API 面、两步衔接与换装监听器的行为。
+// 渠道模型下 mock 按请求的 channel 各给 stable/preview 候选并捕获调用参数，
+// 断言面板把设置里的渠道原样传给 release-service、不私自换轨。
 function selfUpdateReleaseService(state = "update_available") {
+  const seen = [];
+  const releaseFor = (channel) => channel === "preview"
+    ? { version: "0.7.0-preview.1", tag: "v0.7.0-preview.1", prerelease: true, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.0-preview.1", publishedAt: "2026-10-09T00:00:00.000Z" }
+    : { version: "0.7.0", tag: "v0.7.0", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.0", publishedAt: "2026-10-09T00:00:00.000Z" };
   return {
-    getAppUpdate: async () => ({
-      currentVersion: "0.6.1-preview",
-      state,
-      checkedAt: "2026-10-09T00:00:00.000Z",
-      release: state === "update_available" ? { version: "0.7.0", tag: "v0.7.0", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.0" } : null,
-      errorCode: null,
-    }),
+    seen,
+    getAppUpdate: async ({ force, channel } = {}) => {
+      const requested = channel === "preview" ? "preview" : "stable";
+      seen.push({ force, channel: requested });
+      return {
+        currentVersion: "0.6.1-preview",
+        channel: requested,
+        state,
+        checkedAt: "2026-10-09T00:00:00.000Z",
+        release: state === "update_available" ? releaseFor(requested) : null,
+        errorCode: null,
+      };
+    },
     getClientLatest: async () => { throw new Error("not used by self update"); },
   };
 }
@@ -40,6 +52,7 @@ function stagedRun(overrides = {}) {
     finishedAt: "2026-10-09T00:01:00.000Z",
     result: { outcome: "downloaded", message: "已下载 0.7.0，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.7.0" },
     workerPid: process.pid,
+    channel: "stable",
     targetVersion: "0.7.0",
     targetTag: "v0.7.0",
     phase: "staged",
@@ -50,10 +63,8 @@ function stagedRun(overrides = {}) {
 async function withPanel(options, run) {
   const journalDir = options.clientUpdateJournalDir ?? mkdtempSync(join(tmpdir(), "anys-self-update-panel-"));
   const ownsJournal = !options.clientUpdateJournalDir;
-  // base 不隔离就会读到真实机器的 settings（先行版开关等），用例随宿主机状态漂移：
-  // 本机先行版常开，稳定轨用例会被整体拖进先行轨真 git 身份路径（drift 套件因此
-  // 在本机长期红）。默认给每个用例一个干净的临时 LOCALAPPDATA；显式传 base 的
-  // 先行轨套件不受影响。
+  // base 不隔离就会读到真实机器的 settings（渠道开关等），用例随宿主机状态漂移。
+  // 默认给每个用例一个干净的临时 LOCALAPPDATA；显式传 base 的渠道套件不受影响。
   const ownsBase = !options.base;
   const base = options.base ?? { LOCALAPPDATA: mkdtempSync(join(tmpdir(), "anys-self-update-base-")) };
   options = {
@@ -61,14 +72,18 @@ async function withPanel(options, run) {
     ...options,
     base,
     // store root（relayRoot）落进用例自己的临时 base：/api/status 的终端宿主状态
-    // 链每拍都会求值 relayPullToken()（panel.mjs:1959），它按 relayRoot 生成/读取
-    // pi-relay-token——固定真实路径等于每跑一次测试都在真机落一个目录。生产里
-    // relayRoot 本来就是 %LOCALAPPDATA%\Anyswitch，这里同形落位，随 base 一起清走。
+    // 链每拍都会求值 relayPullToken()，它按 relayRoot 生成/读取 pi-relay-token——
+    // 固定真实路径等于每跑一次测试都在真机落一个目录。生产里 relayRoot 本来就是
+    // %LOCALAPPDATA%\Anyswitch，这里同形落位，随 base 一起清走。
     storePaths: options.storePaths ?? { root: join(base.LOCALAPPDATA, "Anyswitch") },
     // 终端宿主状态不在本文件的关注面：注入 null 回落（与 relay 不可达同一降级
     // 路径），否则 /panel/api/status 会向真实 127.0.0.1:47821 发 HTTP 探测，
     // 断言随宿主机 relay 是否在跑漂移。
     fetchTerminalHostStatus: options.fetchTerminalHostStatus ?? (async () => null),
+    // 默认无本地 git 身份＝打包安装形态（app 目录没有 .git）。drift 的 offTag 维度
+    // 与 app-info 的 commit 携带都会真实查询 git——不注入的话测试会对本 worktree
+    // 跑真 rev-parse，需要身份的用例（drift offTag）显式覆盖。
+    readLocalHeadFn: options.readLocalHeadFn ?? (async () => null),
     clientUpdateJournalDir: journalDir,
     spawnClientUpdateWorkerFn: () => process.pid,
     spawnSelfUpdateWorkerFn: options.spawnSelfUpdateWorkerFn ?? (() => process.pid),
@@ -128,20 +143,19 @@ async function withPanel(options, run) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("POST /panel/api/self-update（下载）", () => {
-  test("有可用更新：登记 download 任务、拉起脱离 worker、布监听器，返回 202", async () => {
+  test("有可用更新：登记 download 任务、拉起脱离 worker，返回 202", async () => {
     const spawned = [];
-    const watch = { scheduled: 0, canceled: 0, pump: null };
+    const service = selfUpdateReleaseService();
     await withPanel({
-      releaseService: selfUpdateReleaseService(),
+      releaseService: service,
       spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return 424242; },
-      selfUpdateWatchScheduleFn: (fn) => { watch.pump = fn; watch.scheduled += 1; return 42; },
-      selfUpdateWatchCancelFn: () => { watch.canceled += 1; },
     }, async (get, post) => {
       const result = await post("/panel/api/self-update", {});
       assert.equal(result.status, 202);
       assert.equal(result.body.ok, true);
       assert.equal(result.body.clientId, "anyswitch");
       assert.equal(result.body.step, "download");
+      assert.equal(result.body.channel, "stable");
       assert.equal(result.body.targetVersion, "0.7.0");
       assert.equal(spawned.length, 1);
       const recorded = readClientUpdateRun(spawned[0].journalDir, result.body.runId);
@@ -150,12 +164,17 @@ describe("POST /panel/api/self-update（下载）", () => {
       assert.equal(recorded.state, "running");
       assert.equal(recorded.workerPid, 424242);
       assert.equal(recorded.phase, "staging");
+      assert.equal(recorded.channel, "stable");
       assert.equal(recorded.targetVersion, "0.7.0");
       assert.equal(recorded.targetTag, "v0.7.0");
       assert.equal(recorded.beforeVersion, "0.6.1-preview");
       // appDir 就是仓根（panel.mjs 在 src/panel/，向上两级），与检出位置的名字无关。
       assert.equal(recorded.appDir, dirname(dirname(fileURLToPath(import.meta.url))));
-      assert.equal(watch.scheduled, 0, "下载阶段不布换装监听器：它只等换装阶段，应用时才布");
+      // 源码检出不处于 versions/<ver>/app 布局：installRoot 如实为 null，worker
+      // 按「更新信息不完整」拒绝——打包自更新只对打包安装开放。
+      assert.equal(recorded.installRoot, null);
+      // relayRoot 落在用例自己的临时 base 下（storePaths 注入），随 base 一起清走。
+      assert.ok(typeof recorded.relayRoot === "string" && recorded.relayRoot.endsWith(join("Anyswitch")));
     });
   });
 
@@ -176,10 +195,6 @@ describe("POST /panel/api/self-update（下载）", () => {
     const spawned = [];
     await withPanel({
       releaseService: selfUpdateReleaseService("current"),
-      // state=current 会进 buildStableDrift（panel.mjs:2363-2368）：不注入本地
-      // 身份就在测试里真跑 rev-parse + ls-remote github.com（网络不通时单用例
-      // 挂满 20s git 超时）。null＝无 git 身份，drift 原地短路，本用例只钉 409 分支。
-      readLocalHeadFn: async () => null,
       spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
     }, async (get, post) => {
       const result = await post("/panel/api/self-update", {});
@@ -198,7 +213,7 @@ describe("POST /panel/api/self-update（下载）", () => {
       writeClientUpdateRun(ctx.journalDir, {
         runId: RUN_ID, clientId: "anyswitch", action: "update", step: "download", state: "running",
         startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
-        workerPid: process.pid, phase: "staging", targetVersion: "0.7.0",
+        workerPid: process.pid, phase: "staging", channel: "stable", targetVersion: "0.7.0",
       });
       const result = await post("/panel/api/self-update", {});
       assert.equal(result.status, 409);
@@ -235,6 +250,7 @@ describe("POST /panel/api/self-update/apply（应用）", () => {
       assert.equal(result.status, 202);
       assert.equal(result.body.step, "apply");
       assert.equal(result.body.runId, RUN_ID);
+      assert.equal(result.body.channel, "stable");
       assert.equal(result.body.targetVersion, "0.7.0");
       const recorded = readClientUpdateRun(ctx.journalDir, RUN_ID);
       assert.equal(recorded.state, "running");
@@ -243,6 +259,26 @@ describe("POST /panel/api/self-update/apply（应用）", () => {
       assert.equal(recorded.result, null);
       assert.equal(recorded.workerPid, 424242);
       assert.equal(watch.scheduled, 1, "the swap watcher must be armed");
+    });
+  });
+
+  test("preview 渠道的 staged 记录：应用时 channel 原样带回（worker 按渠道验签）", async () => {
+    const spawned = [];
+    await withPanel({
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return 424242; },
+    }, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun({
+        channel: "preview",
+        targetVersion: "0.7.0-preview.1",
+        targetTag: "v0.7.0-preview.1",
+        result: { outcome: "downloaded", message: "已下载 0.7.0-preview.1，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.7.0-preview.1" },
+      }));
+      const result = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(result.status, 202);
+      assert.equal(result.body.channel, "preview");
+      const recorded = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      assert.equal(recorded.channel, "preview");
+      assert.equal(recorded.state, "running");
     });
   });
 
@@ -273,7 +309,7 @@ describe("POST /panel/api/self-update/apply（应用）", () => {
       writeClientUpdateRun(ctx.journalDir, {
         runId: "00000000-0000-4000-8000-000000000009", clientId: "anyswitch", action: "update", step: "download", state: "running",
         startedAt: "2026-10-09T00:02:00.000Z", finishedAt: null, result: null,
-        workerPid: process.pid, phase: "staging", targetVersion: "0.7.0",
+        workerPid: process.pid, phase: "staging", channel: "stable", targetVersion: "0.7.0",
       });
       const result = await post("/panel/api/self-update/apply", { runId: RUN_ID });
       assert.equal(result.status, 409);
@@ -286,18 +322,19 @@ describe("POST /panel/api/self-update/apply（应用）", () => {
 });
 
 describe("GET /panel/api/self-update/*", () => {
-  test("active 与按 runId 状态查询带 phase/step；未知 run 404", async () => {
+  test("active 与按 runId 状态查询带 phase/step/channel；未知 run 404", async () => {
     await withPanel({}, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, {
         runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
         startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
-        workerPid: process.pid, phase: "installing", targetVersion: "0.7.0", targetTag: "v0.7.0",
+        workerPid: process.pid, phase: "installing", channel: "stable", targetVersion: "0.7.0", targetTag: "v0.7.0",
       });
       const active = await get("/panel/api/self-update/active");
       assert.equal(active.status, 200);
       assert.equal(active.body.runs.length, 1);
       assert.equal(active.body.runs[0].phase, "installing");
       assert.equal(active.body.runs[0].step, "apply");
+      assert.equal(active.body.runs[0].channel, "stable");
       assert.equal(active.body.runs[0].targetVersion, "0.7.0");
       assert.equal(active.body.staged, null);
       const status = await get(`/panel/api/self-update/${RUN_ID}`);
@@ -317,6 +354,7 @@ describe("GET /panel/api/self-update/*", () => {
       assert.equal(active.body.runs.length, 0);
       assert.equal(active.body.staged.runId, RUN_ID);
       assert.equal(active.body.staged.outcome, "downloaded");
+      assert.equal(active.body.staged.channel, "stable");
       assert.equal(active.body.staged.targetVersion, "0.7.0");
       assert.equal(active.body.staged.targetTag, "v0.7.0");
     });
@@ -327,7 +365,7 @@ describe("GET /panel/api/self-update/*", () => {
       writeClientUpdateRun(ctx.journalDir, {
         runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
         startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
-        workerPid: process.pid, phase: "installing", targetVersion: "0.7.0", targetTag: "v0.7.0",
+        workerPid: process.pid, phase: "installing", channel: "stable", targetVersion: "0.7.0", targetTag: "v0.7.0",
       });
       writeClientUpdateRun(ctx.journalDir, {
         runId: "00000000-0000-4000-8000-000000000009", clientId: "claude", action: "update", state: "running",
@@ -365,13 +403,142 @@ describe("GET /panel/api/self-update/*", () => {
         runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "done",
         startedAt: "2026-10-09T00:00:00.000Z", finishedAt: "2026-10-09T00:05:00.000Z",
         result: { outcome: "updated", message: "已更新到 0.7.0", beforeVersion: "0.6.1-preview", afterVersion: "0.7.0", latestVersion: "0.7.0" },
-        workerPid: process.pid, phase: "waiting-panel", targetVersion: "0.7.0",
+        workerPid: process.pid, phase: "waiting-panel", channel: "stable", targetVersion: "0.7.0",
       });
       const status = await get(`/panel/api/self-update/${RUN_ID}`);
       assert.equal(status.status, 200);
       assert.equal(status.body.state, "done");
       assert.equal(status.body.outcome, "updated");
       assert.equal(status.body.afterVersion, "0.7.0");
+    });
+  });
+});
+
+// ── 更新渠道（stable/preview）─────────────────────────────────────────
+describe("更新渠道（updateChannel）", () => {
+  function withSettings(baseDir, settings) {
+    mkdirSync(join(baseDir, "Anyswitch"), { recursive: true });
+    writeFileSync(join(baseDir, "Anyswitch", "settings.json"), JSON.stringify(settings));
+  }
+
+  test("默认渠道 stable：GET /api/updates 带 channel 与 track 同值、stable 候选", async () => {
+    const service = selfUpdateReleaseService();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-channel-"));
+    try {
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: service,
+      }, async (get) => {
+        const body = (await get("/panel/api/updates?refresh=1")).body;
+        assert.equal(body.channel, "stable");
+        assert.equal(body.track, "stable", "track 与 channel 同值（历史消费面）");
+        assert.equal(body.state, "update_available");
+        assert.equal(body.release.version, "0.7.0");
+        assert.equal(body.release.tag, "v0.7.0");
+        assert.equal(body.release.prerelease, false);
+        assert.deepEqual(service.seen, [{ force: true, channel: "stable" }], "面板把设置里的渠道原样传给 release-service");
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("preview 渠道：release-service 收到 preview、响应带 preview 候选", async () => {
+    const service = selfUpdateReleaseService();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-channel-"));
+    try {
+      withSettings(baseDir, { updateChannel: "preview" });
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: service,
+      }, async (get) => {
+        const body = (await get("/panel/api/updates?refresh=1")).body;
+        assert.equal(body.channel, "preview");
+        assert.equal(body.track, "preview");
+        assert.equal(body.state, "update_available");
+        assert.equal(body.release.version, "0.7.0-preview.1");
+        assert.equal(body.release.prerelease, true);
+        assert.deepEqual(service.seen, [{ force: true, channel: "preview" }]);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy bleedingEdgeMode=true 读作 preview 渠道；畸形渠道键回落 stable", async () => {
+    for (const [settings, expected] of [[{ bleedingEdgeMode: true }, "preview"], [{ updateChannel: "bleeding" }, "stable"], [{ updateChannel: 42 }, "stable"]]) {
+      const service = selfUpdateReleaseService();
+      const baseDir = mkdtempSync(join(tmpdir(), "anys-channel-"));
+      try {
+        withSettings(baseDir, settings);
+        await withPanel({
+          base: { LOCALAPPDATA: baseDir },
+          releaseService: service,
+        }, async (get) => {
+          const body = (await get("/panel/api/updates?refresh=1")).body;
+          assert.equal(body.channel, expected);
+          assert.deepEqual(service.seen, [{ force: true, channel: expected }]);
+        });
+      } finally {
+        rmSync(baseDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("POST /api/self-update（preview 渠道）：登记 channel=preview 的 run 与 preview 目标", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-channel-"));
+    const spawned = [];
+    try {
+      withSettings(baseDir, { updateChannel: "preview" });
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+      }, async (get, post, ctx) => {
+        const result = await post("/panel/api/self-update", {});
+        assert.equal(result.status, 202);
+        assert.equal(result.body.channel, "preview");
+        assert.equal(result.body.targetVersion, "0.7.0-preview.1");
+        const run = readClientUpdateRun(ctx.journalDir, result.body.runId);
+        assert.equal(run.channel, "preview");
+        assert.equal(run.targetVersion, "0.7.0-preview.1");
+        assert.equal(run.targetTag, "v0.7.0-preview.1");
+        assert.equal(spawned.length, 1);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("stable 渠道没有候选就不发起：绝不回退 preview 候选", async () => {
+    // release-service 只给 stable 一个 no_releases（没有候选）；面板不得私自换
+    // 渠道去拿 preview 候选充数——渠道是用户的显式选择。
+    const service = {
+      seen: [],
+      getAppUpdate: async ({ force, channel } = {}) => {
+        const requested = channel === "preview" ? "preview" : "stable";
+        service.seen.push({ force, channel: requested });
+        return {
+          currentVersion: "0.6.1-preview", channel: requested, state: "no_releases",
+          checkedAt: "2026-10-09T00:00:00.000Z",
+          release: requested === "preview"
+            ? { version: "0.7.0-preview.1", tag: "v0.7.0-preview.1", prerelease: true, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.0-preview.1", publishedAt: "2026-10-09T00:00:00.000Z" }
+            : null,
+          errorCode: null,
+        };
+      },
+      getClientLatest: async () => { throw new Error("not used"); },
+    };
+    const spawned = [];
+    await withPanel({
+      releaseService: service,
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+    }, async (get, post) => {
+      const result = await post("/panel/api/self-update", {});
+      assert.equal(result.status, 409);
+      assert.equal(result.body.error, "no_update");
+      assert.equal(spawned.length, 0);
+      assert.deepEqual(service.seen, [{ force: true, channel: "stable" }], "只按 stable 查过一次，没去 preview 兜底");
     });
   });
 });
@@ -426,7 +593,7 @@ describe("自更新换装监听器", () => {
     writeClientUpdateRun(journalDir, {
       runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
       startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
-      workerPid: process.pid, phase: "waiting-panel", targetVersion: "0.7.0", targetTag: "v0.7.0",
+      workerPid: process.pid, phase: "waiting-panel", channel: "stable", targetVersion: "0.7.0", targetTag: "v0.7.0",
     });
     try {
       await withPanel({
@@ -576,14 +743,14 @@ describe("staged 有效性判定", () => {
     });
   });
 
-    test("稳定轨目标版本严格低于当前版本：staged 失效（不只是相等才失效）", async () => {
+  test("目标版本严格低于当前版本：staged 失效（不只是相等才失效）", async () => {
     const spawned = [];
     await withPanel({
       appInfo: { version: "0.7.0", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
       spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
     }, async (get, post, ctx) => {
-      // 目标 0.6.5 < 当前 0.7.0：下载后本地已经升到过它——把工作树换回去就是降级。
-      // 有效性判定必须按「目标不比当前新即失效」，不能只认相等：把 >= 0 收窄成
+      // 目标 0.6.5 < 当前 0.7.0：下载后本地已经升到过它——应用它就是降级。
+      // 有效性判定必须按「目标不比当前新即失效」，不能只认相等：把 >= 收窄成
       // === 0 的变异体会放过这条防线，staged 横幅会留着一条降级应用入口。
       writeClientUpdateRun(ctx.journalDir, stagedRun({
         targetVersion: "0.6.5", targetTag: "v0.6.5",
@@ -601,27 +768,12 @@ describe("staged 有效性判定", () => {
     });
   });
 
-test("稳定轨目标高于当前版本：staged 照常给出（正常停留态不受影响）", async () => {
+  test("目标高于当前版本：staged 照常给出（正常停留态不受影响）", async () => {
     await withPanel({}, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, stagedRun());
       const active = (await get("/panel/api/self-update/active")).body;
       assert.equal(active.staged?.runId, RUN_ID);
       assert.equal(readClientUpdateRun(ctx.journalDir, RUN_ID).stale, undefined);
-    });
-  });
-
-  test("先行轨目标已是本地 HEAD：staged 失效并标记 stale", async () => {
-    const SHA = "fedcba0987654321fedcba0987654321fedcba09";
-    await withPanel({
-      readLocalHeadFn: async () => ({ sha: SHA, short: "fedcba0" }),
-    }, async (get, post, ctx) => {
-      writeClientUpdateRun(ctx.journalDir, stagedRun({
-        track: "bleeding", targetSha: SHA, targetVersion: "0.6.7", targetTag: null,
-        result: { outcome: "downloaded", message: "已下载 fedcba0，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.6.7" },
-      }));
-      const active = (await get("/panel/api/self-update/active")).body;
-      assert.equal(active.staged, null, "目标提交已在本地：不呈现");
-      assert.equal(readClientUpdateRun(ctx.journalDir, RUN_ID).staleReason, "already_at_target");
     });
   });
 });
@@ -673,293 +825,8 @@ describe("自更新 worker 拉起失败", () => {
   });
 });
 
-// ── 先行轨道：检查、登记、回退计划与逆更新 ────────────────────────────
-describe("先行轨道（bleedingEdgeMode）", () => {
-  const LOCAL_SHA = "0123456789abcdef0123456789abcdef01234567";
-  const MAIN_SHA = "fedcba0987654321fedcba0987654321fedcba09";
-  const identityFns = {
-    readLocalHeadFn: async () => ({ sha: LOCAL_SHA, short: "0123456" }),
-    readRemoteRefsFn: async () => ({
-      headSha: MAIN_SHA,
-      tags: new Map([
-        ["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"],
-        ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
-      ]),
-    }),
-    // 缺席＝既有邀请行为（真安装机上远端尖端通常不在本仓）；防倒退用例单独覆写。
-    readRemoteHeadRelationFn: async () => "absent",
-  };
-
-  function bleedingSettings(baseDir) {
-    mkdirSync(join(baseDir, "Anyswitch"), { recursive: true });
-    writeFileSync(join(baseDir, "Anyswitch", "settings.json"), JSON.stringify({ bleedingEdgeMode: true }));
-  }
-
-  test("检查更新走提交比对：/api/updates 给出先行轨状态与双方身份", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
-    try {
-      bleedingSettings(baseDir);
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService("current"),
-        ...identityFns,
-      }, async (get, post) => {
-        const result = (await get("/panel/api/updates?refresh=1")).body;
-        assert.equal(result.track, "bleeding");
-        assert.equal(result.identity, true);
-        assert.equal(result.state, "update_available", "本地 HEAD ≠ 远端最新提交：有先行更新");
-        assert.equal(result.remoteSha, MAIN_SHA);
-        assert.equal(result.remoteCommit, "fedcba0");
-        assert.equal(result.currentCommit, "0123456");
-      });
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("防倒退：远端尖端是本地祖先或已分叉（本地不落后）→ 不发更新邀请，state=current", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
-    try {
-      bleedingSettings(baseDir);
-      for (const relation of ["remote_older", "diverged"]) {
-        await withPanel({
-          base: { LOCALAPPDATA: baseDir },
-          releaseService: selfUpdateReleaseService("current"),
-          ...identityFns,
-          readRemoteHeadRelationFn: async () => relation,
-        }, async (get) => {
-          const body = (await get("/panel/api/updates?refresh=1")).body;
-          assert.equal(body.state, "current", `relation=${relation}：本地不落后，换装即倒退/丢提交，不发邀请`);
-          assert.equal(body.currentCommit, "0123456");
-        });
-      }
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("本地严格落后于远端尖端（remote_newer 纯前进）：照常发出更新邀请", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
-    try {
-      bleedingSettings(baseDir);
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService("current"),
-        ...identityFns,
-        readRemoteHeadRelationFn: async () => "remote_newer",
-      }, async (get) => {
-        const body = (await get("/panel/api/updates?refresh=1")).body;
-        assert.equal(body.state, "update_available");
-        assert.equal(body.remoteSha, MAIN_SHA);
-      });
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("本地已跟上远端最新提交：state=current；远端不可达：state=error（不新增报错形态）", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
-    try {
-      bleedingSettings(baseDir);
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService("current"),
-        readLocalHeadFn: identityFns.readLocalHeadFn,
-        readRemoteRefsFn: async () => ({ headSha: LOCAL_SHA, tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
-      }, async (get) => {
-        assert.equal((await get("/panel/api/updates?refresh=1")).body.state, "current");
-      });
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService("current"),
-        readLocalHeadFn: identityFns.readLocalHeadFn,
-        readRemoteRefsFn: async () => null,
-      }, async (get) => {
-        const body = (await get("/panel/api/updates?refresh=1")).body;
-        assert.equal(body.state, "error");
-        assert.equal(body.track, "bleeding");
-      });
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("无本地 git 身份（镜像安装未引导）：按稳定轨口径回答（identity=false）", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
-    try {
-      bleedingSettings(baseDir);
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService("update_available"),
-        readLocalHeadFn: async () => null,
-      }, async (get) => {
-        const body = (await get("/panel/api/updates?refresh=1")).body;
-        assert.equal(body.track, "bleeding");
-        assert.equal(body.identity, false);
-        assert.equal(body.state, "update_available", "版本号比较照常给出结论");
-      });
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("POST /api/self-update（先行轨）：按 remoteSha 登记 bleeding run，无 tag/版本", async () => {
-    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
-    const spawned = [];
-    try {
-      bleedingSettings(baseDir);
-      await withPanel({
-        base: { LOCALAPPDATA: baseDir },
-        releaseService: selfUpdateReleaseService("current"),
-        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
-        ...identityFns,
-      }, async (get, post, ctx) => {
-        const result = await post("/panel/api/self-update", {});
-        assert.equal(result.status, 202);
-        assert.equal(result.body.step, "download");
-        assert.equal(result.body.targetSha, MAIN_SHA);
-        assert.equal(result.body.targetVersion, null);
-        const run = readClientUpdateRun(ctx.journalDir, result.body.runId);
-        assert.equal(run.track, "bleeding");
-        assert.equal(run.targetSha, MAIN_SHA);
-        assert.equal(run.targetTag, null);
-        assert.equal(spawned.length, 1);
-      });
-    } finally {
-      rmSync(baseDir, { recursive: true, force: true });
-    }
-  });
-
-  test("GET /api/self-update/bleeding-plan：HEAD 不在 tag 上 → 回退到本地版本之下最近的 tag", async () => {
-    await withPanel({
-      appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
-      ...identityFns,
-    }, async (get) => {
-      const plan = (await get("/panel/api/self-update/bleeding-plan")).body;
-      assert.equal(plan.ok, true);
-      assert.equal(plan.onStableNode, false);
-      assert.equal(plan.baseTag, "v0.6.6");
-      assert.equal(plan.baseVersion, "0.6.6");
-    });
-  });
-
-  test("HEAD 恰在远端 tag 上：onStableNode=true（就地关闭）；远端不可达：ok=false", async () => {
-    await withPanel({
-      ...identityFns,
-      readRemoteRefsFn: async () => ({ headSha: MAIN_SHA, tags: new Map([["v0.6.6", LOCAL_SHA], ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]]) }),
-    }, async (get) => {
-      const plan = (await get("/panel/api/self-update/bleeding-plan")).body;
-      assert.equal(plan.ok, true);
-      assert.equal(plan.onStableNode, true);
-      assert.equal(plan.baseVersion, "0.6.6");
-    });
-    await withPanel({
-      ...identityFns,
-      readRemoteRefsFn: async () => null,
-    }, async (get) => {
-      assert.equal((await get("/panel/api/self-update/bleeding-plan")).body.ok, false);
-    });
-  });
-
-  test("POST /api/self-update/rollback：登记 step=apply 的 rollback run 并布换装监听器", async () => {
-    const spawned = [];
-    const watch = { scheduled: 0 };
-    await withPanel({
-      ...identityFns,
-      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return 424242; },
-      selfUpdateWatchScheduleFn: (fn) => { watch.scheduled += 1; return 42; },
-      selfUpdateWatchCancelFn: () => {},
-    }, async (get, post, ctx) => {
-      const result = await post("/panel/api/self-update/rollback", {});
-      assert.equal(result.status, 202);
-      assert.equal(result.body.step, "apply");
-      assert.equal(result.body.track, "rollback");
-      assert.equal(result.body.targetVersion, "0.6.6");
-      const run = readClientUpdateRun(ctx.journalDir, result.body.runId);
-      assert.equal(run.track, "rollback");
-      assert.equal(run.targetTag, "v0.6.6");
-      assert.equal(run.phase, "installing");
-      assert.equal(spawned.length, 1);
-      assert.equal(watch.scheduled, 1, "回退同样要布换装监听器");
-    });
-  });
-
-  test("rollback：远端不可达：409，不登记不拉起", async () => {
-    const spawned = [];
-    await withPanel({
-      ...identityFns,
-      readRemoteRefsFn: async () => null,
-      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
-    }, async (get, post) => {
-      const result = await post("/panel/api/self-update/rollback", {});
-      assert.equal(result.status, 409);
-      assert.equal(result.body.error, "no_rollback");
-      assert.equal(spawned.length, 0);
-    });
-  });
-
-  test("先行换装监听器：本地身份未对上→点火；已是目标提交→不自杀刚接班的自己", async () => {
-    const SHA = "fedcba0987654321fedcba0987654321fedcba09";
-    const stagedBleeding = () => stagedRun({
-      track: "bleeding", targetSha: SHA, targetVersion: "0.6.7", targetTag: null,
-      result: { outcome: "downloaded", message: "已下载 fedcba0，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.6.7" },
-    });
-    // 与「自更新换装监听器」describe 里的 watchCapture 同形（那是它的局部函数）。
-    const watchCaptureLocal = () => {
-      const watch = { pumps: [], canceled: 0, restarts: 0, exits: [] };
-      return {
-        watch,
-        selfUpdateWatchScheduleFn: (fn) => { watch.pumps.push(fn); return 42; },
-        selfUpdateWatchCancelFn: () => { watch.canceled += 1; },
-        spawnPanelHostRestartFn: () => { watch.restarts += 1; return 99; },
-        exitPanelHostFn: (code) => { watch.exits.push(code); },
-      };
-    };
-    // 场景一（点火）：本地 HEAD 不是目标提交 → 异步续体确认后拉起换装。
-    const fired = watchCaptureLocal();
-    await withPanel({
-      readLocalHeadFn: async () => ({ sha: "0123456789abcdef0123456789abcdef01234567", short: "0123456" }),
-      ...fired,
-    }, async (get, post, ctx) => {
-      writeClientUpdateRun(ctx.journalDir, stagedBleeding());
-      await post("/panel/api/self-update/apply", { runId: RUN_ID });
-      assert.equal(fired.watch.pumps.length, 1, "apply 布上换装监听器");
-      const running = readClientUpdateRun(ctx.journalDir, RUN_ID);
-      writeClientUpdateRun(ctx.journalDir, { ...running, phase: "waiting-panel" });
-      fired.watch.pumps[0]();
-      await sleep(50);
-      assert.equal(fired.watch.restarts, 1, "身份未对上：拉起换装");
-      assert.equal(fired.watch.canceled, 1);
-    });
-    // 场景二（不点火）：本地已换装到目标提交（新面板接班）——绝不点火自杀。
-    // 用启动接管形态模拟：路由创建前 journal 里就有进行中的先行 apply run。
-    const quiet = watchCaptureLocal();
-    const journalDir = mkdtempSync(join(tmpdir(), "anys-bleeding-pump-"));
-    try {
-      writeClientUpdateRun(journalDir, {
-        runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
-        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null, workerPid: process.pid,
-        track: "bleeding", targetSha: SHA, targetVersion: "0.6.7", targetTag: null, phase: "waiting-panel",
-      });
-      await withPanel({
-        clientUpdateJournalDir: journalDir,
-        readLocalHeadFn: async () => ({ sha: SHA, short: "fedcba0" }),
-        ...quiet,
-      }, async (get, post) => {
-        assert.equal(quiet.watch.pumps.length, 1, "启动接管：进行中的 run 会布上监听器");
-        quiet.watch.pumps[0]();
-        await sleep(50);
-        assert.equal(quiet.watch.restarts, 0, "已是目标提交：不点火");
-        assert.equal(quiet.watch.canceled, 0);
-      });
-    } finally {
-      rmSync(journalDir, { recursive: true, force: true });
-    }
-  });
-});
-
-// ── 稳定轨的不一致判定（ahead / 安装游离）───────────────────────────────
-describe("稳定轨不一致判定（drift）", () => {
+// ── 版本领先提示（drift）：ahead 纯版本比较；offTag 只在有本地 git 身份时判定 ──
+describe("版本领先提示（drift）", () => {
   test("版本一致但 HEAD 不在 tag 上：state=current 且 drift.offTag=true", async () => {
     const identity = {
       readLocalHeadFn: async () => ({ sha: "dddddddddddddddddddddddddddddddddddddddd", short: "ddddddd" }),
@@ -969,7 +836,7 @@ describe("稳定轨不一致判定（drift）", () => {
     await withPanel({
       appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
       releaseService: { getAppUpdate: async () => ({
-        currentVersion: "0.6.6", state: "current", checkedAt: "2026-10-15T00:00:00.000Z",
+        currentVersion: "0.6.6", channel: "stable", state: "current", checkedAt: "2026-10-15T00:00:00.000Z",
         release: { version: "0.6.6", tag: "v0.6.6", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.6.6" },
         errorCode: null,
       }) },
@@ -977,6 +844,7 @@ describe("稳定轨不一致判定（drift）", () => {
     }, async (get) => {
       const body = (await get("/panel/api/updates?refresh=1")).body;
       assert.equal(body.state, "current");
+      assert.equal(body.channel, "stable");
       assert.equal(body.track, "stable");
       assert.equal(body.drift.ahead, false);
       assert.equal(body.drift.offTag, true);
@@ -984,13 +852,12 @@ describe("稳定轨不一致判定（drift）", () => {
     });
   });
 
-  test("稳定轨干净安装（HEAD 恰在官方 tag 上 / 无本地 git 身份）：不产生 drift", async () => {
+  test("干净安装（HEAD 恰在官方 tag 上 / 无本地 git 身份）：不产生 drift", async () => {
     // 干净安装的守卫：ahead 与 offTag 都不成立时 buildStableDrift 必须原地返回
     // null。删掉 `if (!ahead && !offTag) return null;` 会落一个双 false 的 drift
-    // 对象，关于页随之给干净安装错画「当前安装不是官方发布的版本」提示行——
-    // 现有套件只覆盖 ahead / offTag 至少一立的形态，守卫本身零保护。
+    // 对象，关于页随之给干净安装错画「当前安装不是官方发布的版本」提示行。
     const release = { getAppUpdate: async () => ({
-      currentVersion: "0.6.6", state: "current", checkedAt: "2026-10-15T00:00:00.000Z",
+      currentVersion: "0.6.6", channel: "stable", state: "current", checkedAt: "2026-10-15T00:00:00.000Z",
       release: { version: "0.6.6", tag: "v0.6.6", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.6.6" },
       errorCode: null,
     }) };
@@ -1006,7 +873,7 @@ describe("稳定轨不一致判定（drift）", () => {
       assert.equal(body.track, "stable");
       assert.equal(body.drift, null, "HEAD 在官方 tag 上：无不一致，drift 必须是 null");
     });
-    // 镜像安装没有 .git：HEAD 维度跳过（offTag=null）、ahead=false
+    // 打包安装没有 .git：HEAD 维度跳过（offTag=null）、ahead=false
     await withPanel({
       appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
       releaseService: release,
@@ -1022,8 +889,6 @@ describe("稳定轨不一致判定（drift）", () => {
     await withPanel({
       appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
       releaseService: selfUpdateReleaseService("update_available"),
-      readLocalHeadFn: async () => ({ sha: "dddddddddddddddddddddddddddddddddddddddd", short: "ddddddd" }),
-      readRemoteRefsFn: async () => ({ headSha: "x", tags: new Map() }),
     }, async (get) => {
       const body = (await get("/panel/api/updates?refresh=1")).body;
       assert.equal(body.drift, null, "update_available 不叠加不一致提示");
@@ -1056,7 +921,7 @@ describe("GET /panel/api/status 的 selfUpdate 捎带", () => {
     finishedAt: null,
     result: null,
     workerPid: process.pid,
-    track: "stable",
+    channel: "stable",
     targetVersion: "0.7.0",
     targetTag: "v0.7.0",
     phase: "staging",

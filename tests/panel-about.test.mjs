@@ -1444,35 +1444,6 @@ test("关于页新增的更新入口与确认弹层都在 DOM 里，弹层按钮
   assert.doesNotMatch(html, /npm i -g|npm install --global/, "界面不展示实现层命令");
 });
 
-// ── 先行轨道与「本地 vs 官方发布」不一致提示 ──────────────────────────
-test("先行轨：版本号带提交标识、先行版徽标独占、状态行按提交比对答话", async () => {
-  const h = harness((path) => {
-    if (path === "/api/app-info") return { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false, commit: "0123456" };
-    if (path === "/api/settings") return { ok: true, settings: { bleedingEdgeMode: true } };
-    if (path.startsWith("/api/updates")) return { track: "bleeding", identity: true, state: "current", currentVersion: "0.6.6", currentCommit: "0123456", remoteCommit: "0123456", checkedAt: "2026-10-15T00:00:00Z", release: null, errorCode: null };
-    return normal(path);
-  });
-  await h.controller.enter();
-  await tick(); await tick(); await tick();
-  assert.equal(h.get("aboutAppVersion").textContent, "0.6.6-0123456", "版本号＝包版本-短哈希");
-  assert.equal(h.get("aboutBleedingBadge").hidden, false);
-  assert.equal(h.get("aboutPreviewBadge").hidden, true, "先行时预览徽标让位（防提交标识被误判成预发布）");
-  assert.match(h.get("aboutUpdateStatus").textContent, /已是先行版最新/);
-  assert.equal(h.get("aboutDriftRow").hidden, true, "先行是常态，不出不一致提示");
-});
-
-test("先行轨：上游有新提交 → 状态行给出提交标识，「立即更新」可用；检查失败用现有文案", async () => {
-  const h = harness((path) => {
-    if (path === "/api/settings") return { ok: true, settings: { bleedingEdgeMode: true } };
-    if (path.startsWith("/api/updates")) return { track: "bleeding", identity: true, state: "update_available", currentVersion: "0.6.6", currentCommit: "0123456", remoteCommit: "fedcba0", remoteSha: "fedcba0987654321fedcba0987654321fedcba09", checkedAt: "2026-10-15T00:00:00Z", release: null, errorCode: null };
-    return normal(path);
-  });
-  await h.controller.enter();
-  await tick(); await tick(); await tick();
-  assert.match(h.get("aboutUpdateStatus").textContent, /发现先行新提交 fedcba0/);
-  assert.equal(h.get("aboutSelfUpdate").hidden, false);
-});
-
 test("不一致提示行：三种形态的文案、「不再显示」按状态指纹静默、新状态复现", async () => {
   let answer = { state: "current", checkedAt: "2026-10-15T00:00:00Z", release: { version: "0.6.6", tag: "v0.6.6", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.6.6" }, errorCode: null, track: "stable",
     drift: { ahead: false, offTag: true, localVersion: "0.6.6", remoteVersion: "0.6.6", localCommit: "0123456" } };
@@ -1505,26 +1476,21 @@ test("不一致提示行：三种形态的文案、「不再显示」按状态�
   assert.match(h.get("aboutDriftNotice").textContent, /当前安装不是官方发布的版本（0\.6\.7-1234567），官方最新为 0\.6\.6/);
 });
 
-test("先行版开关与确认弹层的定稿文案逐字落盘（对稿结论）", () => {
-  // 本用例只保留套件里别处没有覆盖的文案契约：高级选项页「更新通道」卡的开关行
-  // 说明、开关控件、先行版徽标与「不再显示」的动作文案、开启/关闭确认弹层与
-  // toast。这些 UI 片段没有渲染用例走过，逐字落盘是它们唯一的回归保护。
-  // 关于页的先行状态行（已是先行版最新 / 发现先行新提交）、不一致提示行三形态与
-  // 中性状态行（已检查更新）不在字面层重复断言——「先行轨」两条与「不一致提示行」
-  // 用例已通过渲染结果逐字验证它们出现在正确的状态分支上，ahead 形态另见
-  // 「update check runs once…all server states render」。
-  // 高级选项页「更新通道」卡：开关行说明。
-  assert.ok(html.includes("关闭时，更新只提供官方正式发布的版本；开启后，检查更新跟随上游最新提交，安装的版本号会带提交标识并显示「先行版」标记。从先行版关闭时，会先回退到离当前最近的稳定版本。"), "开关行说明");
-  assert.ok(html.includes('id="bleedingEdgeToggle"'));
-  assert.ok(html.includes(">先行版</span>"), "先行版徽标");
-  assert.ok(html.includes(">不再显示</a>"), "不再显示动作");
-  // 开启确认 / 关闭确认（带回退）/ 关闭确认（已在稳定节点）。
-  assert.ok(source.includes("开启后只切换更新来源，当前已安装的版本不变；之后检查更新会显示上游最新提交，是否更新到它由你在关于页决定。先行版本包含尚未正式发布的改动。确认开启？"), "开启确认");
-  assert.ok(source.includes("已开启先行版") && source.includes("已关闭先行版"), "开/关 toast");
-  assert.ok(source.includes("关闭前会把 Anyswitch 回退到离当前最近的稳定版本（"), "回退确认前半");
-  assert.ok(source.includes("回退期间面板与 Relay 会自动重启，服务中断几秒钟；安装目录中的手动修改会被覆盖。关闭后，更新只提供官方正式发布的版本。"), "回退确认后半");
-  assert.ok(source.includes("当前已在稳定版本（"), "就地关闭确认");
-  assert.ok(source.includes("确认回退并关闭？"), "回退确认按钮");
+test("stable and prerelease releases use the same app identity while only prerelease shows its existing badge", async () => {
+  assert.doesNotMatch(html, /id="(?:bleedingEdgeToggle|aboutBleedingBadge)"/);
+  assert.match(html, /id="aboutPreviewBadge"/);
+  assert.doesNotMatch(source, /bleedingEdgeToggle|aboutBleedingBadge|bleedingMode|bleedingTrack|bleedingEdgeMode|先行版|先行轨/);
+  for (const prerelease of [false, true]) {
+    const h = harness((path) => {
+      if (path === "/api/app-info") return { ...appInfo, version: prerelease ? "1.2.3-preview.1" : "1.2.3", prerelease, commit: "abc1234" };
+      if (path.startsWith("/api/updates")) return { state: "current", track: "stable", checkedAt: "2026-11-20T00:00:00Z", release: null, drift: null };
+      return normal(path);
+    });
+    await h.controller.enter();
+    await tick(); await tick(); await tick();
+    assert.equal(h.get("aboutAppVersion").textContent, prerelease ? "1.2.3-preview.1" : "1.2.3");
+    assert.equal(h.get("aboutPreviewBadge").hidden, !prerelease);
+  }
 });
 
 // ── 一键自更新（服务端 autoApply 流水线，前端只跟同一 runId）──────────────

@@ -266,8 +266,8 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, proxyRes
       };
     }
   }
-  async function queryAppUpdate() {
-    const base = { currentVersion: currentVersion ?? null, checkedAt: new Date(now()).toISOString(), release: null, errorCode: null };
+  async function queryAppUpdate(channel = "stable") {
+    const base = { currentVersion: currentVersion ?? null, channel, checkedAt: new Date(now()).toISOString(), release: null, errorCode: null };
     const current = parseVersion(currentVersion);
     if (!current) return { ...base, state: "unknown_version" };
     try {
@@ -296,13 +296,13 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, proxyRes
         }
         endpoint = nextPage(response.headers.get("link"), page);
       }
-      // 预览版身份两条渠道都看；稳定版身份优先正式渠道，正式渠道一个 Release 都没有时
-      // 回退到最新预览版——否则在只有预览版可升的时期，稳定版用户只会看到「暂无发布版本」。
-      const target = current.prerelease.length
-        ? ([stable, preview].filter(Boolean).sort((a, b) => compareVersions(b.version, a.version))[0] ?? null)
-        : stable ?? preview;
+      // 渠道判定（打包更新裁决 2026-11-20）：stable 只认正式发布，一个都没有时报
+      // 暂无发布版本、绝不拿预览版充数；preview 认预发布身份（Release 的 prerelease
+      // 标记或版本号自带的预发布段，两者任一）。渠道是用户的显式选择，不互相兜底。
+      if (channel !== "stable" && channel !== "preview") throw new ReleaseError("invalid_channel");
+      const target = channel === "preview" ? preview : stable;
       const order = target ? compareVersions(currentVersion, target.version) : null;
-      return { ...base, checkedAt: new Date(now()).toISOString(), release: target, state: !target ? "no_releases" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current" };
+      return { ...base, channel, checkedAt: new Date(now()).toISOString(), release: target, state: !target ? "no_releases" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current" };
     } catch (error) {
       return { ...base, checkedAt: new Date(now()).toISOString(), state: "error", errorCode: error instanceof ReleaseError ? error.code : "network_error" };
     }
@@ -312,8 +312,9 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, proxyRes
     return cached(`client:${id}`, force, () => queryClientLatest(id));
   }
 
-  function getAppUpdate({ force = false } = {}) {
-    return cached("app", force, queryAppUpdate);
+  function getAppUpdate({ force = false, channel = "stable" } = {}) {
+    if (channel !== "stable" && channel !== "preview") return Promise.resolve({ currentVersion: currentVersion ?? null, channel, state: "error", release: null, checkedAt: new Date(now()).toISOString(), errorCode: "invalid_channel" });
+    return cached(`app:${channel}`, force, () => queryAppUpdate(channel));
   }
 
   return { getClientLatest, getAppUpdate };

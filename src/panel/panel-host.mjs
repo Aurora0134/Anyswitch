@@ -23,7 +23,7 @@ import { createPanelRouter, startRelayLogBridge } from "./panel.mjs";
 import { createLogger, formatLogStamp } from "../shared/logger.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { storePaths } from "../store/store-io.mjs";
-import { loadSettings, defaultSettingsPath, createLoggingEnabledGate } from "../relay/relay-settings.mjs";
+import { loadSettings, defaultSettingsPath, createLoggingEnabledGate, relayDataRoot } from "../relay/relay-settings.mjs";
 import { isWatchdogAutostartEnabled, enableWatchdogAutostart, reconcileAutostart } from "../ops/autostart.mjs";
 import { spawnWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
 import { reconcileShims } from "../agents/shim-reconcile.mjs";
@@ -233,8 +233,14 @@ function installCrashLog(logPath) {
 
 export async function startPanelHost(options = {}) {
   // logPath 是纯测试注入口：装配测试把 stderr tee 与崩溃记录引进临时沙箱，
-  // 默认仍是安装树下的 logs/panel-host.log（生产路径不变）。
-  const logPath = options.logPath ?? join(APP_DIR, "logs", "panel-host.log");
+  // 默认落数据根 logs/panel-host.log（跨版本连续，2026-11-20 用户裁决：清版本
+  // 目录不能把日志带走；terminal-switch.log 早已同款落数据根）。目录只在走
+  // 默认路径时才建，测试注入口不受影响。
+  const defaultLogDir = join(relayDataRoot(process.env), "logs");
+  const logPath = options.logPath ?? join(defaultLogDir, "panel-host.log");
+  if (!options.logPath) {
+    try { mkdirSync(defaultLogDir, { recursive: true }); } catch { /* 落盘尽力而为 */ }
+  }
   rotateLogIfNeeded(logPath);
   teeStderrToFile(logPath);
   installCrashLog(logPath);

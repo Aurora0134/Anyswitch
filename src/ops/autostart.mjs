@@ -43,6 +43,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveInstallRoot } from "./update-trust.mjs";
 
 // Migration note: tasks were registered as "ApiCredRelay"/"ApiCredWatchdog"
 // before the product rename ApiCred → Anyswitch. New registrations use the
@@ -64,14 +65,38 @@ const RELAY_SCRIPT = join("..", "relay", "relay-host.mjs");
 const WATCHDOG_SCRIPT = join("..", "agents", "agent-watchdog.mjs");
 const PANEL_SCRIPT = join("..", "panel", "panel-host.mjs");
 
-export function getAutostartCommand(script = RELAY_SCRIPT) {
-  // Plain-node form of the launch line: `node "<app>/<script>"`, quoted because
-  // LOCALAPPDATA paths can contain spaces. This is NOT what the scheduled task
-  // runs — the task's Exec action starts wscript.exe with silent-start.vbs, so
-  // registering this string instead would pop a console at every logon (see
-  // buildTaskXml). Currently exercised only by the tests.
+// 本进程的打包安装根（分发器注入的 ANYSWITCH_* 推导；源码安装 null）。
+function detectInstallRoot(env = process.env) {
+  try {
+    const appRoot = env.ANYSWITCH_APP_ROOT ?? env.ANYSWITCH_APP_DIR;
+    return resolveInstallRoot({ appRoot, env }) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// 相对 src/ops/ 的 script（如 "..\relay\relay-host.mjs"）→ 相对 app 的入口
+// （src/relay/relay-host.mjs），打包分发器的参数形态。
+function appEntryOf(script) {
+  const parts = String(script).split(/[/\\]/).filter((part) => part.length > 0);
+  if (parts[0] !== ".." || parts.slice(1).includes("..")) {
+    throw new Error(`unexpected entry path for packaged dispatch: ${script}`);
+  }
+  return ["src", ...parts.slice(1)].join("/");
+}
+
+export function getAutostartCommand(script = RELAY_SCRIPT, installRoot = detectInstallRoot()) {
+  // Plain-node form of the launch line, source installs only: `node "<app>/<script>"`,
+  // quoted because LOCALAPPDATA paths can contain spaces. Packaged installs get the
+  // dispatcher form instead: the installer root's anyswitch.cmd resolves the active
+  // version and runs its bundled node, so the command never depends on PATH. This is
+  // NOT what the scheduled task runs — the task's Exec action starts wscript.exe
+  // with silent-start.vbs (source) / anyswitch-silent.vbs (packaged), so registering
+  // this string instead would pop a console at every logon (see buildTaskXml).
+  // Currently exercised only by the tests.
   // script 默认值给相对 src/ops/ 的路径——源码 2026-11 起迁入 src/ 子目录，
   // __dirname 已不在仓根。
+  if (installRoot) return `"${join(installRoot, "anyswitch.cmd")}" "${appEntryOf(script)}"`;
   return `node "${join(__dirname, script)}"`;
 }
 
@@ -91,9 +116,19 @@ function currentUser() {
 // The Exec action of a task, as this build would write it today. buildTaskXml
 // interpolates it and reconcileAutostart compares against it — one source, so
 // the two can never disagree about what "correct" means.
-export function taskAction(script = RELAY_SCRIPT) {
+export function taskAction(script = RELAY_SCRIPT, installRoot = detectInstallRoot()) {
+  const wscript = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
+  if (installRoot) {
+    // 打包安装：Exec 指安装根的静默分发器，参数是 app 相对入口。分发器每次
+    // 运行读 current.json，所以自更新换代后已注册任务无需重写——换版本只换
+    // 指针。reconcileAutostart 的比对（actionMatches）也因此天然稳定。
+    return {
+      command: wscript,
+      arguments: `"${join(installRoot, "anyswitch-silent.vbs")}" "${appEntryOf(script)}"`,
+    };
+  }
   return {
-    command: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe"),
+    command: wscript,
     arguments: `"${join(__dirname, "../../silent-start.vbs")}" "${join(__dirname, script)}"`,
   };
 }

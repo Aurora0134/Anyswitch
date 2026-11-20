@@ -34,6 +34,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
+import { resolveInstallRoot } from "../ops/update-trust.mjs";
 
 // ─────────────────────────────────────────────────────────────
 // Shim registry
@@ -82,10 +83,50 @@ export function findShimSpec(specOrId) {
 // ASCII-only on purpose: cmd parses .cmd under the console code page and
 // PowerShell 5.1 reads a BOM-less file as ANSI, so a non-ASCII byte here
 // could mangle the statements (the dsh-cli shim comments say the same).
-export function renderShimScripts(spec) {
+// 打包安装时命令门牌指向安装根分发器（anyswitch.cmd）：分发器每次运行读
+// current.json 定位活动版本、用该版本自带的 runtime\node.exe 跑 launcher 并注入
+// ANYSWITCH_INSTALL_ROOT / ANYSWITCH_APP_ROOT——更新换代只改指针，门牌字节不变，
+// 也不依赖用户 PATH 里的任何 node。源码安装（installRoot 为 null）维持既有形
+// 态：node + %LOCALAPPDATA%\Anyswitch\app 下的 launcher。
+// 安装根含非 ASCII（如中文用户名）时：cmd 字面路径实测可行、sh 本就按 UTF-8
+// 读，ps1 必须带 UTF-8 BOM——PowerShell 5.1 把无 BOM 文件按 ANSI 读，中文
+// 路径会成乱码（2026-11-20 评审实证、修法同日验证）；cmd/sh 不带 BOM（会伤
+// cmd 首行解析）。
+export function renderShimScripts(spec, { installRoot = null } = {}) {
   const args = spec.launcherArgs ?? [];
   const shArgs = args.length > 0 ? ` ${args.join(" ")}` : "";
   const launcherWinRel = spec.launcher.replace(/\//g, "\\");
+  if (installRoot) {
+    const dispatcherCmd = join(installRoot, "anyswitch.cmd");
+    const ps1Root = String(installRoot).replaceAll("'", "''");
+    return {
+      sh: [
+        "#!/bin/sh",
+        `exec "${String(dispatcherCmd).replaceAll("\\", "\\\\")}" "${spec.launcher}"${shArgs} "$@"`,
+        "",
+      ].join("\n"),
+      cmd: [
+        "@ECHO off",
+        "SETLOCAL",
+        `call "${dispatcherCmd}" "${launcherWinRel}"${shArgs} %*`,
+        "EXIT /b %ERRORLEVEL%",
+        "",
+      ].join("\n"),
+      // \uFEFF：见上方打包形态注释——PowerShell 5.1 无 BOM 按 ANSI 读。
+      ps1: "\uFEFF" + [
+        "#!/usr/bin/env pwsh",
+        `$dispatcher = '${ps1Root}\\anyswitch.cmd'`,
+        `$entry = '${launcherWinRel.replaceAll("'", "''")}'`,
+        "if ($MyInvocation.ExpectingInput) {",
+        `  $input | & $dispatcher $entry${shArgs} @args`,
+        "} else {",
+        `  & $dispatcher $entry${shArgs} @args`,
+        "}",
+        "exit $LASTEXITCODE",
+        "",
+      ].join("\n"),
+    };
+  }
   const launcherWin = `%LOCALAPPDATA%\\Anyswitch\\app\\${launcherWinRel}`;
   return {
     sh: [
@@ -113,6 +154,17 @@ export function renderShimScripts(spec) {
       "",
     ].join("\n"),
   };
+}
+
+// 本进程的打包安装根：分发器注入的 ANYSWITCH_* 环境推导；源码安装返回 null。
+// 门牌渲染与对账（shim-reconcile）共用这一个口径。
+export function shimInstallRoot(env = process.env) {
+  try {
+    const appRoot = env.ANYSWITCH_APP_ROOT ?? env.ANYSWITCH_APP_DIR;
+    return resolveInstallRoot({ appRoot, env }) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** The triplet's file names for a command: extensionless sh, .cmd, .ps1. */
@@ -311,12 +363,13 @@ export function createShimManager({
   broadcastFn = createEnvironmentBroadcaster(),
 } = {}) {
   const root = shimRoot(env);
+  const installRoot = shimInstallRoot(env);
   const dirFor = (spec) => join(root, spec.dir);
 
   /** Rendered triplet as { [fileName]: text } for a spec. */
   function renderSpec(specOrId) {
     const spec = findShimSpec(specOrId);
-    const scripts = renderShimScripts(spec);
+    const scripts = renderShimScripts(spec, { installRoot });
     const names = shimFileNames(spec);
     return { [names[0]]: scripts.sh, [names[1]]: scripts.cmd, [names[2]]: scripts.ps1 };
   }

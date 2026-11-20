@@ -107,7 +107,15 @@ const PANEL_HOST_SCRIPT = join(here, "panel-host.mjs");
 // The helper's only diagnostic trail. Losing it would mean a failed restart
 // leaves nothing to read — the panel is just gone until the user re-runs the
 // desktop shortcut.
-export const RESTART_LOG_PATH = join(here, "../../logs", "panel-host-restart.log");
+// 落数据根 logs/（跨版本连续，2026-11-20 用户裁决）。就地内联解析而不引
+// relay-settings：这个进程是「panel-host 崩掉之后的最后一根稻草」，模块图
+// 必须保持最小。
+export const RESTART_LOG_PATH = join(
+  process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Local"),
+  "Anyswitch",
+  "logs",
+  "panel-host-restart.log",
+);
 
 // 落盘行与 relay-host.log 同一格式（[ts] [level] 封套）：这份文件按时间线读，
 // 裸行无法把多次重启排出先后。本地时区戳与 logger.mjs 的约定一致——文件是

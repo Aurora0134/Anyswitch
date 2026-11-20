@@ -175,13 +175,12 @@ export function parseAutoDownloadUpdates(raw) {
   return raw === true ? true : DEFAULT_AUTO_DOWNLOAD_UPDATES;
 }
 
-// 先行版轨道开关：关闭（默认）＝更新只认正式发布；开启后检查更新按上游提交粒度
-// 走，身份判定与任务登记都在 panel.mjs（需要 git），这里只管布尔本身。畸形值
-// 保持关闭——切轨是显式动作，不能被脏数据顶开。
-export const DEFAULT_BLEEDING_EDGE_MODE = false;
+export const UPDATE_CHANNELS = Object.freeze(["stable", "preview"]);
+export const DEFAULT_UPDATE_CHANNEL = "stable";
 
-export function parseBleedingEdgeMode(raw) {
-  return raw === true ? true : DEFAULT_BLEEDING_EDGE_MODE;
+export function parseUpdateChannel(raw, legacyBleedingEdgeMode) {
+  if (UPDATE_CHANNELS.includes(raw)) return raw;
+  return legacyBleedingEdgeMode === true ? "preview" : DEFAULT_UPDATE_CHANNEL;
 }
 
 // 号池智能分流开关：关闭（默认）＝号池沿用粘性路由（最后成功成员优先，失败才
@@ -333,7 +332,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const terminalBottomAutoAlign = parseTerminalBottomAutoAlign(raw.terminalBottomAutoAlign);
   const credentialCacheEnabled = parseCredentialCacheEnabled(raw.credentialCacheEnabled);
   const autoDownloadUpdates = parseAutoDownloadUpdates(raw.autoDownloadUpdates);
-  const bleedingEdgeMode = parseBleedingEdgeMode(raw.bleedingEdgeMode);
+  const updateChannel = parseUpdateChannel(raw.updateChannel, raw.bleedingEdgeMode);
   const poolLoadBalancing = parsePoolLoadBalancing(raw.poolLoadBalancing);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
@@ -359,7 +358,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       terminalBottomAutoAlign,
       credentialCacheEnabled,
       autoDownloadUpdates,
-      bleedingEdgeMode,
+      updateChannel,
       poolLoadBalancing,
       claudeTierMappingsEnabled,
       claudeTierMappings,
@@ -378,7 +377,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     terminalBottomAutoAlign,
     credentialCacheEnabled,
     autoDownloadUpdates,
-    bleedingEdgeMode,
+    updateChannel,
     poolLoadBalancing,
     claudeTierMappingsEnabled,
     claudeTierMappings,
@@ -503,9 +502,12 @@ export function saveSettings(settingsPath, patch, env = process.env) {
   if (Object.prototype.hasOwnProperty.call(patch, "autoDownloadUpdates")) {
     updated.autoDownloadUpdates = parseAutoDownloadUpdates(patch.autoDownloadUpdates);
   }
-
-  if (Object.prototype.hasOwnProperty.call(patch, "bleedingEdgeMode")) {
-    updated.bleedingEdgeMode = parseBleedingEdgeMode(patch.bleedingEdgeMode);
+  if (Object.prototype.hasOwnProperty.call(patch, "updateChannel") || Object.prototype.hasOwnProperty.call(patch, "bleedingEdgeMode")) {
+    updated.updateChannel = parseUpdateChannel(patch.updateChannel, patch.bleedingEdgeMode);
+    delete updated.bleedingEdgeMode;
+  } else if (!Object.hasOwn(updated, "updateChannel")) {
+    updated.updateChannel = parseUpdateChannel(undefined, updated.bleedingEdgeMode);
+    delete updated.bleedingEdgeMode;
   }
 
   if (Object.prototype.hasOwnProperty.call(patch, "poolLoadBalancing")) {

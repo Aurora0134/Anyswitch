@@ -427,3 +427,30 @@ describe("panel autostart variants", () => {
     assert.ok(psCommandOf(calls[0]).includes("$names = @('AnyswitchPanel')"));
   });
 });
+
+// ── 打包安装形态：任务 Exec 指安装根静默分发器 ────────────────────────────
+describe("autostart packaged", () => {
+  const INSTALL_ROOT = join("C:", "Apps", "Anyswitch");
+
+  it("taskAction 指 anyswitch-silent.vbs + app 相对入口（换版本零重写）", () => {
+    const action = taskAction(PANEL_SCRIPT, INSTALL_ROOT);
+    assert.match(action.command, /System32[\\/]wscript\.exe$/i);
+    assert.equal(action.arguments, `"${join(INSTALL_ROOT, "anyswitch-silent.vbs")}" "src/panel/panel-host.mjs"`);
+    // entry 换算：相对 src/ops/ 的 ../panel/panel-host.mjs → app 相对 src/panel/panel-host.mjs
+    const relayAction = taskAction(join("..", "relay", "relay-host.mjs"), INSTALL_ROOT);
+    assert.equal(relayAction.arguments, `"${join(INSTALL_ROOT, "anyswitch-silent.vbs")}" "src/relay/relay-host.mjs"`);
+    assert.ok(!action.arguments.includes(silentStartVbs()), "不再指 app 内 silent-start.vbs");
+  });
+
+  it("getAutostartCommand 打包形态给 anyswitch.cmd 形态", () => {
+    assert.equal(getAutostartCommand(PANEL_SCRIPT, INSTALL_ROOT), `"${join(INSTALL_ROOT, "anyswitch.cmd")}" "src/panel/panel-host.mjs"`);
+  });
+
+  it("appEntryOf 拒绝越出 src 的路径（逃逸防御）", () => {
+    assert.throws(() => taskAction(join("..", "..", "outside", "x.mjs"), INSTALL_ROOT), /unexpected entry path/);
+  });
+});
+
+function silentStartVbs() {
+  return join("silent-start.vbs");
+}

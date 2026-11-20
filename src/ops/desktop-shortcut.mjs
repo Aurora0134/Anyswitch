@@ -19,8 +19,10 @@
 // pointing at live code.
 
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseCurrentPointer, resolveInstallRoot } from "./update-trust.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -32,11 +34,50 @@ const SHORTCUT_DESCRIPTION = "Anyswitch 控制面板";
 
 // The full field set written into the .lnk. Exported so tests assert the
 // wiring (wscript + panel-app.vbs + icon) without a real shell.
-export function shortcutPayload() {
+// 本进程的打包安装根（分发器注入的 ANYSWITCH_* 推导；源码安装 null）。
+function detectInstallRoot(env = process.env) {
+  try {
+    const appRoot = env.ANYSWITCH_APP_ROOT ?? env.ANYSWITCH_APP_DIR;
+    return resolveInstallRoot({ appRoot, env }) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function shortcutPayload({ installRoot = detectInstallRoot(), currentVersion = null } = {}) {
+  const wscript = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
+  if (installRoot) {
+    // 打包安装：快捷方式指安装根的静默分发器（隐藏控制台、打开面板）。分发
+    // 器每次运行读 current.json，自更新换代后快捷方式仍指活动版本——target
+    // 不需要重写。icon 优先指安装根的 anyswitch.ico（安装器 [Files] 摆放的
+    // 稳定副本：换版本不动、清旧版本不失效——2026-11-20 用户裁决，图标要
+    // 跨版本连续）；根副本缺失时回落活动版本 app 内的 ico。
+    let version = typeof currentVersion === "string" && currentVersion ? currentVersion : null;
+    if (!version) {
+      try {
+        version = parseCurrentPointer(readFileSync(join(installRoot, "current.json"), "utf8")).version;
+      } catch {
+        version = null; // 指针读不出（首装前/损坏）：回落源码形态，按钮可再修
+      }
+    }
+    if (version) {
+      // 根副本在盘（安装器 [Files] 落点）即指根副本；缺失时回落版本内 ico。
+      const rootIcon = join(installRoot, "anyswitch.ico");
+      const iconPath = existsSync(rootIcon) ? rootIcon : join(installRoot, "versions", version, "app", "anyswitch.ico");
+      return {
+        name: SHORTCUT_NAME,
+        description: SHORTCUT_DESCRIPTION,
+        target: wscript,
+        arguments: `"${join(installRoot, "anyswitch-silent.vbs")}" "src\\panel\\panel-launcher.mjs"`,
+        icon: `${iconPath},0`,
+        workingDirectory: installRoot,
+      };
+    }
+  }
   return {
     name: SHORTCUT_NAME,
     description: SHORTCUT_DESCRIPTION,
-    target: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe"),
+    target: wscript,
     arguments: `"${join(APP_ROOT, "panel-app.vbs")}"`,
     icon: `${join(APP_ROOT, "anyswitch.ico")},0`,
     workingDirectory: APP_ROOT,

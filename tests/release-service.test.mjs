@@ -122,29 +122,24 @@ it("follows all release pages before deciding and never trusts partial results",
   }
 });
 
-it("selects the highest eligible app SemVer, keeping the process version and empty releases distinct", async () => {
+it("selects the highest app SemVer within the explicitly requested update channel", async () => {
   const releases = [release("v0.5.0-preview.2", { published_at: "2026-09-19T01:00:00Z" }), release("v0.5.0-preview.10"), release("v0.4.3"), release("v9.0.0", { draft: true })];
-  for (const [currentVersion, state, tag] of [
-    ["0.5.0-preview.2", "update_available", "v0.5.0-preview.10"],
-    ["0.5.0-preview.10", "current", "v0.5.0-preview.10"],
-    ["0.5.0-preview.11", "ahead", "v0.5.0-preview.10"],
-    ["0.4.3", "current", "v0.4.3"],
-    ["0.4.2", "update_available", "v0.4.3"],
-    ["0.6.0", "ahead", "v0.4.3"],
+  for (const [channel, currentVersion, state, tag] of [
+    ["preview", "0.5.0-preview.2", "update_available", "v0.5.0-preview.10"],
+    ["preview", "0.5.0-preview.10", "current", "v0.5.0-preview.10"],
+    ["preview", "0.5.0-preview.11", "ahead", "v0.5.0-preview.10"],
+    ["stable", "0.4.3", "current", "v0.4.3"],
+    ["stable", "0.4.2", "update_available", "v0.4.3"],
+    ["stable", "0.6.0", "ahead", "v0.4.3"],
   ]) {
-    const service = createReleaseService({ currentVersion, now, fetchFn: async (url) => {
-      assert.equal(url, appEndpoint);
-      return json(releases);
-    } });
-    assert.deepEqual(await service.getAppUpdate(), {
-      currentVersion, state, checkedAt, errorCode: null,
-      release: { version: tag.slice(1), tag, prerelease: tag.includes("-"), url: `https://github.com/Aurora0134/Anyswitch/releases/tag/${tag}`, publishedAt: "2026-09-17T01:00:00Z" },
-    });
+    const service = createReleaseService({ currentVersion, now, fetchFn: async (url) => { assert.equal(url, appEndpoint); return json(releases); } });
+    assert.deepEqual(await service.getAppUpdate({ channel }), { currentVersion, channel, state, checkedAt, errorCode: null, release: { version: tag.slice(1), tag, prerelease: tag.includes("-"), url: `https://github.com/Aurora0134/Anyswitch/releases/tag/${tag}`, publishedAt: "2026-09-17T01:00:00Z" } });
   }
-  const empty = createReleaseService({ currentVersion: "0.5.0-preview", now, fetchFn: async () => json([]) });
-  assert.deepEqual(await empty.getAppUpdate(), { currentVersion: "0.5.0-preview", state: "no_releases", release: null, checkedAt, errorCode: null });
+  const previewEmpty = await createReleaseService({ currentVersion: "0.5.0-preview", now, fetchFn: async () => json([release("v0.5.0-preview.10")]) }).getAppUpdate({ channel: "stable" });
+  assert.equal(previewEmpty.state, "no_releases", "stable must not fall back to prerelease releases");
+  assert.equal(previewEmpty.release, null);
   const unknown = createReleaseService({ currentVersion: "1.2.3.4", now, fetchFn: () => assert.fail("unknown current version must not query") });
-  assert.deepEqual(await unknown.getAppUpdate(), { currentVersion: "1.2.3.4", state: "unknown_version", release: null, checkedAt, errorCode: null });
+  assert.deepEqual(await unknown.getAppUpdate(), { currentVersion: "1.2.3.4", channel: "stable", state: "unknown_version", release: null, checkedAt, errorCode: null });
 });
 
 it("reports unavailable or malformed sources without claiming a latest version", async () => {
@@ -176,24 +171,14 @@ it("reports unavailable or malformed sources without claiming a latest version",
   }
 });
 
-it("falls back to the newest preview for a stable install when no stable release exists yet", async () => {
-  const onlyPreview = [release("v0.5.0-preview.2", { published_at: "2026-09-19T01:00:00Z" }), release("v0.5.0-preview.10")];
-  for (const [currentVersion, state, tag] of [
-    ["0.4.3", "update_available", "v0.5.0-preview.10"],
-    ["0.4.2", "update_available", "v0.5.0-preview.10"],
-    ["0.9.0", "ahead", "v0.5.0-preview.10"],
-  ]) {
-    const service = createReleaseService({ currentVersion, now, fetchFn: async () => json(onlyPreview) });
-    const result = await service.getAppUpdate();
-    assert.equal(result.state, state);
-    assert.equal(result.release.version, tag.slice(1));
-    assert.equal(result.release.prerelease, true);
-    assert.equal(result.release.url, `https://github.com/Aurora0134/Anyswitch/releases/tag/${tag}`);
-  }
-  const draftsOnly = [release("v0.5.0", { draft: true })];
-  const drafted = await createReleaseService({ currentVersion: "0.4.3", now, fetchFn: async () => json(draftsOnly) }).getAppUpdate();
-  assert.equal(drafted.state, "no_releases");
-  assert.equal(drafted.release, null);
+it("keeps preview selection explicit and never uses it as a stable fallback", async () => {
+  const releases = [release("v0.5.0-preview.2"), release("v0.5.0-preview.10")];
+  const service = createReleaseService({ currentVersion: "0.4.3", now, fetchFn: async () => json(releases) });
+  assert.equal((await service.getAppUpdate({ channel: "preview" })).release.version, "0.5.0-preview.10");
+  const stable = await service.getAppUpdate({ channel: "stable" });
+  assert.equal(stable.state, "no_releases"); assert.equal(stable.release, null);
+  const invalid = await service.getAppUpdate({ channel: "bleeding" });
+  assert.equal(invalid.state, "error"); assert.equal(invalid.errorCode, "invalid_channel");
 });
 
 it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", async () => {

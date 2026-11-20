@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   shimRoot,
@@ -20,6 +20,7 @@ import {
   createRegistryPathStore,
   createEnvironmentBroadcaster,
   createShimManager,
+  shimInstallRoot,
 } from "../src/agents/shim-manager.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -301,4 +302,60 @@ test("broadcast is a separate explicit step", async () => {
     },
   });
   await assert.rejects(() => failing.broadcastEnvironmentChange(), /no broadcast/);
+});
+
+// ── 打包安装形态：门牌指安装根分发器，不吃 PATH 里的 node ──────────────────
+test("打包安装形态：三件套指安装根 anyswitch.cmd，不再钉死源码 app 路径", () => {
+  const installRoot = join("C:", "Apps", "Anyswitch");
+  const grok = renderShimScripts(findShimSpec("grok"), { installRoot });
+  assert.match(grok.cmd, /call "C:\\Apps\\Anyswitch\\anyswitch\.cmd" "src\\launchers\\grok-launcher\.mjs" %\*/);
+  assert.ok(!grok.cmd.includes("%LOCALAPPDATA%"), "cmd 不再展开 LOCALAPPDATA");
+  assert.ok(!grok.cmd.startsWith("node "), "不再依赖 PATH 里的 node");
+  const dispatcherShPath = join("C:", "Apps", "Anyswitch", "anyswitch.cmd").replaceAll("\\", "\\\\");
+  assert.equal(grok.sh, `#!/bin/sh
+exec "${dispatcherShPath}" "src/launchers/grok-launcher.mjs" "$@"
+`, "sh 门牌：分发器路径反斜杠双写（bash 双引号里 \\\\ 还原成 \\）");
+  assert.match(grok.ps1, /^\$dispatcher = 'C:\\Apps\\Anyswitch\\anyswitch\.cmd'$/m);
+  assert.match(grok.ps1, /^\$entry = 'src\\launchers\\grok-launcher\.mjs'$/m);
+  // launcherArgs 跟在 entry 之后（分发器的剩余参数位），顺序与源码形态一致。
+  const dsh = renderShimScripts(findShimSpec("dsh"), { installRoot });
+  assert.match(dsh.cmd, /anyswitch\.cmd" "src\\launchers\\dsh-launcher\.mjs" --profile dsh-tui %\*/);
+  assert.match(dsh.ps1, /& \$dispatcher \$entry --profile dsh-tui @args/);
+});
+
+test("打包 ps1 门牌带 UTF-8 BOM（非 ASCII 安装根防 PS 5.1 按 ANSI 误读），cmd/sh 不带", () => {
+  const installRoot = join("C:", "Apps", "Anyswitch 中文");
+  const grok = renderShimScripts(findShimSpec("grok"), { installRoot });
+  assert.ok(grok.ps1.startsWith("\uFEFF"), "ps1 必须带 BOM：PowerShell 5.1 对无 BOM 文件按 ANSI 读，中文安装根会成乱码");
+  assert.ok(grok.ps1.includes("Anyswitch 中文"), "安装根字面量进 ps1");
+  assert.ok(!grok.cmd.startsWith("\uFEFF"), "cmd 不带 BOM（BOM 会伤 cmd.exe 首行解析）");
+  assert.ok(!grok.sh.startsWith("\uFEFF"), "sh 保持 git-bash 期望的字节形态");
+  const sourceForm = renderShimScripts(findShimSpec("grok"));
+  assert.ok(!sourceForm.ps1.startsWith("\uFEFF"), "源码形态全 ASCII，无需 BOM");
+});
+
+test("shimInstallRoot：分发器 env 推导安装根；源码与空 env 返回 null", () => {
+  assert.equal(shimInstallRoot({ ANYSWITCH_INSTALL_ROOT: "C:\\Apps\\Anyswitch" }), "C:\\Apps\\Anyswitch");
+  assert.equal(shimInstallRoot({ ANYSWITCH_APP_ROOT: "C:\\Apps\\Anyswitch\\versions\\1.2.3\\app" }), "C:\\Apps\\Anyswitch");
+  assert.equal(shimInstallRoot({ ANYSWITCH_APP_DIR: "C:\\Apps\\Anyswitch\\versions\\1.2.3\\app" }), "C:\\Apps\\Anyswitch");
+  assert.equal(shimInstallRoot({ ANYSWITCH_APP_DIR: "C:\\Users\\x\\AppData\\Local\\Anyswitch\\app" }), null, "源码 app 不在 versions 布局：null");
+  assert.equal(shimInstallRoot({}), null);
+});
+
+test("createShimManager：打包 env 下 installShim 写分发器形态，重装幂等零写入", () => {
+  const tmp = mkTestDir("anys-shim-packaged-");
+  try {
+    const env = { USERPROFILE: tmp, ANYSWITCH_INSTALL_ROOT: "C:\\Apps\\Anyswitch" };
+    const manager = createShimManager({ env });
+    const result = manager.installShim("grok");
+    assert.ok(result.ok);
+    assert.equal(result.written.length, 3);
+    const cmdText = readFileSync(join(manager.root, "bin-grok", "grok.cmd"), "utf8");
+    assert.match(cmdText, /call "C:\\Apps\\Anyswitch\\anyswitch\.cmd" "src\\launchers\\grok-launcher\.mjs" %\*/);
+    const again = manager.installShim("grok");
+    assert.equal(again.written.length, 0, "幂等：字节相同零写入");
+    assert.equal(again.unchanged.length, 3);
+  } finally {
+    if (typeof rmSync === "function") rmSync(tmp, { recursive: true, force: true });
+  }
 });
