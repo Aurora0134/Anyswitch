@@ -1538,13 +1538,15 @@
   .live-log-region { display: block; }
   .live-log {
     display: flex; flex-direction: column; gap: 8px;
-    --ll-step: 22px;
+    --ll-step: 18px;
     --ll-gutter: 0px;
     --ll-collapsed-h: 0px;
     --ll-view-h: 0px;
     /* 景深阶梯（2026-11-19 用户回调）：收起叠卡回到三张卡、不画卡沿；阶梯幅度在
        原版（0.96/0.92、0.4/0.8）基础上加深一档，退层感由缩放＋错位＋虚化表达，
-       整卡透明度不再参与（壁纸域整卡变淡会把卡面带字跟壁纸混洗）。 */
+       整卡透明度不再参与（壁纸域整卡变淡会把卡面带字跟壁纸混洗）。层间错位
+       22px→18px（2026-11-20 用户回调：三张卡收紧，底部少露一截），每层露出的
+       边带仍读作一行 meta。 */
     --ll-scale-1: 0.95; --ll-scale-2: 0.90;
     --ll-blur-1: 0.5px; --ll-blur-2: 1px;
     --ll-retreat-delay: 45ms;
@@ -1711,7 +1713,7 @@
   .live-log[data-clearing] .live-log-stack .live-log-msg.is-leaving,
   .live-log[data-clearing] .live-log-viewport .live-log-msg.is-leaving { transition-duration: 120ms; }
   /* 收起态整叠是一个点击面（#logStack 是唯一监听），悬停按整叠给一层薄反馈：逐卡只
-     会点亮露出的那 22px 边带，末卡比最高卡矮时舞台底部还会剩一条可点却无反馈的死区。
+     会点亮露出的那 18px 边带，末卡比最高卡矮时舞台底部还会剩一条可点却无反馈的死区。
      只动上面已挂进 220ms 过渡的三条属性——transform 被 data-slot 位移与
      is-appearing / is-leaving 共用，碰它要么被源序压死、要么把槽位位移顶掉。
      放在这组状态规则之后：同特异性时源序在后，谁往槽位/入场/离场里加底或描边，

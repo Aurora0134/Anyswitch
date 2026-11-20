@@ -3057,7 +3057,7 @@ async function api(method, path, body) {
     const stack = $("logStack"), root = $("liveLog");
     if (!stack || !root || (stack.getBoundingClientRect && !stack.offsetWidth)) return;
     const style = getComputedStyle(root);
-    const step = parseFloat(style.getPropertyValue?.("--ll-step")) || 22;
+    const step = parseFloat(style.getPropertyValue?.("--ll-step")) || 18;
     const scales = [1, parseFloat(style.getPropertyValue?.("--ll-scale-1")) || 0.95,
       parseFloat(style.getPropertyValue?.("--ll-scale-2")) || 0.90];
     let bottom = 0;
