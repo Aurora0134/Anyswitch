@@ -260,7 +260,7 @@ describe("translateResponsesRequest", () => {
   it("folds codex reasoning.effort into reasoning_effort on the library vocabulary", () => {
     assert.equal(translateResponsesRequest({ reasoning: { effort: "high" } }).reasoning_effort, "high");
     assert.equal(translateResponsesRequest({ reasoning: { effort: "none" } }).reasoning_effort, "off");
-    assert.equal(translateResponsesRequest({ reasoning: { effort: "ultra" } }).reasoning_effort, "max");
+    assert.equal(translateResponsesRequest({ reasoning: { effort: "ultra" } }).reasoning_effort, "ultra");
     assert.equal(translateResponsesRequest({ reasoning: { effort: "persistent" } }).reasoning_effort, "max");
     assert.equal("reasoning" in translateResponsesRequest({ reasoning: { effort: "high", summary: "auto" } }), false);
   });

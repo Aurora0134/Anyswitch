@@ -461,6 +461,30 @@ describe("modelEffortSurface", () => {
     assert.equal(surface.default, "high");
   });
 
+  it("lists ultra for a GPT row on the codex face and clips it for dsh/pi", () => {
+    // gpt-5.6+ 库内行的最深档是 ultra：codex 词表含 ultra，原样列出；
+    // dsh/pi 的固定档位集停在 max，ultra 与 light 一样被裁掉。
+    const gpt = {
+      models: new Map([["gpt-5.6-luna", normalizeEffortEntry({
+        kind: "reasoning", levels: ["light", "medium", "high", "xhigh", "ultra"], default: "high", wire: { ultra: "ultra" },
+      })]]),
+    };
+    const codex = modelEffortSurface("gpt-5.6-luna", { catalog: gpt, agent: "codex" });
+    assert.deepEqual(codex.levels, ["medium", "high", "xhigh", "ultra"]);
+    assert.equal(codex.default, "high");
+    assert.deepEqual(modelEffortSurface("gpt-5.6-luna", { catalog: gpt, agent: "dsh" }).levels, ["medium", "high", "xhigh"]);
+    assert.deepEqual(modelEffortSurface("gpt-5.6-luna", { catalog: gpt, agent: "pi" }).levels, ["medium", "high", "xhigh"]);
+    // resolveEndpointEfforts 无 store 声明时同路：codex 面到 ultra，dsh 面裁掉。
+    assert.deepEqual(
+      resolveEndpointEfforts("gpt-5.6-luna", { catalog: gpt, agent: "codex", model: {} }).levels,
+      ["medium", "high", "xhigh", "ultra"],
+    );
+    assert.deepEqual(
+      resolveEndpointEfforts("gpt-5.6-luna", { catalog: gpt, agent: "dsh", model: {} }).levels,
+      ["medium", "high", "xhigh"],
+    );
+  });
+
   it("says nothing for a non-text model", () => {
     assert.equal(modelEffortSurface("agnes-image-2.0-flash", { catalog, agent: "pi" }), null);
   });

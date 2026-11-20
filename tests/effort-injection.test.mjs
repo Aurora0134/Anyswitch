@@ -16,6 +16,9 @@ const CATALOG = {
   models: new Map([
     ["glm-5.3", reasoning(["medium", "high", "xhigh", "max"], "high")],
     ["claude-fable-5", reasoning(["xhigh", "max"], "xhigh")],
+    // The GPT-class ladder with ultra as its deepest tier (the library row
+    // shape after max moved to ultra on the gpt-5.6+ entries).
+    ["gpt-5.6-luna", reasoning(["light", "medium", "high", "xhigh", "ultra"], "high")],
     // The id must dodge the catalog's own non-text regex: otherwise the row is
     // never consulted and the test only exercises the spelling-based fallback
     // (already covered by effort-catalog.test.mjs's isNonTextModel suite).
@@ -92,6 +95,21 @@ describe("createEffortInjector.inject", () => {
     }).injected, "xhigh");
     assert.equal(injector.inject({
       providerId: "p", body: bodyFor("claude-fable-5"), clientEffort: { stated: true, level: "xhigh" },
+    }).injected, "xhigh");
+  });
+
+  it("carries a GPT row's ultra tier through on the request face", () => {
+    const { injector } = makeInjector();
+    // 客户端未选档：注入该行的库默认 high。
+    assert.equal(injector.inject({ providerId: "p", body: bodyFor("gpt-5.6-luna") }).injected, "high");
+    // 客户端自选 ultra：库内最深档就是 ultra，原样下发，不折叠到 max。
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("gpt-5.6-luna"), clientEffort: { stated: true, level: "ultra" },
+    }).injected, "ultra");
+    // 客户端自选 max：max 与 ultra 在 EFFORT_LEVELS_ORDER 上等距、平手取浅档，
+    // 按既有通用夹紧规则落到 xhigh。这不是 ultra 特有的裁剪，逻辑本身不改。
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("gpt-5.6-luna"), clientEffort: { stated: true, level: "max" },
     }).injected, "xhigh");
   });
 

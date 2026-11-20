@@ -63,7 +63,7 @@
       },
       {
         "id": "gpt-5.6+-light-set",
-        "what": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
+        "what": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
       },
       {
         "id": "deepseek-v4.1-native",
@@ -1236,12 +1236,12 @@
         "medium",
         "high",
         "xhigh",
-        "max"
+        "ultra"
       ],
       "default": "high",
       "wire": {
         "xhigh": "xhigh",
-        "max": "max",
+        "ultra": "ultra",
         "light": "light",
         "medium": "medium",
         "high": "high"
@@ -1258,7 +1258,7 @@
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
     },
     "gpt-5.6-sol": {
       "levels": [
@@ -1266,13 +1266,13 @@
         "medium",
         "high",
         "xhigh",
-        "max"
+        "ultra"
       ],
       "default": "high",
       "wire": {
         "off": null,
         "xhigh": "xhigh",
-        "max": "max",
+        "ultra": "ultra",
         "light": "light",
         "medium": "medium",
         "high": "high"
@@ -1288,7 +1288,7 @@
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
     },
     "gpt-5.6-terra": {
       "levels": [
@@ -1296,13 +1296,13 @@
         "medium",
         "high",
         "xhigh",
-        "max"
+        "ultra"
       ],
       "default": "high",
       "wire": {
         "off": null,
         "xhigh": "xhigh",
-        "max": "max",
+        "ultra": "ultra",
         "light": "light",
         "medium": "medium",
         "high": "high"
@@ -1318,7 +1318,7 @@
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
     },
     "gpt-6-astra": {
       "levels": [
@@ -1326,7 +1326,7 @@
         "medium",
         "high",
         "xhigh",
-        "max"
+        "ultra"
       ],
       "default": "high",
       "wire": {
@@ -1334,7 +1334,7 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "max": "max"
+        "ultra": "ultra"
       },
       "source": "operator-rule",
       "confidence": "high",
@@ -1349,7 +1349,7 @@
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
     },
     "gpt-image-2": {
       "levels": null,
