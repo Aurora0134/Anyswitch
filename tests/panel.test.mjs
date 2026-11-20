@@ -13061,6 +13061,29 @@ describe("虚拟终端底部自动对齐", () => {
     assert.deepEqual(writes, [90], "后续滚动事件不会继续裁字");
   });
 
+  for (const [input, event, detail] of [
+    ["滚轮", "wheel", { deltaY: -120 }],
+    ["Shift+PageUp", "keydown", { key: "PageUp", shiftKey: true }],
+  ]) {
+    it(`${input}连续上翻：从空底换到有字的页面时完整显示末行`, () => {
+      const { root, screen, term, writes, flush } = alignSandbox({ lines: { 466: "older text", 467: "last visible row" } });
+      const buffer = term.buffer.active;
+      root.fire(event, detail);
+      buffer.viewportY = 468;
+      flush();
+      assert.equal(screen.scrollTop, 0, "第一页的底部空白可以全部收掉");
+
+      root.fire(event, detail);
+      buffer.viewportY = 439;
+      flush();
+      assert.equal(screen.scrollTop, 230, "第二页的末行底缘从 y=892 回到裁切线 y=662");
+      assert.equal(buffer.viewportY, 439, "恢复外层空间不移动历史阅读位置");
+      screen.fire("scroll");
+      flush();
+      assert.deepEqual(writes, [0, 230], "外层滚动回调不会继续写入");
+    });
+  }
+
   it("无空带不动：scrollHeight==clientHeight 时上滚零写；行高取整残余（<阈值）同样不动", () => {
     const tight = alignSandbox();
     tight.screen.scrollHeight = 600; // 与 clientHeight 齐平：无带
