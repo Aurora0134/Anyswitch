@@ -21116,7 +21116,7 @@ async function api(method, path, body) {
         <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机加密保存，保存后不再显示）</label>
           <input class="store-form-input" type="password" id="storeAddKey" autocomplete="new-password"></div>
         <div class="store-form-row"><label class="store-form-label">模型 IDs（可选，每行一个；留空则在线发现，发现失败时必须手填）</label>
-          <textarea class="store-form-textarea" id="storeAddModels" placeholder="gpt-5&#10;claude-sonnet-4">${escapeHtml(v.modelIdsText || "")}</textarea></div>
+          <textarea class="store-form-textarea" id="storeAddModels" placeholder="gpt-6-astra&#10;claude-opus-5.5">${escapeHtml(v.modelIdsText || "")}</textarea></div>
         <div class="store-form-error" id="storeAddError" hidden></div>`;
     showSkillsModal({
       title: "新增渠道",
