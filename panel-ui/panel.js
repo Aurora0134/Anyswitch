@@ -2879,6 +2879,7 @@ async function api(method, path, body) {
       // 中途切到 reduce：让在途的 height 动画作废，否则它的收尾回调会把刚展开的卡收回。
       if (text) { logTextAnim.delete(text); text.style.height = ""; }
       node.classList.toggle("is-open", open);
+      syncLogViewHeight();
       return;
     }
     if (!text) { node.classList.toggle("is-open", open); return; }
@@ -2907,7 +2908,19 @@ async function api(method, path, body) {
       text.style.height = "";
       logTextAnim.delete(text);
       if (onDone) onDone();
+      // 卡内高度变化落在动画收尾后量（onDone 已把 text 落回终态），视口随内容长高/
+      // 收短；舞台有 220ms 高度过渡，与文字动画几乎同拍收口。
+      syncLogViewHeight();
     }, 240);
+  }
+
+  // 卡内展/收改的是视口内容高，舞台高度跟手重算一次。不走 renderLogFeed（整列
+  // 重排＋入场/阅读位补偿对一次卡内高度变化是重手段）。收起态跳过：舞台高走
+  // --ll-collapsed-h，此刻量到的值无人消费，下次展开 setLogExpanded 会重测。
+  function syncLogViewHeight() {
+    if (!logExpanded) return;
+    const body = $("logBody"), stage = $("liveLogStage"), root = $("liveLog");
+    if (body && stage && root) logViewHeight(body, stage, root);
   }
 
   function syncLogCardOverflow(node) {

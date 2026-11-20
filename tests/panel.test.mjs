@@ -18594,7 +18594,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/\.live-log-viewport \{[^}]*scroll-behavior/.test(panelCss), "视口去掉平滑滚动，贴顶瞬时");
     assert.ok(/\.live-log-viewport \.live-log-text \{[^}]*-webkit-line-clamp: 2;[^}]*transition: height 220ms var\(--ease-out\)/.test(panelCss), "视口卡默认 2 行截断＋高度过渡");
     assert.ok(/\.live-log-motion\) \.live-log-msg\.is-open \.live-log-text \{ display: block; -webkit-line-clamp: unset; \}/.test(panelCss), "卡内展开解除本卡截断");
-    assert.ok(/\.live-log-msg-fold \{[^}]*width: 20px; height: 20px;[^}]*color: var\(--text-3\); font-size: 14px;[^}]*transition: transform 160ms var\(--ease-out\)/.test(panelCss), "卡内钮 20px 热区＋14px 醒目 caret");
+    assert.ok(/\.live-log-msg-fold \{[^}]*position: absolute;[^}]*width: 20px; height: 20px;[^}]*color: var\(--text-3\); font-size: 14px;[^}]*transition: transform 160ms var\(--ease-out\)/.test(panelCss), "卡内钮 20px 热区＋14px 醒目 caret");
+    assert.ok(/\.live-log-msg \{[^}]*position: relative;/.test(panelCss), "卡基座是钮的定位锚（钮悬浮于 meta 行右端）");
+    assert.ok(!/\.live-log-msg-fold \{[^}]*margin-left: auto/.test(panelCss), "钮不再占 meta 行内流：两态卡高一致，展开不跳高");
     assert.ok(/\.log-clear-btn, \.live-log-toggle \{[^}]*min-height: 20px;[^}]*line-height: 1\.2;/.test(panelCss), "两个文字钮同盒高同基线");
     assert.ok(/\.live-log-msg-fold\[aria-expanded="true"\] \{ transform: rotate\(90deg\); \}/.test(panelCss), "展开 caret 转 90deg");
     assert.ok(/\.live-log-msg\.is-overflowing \.live-log-msg-fold \{ display: inline-flex; \}/.test(panelCss), "仅超行卡显示钮");
@@ -19083,6 +19085,46 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 41, "一行卡高＋6px 行距撑开视口");
     sandbox.setLogExpanded(false);
     assert.equal(els.logEmpty.hidden, true, "收起即收掉空卡");
+  });
+
+  // 卡内展/收改的是视口内容高：动画收尾（onDone 落回终态后）舞台高度跟手重算，
+  // 视口不再冻在卡内展开前的值（2026-11-20 实测：全文卡 184px 淹没在 79.8px 冻结
+  // 视口的滚动区）。收起态跳过：此刻量到的值无人消费，展开时 setLogExpanded 会重测。
+  it("卡内展开/收起后视口高跟随内容重算；收起态不量、reduced 同拍落终态", () => {
+    const { sandbox, els, setReduced, flush, setFrameMode, flushFrames } = makeSandbox({ layout: true });
+    sandbox.appendLog({ level: "info", message: "long" });
+    const card = els.logBody.children[0];
+    // queued 帧模式：摊开 motion 的 rAF 循环交给 flushFrames 推帧（sync 模式下
+    // now 恒 0，动画结束条件永不满足会栈溢出）。
+    setFrameMode("queued");
+    sandbox.setLogExpanded(true);
+    flushFrames(6);
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 55, "两行截断卡＋6px 行距");
+    // 卡内展开：卡盒长高（is-open 全文），动画收尾后视口重算到新内容高。
+    card._computedHeight = card.offsetHeight = 145;
+    sandbox.setLogCardOpen(card, true);
+    flush(240);
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 151, "全文卡高＋6px 行距跟随");
+    // 卡内收起：视口跟着收短。
+    card._computedHeight = card.offsetHeight = 49;
+    sandbox.setLogCardOpen(card, false);
+    flush(240);
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 55, "收起后回两行卡高");
+    // 收起态不量：区域收起后再触发卡内收起（防御路径），视口值不被半途内容改写。
+    sandbox.setLogExpanded(false);
+    const frozen = els.liveLog.style["--ll-view-h"];
+    card._computedHeight = card.offsetHeight = 145;
+    sandbox.setLogCardOpen(card, false);
+    flush(240);
+    assert.equal(els.liveLog.style["--ll-view-h"], frozen, "收起态不重算视口高");
+    // reduced-motion：卡内展开直接落终态，视口同拍重算。
+    setReduced(true);
+    card._computedHeight = card.offsetHeight = 49;
+    sandbox.setLogExpanded(true);
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 55, "reduced 下展开重测回两行卡高");
+    card._computedHeight = card.offsetHeight = 145;
+    sandbox.setLogCardOpen(card, true);
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 151, "reduced 下卡内展开同拍落终值");
   });
 
   it("两态都从最新日志开始显示", () => {
