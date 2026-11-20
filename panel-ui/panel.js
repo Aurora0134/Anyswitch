@@ -8869,12 +8869,12 @@ async function api(method, path, body) {
   const TERMINAL_FOREGROUND_RESTORE_SETTLE_MS = 150;
   const TERMINAL_FOREGROUND_RESTORE_MAX_MS = 2500;
 
-  // 回前台和用户上滚共用裁切下限，只裁掉当前 xterm 画面末行以下的空白。
-  function trimTerminalOuterBand(screen = $("terminalScreen"), term = terminalXterm) {
+  // 回前台只收空白；用户换到新的历史画面时，也可以恢复末行所需的空间。
+  function trimTerminalOuterBand(screen = $("terminalScreen"), term = terminalXterm, restoreContent = false) {
     if (!screen || screen.clientHeight <= 0) return;
     const gap = screen.scrollHeight - screen.clientHeight;
     const scrollTop = screen.scrollTop;
-    if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX || scrollTop <= 0) return;
+    if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX || (!restoreContent && scrollTop <= 0)) return;
 
     // 垫片仍挂在屏内且可测量时按旧画面量，揭幕后按新实例量。
     const measure = (candidate) => {
@@ -8905,7 +8905,8 @@ async function api(method, path, body) {
       target = Math.max(0, Math.ceil(lastRowBottom - clipBottom));
       break;
     }
-    if (target >= scrollTop) return;
+    target = Math.min(target, gap);
+    if (target === scrollTop || (target > scrollTop && (!restoreContent || visibleTerm !== term))) return;
     screen.dataset.bottomAlignTrim = String(gap);
     screen.scrollTop = target;
   }
@@ -9708,18 +9709,26 @@ async function api(method, path, body) {
     // 外层滚动盒是静态基名 id（终端屏唯一，无按列定址）。
     const screen = $("terminalScreen");
     if (!screen) return;
+    let viewportBeforeUp = null;
     const trimOuterBand = () => {
       terminalBottomAlignTrimFrame = null;
+      const before = viewportBeforeUp;
+      viewportBeforeUp = null;
       if (!terminalBottomAlignEnabled()) return;
       if (terminalImeHold) return;             // 组字期不动几何
       if ($("terminalView")?.hidden) return;  // 隐藏期不量不动
-      trimTerminalOuterBand(screen, term);
+      const buffer = term.buffer.active;
+      const movedUp = before?.type === buffer.type && buffer.viewportY < before?.y;
+      trimTerminalOuterBand(screen, term, movedUp);
     };
     const scheduleTrim = () => {
+      if (!screen.contains(root)) return;
       if (terminalBottomAlignTrimFrame !== null) return;
       terminalBottomAlignTrimFrame = requestAnimationFrame(trimOuterBand);
     };
     const noteUpIntent = () => {
+      const buffer = term.buffer.active;
+      viewportBeforeUp ??= { type: buffer.type, y: buffer.viewportY };
       terminalBottomAlignIntentAt = Date.now();
       scheduleTrim();
     };
