@@ -2447,7 +2447,8 @@ export function runTerminalHostEntry({
   startHost = startTerminalHost,
   installFaultHandlers = installTerminalHostFaultHandlers,
   watchParent = watchParentProcess,
-  logPath = join(APP_DIR, "logs", "terminal-host.log"),
+  // 默认落数据根 logs/（跨版本连续，2026-11-20 用户裁决；目录由故障处理器自建）。
+  logPath = join(env.LOCALAPPDATA ?? join(env.USERPROFILE ?? "", "AppData", "Local"), "Anyswitch", "logs", "terminal-host.log"),
   logger = null,
 } = {}) {
   const hostLogger = logger ?? createTerminalHostLogger({ write: (line) => proc.stderr.write(line) });

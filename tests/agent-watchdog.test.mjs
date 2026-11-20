@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { writeFileSync, existsSync, mkdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, spawnWatchdog, createWatchdogLogger, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
+import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, spawnWatchdog, watchdogSpawnTarget, createWatchdogLogger, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
 import { createAgentWatcher, DEFAULT_INTERVAL_MS } from "../src/agents/agent-watcher.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -525,4 +525,19 @@ test("spawnWatchdog short-circuits on a live watchdog without touching the disk"
   });
   assert.deepEqual(result, { ok: true, reused: true });
   assert.equal(spawns, 0);
+});
+
+// ── 打包更新换装：看门狗拉起的目标版本推导 ────────────────────────────────
+test("watchdogSpawnTarget 默认＝本进程 node + 本模块同版脚本；换装 env 指目标版本", () => {
+  const fallback = watchdogSpawnTarget({});
+  assert.equal(fallback.execPath, process.execPath);
+  assert.ok(fallback.script.endsWith(join("src", "agents", "agent-watchdog.mjs")));
+  assert.equal(fallback.cwd, join(fallback.script, ".."));
+
+  const node = join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "runtime", "node.exe");
+  const appRoot = join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "app");
+  const target = watchdogSpawnTarget({ ANYSWITCH_NODE_PATH: node, ANYSWITCH_APP_ROOT: appRoot });
+  assert.equal(target.execPath, node, "自更新换装期：目标版本 node 优先于本进程");
+  assert.equal(target.script, join(appRoot, "src", "agents", "agent-watchdog.mjs"));
+  assert.equal(target.cwd, join(appRoot, "src", "agents"));
 });

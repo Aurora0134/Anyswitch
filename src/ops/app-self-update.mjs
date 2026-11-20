@@ -1,482 +1,271 @@
-// Anyswitch 自身的更新执行面，分两步：下载与应用。
-//
-// 下载（step=download）：把目标 release tag 浅拉进本地 git 仓库，并用
-// git show 核对 tag 里的 package.json 版本——全程不碰工作树、不动任何进程，
-// 失败即服务无损。完成后记录停在「已下载待应用」（phase=staged）。
-//
-// 应用（step=apply）：同一条记录被面板翻回 running 后由新 worker 接管——幂等
-// 补拉、记录回滚点、--detach --force 换装、复核树版本、装依赖（中止都先还原
-// 工作树），然后停 watchdog、重启 relay、等 panel-host 经 restart-helper 自杀
-// 换新并验证复活；新面板未接管以回滚点退回旧版并重装依赖。
-//
-// autoApply 记录（用户一键确认过「下载并应用」）不在 staged 停留：下载核验通过
-// 后同一个 worker 原地把记录翻成 apply 顺延执行，下载与应用之间没有「等前端来
-// 点」的空窗——浏览器页面在不在、在哪个页签都不影响跑完。自动下载的记录绝不带
-// 这个标记，仍旧停在 staged 等用户确认。
-//
-// 三条轨道共用同一副骨架，只差目标身份与核验键（journal 记 track 字段）：
-//   stable  —— 正式 release tag，核验 package.json 版本；
-//   bleeding —— 上游默认分支 HEAD 的单个提交（targetSha），核验提交 SHA，版本号
-//              下载后才从 FETCH_HEAD 读出、回写 journal 供应用阶段与终态文案使用；
-//   rollback —— 关闭先行版触发的逆更新，目标是「本地之下的最近稳定 tag」，执行
-//              与 stable 完全同型（fetch tag → 换装 → 核版本），只是终态文案不同。
-//
-// 工作树归更新器全权管理：checkout 一律 --force（收敛手动同步留下的漂移），
-// logs/node_modules 等运行时文件在 .gitignore 里不受影响。
-import { execFile as execFileDefault, spawn as spawnDefault } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { spawn as spawnDefault } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { atomicWriteFile } from "../store/atomic-write.mjs";
 import { readClientUpdateRun, writeClientUpdateRun } from "../agents/client-update-journal.mjs";
-import { resolveNpmCli } from "../agents/client-lifecycle.mjs";
 import { restartRelay } from "../relay/relay-process-manager.mjs";
 import { probeWatchdog, spawnWatchdog, stopWatchdog } from "../agents/agent-watchdog.mjs";
 import { storePaths } from "../store/store-io.mjs";
+import { UPDATE_SIGNING_PUBLIC_KEY, isValidReleaseVersion, parseCurrentPointer, resolveInstallRoot, verifyReleaseManifest } from "./update-trust.mjs";
+import { extractReleaseArchive } from "./update-archive.mjs";
+
+export { verifyReleaseManifest, parseCurrentPointer, resolveInstallRoot } from "./update-trust.mjs";
+export { extractReleaseArchive } from "./update-archive.mjs";
 
 export const SELF_UPDATE_CLIENT_ID = "anyswitch";
 export const APP_REPO_URL = "https://github.com/Aurora0134/Anyswitch.git";
+export const MAX_RELEASE_ARCHIVE_BYTES = 1024 * 1024 * 1024;
+const API_URL = "https://api.github.com/repos/Aurora0134/Anyswitch/releases/tags/";
+const API_HEADERS = { accept: "application/vnd.github+json", "user-agent": "anyswitch-self-update" };
+const DOWN_MS = 20_000, UP_MS = 30_000, POLL_MS = 500;
 
-// worker 等旧面板退场、再等新面板接管的窗口。面板侧的 helper 有自己的 10s/12s
-// 预算，这两个窗口给得比它宽——worker 的结论只写 journal，超时各自有如实的结果。
-const PANEL_DOWN_TIMEOUT_MS = 20_000;
-const PANEL_UP_TIMEOUT_MS = 30_000;
-const POLL_MS = 500;
-// git fetch 走外网，慢链路上一次浅拉可能拖到分钟级，但不能没有上限；npm 与 client-lifecycle 同一量级。
-const GIT_TIMEOUT_MS = 10 * 60_000;
-const NPM_TIMEOUT_MS = 10 * 60_000;
-const MAX_OUTPUT_CHARS = 2000;
+const assetNames = (version) => {
+  const zip = "anyswitch-v" + version + "-win-x64.zip";
+  return { zip, manifest: zip.replace(/\.zip$/, ".manifest.json"), signature: zip.replace(/\.zip$/, ".manifest.sig") };
+};
+const releaseTag = (run) => run.targetTag ?? "v" + run.targetVersion;
 
-// 目标 tag 只接受 release-service 的发布形态（v<semver>）：tag 来自 journal 记录，
-// 进 git 参数前钉住形态，杜绝任何以 `-` 开头被当成选项解析的余地。
-const TARGET_TAG_PATTERN = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
-// 先行轨的目标是上游 main 的单个提交：SHA 同样来自 journal 记录，钉住形态。
-const TARGET_SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
-// npm 显式指回官方源：用户 npm 配置的 registry 可能停在同步落后的镜像上
-// （client-lifecycle 对 grok 已确立同一先例）。
-const NPM_REGISTRY = "https://registry.npmjs.org";
-
-// 与 client-lifecycle 同一口径的输出收尾：只留末 8 行、总长截断。
-function tailLines(text, limit, maxChars) {
-  const lines = String(text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const tail = lines.slice(Math.max(0, lines.length - limit)).join("\n");
-  return tail.length > maxChars ? tail.slice(tail.length - maxChars) : tail;
+function releaseAsset(release, name) {
+  const asset = release.assets?.find((row) => row?.name === name);
+  if (!asset || typeof asset.browser_download_url !== "string" || !Number.isSafeInteger(asset.size) || asset.size <= 0 || (asset.digest !== undefined && asset.digest !== null && typeof asset.digest !== "string")) throw new Error("release asset metadata unavailable");
+  const url = new URL(asset.browser_download_url);
+  if (url.protocol !== "https:" || !["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"].includes(url.hostname) || url.username || url.password) throw new Error("unsafe release asset URL");
+  return asset;
 }
 
-// execFile 形态的一跳：git / npm 共用。stdout 与 stderr 谁非空取谁（git 的进度
-// 与报错走 stderr，rev-parse/get-url 的数据走 stdout），ENOENT 单独标出。
-// raw 模式保留完整 stdout（git show 读文件内容用，8 行收尾会把 JSON 截残）。
-function runCommand({ file, args, cwd = null, spawnFn = execFileDefault, timeoutMs = GIT_TIMEOUT_MS, raw = false }) {
-  return new Promise((done) => {
-    spawnFn(file, args, { ...(cwd ? { cwd } : {}), timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
-      const output = raw && !error ? String(stdout ?? "") : tailLines(String(stderr ?? "").trim() || String(stdout ?? "").trim(), 8, MAX_OUTPUT_CHARS);
-      done({ ok: !error, missing: error?.code === "ENOENT", timedOut: Boolean(error?.killed), output });
-    });
-  });
+async function fetchRelease({ run, channel, fetchFn, signal }) {
+  const tag = releaseTag(run);
+  if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(tag) || tag !== "v" + run.targetVersion) throw new Error("invalid release tag");
+  const response = await fetchFn(API_URL + encodeURIComponent(tag), { headers: API_HEADERS, signal, redirect: "error" });
+  if (!response.ok) throw new Error("release unavailable");
+  const release = await response.json();
+  if (release.tag_name !== tag || release.draft === true || release.prerelease !== (channel === "preview")) throw new Error("release channel mismatch");
+  const names = assetNames(run.targetVersion);
+  const zip = releaseAsset(release, names.zip);
+  const manifest = releaseAsset(release, names.manifest);
+  const signature = releaseAsset(release, names.signature);
+  const manifestBytes = await fetchSmallAsset(fetchFn, manifest, 16 * 1024, signal);
+  const signatureBytes = await fetchSmallAsset(fetchFn, signature, 256, signal);
+  return { release, assets: { zip, manifest, signature }, manifestBytes, signature: signatureBytes.toString("utf8") };
 }
 
-// 快捷方式拉起的进程 PATH 可能很窄（client-lifecycle 的 npm 同理），git 依次试
-// PATH 与标准安装位；ENOENT 换下一个候选，其余错误当场定夺。
-async function runGit({ args, cwd, spawnFn, env, timeoutMs = GIT_TIMEOUT_MS, raw = false }) {
-  const candidates = ["git", join(env.ProgramFiles ?? "C:\\Program Files", "Git", "cmd", "git.exe")];
-  let last = { ok: false, missing: true, timedOut: false, output: "" };
-  for (const candidate of candidates) {
-    const result = await runCommand({ file: candidate, args, cwd, spawnFn, timeoutMs, raw });
-    if (!result.missing) return result;
-    last = result;
-  }
-  return last;
+async function fetchSmallAsset(fetchFn, asset, limit, signal) {
+  if (asset.size > limit) throw new Error("release metadata asset too large");
+  const response = await fetchFn(asset.browser_download_url, { headers: { "user-agent": API_HEADERS["user-agent"] }, signal });
+  if (!response.ok) throw new Error("release asset download failed");
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length !== asset.size) throw new Error("release asset size mismatch");
+  return bytes;
 }
 
-// 面板复活探测：app-info 是最轻的带版本端点。null = 没人应答（端口安静）。
-// commit 是新面板自报的 HEAD 短哈希——先行轨的复活验证只认它（先行期版本号
-// 可以原地不动，唯 SHA 唯一）。
-// export 仅作测试观察缝：默认行为与调用方（runSelfUpdate 的 probePanelFn 默认
-// 参数）完全不变。
-export async function probePanelAppInfo(port = 47820, fetchFn = fetch) {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
-    try {
-      const response = await fetchFn(`http://127.0.0.1:${port}/panel/api/app-info`, { signal: controller.signal });
+async function fetchArchive(fetchFn, asset, signal) {
+  if (asset.size > MAX_RELEASE_ARCHIVE_BYTES) throw new Error("release archive too large");
+  if (asset.digest != null && !/^sha256:[0-9a-f]{64}$/.test(asset.digest)) throw new Error("GitHub asset digest invalid");
+  const response = await fetchFn(asset.browser_download_url, { headers: { "user-agent": API_HEADERS["user-agent"] }, signal });
+  if (!response.ok) throw new Error("release archive download failed");
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length !== asset.size) throw new Error("release archive size mismatch");
+  const digest = "sha256:" + createHash("sha256").update(bytes).digest("hex");
+  if (asset.digest != null && digest !== asset.digest) throw new Error("GitHub asset digest mismatch");
+  return bytes;
+}
+
+function currentPath(root) { return join(root, "current.json"); }
+function writePointer(path, version) { atomicWriteFile(path, JSON.stringify({ schema: 1, version }) + "\n"); }
+
+export function probePanelAppInfo(port = 47820, fetchFn = fetch, timers = {}) {
+  const controller = new AbortController();
+  const setTimer = timers.setTimeoutFn ?? setTimeout;
+  const clearTimer = timers.clearTimeoutFn ?? clearTimeout;
+  const timer = setTimer(() => controller.abort(), 1500);
+  return fetchFn("http://127.0.0.1:" + port + "/panel/api/app-info", { signal: controller.signal })
+    .then(async (response) => {
       if (!response.ok) return null;
       const data = await response.json();
       return { version: typeof data?.version === "string" ? data.version : null, commit: typeof data?.commit === "string" ? data.commit : null };
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    return null;
-  }
+    })
+    .catch(() => null)
+    .finally(() => clearTimer(timer));
 }
 
-// 回滚/接管的兜底拉起：与 helper spawn panel-host 同一形态（脱离、隐藏、丢管道）。
-// spawnFn 仅作测试注入缝（默认仍用真实 spawn）：不传时默认行为与副作用顺序逐字不变。
-export function defaultSpawnPanelHost({ appDir, execPath = process.execPath, spawnFn = spawnDefault }) {
-  const child = spawnFn(execPath, [join(appDir, "src", "panel", "panel-host.mjs")], {
-    cwd: appDir,
-    detached: true,
-    windowsHide: true,
-    stdio: "ignore",
-    shell: false,
+export function defaultSpawnPanelHost({ installRoot, appRoot, appDir, nodePath, env = process.env, spawnFn = spawnDefault }) {
+  const root = installRoot ?? resolveInstallRoot({ appRoot: appRoot ?? appDir, env });
+  if (!root) throw new Error("packaged install root unavailable");
+  const launcher = join(root, "anyswitch.cmd");
+  const child = spawnFn("cmd.exe", ["/d", "/s", "/c", "start \"\" \"" + launcher + "\" src\\panel\\panel-host.mjs"], {
+    detached: true, windowsHide: true, stdio: "ignore", shell: false,
+    env: { ...env, ANYSWITCH_INSTALL_ROOT: root, ...(appRoot ? { ANYSWITCH_APP_ROOT: appRoot } : {}), ...(nodePath ? { PATH: [dirname(nodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") } : {}) },
   });
   child.unref?.();
   return child.pid;
 }
 
-// 自更新 worker 的脱离拉起，形态与 client-update-journal.mjs 的
-// spawnClientUpdateWorker 逐字一致：stdio 置 ignore 丢弃管道，面板退出不会连带
-// 收走安装进程（理由见该函数上方注释）。两处须保持同形，改一处要同步另一处。
-export function spawnSelfUpdateWorker({
-  runId,
-  journalDir,
-  spawnFn = spawnDefault,
-  execPath = process.execPath,
-  workerPath = fileURLToPath(new URL("./self-update-worker.mjs", import.meta.url)),
-} = {}) {
+export function spawnSelfUpdateWorker({ runId, journalDir, spawnFn = spawnDefault, execPath = process.execPath, workerPath = fileURLToPath(new URL("./self-update-worker.mjs", import.meta.url)), env = process.env } = {}) {
+  const appRoot = env.ANYSWITCH_APP_ROOT ?? env.ANYSWITCH_APP_DIR ?? dirname(dirname(fileURLToPath(import.meta.url)));
   const child = spawnFn(execPath, [workerPath, runId, journalDir], {
-    detached: true,
-    windowsHide: true,
-    stdio: "ignore",
-    shell: false,
+    detached: true, windowsHide: true, stdio: "ignore", shell: false,
+    env: { ...env, ANYSWITCH_INSTALL_ROOT: env.ANYSWITCH_INSTALL_ROOT ?? "", ANYSWITCH_APP_ROOT: appRoot },
   });
   child.unref?.();
   return child.pid;
 }
 
-// remote URL 归一化：尾斜杠与 .git 后缀不影响同一性判断。
-function normalizeRepoUrl(url) {
-  return String(url ?? "").replace(/\/+$/, "").replace(/\.git$/i, "").toLowerCase();
-}
-
-// Entry used by the worker. Reads the request the panel already recorded and
-// drives the step the record names (download by default). Every step writes its
-// phase back so the panel (and the page) can render progress; the final result
-// uses the same shape the client-update journal does.
 export async function runSelfUpdate({
-  runId,
-  journalDir,
-  io = { existsSync, readFileSync },
-  spawnFn = execFileDefault,
-  execPath = process.execPath,
-  env = process.env,
+  runId, journalDir,
+  io = { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync },
   fetchFn = fetch,
-  restartRelayFn = (root) => restartRelay(root),
+  env = process.env,
+  restartRelayFn = (root, targetEnv = env) => restartRelay(root, targetEnv),
   stopWatchdogFn = (e) => stopWatchdog(e),
   probeWatchdogFn = () => probeWatchdog(),
   spawnWatchdogFn = (e) => spawnWatchdog(e),
   spawnPanelHostFn = defaultSpawnPanelHost,
   probePanelFn = (port) => probePanelAppInfo(port, fetchFn),
+  publicKey = UPDATE_SIGNING_PUBLIC_KEY,
   delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now = () => new Date().toISOString(),
-  nowMs = Date.now,
-  gitTimeoutMs = GIT_TIMEOUT_MS,
-  npmTimeoutMs = NPM_TIMEOUT_MS,
-  panelDownTimeoutMs = PANEL_DOWN_TIMEOUT_MS,
-  panelUpTimeoutMs = PANEL_UP_TIMEOUT_MS,
-  pollMs = POLL_MS,
-  panelPort = 47820,
+  now = () => new Date().toISOString(), nowMs = Date.now,
+  panelDownTimeoutMs = DOWN_MS, panelUpTimeoutMs = UP_MS, pollMs = POLL_MS, panelPort = 47820,
 } = {}) {
   const run = readClientUpdateRun(journalDir, runId);
   if (!run || run.state !== "running" || run.clientId !== SELF_UPDATE_CLIENT_ID) return null;
-  const step = run.step === "apply" ? "apply" : "download";
   writeClientUpdateRun(journalDir, { ...run, workerPid: process.pid });
-  const appDir = run.appDir ?? null;
-  // 轨道与目标身份：track 缺席的旧记录一律按 stable 走（与既有 journal 兼容）。
-  const track = run.track === "bleeding" || run.track === "rollback" ? run.track : "stable";
-  // targetVersion 用 let：先行轨的版本号要等下载后才从 FETCH_HEAD 读出，autoApply
-  // 顺延进应用段时带着这份回填值走完剩余流程。
-  let targetVersion = run.targetVersion ?? null;
-  const targetTag = run.targetTag ?? null;
-  const autoApply = run.autoApply === true;
-  const targetSha = track === "bleeding" ? String(run.targetSha ?? "") : null;
-  const shortSha = targetSha ? targetSha.slice(0, 7) : null;
-  // 先行轨不打 tag，journal 里 targetTag 恒为 null；两次 fetch 的失败文案共用这一处目标标识。
-  const targetLabel = track === "bleeding" ? shortSha : targetTag;
-  const repoUrl = run.repoUrl ?? APP_REPO_URL;
-  const relayRoot = run.relayRoot ?? storePaths().root;
+  const channel = run.channel === "preview" ? "preview" : "stable";
+  const runningAppRoot = run.appRoot ?? run.appDir ?? env.ANYSWITCH_APP_ROOT ?? env.ANYSWITCH_APP_DIR;
+  const installRoot = resolveInstallRoot({ appRoot: runningAppRoot, env: { ...env, ANYSWITCH_INSTALL_ROOT: run.installRoot ?? env.ANYSWITCH_INSTALL_ROOT } });
+  const targetVersion = run.targetVersion;
   const beforeVersion = run.beforeVersion ?? null;
-
-  // 面板复活的身份验证按轨道走：stable/rollback 比版本号（tag 的承诺），
-  // bleeding 比 HEAD 短哈希（app-info 自报的 commit 字段）。
-  const identityMatches = (identity) => track === "bleeding"
-    ? identity?.commit === shortSha
-    : identity?.version === targetVersion;
-
-  // 阶段推进：journal 是 worker 与面板（监听器）、页面（轮询）之间唯一的进度通道。
-  const setPhase = (phase) => {
-    const current = readClientUpdateRun(journalDir, runId);
-    if (current) writeClientUpdateRun(journalDir, { ...current, phase, workerPid: process.pid });
-  };
   const finish = (result) => {
     const current = readClientUpdateRun(journalDir, runId) ?? run;
     writeClientUpdateRun(journalDir, { ...current, state: "done", finishedAt: now(), result, workerPid: process.pid });
     return result;
   };
-  const gitFailure = (stepName, r) => r.missing
-    ? `未检测到 Git，请先安装 Git 后重试`
-    : r.timedOut
-      ? `${stepName}用时过长被中止，请检查网络或代理设置后重试`
-      : `${stepName}失败，请稍后重试`;
-
-  if (track === "bleeding") {
-    if (!appDir || !TARGET_SHA_PATTERN.test(targetSha)) {
-      return finish({ outcome: "failed", message: "更新目标无效，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
-    }
-  } else if (!appDir || !targetVersion || !targetTag) {
-    return finish({ outcome: "failed", message: "更新信息不完整，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
-  } else if (!TARGET_TAG_PATTERN.test(targetTag)) {
-    return finish({ outcome: "failed", message: "更新目标无效，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
-  }
-
-  // 确保 app 工作树有 git 身份：镜像安装（无 .git）首次引导；clone 安装只校正 remote。
-  const ensureGitReady = async () => {
-    if (!io.existsSync(join(appDir, ".git"))) {
-      const init = await runGit({ args: ["init"], cwd: appDir, spawnFn, env });
-      if (!init.ok) return gitFailure("准备更新环境", init);
-      const remote = await runGit({ args: ["remote", "add", "origin", repoUrl], cwd: appDir, spawnFn, env });
-      if (!remote.ok) return gitFailure("连接更新源", remote);
-      return null;
-    }
-    const current = await runGit({ args: ["remote", "get-url", "origin"], cwd: appDir, spawnFn, env });
-    if (current.ok && normalizeRepoUrl(current.output) !== normalizeRepoUrl(repoUrl)) {
-      await runGit({ args: ["remote", "set-url", "origin", repoUrl], cwd: appDir, spawnFn, env });
-    }
-    return null;
+  const setPhase = (phase) => {
+    const current = readClientUpdateRun(journalDir, runId);
+    if (current) writeClientUpdateRun(journalDir, { ...current, phase, workerPid: process.pid });
   };
-
-  // 先行轨按引用拉远端默认分支（origin HEAD）——按 SHA fetch 是服务端可选能力，
-  // 不依赖它；不写死分支名，检查与下载问的是同一个引用。HEAD 在检查之后又前进
-  // 的窗口由下载后的 SHA 核验兜住，不一致即中止、如实报告。
-  const fetchTarget = () => runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", ...(track === "bleeding" ? ["HEAD"] : ["tag", targetTag])], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
-
-  if (step === "download") {
-    // ── 下载：只把比特拉进本地仓库，工作树与进程一个都不动 ──
-    setPhase("staging");
-    const readyError = await ensureGitReady();
-    if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
-    const fetched = await fetchTarget();
-    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetLabel}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
-    if (track === "bleeding") {
-      // 先行轨的核验键是提交 SHA：FETCH_HEAD 与检查时的目标不一致（上游又前进
-      // 了）即止步。版本号此刻才从 FETCH_HEAD 读出并回写 journal——应用阶段的
-      // 终态文案、关于页的补显都用这一份。
-      const head = await runGit({ args: ["rev-parse", "FETCH_HEAD"], cwd: appDir, spawnFn, env, raw: true });
-      const fetchedSha = head.ok ? head.output.split(/\r?\n/)[0]?.trim() ?? "" : "";
-      if (!TARGET_SHA_PATTERN.test(fetchedSha) || fetchedSha !== targetSha) {
-        return finish({ outcome: "failed", message: `下载的代码版本（${fetchedSha.slice(0, 7) || "未知"}）与目标（${shortSha}）不一致，已中止更新`, beforeVersion, latestVersion: null });
-      }
-      const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
-      let fetchedVersion = null;
-      try { fetchedVersion = JSON.parse(shown.output).version ?? null; } catch { fetchedVersion = null; }
-      if (!shown.ok || !fetchedVersion) {
-        return finish({ outcome: "failed", message: `下载的代码版本（未知）与目标（${shortSha}）不一致，已中止更新`, beforeVersion, latestVersion: null });
-      }
-      const currentRun = readClientUpdateRun(journalDir, runId) ?? run;
-      writeClientUpdateRun(journalDir, { ...currentRun, targetVersion: fetchedVersion });
-      // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
-      // autoApply 的记录不停留，带着回填的版本号顺延进应用段。
-      if (!autoApply) {
-        setPhase("staged");
-        return finish({ outcome: "downloaded", message: `已下载 ${shortSha}，应用后生效`, beforeVersion, latestVersion: fetchedVersion });
-      }
-      targetVersion = fetchedVersion;
-    } else {
-      // 不脱裤查验：直接读 tag 里的 package.json，版本不符在此止步——磁盘上什么都没动。
-      const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
-      let tagVersion = null;
-      try { tagVersion = JSON.parse(shown.output).version ?? null; } catch { tagVersion = null; }
-      if (!shown.ok || tagVersion !== targetVersion) {
-        return finish({ outcome: "failed", message: `下载的代码版本（${tagVersion ?? "未知"}）与目标（${targetVersion}）不一致，已中止更新`, beforeVersion, latestVersion: targetVersion });
-      }
-      if (!autoApply) {
-        // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
-        setPhase("staged");
-        return finish({ outcome: "downloaded", message: `已下载 ${targetVersion}，应用后生效`, beforeVersion, latestVersion: targetVersion });
-      }
-    }
-    // 一键任务原地续跑：记录翻成 apply（页面轮询见 step=apply 才武装换装信号），
-    // 同一个 worker 顺延进下面的应用段——下载与应用之间没有「等前端来点」的空窗。
-    const carried = readClientUpdateRun(journalDir, runId) ?? run;
-    writeClientUpdateRun(journalDir, { ...carried, step: "apply", targetVersion });
-  }
-
-  // ── 应用：换装 + 依赖 + 重启 ──
+  if (!installRoot || typeof targetVersion !== "string" || !isValidReleaseVersion(targetVersion)) return finish({ outcome: "failed", message: "更新信息不完整，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion ?? null });
+  const names = assetNames(targetVersion), stageDir = join(installRoot, "staging", runId);
+  const archivePath = join(stageDir, names.zip), manifestPath = join(stageDir, names.manifest), signaturePath = join(stageDir, names.signature);
   let watchdogStopped = false;
-  const restoreWatchdog = async () => {
-    if (!watchdogStopped) return;
-    try { await spawnWatchdogFn(env); } catch { /* 恢复失败不翻转结果：面板设置页可见漂移 */ }
-  };
-
   try {
+    if (run.step !== "apply") {
+      setPhase("staging");
+      const release = await fetchRelease({ run, channel, fetchFn });
+      const manifest = verifyReleaseManifest(release.manifestBytes, release.signature, {
+        publicKey, assetName: release.assets.zip.name, channel, prerelease: release.release.prerelease,
+        assetDigest: release.assets.zip.digest, assetSize: release.assets.zip.size,
+      });
+      if (manifest.version !== targetVersion) throw new Error("release version mismatch");
+      const archive = await fetchArchive(fetchFn, release.assets.zip);
+      // 同 runId 重派（面板重试）先清旧 staging：wx 落盘撞残留即 EEXIST。
+      io.rmSync(stageDir, { recursive: true, force: true });
+      io.mkdirSync(stageDir, { recursive: true });
+      io.writeFileSync(archivePath, archive, { flag: "wx" });
+      io.writeFileSync(manifestPath, release.manifestBytes, { flag: "wx" });
+      io.writeFileSync(signaturePath, release.signature, { flag: "wx" });
+      const current = readClientUpdateRun(journalDir, runId) ?? run;
+      writeClientUpdateRun(journalDir, { ...current, manifestDigest: release.assets.zip.digest, channel });
+      if (!run.autoApply) return finish({ outcome: "downloaded", message: "已下载 " + targetVersion + "，应用后生效", beforeVersion, latestVersion: targetVersion });
+      writeClientUpdateRun(journalDir, { ...current, step: "apply", targetVersion, manifestDigest: release.assets.zip.digest, channel });
+    }
+
     setPhase("installing");
-    const readyError = await ensureGitReady();
-    if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
-    // 幂等补拉：已下载过的 tag 秒回；也兜住「下载后对象被 gc」的边角。
-    const fetched = await fetchTarget();
-    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetLabel}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
-    // 回滚点在应用开始时现取：HEAD 此刻仍是旧版（下载阶段不碰工作树）。首次引导
-    // 没有 HEAD，回滚分支如实告知。
-    const head = await runGit({ args: ["rev-parse", "HEAD"], cwd: appDir, spawnFn, env });
-    const beforeHead = head.ok ? head.output.split(/\r?\n/)[0]?.trim() || null : null;
-    // 换装之后的中止都先把工作树还原到这个点：进程还活着（旧模块在内存里服务），
-    // 但磁盘不能停在「新代码配旧进程」——面板静态资源是按请求活读的。
-    const restoreTree = async () => {
-      if (!beforeHead) return false;
-      const back = await runGit({ args: ["checkout", "--detach", "--force", beforeHead], cwd: appDir, spawnFn, env });
-      return back.ok;
-    };
-    // 就地换装。force 是所有权声明：手动同步留下的漂移在这里被收敛成目标版本。
-    const checkedOut = await runGit({ args: ["checkout", "--detach", "--force", "FETCH_HEAD"], cwd: appDir, spawnFn, env });
-    if (!checkedOut.ok) return finish({ outcome: "failed", message: gitFailure("应用新版本", checkedOut), detail: checkedOut.output || undefined, beforeVersion, latestVersion: targetVersion });
-    // 落盘的身份必须与目标一致，否则还原工作树后止步——面板与 relay 都还没动过。
-    // 先行轨比 HEAD 的 SHA（版本号先行期可能不动）；稳定/回退轨比 package.json
-    // 版本。treeVersion 两种轨道都读：先行轨的终态文案要拿它拼版本号后缀。
-    let treeVersion = null;
-    try { treeVersion = JSON.parse(io.readFileSync(join(appDir, "package.json"), "utf8")).version ?? null; } catch { treeVersion = null; }
-    if (track === "bleeding") {
-      const head = await runGit({ args: ["rev-parse", "HEAD"], cwd: appDir, spawnFn, env, raw: true });
-      const treeSha = head.ok ? head.output.split(/\r?\n/)[0]?.trim() ?? "" : "";
-      if (treeSha !== targetSha) {
-        const restored = await restoreTree();
-        return finish({
-          outcome: "failed",
-          message: `下载的代码版本（${treeSha.slice(0, 7) || "未知"}）与目标（${shortSha}）不一致，已中止更新${restored ? "，文件已还原到更新前状态" : ""}`,
-          beforeVersion,
-          afterVersion: restored ? beforeVersion : null,
-          latestVersion: targetVersion,
-        });
-      }
-    } else if (treeVersion !== targetVersion) {
-      const restored = await restoreTree();
-      return finish({
-        outcome: "failed",
-        message: `下载的代码版本（${treeVersion ?? "未知"}）与目标（${targetVersion}）不一致，已中止更新${restored ? "，文件已还原到更新前状态" : ""}`,
-        beforeVersion,
-        afterVersion: restored ? beforeVersion : treeVersion,
-        latestVersion: targetVersion,
-      });
-    }
-    // 依赖安装：仍在旧进程服务期间做，不占中断窗口。registry 钉回官方源，
-    // 用户 npm 配置里同步落后的镜像不会掺进这次安装。
-    const npmCli = resolveNpmCli({ execPath, io });
-    if (!npmCli) {
-      const restored = await restoreTree();
-      return finish({
-        outcome: "failed",
-        message: `未找到 Node.js 自带的安装工具（npm），请修复或重装 Node.js 后重试${restored ? "；文件已还原到更新前状态" : ""}`,
-        beforeVersion,
-        afterVersion: restored ? beforeVersion : treeVersion,
-        latestVersion: targetVersion,
-      });
-    }
-    const npm = await runCommand({ file: execPath, args: [npmCli, "install", "--no-audit", "--no-fund", `--registry=${NPM_REGISTRY}`], cwd: appDir, spawnFn, timeoutMs: npmTimeoutMs });
-    if (!npm.ok) {
-      const restored = await restoreTree();
-      return finish({
-        outcome: "failed",
-        message: `${npm.timedOut ? "新版本组件安装用时过长被中止，请检查网络或代理设置后重试" : "新版本组件安装失败，请稍后重试"}${restored ? "；文件已还原到更新前状态" : ""}`,
-        detail: npm.output || undefined,
-        beforeVersion,
-        afterVersion: restored ? beforeVersion : treeVersion,
-        latestVersion: targetVersion,
-      });
-    }
-    // 中断窗口开始：watchdog 先停（防 3s 轮询在窗口内拉起旧代码 relay；即使拉起，
-    // 磁盘已是新代码，只是时序变脏），relay 换新，然后交棒给面板自换。
-    setPhase("ready-to-restart");
-    const watchdogUp = await probeWatchdogFn().catch(() => false);
-    if (watchdogUp) {
-      const stopped = await stopWatchdogFn(env).catch(() => ({ ok: false }));
-      watchdogStopped = stopped?.ok === true;
-    }
-    const relay = await restartRelayFn(relayRoot).catch(() => ({ ok: false }));
-    const relayClause = relay?.ok ? null : "Relay 未能自动重启，请在面板中手动重启 Relay";
-    // 结构化同行：面板据此把「装好了但 Relay 没起来」从成功绿降为警示琥珀，
-    // 不靠嗅探 message 里的子句。
-    const relayRestartFailed = relay?.ok !== true;
-    // 面板内监听器看到 ready-to-restart 就会拉起 helper 并按宽限自退；这里等它退场。
-    // 注意监听器在 ready-to-restart 就点火：relay 重启要花几秒，面板可能在我们
-    // 还没到这一步时就换完了。所以「退场」的证据有两种——探测落空（旧面板走了、
-    // 新面板还没起），或答话的已是目标版本（换装抢在轮询前完成）。两种都算数。
-    setPhase("waiting-panel");
-    let downSeen = false;
-    const downDeadline = nowMs() + panelDownTimeoutMs;
-    while (nowMs() < downDeadline) {
-      const identity = await probePanelFn(panelPort);
-      if (identity === null || identityMatches(identity)) { downSeen = true; break; }
-      await delay(pollMs);
-    }
-    if (!downSeen) {
-      await restoreWatchdog();
-      // 面板没有退场：文件已换装而旧面板还在跑旧代码。如实记录，不谎报已生效。
-      return finish({
-        outcome: "updated_pending_restart",
-        message: `新版本已安装，重启面板后生效${relayClause ? `；${relayClause}` : ""}`,
-        beforeVersion,
-        afterVersion: targetVersion,
-        latestVersion: targetVersion,
-        relayRestartFailed,
-      });
-    }
-    // 等新面板接管（helper 拉起的新 panel-host 载的就是刚换装的代码）。
-    let revived = null;
-    const upDeadline = nowMs() + panelUpTimeoutMs;
-    while (nowMs() < upDeadline) {
-      const identity = await probePanelFn(panelPort);
-      if (identityMatches(identity)) { revived = identity; break; }
-      await delay(pollMs);
-    }
-    if (revived) {
-      await restoreWatchdog();
-      // 终态文案按轨道：先行版带提交标识；回退轨明说「回到稳定版」；稳定轨原样。
-      const afterLabel = track === "bleeding" ? (treeVersion ? `${treeVersion}-${shortSha}` : shortSha) : targetVersion;
-      const verb = track === "rollback" ? "已回到稳定版" : "已更新到";
-      return finish({ outcome: "updated", message: `${verb} ${afterLabel}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: afterLabel, latestVersion: targetVersion, relayRestartFailed });
-    }
-    // 新面板没有接管：有恢复点就退回旧版并重装依赖（旧代码配旧依赖才算恢复
-    // 完整），再把面板与 relay 拉起；没有恢复点就把面板尽力拉起并如实报告。
-    if (beforeHead && (await restoreTree())) {
-      let rollbackDepsOk = true;
-      const rollbackNpmCli = resolveNpmCli({ execPath, io });
-      if (rollbackNpmCli) {
-        const rollbackNpm = await runCommand({ file: execPath, args: [rollbackNpmCli, "install", "--no-audit", "--no-fund", `--registry=${NPM_REGISTRY}`], cwd: appDir, spawnFn, timeoutMs: npmTimeoutMs });
-        rollbackDepsOk = rollbackNpm.ok;
-      }
-      const depsClause = rollbackDepsOk ? "" : "；运行组件未完全恢复，请重新执行一次更新";
-      try { spawnPanelHostFn({ appDir, execPath }); } catch { /* 拉起失败由下面的探测如实呈现 */ }
-      await restartRelayFn(relayRoot).catch(() => ({ ok: false }));
-      let backUp = null;
-      const backDeadline = nowMs() + panelUpTimeoutMs;
-      while (nowMs() < backDeadline) {
-        const identity = await probePanelFn(panelPort);
-        if (identity) { backUp = identity; break; }
-        await delay(pollMs);
-      }
-      await restoreWatchdog();
-      return finish({
-        outcome: "rolled_back",
-        message: backUp
-          ? `新面板未能启动，已恢复到更新前版本${depsClause}`
-          : `已恢复到更新前版本，但面板未能自动启动，请用桌面快捷方式重新打开${depsClause}`,
-        beforeVersion,
-        afterVersion: backUp?.version ?? run.beforeVersion ?? null,
-        latestVersion: targetVersion,
-      });
-    }
-    try { spawnPanelHostFn({ appDir, execPath }); } catch { /* 同上 */ }
-    await restoreWatchdog();
-    return finish({
-      outcome: "failed",
-      message: beforeHead
-        ? "新面板未能启动，恢复旧版本也未成功，请用桌面快捷方式重新打开面板"
-        : "新面板未能启动（本次为首次更新，没有可退回的旧版本），请重新打开面板后重试",
-      detail: relayClause || undefined,
-      beforeVersion,
-      afterVersion: null,
-      latestVersion: targetVersion,
+    const release = await fetchRelease({ run, channel, fetchFn });
+    const stagedManifestBytes = io.readFileSync(manifestPath);
+    const stagedSignature = io.readFileSync(signaturePath, "utf8");
+    if (!stagedManifestBytes.equals(release.manifestBytes) || stagedSignature !== release.signature) throw new Error("staged release metadata changed");
+    const manifest = verifyReleaseManifest(stagedManifestBytes, stagedSignature, {
+      publicKey, assetName: release.assets.zip.name, channel, prerelease: release.release.prerelease,
+      assetDigest: release.assets.zip.digest, assetSize: release.assets.zip.size,
     });
-  } catch {
-    await restoreWatchdog();
-    return finish({ outcome: "failed", message: "更新失败，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
+    if (manifest.version !== targetVersion) throw new Error("release version mismatch");
+    const archive = io.readFileSync(archivePath);
+    const digest = "sha256:" + createHash("sha256").update(archive).digest("hex");
+    if ((release.assets.zip.digest != null && digest !== release.assets.zip.digest) || archive.length !== manifest.size || digest !== "sha256:" + manifest.sha256) throw new Error("staged release digest mismatch");
+    const stageRoot = join(installRoot, "staging");
+    io.mkdirSync(stageRoot, { recursive: true });
+    const extractRoot = io.mkdtempSync(join(stageRoot, runId + "-"));
+    let payload;
+    try {
+      payload = extractReleaseArchive(archive, extractRoot);
+      if (payload.version !== targetVersion) throw new Error("package version mismatch");
+      const targetDir = join(installRoot, "versions", targetVersion);
+      if (io.existsSync(targetDir)) throw new Error("version already exists");
+      io.mkdirSync(dirname(targetDir), { recursive: true });
+      io.renameSync(extractRoot, targetDir);
+    } catch (error) {
+      io.rmSync(extractRoot, { recursive: true, force: true });
+      throw error;
+    }
+
+    const pointerFile = currentPath(installRoot);
+    let previous = null;
+    try {
+      previous = parseCurrentPointer(io.readFileSync(pointerFile, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    setPhase("ready-to-restart");
+    writePointer(pointerFile, targetVersion);
+    const dataRoot = run.relayRoot ?? join(env.LOCALAPPDATA ?? "", "Anyswitch");
+    const targetAppRoot = join(installRoot, "versions", targetVersion, "app");
+    const targetNodePath = join(installRoot, "versions", targetVersion, "runtime", "node.exe");
+    const targetEnv = { ...env, ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_ROOT: targetAppRoot, ANYSWITCH_NODE_PATH: targetNodePath, PATH: [dirname(targetNodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") };
+    const watchdogWasUp = await probeWatchdogFn().catch(() => false);
+    if (watchdogWasUp) watchdogStopped = (await stopWatchdogFn(env).catch(() => ({ ok: false })))?.ok === true;
+    const relay = await restartRelayFn(dataRoot, targetEnv).catch(() => ({ ok: false }));
+    setPhase("waiting-panel");
+    const deadline = nowMs() + panelDownTimeoutMs;
+    let panelDown = false;
+    let targetPanelAlreadyUp = false;
+    while (nowMs() < deadline) {
+      const identity = await probePanelFn(panelPort);
+      if (identity === null) { panelDown = true; break; }
+      if (identity.version === targetVersion) { panelDown = true; targetPanelAlreadyUp = true; break; }
+      await delay(pollMs);
+    }
+    if (panelDown && !targetPanelAlreadyUp) {
+      try { spawnPanelHostFn({ installRoot, appRoot: targetAppRoot, appDir: targetAppRoot, nodePath: targetNodePath, env: targetEnv }); } catch { /* health probe reports failure */ }
+    }
+    let targetPanelHealthy = targetPanelAlreadyUp;
+    const upDeadline = nowMs() + panelUpTimeoutMs;
+    while (!targetPanelHealthy && nowMs() < upDeadline) {
+      const identity = await probePanelFn(panelPort);
+      targetPanelHealthy = identity?.version === targetVersion;
+      if (!targetPanelHealthy) await delay(pollMs);
+    }
+    if (targetPanelHealthy && relay?.ok === true) {
+      if (watchdogStopped) await spawnWatchdogFn(targetEnv).catch(() => {});
+      io.rmSync(stageDir, { recursive: true, force: true });
+      return finish({ outcome: "updated", message: "已更新到 " + targetVersion, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion, relayRestartFailed: false });
+    }
+    if (previous && previous.version !== targetVersion) {
+      writePointer(pointerFile, previous.version);
+      const previousAppRoot = join(installRoot, "versions", previous.version, "app");
+      const previousNodePath = join(installRoot, "versions", previous.version, "runtime", "node.exe");
+      const previousEnv = { ...env, ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_ROOT: previousAppRoot, ANYSWITCH_NODE_PATH: previousNodePath, PATH: [dirname(previousNodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") };
+      await restartRelayFn(dataRoot, previousEnv).catch(() => ({ ok: false }));
+      try { spawnPanelHostFn({ installRoot, appRoot: previousAppRoot, appDir: previousAppRoot, nodePath: previousNodePath, env: previousEnv }); } catch { /* best effort */ }
+      if (watchdogStopped) await spawnWatchdogFn(previousEnv).catch(() => {});
+      // 本轮换装失败：目标目录是本 run 刚落成的（指针已回退、必不指向它），留着
+      // 会让同版本重试永远撞 "version already exists"——删掉，staging 同理。
+      io.rmSync(join(installRoot, "versions", targetVersion), { recursive: true, force: true });
+      io.rmSync(stageDir, { recursive: true, force: true });
+      return finish({ outcome: "rolled_back", message: "新面板未能启动，已恢复到更新前版本", beforeVersion, afterVersion: previous.version, latestVersion: targetVersion });
+    }
+    io.rmSync(pointerFile, { force: true });
+    if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
+    // 首装失败同理：目标目录与 staging 都是本 run 的残留，清掉再收场。
+    io.rmSync(join(installRoot, "versions", targetVersion), { recursive: true, force: true });
+    io.rmSync(stageDir, { recursive: true, force: true });
+    return finish({ outcome: "failed", message: "新面板未能启动，且没有可恢复的旧版本", beforeVersion, afterVersion: null, latestVersion: targetVersion, relayRestartFailed: relay?.ok !== true });
+  } catch (error) {
+    // 停了的看门狗不能因异常收场而无人拉起（对齐 62e69f9 旧版的 restoreWatchdog）：
+    // apply 阶段同步 I/O 异常时面板已换装或已回滚，等面板重启才拉起会留自愈空窗。
+    if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
+    const keyUnavailable = error?.message === "release signing key unavailable";
+    return finish({ outcome: "failed", message: keyUnavailable ? "更新验证失败，请稍后重试" : "更新失败，请重新检查更新后重试", detail: error?.message ?? undefined, beforeVersion, latestVersion: targetVersion });
   }
 }

@@ -1,3 +1,4 @@
+
 // relay-process-manager unit tests.
 //
 // Locks the PID identity gate: stopRelay must never taskkill a PID whose
@@ -20,8 +21,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  getRelayPidPath,
+import {getRelayPidPath,
   writeRelayPid,
   readRelayPid,
   isOwnProcess,
@@ -35,8 +35,7 @@ import {
   createCachedPortOwnerFinder,
   PORT_OWNER_CACHE_TTL_MS,
   probePidLiveness,
-  isPidAlive,
-} from "../src/relay/relay-process-manager.mjs";
+  isPidAlive, relaySpawnTarget } from "../src/relay/relay-process-manager.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 // isOwnProcess verifies against the repo root — the same APP_DIR the source
@@ -747,4 +746,38 @@ test("stopRelay 生产默认链对查不到命令线的 PID 拒杀（fail-safe �
   assert.match(result.reason, /1234/);
   assert.deepEqual(killed, [], "fail-safe 默认链同样不许杀验明不了的 PID");
   assert.equal(powershellSpawns, 1, "async 命令行查询确实跑了一次");
+});
+
+// ── 打包更新换装：目标版本拉起与跨版本杀进程边界 ──────────────────────────
+test("relaySpawnTarget 默认＝本进程 node + 本模块同版 relay-host", () => {
+  const target = relaySpawnTarget({});
+  assert.equal(target.execPath, process.execPath);
+  assert.ok(target.script.endsWith(join("src", "relay", "relay-host.mjs")));
+  assert.equal(target.cwd, join(target.script, ".."));
+});
+
+test("relaySpawnTarget 尊重换装 env 的 ANYSWITCH_NODE_PATH / ANYSWITCH_APP_ROOT（目标版本优先）", () => {
+  const node = join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "runtime", "node.exe");
+  const appRoot = join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "app");
+  const target = relaySpawnTarget({ ANYSWITCH_NODE_PATH: node, ANYSWITCH_APP_ROOT: appRoot });
+  assert.equal(target.execPath, node);
+  assert.equal(target.script, join(appRoot, "src", "relay", "relay-host.mjs"));
+  assert.equal(target.cwd, join(appRoot, "src", "relay"));
+  // 分发器注入的 APP_ROOT（当前版本，与常态等价）也走同一分支
+  const sameVersion = relaySpawnTarget({ ANYSWITCH_APP_ROOT: join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "app") });
+  assert.ok(sameVersion.script.endsWith(join("src", "relay", "relay-host.mjs")));
+});
+
+test("isOwnProcess 打包边界：安装根为界时另一版本的命令行才算自己（跨版本停旧 relay）", () => {
+  const installRoot = join("C:", "Apps", "Anyswitch");
+  const oldVersion = join(installRoot, "versions", "9.9.9");
+  const foreignVersionLine = `"${join(oldVersion, "runtime", "node.exe")}" "${join(oldVersion, "app", "src", "relay", "relay-host.mjs")}"`;
+  // 打包安装的默认信任边界是安装根（OWN_PROCESS_DIR）：另一版本的命令行引用
+  // 同一安装树，跨版本停旧 relay 的杀门必须放行。
+  assert.equal(isOwnProcess(foreignVersionLine, installRoot), true, "安装根为界：另一版本算自己");
+  assert.equal(isOwnProcess(foreignVersionLine, join(installRoot, "versions", "1.0.0", "app")), false, "版本子目录为界时另一版本不是自己（默认边界放宽到安装根的理由）");
+  const ownVersion = join(installRoot, "versions", "1.0.0", "app");
+  assert.equal(isOwnProcess(`"${join(ownVersion, "runtime", "node.exe")}" "${join(ownVersion, "src", "relay", "relay-host.mjs")}"`, ownVersion), true, "同版本正常判");
+  assert.equal(isOwnProcess(foreignVersionLine, join("D:", "Other", "Tree")), false, "别的树不算");
+  assert.equal(isOwnProcess(`node ${join("D:", "Other", "relay-host.mjs")}`, installRoot), false);
 });

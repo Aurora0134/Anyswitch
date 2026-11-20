@@ -4082,7 +4082,6 @@ async function api(method, path, body) {
     const rows = new Map();
     let active = false, environmentGen = 0, updateGen = 0;
     let appInfo = null, local = null, localAt = 0, update = null, updateAt = 0;
-    let bleedingMode = false; // 先行轨道开关（进页从设置现读；渲染层只读它）
     let environmentTask = null, updateTask = null, localFailed = false;
     // 强制重检的单调序号：结果时间戳在同毫秒内会分不出先后，用序号判「这次重检
     // 的发起是否晚于结果落地」。只有晚于结果的那次才读得到安装后的版本。
@@ -4521,8 +4520,7 @@ async function api(method, path, body) {
     function renderSelfUpdateStaged() {
       if (!active || !selfUpdateStaged) return;
       const statusEl = get("aboutUpdateStatus");
-      // 横幅文案以任务自报的结论为准（先行轨的落点是提交标识，稳定轨是版本号）；
-      // 结论缺失时按记录里的目标兜底拼同一句式。
+      // 横幅文案以任务自报的结论为准；结论缺失时按记录里的版本号兜底拼同一句式。
       statusEl.textContent = selfUpdateStaged.message || `已下载 ${selfUpdateStaged.targetVersion || ""}，应用后生效`;
       statusEl.dataset.tone = "";
       get("aboutUpdateTime").textContent = "";
@@ -4630,10 +4628,7 @@ async function api(method, path, body) {
     }
     async function startSelfUpdate() {
       if (selfUpdateRun || !selfUpdateAdopted) return;
-      // 目标标识按轨道取：先行轨是远端最新提交的标识，稳定轨是 release 版本号。
-      // 确认与进度文案用同一份；服务端登记时自会以它自己的强制检查为准。
-      const bleedingTrack = update?.track === "bleeding" && update.identity !== false;
-      const target = bleedingTrack ? (update?.remoteCommit || "") : (update?.release?.version || "");
+      const target = update?.release?.version || "";
       if (!target) return;
       // 一键更新：一次确认覆盖下载与应用两步。下载不动任何运行中的东西，应用才打断
       // 服务——重启提示是底线，有在跑 Agent 时把中断警示叠加上去，两条都要让用户看到。
@@ -4681,7 +4676,7 @@ async function api(method, path, body) {
         const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
         if (running.length) warning += `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），其进行中的请求会被中断。`;
       } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
-      const confirmed = await confirmSelfUpdate(`应用更新 ${staged.track === "bleeding" ? String(staged.targetSha ?? "").slice(0, 7) : staged.targetVersion || ""}`, `${warning}确认现在应用？`, "立即应用");
+      const confirmed = await confirmSelfUpdate(`应用更新 ${staged.targetVersion || ""}`, `${warning}确认现在应用？`, "立即应用");
       if (!confirmed) return;
       if (selfUpdateRun || selfUpdateStaged !== staged) return;
       await applySelfUpdateRun(staged);
@@ -4725,13 +4720,8 @@ async function api(method, path, body) {
       if (active) renderUpdate(Boolean(updateTask));
     }
     function renderApp() {
-      // 先行轨道的版本号带提交标识（app-info 自报的 HEAD 短哈希；无本地 git 身份
-      // 时无后缀、只显徽标）。先行徽标与预览徽标互斥：带提交标识的版本号会被
-      // 误判成预发布，先行时预览徽标必须让位。
-      const commit = typeof appInfo?.commit === "string" ? appInfo.commit : "";
-      get("aboutAppVersion").textContent = bleedingMode && commit ? `${appInfo?.version || ""}-${commit}` : (appInfo?.version || "版本暂时无法读取");
-      get("aboutPreviewBadge").hidden = bleedingMode || !appInfo?.prerelease;
-      get("aboutBleedingBadge").hidden = !bleedingMode;
+      get("aboutAppVersion").textContent = appInfo?.version || "版本暂时无法读取";
+      get("aboutPreviewBadge").hidden = !appInfo?.prerelease;
       const system = local || appInfo;
       if (system) get("aboutSystem").textContent = `${({ win32: "Windows", darwin: "macOS", linux: "Linux" })[system.platform] || "当前系统"} · Node ${system.nodeVersion || "版本未知"}`;
     }
@@ -4741,12 +4731,12 @@ async function api(method, path, body) {
       return `${drift.localCommit || drift.localVersion || ""}:${drift.remoteVersion || ""}`;
     }
     // 不一致提示行：持续状态（条件在它就长期在），静态摆在状态行下方独占一行，
-    // 与「检查时间」同级小字。先行轨道不判游离——先行即常态。
+    // 与「检查时间」同级小字。
     function renderDriftRow() {
       const row = get("aboutDriftRow");
       const notice = get("aboutDriftNotice");
       const dismiss = get("aboutDriftDismiss");
-      const drift = update?.track === "stable" ? update?.drift : null;
+      const drift = update?.drift ?? null;
       if (!drift) {
         row.hidden = true;
         notice.textContent = "";
@@ -4783,16 +4773,9 @@ async function api(method, path, body) {
       // 刚进页补显的最终结论：只能被「又有更新」盖掉，不被「已是最新」盖掉。
       const keepOutcome = selfUpdateLastOutcome && !checking && update?.state !== "update_available";
       const state = update?.state;
-      const drift = update?.track === "stable" ? update?.drift : null;
+      const drift = update?.drift ?? null;
       const status = get("aboutUpdateStatus");
-      // 先行轨按提交身份答话；无 git 身份的先行（镜像安装未引导）回退版本号比较，
-      // 与稳定轨同一套文案。
-      const bleedingTrack = update?.track === "bleeding" && update.identity !== false;
-      const copy = bleedingTrack ? {
-        current: "已是先行版最新",
-        update_available: `发现先行新提交 ${update?.remoteCommit || ""}`,
-        error: "暂时无法检查，请检查网络或代理设置后重试",
-      } : {
+      const copy = {
         update_available: update?.release?.prerelease ? `发现新预览版 ${update?.release?.version || ""}` : `发现新版本 ${update?.release?.version || ""}`,
         // 不一致家族（ahead / 安装游离）：状态行只交代检查发生过，事实在不一致
         // 提示行上；点过「不再显示」后状态行也回落到这句。
@@ -5227,20 +5210,10 @@ async function api(method, path, body) {
         updateBatchButton();
       }, () => {});
     }
-    // 先行轨道开关是运行时设置：进页现读一次（版本号后缀与徽标只由它驱动），
-    // 高级页切换后回到关于页会重新进页、重新读取，不另挂监听。
-    async function refreshBleedingMode() {
-      try {
-        const data = await fetchOnce("/api/settings");
-        bleedingMode = data?.settings?.bleedingEdgeMode === true;
-      } catch { return; }
-      if (active) renderApp();
-    }
     function enter() {
       if (active) return environmentTask || Promise.resolve();
       active = true;
       if (appInfo) renderApp();
-      void refreshBleedingMode();
       renderUpdate();
       renderLocal();
       updateBatchButton();
@@ -5295,7 +5268,7 @@ async function api(method, path, body) {
     // 会重新出现——不是永久关闭。
     get("aboutDriftDismiss").onclick = (event) => {
       event?.preventDefault?.();
-      const drift = update?.track === "stable" ? update?.drift : null;
+      const drift = update?.drift ?? null;
       if (!drift) return;
       try { localStorage.setItem(`anyswitch:drift-shown:${driftFingerprint(drift)}`, "1"); } catch { /* 存档不可写：保持提示，不吞状态 */ }
       renderDriftRow();
@@ -5304,8 +5277,8 @@ async function api(method, path, body) {
     get("clientUpdateModalClose").onclick = () => closeLifecycleModal(false);
     get("clientUpdateModalConfirm").onclick = () => closeLifecycleModal(true);
     get("clientUpdateModal").onclick = (event) => { if (event?.target === get("clientUpdateModal")) closeLifecycleModal(false); };
-    // confirmSelfUpdate 同时暴露给设置视图：先行版开关的双确认复用同一只弹层
-    // （单例+排队语义不变）。弹层开着时遮罩盖住页面，切走即按取消作答，安全。
+    // confirmSelfUpdate 同时暴露给设置视图，供需要二次确认的动作复用同一只弹层。
+    // 弹层开着时遮罩盖住页面，切走即按取消作答，安全。
     return {
       enter,
       leave,
@@ -5446,7 +5419,6 @@ async function api(method, path, body) {
     const injectEffortToggle = $("injectEffortToggle");
     const credentialCacheToggle = $("credentialCacheToggle");
     const autoDownloadUpdatesToggle = $("autoDownloadUpdatesToggle");
-    const bleedingEdgeToggle = $("bleedingEdgeToggle");
     const poolRoutingSeg = $("poolRoutingSeg");
     const poolRoutingDesc = $("poolRoutingDesc");
     const poolRoutingSegBtns = poolRoutingSeg ? Array.from(poolRoutingSeg.querySelectorAll("[data-pool-routing-choice]")) : [];
@@ -5463,6 +5435,23 @@ async function api(method, path, body) {
         b.setAttribute("aria-checked", String((b.dataset.poolRoutingChoice === "balance") === poolRoutingEnabled));
       }
       if (poolRoutingDesc) poolRoutingDesc.textContent = poolRoutingEnabled ? POOL_ROUTING_DESC.balance : POOL_ROUTING_DESC.backoff;
+    }
+    const updateChannelSeg = $("updateChannelSeg");
+    const updateChannelDesc = $("updateChannelDesc");
+    const updateChannelSegBtns = updateChannelSeg ? Array.from(updateChannelSeg.querySelectorAll("[data-update-channel-choice]")) : [];
+    // 两句定稿（2026-11-20 裁决，稳定版句去掉后半句）：只描述当前选中渠道，无句末句号。
+    const UPDATE_CHANNEL_DESC = {
+      stable: "检查更新只提供正式发布的版本",
+      preview: "检查更新提供最新发布的版本，包括尚未正式发布的预览版本",
+    };
+    let updateChannel = "stable";
+    // 选中态与说明句唯一的切换口：载入回显、点选、失败回滚都走这里，两者不各说各话。
+    function applyUpdateChannel(channel) {
+      updateChannel = channel === "preview" ? "preview" : "stable";
+      for (const b of updateChannelSegBtns) {
+        b.setAttribute("aria-checked", String(b.dataset.updateChannelChoice === updateChannel));
+      }
+      if (updateChannelDesc) updateChannelDesc.textContent = UPDATE_CHANNEL_DESC[updateChannel];
     }
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
@@ -5487,7 +5476,7 @@ async function api(method, path, body) {
       on: { title: "抗截断", desc: KEEP_ALIVE_DESC, toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false, poolLoadBalancing: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, poolLoadBalancing: false, updateChannel: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -5779,13 +5768,14 @@ async function api(method, path, body) {
         if (!settingsSaving.autoDownloadUpdates && autoDownloadUpdatesToggle && d.settings && typeof d.settings.autoDownloadUpdates === "boolean") {
           autoDownloadUpdatesToggle.checked = d.settings.autoDownloadUpdates;
         }
-        // 先行版开关：保存中（含确认弹层挂着的那段时间）不被轮询回灌盖回。
-        if (!settingsSaving.bleedingEdge && bleedingEdgeToggle && d.settings && typeof d.settings.bleedingEdgeMode === "boolean") {
-          bleedingEdgeToggle.checked = d.settings.bleedingEdgeMode;
-        }
         // 号池路由双选：保存中不被轮询回灌盖回；选中态与说明句经同一口切换。
         if (!settingsSaving.poolLoadBalancing && poolRoutingSeg && d.settings && typeof d.settings.poolLoadBalancing === "boolean") {
           applyPoolRouting(d.settings.poolLoadBalancing);
+        }
+        // 更新渠道双选：保存中不被轮询回灌盖回；服务端口径只有两值，其余值不回灌
+        // （畸形值后端已按 stable 夹取，前端不重复夹取）。
+        if (!settingsSaving.updateChannel && updateChannelSeg && d.settings && (d.settings.updateChannel === "stable" || d.settings.updateChannel === "preview")) {
+          applyUpdateChannel(d.settings.updateChannel);
         }
         // 运行日志开关：回灌时把左侧那块运行日志的显隐一并跟上，免得设置页与看板
         // 各说各话。
@@ -6326,70 +6316,6 @@ async function api(method, path, body) {
       };
     }
 
-    // ── 先行版（更新通道）：开=确认后只切检测通道（换装仍走关于页的两步更新）；
-    // 关=按回退计划确认——已在稳定节点上直接关，否则先换装回「本地之下的最近
-    // 稳定版本」再关。回退的进度与终态结论都在关于页呈现（换装本来就要换掉本
-    // 进程），确认通过后直接切过去接看；定不出回退计划（网络）时如实回弹开关。
-    if (bleedingEdgeToggle) {
-      bleedingEdgeToggle.onchange = async () => {
-        if (settingsSaving.bleedingEdge) {
-          bleedingEdgeToggle.checked = !bleedingEdgeToggle.checked;
-          return;
-        }
-        const next = bleedingEdgeToggle.checked;
-        settingsSaving.bleedingEdge = true;
-        settingsLoadGen += 1;
-        bleedingEdgeToggle.setAttribute("aria-busy", "true");
-        const revert = () => { bleedingEdgeToggle.checked = !next; };
-        try {
-          if (next) {
-            const confirmed = await about.confirmSelfUpdate(
-              "开启先行版",
-              "开启后只切换更新来源，当前已安装的版本不变；之后检查更新会显示上游最新提交，是否更新到它由你在关于页决定。先行版本包含尚未正式发布的改动。确认开启？",
-              "开启先行版",
-            );
-            if (!confirmed) { revert(); return; }
-            const d = await api("POST", "/api/settings", { bleedingEdgeMode: true });
-            if (!d.ok) { revert(); toast("设置保存失败", true); return; }
-            if (typeof d.settings?.bleedingEdgeMode === "boolean") bleedingEdgeToggle.checked = d.settings.bleedingEdgeMode;
-            toast("已开启先行版");
-            return;
-          }
-          let plan = null;
-          try { plan = await api("GET", "/api/self-update/bleeding-plan"); } catch { plan = null; }
-          if (!plan?.ok) { revert(); toast("暂时无法检查，请检查网络或代理设置后重试", true); return; }
-          let confirmed, rollback = false;
-          if (plan.onStableNode) {
-            const body = plan.baseVersion
-              ? `当前已在稳定版本（${plan.baseVersion}）上，关闭后更新只提供官方正式发布的版本。确认关闭？`
-              : "关闭后更新只提供官方正式发布的版本。确认关闭？";
-            confirmed = await about.confirmSelfUpdate("关闭先行版", body, "关闭先行版");
-          } else {
-            let warning = `关闭前会把 Anyswitch 回退到离当前最近的稳定版本（${plan.baseVersion}）：回退期间面板与 Relay 会自动重启，服务中断几秒钟；安装目录中的手动修改会被覆盖。关闭后，更新只提供官方正式发布的版本。`;
-            try {
-              const data = await api("GET", "/api/agents");
-              const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
-              if (running.length) warning += `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），其进行中的请求会被中断。`;
-            } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
-            confirmed = await about.confirmSelfUpdate("关闭先行版", `${warning}确认回退并关闭？`, "回退并关闭");
-            rollback = true;
-          }
-          if (!confirmed) { revert(); return; }
-          const d = await api("POST", "/api/settings", { bleedingEdgeMode: false });
-          if (!d.ok) { revert(); toast("设置保存失败", true); return; }
-          bleedingEdgeToggle.checked = false;
-          if (!rollback) { toast("已关闭先行版"); return; }
-          // 回退换装即刻开跑：切到关于页接看进度（换装完成时本页随面板换新）。
-          // 起不来（busy 等）也切过去——那边的状态行会如实给出正在进行的任务。
-          try { await api("POST", "/api/self-update/rollback", {}); } catch { /* 状态由关于页如实呈现 */ }
-          activateSettingsSubTab("about");
-        } finally {
-          settingsSaving.bleedingEdge = false;
-          bleedingEdgeToggle.removeAttribute("aria-busy");
-        }
-      };
-    }
-
     // 号池路由双选：即改即存（布尔字段不变），中继每请求现读，改完下一请求即生效。
     // 无成功 toast（2026-11-18 裁决）：选中项高亮当帧移动即反馈，同「UI版本」；
     // 失败回滚选中态＋报错 toast。点已选中项与保存中的点击都忽略。
@@ -6421,6 +6347,41 @@ async function api(method, path, body) {
         const next = b.dataset.poolRoutingChoice === "balance";
         if (next === poolRoutingEnabled) return;
         savePoolRouting(next);
+      };
+    }
+
+    // 更新渠道双选：即改即存，下一轮检查更新按新渠道，无需重启。无成功 toast
+    // （与号池路由同构）：选中项高亮当帧移动即反馈；失败回滚选中态＋报错 toast。
+    // 点已选中项与保存中的点击都忽略。
+    async function saveUpdateChannel(next) {
+      if (settingsSaving.updateChannel) return;
+      const prev = updateChannel;
+      settingsSaving.updateChannel = true;
+      settingsLoadGen += 1;
+      updateChannelSeg.setAttribute("aria-busy", "true");
+      applyUpdateChannel(next);
+      try {
+        const d = await api("POST", "/api/settings", { updateChannel: next });
+        if (!d.ok) {
+          applyUpdateChannel(prev);
+          toast("设置保存失败", true);
+        } else {
+          const saved = d.settings?.updateChannel;
+          applyUpdateChannel(saved === "stable" || saved === "preview" ? saved : next);
+        }
+      } catch (e) {
+        applyUpdateChannel(prev);
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        settingsSaving.updateChannel = false;
+        updateChannelSeg.removeAttribute("aria-busy");
+      }
+    }
+    for (const b of updateChannelSegBtns) {
+      b.onclick = () => {
+        const next = b.dataset.updateChannelChoice;
+        if (next === updateChannel) return;
+        saveUpdateChannel(next);
       };
     }
 

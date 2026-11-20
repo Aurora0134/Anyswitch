@@ -51,10 +51,9 @@ const STOP_TIMEOUT_MS = 6000;
 // 崩溃、原生 abort 这类「日志系统还没来得及活」的输出；logger 行走的收口过的
 // 行，裸子进程噪音不上总线。
 // ---------------------------------------------------------------------------
-// 与 relay-host 的 logs/relay-host.log 同目录、同款 join 惯写法（不走
-// import.meta.url 自指——module-graph 守卫要求自指 URL 在盘，而 logs/
-// 是运行时产物，仓库里不该存在）。
-const WATCHDOG_LOG_PATH = join(dirname(fileURLToPath(import.meta.url)), "../../logs", "watchdog.log");
+// 与 relay-host 的 relay-host.log 同落数据根 logs/（relayDataRoot——跨版本连续，
+// 2026-11-20 用户裁决：清版本目录不能把日志带走；terminal-switch.log 同款先例）。
+const WATCHDOG_LOG_PATH = join(relayDataRoot(process.env), "logs", "watchdog.log");
 const WATCHDOG_LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024;
 
 // relay-host.mjs rotateLogIfNeeded 的看门狗份（启动时轮替一次，运行中不动——
@@ -192,6 +191,21 @@ export function probeWatchdog(port = WATCHDOG_PORT) {
   });
 }
 
+// 拉起看门狗的目标推导（纯函数，供 spawnWatchdog 与测试共用）：常态（面板/
+// 设置在同版本进程里拉起看门狗）＝本进程的 node 与本模块同版的 watchdog 脚本；
+// 自更新换装期 worker 传入的 env 显式携带 ANYSWITCH_NODE_PATH /
+// ANYSWITCH_APP_ROOT——指向目标版本的 node 与脚本，必须优先于本进程，否则
+// 「升级成功」后看门狗还跑在旧版本上。
+export function watchdogSpawnTarget(env = process.env) {
+  const execPath = typeof env.ANYSWITCH_NODE_PATH === "string" && env.ANYSWITCH_NODE_PATH
+    ? env.ANYSWITCH_NODE_PATH
+    : process.execPath;
+  const script = typeof env.ANYSWITCH_APP_ROOT === "string" && env.ANYSWITCH_APP_ROOT
+    ? join(env.ANYSWITCH_APP_ROOT, "src", "agents", "agent-watchdog.mjs")
+    : WATCHDOG_SCRIPT;
+  return { execPath, script, cwd: dirname(script) };
+}
+
 export async function spawnWatchdog(env = process.env, options = {}) {
   const probe = options.probe ?? (() => probeWatchdog());
   if (await probe()) return { ok: true, reused: true };
@@ -211,10 +225,11 @@ export async function spawnWatchdog(env = process.env, options = {}) {
     logFd = null;
   }
   const spawnFn = options.spawnFn ?? spawn;
+  const target = watchdogSpawnTarget(env);
   let child;
   try {
-    child = spawnFn(process.execPath, [WATCHDOG_SCRIPT], {
-      cwd: fileURLToPath(new URL(".", import.meta.url)),
+    child = spawnFn(target.execPath, [target.script], {
+      cwd: target.cwd,
       detached: true,
       stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
       windowsHide: true,

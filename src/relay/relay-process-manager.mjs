@@ -14,10 +14,11 @@
 // itself).
 
 import { existsSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { probeRelay, probeRelayHealth, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
+import { resolveInstallRoot } from "../ops/update-trust.mjs";
 
 // Re-export of the shared constant (openai-server.mjs is the single source of
 // truth): panel.mjs builds its relay-facing URLs and status frame from this,
@@ -33,6 +34,16 @@ const RELAY_HOST_SCRIPT = fileURLToPath(new URL("relay-host.mjs", import.meta.ur
 // This is the trust boundary for the PID identity check before any taskkill.
 // APP_DIR 指仓根（本文件在 src/relay/）：进程身份识别按命令行前缀匹配整个安装树。
 const APP_DIR = fileURLToPath(new URL("../..", import.meta.url));
+// 打包安装的进程身份信任边界放宽到整个安装根：自更新换代后，本进程要停的是
+// 旧版本目录里的 relay（以及回滚时反向），命令行引用的是同一安装树里的不同
+// versions 子目录。源码安装（无安装根）维持 APP_DIR，不放宽。
+const OWN_PROCESS_DIR = (() => {
+  try {
+    return resolveInstallRoot({ appRoot: APP_DIR, env: process.env }) ?? APP_DIR;
+  } catch {
+    return APP_DIR;
+  }
+})();
 
 const PS_QUERY_TIMEOUT_MS = 5000;
 
@@ -350,14 +361,14 @@ export function getProcessCommandLineAsync(pid, deps = {}) {
   });
 }
 
-// A PID may only be terminated when its command line references this app
-// directory. The check is deliberately "command line contains the app dir",
-// NOT "runs relay-host.mjs": the per-launch launchers also legitimately bind
-// 47821, and every one of them is spawned from a script inside this
-// directory. Both slash styles are accepted (spawned command lines may use
-// either). Anything else — foreign process, or a command line we could not
-// read — fails the check.
-export function isOwnProcess(commandLine, appDir = APP_DIR) {
+// A PID may only be terminated when its command line references this app tree
+// (the packaged install root, or the source app directory). The check is
+// deliberately "command line contains the tree", NOT "runs relay-host.mjs":
+// the per-launch launchers also legitimately bind 47821, and every one of them
+// is spawned from a script inside this tree. Both slash styles are accepted
+// (spawned command lines may use either). Anything else — foreign process, or
+// a command line we could not read — fails the check.
+export function isOwnProcess(commandLine, appDir = OWN_PROCESS_DIR) {
   if (typeof commandLine !== "string" || typeof appDir !== "string") return false;
   const haystack = commandLine.toLowerCase();
   const back = appDir.toLowerCase();
@@ -378,9 +389,25 @@ function terminatePid(pid) {
   }
 }
 
+// 拉起 relay 的目标推导（纯函数，供 spawnRelayHost 与测试共用）：
+// 常态（面板/看门狗在同版本进程里拉起 relay）＝本进程的 node 与本模块同版的
+// relay-host。自更新换装期 worker 传入的 env 显式携带 ANYSWITCH_NODE_PATH /
+// ANYSWITCH_APP_ROOT——它们指向目标版本的 node 与脚本，必须优先于本进程，
+// 否则「升级成功」后 relay 还跑在旧版本上。
+export function relaySpawnTarget(env = process.env) {
+  const execPath = typeof env.ANYSWITCH_NODE_PATH === "string" && env.ANYSWITCH_NODE_PATH
+    ? env.ANYSWITCH_NODE_PATH
+    : process.execPath;
+  const script = typeof env.ANYSWITCH_APP_ROOT === "string" && env.ANYSWITCH_APP_ROOT
+    ? join(env.ANYSWITCH_APP_ROOT, "src", "relay", "relay-host.mjs")
+    : RELAY_HOST_SCRIPT;
+  return { execPath, script, cwd: dirname(script) };
+}
+
 function spawnRelayHost(env = process.env) {
-  const child = spawn(process.execPath, [RELAY_HOST_SCRIPT], {
-    cwd: fileURLToPath(new URL(".", import.meta.url)),
+  const target = relaySpawnTarget(env);
+  const child = spawn(target.execPath, [target.script], {
+    cwd: target.cwd,
     detached: true,
     stdio: "ignore",
     windowsHide: true,

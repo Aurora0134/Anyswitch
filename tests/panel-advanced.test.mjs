@@ -555,6 +555,107 @@ test("导入成功经 onImportApplied 通知备份卡刷新列表；失败不通
   assert.match(source, /onImportApplied: \(\) => backupLocation\.refresh\(\)/, "装配处接线");
 });
 
+// 更新通道卡：双选文字钮「稳定版｜预览版」（2026-11-20 裁决，先行版清理后的
+// 渠道入口）。文案为对稿定稿（稳定版句为用户修正稿：去掉后半句），点选即存、
+// 下一轮检查更新按新渠道。这里钉住 markup 文案 ↔ 双选钮 id ↔ 保存/回显接线。
+test("更新通道卡：定稿文案逐字落盘，双选钮结构，不披露机制", () => {
+  assert.ok(html.includes("更新通道"), "卡头");
+  const seg = html.indexOf('id="updateChannelSeg"');
+  assert.ok(seg > 0, "双选钮有稳定 id 供读写");
+  const item = html.slice(html.lastIndexOf('<div class="modal-item">', seg), html.indexOf("<!-- 号池路由逻辑", seg));
+  assert.ok(item.includes('class="seg-switch"'), "沿用「UI版本」同款双选控件");
+  assert.ok(item.includes('data-update-channel-choice="stable" role="radio" aria-checked="true">稳定版</button>'), "稳定版在左且为默认选中");
+  assert.ok(item.includes('data-update-channel-choice="preview" role="radio" aria-checked="false">预览版</button>'), "预览版在右");
+  assert.ok(item.includes('id="updateChannelDesc">检查更新只提供正式发布的版本</div>'), "稳定版定稿说明句为 markup 初值（修正稿，无后半句）");
+  assert.ok(!item.includes("modal-item-title"), "行标题退场，卡头即栏目名");
+  assert.ok(!/先行|bleeding|候选|manifest|签名|回退/.test(item), "不向用户暴露实现细节与已退役的先行版语义");
+});
+
+test("更新通道说明：两句定稿逐字在档，选中态与说明句经同一口切换", () => {
+  const block = source.match(/const UPDATE_CHANNEL_DESC = \{[\s\S]*?function applyUpdateChannel\(channel\) \{[\s\S]*?\n    \}/);
+  assert.ok(block, "定稿常量与回显函数在 panel.js 里");
+  assert.ok(block[0].includes("检查更新只提供正式发布的版本"), "稳定版定稿句（修正稿）");
+  assert.ok(block[0].includes("检查更新提供最新发布的版本，包括尚未正式发布的预览版本"), "预览版定稿句");
+  const makeBtn = (choice) => ({ dataset: { updateChannelChoice: choice }, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } });
+  const run = (channel) => {
+    const btns = [makeBtn("stable"), makeBtn("preview")];
+    const desc = { textContent: "" };
+    return new Function("updateChannelSegBtns", "updateChannelDesc",
+      `${block[0]} applyUpdateChannel(${JSON.stringify(channel)}); return { text: updateChannelDesc.textContent, checked: updateChannelSegBtns.map((b) => b.attrs["aria-checked"]), channel: updateChannel };`)(btns, desc);
+  };
+  const on = run("preview");
+  assert.equal(on.text, "检查更新提供最新发布的版本，包括尚未正式发布的预览版本");
+  assert.deepEqual(on.checked, ["false", "true"], "预览版选中");
+  assert.equal(on.channel, "preview");
+  const off = run("stable");
+  assert.equal(off.text, "检查更新只提供正式发布的版本");
+  assert.deepEqual(off.checked, ["true", "false"], "稳定版选中");
+  assert.equal(off.channel, "stable");
+  assert.equal(run("bogus").channel, "stable", "畸形值夹到 stable");
+});
+
+test("更新通道双选：点选 POST 该设置，以服务端回读值为准，成功无 toast", async () => {
+  const match = source.match(/async function saveUpdateChannel\(next\) \{[\s\S]*?\n    \}/);
+  assert.ok(match, "保存函数在 panel.js 里");
+  const run = (next, api, toasts, applied, settingsSaving) => {
+    const segAttrs = {};
+    const p = new Function(
+      "updateChannelSeg", "updateChannel", "applyUpdateChannel", "settingsSaving", "api", "toast", "panelError",
+      `let settingsLoadGen = 0; ${match[0]} return saveUpdateChannel(${JSON.stringify(next)});`,
+    )({ setAttribute(k, v) { segAttrs[k] = v; }, removeAttribute(k) { delete segAttrs[k]; } },
+      "stable", (v) => applied.push(v), settingsSaving, api, (m) => toasts.push(m), (e, fallback) => fallback);
+    return p.then(() => segAttrs);
+  };
+
+  const onCalls = [];
+  const onToasts = [];
+  const onApplied = [];
+  const onSaving = { updateChannel: false };
+  const onAttrs = await run("preview", async (method, path, body) => {
+    onCalls.push({ method, path, body });
+    assert.equal(onSaving.updateChannel, true, "请求在途时忙标记立起");
+    return { ok: true, settings: { updateChannel: "preview" } };
+  }, onToasts, onApplied, onSaving);
+  assert.deepEqual(onCalls, [{ method: "POST", path: "/api/settings", body: { updateChannel: "preview" } }]);
+  assert.deepEqual(onApplied, ["preview", "preview"]);
+  assert.deepEqual(onToasts, [], "成功无 toast（选中项高亮即反馈）");
+  assert.equal(onSaving.updateChannel, false, "保存标记必须复位");
+  assert.deepEqual(onAttrs, {}, "aria-busy 必须摘掉");
+
+  const echoApplied = [];
+  await run("preview", async () => ({ ok: true, settings: { updateChannel: "stable" } }), [], echoApplied, { updateChannel: false });
+  assert.deepEqual(echoApplied, ["preview", "stable"], "以服务端回读值为准");
+
+  const missApplied = [];
+  await run("preview", async () => ({ ok: true, settings: {} }), [], missApplied, { updateChannel: false });
+  assert.deepEqual(missApplied, ["preview", "preview"], "回读缺失时保持本次点选（同号池路由范式）");
+
+  const failToasts = [];
+  const failApplied = [];
+  await run("preview", async () => ({ ok: false }), failToasts, failApplied, { updateChannel: false });
+  assert.deepEqual(failApplied, ["preview", "stable"], "失败回滚到点选前");
+  assert.deepEqual(failToasts, ["设置保存失败"]);
+
+  const errToasts = [];
+  const errApplied = [];
+  await run("preview", async () => { throw new Error("boom"); }, errToasts, errApplied, { updateChannel: false });
+  assert.deepEqual(errApplied, ["preview", "stable"]);
+  assert.deepEqual(errToasts, ["请求失败"]);
+
+  const busyCalls = [];
+  const busyApplied = [];
+  await run("preview", async () => { busyCalls.push(1); return { ok: true }; }, [], busyApplied, { updateChannel: true });
+  assert.deepEqual(busyCalls, []);
+  assert.deepEqual(busyApplied, []);
+});
+
+test("更新通道：回显接线存在，保存中不被轮询盖回", () => {
+  assert.ok(source.includes('const updateChannelSeg = $("updateChannelSeg");'), "声明取 id");
+  assert.ok(source.includes("settingsSaving.updateChannel"), "纳入保存忙标记");
+  assert.ok(source.includes('!settingsSaving.updateChannel && updateChannelSeg && d.settings && (d.settings.updateChannel === "stable" || d.settings.updateChannel === "preview")'), "回显守忙标记且只认两值");
+  assert.ok(source.includes("applyUpdateChannel(d.settings.updateChannel)"), "回显走统一切换口");
+});
+
 // 号池路由逻辑卡：双选文字钮「退避｜分流」（2026-11-18 裁决，取代旧「智能分流」
 // 开关）。文案为对稿定稿（只描述当前选中模式、中性、不披露机制），即改即存，
 // 中继每请求现读。这里钉住 markup 文案 ↔ 双选钮 id ↔ 保存/回显接线一致。

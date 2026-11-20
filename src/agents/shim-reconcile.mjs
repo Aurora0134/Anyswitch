@@ -36,6 +36,7 @@ import {
   createShimManager,
   renderShimScripts,
   shimFileNames,
+  shimInstallRoot,
   splitPathValue,
   pathEntriesEqual,
   createRegistryPathStore,
@@ -145,8 +146,14 @@ function legacySpecOf(spec) {
  * shimFileNames 的顺序（sh/.cmd/.ps1）与 renderShimScripts 的键（sh/cmd/ps1）
  * 按位一一对应——按文件名去索引渲染结果会恒 undefined，这里是两套命名的桥。
  */
-export function shimSetIsOurs(spec, dir, fs) {
-  const forms = [renderShimScripts(spec), renderShimScripts(legacySpecOf(spec))];
+export function shimSetIsOurs(spec, dir, fs, { installRoot = null } = {}) {
+  // 打包安装下「我们的」有三代形态：分发器门牌（当前）、源码 app 门牌（迁移
+  // 自源码安装的在盘旧版要能被认领改写）、根路径 legacy 门牌。
+  const forms = [
+    renderShimScripts(spec, { installRoot }),
+    renderShimScripts(spec),
+    renderShimScripts(legacySpecOf(spec)),
+  ];
   const names = shimFileNames(spec);
   const kinds = ["sh", "cmd", "ps1"];
   for (let i = 0; i < names.length; i++) {
@@ -205,6 +212,7 @@ export async function reconcileShims(deps = {}) {
   const store = probe.store;
 
   const manager = createShimManager({ env, fs, pathStore, broadcastFn });
+  const installRoot = shimInstallRoot(env);
   const dirFor = (spec) => join(manager.root, spec.dir);
 
   const installed = [];
@@ -225,7 +233,7 @@ export async function reconcileShims(deps = {}) {
       if (spec.retired) {
         // 退役命令永不安装；在盘且是我们的 → 清掉（2026-11-01 孤儿类的自愈）。
         if (hasFiles) {
-          if (shimSetIsOurs(spec, dir, fs)) {
+          if (shimSetIsOurs(spec, dir, fs, { installRoot })) {
             manager.removeShim(spec);
             removed.push(spec.id);
             log("info", `shims: retired command "${spec.command}" removed`);
@@ -239,7 +247,7 @@ export async function reconcileShims(deps = {}) {
       const wanted = isEndpointWired(store, spec.id) && isEndpointInstalled(spec.id, env);
       if (wanted) {
         // 在盘的是异形（用户自己的启动器）就不覆盖：尊重自定义，宁可少装。
-        if (hasFiles && !shimSetIsOurs(spec, dir, fs)) {
+        if (hasFiles && !shimSetIsOurs(spec, dir, fs, { installRoot })) {
           keptForeign.push(spec.id);
           log("warn", `shims: "${spec.command}" has hand-made files, not overwriting`);
           continue;
@@ -248,7 +256,7 @@ export async function reconcileShims(deps = {}) {
         if (result.written.length > 0) (hasFiles ? rewrote : installed).push(spec.id);
         if (!desiredDirs.includes(dir)) desiredDirs.push(dir);
       } else if (hasFiles) {
-        if (shimSetIsOurs(spec, dir, fs)) {
+        if (shimSetIsOurs(spec, dir, fs, { installRoot })) {
           manager.removeShim(spec);
           removed.push(spec.id);
         } else {

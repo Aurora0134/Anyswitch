@@ -497,3 +497,49 @@ function fakeReqRes(path, method) {
   res.json = () => JSON.parse(chunks.join("") || "null");
   return { req, res, json: () => res.json() };
 }
+
+// ── 打包安装形态：分发器门牌的装与改写 ────────────────────────────────────
+test("shimSetIsOurs：打包对账认领源码门牌（迁移自源码安装的在盘旧版可被改写）", () => {
+  const home = makeHome();
+  try {
+    const grok = specOf("grok");
+    const dir = join(home.home, ".config", "anyswitch-bin", "bin-grok");
+    const realFs = { existsSync: (p) => existsSync(p), readFileSync: (p) => readFileSync(p, "utf8") };
+    // 在盘的是源码形态门牌；打包 env 的对账必须认领它（否则升级门牌被当异形跳过）。
+    writeTriplet(grok, dir, grok);
+    assert.equal(shimSetIsOurs(grok, dir, realFs, { installRoot: "C:\\Apps\\Anyswitch" }), true, "源码形态在打包对账下认领");
+    // 在盘的是分发器形态门牌：同样认领（幂等判定）。
+    const dispatcherForm = { ...grok };
+    writeFileSync(join(dir, "grok.cmd"), renderShimScripts(dispatcherForm, { installRoot: "C:\\Apps\\Anyswitch" }).cmd);
+    writeFileSync(join(dir, "grok"), renderShimScripts(dispatcherForm, { installRoot: "C:\\Apps\\Anyswitch" }).sh);
+    writeFileSync(join(dir, "grok.ps1"), renderShimScripts(dispatcherForm, { installRoot: "C:\\Apps\\Anyswitch" }).ps1);
+    assert.equal(shimSetIsOurs(grok, dir, realFs, { installRoot: "C:\\Apps\\Anyswitch" }), true, "分发器形态认领");
+    // 源码对账（installRoot=null）的认领面只有源码形态与 legacy：分发器门牌对它是
+    // 异形——源码安装上出现分发器门牌属于用户自有物，保守不碰（与手写异形同待遇）。
+    assert.equal(shimSetIsOurs(grok, dir, realFs), false, "源码对账不认领分发器形态（保守不碰）");
+  } finally {
+    rmSync(home.home, { recursive: true, force: true });
+  }
+});
+
+test("reconcile：打包 env 装分发器门牌，在盘源码门牌被改写（迁移自愈）", async () => {
+  const home = { home: mkdtempSync(join(tmpdir(), "shim-reconcile-packaged-")), env: null };
+  home.env = { USERPROFILE: home.home, LOCALAPPDATA: join(home.home, "AppData", "Local"), ANYSWITCH_INSTALL_ROOT: "C:\\Apps\\Anyswitch" };
+  try {
+    const grok = specOf("grok");
+    const dir = join(home.home, ".config", "anyswitch-bin", "bin-grok");
+    writeTriplet(grok, dir, grok); // 源码形态在盘（迁移现场）
+    const runner = makeRunner(home);
+    const result = await runner.run();
+    assert.ok(result.ok);
+    assert.ok(result.rewrote.includes("grok"), "源码门牌被改写为分发器形态：" + JSON.stringify(result));
+    const cmdText = readFileSync(join(dir, "grok.cmd"), "utf8");
+    assert.match(cmdText, /call "C:\\Apps\\Anyswitch\\anyswitch\.cmd" "src\\launchers\\grok-launcher\.mjs" %\*/, "改写后是分发器门牌");
+    // 第二轮幂等：零改写。
+    const second = await runner.run();
+    assert.equal(second.rewrote.length, 0);
+    assert.equal(second.installed.length, 0);
+  } finally {
+    rmSync(home.home, { recursive: true, force: true });
+  }
+});
