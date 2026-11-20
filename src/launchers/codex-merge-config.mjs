@@ -281,6 +281,44 @@ function insertTopLevelKey(text, keyLine) {
   return (before ? `${before}\n${keyLine}\n\n` : `${keyLine}\n\n`) + after;
 }
 
+// A top-level selector key in any TOML key form — bare, double- or
+// single-quoted. The re-point rules parse only the bare form; this detector
+// exists so the default anchor never duplicates a quoted selector it
+// cannot see (a duplicated model_provider key fails codex's config load
+// outright).
+const SELECTOR_KEY_LINE_RE = /^\s*(?:"model_provider"|'model_provider'|model_provider)\s*=/;
+
+// Fresh installs never carried a manual config, so codex resolves its
+// built-in "openai" provider and sends every catalog model to
+// api.openai.com — persistent "request timed out" (2026-11-20). Anchor the
+// default selector (auto when present, else the first managed id; the relay
+// routes by the channel-qualified model slug, so one global selector serves
+// every channel). Runs on the head, before the pointer writer and the
+// managed block: the pointer line is stripped and re-inserted every sync,
+// so anchoring on the merged text would flip the two keys' order on the
+// second merge, and anchoring inside the managed block would be dropped by
+// the next stripManagedBlock. Any selector the head already carries —
+// bare or quoted, parseable or not — blocks the anchor, so no duplicate
+// key can be created; protectModelProvider owns re-pointing and removal.
+function anchorDefaultModelProvider(head, managed) {
+  if (managed.length === 0) return head;
+  const lines = head.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) break; // top-level keys end at the first table
+    if (SELECTOR_KEY_LINE_RE.test(lines[index])) return head;
+  }
+  const target = managed.includes(AUTO_CHANNEL_KEY) ? AUTO_PROVIDER_ID : managedProviderId(managed[0]);
+  const keyLine = `model_provider = ${tomlString(target)}`;
+  const tableMatch = head.match(/^[ \t]*\[/m);
+  if (!tableMatch) {
+    const trimmed = head.replace(/\s+$/, "");
+    return (trimmed ? `${trimmed}\n` : "") + keyLine + "\n";
+  }
+  const before = head.slice(0, tableMatch.index).replace(/\s+$/, "");
+  const after = head.slice(tableMatch.index);
+  return (before ? `${before}\n${keyLine}\n\n` : `${keyLine}\n\n`) + after;
+}
+
 // One table per channel. codex speaks only the Responses API
 // (wire_api="responses"); base_url is a plain string concat target with no
 // auto "/v1" suffix, so the full prefix is written out. Pseudo-channels (auto
@@ -371,11 +409,14 @@ function dropLegacyKeys(text) {
 // selector, a stale `anyswitch-*` id from a previous managed set, or a
 // dangling id with no table anywhere. Anything else — a current managed id, a
 // user-defined provider, another built-in — is left untouched, as is an absent
-// selector (codex's default is the user's business, not ours).
+// selector (the fresh-install default anchor is anchorDefaultModelProvider's
+// business, run earlier on the head). When the managed set emptied out
+// entirely, our own stale selector is dropped instead of left dangling: a
+// dangling id fails codex's config load outright, and falling back to
+// codex's default provider is the removal semantics.
 export function protectModelProvider(text, managed) {
   const managedIds = managed.map(managedProviderId);
-  if (managedIds.length === 0) return text;
-  const target = managedIds.includes(AUTO_PROVIDER_ID) ? AUTO_PROVIDER_ID : managedIds[0];
+  const target = managedIds.length === 0 ? null : (managedIds.includes(AUTO_PROVIDER_ID) ? AUTO_PROVIDER_ID : managedIds[0]);
 
   const defined = new Set(managedIds);
   for (const match of text.matchAll(/^\s*\[model_providers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))(?:\.[^\]]*)?\]\s*$/gm)) {
@@ -389,6 +430,13 @@ export function protectModelProvider(text, managed) {
     if (!kv) continue;
     const value = kv[3];
     const staleManaged = value.startsWith(MANAGED_ID_PREFIX) && !defined.has(value);
+    if (managedIds.length === 0) {
+      // Every channel was removed: our stale selector can never resolve
+      // again — drop it. A value outside our prefix stays, ours or not.
+      if (!staleManaged) return text;
+      lines.splice(index, 1);
+      return lines.join("\n");
+    }
     const dangling = !value.startsWith(MANAGED_ID_PREFIX) && value !== "openai"
       && !defined.has(value) && !BUILTIN_PROVIDER_IDS.has(value);
     if (value === "openai" || staleManaged || dangling) {
@@ -452,6 +500,7 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   const catalogModels = catalogTemplate ? collectCodexCatalogModels(providers) : new Map();
   const pointer = extractCatalogPointer(preserved);
   let head = collapseTopLevelBlankRun(pointer.text);
+  head = anchorDefaultModelProvider(head, managed);
   let catalogPointer = "none";
   if (pointer.userPointer !== null) {
     catalogPointer = "user";

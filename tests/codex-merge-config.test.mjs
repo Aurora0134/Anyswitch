@@ -183,10 +183,59 @@ describe("codex-merge-config", () => {
     const builtin = 'model_provider = "ollama"\n';
     const { text: builtinOut } = mergeCodexConfigToml(builtin, extractManagedProviders(STORE), 47821, "tok");
     assert.match(builtinOut, /^model_provider = "ollama"$/m);
+  });
 
-    const absent = 'model = "gpt-6-astra"\n';
-    const { text: absentOut } = mergeCodexConfigToml(absent, extractManagedProviders(STORE), 47821, "tok");
-    assert.doesNotMatch(absentOut, /^model_provider/m);
+  it("anchors a default model_provider when the selector is absent (fresh install)", () => {
+    // A codex installed fresh never carried a manual config, so no selector
+    // exists at all — codex then resolves its built-in "openai" provider and
+    // sends every catalog model to api.openai.com, where the request dies at
+    // the connect phase and the UI keeps reporting request timeouts. The
+    // merge anchors the default onto the managed tables instead; the relay
+    // routes by the channel-qualified model slug on both data-plane routes,
+    // so one global selector serves every channel.
+    const fresh = mergeCodexConfigToml('model = "poke-api~gpt-6-astra"\n', extractManagedProviders(STORE), 47821, "tok");
+    assert.match(fresh.text, /^model_provider = "anyswitch-poke-api"$/m);
+    assert.equal((fresh.text.match(/^\s*(?:"model_provider"|'model_provider'|model_provider)\s*=/gm) || []).length, 1, "exactly one selector key");
+    assert.ok(fresh.text.indexOf("model_provider =") < fresh.text.indexOf(MANAGED_BEGIN), "the key lives outside the managed block");
+    assert.ok(fresh.text.indexOf("model_provider =") < fresh.text.indexOf("[model_providers"), "the key precedes every table");
+
+    const empty = mergeCodexConfigToml("", extractManagedProviders(STORE), 47821, "tok");
+    assert.match(empty.text, /^model_provider = "anyswitch-poke-api"$/m);
+
+    const chained = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveAutoRouteChannel(CHAIN_STORE, "codex"));
+    assert.match(chained.text, /^model_provider = "anyswitch-auto"$/m);
+
+    // A user table ahead of the managed block: the key must precede the FIRST
+    // table header, not merely the managed markers — a top-level key after a
+    // table header is invalid TOML.
+    const userTableFirst = ["[model_providers.corp]", 'name = "Corp"', ""].join("\n");
+    const { text: corpOut } = mergeCodexConfigToml(userTableFirst, extractManagedProviders(STORE), 47821, "tok");
+    assert.match(corpOut, /^model_provider = "anyswitch-poke-api"$/m);
+    assert.ok(corpOut.indexOf("model_provider =") < corpOut.indexOf("[model_providers.corp]"));
+
+    // Empty managed set: nothing to anchor onto, nothing written.
+    const none = mergeCodexConfigToml('model = "gpt-6-astra"\n', {}, 47821, "tok");
+    assert.doesNotMatch(none.text, /^model_provider/m);
+
+    // Stable across re-merges: the anchored selector is a current managed id.
+    const twice = mergeCodexConfigToml(fresh.text, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal(twice.text, fresh.text);
+  });
+
+  it("keeps a quoted selector key the re-point rules cannot parse, without duplicating it", () => {
+    // TOML admits quoted keys; the re-point rules see only the bare form. The
+    // anchor must still recognize the quoted forms as an existing selector —
+    // inserting alongside them would create a duplicate key that fails
+    // codex's config load outright.
+    const doubleQuoted = 'model = "gpt-6-astra"\n"model_provider" = "ollama"\n';
+    const { text: dq } = mergeCodexConfigToml(doubleQuoted, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal((dq.match(/^\s*(?:"model_provider"|'model_provider'|model_provider)\s*=/gm) || []).length, 1);
+    assert.match(dq, /^"model_provider" = "ollama"$/m);
+
+    const singleQuoted = "'model_provider' = \"my-corp\"\n";
+    const { text: sq } = mergeCodexConfigToml(singleQuoted, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal((sq.match(/^\s*(?:"model_provider"|'model_provider'|model_provider)\s*=/gm) || []).length, 1);
+    assert.match(sq, /^'model_provider' = "my-corp"$/m);
   });
 });
 
@@ -878,8 +927,8 @@ describe("blank-line convergence between the top-level key region and the first 
     const once = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
     assert.match(
       once.text,
-      /^model = "gpt-6-astra"\nmodel_catalog_json = "model-catalogs\/anyswitch-models\.json"\n\n\[desktop\]\ntheme = "dark"$/m,
-      "the user's single separating blank survives, the pointer slots into the key region",
+      /^model = "gpt-6-astra"\nmodel_provider = "anyswitch-poke-api"\nmodel_catalog_json = "model-catalogs\/anyswitch-models\.json"\n\n\[desktop\]\ntheme = "dark"$/m,
+      "the anchored selector and the pointer slot into the key region, one separating blank ahead of the first table",
     );
     const twice = mergeCodexConfigToml(once.text, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
     assert.equal(twice.text, once.text);
@@ -906,6 +955,6 @@ describe("blank-line convergence between the top-level key region and the first 
     const { text } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
     assert.match(text, /theme = "dark"\n\n\n\n\[mcp_servers\.fs\]/, "blank lines inside a table are not ours to fold");
     assert.match(text, /^model = "gpt-6-astra"\n\n\nnotify = true$/m, "blank lines between the user's own keys are not ours to fold");
-    assert.match(text, /notify = true\n\n\[desktop\]/, "the band sitting on the first table folds to one blank line");
+    assert.match(text, /notify = true\nmodel_provider = "anyswitch-poke-api"\n\n\[desktop\]/, "the band sitting on the first table folds to one blank line and carries the anchored selector");
   });
 });
