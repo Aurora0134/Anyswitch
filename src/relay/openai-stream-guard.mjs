@@ -47,10 +47,24 @@
 // per endpoint and disabled by default. It only fills genuine gaps, echoing
 // the first real value seen so a well-formed stream stays byte-identical.
 //
+// Thinking-tag purification: some channels wrap a Responses-protocol backend
+// and, when their reasoning→field conversion fails, drop the model's
+// thinking into delta.content still wrapped in literal <thinking>…</thinking>
+// tags (observed 2026-11 on a GPT channel, per-response probabilistic).
+// Field-driven clients render that thinking as body text, and the tagged
+// text replays into history, teaching the model to keep leaking. The guard
+// moves a leading tag span into the reasoning channel before any tracking
+// or forwarding runs — always on, covering the OpenAI passthrough and both
+// translated faces, which consume the guard's output. A stream whose
+// content never matches the tag stays byte-identical; see
+// thinking-repair.mjs for the state machine and the boundary (leading
+// blocks only; once real answer text started, nothing is reclassified).
+//
 // Pure state machine over decoded text. No IO.
 
 import { randomUUID } from "node:crypto";
 import { REASONING_FIELDS } from "./stream.mjs";
+import { ThinkingTagRepair } from "./thinking-repair.mjs";
 
 const ERROR_TYPE = "api_error";
 // Numeric error code for an upstream response that arrived incomplete. 502 is
@@ -220,11 +234,12 @@ function fillChunkEnvelope(parsed, envelope) {
 
 // Apply every per-line repair in a single pass, so a line is re-serialized at
 // most once. Returns the original line untouched when no repair applies — the
-// byte-identical passthrough every non-opted-in channel still relies on.
-function rewriteDataLine(line, parsed, envelope) {
+// byte-identical passthrough every clean stream still relies on (only the
+// always-on thinking purification and the grok envelope fill ever rewrite).
+function rewriteDataLine(line, parsed, envelope, thinkingTouched = false) {
   const strippedEmptyKeys = stripEmptyToolCallKeys(parsed);
   const filledEnvelope = fillChunkEnvelope(parsed, envelope);
-  if (!strippedEmptyKeys && !filledEnvelope) return line;
+  if (!strippedEmptyKeys && !filledEnvelope && !thinkingTouched) return line;
   const nl = line.endsWith("\r\n") ? "\r\n" : "\n";
   const body = line.slice(0, line.length - nl.length);
   const sep = body.slice(5, 6) === " " ? " " : "";
@@ -251,6 +266,8 @@ export class OpenAIStreamGuard {
             created: Math.floor(Date.now() / 1000),
             model: hasText(fillChunkEnvelope.model) ? fillChunkEnvelope.model : "unknown",
           };
+    // Thinking-tag purification state (always on; see thinking-repair.mjs).
+    this.thinkingRepair = new ThinkingTagRepair();
     this.partial = ""; // decoded text not yet forming a complete line
     this.holding = true; // nothing forwarded yet
     this.held = ""; // verbatim text withheld during the hold phase
@@ -371,13 +388,14 @@ export class OpenAIStreamGuard {
       return "";
     }
 
+    const thinkingTouched = this.applyThinkingRepair(parsed);
     this.trackToolCalls(parsed);
     this.trackContent(parsed);
     // The pre-content hold phase: nothing is forwarded until the stream proves
     // usable, so a first-word failure is still a clean retry; the per-call hold
     // below is orthogonal to it.
     if (this.holding) {
-      this.held += rewriteDataLine(line, parsed, this.envelope);
+      this.held += rewriteDataLine(line, parsed, this.envelope, thinkingTouched);
       if (this.isHealthy(parsed)) {
         this.sawContent = true;
         this.holding = false;
@@ -389,10 +407,10 @@ export class OpenAIStreamGuard {
     // until it parses; everything else (text, reasoning, usage) goes through
     // immediately and is shadowed for the resume path.
     if (PER_CALL_HOLD_TOOL_ARGS) {
-      return this.routeForward(rewriteDataLine(line, parsed, this.envelope), parsed);
+      return this.routeForward(rewriteDataLine(line, parsed, this.envelope, thinkingTouched), parsed);
     }
     this.shadowForward(parsed);
-    return rewriteDataLine(line, parsed, this.envelope);
+    return rewriteDataLine(line, parsed, this.envelope, thinkingTouched);
   }
 
   holdOrEmit(line) {
@@ -465,6 +483,44 @@ export class OpenAIStreamGuard {
     for (const field of REASONING_FIELDS) {
       if (typeof delta[field] === "string") this.forwardedReasoning += delta[field];
     }
+  }
+
+  // Move a leading <thinking>…</thinking> span out of delta.content into the
+  // reasoning channel, before tracking or forwarding runs, so the guard
+  // classifies the stream the client actually sees and the resume shadow
+  // accumulates the purified form. Mutates `parsed`; returns whether the
+  // line needs re-serialization.
+  applyThinkingRepair(parsed) {
+    const delta = parsed?.choices?.[0]?.delta;
+    if (delta === null || typeof delta !== "object") return false;
+    if (typeof delta.content !== "string" || delta.content.length === 0) return false;
+    const { text, reasoning } = this.thinkingRepair.push(delta.content);
+    if (reasoning === "" && text === delta.content) return false;
+    delta.content = text;
+    if (reasoning !== "") {
+      // Join the reasoning field the upstream already speaks — a second
+      // populated reasoning field would be dropped by first-match readers —
+      // and only create reasoning_content when none exists.
+      const field = REASONING_FIELDS.find((f) => typeof delta[f] === "string") ?? "reasoning_content";
+      delta[field] = (delta[field] ?? "") + reasoning;
+    }
+    return true;
+  }
+
+  // End-of-stream flush: an unterminated thinking block is thinking, an
+  // undecided prefix never became a tag so it is text. Only a stream that
+  // already forwarded something can still deliver the frame — a held stream
+  // forwarded nothing, so its pending bytes die with the verdict.
+  flushThinkingRepair() {
+    if (this.holding) return "";
+    const { text, reasoning } = this.thinkingRepair.finish();
+    if (text === "" && reasoning === "") return "";
+    const delta = {};
+    if (reasoning !== "") delta.reasoning_content = reasoning;
+    if (text !== "") delta.content = text;
+    const parsed = { choices: [{ index: 0, delta }] };
+    fillChunkEnvelope(parsed, this.envelope);
+    return `data: ${JSON.stringify(parsed)}\n\n`;
   }
 
   // The per-call hold decides whether a frame reaches the client now.
@@ -724,7 +780,8 @@ export class OpenAIStreamGuard {
     // (an argument-less call is legal), otherwise it stays dropped — the
     // client never saw it, so it cannot poison the turn's output.
     const openTail = this.openCall === null ? "" : this.closeOpenCall(true);
-    const tail = openTail + (this.holding ? this.held : this.pendingDone) + this.partial;
+    const repairTail = this.flushThinkingRepair();
+    const tail = openTail + (this.holding ? this.held : repairTail + this.pendingDone) + this.partial;
     this.partial = "";
     if (this.holding) {
       // Nothing was forwarded yet, so every failure shape is safely
