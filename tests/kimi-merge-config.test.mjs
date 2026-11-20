@@ -16,6 +16,7 @@ import {
   deriveAutoRouteChannel,
   takeOverKimiThinkingTable,
 } from "../src/launchers/kimi-merge-config.mjs";
+import { AUTO_CHANNEL_KEY } from "../src/launchers/merge-common.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 const STORE = {
@@ -426,7 +427,7 @@ describe("kimi thinking effort levels", () => {
     const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok");
     const table = tableOf(text, "_poke-api/kimi-k3");
     assert.equal(table.includes("support_efforts"), false);
-    assert.equal(table.includes("capabilities"), false, "没有档位可声明时也不要去声明能力");
+    assert.match(table, /capabilities = \["image_in"\]/, "没有档位可声明时 image_in 仍然声明：客户端的图片入口只认这个键");
   });
 
   it("declares the picker list and the level a session defaults to", () => {
@@ -443,7 +444,7 @@ describe("kimi thinking effort levels", () => {
     // 我们的渠道是 type = "openai"。少这一行，同一份配置在终端能选档、在桌面端
     // 写着「不支持思考强度」（2026-09-23 实测症状）。
     const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", { catalog });
-    assert.match(tableOf(text, "_poke-api/kimi-k3"), /capabilities = \["thinking"\]/);
+    assert.match(tableOf(text, "_poke-api/kimi-k3"), /capabilities = \["image_in", "thinking"\]/);
     assert.equal(
       /always_thinking/.test(text),
       false,
@@ -456,7 +457,65 @@ describe("kimi thinking effort levels", () => {
     const table = tableOf(text, "_poke-api/agnes-image-2.0-flash");
     assert.ok(table.includes("max_context_size"), "the model itself is still declared");
     assert.equal(table.includes("support_efforts"), false);
-    assert.equal(table.includes("capabilities"), false);
+    assert.match(table, /capabilities = \["image_in"\]/, "非文本模型同样只声明 image_in：客户端不设截断，收不了图的模型由 anys 降级链兜底");
+    assert.equal(table.includes("thinking"), false, "没有档位就不声明 thinking");
+  });
+});
+
+describe("kimi image input capability", () => {
+  // kimi 客户端的图片入口（Read 工具读图、READ_MEDIA_FILE 媒体读工具注册）
+  // 只认模型表 capabilities 里的 image_in；未声明的托管模型在客户端第一步就
+  // 被「当前模型不支持图片输入」截杀，请求到不了 relay，anys 的图片降级链
+  // （media-strip）毫无上场机会。故 image_in 对所有托管模型无条件声明。
+  const PROVIDER = {
+    baseURL: "https://poke.example/v1",
+    models: {
+      "kimi-k3": { displayName: "Kimi K3", contextWindow: 1000000 },
+      "glm-5.3": { displayName: "GLM 5.3", contextWindow: 1000000 },
+      "agnes-image-2.0-flash": { displayName: "Agnes", contextWindow: 4096 },
+    },
+  };
+  const catalog = {
+    models: new Map([
+      ["kimi-k3", { kind: "reasoning", levels: ["low", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: "openai" }],
+      ["glm-5.3", { kind: "reasoning", levels: ["medium", "high"], default: "high", wire: {}, thinkingFormat: "openai" }],
+      ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const tableOf = (text, alias) =>
+    text.split(/\n(?=\[)/).find((chunk) => chunk.startsWith(`[models.${JSON.stringify(alias)}]`)) ?? "";
+  const modelTables = (text) =>
+    text.split(/\n(?=\[)/).filter((chunk) => chunk.startsWith('[models.'));
+
+  it("declares image_in on every managed model, with or without effort levels", () => {
+    for (const effort of [null, { catalog }]) {
+      const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", effort);
+      assert.equal(modelTables(text).length, 3, "三个托管模型表都在");
+      for (const alias of ["_poke-api/kimi-k3", "_poke-api/glm-5.3", "_poke-api/agnes-image-2.0-flash"]) {
+        assert.match(tableOf(text, alias), /capabilities = \["image_in/, `${alias} 必须声明 image_in`);
+      }
+    }
+  });
+
+  it("covers the auto pseudo-channel models too", () => {
+    const chainStore = {
+      ...STORE,
+      routingChains: {
+        kimi: { chain: [{ node: "poke-api", model: "claude-opus-5" }] },
+      },
+    };
+    const auto = deriveAutoRouteChannel(chainStore, "kimi");
+    assert.ok(auto, "fixture 必须真能导出伪渠道，否则这条用例是空转");
+    const { text } = buildKimiManagedToml({ [AUTO_CHANNEL_KEY]: auto }, 47821, "tok");
+    assert.match(tableOf(text, "_auto/auto"), /capabilities = \["image_in"\]/, "auto 伪渠道不例外");
+  });
+
+  it("never opens video or audio input, which anys has no degradation path for", () => {
+    const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", { catalog });
+    assert.equal(/video_in/.test(text), false);
+    assert.equal(/audio_in/.test(text), false);
+    assert.equal(/image_out/.test(text), false);
+    assert.equal(/always_thinking/.test(text), false);
   });
 });
 
