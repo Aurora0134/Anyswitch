@@ -52,6 +52,9 @@ const BUNDLED_EFFORT_BASELINE_PATH = fileURLToPath(
 // minimal/low at all). pi and DSH hard-validate against their own fixed level
 // sets that predate it, so their endpoint vocabularies below deliberately
 // exclude it — their pickers clip it away rather than break config load.
+// `ultra` sits above max: the deepest tier the GPT-class upstreams speak
+// (codex carries the word natively). Endpoint vocabularies that predate it
+// clip it away exactly like light.
 export const EFFORT_LEVELS_ORDER = Object.freeze([
   "off",
   "light",
@@ -61,6 +64,7 @@ export const EFFORT_LEVELS_ORDER = Object.freeze([
   "high",
   "xhigh",
   "max",
+  "ultra",
 ]);
 
 export const OPTIMISTIC_EFFORT_LEVELS = Object.freeze(["high", "xhigh", "max"]);
@@ -349,14 +353,15 @@ const AGENT_EFFORT_VOCABULARIES = Object.freeze({
   kimi: null,
   qoder: Object.freeze([]),
   // codex spells its zero level "none" (not "off") and tops out at
-  // ultra/persistent beyond max; those three words never appear in
-  // EFFORT_LEVELS_ORDER, so the clip effectively passes minimal..max and
-  // drops off/light — the request-side dialect fold is the translator's job.
+  // ultra/persistent beyond max. ultra has a library slot of its own (the
+  // GPT-class upstreams speak it), so the clip passes it through; persistent
+  // is still a codex-only word the library space never produces — the
+  // request-side dialect fold is the translator's job.
   codex: Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"]),
   // grok's --reasoning-effort canon is none/minimal/low/medium/high/xhigh/max
   // (user-guide/14-headless-mode.md): same "none" zero spelling as codex but
   // without the ultra/persistent extension, so the clip passes minimal..max
-  // and drops off/light exactly like the codex row above.
+  // and drops off/light/ultra exactly like the codex row above.
   grok: Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
 });
 

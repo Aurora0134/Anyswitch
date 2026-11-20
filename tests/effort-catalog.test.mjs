@@ -128,7 +128,7 @@ describe("normalizeEffortEntry", () => {
     assert.deepEqual(normalizeEffortEntry({ kind: "reasoning", levels: ["turbo"] }), null);
     assert.deepEqual(
       normalizeEffortEntry({ kind: "reasoning", levels: ["high", "high", "ultra", "max"] }).levels,
-      ["high", "max"],
+      ["high", "ultra", "max"],
     );
   });
 
@@ -409,7 +409,7 @@ describe("intersectEffortVocabulary", () => {
     assert.deepEqual(intersectEffortVocabulary(["high"], "qoder"), []);
   });
 
-  it("clips to codex's vocabulary: off/light drop, minimal..max pass", () => {
+  it("clips to codex's vocabulary: off/light drop, minimal..max and ultra pass", () => {
     // codex's zero level is spelled "none", so an "off" library level has no
     // codex word and clips away; "light" is likewise outside its wire set.
     assert.deepEqual(
@@ -417,9 +417,11 @@ describe("intersectEffortVocabulary", () => {
       ["minimal", "low", "medium", "high", "xhigh", "max"],
     );
     assert.deepEqual(intersectEffortVocabulary(["light", "high"], "codex"), ["high"]);
-    // ultra/persistent are codex wire words the library space never produces,
-    // so they never survive the canonical-order filter either.
-    assert.deepEqual(intersectEffortVocabulary(["ultra", "high"], "codex"), ["high"]);
+    // ultra carries a library slot (GPT-class upstreams speak it), so it
+    // survives the canonical-order filter for codex; persistent is still a
+    // codex-only word the library space never produces and never survives.
+    assert.deepEqual(intersectEffortVocabulary(["ultra", "high"], "codex"), ["high", "ultra"]);
+    assert.deepEqual(intersectEffortVocabulary(["ultra", "persistent", "max"], "codex"), ["max", "ultra"]);
   });
 
   it("clips to grok's codex-like vocabulary: off/light drop, minimal..max pass", () => {

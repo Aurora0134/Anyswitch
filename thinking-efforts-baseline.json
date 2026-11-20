@@ -10,7 +10,8 @@
     "medium",
     "high",
     "xhigh",
-    "max"
+    "max",
+    "ultra"
   ],
   "policy": {
     "optimisticDefaultLevels": [
