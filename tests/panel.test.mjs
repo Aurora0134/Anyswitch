@@ -18542,6 +18542,25 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(!/class="log-console"/.test(panelHtml), "伪终端壳退场");
   });
 
+  it("展开态空态卡在册：一行「暂无内容」随 markup 出生，显隐由 syncLogEmpty 切", () => {
+    assert.ok(panelHtml.includes('<div class="live-log-empty" id="logEmpty" hidden>暂无内容</div>'),
+      "空态卡是视口常驻子节点、初值 hidden，文案不由脚本造");
+    const bodyAt = panelHtml.indexOf('id="logBody"');
+    const emptyAt = panelHtml.indexOf('id="logEmpty"');
+    const noteAt = panelHtml.indexOf('id="logLimitNote"');
+    assert.ok(bodyAt > 0 && emptyAt > bodyAt && noteAt > emptyAt, "空态卡在视口内、留痕行之前");
+    assert.match(panelCss, /\.live-log-empty \{[^}]*background: var\(--ll-face\);[^}]*text-align: center;/, "与消息卡同皮");
+    assert.ok(/function syncLogEmpty\(\) \{/.test(panelJs), "显隐函数在册");
+    const viewSrc = panelJs.match(/function renderLogViewport\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    assert.ok(viewSrc.includes("syncLogEmpty()"), "每次视口渲染都同步空态显隐");
+    const expandSrc = panelJs.match(/function setLogExpanded\([\s\S]*?\n  \}/)?.[0] ?? "";
+    const flipAt = expandSrc.indexOf("logExpanded = expanded;");
+    const syncAt = expandSrc.indexOf("syncLogEmpty();");
+    const measureAt = expandSrc.indexOf("logViewHeight(");
+    assert.ok(flipAt >= 0 && syncAt > flipAt && measureAt > syncAt,
+      "展收那拍先切空态再量高，空卡参与舞台测量");
+  });
+
   it("过渡中只显示一份卡面，真实列表保留滚动条槽", () => {
     assert.ok(panelCss.includes('.live-log[data-motion] :is(.live-log-stack, .live-log-viewport) { visibility: hidden; }'));
     assert.match(panelCss, /\.live-log-viewport \{[^}]*scrollbar-gutter: stable;/);
@@ -18671,7 +18690,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
       observe() {}
       disconnect() {}
     }
-    const ids = ["liveLogCard", "liveLog", "liveLogTitle", "logToggle", "logBody", "logStack", "clearLog", "logLevelRows", "logLevelSelect", "logLimitNote"];
+    const ids = ["liveLogCard", "liveLog", "liveLogTitle", "logToggle", "logBody", "logStack", "clearLog", "logLevelRows", "logLevelSelect", "logLimitNote", "logEmpty"];
     if (layout) ids.push("liveLogStage", "logMotion");
     const els = Object.fromEntries(ids.map((id) => [id, new FakeElement("div")]));
     els.liveLog.toggleAttribute = (name, yes) => yes ? els.liveLog.setAttribute(name, "") : els.liveLog.removeAttribute(name);
@@ -18694,6 +18713,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     els.logToggle.setAttribute("aria-expanded", "false");
     els.logBody.tabIndex = -1;
     els.logLevelSelect.value = "";
+    // logEmpty 与 logLimitNote 同口径：初值 hidden＋文案写在 panel.html 里，脚本不另造
+    els.logEmpty.hidden = true;
+    els.logEmpty.textContent = "暂无内容";
     let timers = []; let nextTimerId = 1;
     const frames = [];
     let frameMode = "sync";
@@ -19028,6 +19050,39 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.equal(sandbox.entries.length, 500);
     assert.equal(els.logLimitNote.hidden, false, "有裁掉即揭开");
     assert.equal(els.logLimitNote.textContent, "还有 7 条更早的日志未显示，已写入日志文件");
+  });
+
+  // 展开态零条目：视口里一张与消息卡同皮的空卡撑开一行「暂无内容」。收起态不显示
+  // ——空叠卡没有可看的内容；清空批淡出期间旧卡还在，不抢跑。
+  it("展开态零条目显示空卡一行「暂无内容」；收起、有日志、淡出期间不显示", () => {
+    const { sandbox, els, flush } = makeSandbox();
+    assert.equal(els.logEmpty.hidden, true, "初始收起态不显示");
+    sandbox.setLogExpanded(true);
+    assert.equal(els.logEmpty.hidden, false, "展开且零条目：空卡在位");
+    assert.equal(els.logEmpty.textContent, "暂无内容", "文案取 markup 初值，脚本不另造");
+    sandbox.appendLog({ level: "info", message: "arrive" });
+    assert.equal(els.logEmpty.hidden, true, "有日志即退场");
+    sandbox.setLogExpanded(true);
+    sandbox.handleLogEntry({ type: "clear" });
+    assert.equal(els.logEmpty.hidden, true, "清空批淡出期间旧卡还在，不算空");
+    flush(120);
+    assert.equal(els.logEmpty.hidden, false, "旧卡摘除后落空卡");
+    sandbox.setLogExpanded(false);
+    assert.equal(els.logEmpty.hidden, true, "收起态不显示");
+  });
+
+  it("展开态空卡撑开舞台一行高：不收成零高度的一条边", () => {
+    const { sandbox, els, setReduced } = makeSandbox({ layout: true });
+    // fake 里 logEmpty 默认不挂进 logBody（挂进去会搅动所有数 children 的既有断言）；
+    // 量高需要的桩按真实布局补：rect 给一行卡高，挂进 logBody 让行距注缝认它。
+    els.logEmpty.getBoundingClientRect = () => ({ top: 0, bottom: 35, height: 35 });
+    els.logBody.appendChild(els.logEmpty);
+    setReduced(true);
+    sandbox.setLogExpanded(true);
+    assert.equal(els.logEmpty.hidden, false, "空卡在位");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-view-h"])), 41, "一行卡高＋6px 行距撑开视口");
+    sandbox.setLogExpanded(false);
+    assert.equal(els.logEmpty.hidden, true, "收起即收掉空卡");
   });
 
   it("两态都从最新日志开始显示", () => {

@@ -848,8 +848,10 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="live-log-stage" id="liveLogStage">
               <div class="live-log-stack" id="logStack" aria-hidden="true"></div>
               <!-- logLimitNote：超出保留上限被裁掉的更早日志的留痕行，初始 hidden，
-                   有裁掉才由 panel.js#syncLogLimitNote 填字揭开；常驻视口最旧端。 -->
-              <div class="live-log-viewport" id="logBody" role="log" tabindex="-1" inert><div class="live-log-limit" id="logLimitNote" hidden></div></div>
+                   有裁掉才由 panel.js#syncLogLimitNote 填字揭开；常驻视口最旧端。
+                   logEmpty：展开态零条目时的空态行，与消息卡同皮的一行「暂无内容」，
+                   初始 hidden，显隐只由 panel.js#syncLogEmpty 切；有日志即退场。 -->
+              <div class="live-log-viewport" id="logBody" role="log" tabindex="-1" inert><div class="live-log-empty" id="logEmpty" hidden>暂无内容</div><div class="live-log-limit" id="logLimitNote" hidden></div></div>
               <div class="live-log-motion" id="logMotion" aria-hidden="true" inert></div>
             </div>
           </div>
