@@ -485,6 +485,25 @@ describe("modelEffortSurface", () => {
     );
   });
 
+  it("renames an ordinary model's deepest max to ultra on the codex face only", () => {
+    // 普通模型（库内最高档是 max、没有 ultra）在 codex 词典里最深的一档叫
+    // ultra；目录面改名后 codex 的选择器才列得出来，请求面再折回 max。
+    const ordinary = {
+      models: new Map([["kimi-k3", normalizeEffortEntry({
+        kind: "reasoning", levels: ["low", "high", "max"], default: "max",
+      })]]),
+    };
+    const codex = modelEffortSurface("kimi-k3", { catalog: ordinary, agent: "codex" });
+    assert.deepEqual(codex.levels, ["low", "high", "ultra"]);
+    assert.equal(codex.default, "ultra", "默认档落在改名的这一档上时同步改名");
+    // 其余端点的词表没有 ultra，档位名与默认档都不动。
+    for (const agent of ["dsh", "pi", "grok", "kimi", "zcode"]) {
+      const surface = modelEffortSurface("kimi-k3", { catalog: ordinary, agent });
+      assert.deepEqual(surface.levels, ["low", "high", "max"], agent);
+      assert.equal(surface.default, "max", agent);
+    }
+  });
+
   it("says nothing for a non-text model", () => {
     assert.equal(modelEffortSurface("agnes-image-2.0-flash", { catalog, agent: "pi" }), null);
   });

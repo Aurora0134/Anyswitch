@@ -113,6 +113,38 @@ describe("createEffortInjector.inject", () => {
     }).injected, "xhigh");
   });
 
+  it("restores the codex face's ultra back to max for a row with no ultra of its own", () => {
+    const { injector } = makeInjector();
+    // codex 面把 glm-5.3 的最深档报成 ultra；客户端选 ultra 回来时还原 max。
+    const chosen = injector.inject({
+      providerId: "p", body: bodyFor("glm-5.3"), clientEffort: { stated: true, level: "ultra" },
+    });
+    assert.equal(chosen.body[EFFORT_REQUEST_FIELD], "max");
+    assert.equal(chosen.injected, "max");
+
+    // Responses 面翻译后字段已在 body 里（codex 的 reasoning.effort 透成
+    // reasoning_effort）：同样还原，且不算我们注入的档位——拒绝重试不该删掉
+    // 客户端自己的选择。
+    const carried = injector.inject({
+      providerId: "p", body: { ...bodyFor("glm-5.3"), [EFFORT_REQUEST_FIELD]: "ultra" },
+    });
+    assert.equal(carried.body[EFFORT_REQUEST_FIELD], "max");
+    assert.equal(carried.injected, null);
+
+    // 真带 ultra 的行原样放行。
+    const gpt = injector.inject({
+      providerId: "p", body: { ...bodyFor("gpt-5.6-luna"), [EFFORT_REQUEST_FIELD]: "ultra" },
+    });
+    assert.equal(gpt.body[EFFORT_REQUEST_FIELD], "ultra");
+
+    // 库里没有的模型走乐观兜底（high/xhigh/max）：codex 面同样改名，回来的
+    // ultra 也必须还原，否则未知上游会收到一档它未必认识的拼写。
+    const unknown = injector.inject({
+      providerId: "p", body: bodyFor("brand-new-model"), clientEffort: { stated: true, level: "ultra" },
+    });
+    assert.equal(unknown.body[EFFORT_REQUEST_FIELD], "max");
+  });
+
   it("forwards a name the shared ladder does not know, unclipped", () => {
     const { injector } = makeInjector();
     const result = injector.inject({

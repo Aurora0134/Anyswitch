@@ -38,6 +38,7 @@
 
 import {
   EFFORT_LEVELS_ORDER,
+  codexTopLevelAliased,
   getEffortCatalog,
   resolveModelEfforts,
   resolveDeclaredEfforts,
@@ -182,6 +183,23 @@ export function createEffortInjector({
   }
 
   /**
+   * The codex face renames an ordinary model's deepest level, max, to ultra
+   * (effort-catalog.mjs's CODEX_TOP_ALIAS). A request that comes back saying
+   * ultra therefore names a level the upstream may not know; rename it to the
+   * max it stands for. Rows that genuinely carry ultra are left alone, and so is
+   * every other spelling. The predicate is the config face's own, so the two
+   * directions cannot drift apart.
+   */
+  function restoreCodexTopLevel(rawId, level, model, provider) {
+    if (level !== "ultra") return level;
+    const catalog = currentCatalog();
+    const levels = modelDeclaresOwnEfforts(model, provider)
+      ? resolveDeclaredEfforts(rawId, { catalog, model, provider }).levels
+      : resolveModelEfforts(rawId, catalog).levels;
+    return codexTopLevelAliased(levels) ? "max" : level;
+  }
+
+  /**
    * @param {{ providerId: string, body: object, clientEffort?: {stated: boolean,
    *           level: string|null}|null, model?: object, provider?: object }} args
    * @returns {{ body: object, injected: string|null }} the body to send and the
@@ -191,13 +209,27 @@ export function createEffortInjector({
   function inject({ providerId, body, clientEffort = null, model = null, provider = null }) {
     if (body === null || typeof body !== "object" || Array.isArray(body)) return { body, injected: null };
     if (!enabled()) return { body, injected: null };
-    if (EFFORT_REQUEST_FIELD in body) return { body, injected: null };
     if (rejectedChannels.has(providerId)) return { body, injected: null };
+    if (EFFORT_REQUEST_FIELD in body) {
+      // A client that wrote the field itself is never overridden — except the
+      // one name the codex face invented. That is our rename coming home, not a
+      // fresh choice of the client's: send the max it stands for.
+      const stated = body[EFFORT_REQUEST_FIELD];
+      if (typeof stated === "string" && stated.length > 0) {
+        const normalized = stated.toLowerCase();
+        const restored = restoreCodexTopLevel(body.model, normalized, model, provider);
+        if (restored !== normalized) {
+          return { body: { ...body, [EFFORT_REQUEST_FIELD]: restored }, injected: null };
+        }
+      }
+      return { body, injected: null };
+    }
     if (clientEffort?.stated) {
       if (typeof clientEffort.level !== "string" || clientEffort.level.length === 0) {
         return { body, injected: null };
       }
-      const level = clampToStatedLevels(body.model, clientEffort.level, model, provider);
+      const restored = restoreCodexTopLevel(body.model, clientEffort.level.toLowerCase(), model, provider);
+      const level = clampToStatedLevels(body.model, restored, model, provider);
       if (!level) return { body, injected: null };
       return { body: { ...body, [EFFORT_REQUEST_FIELD]: level }, injected: level };
     }
