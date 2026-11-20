@@ -55,9 +55,11 @@ const RESPONSE_REQUEST_COPY_FIELDS = [
 ];
 
 // codex's effort vocabulary onto the library's EFFORT_LEVELS_ORDER (see
-// effort-catalog.mjs): "none" is the library's "off", and ultra/persistent
-// sit above the library ceiling so they fold down to "max".
-const CODEX_EFFORT_FOLD = { none: "off", ultra: "max", persistent: "max" };
+// effort-catalog.mjs): "none" is the library's "off"; ultra now has a
+// library level (GPT-class upstreams take it natively) and passes through
+// as-is; "persistent" is codex-only with no library level and still folds
+// down to "max".
+const CODEX_EFFORT_FOLD = { none: "off", persistent: "max" };
 
 // ── shared leaf helpers ────────────────────────────────────────────────────
 
