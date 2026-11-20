@@ -9709,16 +9709,22 @@ async function api(method, path, body) {
     // 外层滚动盒是静态基名 id（终端屏唯一，无按列定址）。
     const screen = $("terminalScreen");
     if (!screen) return;
+    const viewport = root.querySelector(".xterm-viewport");
     let viewportBeforeUp = null;
+    const pendingUp = () => {
+      const before = viewportBeforeUp;
+      if (!before || Date.now() - before.at > TERMINAL_SCROLL_INTENT_MS) return null;
+      return before.type === term.buffer.active.type ? before : null;
+    };
     const trimOuterBand = () => {
       terminalBottomAlignTrimFrame = null;
-      const before = viewportBeforeUp;
-      viewportBeforeUp = null;
+      if (!screen.contains(root)) return;
+      const before = pendingUp();
+      const movedUp = !!before && term.buffer.active.viewportY < before.y;
+      if (movedUp || !before) viewportBeforeUp = null;
       if (!terminalBottomAlignEnabled()) return;
       if (terminalImeHold) return;             // 组字期不动几何
       if ($("terminalView")?.hidden) return;  // 隐藏期不量不动
-      const buffer = term.buffer.active;
-      const movedUp = before?.type === buffer.type && buffer.viewportY < before?.y;
       trimTerminalOuterBand(screen, term, movedUp);
     };
     const scheduleTrim = () => {
@@ -9728,14 +9734,20 @@ async function api(method, path, body) {
     };
     const noteUpIntent = () => {
       const buffer = term.buffer.active;
-      viewportBeforeUp ??= { type: buffer.type, y: buffer.viewportY };
       terminalBottomAlignIntentAt = Date.now();
+      const before = pendingUp();
+      viewportBeforeUp = { type: buffer.type, y: before?.y ?? buffer.viewportY, at: terminalBottomAlignIntentAt };
       scheduleTrim();
     };
     root.addEventListener("wheel", (event) => { if (event.deltaY < 0) noteUpIntent(); }, { capture: true, passive: true });
     root.addEventListener("keydown", (event) => {
       if (event.shiftKey && event.key === "PageUp") noteUpIntent();
     }, { capture: true, passive: true });
+    // 原生滚轮可能在首轮测量之后才更新 viewportY；等 xterm 的滚动监听落位后补测。
+    viewport?.addEventListener("scroll", () => {
+      const before = pendingUp();
+      if (before && term.buffer.active.viewportY < before.y) scheduleTrim();
+    }, { passive: true });
     // 滚动事件流内逐步收：带内滚动（滚轮到底后链入外层）在意图时效窗内即收——
     // 任何滚速下带子随滚动逐拍消失，视口内容不跳。
     screen.addEventListener("scroll", () => {

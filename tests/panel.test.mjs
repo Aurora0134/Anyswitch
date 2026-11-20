@@ -12999,6 +12999,7 @@ describe("虚拟终端底部自动对齐", () => {
       return { installTerminalBottomAlign, makeEl, els, column };
     `)(state);
     const root = sandbox.makeEl();
+    const viewport = sandbox.makeEl();
     const screen = sandbox.makeEl();
     screen.scrollHeight = 900;
     screen.clientHeight = 600;
@@ -13011,7 +13012,7 @@ describe("虚拟终端底部自动对齐", () => {
     screen.clientTop = 2;
     screen.getBoundingClientRect = () => ({ top: 60 });
     const renderer = { getBoundingClientRect: () => ({ top: 80 - screen.scrollTop, height: 840 }) };
-    root.querySelector = (selector) => selector === ".xterm-screen" ? renderer : null;
+    root.querySelector = (selector) => selector === ".xterm-screen" ? renderer : selector === ".xterm-viewport" ? viewport : null;
     screen.contains = (element) => element === root;
     sandbox.els.terminalScreen = screen;
     sandbox.els.terminalView = { get hidden() { return state.viewHidden; } };
@@ -13027,7 +13028,7 @@ describe("虚拟终端底部自动对齐", () => {
     };
     sandbox.installTerminalBottomAlign(term);
     const flush = () => { for (const cb of state.rafQueue.splice(0)) cb(); };
-    return { state, root, screen, term, column: sandbox.column, writes, flush };
+    return { state, root, viewport, screen, term, column: sandbox.column, writes, flush };
   }
 
   it("开关关：上滚意图不动作，外层 scrollTop 原样", () => {
@@ -13083,6 +13084,24 @@ describe("虚拟终端底部自动对齐", () => {
       assert.deepEqual(writes, [0, 230], "外层滚动回调不会继续写入");
     });
   }
+
+  it("原生滚轮晚一帧换页时仍保留末行", () => {
+    const { root, viewport, screen, term, writes, flush } = alignSandbox({ lines: { 467: "last visible row" } });
+    const buffer = term.buffer.active;
+    buffer.viewportY = 468;
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    assert.equal(screen.scrollTop, 0, "当前页底部没有字，可以收掉空带");
+
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    buffer.viewportY = 439;
+    viewport.fire("scroll");
+    flush();
+    assert.equal(screen.scrollTop, 230, "原生滚动换页后，末行底缘回到裁切线");
+    assert.equal(buffer.viewportY, 439, "仍停在用户翻到的位置");
+    assert.deepEqual(writes, [0, 230]);
+  });
 
   it("无空带不动：scrollHeight==clientHeight 时上滚零写；行高取整残余（<阈值）同样不动", () => {
     const tight = alignSandbox();
