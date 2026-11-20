@@ -2976,6 +2976,7 @@ async function api(method, path, body) {
     }
     if (logExpanded && followLogs) body.scrollTop = 0;
     syncLogLimitNote();
+    syncLogEmpty();
   }
 
   // 超出 LOG_LINE_CAP 被裁掉的行在展开视口底部留一行静态提示（markup 初值
@@ -2991,6 +2992,17 @@ async function api(method, path, body) {
     } else {
       note.hidden = true;
     }
+  }
+
+  // 展开态零条目：视口里放一张与消息卡同皮的空卡（markup 初值 hidden），卡自己
+  // 撑开一行高——空日志展开时不收成零高度的一条边，里面有一行字可看。收起态不
+  // 显示：空叠卡没有可看的内容，露出来只是噪声。显隐只跟「展开且零条目」走，
+  // 清空批淡出期间旧卡还在，不算空。与留痕行同为视口常驻子节点，不参与两层
+  // 交接与逐条动效。
+  function syncLogEmpty() {
+    const el = $("logEmpty");
+    if (!el) return;
+    el.hidden = !(logExpanded && logEntries.length === 0);
   }
 
   function renderLogStack() {
@@ -3240,6 +3252,8 @@ async function api(method, path, body) {
     }
     syncLogGutter();
     logExpanded = expanded;
+    // 空态卡先切再量高：展开态零条目时它参与舞台测量，卡才撑得开这一行。
+    syncLogEmpty();
     if (root) {
       if (from) root.setAttribute('data-motion', expanded ? 'expanding' : 'collapsing');
       root.dataset.state = expanded ? 'expanded' : 'collapsed';
