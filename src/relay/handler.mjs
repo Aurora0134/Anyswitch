@@ -37,6 +37,7 @@ import {
   passesDesktopPickerFilter,
 } from "../panel/desktop-route-alias.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
+import { repairNonStreamThinking } from "./thinking-repair.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "../catalog/effort-injection.mjs";
 import { requestModelIsTextOnly, looksLikeTextOnlyRejection } from "../catalog/text-models.mjs";
 import { requestHasImages, stripImages, noteImageFallback } from "./media-strip.mjs";
@@ -639,7 +640,10 @@ export function createHandler(deps) {
     } finally {
       upstreamFetch.releaseResponse?.(upstream);
     }
-    return { status: 200, body: openAIToAnthropic(payload, body.model) };
+    // A leading <thinking> block in message.content is purified into the
+    // reasoning channel before translation, so the Anthropic client renders
+    // a thinking block instead of tagged body text (thinking-repair.mjs).
+    return { status: 200, body: openAIToAnthropic(repairNonStreamThinking(payload), body.model) };
   }
 
   // 档位映射 (Claude Code tier entries) — the takeover pre-flight.

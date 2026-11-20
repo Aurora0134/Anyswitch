@@ -10,6 +10,7 @@ import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } fro
 import { buildChannelModelSlugCatalog } from "../channels/channel-model-slug.mjs";
 import { requestModelIsTextOnly, looksLikeTextOnlyRejection } from "../catalog/text-models.mjs";
 import { requestHasImages, stripImages, noteImageFallback } from "./media-strip.mjs";
+import { repairNonStreamThinking } from "./thinking-repair.mjs";
 import { imageFallbackEnabled, imageHeuristicEnabled, poolLoadBalancingEnabled } from "./relay-settings.mjs";
 
 // The optional `code` rides inside the error object. OpenAI's own error
@@ -565,7 +566,11 @@ export function createOpenAIHandler(deps) {
     } finally {
       upstreamFetch.releaseResponse?.(upstream);
     }
-    return { status: 200, body: payload };
+    // The non-streaming exit point of the OpenAI face: a leading <thinking>
+    // block in message.content moves to the reasoning channel here (the
+    // streaming faces run the same repair inside the stream guard; see
+    // thinking-repair.mjs).
+    return { status: 200, body: repairNonStreamThinking(payload) };
   }
 
   // Pool routing pre-flight. Returns:
