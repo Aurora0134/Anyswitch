@@ -18866,9 +18866,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.ok(els.logBody.inert);
   });
 
-  it("叠卡景深阶梯三档在册：错位 22px、后层缩放 0.95/0.90、文字虚化 0.5/1px，不画卡沿", () => {
+  it("叠卡景深阶梯三档在册：错位 18px、后层缩放 0.95/0.90、文字虚化 0.5/1px，不画卡沿", () => {
     const rootBlock = panelCss.match(/\.live-log \{([\s\S]*?)\}/)?.[1] ?? "";
-    assert.ok(/--ll-step: 22px;/.test(rootBlock), "层间错位回 22px：每层露出整行 meta");
+    assert.ok(/--ll-step: 18px;/.test(rootBlock), "层间错位收紧到 18px（2026-11-20 用户回调）：每层露出约一行 meta 边带");
     assert.ok(/--ll-scale-1: 0\.95; --ll-scale-2: 0\.90;/.test(rootBlock), "后层缩放在原版 0.96/0.92 上加深一档（2026-11-19 用户回调）");
     assert.ok(/--ll-blur-1: 0\.5px; --ll-blur-2: 1px;/.test(rootBlock), "文字虚化在原版 0.4/0.8 上加深一档");
     assert.ok(!/live-log-depth/.test(panelCss) && !panelHtml.includes("logDepth"), "卡沿层整体退场：收起叠卡只画三张卡，多卡不再露底缘细条");
@@ -19066,7 +19066,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     assert.deepEqual(slots, ["0", "1", "2"], "三张各占一层，无重复槽位");
     els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
     sandbox.appendLog({ level: "info", message: "s4" });
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 88, "舞台包住三层错位后的最底卡边");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 80, "舞台包住三层错位后的最底卡边");
   });
 
   it("槽宽量自视口并写回根变量：两层同宽，平台槽宽变化跟得上", () => {
@@ -19095,9 +19095,9 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     sandbox.appendLog({ level: "info", message: "k2" });
     els.logStack.children.forEach((n) => { n.offsetHeight = 49; });
     sandbox.appendLog({ level: "info", message: "k3" });
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 88, "舞台包住已测量的卡片");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 80, "舞台包住已测量的卡片");
     // 切到别的页：看板 display:none，叠卡 offsetHeight 全 0。隐藏期间到来的两行卡
-    // 量不到高——陈旧值必须留着（擦成 0 舞台会掉到 44px，那才是真裁）
+    // 量不到高——陈旧值必须留着（擦成 0 舞台会掉到 36px，那才是真裁）
     els.logStack.offsetHeight = 0;
     els.logStack.offsetWidth = 0;
     roInstances[0].cb();
@@ -19112,7 +19112,7 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     els.logStack.offsetWidth = 320;
     els.logStack.children.forEach((n) => { n.offsetHeight = 66; });
     roInstances[0].cb();
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 103, "恢复可见后重新测量");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 95, "恢复可见后重新测量");
   });
 
   it("离场卡参与卡高测量：最高卡淡出期间舞台不缩，底卡下端不被裁", () => {
@@ -19127,12 +19127,12 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     setH("old-tall", 66); setH("new-1", 49);
     sandbox.appendLog({ level: "info", message: "new-2" });
     setH("new-2", 49);
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 103, "覆盖最高卡的下边缘");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 95, "覆盖最高卡的下边缘");
     // 新单行到达：old-tall 离场。它仍以 scale 0.9 占着第三层淡出——若排除出测量，
-    // 舞台立刻缩到 93，离场卡底边（44+0.9×66≈103）被 overflow 裁掉。
+    // 舞台立刻缩到 80，离场卡底边（36+0.9×66≈95）被 overflow 裁掉。
     sandbox.appendLog({ level: "info", message: "new-3" });
     setH("new-3", 49);
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 103, "淡出期间仍覆盖最高卡");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 95, "淡出期间仍覆盖最高卡");
     const leaving = els.logStack.children.find((c) => c.classList.contains("is-leaving"));
     assert.ok(leaving && leaving.innerHTML.includes("old-tall"), "最高卡进入离场档");
   });
@@ -19148,10 +19148,10 @@ describe("看板运行日志：无框消息提示式双态流", () => {
     setH("new-2", 49); setH("new-1", 49); setH("old-tall", 66);
     sandbox.appendLog({ level: "info", message: "new-3" });
     setH("new-3", 49);
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 103);
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 95);
     flush(200); // 离场计时器到点：摘卡＋补测
     assert.ok(!els.logStack.children.some((c) => c.innerHTML.includes("old-tall")), "离场卡已摘除");
-    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 88, "摘除后舞台收紧");
+    assert.equal(Math.round(parseFloat(els.liveLog.style["--ll-collapsed-h"])), 80, "摘除后舞台收紧");
   });
 
 
