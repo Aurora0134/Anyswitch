@@ -99,6 +99,10 @@ describe("thinking-efforts 脱敏基线", () => {
     assert.equal(models["minimax-m3.1-flash"].default, "max");
     assert.equal(models["agnes-image-2.0-flash"].kind, "non-text");
     assert.equal(models["agnes-image-2.0-flash"].levels, null);
+    // 2026-11-20 新模型批次：官方文档三档与 Gemini 4 原生（无 max）各钉一条
+    assert.deepEqual(models["kimi-k3.1-pro"].levels, ["low", "high", "max"]);
+    assert.equal(models["kimi-k3.1-pro"].default, "max");
+    assert.deepEqual(models["gemini-4-neon"].levels, ["low", "medium", "high", "xhigh"]);
   });
 
   it("运行时指针钉死：操作者库缺席时，兜底加载的就是产品自己定位的这份仓根基线", () => {

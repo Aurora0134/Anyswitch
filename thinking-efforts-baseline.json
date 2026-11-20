@@ -126,6 +126,18 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "agnes-3.0-flash": {
+      "levels": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "optimistic-default",
+      "confidence": "guess",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "agnes-image-2.0-flash": {
       "levels": null,
       "default": null,
@@ -264,6 +276,20 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "claude-fable-5-1": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "claude-haiku-3-5": {
       "levels": [
         "high",
@@ -286,6 +312,20 @@
       ],
       "default": "high",
       "source": "pi-ai:no-map",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "claude-haiku-5-5": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "models.dev",
       "confidence": "high",
       "kind": "reasoning",
       "userEdited": false
@@ -428,6 +468,20 @@
       },
       "rule": "Claude opus/sonnet 4.6 及以上补 high"
     },
+    "claude-opus-5-5": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "claude-sonnet-3-5": {
       "levels": [
         "high",
@@ -524,6 +578,20 @@
       },
       "rule": "Claude opus/sonnet 4.6 及以上补 high"
     },
+    "claude-sonnet-5-5": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "codex-auto-review": {
       "levels": [
         "high",
@@ -533,6 +601,16 @@
       "default": "high",
       "source": "optimistic-default",
       "confidence": "guess",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "cohere-north-mini-code": {
+      "levels": [
+        "high"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
       "kind": "reasoning",
       "userEdited": false
     },
@@ -784,6 +862,48 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "deepseek-v4.1-flash-1017": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "DeepSeek V4.1 Flash（含官方改名 deepseek-flash）用原生三档 low/high/max"
+    },
+    "deepseek-v4.1-flash-uncensored": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "DeepSeek V4.1 Flash（含官方改名 deepseek-flash）用原生三档 low/high/max"
+    },
     "dev": {
       "levels": null,
       "default": null,
@@ -804,6 +924,27 @@
       "confidence": "medium",
       "kind": "reasoning",
       "userEdited": false
+    },
+    "doubao-seed-2.1-lite": {
+      "levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "doubao-seed-2.1-lite 按火山引擎官方参数表四档 minimal/low/medium/high，默认 high"
     },
     "doubao-seed-2.1-turbo": {
       "levels": [
@@ -1065,6 +1206,56 @@
       },
       "rule": "gemini 3.7 及以上补 xhigh/max"
     },
+    "gemini-4-argon": {
+      "levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "gemini-4-carbon": {
+      "levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "gemini-4-hydrogen": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "gemini-4-neon": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "gemini-embedding-2": {
       "levels": null,
       "default": null,
@@ -1189,6 +1380,18 @@
         "kind": "reasoning"
       },
       "rule": "GLM 5.2 及以上补 xhigh + GLM 5.3 补 max"
+    },
+    "glm-5.3-flashx": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
     },
     "glm-z1-9b-0414": {
       "levels": [
@@ -1351,6 +1554,166 @@
       },
       "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
     },
+    "gpt-6-luna": {
+      "levels": [
+        "light",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "light": "light",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "ultra": "ultra"
+      },
+      "preOperator": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+    },
+    "gpt-6-sol": {
+      "levels": [
+        "light",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "light": "light",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "ultra": "ultra"
+      },
+      "preOperator": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+    },
+    "gpt-6.1-sol": {
+      "levels": [
+        "light",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "light": "light",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "ultra": "ultra"
+      },
+      "preOperator": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+    },
+    "gpt-6.2-astra": {
+      "levels": [
+        "light",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "light": "light",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "ultra": "ultra"
+      },
+      "preOperator": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+    },
+    "gpt-6.2-sol": {
+      "levels": [
+        "light",
+        "medium",
+        "high",
+        "xhigh",
+        "ultra"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "light": "light",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "ultra": "ultra"
+      },
+      "preOperator": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+    },
     "gpt-image-2": {
       "levels": null,
       "default": null,
@@ -1495,6 +1858,30 @@
       },
       "rule": "grok 4.5/4.6 补 xhigh/max"
     },
+    "grok-4.7": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "grok 4.5/4.6 补 xhigh/max"
+    },
     "grok-build-0.1": {
       "levels": [
         "medium",
@@ -1546,6 +1933,27 @@
       "confidence": "high",
       "kind": "reasoning",
       "userEdited": false
+    },
+    "hy4": {
+      "levels": [
+        "off",
+        "high"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "off": "no_think"
+      },
+      "preOperator": {
+        "levels": [
+          "high"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "hy4 按腾讯混元官方文档两档 high/no_think，默认 high"
     },
     "hy4-preview": {
       "levels": [
@@ -1612,6 +2020,40 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "kimi-k2.8": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "max",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "rule": "kimi k2.8 按官方文档三档 low/high/max，默认 max"
+    },
+    "kimi-k2.8-preview": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "max",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "kimi k2.8 按官方文档三档 low/high/max，默认 max"
+    },
     "kimi-k3": {
       "levels": [
         "low",
@@ -1643,6 +2085,48 @@
         "kind": "reasoning"
       },
       "rule": "kimi k3 补 xhigh"
+    },
+    "kimi-k3.1-pro": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "max",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "kimi k3.1 pro 按官方文档三档 low/high/max，默认 max，不支持关闭思考"
+    },
+    "kimi-k3.1-pro-highspeed": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "max",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "kimi k3.1 pro 按官方文档三档 low/high/max，默认 max，不支持关闭思考"
     },
     "kolors": {
       "levels": null,
@@ -1742,6 +2226,38 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "mimo-v2.6-flash": {
+      "levels": [
+        "off",
+        "low",
+        "high"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "off": "none"
+      },
+      "rule": "mimo-v2.6 按小米官方文档：effort 仅 none 关闭推理，minimal 映射 low、xhigh/max/ultra 映射 high，默认开启"
+    },
+    "mimo-v2.6-pro": {
+      "levels": [
+        "off",
+        "low",
+        "high"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "off": "none"
+      },
+      "rule": "mimo-v2.6 按小米官方文档：effort 仅 none 关闭推理，minimal 映射 low、xhigh/max/ultra 映射 high，默认开启"
+    },
     "mineru2.5-pro": {
       "levels": null,
       "default": null,
@@ -1761,6 +2277,15 @@
       "confidence": "guess",
       "kind": "reasoning",
       "userEdited": false
+    },
+    "minimax-h3": {
+      "levels": null,
+      "default": null,
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "non-text",
+      "userEdited": false,
+      "rule": "minimax-h3 判为非文本，剔除挡位"
     },
     "minimax-m2.7": {
       "levels": [
@@ -1815,6 +2340,18 @@
       },
       "rule": "MiniMax-M3.1-Flash 按官方文档五档 low/medium/high/xhigh/max，默认 max，不支持关闭思考"
     },
+    "mistral-large-4": {
+      "levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "muse-glimmer-30b": {
       "levels": [
         "medium",
@@ -1839,6 +2376,21 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "muse-spark-1.3": {
+      "levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "muse-spark-1.3-contributor": {
       "levels": [
         "minimal",
@@ -1848,6 +2400,19 @@
       ],
       "default": "high",
       "source": "litellm",
+      "confidence": "medium",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "muse-spark-open": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": "high",
+      "source": "models.dev",
       "confidence": "medium",
       "kind": "reasoning",
       "userEdited": false
@@ -2066,6 +2631,51 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "qwen3.8-flash-next": {
+      "levels": [
+        "low",
+        "medium",
+        "xhigh"
+      ],
+      "default": "xhigh",
+      "source": "models.dev",
+      "confidence": "medium",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "qwen3.8-omni-flash": {
+      "levels": [
+        "low",
+        "medium",
+        "xhigh"
+      ],
+      "default": "xhigh",
+      "source": "models.dev",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
+    "qwen4-max": {
+      "levels": [
+        "low",
+        "high",
+        "xhigh"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "low",
+          "high",
+          "xhigh"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "qwen4-max 按阿里云百炼官方文档三档 low/high/xhigh，默认 high"
+    },
     "sensenova-6.7-flash-lite": {
       "levels": [
         "high",
@@ -2077,6 +2687,22 @@
       "confidence": "medium",
       "kind": "reasoning",
       "userEdited": false
+    },
+    "sensenova-6.8-flash": {
+      "levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "rule": "sensenova-6.8-flash 按商汤官方文档六档 minimal/low/medium/high/xhigh/max，默认 high，不支持关闭思考"
     },
     "sensenova-6.8-flash-lite": {
       "levels": [
@@ -2131,6 +2757,24 @@
       "confidence": "certain",
       "kind": "non-text",
       "userEdited": false
+    },
+    "spark-x2.5": {
+      "levels": [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "wire": {
+        "off": "none"
+      },
+      "rule": "spark-x2.5 按讯飞官方文档五档 none/low/medium/high/max，none 为关闭思考"
     },
     "step-5-preview": {
       "levels": [
