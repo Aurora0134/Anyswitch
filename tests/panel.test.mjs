@@ -5741,7 +5741,7 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   it("reveal 半途被 morph 接管：dash 从已画弧长连续起步、沿用原时钟归一续推（不重启、总时长不变）", () => {
     // reveal 的 t0 记上 state，供接管沿用
     assert.ok(
-      /const state = \{ raf: 0, current: commitPixels\(\), grown: new Map\(\), targetSig: animSig, t0: performance\.now\(\) \}/.test(panelJs),
+      /const state = \{ raf: 0, current: commitPixels\(\), grown: new Map\(\), targetSig: animSig, t0: performance\.now\(\)/.test(panelJs),
       "reveal state carries t0 for takeover clock inheritance");
     // morph 状态带 dashT0（续接时钟）与 grown（链式续推的成员判定）
     assert.ok(

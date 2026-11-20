@@ -23835,6 +23835,8 @@ async function api(method, path, body) {
     }
     // 基线优先级：在飞动画的中间像素帧 > 上次提交的像素帧
     const prevAnim = container._statsAnim || null;
+    // 生长首帧前没有已画弧长可续接，直接用新数据起播。
+    const reveal = anim?.type === "reveal" || (anim?.type === "morph" && prevAnim?.revealPending);
     const baseline = (prevAnim && prevAnim.current) || container._statsCommit || null;
     if (prevAnim) { cancelAnimationFrame(prevAnim.raf); container._statsAnim = null; }
     container.textContent = "";
@@ -23971,20 +23973,19 @@ async function api(method, path, body) {
         else it.seg.el.removeAttribute("stroke-dasharray");
       }
     };
-    if (!reduceMotion && anim && anim.type === "reveal") {
+    if (!reduceMotion && reveal) {
       // recharts 3 Line 首绘机制：曲线按终态一次画好，dash 段从 0 沿弧长生长到总长——
       // 笔迹贴曲线走向从左画到右（非 clip 垂直边擦除），1500ms + 'ease' 与 morph 同参数。
       // 挂载前先置零长 dash 防整图闪现一帧，弧长首帧 rAF 再测。
       for (const rec of seriesRecs) for (const seg of rec.segs) seg.el.setAttribute("stroke-dasharray", "0px 100000px");
       const plans = seriesRecs.map((rec) => ({ rec, items: [], total: 0 }));
-      let measured = false;
       // grown：各系列已画弧长，被 morph 接管时作续接成员判定（终态像素帧另记在 current）；
       // t0 记上 state：接管时 dash 续推沿用本时钟（见 morph 分支 dashT0）
-      const state = { raf: 0, current: commitPixels(), grown: new Map(), targetSig: animSig, t0: performance.now() };
+      const state = { raf: 0, current: commitPixels(), grown: new Map(), targetSig: animSig, t0: performance.now(), revealPending: true };
       const tick = (t) => {
-        if (!measured) {
+        if (state.revealPending) {
           for (const pl of plans) { const m = measureSegs(pl.rec); pl.items = m.items; pl.total = m.total; }
-          measured = true;
+          state.revealPending = false;
         }
         const p = Math.min(1, (t - state.t0) / STATS_MORPH_MS);
         const e = STATS_MORPH_EASE(p);
