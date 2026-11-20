@@ -205,6 +205,38 @@ function stripCodexCatalogPointer(text) {
   return out.join("\n");
 }
 
+// The default selector anchor: a top-level model_provider pointing at a
+// managed id (anyswitch-*). The anchor deliberately lives outside the
+// managed block (a line inside the markers would be dropped by the next
+// sync), so the sweep has to remove the line itself — a stale managed id
+// left dangling would fail codex's config load outright.
+function codexSelectorMatch(line) {
+  const kv = line.match(/^\s*model_provider\s*=\s*(["'])((?:[^"\\]|\\.)*)\1\s*(?:#.*)?$/);
+  if (!kv) return false;
+  return kv[2].replace(/\\(["\\])/g, "$1").startsWith("anyswitch-");
+}
+
+function stripCodexSelector(text) {
+  const lines = text.split("\n");
+  const out = [];
+  let inTopLevel = true;
+  for (const line of lines) {
+    if (/^\s*\[/.test(line)) inTopLevel = false;
+    if (inTopLevel && codexSelectorMatch(line)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+function hasCodexSelector(text) {
+  let inTopLevel = true;
+  for (const line of text.split("\n")) {
+    if (/^\s*\[/.test(line)) inTopLevel = false;
+    if (inTopLevel && codexSelectorMatch(line)) return true;
+  }
+  return false;
+}
+
 function hasCodexCatalogPointer(text) {
   let inTopLevel = true;
   for (const line of text.split("\n")) {
@@ -239,8 +271,9 @@ async function stripCodex(ctx) {
     hasResidue: (text) =>
       text.includes(codexMerge.MANAGED_BEGIN) ||
       /^\s*\[model_providers\."?anyswitch-/m.test(text) ||
-      hasCodexCatalogPointer(text),
-    strip: (text) => codexMerge.stripManagedTables(codexMerge.stripManagedBlock(stripCodexCatalogPointer(text))),
+      hasCodexCatalogPointer(text) ||
+      hasCodexSelector(text),
+    strip: (text) => codexMerge.stripManagedTables(codexMerge.stripManagedBlock(stripCodexSelector(stripCodexCatalogPointer(text)))),
     writeWithBackup: codexMerge.writeCodexConfigTomlWithBackup,
   }));
   try {
