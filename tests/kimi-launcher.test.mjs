@@ -356,7 +356,7 @@ describe("writeKimiConfig 注入推理强度总开关的默认接线", () => {
     assert.match(text, /^enabled = true$/m, "总开关开着：用户的全局开关被接管");
     assert.match(text, /support_efforts = \["low", "high"\]/);
     assert.match(text, /default_effort = "high"/);
-    assert.match(text, /capabilities = \["thinking"\]/);
+    assert.match(text, /capabilities = \["image_in", "thinking"\]/);
   });
 
   it("settings.json 写 injectThinkingEffort:false＝关：不写档位也不接管 [thinking]", async () => {
@@ -373,7 +373,8 @@ describe("writeKimiConfig 注入推理强度总开关的默认接线", () => {
     assert.match(text, /^enabled = false$/m, "开关关着：用户的 [thinking] 原样保留");
     assert.doesNotMatch(text, /support_efforts/);
     assert.doesNotMatch(text, /default_effort/);
-    assert.doesNotMatch(text, /capabilities = \["thinking"\]/);
+    assert.doesNotMatch(text, /capabilities = \["image_in", "thinking"\]/);
+    assert.match(text, /capabilities = \["image_in"\]/, "档位随开关停，image_in 不停：客户端图片入口与思考档位解耦");
   });
 
   it("settings.json 存在但没写这个键＝仍是默认开", async () => {

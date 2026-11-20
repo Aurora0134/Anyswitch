@@ -106,6 +106,17 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
       const efforts = effort?.catalog
         ? resolveEndpointEfforts(modelId, { catalog: effort.catalog, agent: "kimi", model: model, provider })
         : null;
+      // image_in 对所有托管模型常声明，不设任何条件。kimi 客户端的图片入口
+      // （Read 工具读图、READ_MEDIA_FILE 媒体读工具注册）只认模型表
+      // capabilities 数组里的 image_in 键，未声明即「当前模型不支持图片输入」
+      // ——请求连客户端都出不去，relay 侧的图片降级链（media-strip：store 声明
+      // 优先 > 纯文本名单预判 > 上游拒识措辞兜底，两 handler 均已挂点）毫无上场
+      // 机会。与 kimi 自己探测到的能力取并集、只加不减（resolveModelCapabilities
+      // 语义），不影响 tool_use 等既有能力；真正收不了图的模型由 anys 降级链兜
+      // （替换为 [Unsupported Image] 占位后照常发送），客户端这一侧不再充当
+      // 截断点。video_in/audio_in 不声明：anys 没有对应的降级路径，放开只会
+      // 把失败原样送上游。
+      const capabilities = ["image_in"];
       if (efforts) {
         // 「这个模型会思考」在两处界面上由两个不同的键说给 kimi 听，只写一个就会
         // 出现「终端能选档、桌面端与网页端写着不支持思考强度」。两处界面的口径：
@@ -118,7 +129,10 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
         // 声明与 kimi 自己探测到的能力取并集、只加不减，所以下面这一行不会削弱
         // 工具调用等既有能力。`always_thinking` 绝对不写：那是「想关也关不掉」。
         // default_effort 是「这个会话没动过档位」时发出去的档。
-        lines.push(`capabilities = ["thinking"]`);
+        capabilities.push("thinking");
+      }
+      lines.push(`capabilities = ${tomlArray(capabilities)}`);
+      if (efforts) {
         lines.push(`reasoning = true`);
         lines.push(`support_efforts = ${tomlArray(efforts.levels)}`);
         lines.push(`default_effort = ${tomlString(efforts.default)}`);
