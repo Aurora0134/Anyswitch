@@ -1620,6 +1620,7 @@
     border-radius: var(--radius-md, 8px);
     box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 16%, transparent);
     padding: 7px 10px; overflow: hidden;
+    position: relative;
   }
   .live-log-meta {
     display: flex; align-items: center; gap: 6px;
@@ -1661,9 +1662,12 @@
   .live-log-motion .live-log-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   :is(.live-log-viewport, .live-log-motion) .live-log-msg.is-open .live-log-text { display: block; -webkit-line-clamp: unset; }
   /* 卡内展开钮沿用 Top5 列表的 ▸ caret 形，热区放大到 20px 方：仅超行卡显示，
-     堆叠预览卡恒隐（点卡是展开区域）。 */
+     堆叠预览卡恒隐（点卡是展开区域）。悬浮于 meta 行右端而不占行内流——钮 20px
+     会把 12.6px 的 meta 行撑高 7.4px，展开瞬间卡高随之一跳（收起态叠卡不跑超行
+     判定、钮恒隐，两态卡高就分叉了）；绝对定位后两态卡高严格一致。 */
   .live-log-msg-fold {
-    display: none; margin-left: auto; flex: none;
+    position: absolute; top: 3px; right: 10px;
+    display: none;
     width: 20px; height: 20px; padding: 0;
     align-items: center; justify-content: center;
     border: none; background: none; border-radius: var(--radius-sm, 6px); cursor: pointer;
