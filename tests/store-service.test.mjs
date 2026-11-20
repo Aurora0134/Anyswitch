@@ -246,6 +246,81 @@ describe("store-service testProvider", () => {
   });
 });
 
+describe("store-service testModel", () => {
+  function chatResponse(payload, { ok = true, status = 200 } = {}) {
+    return { ok, status, json: async () => payload, body: { cancel: async () => {} } };
+  }
+
+  it("posts a minimal chat completion and reports the returned model field", async () => {
+    const paths = makeRoot();
+    seedStore(paths, { prov: richEntry("prov", ["model-a"]) });
+    writeCredential(paths, "prov");
+    const calls = [];
+    const svc = makeService(paths, {
+      fetchImpl: async (url, opts) => {
+        calls.push({ url, opts });
+        return chatResponse({ model: "model-a", choices: [] });
+      },
+    });
+    const before = readStore(paths).hash;
+    const result = await svc.testModel("prov", "model-a");
+    assert.equal(result.ok, true);
+    assert.equal(result.requested, "model-a");
+    assert.equal(result.returned, "model-a");
+    assert.equal(result.match, true);
+    assert.equal(typeof result.latencyMs, "number");
+    // 请求形状：chat/completions 端点、Bearer 凭证、最小请求体
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://api.example.com/v1/chat/completions");
+    assert.equal(calls[0].opts.method, "POST");
+    assert.equal(calls[0].opts.headers.Authorization, "Bearer sk-test");
+    const sent = JSON.parse(calls[0].opts.body);
+    assert.equal(sent.model, "model-a");
+    assert.equal(sent.stream, false);
+    assert.equal(sent.max_tokens, 1);
+    // 只读操作：store 不落任何写
+    assert.equal(readStore(paths).hash, before);
+  });
+
+  it("flags a swapped model as match:false and a missing model field as returned:null", async () => {
+    const paths = makeRoot();
+    seedStore(paths, { prov: richEntry("prov", ["model-a"]) });
+    writeCredential(paths, "prov");
+    const swapped = makeService(paths, { fetchImpl: async () => chatResponse({ model: "model-b" }) });
+    const r1 = await swapped.testModel("prov", "model-a");
+    assert.equal(r1.ok, true);
+    assert.equal(r1.match, false);
+    assert.equal(r1.returned, "model-b");
+
+    const silent = makeService(paths, { fetchImpl: async () => chatResponse({ choices: [] }) });
+    const r2 = await silent.testModel("prov", "model-a");
+    assert.equal(r2.ok, true);
+    assert.equal(r2.returned, null);
+    assert.equal(r2.match, false);
+  });
+
+  it("reports HTTP, network and validation failures as ok:false", async () => {
+    const paths = makeRoot();
+    seedStore(paths, { prov: richEntry("prov", ["model-a"]) });
+    writeCredential(paths, "prov");
+
+    const http = makeService(paths, { fetchImpl: async () => chatResponse({}, { ok: false, status: 503 }) });
+    const r1 = await http.testModel("prov", "model-a");
+    assert.equal(r1.ok, false);
+    assert.match(r1.error, /HTTP 503/);
+
+    const boom = makeService(paths, { fetchImpl: async () => { throw new Error("boom"); } });
+    const r2 = await boom.testModel("prov", "model-a");
+    assert.equal(r2.ok, false);
+    assert.match(r2.error, /request failed/);
+
+    const svc = makeService(paths);
+    assert.equal((await svc.testModel("nope", "model-a")).ok, false);
+    assert.equal((await svc.testModel("prov", "")).ok, false);
+    assert.equal((await svc.testModel("prov", "  ")).ok, false);
+  });
+});
+
 describe("store-service refreshProviders", () => {
   it("lazily migrates a legacy entry and applies discovered semantics", async () => {
     const paths = makeRoot();

@@ -43,6 +43,7 @@ import {
   planStoreRefresh,
   providerModelsURL,
   sanitizeModelIds,
+  validateBaseURL,
   validateFilterSave,
   validateProviderId,
 } from "./store-core.mjs";
@@ -617,6 +618,73 @@ export function createStoreService({
       } catch (error) {
         return { ok: false, error: error.message };
       } finally {
+        plaintext?.fill?.(0);
+      }
+    },
+
+    /**
+     * Verify one model end-to-end: POST a minimal chat/completions with the
+     * requested model id and report the model field the upstream actually
+     * returned — a mismatch means the upstream silently served a different
+     * model than asked. Sends a real request (a handful of tokens); the panel
+     * gates this behind an explicit confirm. Error strings keep the
+     * testProvider conventions (HTTP <status> / timed out / request failed)
+     * so the panel's existing error translation applies unchanged.
+     */
+    async testModel(id, modelId) {
+      try {
+        validateProviderId(id);
+      } catch (error) {
+        return { ok: false, error: error.message };
+      }
+      if (typeof modelId !== "string" || modelId.trim() === "") {
+        return { ok: false, error: "model must be a non-empty string" };
+      }
+      const requested = modelId.trim();
+      const loaded = load();
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
+      const entry = loaded.store.providers?.[id];
+      if (!entry) return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
+      const credential = await readPlaintextCredential(id, entry.credentialFile ?? `${id}.dpapi`);
+      if (!credential.ok) return { ok: false, error: credential.error };
+      const plaintext = credential.plaintext;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      const startedAt = Date.now();
+      try {
+        let response;
+        try {
+          response = await fetchImpl(`${validateBaseURL(entry.baseURL).replace(/\/$/, "")}/chat/completions`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${plaintext.toString("utf8")}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: requested,
+              messages: [{ role: "user", content: "ping" }],
+              max_tokens: 1,
+              stream: false,
+            }),
+            redirect: "error",
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (error?.name === "AbortError") throw new Error("model test timed out after 30 seconds");
+          throw new Error("model test request failed; check the network, proxy, TLS, and API endpoint");
+        }
+        const latencyMs = Date.now() - startedAt;
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`model test failed with HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        const returned = typeof payload?.model === "string" && payload.model.trim() !== "" ? payload.model.trim() : null;
+        return { ok: true, requested, returned, match: returned === requested, latencyMs };
+      } catch (error) {
+        return { ok: false, error: error.message };
+      } finally {
+        clearTimeout(timer);
         plaintext?.fill?.(0);
       }
     },

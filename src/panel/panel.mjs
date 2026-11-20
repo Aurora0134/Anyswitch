@@ -4214,6 +4214,13 @@ export function createPanelRouter({
             const result = await svc.testProvider(requireString(body.id, "id"));
             return sendJson(res, 200, result);
           }
+          if (path === "/panel/api/store/test-model") {
+            const result = await svc.testModel(
+              requireString(body.id, "id"),
+              requireString(body.model, "model"),
+            );
+            return sendJson(res, 200, result);
+          }
           if (path === "/panel/api/store/refresh") {
             const result = await svc.refreshProviders(
               typeof body.id === "string" && body.id.trim() ? body.id.trim() : undefined,

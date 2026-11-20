@@ -73,6 +73,7 @@ function mockService(overrides = {}) {
     addProvider: async () => ({ ok: true, id: "prov", modelCount: 2 }),
     rotateProvider: async () => ({ ok: true, id: "prov" }),
     testProvider: async () => ({ ok: true, modelCount: 2 }),
+    testModel: async () => ({ ok: true, requested: "m1", returned: "m1", match: true, latencyMs: 12 }),
     refreshProviders: async () => ({ ok: true, reports: [{ providerId: "prov", status: "updated", added: ["model-b"], pruned: [], reason: null }], anyFailed: false }),
     saveFilter: async () => ({ ok: true, effective: ["m1"] }),
     addModels: async () => ({ ok: true, added: ["m2"], models: ["m1", "m2"] }),
@@ -188,6 +189,16 @@ describe("panel router store routes", () => {
     assert.equal(res.statusCode, 200);
     assert.equal(json().modelCount, 2);
     assert.equal(svc.calls[0].arg, "prov");
+  });
+
+  it("POST /panel/api/store/test-model forwards the provider id and model", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const { req, res, json } = fakeReqRes("/panel/api/store/test-model", "POST", { id: "prov", model: "m1" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().match, true);
+    assert.deepEqual(svc.calls[0].arg, ["prov", "m1"]);
   });
 
   it("POST /panel/api/store/refresh forwards a single id or undefined for all", async () => {
@@ -611,7 +622,7 @@ describe("panel router store routes", () => {
   it("rejects untrusted POSTs with 403 before the service is reached", async () => {
     const svc = mockService();
     const router = storeRouter(svc);
-    for (const path of ["/panel/api/store/add", "/panel/api/store/rotate", "/panel/api/store/test", "/panel/api/store/refresh", "/panel/api/store/filter", "/panel/api/store/models/add", "/panel/api/store/models/remove", "/panel/api/store/pool/create", "/panel/api/store/pool/delete", "/panel/api/store/rename", "/panel/api/store/pool/rename", "/panel/api/store/pool/members/update", "/panel/api/store/reorder", "/panel/api/store/route-chain/save", "/panel/api/store/route-chain/delete", "/panel/api/store/delete"]) {
+    for (const path of ["/panel/api/store/add", "/panel/api/store/rotate", "/panel/api/store/test", "/panel/api/store/test-model", "/panel/api/store/refresh", "/panel/api/store/filter", "/panel/api/store/models/add", "/panel/api/store/models/remove", "/panel/api/store/pool/create", "/panel/api/store/pool/delete", "/panel/api/store/rename", "/panel/api/store/pool/rename", "/panel/api/store/pool/members/update", "/panel/api/store/reorder", "/panel/api/store/route-chain/save", "/panel/api/store/route-chain/delete", "/panel/api/store/delete"]) {
       const noHeader = fakeReqRes(path, "POST", { id: "prov", modelFilter: [] }, { "x-anyswitch-panel": "0" });
       await router.handle(noHeader.req, noHeader.res);
       assert.equal(noHeader.res.statusCode, 403, `${path} without the panel header`);

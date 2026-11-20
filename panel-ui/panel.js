@@ -20634,6 +20634,99 @@ async function api(method, path, body) {
     }
   }
 
+  // ── 模型字段测试：模型行右键「测试模型字段」→ 窗内确认 → 真实请求 → 双框对比 ──
+  // 真实请求消耗极少额度，确认态内嵌在弹窗里（不开独立确认框）。进行中禁关窗防
+  // 误触；失败原因复用 storeTestErrorText 的翻译口径。弹窗单例，state 即互斥锁。
+  let modelTestState = "idle"; // idle | confirm | running | result
+  let modelTestCtx = null;     // { providerId, providerName, mid }
+
+  function modelTestCompareHtml(state, rightHtml) {
+    return `
+      <div class="mft-compare" data-state="${state}">
+        <div class="mft-box">
+          <span class="mft-box-label">请求模型</span>
+          <span class="mft-box-value">${escapeHtml(modelTestCtx.mid)}</span>
+        </div>
+        <div class="mft-link"></div>
+        <div class="mft-box">
+          <span class="mft-box-label">实际模型</span>
+          ${rightHtml}
+        </div>
+      </div>`;
+  }
+
+  function renderModelTestConfirm() {
+    modelTestState = "confirm";
+    $("modelTestBody").innerHTML = `
+      <p class="mft-desc">将向渠道 ${escapeHtml(modelTestCtx.providerName)} 发送一条真实请求，核对该模型实际返回的模型标识；请求消耗极少额度。</p>
+      ${modelTestCompareHtml("idle", `<span class="mft-box-value placeholder">测试后显示</span>`)}`;
+    $("modelTestFoot").innerHTML = `
+      <button class="btn" id="modelTestCancelBtn">取消</button>
+      <button class="btn btn-primary" id="modelTestStartBtn">开始测试</button>`;
+    $("modelTestCancelBtn").onclick = closeModelTestModal;
+    $("modelTestStartBtn").onclick = runModelTest;
+  }
+
+  function renderModelTestRunning() {
+    modelTestState = "running";
+    $("modelTestBody").innerHTML = modelTestCompareHtml("running", `<span class="mft-box-value placeholder">测试后显示</span>`);
+    $("modelTestFoot").innerHTML = `
+      <button class="btn" disabled>取消</button>
+      <button class="btn btn-primary" disabled>测试中…</button>`;
+  }
+
+  function renderModelTestResult(r) {
+    modelTestState = "result";
+    let state, rightHtml, verdict;
+    if (!r.ok) {
+      verdict = `<div class="mft-verdict neg">${escapeHtml(r.reason)}</div>`;
+      rightHtml = `<span class="mft-box-value neg">请求失败</span>`;
+      state = "fail";
+    } else if (r.returned === null) {
+      verdict = `<div class="mft-verdict warn">上游未返回模型标识，无法判定</div>`;
+      rightHtml = `<span class="mft-box-value placeholder">未返回</span>`;
+      state = "no-field";
+    } else if (r.match) {
+      verdict = `<div class="mft-verdict ok">返回的模型标识与请求一致</div>`;
+      rightHtml = `<span class="mft-box-value">${escapeHtml(r.returned)}</span>`;
+      state = "match";
+    } else {
+      verdict = `<div class="mft-verdict neg">返回的模型标识与请求不一致</div>`;
+      rightHtml = `<span class="mft-box-value neg">${escapeHtml(r.returned)}</span>`;
+      state = "mismatch";
+    }
+    const meta = typeof r.latencyMs === "number" ? `<div class="mft-meta">耗时 ${r.latencyMs} ms</div>` : "";
+    $("modelTestBody").innerHTML = modelTestCompareHtml(state, rightHtml) + verdict + meta;
+    $("modelTestFoot").innerHTML = `
+      <button class="btn" id="modelTestRetryBtn">重新测试</button>
+      <button class="btn btn-primary" id="modelTestDoneBtn">关闭</button>`;
+    $("modelTestRetryBtn").onclick = runModelTest;
+    $("modelTestDoneBtn").onclick = closeModelTestModal;
+  }
+
+  async function runModelTest() {
+    renderModelTestRunning();
+    try {
+      const r = await api("POST", "/api/store/test-model", { id: modelTestCtx.providerId, model: modelTestCtx.mid });
+      renderModelTestResult({ ok: true, returned: r.returned ?? null, match: r.match === true, latencyMs: r.latencyMs });
+    } catch (e) {
+      renderModelTestResult({ ok: false, reason: storeTestErrorText(e) });
+    }
+  }
+
+  function openModelTestModal(p, mid) {
+    modelTestCtx = { providerId: p.id, providerName: p.displayName || p.id, mid };
+    $("modelTestModal").classList.add("show");
+    renderModelTestConfirm();
+  }
+
+  function closeModelTestModal() {
+    if (modelTestState === "running") return; // 进行中禁关窗，防误触
+    modelTestState = "idle";
+    modelTestCtx = null;
+    $("modelTestModal").classList.remove("show");
+  }
+
   // ── 新增模型待读态：刷新后把本轮 added 记入 localStorage；该渠道详情第一次带着
   // 新增态渲染出来时置顶 + 高光（这一帧即「看过」），渲染末尾立即消耗，之后任何
   // 重渲染都放回原位、撤下高光。纯前端机制，不动 store 落盘。
@@ -23113,8 +23206,8 @@ async function api(method, path, body) {
       showStoreContextMenu(e.clientX, e.clientY, id);
     });
     $("storeList").addEventListener("scroll", hideSkillsContextMenu);
-    // 模型行右键菜单：删除入口收进菜单，不设显性删除按钮。委托绑定在详情卡
-    // 容器上（行由 innerHTML 重建，绑行会丢）。菜单暂只含「删除模型」一项。
+    // 模型行右键菜单：测试/删除入口收进菜单，不设显性按钮。委托绑定在详情卡
+    // 容器上（行由 innerHTML 重建，绑行会丢）。
     $("storeDetailBody").addEventListener("contextmenu", (e) => {
       const row = e.target.closest(".store-model-row");
       if (!row) return;
@@ -23124,11 +23217,21 @@ async function api(method, path, body) {
       if (!p || !mid) return;
       hideSkillsContextMenu();
       popSkillsContextMenu(e.clientX, e.clientY, mid, [
+        { label: "测试模型字段", fn: () => openModelTestModal(p, mid) },
         { label: "删除模型", danger: true, fn: () => removeStoreModel(p, mid) },
       ]);
     });
     // scroll 不冒泡：捕获阶段监听，模型列表滚动时收起菜单
     $("storeDetailBody").addEventListener("scroll", hideSkillsContextMenu, true);
+
+    // 模型字段测试弹窗：✕/遮罩点击/Esc 关闭（进行中由 closeModelTestModal 挡住）
+    $("modelTestCloseBtn").onclick = closeModelTestModal;
+    $("modelTestModal").addEventListener("click", (e) => {
+      if (e.target === $("modelTestModal")) closeModelTestModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("modelTestModal").classList.contains("show")) closeModelTestModal();
+    });
 
     // 组建号池弹窗：关闭/取消/确认/遮罩点击
     $("poolBuildCloseBtn").onclick = hidePoolBuildModal;
