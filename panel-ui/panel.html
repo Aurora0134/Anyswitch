@@ -3103,6 +3103,20 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </div>
 
+<!-- 模型字段测试弹窗：渠道管理模型行右键「测试模型字段」入口。确认态内嵌窗内
+     （真实请求前先确认），结果态为请求/实际双框对比 + 连接线语义变色。正文与
+     底栏按钮由 panel.js 按态重建（确认/进行中/结果三态按钮不同）。 -->
+<div class="modal-overlay" id="modelTestModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>模型字段测试</h3>
+      <button class="modal-close-btn" id="modelTestCloseBtn" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="modelTestBody" style="font-size:13px; color:var(--text-2); line-height:1.6;"></div>
+    <div class="modal-foot" id="modelTestFoot"></div>
+  </div>
+</div>
+
 <!-- 路由链编辑器弹窗（端点链与虚拟模型共用）：左=纵向链舞台（入口 = auto 或虚拟模型名 → 逐跳退避，拖拽调序/右键移除），右=候选渠道/号池（点击接入链尾），不走 showSkillsModal 单例 -->
 <div class="modal-overlay route-modal-overlay" id="routeChainModal">
   <div class="modal-card">

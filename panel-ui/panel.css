@@ -3521,6 +3521,67 @@
     padding-left: 7px;
   }
   .store-model-row-new:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+
+  /* 模型字段测试弹窗：请求/实际双框对比 + 连接线语义变色（一致绿 / 不一致与失败红 /
+     缺失黄；进行中为主题色流动蚂蚁线）。颜色全走语义 token + color-mix，四静态皮肤
+     与 wallpaper 动态 token 自行适配，无需逐主题覆盖。 */
+  .mft-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+  .mft-compare { display: flex; align-items: stretch; margin-top: 14px; }
+  .mft-box {
+    flex: 1 1 0; min-width: 0; background: var(--surface-sunken);
+    border: 1px solid var(--border); border-radius: var(--radius-md, 8px);
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
+    transition: border-color 300ms var(--ease-out), box-shadow 300ms var(--ease-out);
+  }
+  .mft-box-label { font-size: 11px; color: var(--text-3); }
+  .mft-box-value {
+    font-family: var(--font-mono); font-size: 12.5px; color: var(--text-2);
+    word-break: break-all; line-height: 1.5; min-height: 19px;
+  }
+  .mft-box-value.placeholder { font-family: var(--font-sans); color: var(--text-4); }
+  .mft-box-value.neg { color: var(--danger); font-weight: 600; }
+  .mft-link {
+    flex: 0 0 56px; align-self: center; height: 2px; margin: 0 6px; border-radius: 1px;
+    background-image: linear-gradient(90deg, var(--border-strong) 55%, transparent 45%);
+    background-size: 10px 2px;
+    transition: box-shadow 300ms var(--ease-out);
+  }
+  .mft-compare[data-state="running"] .mft-link {
+    background-image: linear-gradient(90deg, var(--accent) 55%, transparent 45%);
+    animation: mft-dash 0.7s linear infinite;
+    box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .mft-compare[data-state="match"] .mft-link {
+    background-image: linear-gradient(90deg, var(--ok) 55%, transparent 45%);
+    animation: mft-dash 1.6s linear infinite;
+    box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 50%, transparent);
+  }
+  .mft-compare[data-state="mismatch"] .mft-link,
+  .mft-compare[data-state="fail"] .mft-link {
+    background-image: linear-gradient(90deg, var(--danger) 55%, transparent 45%);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 45%, transparent);
+  }
+  .mft-compare[data-state="no-field"] .mft-link {
+    background-image: linear-gradient(90deg, var(--warn) 55%, transparent 45%);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--warn) 40%, transparent);
+  }
+  .mft-compare[data-state="match"] .mft-box {
+    border-color: var(--ok-border); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 18%, transparent);
+  }
+  .mft-compare[data-state="mismatch"] .mft-box,
+  .mft-compare[data-state="fail"] .mft-box {
+    border-color: var(--danger-border); box-shadow: 0 0 10px color-mix(in srgb, var(--danger) 16%, transparent);
+  }
+  .mft-compare[data-state="no-field"] .mft-box {
+    border-color: var(--warn-border); box-shadow: 0 0 10px color-mix(in srgb, var(--warn) 15%, transparent);
+  }
+  .mft-verdict { margin-top: 14px; font-size: 12.5px; font-weight: 600; line-height: 1.5; }
+  .mft-verdict.ok { color: var(--ok); }
+  .mft-verdict.neg { color: var(--danger); }
+  .mft-verdict.warn { color: var(--warn); }
+  .mft-meta { margin-top: 6px; font-size: 11.5px; color: var(--text-4); }
+  @keyframes mft-dash { to { background-position: 20px 0; } }
+
   .store-manual-add { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
   .store-manual-add textarea { flex: 1; min-height: 34px; height: 34px; }
   .store-manual-add .btn { flex-shrink: 0; margin-top: 4px; }
