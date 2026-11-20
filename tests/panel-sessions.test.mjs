@@ -278,9 +278,17 @@ parentPort.on("message", (message) => {
     assert.equal(svc.calls.scanAll, 1);
   });
 
-  // mergeEndpoint 的 endpoint＋id 去重不变量：单家追赶不经 scanAll 的去重，
-  // 行集里同一会话出现两份（同 id 新旧两条，盘面滞后的形状）时不去重就会双行
-  // 进快照。按 lastActive 倒序后取首个＝保留最近活跃那份。
+  it("Codex 回退后快速刷新只返回当前存档，主动分支仍单独显示", async () => {
+    const old = { endpoint: "codex", id: "thread", file: "rollout-thread.jsonl", lastActive: 100 };
+    const current = { endpoint: "codex", id: "thread", file: "rollout-thread_rewind.jsonl", lastActive: 300 };
+    const fork = { endpoint: "codex", id: "fork", file: "rollout-fork.jsonl", lastActive: 200 };
+    const router = sessionsRouter(mockSessionScan({ scanAgentResult: [old, fork, current] }));
+    const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=codex");
+    await router.handle(hit.req, hit.res);
+    assert.equal(hit.res.statusCode, 200);
+    assert.deepEqual(hit.json().sessions, [current, fork]);
+  });
+
   it("追赶行集内同一会话重复出现：快照按 endpoint+id 去重，保留最近活跃那份", async () => {
     const svc = mockSessionScan({
       scanResult: { sessions: [{ endpoint: "claude", id: "full-1", file: "C:/s/full.jsonl" }], endpointErrors: [] },
@@ -295,7 +303,6 @@ parentPort.on("message", (message) => {
     const hit = fakeReqRes("/panel/api/sessions/list?refresh=1&endpoint=kimi", "GET");
     await router.handle(hit.req, hit.res);
     assert.equal(hit.res.statusCode, 200);
-    // 响应契约仍是单家结果原样透传；去重不变量管的是并进快照的那份。
     const after = fakeReqRes("/panel/api/sessions/list", "GET");
     await router.handle(after.req, after.res);
     const rows = after.json().sessions.filter((row) => row.id === "k-1");
