@@ -1,12 +1,13 @@
 import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
-import { parseOpenAIPath, buildOpenAIPath, AGENT_SEGMENT_SEPARATOR } from "./openai-path.mjs";
+import { parseOpenAIPath, buildOpenAIPath, AGENT_SEGMENT_SEPARATOR, AGGREGATE_ENTRY_SEGMENT } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
 import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel, appendFailoverContext, logIdentitySegment } from "./stream-pipe.mjs";
 import { translateResponsesRequest } from "./responses-translate.mjs";
 import { validateStore } from "../store/store-schema.mjs";
-import { isPoolFailoverStatus } from "../channels/pool-routing.mjs";
-import { isChainFailoverStatus, buildChainRuntime } from "../channels/chain-routing.mjs";
+import { isPoolFailoverStatus, resolvePool } from "../channels/pool-routing.mjs";
+import { deriveVisibleChannels } from "../channels/pool-providers.mjs";
+import { isChainFailoverStatus, buildChainRuntime, AUTO_MODEL, resolveVirtualModelEntry } from "../channels/chain-routing.mjs";
 import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import { instanceIdFromSocket, bindLateSocketInstance, socketFallbackClientPid, SOCKET_OVERRIDE_AGENT_IDS, UNTRUSTED_INSTANCE_HEADER_AGENT_IDS } from "../agents/late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
@@ -553,6 +554,48 @@ function resolveChannelModelSlug(path, body, deps) {
   return { path: buildOpenAIPath(segment, parsed.subpath), body: { ...body, model: hit.modelId } };
 }
 
+// 聚合入口段（AGGREGATE_ENTRY_SEGMENT，"auto"）的裸模型分派。该段是聚合供应商
+// 的固定地址（写入侧 deriveCodexAggregateChannel），slug 剥离与 auto/虚拟模型
+// 拦截各有既有位置，本函数只补最后一格：裸模型名在可见渠道里做精确匹配——
+// 唯一命中即改写路由段（归属与生成门随之落真实渠道，身份前缀同 slug 改写纪律
+// 保留），歧义与无命中明确报错，绝不回落到无关渠道。渠道/号池撞名 auto 时
+// 整体退场（写入侧同判据回落链头段），该段保持经典/号池语义。
+// 返回 { path }（改写）/ { status, body }（终局错误，调用侧在 tracker 就位后
+// 发出，失败计数口径与经典路径一致）/ null（不介入）。
+function resolveAggregateBareModel(path, body, deps) {
+  const parsed = parseOpenAIPath(path);
+  if (!parsed.ok || parsed.providerId !== AGGREGATE_ENTRY_SEGMENT) return null;
+  const model = body?.model;
+  if (typeof model !== "string" || model.length === 0 || model.includes(CHANNEL_MODEL_SEPARATOR)) return null;
+  // auto/虚拟模型是链规划的触发词，拦截位在下游，这里不碰。
+  if (model === AUTO_MODEL) return null;
+  const loaded = deps.loadStore?.();
+  if (!loaded?.ok) return null;
+  const store = loaded.store;
+  if (store?.providers?.[AGGREGATE_ENTRY_SEGMENT] !== undefined || resolvePool(store, AGGREGATE_ENTRY_SEGMENT)) return null;
+  if (resolveVirtualModelEntry(store, model)) return null;
+  const hits = [];
+  for (const [channelId, channel] of Object.entries(deriveVisibleChannels(store))) {
+    if (channel?.models?.[model] !== undefined) hits.push(channelId);
+  }
+  if (hits.length === 1) {
+    const segment = parsed.agentHint === null
+      ? hits[0]
+      : `${parsed.agentHint}${AGENT_SEGMENT_SEPARATOR}${hits[0]}`;
+    return { path: buildOpenAIPath(segment, parsed.subpath) };
+  }
+  if (hits.length === 0) {
+    return { status: 404, body: openAIError("not_found_error", `model "${model}" is not offered by any channel`) };
+  }
+  return {
+    status: 400,
+    body: openAIError(
+      "invalid_request_error",
+      `model "${model}" is offered by multiple channels (${hits.join(", ")}); use a channel-qualified model name`,
+    ),
+  };
+}
+
 // Derive the /api/internal/agents-activity snapshot rows from a getAgentsStatus
 // result. Aggregate endpoints contribute one (instanceId: null) row from their
 // 全局汇总 session plus one row per instance bucket; the per-session endpoint
@@ -921,7 +964,11 @@ export function createOpenAIRelayServer(deps) {
         // 渠道限定模型 slug（<channelId>~<modelId>）入口剥离：命中已知渠道时
         // 路由渠道与模型名在此改写，下游全部只见真实渠道 id 与干净模型名。
         const slugRewrite = resolveChannelModelSlug(path, body, deps);
-        const routePath = slugRewrite?.path ?? path;
+        // 聚合段裸模型分派（同 slug 的入口改写纪律）：唯一命中在 tracker 开口
+        // 前落进 routePath；歧义/无命中的终局错误延到链规划之后、tracker 就位
+        // 再发。
+        const aggregate = slugRewrite === null ? resolveAggregateBareModel(path, body, deps) : null;
+        const routePath = aggregate?.path ?? slugRewrite?.path ?? path;
         if (slugRewrite) body = slugRewrite.body;
         // URL 段可能带 `<agent>~` 身份前缀（见 openai-path）。这里解析一次：
         // agentHint 供归属用，providerId 必须是剥离前缀后的真实渠道 id——直接把
@@ -1016,6 +1063,15 @@ export function createOpenAIRelayServer(deps) {
           // virtual model "auto" never becomes an independent stats entry.
           // Pool plans keep their pool-level attribution (no resolver).
           if (chainPlan) tracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
+
+          // 聚合段裸模型的终局错误（歧义/无命中）：tracker 已就位，计数口径
+          // 与经典路径的 4xx 一致。与 memberPlan 互斥——裸模型名既不是 auto/
+          // 虚拟模型，聚合段也不是号池。
+          if (aggregate?.status) {
+            tracker?.recordEnd({ status: aggregate.status, error: { status: aggregate.status, message: aggregate.body?.error?.message || "Error" } });
+            sendJson(res, aggregate.status, aggregate.body);
+            return;
+          }
 
           if (body.stream === true) {
             await runStreamWithKeepAlive(res, openAIStreamChannel({
@@ -1150,7 +1206,9 @@ export function createOpenAIRelayServer(deps) {
         // 渠道限定模型 slug 入口剥离（同 chat/completions 路由）：必须在翻译
         // 之前改写，翻译层、扇出与归属才能全部拿到干净模型名与真实渠道 id。
         const slugRewrite = resolveChannelModelSlug(path, body, deps);
-        const routePath = slugRewrite?.path ?? path;
+        // 聚合段裸模型分派，同 chat/completions 路由（见彼处注）。
+        const aggregate = slugRewrite === null ? resolveAggregateBareModel(path, body, deps) : null;
+        const routePath = aggregate?.path ?? slugRewrite?.path ?? path;
         if (slugRewrite) body = slugRewrite.body;
         // URL 段前缀与归属解析同 chat/completions 路由（见上）。codex 恒流式，
         // 翻译后强制 stream:true，上游扇出无条件走流式管线；include_usage 由
@@ -1232,6 +1290,13 @@ export function createOpenAIRelayServer(deps) {
           // bound model), pool plans keep 404 request-shaped (passthrough).
           const isFailoverStatus = chainPlan ? isChainFailoverStatus : isPoolFailoverStatus;
           if (chainPlan) tracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
+
+          // 聚合段裸模型的终局错误，同 chat/completions 路由（见彼处注）。
+          if (aggregate?.status) {
+            tracker?.recordEnd({ status: aggregate.status, error: { status: aggregate.status, message: aggregate.body?.error?.message || "Error" } });
+            sendJson(res, aggregate.status, aggregate.body);
+            return;
+          }
 
           await runStreamWithKeepAlive(res, responsesStreamChannel({
             res,

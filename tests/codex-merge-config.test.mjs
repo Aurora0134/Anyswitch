@@ -10,7 +10,7 @@ import {
   writeCodexConfigTomlWithBackup,
   writeCodexConfig,
   extractManagedProviders,
-  deriveAutoRouteChannel,
+  deriveCodexAggregateChannel,
   readSidecar,
   writeSidecar,
   sidecarPath,
@@ -94,8 +94,8 @@ describe("codex-merge-config", () => {
   });
 
   it("is idempotent: merging the merged output changes nothing", () => {
-    const once = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveAutoRouteChannel(CHAIN_STORE, "codex"));
-    const twice = mergeCodexConfigToml(once.text, extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveAutoRouteChannel(CHAIN_STORE, "codex"));
+    const once = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveCodexAggregateChannel(CHAIN_STORE));
+    const twice = mergeCodexConfigToml(once.text, extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveCodexAggregateChannel(CHAIN_STORE));
     assert.equal(twice.text, once.text);
   });
 
@@ -156,7 +156,7 @@ describe("codex-merge-config", () => {
       extractManagedProviders(CHAIN_STORE),
       47821,
       "tok",
-      deriveAutoRouteChannel(CHAIN_STORE, "codex"),
+      deriveCodexAggregateChannel(CHAIN_STORE),
     );
     assert.match(staleOut, /^model_provider = "anyswitch-auto" # 我选的$/m);
     assert.doesNotMatch(staleOut, /anyswitch-gone/);
@@ -202,7 +202,7 @@ describe("codex-merge-config", () => {
     const empty = mergeCodexConfigToml("", extractManagedProviders(STORE), 47821, "tok");
     assert.match(empty.text, /^model_provider = "anyswitch-poke-api"$/m);
 
-    const chained = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveAutoRouteChannel(CHAIN_STORE, "codex"));
+    const chained = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveCodexAggregateChannel(CHAIN_STORE));
     assert.match(chained.text, /^model_provider = "anyswitch-auto"$/m);
 
     // A user table ahead of the managed block: the key must precede the FIRST
@@ -247,7 +247,7 @@ describe("model key protection (channel-qualified slugs)", () => {
       extractManagedProviders(CHAIN_STORE),
       47821,
       "tok",
-      deriveAutoRouteChannel(CHAIN_STORE, "codex"),
+      deriveCodexAggregateChannel(CHAIN_STORE),
       CATALOG_TEMPLATE,
     );
     assert.match(text, /^model = "auto" # 我选的$/m);
@@ -379,16 +379,30 @@ describe("[features] memories: user-owned key", () => {
 });
 
 describe("auto routing channel (anyswitch-auto)", () => {
-  it("injects the auto provider pointing at the chain head", () => {
-    const auto = deriveAutoRouteChannel(CHAIN_STORE, "codex");
+  it("injects the auto provider pointing at the reserved aggregate segment", () => {
+    const auto = deriveCodexAggregateChannel(CHAIN_STORE);
     const { text, managed } = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", auto);
     assert.match(text, /\[model_providers\."anyswitch-auto"\]/);
     const autoBlock = text.match(/\[model_providers\."anyswitch-auto"\][^[]*/)[0];
     assert.match(autoBlock, /name = "Anyswitch"/);
-    assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
+    // 段恒为保留名 auto，不再借用链头渠道名：报错地址语义稳定，不随路由配置漂移。
+    assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/auto\/v1"/);
     assert.match(autoBlock, /"x-agent-id" = "codex"/);
     assert.ok(managed.includes("auto"), "sidecar tracks the auto channel as managed");
     assert.equal(managedProviderId("auto"), "anyswitch-auto");
+  });
+
+  it("keeps the chain-head segment when a real channel or pool is named auto", () => {
+    const collisionStore = {
+      ...CHAIN_STORE,
+      providers: {
+        ...CHAIN_STORE.providers,
+        auto: { displayName: "Auto", baseURL: "https://auto.example/v1", protocol: "openai-compatible", credentialFile: "auto.dpapi", models: { m: {} } },
+      },
+    };
+    const { text } = mergeCodexConfigToml("", extractManagedProviders(collisionStore), 47821, "tok", deriveCodexAggregateChannel(collisionStore));
+    const autoBlock = text.match(/\[model_providers\."anyswitch-auto"\][^[]*/)[0];
+    assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/, "撞名时回落链头段，与 relay 的退场判据同口径");
   });
 
   it("does not inject anyswitch-auto when the endpoint has no route chain", () => {
@@ -397,16 +411,16 @@ describe("auto routing channel (anyswitch-auto)", () => {
       extractManagedProviders(STORE),
       47821,
       "tok",
-      deriveAutoRouteChannel(STORE, "codex"),
+      deriveCodexAggregateChannel(STORE),
     );
     assert.doesNotMatch(text, /anyswitch-auto/);
     assert.ok(!managed.includes("auto"));
   });
 
   it("drops anyswitch-auto on the re-sync after the chain is deleted", () => {
-    const first = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveAutoRouteChannel(CHAIN_STORE, "codex"));
+    const first = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", deriveCodexAggregateChannel(CHAIN_STORE));
     assert.match(first.text, /anyswitch-auto/);
-    const second = mergeCodexConfigToml(first.text, extractManagedProviders(STORE), 47821, "tok", deriveAutoRouteChannel(STORE, "codex"));
+    const second = mergeCodexConfigToml(first.text, extractManagedProviders(STORE), 47821, "tok", deriveCodexAggregateChannel(STORE));
     assert.doesNotMatch(second.text, /anyswitch-auto/, "stale auto removed once the chain is gone");
     assert.match(second.text, /\[model_providers\."anyswitch-poke-api"\]/, "real channels survive the cleanup");
   });

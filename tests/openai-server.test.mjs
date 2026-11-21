@@ -2533,6 +2533,188 @@ describe("channel-qualified model slugs (<channel>~<model>)", () => {
   });
 });
 
+// ── 聚合入口段（/openai/auto/v1）────────────────────────────────────────────
+// codex 聚合供应商的地址段固定为保留名 auto（写入侧 deriveCodexAggregateChannel），
+// 不再借用链头渠道名——链头写法让客户端报错地址随路由配置漂移并指错方向，裸模型
+// 还会静默按碰巧的链头路由。slug 剥离、auto 链、虚拟模型三格拦截位置既存（本组
+// 前三例钉住它们在聚合段不变），本组的主体是新增的最后一格：裸模型名全渠道精确
+// 匹配（唯一命中才路由，归属落真实渠道），歧义与无命中明确报错，渠道/号池撞名
+// auto 时聚合分派整体退场。
+
+const AGG_STORE = {
+  version: 2,
+  providers: {
+    alpha: {
+      displayName: "Alpha",
+      baseURL: "https://alpha.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "alpha.dpapi",
+      models: { shared: { displayName: "Shared" }, "alpha-only": { displayName: "A" } },
+    },
+    beta: {
+      displayName: "Beta",
+      baseURL: "https://beta.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "beta.dpapi",
+      models: { shared: { displayName: "Shared" }, "beta-only": { displayName: "B" } },
+    },
+  },
+  routingChains: { codex: { chain: [{ node: "beta", model: "beta-only" }] } },
+  virtualModels: [{ name: "mix-vm", chain: [{ node: "alpha", model: "alpha-only" }] }],
+};
+
+function aggDeps(upstreamBody, captured, store = AGG_STORE) {
+  return {
+    token: TOKEN,
+    loadStore: () => ({ ok: true, store }),
+    loadCredential: async () => ({ ok: true, value: "SENTINEL-UPSTREAM-KEY" }),
+    upstreamFetch: async (urls, init) => {
+      captured.urls = urls;
+      captured.body = JSON.parse(init.body);
+      return { ok: true, status: 200, body: upstreamBody };
+    },
+    recordGeneration: () => {},
+    readGeneration: () => null,
+    metricsCollector: {
+      startRequest: (meta) => {
+        captured.meta = meta;
+        return { recordFirstChunk: () => {}, recordEnd: (result) => { captured.end = result; } };
+      },
+    },
+    ...PINNED_KEEPALIVE,
+    ...PINNED_IMAGE_GATES,
+    effortInjector: NO_OP_EFFORT_INJECTOR,
+  };
+}
+
+function postAggregate(port, model, tail = "/v1/chat/completions") {
+  return fetch(`http://127.0.0.1:${port}/openai/auto${tail}`, {
+    method: "POST",
+    headers: { authorization: TOKEN, "content-type": "application/json", "x-agent-id": "codex" },
+    body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hello" }] }),
+  });
+}
+
+describe("aggregate entry segment (/openai/auto/v1)", () => {
+  it("a channel-qualified slug still wins over the endpoint chain at the aggregate segment", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postAggregate(port, "alpha~alpha-only");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.urls).startsWith("https://alpha.invalid/"), "slug 指定的渠道压过 codex 链（链头是 beta）");
+      assert.equal(captured.body.model, "alpha-only");
+      assert.equal(captured.meta.providerId, "alpha");
+    });
+  });
+
+  it("model auto at the aggregate segment walks the endpoint chain", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postAggregate(port, "auto");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.urls).startsWith("https://beta.invalid/"));
+      assert.equal(captured.body.model, "beta-only");
+    });
+  });
+
+  it("a virtual model name at the aggregate segment walks its own chain", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postAggregate(port, "mix-vm");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.urls).startsWith("https://alpha.invalid/"));
+      assert.equal(captured.body.model, "alpha-only");
+    });
+  });
+
+  it("a bare model offered by exactly one channel routes there and attributes the real channel", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postAggregate(port, "beta-only");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.urls).startsWith("https://beta.invalid/"));
+      assert.equal(captured.body.model, "beta-only");
+      assert.equal(captured.meta.providerId, "beta", "归属落真实渠道，不留聚合段假名");
+    });
+  });
+
+  it("a bare model offered by several channels fails naming the channels, never calling upstream", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postAggregate(port, "shared");
+      assert.equal(res.status, 400);
+      const body = await res.json();
+      assert.match(body.error.message, /alpha/);
+      assert.match(body.error.message, /beta/);
+      assert.match(body.error.message, /channel-qualified/);
+      assert.equal(captured.urls, undefined, "歧义请求绝不上路");
+      assert.equal(captured.end?.status, 400, "失败计数口径与经典路径一致");
+    });
+  });
+
+  it("a bare model no channel offers fails with a clear 404", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postAggregate(port, "ghost");
+      assert.equal(res.status, 404);
+      const body = await res.json();
+      assert.match(body.error.message, /"ghost" is not offered by any channel/);
+      assert.equal(captured.urls, undefined);
+      assert.equal(captured.end?.status, 404);
+    });
+  });
+
+  it("a real channel named auto keeps the segment's classic semantics (collision stand-down)", async () => {
+    const collisionStore = {
+      ...AGG_STORE,
+      providers: {
+        ...AGG_STORE.providers,
+        auto: { displayName: "Auto", baseURL: "https://auto.invalid/v1", protocol: "openai-compatible", credentialFile: "auto.dpapi", models: { m: { displayName: "M" } } },
+      },
+    };
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured, collisionStore), async (port) => {
+      const res = await postAggregate(port, "m");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.urls).startsWith("https://auto.invalid/"));
+    });
+  });
+
+  it("responses route: a bare unique model at the aggregate segment routes to its channel", async () => {
+    const captured = {};
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/auto/v1/responses`, {
+        method: "POST",
+        headers: { authorization: TOKEN, "content-type": "application/json", "x-agent-id": "codex" },
+        body: JSON.stringify({ model: "beta-only", input: "hello", stream: true }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.urls).startsWith("https://beta.invalid/"));
+      assert.equal(captured.body.model, "beta-only");
+    });
+  });
+
+  it("the models listing at the aggregate segment keeps the aggregate catalog", async () => {
+    await withServer(aggDeps(chatSseStream(HEALTHY_CHAT_SSE), {}), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/auto/v1/models`, {
+        headers: { authorization: TOKEN, "x-agent-id": "codex" },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      const ids = body.data.map((entry) => entry.id);
+      assert.ok(ids.includes("alpha~alpha-only") && ids.includes("beta~beta-only"), "全渠道 slug 目录");
+      assert.ok(ids.includes("auto"), "端点有链时列出 auto");
+      assert.ok(ids.includes("mix-vm"), "虚拟模型照列");
+    });
+  });
+});
+
 // ── 面板拉取式遥测路由 ──────────────────────────────────────────────────────
 // /api/internal/agents 与 /api/internal/model-stability 是控制面板跨进程拉取
 // 中继权威数据的两条路：guard rail 与数据转发形态都必须被钉住——面板依赖的
