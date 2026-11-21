@@ -13962,9 +13962,9 @@ async function api(method, path, body) {
   let terminalRailMotionArmed = false;
   let terminalRailFlipMode = "instant";
   // FLIP 位移时长：默认 200ms（系统触发的重排）；拖拽落位是用户手上动作的
-  // 直接延续，反馈要更快（120ms），由 drop 路径临时下压、渲染消费后复位。
+  // 直接延续，反馈要更快（60ms），由 drop 路径临时下压、渲染消费后复位。
   let terminalRailFlipMs = 200;
-  const TERMINAL_RAIL_DRAG_FLIP_MS = 120;
+  const TERMINAL_RAIL_DRAG_FLIP_MS = 60;
   // 拖拽落位高亮（300ms 描边闪烁）：记模块状态而非 DOM-only 类名——1s 归属
   // 轮询全树 innerHTML 重铺会冲掉 DOM 类名（选中态同坑，见 terminalRailRowHtml
   // 的 is-active 注释），状态驱动让高亮写进渲染 HTML、轮询重铺后仍挂足时长。
