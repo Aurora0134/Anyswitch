@@ -3731,6 +3731,7 @@ const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, c
     ${extractFn("terminalInstanceRow")}
     ${extractFn("terminalMetricNum")}
     ${extractFn("terminalWorkTime")}
+    ${extractFn("rowRetryingCount")}
     ${extractFn("terminalMetricsFromInstance")}
     ${extractFn("terminalRouteForEndpoint")}
     ${extractFn("terminalBusyByOutput")}

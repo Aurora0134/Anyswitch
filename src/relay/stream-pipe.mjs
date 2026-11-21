@@ -715,7 +715,7 @@ export async function runStreamWithKeepAlive(res, channel) {
             // on this attempt yet, so retry silently — a one-shot 5xx is exactly
             // the kind of blip a single retry absorbs. Log-silent too: the hop
             // only lands in the trail, reported by the end-of-request summary.
-            tracker?.recordRetry?.({ reason: `upstream_${result.status}`, attempt: attempt + 1, usage: result.body?.usage, memberId: member.memberId ?? undefined });
+            tracker?.recordRetry?.({ reason: `upstream_${result.status}`, attempt: attempt + 1, maxRetries, usage: result.body?.usage, memberId: member.memberId ?? undefined });
             try {
               await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
             } catch {
@@ -787,7 +787,7 @@ export async function runStreamWithKeepAlive(res, channel) {
             priorCalls: resumeShadow?.calls ?? [],
           };
           if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
-            tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
+            tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, maxRetries, usage: outcome.usage, memberId: member.memberId ?? undefined });
             try {
               await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
             } catch {
@@ -816,7 +816,7 @@ export async function runStreamWithKeepAlive(res, channel) {
         // definitive outcome (client walking away during backoff, or a retry
         // recovering) invisible to the panel. Latch once, at exhaustion below.
         if (attempt < maxRetries && !res.writableEnded && !abortController.signal.aborted) {
-          tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, usage: outcome.usage, memberId: member.memberId ?? undefined });
+          tracker?.recordRetry?.({ reason: outcome.reason, attempt: attempt + 1, maxRetries, usage: outcome.usage, memberId: member.memberId ?? undefined });
           try {
             await sleepWithAbort(computeDelay(backoffMs, attempt + 1), abortController.signal);
           } catch {

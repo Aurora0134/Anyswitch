@@ -53,6 +53,13 @@ const formatDurationSeconds = new Function(
 const formatRelativeAge = new Function(
   `return (${extractSrc(/function formatRelativeAge\(ts\) \{[\s\S]*?\n  \}/, "formatRelativeAge")});`,
 )();
+// 徽标三态判定（重试中/生成中/待命）：与源码同口径注入，行级重试计数一并取真实现
+const rowRetryingCount = new Function(
+  `return (${extractSrc(/function rowRetryingCount\(row\) \{[\s\S]*?\n  \}/, "rowRetryingCount")});`,
+)();
+const retryingBadgeState = new Function(
+  `return (${extractSrc(/function retryingBadgeState\(isRetrying, isGenerating\) \{[\s\S]*?\n  \}/, "retryingBadgeState")});`,
+)();
 
 function fakeElement() {
   return {
@@ -108,12 +115,12 @@ function makeRenderInstanceRows(env) {
   return new Function(
     "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
     "formatDurationSeconds", "escapeHtml", "formatTokens", "isInstanceStale", "formatRelativeAge", "document",
-    "seedInstanceSparkHistory",
+    "seedInstanceSparkHistory", "rowRetryingCount", "retryingBadgeState",
     `return (${m[0]});`,
   )(
     env.isDetailOpen, env.pushInstanceSpark, env.updateSparkline, env.sparkValues, env.instanceSparkBuffers,
     env.formatDurationSeconds, env.escapeHtml, env.formatTokens, env.isInstanceStale, env.formatRelativeAge, env.document,
-    env.seedInstanceSparkHistory,
+    env.seedInstanceSparkHistory, rowRetryingCount, retryingBadgeState,
   );
 }
 
@@ -616,6 +623,43 @@ describe("实例行面徽标（DSH：一行 = 一个进程，徽标 = 它的界�
     assert.equal(rows.length, 1);
     assert.ok(rows[0].includes("全局汇总"));
     assert.ok(!rows[0].includes(">TUI<"), "汇总行不属于任何一个面");
+  });
+});
+
+describe("实例行状态徽标三态（重试中黄）", () => {
+  const ACTIVE = { id: "kimi-501", title: "kimi-501", status: "active", tokens: {}, requests: 1 };
+  const IDLE = { id: "kimi-502", title: "kimi-502", status: "idle", tokens: {}, requests: 0 };
+
+  function renderRows(instances, opts = {}) {
+    const env = makeEnv();
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances, ...opts });
+    return env.created.filter((el) => el.className === "session-row").map((el) => el.innerHTML);
+  }
+
+  it("retryingRequests>0 的行转「重试中」黄徽标（覆盖生成中，不惊动其他行）", () => {
+    const rows = renderRows([{ ...ACTIVE, retryingRequests: 1 }, IDLE]);
+    assert.ok(rows[0].includes('<span class="badge badge-warn">重试中</span>'), "退避中的行转黄");
+    assert.ok(rows[1].includes('<span class="badge badge-neutral">待命</span>'), "待命行不受影响");
+  });
+
+  it("无 retryingRequests 的行维持 生成中/待命 两态原样", () => {
+    const rows = renderRows([ACTIVE, IDLE]);
+    assert.ok(rows[0].includes('<span class="badge badge-ok">生成中</span>'));
+    assert.ok(rows[1].includes('<span class="badge badge-neutral">待命</span>'));
+  });
+
+  it("计数为 0/缺字段的行不转黄（旧 relay 快照回落两态）", () => {
+    const rows = renderRows([{ ...ACTIVE, retryingRequests: 0 }, { ...ACTIVE, retryingRequests: undefined }]);
+    assert.ok(rows[0].includes("badge-ok\">生成中"));
+    assert.ok(rows[1].includes("badge-ok\">生成中"));
+  });
+
+  it("伪「全局汇总」行不挂状态徽标（重试态同样不挂）", () => {
+    const rows = renderRows([], { aggregateFallback: { tokens: {}, totalRequests: 0, retryingRequests: 1 } });
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0].includes("全局汇总"));
+    assert.ok(!rows[0].includes("重试中"), "汇总行不是实例，不挂状态徽标");
   });
 });
 

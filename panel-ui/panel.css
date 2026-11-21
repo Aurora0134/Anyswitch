@@ -2832,6 +2832,8 @@
     border-radius: var(--radius-md, 8px); background: var(--ok-soft); color: var(--ok);
   }
   .terminal-live-status.is-idle { border-color: var(--border); background: var(--surface-sunken); color: var(--text-2); }
+  /* 重试中：黄（warn）整套配色与进行中/待命同构，仅换色档 */
+  .terminal-live-status.is-retrying { border-color: var(--warn-border); background: var(--warn-soft); color: var(--warn); }
   .terminal-live-icon { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: currentColor; }
   .terminal-live-icon i { width: 8px; height: 8px; display: block; border-radius: 50%; background: var(--surface); }
   .terminal-live-status > div { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
