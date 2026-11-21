@@ -2643,6 +2643,64 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
+      <!-- 余额显示：主开关「启用余额显示」＋从属「显示单位」双选文字钮
+           （.seg-switch 与「号池路由逻辑」同构），两者即改即存。从属段随主开关
+           收起（容器 hidden），折叠只藏控件、不重置已存值——与「日志级别」同构。
+           从属说明句含汇率定值，改汇率要同步改文案与 panel.js 的
+           BALANCE_USD_TO_CNY。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v10"/><path d="M15 9.5c0-1.38-1.34-2.5-3-2.5s-3 1.12-3 2.5c0 3.5 6 1.5 6 5 0 1.38-1.34 2.5-3 2.5s-3-1.12-3-2.5"/></svg>
+            余额显示
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">启用余额显示</div>
+              <div class="modal-item-desc">关闭时，渠道与号池详情不显示余额；开启后，每分钟从各渠道上游查询余额并显示，上游不支持查询的渠道不显示。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="balanceEnabledToggle" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div id="balanceUnitRows" hidden>
+            <div class="modal-item">
+              <div>
+                <div class="modal-item-title">显示单位</div>
+                <div class="modal-item-desc">各渠道余额按 1 美元 = 6.7 人民币换算为该单位显示。</div>
+              </div>
+              <div class="seg-switch" id="balanceUnitSeg" role="radiogroup" aria-label="显示单位">
+                <button type="button" class="seg-switch-btn" data-balance-unit-choice="usd" role="radio" aria-checked="true">美元</button>
+                <button type="button" class="seg-switch-btn" data-balance-unit-choice="cny" role="radio" aria-checked="false">人民币</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 渠道余额币种：逐渠道三态（自动｜美元｜人民币），即改即存、成功无 toast
+           （选中项高亮即反馈），失败回滚选中态＋报错。行由 panel.js 按渠道状态
+           动态渲染（renderBalanceCurrencyRows），渠道增删随渠道状态刷新。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6.5 9.5h.01M17.5 14.5h.01"/></svg>
+            渠道余额币种
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item" style="border-top:none;">
+            <div>
+              <div class="modal-item-desc">自动时按上游返回识别，识别不出按美元计；手动选择优先于自动识别。</div>
+            </div>
+          </div>
+          <div id="balanceCurrencyRows"></div>
+        </div>
+      </div>
+
       <!-- 配置迁移：导出/导入同一功能域合一张大卡（用户终裁标题）。两行
            .modal-item，按钮在行内右侧；状态行与摘要行空闲时整行收起（markup
            即空且 hidden），只在功能发生时揭开。密钥警告是持久事实，固定可见。 -->

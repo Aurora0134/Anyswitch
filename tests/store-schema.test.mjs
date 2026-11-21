@@ -27,6 +27,23 @@ test("validateStore accepts a well-formed v2 store", () => {
   assert.deepEqual(result.errors, []);
 });
 
+
+test("validateStore accepts usd/cny balanceCurrency and rejects anything else", () => {
+  for (const currency of ["usd", "cny"]) {
+    const store = legalStore();
+    store.providers.deepseek.balanceCurrency = currency;
+    const result = validateStore(store);
+    assert.equal(result.valid, true, currency);
+  }
+  for (const currency of ["eur", "auto", "", 1, true, null]) {
+    const store = legalStore();
+    store.providers.deepseek.balanceCurrency = currency;
+    const result = validateStore(store);
+    assert.equal(result.valid, false, JSON.stringify(currency));
+    assert.ok(result.errors.some((e) => e.includes("balanceCurrency")), JSON.stringify(currency));
+  }
+});
+
 test("validateStore accepts a legacy deletedModels list on a provider", () => {
   // The short-lived tombstone experiment (reverted: refresh re-adds removed
   // discovered models) may have left deletedModels fields in real store.json

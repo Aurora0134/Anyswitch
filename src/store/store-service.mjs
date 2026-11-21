@@ -572,6 +572,11 @@ export function createStoreService({
           models: entry.models ?? {},
           discovered: entry.discovered ?? {},
           modelFilter: Array.isArray(entry.modelFilter) ? entry.modelFilter : null,
+          // 渠道余额币种的手工覆盖（absent = 自动）；面板「渠道余额币种」子卡
+          // 的渲染与 balance-service 的覆盖判定都用这个值。
+          balanceCurrency: entry.balanceCurrency === "usd" || entry.balanceCurrency === "cny"
+            ? entry.balanceCurrency
+            : null,
         };
       });
       const pools = Object.entries(rawPools).map(([id, pool]) => ({
@@ -1439,6 +1444,30 @@ export function createStoreService({
       const written = write(nextStore, { expectedHash: loaded.hash });
       if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
       return { ok: true, id, displayName: displayName.trim() };
+    },
+
+    /**
+     * Set or clear a provider's manual balance-currency override
+     * (balance-service resolution order: manual > upstream hint > usd).
+     * `currency` must be "usd" | "cny" | null; null clears the override, so
+     * the on-disk shape of a cleared row matches a never-configured one.
+     */
+    async setBalanceCurrency(id, currency) {
+      if (currency !== null && currency !== "usd" && currency !== "cny") {
+        return { ok: false, error: 'balanceCurrency must be "usd", "cny", or null' };
+      }
+      const loaded = load();
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
+      const entry = loaded.store.providers?.[id];
+      if (!entry) return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
+      const nextStore = structuredClone(loaded.store);
+      const nextEntry = { ...entry };
+      if (currency === null) delete nextEntry.balanceCurrency;
+      else nextEntry.balanceCurrency = currency;
+      nextStore.providers[id] = nextEntry;
+      const written = write(nextStore, { expectedHash: loaded.hash });
+      if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
+      return { ok: true, id, balanceCurrency: currency };
     },
 
     /**

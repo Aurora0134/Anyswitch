@@ -24,7 +24,9 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadStore, storePaths as defaultStorePaths } from "../store/store-io.mjs";
+import { loadStore, storePaths as defaultStorePaths, readCiphertext as defaultReadCiphertext } from "../store/store-io.mjs";
+import { unprotect as defaultDpapiUnprotect } from "../ops/dpapi.mjs";
+import { createBalanceService } from "./balance-service.mjs";
 import { enableAutostart, disableAutostart, isAutostartEnabled, enableWatchdogAutostart, disableWatchdogAutostart, isWatchdogAutostartEnabled } from "../ops/autostart.mjs";
 import { createDesktopShortcut } from "../ops/desktop-shortcut.mjs";
 import { spawnWatchdog, stopWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
@@ -1219,6 +1221,10 @@ export function createPanelRouter({
   // 路由器，真实拍节只能由 panel-host.mjs 显式传入——否则测试进程里 60 秒后
   // 会真的去查更新、真的拉起 worker。
   selfUpdateAutoDownloadScheduleFn = null,
+  // 渠道余额轮询的真实拍节（首开即一轮 + 每 60s 一轮），只在常驻 panel-host
+  // 进程里布——panel.mjs 侧的默认值刻意是「不布」，直建路由器的单测不会真
+  // 起定时器去外呼上游。注入语义同 selfUpdateAutoDownloadScheduleFn。
+  balancePollScheduleFn = null,
   // git 身份查询（app-git-identity.mjs）：本地 rev-parse / 远端 ls-remote，供
   // app-info 的 commit 携带与「本地安装 vs 官方发布」一致性判定共用。打包安装
   // 没有 .git，本地身份如实为 null，两条消费面各自降级。注入给单测——真 git 在
@@ -1262,6 +1268,17 @@ export function createPanelRouter({
     }
   };
   const settingsFile = defaultSettingsPath(base);
+  // 渠道余额轮询：所有外呼都收在这一处按固定间隔发，面板只读缓存快照，
+  // 页面开关与上游限流互不相干。enabledFn 活读 settings.json，关闭时跳过
+  // 抓取并清空快照。真实定时器由 panel-host 注入（balancePollScheduleFn），
+  // 直建路由器的测试不布拍节——与 selfUpdateAutoDownloadScheduleFn 同一纪律。
+  const balanceService = createBalanceService({
+    loadStore: () => loadStore(storePaths),
+    readCiphertext: (credentialFile) => defaultReadCiphertext(credentialFile, storePaths),
+    unprotect: (ciphertext, providerId) => defaultDpapiUnprotect(ciphertext, providerId, { generation: "v2" }),
+    enabledFn: () => loadSettings(settingsFile, base).settings.balanceDisplayEnabled !== false,
+  });
+  balancePollScheduleFn?.(balanceService);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
   const logLevelGate = createLogLevelGate(settingsFile, base);
@@ -4059,6 +4076,21 @@ export function createPanelRouter({
     if (path === "/panel/api/autostart/disable" && method === "POST") return handleAutostartDisable(res);
     if (path === "/panel/api/desktop-shortcut/create" && method === "POST") return handleDesktopShortcutCreate(res);
 
+    if (path === "/panel/api/balances" && method === "GET") {
+      try {
+        const loaded = loadSettings(settingsFile, base);
+        const enabled = loaded.settings.balanceDisplayEnabled !== false;
+        return sendJson(res, 200, {
+          ok: true,
+          enabled,
+          unit: loaded.settings.balanceDisplayUnit,
+          balances: enabled ? balanceService.snapshot() : {},
+        });
+      } catch (err) {
+        return sendJson(res, 500, { ok: false, error: err.message });
+      }
+    }
+
     if (path === "/panel/api/settings" && method === "GET") {
       try {
         const loaded = loadSettings(settingsFile, base);
@@ -4290,6 +4322,13 @@ export function createPanelRouter({
             const result = await svc.renameProvider(
               requireString(body.id, "id"),
               requireString(body.displayName, "displayName"),
+            );
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/balance-currency") {
+            const result = await svc.setBalanceCurrency(
+              requireString(body.id, "id"),
+              body.balanceCurrency === undefined ? null : body.balanceCurrency,
             );
             return sendJson(res, 200, result);
           }

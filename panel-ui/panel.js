@@ -394,6 +394,10 @@ async function api(method, path, body) {
     const firstStatus = startStatusPolling();
     // 自动同步失败上屏：3s 轮询，独立启动不阻塞开屏 ready。
     startSyncStatusPolling();
+    // 渠道余额：60s 一拍拉后端缓存快照，首开一拍、页面隐藏时跳过（与同步状态
+    // 轮询同口径）。typeof 守卫理由同 initTerminalPreview——panel-startup 测试
+    // 的桩环境只有固定名单上的函数。
+    if (typeof startBalancePolling === "function") startBalancePolling();
     // 日志流入口：内部先问运行日志开关再决定连不连，不阻塞开屏 ready。
     startLogStream();
     if (window.panelStartupController) {
@@ -5449,6 +5453,23 @@ async function api(method, path, body) {
     const poolRoutingSeg = $("poolRoutingSeg");
     const poolRoutingDesc = $("poolRoutingDesc");
     const poolRoutingSegBtns = poolRoutingSeg ? Array.from(poolRoutingSeg.querySelectorAll("[data-pool-routing-choice]")) : [];
+    // 余额显示：主开关 + 从属「显示单位」双选。从属段随主开关收起（容器 hidden），
+    // 折叠只藏控件、不重置已存值——与「日志级别」同构。
+    const balanceEnabledToggle = $("balanceEnabledToggle");
+    const balanceUnitRows = $("balanceUnitRows");
+    const balanceUnitSeg = $("balanceUnitSeg");
+    const balanceUnitSegBtns = balanceUnitSeg ? Array.from(balanceUnitSeg.querySelectorAll("[data-balance-unit-choice]")) : [];
+    // 选中态与说明唯一的切换口：载入回显、点选、失败回滚都走这里。
+    function applyBalanceUnit(unit) {
+      balanceDisplayUnit = unit === "cny" ? "cny" : "usd";
+      for (const b of balanceUnitSegBtns) {
+        b.setAttribute("aria-checked", String(b.dataset.balanceUnitChoice === balanceDisplayUnit));
+      }
+    }
+    // 主开关三路径（载入、保存回显、失败回滚）统一的显隐口：折叠只藏控件。
+    function applyBalanceEnabledUi(enabled) {
+      if (balanceUnitRows) balanceUnitRows.hidden = !enabled;
+    }
     // 两句定稿（2026-11-18 裁决）：只描述当前选中模式的效果，无句末句号。
     const POOL_ROUTING_DESC = {
       backoff: "号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员",
@@ -5503,7 +5524,7 @@ async function api(method, path, body) {
       on: { title: "抗截断", desc: KEEP_ALIVE_DESC, toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, poolLoadBalancing: false, updateChannel: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, poolLoadBalancing: false, updateChannel: false, balanceEnabled: false, balanceUnit: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -5694,7 +5715,9 @@ async function api(method, path, body) {
       // 重生成选项，于是渠道增删/改名后回到这一页看到的就是最新模型清单。
       // 拉取失败保留上一次生成的选项，不让一次网络抖动把四行变成空下拉。
       if (which === "general") refreshStoreState().then(renderClaudeTierOptions, () => {});
-      if (which === "advanced") { dataBundle.enter(); return backupLocation.enter(); }
+      // 「高级选项」的余额币种子卡以 store state 为源：进子页即拉一次，渠道增删/
+      // 改名后回到这一页看到的就是最新清单（拉取失败保留上一次渲染，不清空）。
+      if (which === "advanced") { dataBundle.enter(); loadBalanceCurrencyRows(); return backupLocation.enter(); }
       if (which === "about") return about.enter();
     }
 
@@ -5803,6 +5826,17 @@ async function api(method, path, body) {
         // （畸形值后端已按 stable 夹取，前端不重复夹取）。
         if (!settingsSaving.updateChannel && updateChannelSeg && d.settings && (d.settings.updateChannel === "stable" || d.settings.updateChannel === "preview")) {
           applyUpdateChannel(d.settings.updateChannel);
+        }
+        // 余额显示主开关与显示单位：保存中不被回灌盖回；从属段显隐与开关同一口。
+        // 单位变化只改前端换算，余额缓存里的原始值不动——回灌后重算标签即可。
+        if (!settingsSaving.balanceEnabled && balanceEnabledToggle && d.settings && typeof d.settings.balanceDisplayEnabled === "boolean") {
+          balanceEnabledToggle.checked = d.settings.balanceDisplayEnabled;
+          applyBalanceEnabledUi(d.settings.balanceDisplayEnabled);
+          applyBalanceLabels();
+        }
+        if (!settingsSaving.balanceUnit && balanceUnitSeg && d.settings && (d.settings.balanceDisplayUnit === "usd" || d.settings.balanceDisplayUnit === "cny")) {
+          applyBalanceUnit(d.settings.balanceDisplayUnit);
+          applyBalanceLabels();
         }
         // 运行日志开关：回灌时把左侧那块运行日志的显隐一并跟上，免得设置页与看板
         // 各说各话。
@@ -6410,6 +6444,151 @@ async function api(method, path, body) {
         if (next === updateChannel) return;
         saveUpdateChannel(next);
       };
+    }
+
+    // 余额显示：主开关即改即存（toast 报功能名）；单位双选即改即存、成功无 toast
+    // （选中项高亮即反馈，同「号池路由逻辑」）。两者保存成功后都重算余额标签——
+    // 开关管显隐、单位管换算，缓存里的原始余额值不动。
+    async function saveBalanceEnabled(next) {
+      if (settingsSaving.balanceEnabled) return;
+      settingsSaving.balanceEnabled = true;
+      settingsLoadGen += 1;
+      applyBalanceEnabledUi(next);
+      try {
+        const d = await api("POST", "/api/settings", { balanceDisplayEnabled: next });
+        if (!d.ok) {
+          applyBalanceEnabledUi(!next);
+          toast("设置保存失败", true);
+        } else {
+          const saved = d.settings?.balanceDisplayEnabled;
+          const effective = typeof saved === "boolean" ? saved : next;
+          if (balanceEnabledToggle) balanceEnabledToggle.checked = effective;
+          applyBalanceEnabledUi(effective);
+          toast(effective ? "已开启余额显示" : "已关闭余额显示");
+          refreshBalances();
+        }
+      } catch (e) {
+        applyBalanceEnabledUi(!next);
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        settingsSaving.balanceEnabled = false;
+      }
+    }
+    if (balanceEnabledToggle) {
+      balanceEnabledToggle.onchange = () => {
+        if (settingsSaving.balanceEnabled) {
+          balanceEnabledToggle.checked = !balanceEnabledToggle.checked;
+          return;
+        }
+        saveBalanceEnabled(balanceEnabledToggle.checked);
+      };
+    }
+    async function saveBalanceUnit(next) {
+      if (settingsSaving.balanceUnit) return;
+      const prev = balanceDisplayUnit;
+      settingsSaving.balanceUnit = true;
+      settingsLoadGen += 1;
+      balanceUnitSeg.setAttribute("aria-busy", "true");
+      applyBalanceUnit(next);
+      try {
+        const d = await api("POST", "/api/settings", { balanceDisplayUnit: next });
+        if (!d.ok) {
+          applyBalanceUnit(prev);
+          toast("设置保存失败", true);
+        } else {
+          const saved = d.settings?.balanceDisplayUnit;
+          applyBalanceUnit(saved === "usd" || saved === "cny" ? saved : next);
+          applyBalanceLabels();
+        }
+      } catch (e) {
+        applyBalanceUnit(prev);
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        settingsSaving.balanceUnit = false;
+        balanceUnitSeg.removeAttribute("aria-busy");
+      }
+    }
+    for (const b of balanceUnitSegBtns) {
+      b.onclick = () => {
+        const next = b.dataset.balanceUnitChoice;
+        if (next === balanceDisplayUnit) return;
+        saveBalanceUnit(next);
+      };
+    }
+
+    // 渠道余额币种子卡：逐渠道三态行（自动｜美元｜人民币），即改即存、成功无
+    // toast（选中项高亮即反馈，同「号池路由逻辑」），失败回滚选中态＋报错。
+    // 行数据走 /api/store/state 直取，不依赖渠道 tab 是否进过。
+    const balanceCurrencyRows = $("balanceCurrencyRows");
+    const BALANCE_CURRENCY_CHOICES = [
+      { key: "auto", label: "自动" },
+      { key: "usd", label: "美元" },
+      { key: "cny", label: "人民币" },
+    ];
+    const balanceCurrencySaving = new Set();
+
+    function renderBalanceCurrencyRows(providers) {
+      if (!balanceCurrencyRows) return;
+      balanceCurrencyRows.innerHTML = (providers || []).map((p) => {
+        const current = p.balanceCurrency === "usd" || p.balanceCurrency === "cny" ? p.balanceCurrency : "auto";
+        const btns = BALANCE_CURRENCY_CHOICES.map((c) =>
+          `<button type="button" class="seg-switch-btn" data-currency-choice="${c.key}" role="radio" aria-checked="${c.key === current}">${c.label}</button>`
+        ).join("");
+        return `
+          <div class="modal-item" data-provider-id="${escapeHtml(p.id)}">
+            <div><div class="modal-item-title">${escapeHtml(p.displayName || p.id)}</div></div>
+            <div class="seg-switch" role="radiogroup" aria-label="${escapeHtml(p.displayName || p.id)}">${btns}</div>
+          </div>`;
+      }).join("");
+      balanceCurrencyRows.querySelectorAll(".modal-item").forEach((row) => {
+        const id = row.getAttribute("data-provider-id");
+        const seg = row.querySelector(".seg-switch");
+        seg.querySelectorAll("[data-currency-choice]").forEach((b) => {
+          b.onclick = () => saveBalanceCurrency(id, b.dataset.currencyChoice, row, seg);
+        });
+      });
+    }
+
+    function applyBalanceCurrencyChoice(row, choice) {
+      row.querySelectorAll("[data-currency-choice]").forEach((b) => {
+        b.setAttribute("aria-checked", String(b.dataset.currencyChoice === choice));
+      });
+    }
+
+    async function saveBalanceCurrency(id, choice, row, seg) {
+      const current = row.querySelector('[data-currency-choice][aria-checked="true"]')?.dataset.currencyChoice ?? "auto";
+      if (choice === current || balanceCurrencySaving.has(id)) return;
+      balanceCurrencySaving.add(id);
+      seg.setAttribute("aria-busy", "true");
+      applyBalanceCurrencyChoice(row, choice);
+      try {
+        const d = await api("POST", "/api/store/balance-currency", {
+          id,
+          balanceCurrency: choice === "auto" ? null : choice,
+        });
+        if (!d.ok) {
+          applyBalanceCurrencyChoice(row, current);
+          toast("设置保存失败", true);
+        } else {
+          applyBalanceCurrencyChoice(row, d.balanceCurrency === "usd" || d.balanceCurrency === "cny" ? d.balanceCurrency : "auto");
+        }
+      } catch (e) {
+        applyBalanceCurrencyChoice(row, current);
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        balanceCurrencySaving.delete(id);
+        seg.removeAttribute("aria-busy");
+      }
+    }
+
+    async function loadBalanceCurrencyRows() {
+      if (!balanceCurrencyRows) return;
+      try {
+        const d = await api("GET", "/api/store/state");
+        renderBalanceCurrencyRows(d.providers || []);
+      } catch {
+        // 渠道状态取不到时子卡留空行区，不挡设置页其余项。
+      }
     }
 
     // 运行日志：与其它项同构的即改即存，但保存成功后要立刻把左侧那块运行日志显隐
@@ -20230,6 +20409,115 @@ async function api(method, path, body) {
     return n >= 1000 ? (n / 1000).toFixed(n % 1000 ? 1 : 0) + "K" : String(n);
   }
 
+  // ── 渠道余额显示 ──
+  // 后端（balance-service）每 60s 轮询各渠道上游并缓存；这里只按同节奏拉取
+  // 缓存快照、换算、上屏。换算在前端做：快照按渠道原始币种返回，显示单位是
+  // 设置页的全局项，换单位不需要重新查上游。汇率定值 6.7（设置页文案同口径）。
+  const BALANCE_USD_TO_CNY = 6.7;
+  // 显示单位与余额快照都在模块层：设置页（initSettingsView 作用域）与卡片渲染
+  // 共用同一份，双选钮切到哪边卡片就按哪边上屏。
+  let balanceDisplayUnit = "usd";
+  let balanceSnapshot = { enabled: true, unit: "usd", balances: {} };
+  let balanceRenderedSig = "";
+
+  function storeBalanceEntry(id) {
+    if (!balanceSnapshot.enabled) return null;
+    const entry = balanceSnapshot.balances[id];
+    if (!entry || !Number.isFinite(entry.available)) return null;
+    return entry;
+  }
+
+  // 单笔余额换算到当前显示单位；渠道原始币种与单位一致时不换算。
+  function balanceConvert(entry, unit) {
+    if (entry.currency === unit) return entry.available;
+    return unit === "cny" ? entry.available * BALANCE_USD_TO_CNY : entry.available / BALANCE_USD_TO_CNY;
+  }
+
+  function formatBalance(value, unit) {
+    const symbol = unit === "cny" ? "¥" : "$";
+    return `${symbol}${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  // 渠道余额文本；取不到（上游不支持/查询失败/功能关闭）返回空串，卡片不显示。
+  function storeProviderBalanceText(p) {
+    const entry = storeBalanceEntry(p.id);
+    if (!entry) return "";
+    const unit = balanceDisplayUnit;
+    return formatBalance(balanceConvert(entry, unit), unit);
+  }
+
+  // 号池余额 = 成员余额各自换算到显示单位后求和；全体成员都取不到时不显示。
+  function storePoolBalanceText(row) {
+    if (!balanceSnapshot.enabled) return "";
+    const unit = balanceDisplayUnit;
+    let total = 0;
+    let any = false;
+    for (const m of row.members) {
+      const entry = storeBalanceEntry(m.id);
+      if (!entry) continue;
+      total += balanceConvert(entry, unit);
+      any = true;
+    }
+    return any ? formatBalance(total, unit) : "";
+  }
+
+  function balanceBadgeHtml(text, kind, id) {
+    // 标签常驻、空态用 hidden：取不到余额的渠道「不显示任何内容」指视觉空位，
+    // 而不是让标题行布局随轮询结果来回跳动。
+    const attr = kind === "pool" ? "data-balance-pool" : "data-balance-provider";
+    return `<span class="store-balance" ${attr}="${escapeHtml(id)}"${text ? "" : " hidden"}>${escapeHtml(text)}</span>`;
+  }
+
+  // 轻量上屏口：只重写详情卡里已有的余额标签，不重建整张卡（轮询每分钟一拍，
+  // 整卡重建会打断正在看模型列表的用户——滚动位/草稿虽有恢复，闪烁不必有）。
+  // 池详情里池行与成员行各有一枚标签，逐枚按 data 属性重算。
+  function applyBalanceLabels() {
+    const rows = storeRows();
+    document.querySelectorAll("#storeDetailBody .store-balance").forEach((el) => {
+      const pid = el.getAttribute("data-balance-provider");
+      let text = "";
+      if (pid) {
+        const p = storeProviders().find((x) => x.id === pid);
+        if (p) text = storeProviderBalanceText(p);
+      } else {
+        const poolId = el.getAttribute("data-balance-pool");
+        const row = rows.find((r) => r.kind === "pool" && r.id === poolId);
+        if (row) text = storePoolBalanceText(row);
+      }
+      el.textContent = text;
+      el.hidden = !text;
+    });
+  }
+
+  async function refreshBalances() {
+    try {
+      const d = await api("GET", "/api/balances");
+      const next = {
+        enabled: d.enabled !== false,
+        unit: d.unit === "cny" ? "cny" : "usd",
+        balances: d.balances && typeof d.balances === "object" ? d.balances : {},
+      };
+      const sig = JSON.stringify(next);
+      balanceSnapshot = next;
+      // 设置页的单位选择是即改即存的本地权威（applyBalanceUnit）；快照里的 unit
+      // 是同一设置项的服务端回读，两者不会打架——上屏口径以本地选择为准。
+      if (sig !== balanceRenderedSig) {
+        balanceRenderedSig = sig;
+        applyBalanceLabels();
+      }
+    } catch {
+      // 余额取不到不挡渠道配置其余内容，卡片该什么样还什么样。
+    }
+  }
+
+  function startBalancePolling() {
+    void refreshBalances();
+    setInterval(() => {
+      if (document.hidden) return;
+      void refreshBalances();
+    }, 60000);
+  }
+
   // 过滤勾选基线 = 已保存 modelFilter；旧条目（null filter）基线为全选 discovered，
   // 与下方勾选集初始化语义一致。脏判定 = 当前勾选集与基线不全等（改回原点不算脏）。
   function storeFilterBaseline(p) {
@@ -20321,7 +20609,7 @@ async function api(method, path, body) {
     body.innerHTML = `
       <div class="skills-detail-head">
         <div>
-          <div class="skills-detail-name">${escapeHtml(row.displayName)} <span class="badge badge-pool">号池</span></div>
+          <div class="skills-detail-name">${escapeHtml(row.displayName)} <span class="badge badge-pool">号池</span>${balanceBadgeHtml(storePoolBalanceText(row), "pool", row.id)}</div>
           <div class="skills-detail-relpath">${escapeHtml(row.id)} · 成员 ${row.members.length} 个 · 模型并集 ${union.size} · 重复 ${dup.size}</div>
         </div>
         <div class="skills-detail-actions">
@@ -20399,7 +20687,7 @@ async function api(method, path, body) {
     body.innerHTML = `
       <div class="skills-detail-head">
         <div>
-          <div class="skills-detail-name">${escapeHtml(p.displayName)}</div>
+          <div class="skills-detail-name">${escapeHtml(p.displayName)}${balanceBadgeHtml(storeProviderBalanceText(p), "provider", p.id)}</div>
           <div class="skills-detail-relpath">${escapeHtml(p.id)}</div>
         </div>
         <div class="skills-detail-actions">
