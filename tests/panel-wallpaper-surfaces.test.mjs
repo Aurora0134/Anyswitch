@@ -108,14 +108,14 @@ function splitScopes() {
 // 补偿段命中的元素：卡面与统计子 tab 托盘（卡头/空态不在补偿范围，见对应断言）
 const COMPENSATION_SURFACE = /\.panel-card|\.view-tabs\.stats-subtabs/;
 
-const WALLPAPER_SETTINGS_SEL = ':root[data-ui-version="v2"][data-style="wallpaper"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card';
-const WALLPAPER_STATS_SEL = ':root[data-ui-version="v2"][data-style="wallpaper"] #statsView .panel-card';
-const WALLPAPER_STATS_SUBTABS_SEL = ':root[data-ui-version="v2"][data-style="wallpaper"] .view-tabs.stats-subtabs';
-const STAGE2_SETTINGS_SEL = ':root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card';
-const STAGE2_SETTINGS_HEAD_SEL = ':root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-header';
-const STAGE3_STATS_SEL = ':root[data-ui-version="v2"][data-style] #statsView .panel-card';
-const STAGE3_STATS_HEAD_SEL = ':root[data-ui-version="v2"][data-style] #statsView .card-header';
-const STAGE3_STATS_EMPTY_SEL = ':root[data-ui-version="v2"][data-style] #statsView .empty-hint';
+const WALLPAPER_SETTINGS_SEL = ':root[data-style="wallpaper"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card';
+const WALLPAPER_STATS_SEL = ':root[data-style="wallpaper"] #statsView .panel-card';
+const WALLPAPER_STATS_SUBTABS_SEL = ':root[data-style="wallpaper"] #statsView .view-tabs.stats-subtabs';
+const STAGE2_SETTINGS_SEL = ':root[data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card';
+const STAGE2_SETTINGS_HEAD_SEL = ':root[data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-header';
+const STAGE3_STATS_SEL = ':root[data-style] #statsView .panel-card';
+const STAGE3_STATS_HEAD_SEL = ':root[data-style] #statsView .card-header';
+const STAGE3_STATS_EMPTY_SEL = ':root[data-style] #statsView .empty-hint';
 
 describe("壁纸态平铺盒补底（T1）", () => {
   it("设置页四张卡与统计页卡补卡面：只加 background: var(--surface)，描边/圆角/无影沿用平铺段", () => {
@@ -161,7 +161,7 @@ describe("壁纸态平铺盒补底（T1）", () => {
     assert.equal(compensation.filter((c) => c.rule === cardRule).length, 2,
       "卡面规则恰好两个选择器（设置页四面板 + 统计页）");
     for (const { sel } of compensation) {
-      assert.ok(sel.includes('[data-ui-version="v2"]'), "补偿只作用于 v2（v1 平铺段不存在，无需补）");
+
       for (const skin of ["cyan", "aurora", "sepia"]) {
         assert.ok(!sel.includes(skin), `${skin} 不得进补偿段作用域`);
       }
@@ -171,8 +171,8 @@ describe("壁纸态平铺盒补底（T1）", () => {
     // 须仍在 aurora 块内，挪进他皮肤块或散到块外都判红。
     const { css: scopeCss, blocks } = splitScopes();
     for (const [needle, label] of [
-      [':scope:scope[data-ui-version="v2"] #statsView .panel-card {', "统计页玻璃卡例外"],
-      [':scope:scope[data-ui-version="v2"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {', "设置页玻璃卡例外"],
+      [':scope:scope #statsView .panel-card {', "统计页玻璃卡例外"],
+      [':scope:scope :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {', "设置页玻璃卡例外"],
     ]) {
       const idx = scopeCss.indexOf(needle);
       assert.ok(idx >= 0, `aurora ${label}：规则不在册`);
@@ -217,12 +217,12 @@ describe("壁纸态平铺盒补底（T1）", () => {
     assert.deepEqual(tray.decls, ["background: var(--surface-sunken)", "border-color: var(--border)"],
       "只补托盘底与描边（不重画胶囊、不动圆角档，基座已给 --radius-md）");
     // 阶段 3 撤托盘那条仍在（补偿不改写它，三皮肤照旧无托盘）
-    const stage3Tray = ':root[data-ui-version="v2"][data-style] .view-tabs.stats-subtabs {';
+    const stage3Tray = ':root[data-style] #statsView .view-tabs.stats-subtabs {';
     const stage3Idx = panelCss.indexOf(stage3Tray);
     assert.ok(stage3Idx > 0, "阶段 3 撤托盘规则在册");
     assert.ok(stage3Idx < panelCss.indexOf(sel), "补偿在撤托盘之后（靠源序取胜）");
     // 选中态仍是不占几何的下划线指示条（托盘回来了也不改用胶囊选中块）
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style] .stats-subtabs .view-tab.active {\n    background: transparent; border: 0; color: var(--text);\n    box-shadow: inset 0 -2px 0 var(--accent);\n  }'),
+    assert.ok(panelCss.includes(':root[data-style] #statsView .stats-subtabs .view-tab.active {\n    background: transparent; border: 0; color: var(--text);\n    box-shadow: inset 0 -2px 0 var(--accent);\n  }'),
       "选中态 2px accent 下划线原样");
   });
 });

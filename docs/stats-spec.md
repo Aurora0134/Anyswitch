@@ -146,7 +146,7 @@ range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network
 - ⚠️ 无自动化测试钉住（UI 行为），改动时人工核对
 
 ### R-26 请求日志子页=整页固定布局
-日志子页激活时统计视图挂 `logs-fixed`：视图高度钉在视口余量内（100dvh − 站点头 56 − 主区顶距 24 − 屏底余量 16），页面本身不滚；筛选行钉顶、表体在卡内 `overflow-y:auto` 滚动（表头 sticky）、分页条钉屏底（对齐 new-api）。总览子页保持文档流原样。min-height:0 链条（pane→card→card-body→table-wrap）是 flex 内滚动的硬要求，缺一截链即失效。
+日志子页激活时统计视图挂 `logs-fixed`：视图高度钉在视口余量内（100dvh − 站点头 48 − 主区顶距 24 − 屏底余量 16），页面本身不滚；筛选行钉顶、表体在卡内 `overflow-y:auto` 滚动（表头 sticky）、分页条钉屏底（对齐 new-api）。总览子页保持文档流原样。min-height:0 链条（pane→card→card-body→table-wrap）是 flex 内滚动的硬要求，缺一截链即失效。
 - 锚点：panel.css `.stats-view.logs-fixed` 规则组；panel.js `activateStatsSubTab` 的 class 切换
 - ⚠️ 无自动化测试钉住（布局），改动时人工核对
 

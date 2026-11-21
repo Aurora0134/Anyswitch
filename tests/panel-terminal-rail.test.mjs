@@ -16,7 +16,7 @@ const panelCss = readFileSync(join(here, "../panel-ui", "panel.css"), "utf8");
 const panelJs = readFileSync(join(here, "../panel-ui", "panel.js"), "utf8");
 
 const railHtml = () => {
-  const m = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/);
+  const m = panelHtml.match(/<aside class="rail" id="panelRail"[\s\S]*?<\/aside>/);
   assert.ok(m, "左栏在册");
   return m[0];
 };
@@ -158,16 +158,16 @@ describe("终端视图左栏换血", () => {
   });
 
   describe("CSS 换血与首帧孪生", () => {
-    it("运行时 body.terminal-mode 四条 + 首帧 data-prepaint-view 同值四条，只锚 #v2Rail", () => {
+    it("运行时 body.terminal-mode 四条 + 首帧 data-prepaint-view 同值四条，只锚 #panelRail", () => {
       for (const scope of [
-        ':root[data-ui-version="v2"] body.terminal-mode',
-        'html[data-prepaint-view="terminal"][data-ui-version="v2"]',
+        ':root body.terminal-mode',
+        'html[data-prepaint-view="terminal"]',
       ]) {
-        assert.ok(panelCss.includes(`${scope} #v2Rail .rail-tabs { display: none; }`), `${scope} 收主 tab 组`);
-        assert.ok(panelCss.includes(`${scope} #v2Rail #railTerminalDir[hidden] { display: flex !important; }`),
+        assert.ok(panelCss.includes(`${scope} #panelRail .rail-tabs { display: none; }`), `${scope} 收主 tab 组`);
+        assert.ok(panelCss.includes(`${scope} #panelRail #railTerminalDir[hidden] { display: flex !important; }`),
           `${scope} 放终端会话栏（!important 压全局 [hidden] 兜底）`);
-        assert.ok(panelCss.includes(`${scope} #v2Rail #railSettingsBtn { display: none; }`), `${scope} 收栏底齿轮`);
-        assert.ok(panelCss.includes(`${scope} #v2Rail #railBackBtn[hidden] { display: flex !important; }`), `${scope} 放「返回」`);
+        assert.ok(panelCss.includes(`${scope} #panelRail #railSettingsBtn { display: none; }`), `${scope} 收栏底齿轮`);
+        assert.ok(panelCss.includes(`${scope} #panelRail #railBackBtn[hidden] { display: flex !important; }`), `${scope} 放「返回」`);
       }
     });
 
@@ -277,18 +277,15 @@ describe("终端视图左栏换血", () => {
       assert.ok(!panelCss.includes("--rail-bg"), "「遮罩终点＝栏底色」的取值链已删除");
       assert.ok(!panelHtml.includes("rail-term-fade"), "HTML 里不再有渐隐 span");
       // 栏底对调本身保留（与渐隐解耦）：cyan/sepia 的 .rail 仍取 --bg-page。
-      // 成对正则钉的是 0b51458 的显式口径「合并选择器各占一格」：@scope 改写把 base
-      // （d170982）的 cyan/sepia 两格真选择器收成同形一对，成对形态被 panel-preview-
-      // isolation 对 base 的逐条等价对账钉着，列表内去重会让对账判红——不是可清理残留。
-      assert.ok(/:scope:scope\[data-ui-version="v2"\] \.rail,\s*\n\s*:scope:scope\[data-ui-version="v2"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
+      assert.ok(panelCss.includes(':scope:scope .rail { background: var(--bg-page); }'),
         "cyan/sepia 的 .rail 底色仍为 --bg-page");
       assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
       assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section-head, \.rail-term-scroll\) \{ display: none; \}/.test(panelCss),
         "折叠态只留新建图标钮：段头/树整段不出");
-      assert.ok(/:root\[data-ui-version="v2"\]:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
+      assert.ok(/:root:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "窄栏（<1200 自动档）新建按钮收成图标钮");
-      assert.ok(/:root\[data-ui-version="v2"\]\[data-rail="collapsed"\] \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
+      assert.ok(/:root\[data-rail="collapsed"\] \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "手动态 collapsed 同形制");
     });
 
@@ -1755,9 +1752,8 @@ describe("终端视图左栏换血", () => {
     it("返回镜像：终端态栏底「返回」回进入终端前的视图（settingsReturnView 同款）", () => {
       const init = extractFn("initTerminalRail");
       assert.ok(init.includes("closeTerminalPreview"), "终端态「返回」回 terminalReturnView（closeTerminalPreview 同一链）");
-      assert.ok(panelJs.includes("const exitSettings = () => switchView(settingsReturnView);")
-        && panelJs.includes('if (railBackBtn) railBackBtn.onclick = exitSettings;'),
-        "设置态那条既有绑定原样保留（一颗钮两态互斥）");
+      assert.ok(init.includes('closeTerminalPreview() : switchView(settingsReturnView)'),
+        "同一返回钮按当前视图选择终端或设置的返回目标");
       assert.ok(extractFn("openTerminalPreview").includes("terminalReturnView = currentView;"),
         "进入终端前记下返回目标");
     });
@@ -1794,7 +1790,7 @@ describe("终端视图左栏换血", () => {
       // 真删除会话文件不在栏体能力里（归档=标记+过滤，语义不变）
       assert.ok(!railBlock.includes("sessionDelete") && !railBlock.includes("deleteSession"), "栏体不碰真删除");
       // v1 旧版面板通路不碰：栏体全部锚 v2
-      assert.ok(!railBlock.includes('data-ui-version="v1"'), "不写 v1 分支");
+
     });
   });
 

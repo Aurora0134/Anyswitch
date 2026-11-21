@@ -35,7 +35,7 @@ class El {
 }
 
 const IDS = [
-  "settingsTabAdvanced", "settingsPanelAdvanced",
+  "railDirAdvanced", "settingsPanelAdvanced",
   "dataExportBtn", "dataExportStatus", "dataExportMeta",
   "dataImportPickBtn", "dataImportSummary", "dataImportMeta",
   "dataImportModal", "dataImportModalClose", "dataImportModalCancel",
@@ -146,7 +146,7 @@ const confirmApply = (h, rounds = 3) => click(h, "dataImportApplyBtn", rounds);
 
 test("markup 与控制器共用同一批 id，且注册表里有高级选项子 tab", () => {
   for (const id of IDS) assert.ok(html.includes(`id="${id}"`), `panel.html 缺 #${id}`);
-  assert.ok(source.includes('advanced: ["settingsTabAdvanced", "settingsPanelAdvanced"]'),
+  assert.ok(source.includes('advanced: $("railDirAdvanced")'),
     "settingsSubTabs 注册高级选项子 tab");
   const h = harness({ respondPost: () => ({ ok: true }) });
   for (const id of ["dataExportBtn", "dataImportPickBtn", "dataImportApplyBtn", "dataImportModalClose", "dataImportModalCancel", "dataSkillsCustomPickBtn", "dataSkillsCustomClearBtn", "dataSkillsDefaultPickBtn"]) {
@@ -563,7 +563,7 @@ test("更新通道卡：定稿文案逐字落盘，双选钮结构，不披露�
   const seg = html.indexOf('id="updateChannelSeg"');
   assert.ok(seg > 0, "双选钮有稳定 id 供读写");
   const item = html.slice(html.lastIndexOf('<div class="modal-item">', seg), html.indexOf("<!-- 号池路由逻辑", seg));
-  assert.ok(item.includes('class="seg-switch"'), "沿用「UI版本」同款双选控件");
+  assert.ok(item.includes('class="seg-switch"'), "使用分段单选控件");
   assert.ok(item.includes('data-update-channel-choice="stable" role="radio" aria-checked="true">稳定版</button>'), "稳定版在左且为默认选中");
   assert.ok(item.includes('data-update-channel-choice="preview" role="radio" aria-checked="false">预览版</button>'), "预览版在右");
   assert.ok(item.includes('id="updateChannelDesc">检查更新只提供正式发布的版本</div>'), "稳定版定稿说明句为 markup 初值（修正稿，无后半句）");
@@ -665,7 +665,7 @@ test("号池路由逻辑卡：定稿文案逐字落盘，双选钮结构，不�
   const seg = html.indexOf('id="poolRoutingSeg"');
   assert.ok(seg > 0, "双选钮有稳定 id 供读写");
   const item = html.slice(html.lastIndexOf('<div class="modal-item">', seg), html.indexOf("<!-- 配置迁移", seg));
-  assert.ok(item.includes('class="seg-switch"'), "沿用「UI版本」同款双选控件");
+  assert.ok(item.includes('class="seg-switch"'), "使用分段单选控件");
   assert.ok(item.includes('data-pool-routing-choice="backoff" role="radio" aria-checked="true">退避</button>'), "退避在左且为默认选中");
   assert.ok(item.includes('data-pool-routing-choice="balance" role="radio" aria-checked="false">分流</button>'), "分流在右");
   assert.ok(item.includes('id="poolRoutingDesc">号池内的请求按号池顺序分发，最近一次成功的成员优先承接，成员连续失败后顺延到下一成员</div>'), "退避定稿说明句为 markup 初值");

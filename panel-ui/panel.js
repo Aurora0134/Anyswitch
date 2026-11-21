@@ -319,25 +319,17 @@ async function api(method, path, body) {
   // 品牌版本徽标：版本只有一处来源——package.json 经 /api/app-info 下发，
   // 页面里不写死版本号（写死就得每次发版记得手改，漏改即显示过期版本）。
   // 取不到就保持隐藏：宁可没有徽标，也不显示占位符或可能过期的数字。
-  // 两处同源：头行品牌（旧版可见）与新版左栏栏顶品牌，一次取值写两个 id——新版下
-  // 头行品牌已让位给栏顶那一份，各写各的就得请求两次、还可能一处成功一处失败。
-  // 页脚品牌行同这一份取值：版本号取不到时后半段留空，页脚只剩品牌名，不留悬空
-  // 分隔点（分隔点跟版本号一起下发，两者同生共死）。
+  // 左栏和页脚共用版本号。页脚在取到版本后才添加分隔点。
   async function initBrandVersion() {
-    const tags = [$("brandVersion"), $("railBrandVersion")].filter(Boolean);
+    const tag = $("railBrandVersion");
     const footer = $("footerBrandVersion");
-    if (!tags.length && !footer) return;
-    // 彩蛋分支（1/25）：整段改写页脚品牌行——给 footer.parentNode 赋 textContent
-    // 会摘掉该行的全部子节点，footer span 随之脱离 DOM。其后那次页脚版本号写入
-    // （下方 try 内）落到游离节点上、不再上屏：页脚版本号偶尔「消失」正是这条分支
-    // 的机制，不是取值失败；头行与栏顶两处徽标不走这条分支，版本单一来源（见上）
-    // 不受影响。
+    // 彩蛋替换整行，原版本号节点随之脱离页面。
     if (footer && footer.parentNode && Math.random() < 1 / 25) footer.parentNode.textContent = "Ciallo～(∠・ω< )⌒☆";
     try {
       const info = await api("GET", "/api/app-info");
       const version = info && typeof info.version === "string" ? info.version.trim() : "";
       if (!version) return;
-      for (const tag of tags) {
+      if (tag) {
         tag.textContent = "v" + version;
         tag.hidden = false;
       }
@@ -351,14 +343,6 @@ async function api(method, path, body) {
   // 这里只负责绘制之后的两处：设置页这颗开关的回显与写入、看板「重启」的复播入口。
   function startupAnimationEnabled() {
     try { return localStorage.getItem("panel-startup-animation") !== "0"; } catch { return true; }
-  }
-
-  // 「UI版本」本机偏好：与开屏动画同一类存档（localStorage、绘制前由 head 脚本读、
-  // 不 POST、缺省新版——只有显式选过旧版（"classic"）才按旧版渲染）。不同之处是它
-  // 即时生效——设置页分段钮改写 <html> 的 data-ui-version，看板 CSS 当帧换列；
-  // 这里只管回显与写入。
-  function newUiEnabled() {
-    try { return localStorage.getItem("panel-ui-version") !== "classic"; } catch { return true; }
   }
 
   let startupViewReady = Promise.resolve();
@@ -453,7 +437,6 @@ async function api(method, path, body) {
   // 设置头行页题跟当前子 tab 走（实现在 initSettingsView）。switchView 换头行那刻也调
   // 一次：子 tab 的激活排在首帧之后的进入工作里，光靠 activateSettingsSubTab 会让头行
   // 先带着上一格的字亮一帧。参数＝即将落的那一格，空值按「通用」兜底。
-  let syncSettingsHeadTitle = () => {};
   // 子 tab 高亮/显隐的首帧前同步（实现在 initSettingsView）。与页题同理：真正的激活
   // 排在首帧之后，离开设置时旧格的 .active 还留着，不同步会让旧高亮先亮一帧。
   let syncSettingsSubTabUi = () => {};
@@ -5399,61 +5382,28 @@ async function api(method, path, body) {
       for (const el of root.querySelectorAll("[id]")) el.removeAttribute("id");
     };
     scaleEl.textContent = "";
-    // 导航区按 UI 版本取真实形态：旧版是头行胶囊 tab 条；新版主导航在左栏，头行那条
-    // 已被 :root[data-ui-version="v2"] #mainHeadInner .view-tabs 隐去——剥了 id 的克隆体
-    // 不再命中那条规则，照样克隆就是给新版用户画出一条界面上不存在的旧版导航，改为
-    // 克隆一份迷你栏（fixed 通高形态由 :root[v2] .settings-mirror-scale .rail 剥成静态）。
-    const v2 = newUiEnabled();
-    let mirrorRailW = 0;
-    if (v2) {
-      const rail = document.querySelector(".rail");
-      if (rail) {
-        const railClone = rail.cloneNode(true);
-        stripIds(railClone);
-        scaleEl.appendChild(railClone);
-        // 栏宽按克隆实渲取值（宽档 216、窄栏随媒体查询收 72），栏与内容区间的
-        // 24px 间隔由镜像 CSS 的 gap 呈现，自然宽一并补回。
-        mirrorRailW = railClone.offsetWidth;
-      }
-      // 头行一并进镜像：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
-      // 只克隆栏+看板时预览的板内顶栏整条缺失。只克隆 #mainHeadInner（设置头行与
-      // 主头行同在 header.site-head 内，整克隆会把设置头行也带进来），外套新建的
-      // header.site-head 壳——皮肤玻璃底/底边线与 v2 的 48px 高都锚在 .site-head
-      // 祖先链上。剥 id 后 v2 收编头行的 id 锚规则（隐品牌组/旧 tab 条/头行按钮、
-      // 右对齐、栏让位）全部脱钩，由镜像作用域规则顶班（panel.css v2 集中段）；
-      // 剥 hidden——设置态真身主头行带 hidden 属性（switchView 互斥切换），不剥
-      // 克隆体整行不可见。
-      const mainHead = document.querySelector("#mainHeadInner");
-      if (mainHead) {
-        const headClone = mainHead.cloneNode(true);
-        stripIds(headClone);
-        headClone.removeAttribute("hidden");
-        const headWrap = document.createElement("header");
-        headWrap.className = "site-head";
-        headWrap.appendChild(headClone);
-        scaleEl.appendChild(headWrap);
-      }
-    } else {
-      const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
-      if (tabs) {
-        const tabsClone = tabs.cloneNode(true);
-        stripIds(tabsClone);
-        const tabsWrap = document.createElement("div");
-        tabsWrap.className = "settings-mirror-tabs";
-        tabsWrap.appendChild(tabsClone);
-        scaleEl.appendChild(tabsWrap);
-      }
-    }
+    const railClone = document.querySelector(".rail").cloneNode(true);
+    stripIds(railClone);
+    scaleEl.appendChild(railClone);
+    const mirrorRailW = railClone.offsetWidth;
+    // 只克隆主头行，保留 .site-head 外壳以继承皮肤材质。
+    const headClone = $("mainHeadInner").cloneNode(true);
+    stripIds(headClone);
+    headClone.removeAttribute("hidden");
+    const headWrap = document.createElement("header");
+    headWrap.className = "site-head";
+    headWrap.appendChild(headClone);
+    scaleEl.appendChild(headWrap);
     const boardClone = board.cloneNode(true);
     boardClone.removeAttribute("hidden");
     stripIds(boardClone);
     scaleEl.appendChild(boardClone);
-    // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
+    // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；
     // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
     // 预览窗＝当前视口的一屏：高度由容器 aspect-ratio 给定且视口不可滚，sizer 只撑
     // 一屏，整页克隆体超出部分被它裁掉；缩放比封顶 1，窄窗口下不把缩略图放大成怪图。
     const mainCs = getComputedStyle(main);
-    const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
+    const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + mirrorRailW + 24;
     const availW = viewport.clientWidth;
     // 视口此刻应为可见态；万一被空态样式收起，退回预览容器高度，避免首拍算出零高。
     const availH = viewport.clientHeight || (viewport.parentElement && viewport.parentElement.clientHeight) || 0;
@@ -5463,7 +5413,7 @@ async function api(method, path, body) {
     scaleEl.style.transform = `scale(${s})`;
     // 镜像栏的 fixed 通高折算成一屏自然高：按 s 缩放后栏底正好等于视口底。
     scaleEl.style.setProperty("--preview-vh", availH / s + "px");
-    // 栏克隆实渲宽交给 CSS：v2 网格列 1 与绝对定位的镜像栏共用同一值。栏改绝对定位
+    // 栏克隆实渲宽交给 CSS：网格列 1 与绝对定位的镜像栏共用同一值。栏改绝对定位
     // 脱离网格轨道 sizing 的根因见 .settings-mirror-scale .rail 处注释（余量灌头行）。
     scaleEl.style.setProperty("--mirror-rail-w", mirrorRailW + "px");
     // sizer 不写死 px 宽：设置页右栏是 grid 1fr，固定 px 宽会把列撑开，下一轮
@@ -5496,7 +5446,6 @@ async function api(method, path, body) {
     const startupAnimationToggle = $("startupAnimationToggle");
     const boardLayoutSeg = $("boardLayoutSeg");
     const boardLayoutDesc = $("boardLayoutDesc");
-    const uiVersionSeg = $("uiVersionSeg");
     const injectEffortToggle = $("injectEffortToggle");
     const credentialCacheToggle = $("credentialCacheToggle");
     const autoDownloadUpdatesToggle = $("autoDownloadUpdatesToggle");
@@ -5631,26 +5580,10 @@ async function api(method, path, body) {
     // 是本函数的内部函数，外层不直引（见 applyInstalledAgentIds 侧注释）。
     rebuildKeepAliveButtons = () => { buildKeepAliveEndpoints(); };
 
-    // 设置入口：页头齿轮切入全页设置视图，退出回到进入前的视图
-    const openBtn = $("settingsBtn");
-    const exitBtn = $("settingsExitBtn");
-    const openSettings = () => {
+    $("railSettingsBtn").onclick = () => {
       if (currentView !== "settings") settingsReturnView = currentView;
       switchView("settings");
     };
-    if (openBtn) openBtn.onclick = openSettings;
-    // 新版左栏右下角的设置入口与头行齿轮同一处理函数（返回视图记忆语义不变）
-    const railOpenBtn = $("railSettingsBtn");
-    if (railOpenBtn) railOpenBtn.onclick = openSettings;
-    // 退出设置的回跳目标（进入前的视图）只有一个状态源：头行「←」与 v2 栏底「返回」
-    // 挂同一处理函数，不从两个入口各写一份。终端态下同一颗钮由 initTerminalRail 接管
-    // （两态互斥，见那边的注释）。
-    const exitSettings = () => switchView(settingsReturnView);
-    if (exitBtn) exitBtn.onclick = exitSettings;
-    const railBackBtn = $("railBackBtn");
-    if (railBackBtn) railBackBtn.onclick = exitSettings;
-    const terminalEntry = $("openTerminalPreviewBtn");
-    if (terminalEntry) terminalEntry.onclick = () => openTerminalPreview();
 
     // 子 tab：通用 / 自动路由 / 主题 / 关于；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
     const about = createAboutController({ request: api, doc: document, notify: toast });
@@ -5663,80 +5596,37 @@ async function api(method, path, body) {
     const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelFailure, onImportApplied: () => backupLocation.refresh() });
     leaveSettingsView = () => { about.leave(); dataBundle.leave(); backupLocation.leave(); };
     const settingsSubTabs = {
-      general: ["settingsTabGeneral", "settingsPanelGeneral"],
-      advanced: ["settingsTabAdvanced", "settingsPanelAdvanced"],
-      route: ["settingsTabRoute", "settingsPanelRoute"],
-      theme: ["settingsTabTheme", "settingsPanelTheme"],
-      about: ["settingsTabAbout", "settingsPanelAbout"],
+      general: $("railDirGeneral"),
+      advanced: $("railDirAdvanced"),
+      route: $("railDirRoute"),
+      theme: $("railDirTheme"),
+      about: $("railDirAbout"),
     };
-    // 左栏设置目录（v2 设置态整组替换主 tab 组）：键必须与 settingsSubTabs 逐格同，
-    // 值是栏内目录项 id。目录项与原子 tab 同走 activateSettingsSubTab——点击入口
-    // 两个、状态源一个，高亮/aria 在该函数循环里双向同步，不会两处漂移。
-    const settingsDirItems = {
-      general: "railDirGeneral",
-      advanced: "railDirAdvanced",
-      route: "railDirRoute",
-      theme: "railDirTheme",
-      about: "railDirAbout",
-    };
-    // 头行页题＝当前子 tab 的名字。文字现取子 tab 条那一格自己的标签（与 v2 轻页头
-    // #v2PageTitle 取栏 tab 标签同一手法），不另抄一份字符串；静态默认「通用」与静态
-    // 选中的「通用」子 tab 同帧一致。空键按「通用」兜底：主动进设置恒落通用，恢复存档
-    // 里存着已退役的键也只有这一条退路。
     const settingsHeadTitle = $("settingsHeadTitle");
-    syncSettingsHeadTitle = (which) => {
-      const key = settingsSubTabs[which] ? which : "general";
-      if (settingsHeadTitle) settingsHeadTitle.textContent = $(settingsSubTabs[key][0]).textContent.trim();
-    };
-    // 只动呈现（高亮类/aria/面板显隐），与 activateSettingsSubTab 的 DOM 循环同套；
-    // 不写存档、不播动画、不重置滚动、不取数、不碰生命周期——那些属于首帧之后的
-    // 真正激活。空键按「通用」兜底，与页题同一退路。
+    // 首帧只同步呈现。取数和子页生命周期在进入设置时执行。
     syncSettingsSubTabUi = (which) => {
-      const key = settingsSubTabs[which] ? which : "general";
-      for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
-        const on = name === key;
-        $(tabId).classList.toggle("active", on);
-        $(tabId).setAttribute("aria-selected", String(on));
-        $(tabId).tabIndex = on ? 0 : -1;
-        $(panelId).hidden = !on;
-        const dirItem = $(settingsDirItems[name]);
-        if (dirItem) {
-          dirItem.classList.toggle("active", on);
-          dirItem.setAttribute("aria-selected", String(on));
-          if (on) dirItem.setAttribute("aria-current", "page"); else dirItem.removeAttribute("aria-current");
-        }
+      const selected = Object.hasOwn(settingsSubTabs, which) ? settingsSubTabs[which] : settingsSubTabs.general;
+      settingsHeadTitle.textContent = selected.querySelector(".rail-tab-label").textContent.trim();
+      for (const item of Object.values(settingsSubTabs)) {
+        const on = item === selected;
+        item.classList.toggle("active", on);
+        item.setAttribute("aria-selected", String(on));
+        item.tabIndex = on ? 0 : -1;
+        if (on) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current");
+        $(item.getAttribute("aria-controls")).hidden = !on;
       }
     };
-    function activateSettingsSubTab(which, animate) {
+    function activateSettingsSubTab(which, animate, entering = false) {
       const selected = settingsSubTabs[which];
-      if (!selected) return;
-      // 页题先落再谈早退：它跟的是「此刻该显示的那一格」，已经在选中的那格再点一次
-      // （或进入设置时程序置位）也得保证两者一致。
-      syncSettingsHeadTitle(which);
-      if ($(selected[0]).classList.contains("active")) return;
+      if (!entering && selected.classList.contains("active")) return;
+      syncSettingsSubTabUi(which);
       resetPageScroll();
       if (which !== "about") about.leave();
       if (which !== "advanced") { dataBundle.leave(); backupLocation.leave(); }
-      for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
-        const on = name === which;
-        $(tabId).classList.toggle("active", on);
-        $(tabId).setAttribute("aria-selected", String(on));
-        $(tabId).tabIndex = on ? 0 : -1;
-        $(panelId).hidden = !on;
-        // 栏内目录项同帧跟随（高亮类 + aria 与主栏 tab 同套：selected 之外点亮挂
-        // aria-current="page"）；子 tab 的 roving tabindex 只属于原子 tab 条，目录
-        // 项与主栏 tab 一样全员可聚焦。
-        const dirItem = $(settingsDirItems[name]);
-        if (dirItem) {
-          dirItem.classList.toggle("active", on);
-          dirItem.setAttribute("aria-selected", String(on));
-          if (on) dirItem.setAttribute("aria-current", "page"); else dirItem.removeAttribute("aria-current");
-        }
-      }
       // 子 tab 存档 = 此刻真实显示的那一个：进设置时的「通用」重置也走这里，存档
       // 永远与用户看到的一致，刷新恢复不必再区分「用户点的」与「程序置的」。
       try { localStorage.setItem("panel-settings-subtab", which); } catch {}
-      if (animate) replayViewEnter($(selected[1]));
+      if (animate) replayViewEnter($(selected.getAttribute("aria-controls")));
       if (which === "theme") {
         captureSettingsMirror();
         mirrorAwaitRender = true;
@@ -5773,45 +5663,31 @@ async function api(method, path, body) {
       clearTimeout(mirrorResizeTimer);
       mirrorResizeTimer = setTimeout(captureSettingsMirror, 200);
     });
-    function resetSettingsSubTab() {
-      for (const [id] of Object.values(settingsSubTabs)) $(id).classList.remove("active");
-      activateSettingsSubTab("general", false);
-    }
-    function bindSettingsSubTabs() {
-      const names = Object.keys(settingsSubTabs);
-      names.forEach((name, index) => {
-        const [tabId, panelId] = settingsSubTabs[name];
-        const tab = $(tabId);
-        tab.onclick = () => activateSettingsSubTab(name, true);
-        // 栏内目录项点击与原子 tab 同一入口（activateSettingsSubTab 内部回同步两处高亮）
-        const dirItem = $(settingsDirItems[name]);
-        if (dirItem) dirItem.onclick = () => activateSettingsSubTab(name, true);
-        $(panelId).setAttribute("role", "tabpanel");
-        $(panelId).setAttribute("aria-labelledby", tabId);
-        tab.onkeydown = (event) => {
-          const target = event.key === "Home" ? 0 : event.key === "End" ? names.length - 1
-            : event.key === "ArrowRight" ? (index + 1) % names.length
-            : event.key === "ArrowLeft" ? (index + names.length - 1) % names.length : -1;
-          if (target < 0) return;
-          event.preventDefault();
-          $(settingsSubTabs[names[target]][0]).focus();
-          activateSettingsSubTab(names[target], true);
-        };
-      });
-    }
-    bindSettingsSubTabs();
-
+    const settingKeys = Object.keys(settingsSubTabs);
+    settingKeys.forEach((name, index) => {
+      const item = settingsSubTabs[name];
+      item.onclick = () => activateSettingsSubTab(name, true);
+      item.onkeydown = (event) => {
+        let target;
+        switch (event.key) {
+          case "Home": target = 0; break;
+          case "End": target = settingKeys.length - 1; break;
+          case "ArrowDown": target = (index + 1) % settingKeys.length; break;
+          case "ArrowUp": target = (index + settingKeys.length - 1) % settingKeys.length; break;
+          default: return;
+        }
+        event.preventDefault();
+        const next = settingKeys[target];
+        activateSettingsSubTab(next, true);
+        settingsSubTabs[next].focus();
+      };
+    });
     enterSettingsView = () => {
-      // 刷新/重启恢复进设置页：按 restoreView 交来的存档回到原子 tab；主动点齿轮进入
-      // 仍旧从头看起，落「通用」。存档只在此消费一次，不留到下一次进入。
       const restore = settingsSubTabToRestore;
       settingsSubTabToRestore = null;
-      if (restore && Object.keys(settingsSubTabs).includes(restore)) {
-        // 首帧同步已把该格置成 .active，先摘再激活：否则早退守卫会跳过取数与
-        // about/dataBundle/backupLocation 的 enter 等副作用（resetSettingsSubTab 同款）。
-        for (const [id] of Object.values(settingsSubTabs)) $(id).classList.remove("active");
-        activateSettingsSubTab(restore, false);
-      } else resetSettingsSubTab();
+      // 首帧可能已点亮这一格，进入时仍需执行取数和子页生命周期。
+      const target = Object.hasOwn(settingsSubTabs, restore) ? restore : "general";
+      activateSettingsSubTab(target, false, true);
       return loadSettingsState();
     };
 
@@ -6252,33 +6128,6 @@ async function api(method, path, body) {
       reflectBoardLayout();
     }
 
-    if (uiVersionSeg) {
-      // 本机浏览器偏好，点选即时写存档、不 POST（同开屏动画）；不同处是即时生效——
-      // 写存档的同时改写 <html> data-ui-version，看板 CSS 当帧换列，不必等刷新。
-      // 新版是默认态：选新版删存档、不落冗余值；选旧版才写 "classic" 并摘属性。
-      // 无 toast：选中枚高亮当帧移动本身就是反馈（同设置页子 tab）。
-      const segBtns = Array.from(uiVersionSeg.querySelectorAll("[data-ui-version-choice]"));
-      const reflectUiVersion = () => {
-        const v2 = newUiEnabled();
-        for (const b of segBtns) {
-          b.setAttribute("aria-checked", String((b.dataset.uiVersionChoice === "v2") === v2));
-        }
-      };
-      for (const b of segBtns) {
-        b.onclick = () => {
-          const next = b.dataset.uiVersionChoice === "v2";
-          try {
-            if (next) localStorage.removeItem("panel-ui-version");
-            else localStorage.setItem("panel-ui-version", "classic");
-          } catch {}
-          if (next) document.documentElement.setAttribute("data-ui-version", "v2");
-          else document.documentElement.removeAttribute("data-ui-version");
-          reflectUiVersion();
-        };
-      }
-      reflectUiVersion();
-    }
-
     if (injectEffortToggle) {
       injectEffortToggle.onchange = async () => {
         if (settingsSaving.injectEffort) {
@@ -6398,7 +6247,7 @@ async function api(method, path, body) {
     }
 
     // 号池路由双选：即改即存（布尔字段不变），中继每请求现读，改完下一请求即生效。
-    // 无成功 toast（2026-11-18 裁决）：选中项高亮当帧移动即反馈，同「UI版本」；
+    // 无成功 toast（2026-11-18 裁决）：选中项高亮即反馈。
     // 失败回滚选中态＋报错 toast。点已选中项与保存中的点击都忽略。
     async function savePoolRouting(next) {
       if (settingsSaving.poolLoadBalancing) return;
@@ -11550,15 +11399,10 @@ async function api(method, path, body) {
 
   function syncTerminalHostControls() {
     const [cls, label] = TERMINAL_HOST_BADGE_MAP[terminalHostState] || ["badge badge-neutral", "状态未知"];
-    // 同态异词：入口卡（看板侧）在服务从未启动过的冷态也会出现，「未运行」是
-    // 中性事实；终端页头徽标多在关停动作后看到，「已停止」承接动作语境。
-    const entryLabel = terminalHostState === "stopped" ? "未运行" : label;
-    for (const el of [$("terminalHostBadge"), $("terminalHostHeadBadge")]) {
-      if (!el) continue;
-      el.className = cls;
-      // 文案写在 .badge-text 内层：窄屏档只藏内层留圆点，外层类名与底色不动
-      (el.firstElementChild || el).textContent = el.id === "terminalHostBadge" ? entryLabel : label;
-    }
+    const badge = $("terminalHostHeadBadge");
+    badge.className = cls;
+    // 窄屏只隐藏文字，保留外层状态点。
+    badge.firstElementChild.textContent = label;
     // 起停二合一钮：运行中呈关停、已停止/异常呈启动，状态未知按住不动
     const toggleBtn = $("terminalHostToggleBtn");
     if (!toggleBtn) return;
@@ -12480,7 +12324,6 @@ async function api(method, path, body) {
       if (!terminalViewportActivate(viewportId)) return;
       renderTerminalPreviewSession();
     });
-    $("terminalReturnBtn").onclick = () => closeTerminalPreview();
     $("terminalInspectorToggle").onclick = () => {
       const inspector = $("terminalInspector");
       const workspace = $("terminalWorkspace");
@@ -12682,7 +12525,7 @@ async function api(method, path, body) {
     requestAnimationFrame(() => {
       window.scrollTo(0, terminalReturnScrollTop);
       document.documentElement.scrollTop = terminalReturnScrollTop;
-      $("openTerminalPreviewBtn")?.focus();
+      $("railTabTerminal").focus({ preventScroll: true });
     });
   }
 
@@ -13565,52 +13408,42 @@ async function api(method, path, body) {
 
   // 主题切换
   function initTheme() {
-    // 主头行、设置头行、终端页、新版左栏各有一颗亮暗钮：同一状态源
-    // （data-theme + panel-theme），同一套日/月图标逻辑，任一侧切换各侧同步刷新
-    const toggles = [
-      { btn: $("themeToggle"), sun: $("icoSun"), moon: $("icoMoon") },
-      { btn: $("settingsThemeToggle"), sun: $("settingsIcoSun"), moon: $("settingsIcoMoon") },
-      { btn: $("terminalThemeToggle"), sun: $("terminalIcoSun"), moon: $("terminalIcoMoon") },
-      { btn: $("railThemeToggle"), sun: $("railIcoSun"), moon: $("railIcoMoon") },
-    ].filter((t) => t.btn);
+    const button = $("railThemeToggle");
+    const sun = $("railIcoSun");
+    const moon = $("railIcoMoon");
     function currentTheme() {
       const t = document.documentElement.getAttribute("data-theme");
       if (t === "light" || t === "dark") return t;
       return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     }
-    function syncBtns() {
+    function syncButton() {
       const dark = currentTheme() === "dark";
       const label = dark ? "切换到亮色模式" : "切换到暗色模式";
-      for (const t of toggles) {
-        // 日/月是 SVG 元素：hidden 是 HTMLElement 的 IDL 反射属性，SVGElement 上没有——
-        // `.hidden =` 只写 expando 不落 attribute，UA 的 [hidden] 规则永不生效，图标永远
-        // 停在 HTML 初态。必须落 attribute（与 syncRailCollapseBtn 的收展图标同一修法）。
-        // 图标画当前态（暗态挂月亮、亮态挂太阳），aria/title 的「切换到…模式」是目标态
-        // 动作（PANEL-COPY-SPEC：状态用图形，动作归文案）。
-        if (t.sun) t.sun.toggleAttribute("hidden", dark);
-        if (t.moon) t.moon.toggleAttribute("hidden", !dark);
-        t.btn.setAttribute("aria-label", label); t.btn.title = label;
-      }
+      // SVG 不反射 .hidden 属性。图标显示当前状态，标签说明点击后的动作。
+      sun.toggleAttribute("hidden", dark);
+      moon.toggleAttribute("hidden", !dark);
+      button.setAttribute("aria-label", label);
+      button.title = label;
     }
     function setTheme(mode) {
       if (mode === "light" || mode === "dark") document.documentElement.setAttribute("data-theme", mode);
       else document.documentElement.removeAttribute("data-theme");
       try { localStorage.setItem("panel-theme", mode); } catch {}
-      syncBtns();
+      syncButton();
       if (wallpaperController) wallpaperController.syncMode();
       applyTerminalXtermTheme();
     }
     // 系统亮暗变化（用户未显式选定主题时）：同步图标，并重刷终端屏配色
     if (window.matchMedia) {
       window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-        syncBtns();
+        syncButton();
         if (wallpaperController) wallpaperController.syncMode();
         applyTerminalXtermTheme();
       });
     }
     const saved = localStorage.getItem("panel-theme");
     setTheme(saved === "light" || saved === "dark" ? saved : "auto");
-    for (const t of toggles) t.btn.onclick = () => setTheme(currentTheme() === "dark" ? "light" : "dark");
+    button.onclick = () => setTheme(currentTheme() === "dark" ? "light" : "dark");
   }
 
   // 面板主题清单：与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份，改动需两侧
@@ -13840,9 +13673,9 @@ async function api(method, path, body) {
   // 展开态不挂重复提示：各 tab 的 title 与可见标签逐字相同，鼠标扫过一排等于把同一句
   // 话念七遍。原生 title 没法条件
   // 抑制，这里按有效栏态摘挂——收起态标签不渲染，title 是唯一的名字来源，必须留。
-  // 只动运行期属性，HTML 里写死的初值不删（v1 整栏不出，摘挂对它不可见）。
+  // 只动运行期属性，保留 HTML 的初始标签。
   function syncRailTabTitles(collapsed) {
-    const rail = $("v2Rail");
+    const rail = $("panelRail");
     if (!rail) return;
     for (const tab of rail.querySelectorAll(".rail-tab")) {
       const label = tab.querySelector(".rail-tab-label");
@@ -13942,13 +13775,9 @@ async function api(method, path, body) {
       if (wideMq.matches) releaseRailManual();
       syncRailCollapseBtn();
     });
-    // Ctrl/Cmd+\ 与收起钮同一条链。四处豁免：旧版（v2 属性不在册时整栏不出、收起钮
-    // display:none 本也点不到，快捷键是这条链唯一能凭空触达的入口）、IME 组字态（最终
-    // 字节未定，见终端转发闸门先例）、输入控件与可编辑区（全站有搜索框、路径框、编号
-    // 框）、终端视图（内核把 Ctrl 组合原样转发给 PTY，不能被界面快捷键抢走）。
+    // Ctrl/Cmd+\ 与收起钮共用同一操作，避开输入法、编辑控件和终端键盘转发。
     document.addEventListener("keydown", (event) => {
       if (event.key !== "\\" || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
-      if (!document.documentElement.hasAttribute("data-ui-version")) return;
       if (event.isComposing || event.keyCode === 229) return;
       const active = document.activeElement;
       if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable)) return;
@@ -16522,7 +16351,7 @@ async function api(method, path, body) {
   }
 
   // 滚动条指针感知的自动隐退：指针在列内 thumb 可见，离开 2s 后隐退
-  // ——变量替换瞬时消失，无淡出（写了 transition 就错）。挂栏体（#v2Rail）而不是
+  // ——变量替换瞬时消失，无淡出（写了 transition 就错）。挂栏体（#panelRail）而不是
   // 滚动层：整列都算「在列内」，指针挪到底栏那排钮时 thumb 照旧可见。初态即隐退：
   // 进终端视图时指针多半不在列内，不先隐就会常亮一条thumb。
   const TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000;
@@ -16533,7 +16362,7 @@ async function api(method, path, body) {
   }
 
   function initTerminalRailScrollbarQuiet() {
-    const rail = $("v2Rail");
+    const rail = $("panelRail");
     if (!rail || typeof rail.addEventListener !== "function") return;
     setTerminalRailQuiet(true);
     rail.addEventListener("pointerenter", () => {
@@ -17045,15 +16874,10 @@ async function api(method, path, body) {
   }
 
   function initSkillsTab() {
-    $("tabBoard").onclick = () => switchView("board");
-    $("tabSkills").onclick = () => switchView("skills");
-    // 新版左栏 tab：与头行走同一条 switchView 路径；激活态镜像在 switchView 内同步
     for (const [railId, view] of [["railTabBoard", "board"], ["railTabSkills", "skills"], ["railTabPresets", "presets"], ["railTabSessions", "sessions"], ["railTabStore", "store"], ["railTabStats", "stats"]]) {
       const railTab = $(railId);
       if (railTab) railTab.onclick = () => switchView(view);
     }
-    // 「终端」tab 与看板「虚拟终端」入口卡同一条链（openTerminalPreview：记忆返回视图
-    // 与滚动位后进终端页），不另写一套
     const railTerminalTab = $("railTabTerminal");
     if (railTerminalTab) railTerminalTab.onclick = () => openTerminalPreview();
     $("skillsPickRepoBtn").onclick = pickSkillsRepo;
@@ -17301,34 +17125,11 @@ async function api(method, path, body) {
       // 过期才在首帧之后补拉，绝不把这条请求排在画面之前。
       enterTerminalRail();
     }
-    // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
     $("mainHeadInner").hidden = settings || terminal;
     $("settingsHeadInner").hidden = !settings;
-    // 页题先按即将落的那一格写好，再交给进入工作里真正激活子 tab 那一步复核：子 tab 的
-    // 激活排在首帧之后，只在那里写会让头行先带着上一格的字亮一帧。恢复进设置时那格来自
-    // 存档（enterSettingsView 消费的就是它），主动进设置恒落「通用」。
-    if (settings) syncSettingsHeadTitle(settingsSubTabToRestore);
-    // 子 tab 高亮/显隐同帧落位：离开设置时旧格的 .active 与面板显隐原样留着，真正的
-    // 激活在首帧之后，不先同步会让旧高亮亮一帧再被过渡动画挪走（页题同款先手）。
     if (settings) syncSettingsSubTabUi(settingsSubTabToRestore);
-    $("tabBoard").classList.toggle("active", board);
-    $("tabSkills").classList.toggle("active", name === "skills");
-    $("tabPresets").classList.toggle("active", presets);
-    $("tabStore").classList.toggle("active", store);
-    $("tabStats").classList.toggle("active", stats);
-    $("tabSessions").classList.toggle("active", sessions);
-    // tablist 语义：aria-selected 与 active class 同步（屏幕阅读器按 tab 读选中态）
-    for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
-      $(id).setAttribute("aria-selected", on ? "true" : "false");
-    }
-    // 新版左栏 tab 的镜像态：与头行 tab 同一状态源、同一收口点（含 restoreView 恢复
-    // 与设置/终端进出——进设置时六主 tab 全熄、栏底设置钮点亮；进终端时「终端」tab
-    // 亮，栏内第七枚就是它）。高亮即挂 aria-current="page"，熄灭即摘；轻页头页题与
-    // 点亮 tab 的标签同源（现取 .rail-tab-label 的文字，不复制字符串）。取标签而非
-    // tab 整段 textContent：预设/会话两枚栏图标是裸 Unicode 字形（❑/☰）而非 svg，
-    // svg 无文本内容、整段取不会带出图标，裸字形会——整段取就把「❑ 」「☰ 」混进
-    // 页面左上角页题，那处只该是纯标题文字。
-    const v2PageTitle = $("v2PageTitle");
+    // 标题只读标签，以免将预设和会话的字符图标带入标题。
+    const pageTitle = $("pageTitle");
     for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabSessions", sessions], ["railTabStore", store], ["railTabStats", stats], ["railTabTerminal", terminal]]) {
       const railTab = $(railId);
       if (!railTab) continue;
@@ -17336,7 +17137,7 @@ async function api(method, path, body) {
       railTab.setAttribute("aria-selected", on ? "true" : "false");
       if (on) railTab.setAttribute("aria-current", "page"); else railTab.removeAttribute("aria-current");
       const railLabel = railTab.querySelector(".rail-tab-label");
-      if (on && v2PageTitle) v2PageTitle.textContent = (railLabel || railTab).textContent.trim();
+      if (on && pageTitle) pageTitle.textContent = (railLabel || railTab).textContent.trim();
     }
     const railSettings = $("railSettingsBtn");
     if (railSettings) {
@@ -19427,7 +19228,6 @@ async function api(method, path, body) {
   }
 
   function initPresetsTab() {
-    $("tabPresets").onclick = () => switchView("presets");
     $("presetsAddBtn").onclick = () => showPresetFormModal(null);
     $("presetsRefreshBtn").onclick = runPresetsRefreshWithFeedback;
     $("presetsFilterInput").oninput = (e) => {
@@ -23390,7 +23190,6 @@ async function api(method, path, body) {
   }
 
   function initStoreTab() {
-    $("tabStore").onclick = () => switchView("store");
     $("storeAddBtn").onclick = () => showAddModal();
     $("storeImportLocalBtn").onclick = () => openByokImportModal();
     $("storeRefreshAllBtn").onclick = () => storeRefresh(null);
@@ -23641,7 +23440,6 @@ async function api(method, path, body) {
   }
 
   function initStatsTab() {
-    $("tabStats").onclick = () => switchView("stats");
     loadStatsPrefs();
     // 切口径：清屏重绘 + 左至右线生长（重置 reveal 标记走首绘机制），不走 morph 插值；
     // days seg/图例显隐/30s 轮询仍维持 morph 平滑形变
@@ -24402,8 +24200,8 @@ async function api(method, path, body) {
   // 趋势图画布高：恢复阶段3前的宽高联动——设计比例 760:220（彼时 viewBox 760×220
   // 经 CSS width:100%/height:auto 随卡宽等比缩放，宽窗口下图自然填满被网格拉伸的
   // 卡体）。阶段3把 viewBox 宽改按容器实测（1:1 像素、字号线宽不缩放）后高度被钉死
-  // 220，联动断裂、卡下半截悬空（v1/v2 同发）；此处按同比例由宽派生高，与
-  // statsChartWidth 同下限同藏态回落（undefined→220 基线），v1/v2 同效。外层作用域
+  // 220，联动断裂、卡下半截悬空；此处按同比例由宽派生高，与
+  // statsChartWidth 同下限同藏态回落（undefined→220 基线）。外层作用域
   // 声明：调用点在 renderStatsTrend（renderStatsLineChart 之外），嵌套声明会让调用处
   // 直接 ReferenceError、整图中止渲染（历史事故根因）。
   function statsTrendChartHeight(el) {
@@ -25269,13 +25067,10 @@ async function api(method, path, body) {
     });
   }
 
-  // 阶段 3：日志首次加载的骨架行——v2 平铺语义下加载态用 shimmer 底色块暗示行结构
-  // （不画框）。只铺首次空表（tbody 已有内容时 5s 轮询是同签名静默范式，不动 DOM）；
-  // v2-only 门控：v1 保持原行为（空表等首包）。
+  // 请求日志首次加载时显示骨架行，已有数据时保留表格。
   function renderLogsSkeleton() {
     const tbody = $("logsTbody");
     if (!tbody || tbody.children.length) return;
-    if (document.documentElement.getAttribute("data-ui-version") !== "v2") return;
     const widths = [95, 88, 97, 82, 93, 78, 90, 85];
     tbody.innerHTML = widths.map((w) =>
       `<tr class="logs-skel-row" aria-hidden="true"><td colspan="7"><div class="sessions-skel logs-skel-bar" style="width:${w}%"></div></td></tr>`).join("");
@@ -26605,7 +26400,6 @@ async function api(method, path, body) {
   function initSessionsTab() {
     if (sessInited) return;
     sessInited = true;
-    $("tabSessions").onclick = () => switchView("sessions");
 
     // 视图切换 seg
     $("sessViewSeg").querySelectorAll(".seg-btn").forEach((b) => {

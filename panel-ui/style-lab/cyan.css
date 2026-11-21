@@ -89,7 +89,6 @@
   --brand-hl: rgba(255, 255, 255, 0.35);
   --overlay-bg: rgba(23, 24, 28, 0.32);
   --glass-blur: blur(22px) saturate(190%);
-  --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(11, 138, 163, 0.09), transparent 70%);
   --console-bg: #ffffff;
   --console-toolbar-bg: #f8fafc;
   --console-border: #e2e8f0;
@@ -172,7 +171,6 @@
   --brand-hl: rgba(255, 255, 255, 0.25);
   --overlay-bg: rgba(0, 0, 0, 0.55);
   --glass-blur: blur(22px) saturate(190%);
-  --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(62, 194, 214, 0.11), transparent 70%);
   --console-bg: #0a0c11;
   --console-toolbar-bg: #10131a;
   --console-border: rgba(255, 255, 255, 0.07);
@@ -256,7 +254,6 @@
     --brand-hl: rgba(255, 255, 255, 0.25);
     --overlay-bg: rgba(0, 0, 0, 0.55);
     --glass-blur: blur(22px) saturate(190%);
-    --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(62, 194, 214, 0.11), transparent 70%);
     --console-bg: #0a0c11;
     --console-toolbar-bg: #10131a;
     --console-border: rgba(255, 255, 255, 0.07);
@@ -289,18 +286,13 @@
    块内选择器以 `:scope:scope` 顶替原来的「`:root` + 皮肤键」前缀：@scope 的作用域不含
    作用域根自身，保留 `:root` 前缀的规则在块内一条都匹配不到（整段皮肤静默失效）。
    `:scope:scope` 两个伪类 = (0,2,0)，与原 `:root[data-style="…"]` 的特异性相等；选择器上
-   的其他条件原样保留在其后（如 `[data-theme="dark"]`、v2 块的 `[data-ui-version="v2"]`），
+   的其他条件原样保留在其后（如 `[data-theme="dark"]`），
    特异性逐条不变。改动只能动前缀，规则、声明、顺序一律不动。
    上面三段 token 定义与本文件里其他 `:root[data-style=…]` 主题 token 规则必须留在块外：
    @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
    @keyframes 同样在块外顶层。新增皮肤覆盖规则写进本块内（前缀同样写 `:scope:scope`）。
    ========================================================================== */
 @scope (:root[data-style="cyan"]) to (.wallpaper-preview) {
-/* 页面：顶部一抹品牌色径向光晕，营造控制台氛围 */
-:scope:scope body {
-  background: var(--page-bg-image), var(--bg-page);
-}
-
 /* Header：加强玻璃拟态，底部改细分割线 + 极轻投影 */
 :scope:scope header.site-head {
   backdrop-filter: var(--glass-blur);
@@ -317,7 +309,6 @@
 }
 
 /* 版本标签 / 头部信息 pill / 会话 tag：胶囊化 */
-:scope:scope .brand-text .version-tag,
 :scope:scope .meta-pill,
 :scope:scope .tag-bubble {
   border-radius: 999px;
@@ -376,8 +367,8 @@
 /* 遥测四宫格：微渐变底 + 顶部高光，数字收紧字距 */
 :scope:scope .telemetry-card {
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
-  box-shadow: inset 0 1px 0 var(--hl-inset);
+  background: var(--surface-sunken);
+  box-shadow: none;
 }
 :scope:scope .telemetry-num {
   letter-spacing: -0.03em;

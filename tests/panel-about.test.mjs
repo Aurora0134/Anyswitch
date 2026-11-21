@@ -829,13 +829,16 @@ test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", (
   assert.match(html, /href="https:\/\/github\.com\/Aurora0134\/Anyswitch\/releases"[^>]*>发布说明<\/a>/);
 });
 
-test("settings has explicit third tab mapping and leaving About runs its lifecycle without taking a theme snapshot", () => {
+test("settings rail navigation runs the matching lifecycle and updates the title", () => {
   const h = harness();
-  const tabs = source.match(/    const settingsSubTabs = \{[\s\S]*?\n    \};/);
-  const dirItems = source.match(/    const settingsDirItems = \{[\s\S]*?\n    \};/);
-  const activate = source.match(/    function activateSettingsSubTab\(which, animate\) \{[\s\S]*?\n    \}/);
-  const bind = source.match(/    function bindSettingsSubTabs\(\) \{[\s\S]*?\n    \}/);
-  assert.ok(tabs && dirItems && activate && bind);
+  const settingsController = source.slice(source.indexOf("    const settingsSubTabs ="), source.indexOf("    function captureSettingsMirror()"));
+  const bind = source.match(/    const settingKeys = Object.keys\(settingsSubTabs\);\n[\s\S]*?\n    \}\);/);
+  assert.ok(settingsController.includes("function activateSettingsSubTab") && bind);
+  for (const suffix of ["General", "Advanced", "Route", "Theme", "About"]) {
+    const item = h.get(`railDir${suffix}`);
+    item.setAttribute("aria-controls", `settingsPanel${suffix}`);
+    item.querySelector = () => ({ textContent: suffix });
+  }
   let enters = 0, leaves = 0, mirrors = 0, pageScrollResets = 0, bundleEnters = 0, bundleLeaves = 0;
   let backupEnters = 0, backupLeaves = 0;
   const context = vm.createContext({
@@ -850,25 +853,30 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
     // 「通用」子页会拉 store state 生成档位映射下拉的选项（与「自动路由」同源），
     // 本测试只验 About 生命周期，给一条已落地的 Promise 即可。
     refreshStoreState: () => Promise.resolve(), renderClaudeTierOptions() {},
-    // 子 tab 切换同帧要改写设置头行页题（装配在 initSettingsView 里，不在本测试切出的
-    // 片段内）。这里只验生命周期计数，给个空壳即可；页题文字源由 panel.test.mjs 钉。
-    syncSettingsHeadTitle() {},
+    localStorage: { setItem() {} },
+    syncSettingsSubTabUi: null,
+    mirrorAwaitRender: false,
   });
-  vm.runInContext(`${tabs[0]}\n${dirItems[0]}\n${activate[0]}\n${bind[0]}\nbindSettingsSubTabs();`, context);
-  h.get("settingsTabAbout").click();
+  vm.runInContext(`${settingsController}
+${bind[0]}`, context);
+  h.get("railDirAbout").click();
   assert.equal(h.get("settingsPanelAbout").hidden, false);
   assert.equal(h.get("settingsPanelTheme").hidden, true);
   assert.equal(h.get("settingsPanelGeneral").hidden, true);
-  assert.equal(h.get("settingsTabAbout").getAttribute("aria-selected"), "true");
+  assert.equal(h.get("railDirAbout").getAttribute("aria-selected"), "true");
+  assert.equal(h.get("settingsHeadTitle").textContent, "About");
   assert.equal(enters, 1); assert.equal(mirrors, 0);
   assert.equal(pageScrollResets, 1, "switching to About returns the page to the top");
-  h.get("settingsTabAbout").click(); assert.equal(enters, 1); assert.equal(pageScrollResets, 1);
-  h.get("settingsTabTheme").click(); assert.equal(leaves, 1); assert.equal(mirrors, 1); assert.equal(pageScrollResets, 2);
-  const event = { key: "ArrowRight", preventDefault() {} };
-  h.get("settingsTabTheme").onkeydown(event);
-  assert.equal(h.get("settingsTabAbout").focused, true);
+  h.get("railDirAbout").click(); assert.equal(enters, 1); assert.equal(pageScrollResets, 1);
+  h.get("railDirTheme").click(); assert.equal(leaves, 1); assert.equal(mirrors, 1); assert.equal(pageScrollResets, 2);
+  let prevented = false;
+  h.get("railDirTheme").onkeydown({ key: "ArrowDown", preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(h.get("railDirAbout").focused, true);
+  assert.equal(h.get("railDirAbout").tabIndex, 0);
+  assert.equal(h.get("railDirTheme").tabIndex, -1);
   assert.equal(enters, 2); assert.equal(pageScrollResets, 3);
-  h.get("settingsTabGeneral").click();
+  h.get("railDirGeneral").click();
   assert.equal(h.get("settingsPanelGeneral").hidden, false);
   assert.equal(h.get("settingsPanelAbout").hidden, true);
   assert.equal(pageScrollResets, 4);
@@ -884,14 +892,20 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
   assert.equal(bundleEnters, 0, "还没进过高级选项");
   assert.equal(backupLeaves, 4, "备份位置卡与数据搬迁卡同走子页生命周期");
   assert.equal(backupEnters, 0, "还没进过高级选项");
-  h.get("settingsTabAdvanced").click();
+  h.get("railDirAdvanced").click();
   assert.equal(bundleEnters, 1, "切到高级选项要进入数据搬迁卡");
   assert.equal(bundleLeaves, 4, "切进高级选项本身不算离开");
   assert.equal(backupEnters, 1, "切到高级选项要进入备份位置卡");
   assert.equal(backupLeaves, 4, "切进高级选项本身不算离开");
-  h.get("settingsTabGeneral").click();
+  h.get("railDirGeneral").click();
   assert.equal(bundleLeaves, 5, "切走高级选项要让它离开");
   assert.equal(backupLeaves, 5, "切走高级选项也要让备份位置卡离开");
+  for (const [from, key, to] of [["General", "ArrowUp", "About"], ["About", "Home", "General"], ["General", "End", "About"], ["About", "ArrowDown", "General"]]) {
+    h.get(`railDir${from}`).onkeydown({ key, preventDefault() {} });
+    assert.equal(h.get(`railDir${to}`).getAttribute("aria-selected"), "true");
+    assert.equal(h.get(`railDir${to}`).tabIndex, 0);
+    assert.equal(h.get(`railDir${from}`).tabIndex, -1);
+  }
 });
 
 // ── 本地环境卡：安装/更新动作位 ───────────────────────

@@ -7,7 +7,7 @@
 
    布局级覆盖清单（契约放宽项，全部 scoped 于本主题选择器下）：
    1. --radius-sm/md/lg 放大至 10/14/20（基座基准 6/8/12）；
-   2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
+   2. .badge / .toast / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；
    3. 辉光阴影：--accent-glow、卡片 hover，
       box-shadow 偏移/扩散大于基座基准（不占布局空间）；
@@ -328,7 +328,7 @@
    块内选择器以 `:scope:scope` 顶替原来的「`:root` + 皮肤键」前缀：@scope 的作用域不含
    作用域根自身，保留 `:root` 前缀的规则在块内一条都匹配不到（整段皮肤静默失效）。
    `:scope:scope` 两个伪类 = (0,2,0)，与原 `:root[data-style="…"]` 的特异性相等；选择器上
-   的其他条件原样保留在其后（如 `[data-theme="dark"]`、v2 块的 `[data-ui-version="v2"]`），
+   的其他条件原样保留在其后（如 `[data-theme="dark"]`），
    特异性逐条不变。改动只能动前缀，规则、声明、顺序一律不动。
    上面三段 token 定义与本文件里其他 `:root[data-style=…]` 主题 token 规则必须留在块外：
    @scope 的作用域不含作用域根自身，把取 token 的规则收进块内会让它们一起失效。
@@ -362,7 +362,6 @@
 }
 
 /* 版本标签 / 头部信息 pill / 会话 tag：胶囊化 + 玻璃底 */
-:scope:scope .brand-text .version-tag,
 :scope:scope .meta-pill,
 :scope:scope .tag-bubble {
   border-radius: 999px;

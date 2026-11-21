@@ -20,7 +20,7 @@ const panelJs = readFileSync(join(here, "../panel-ui", "panel.js"), "utf8");
 const panelMjs = readFileSync(join(here, "..", "src", "panel", "panel.mjs"), "utf8");
 
 const railHtml = () => {
-  const m = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/);
+  const m = panelHtml.match(/<aside class="rail" id="panelRail"[\s\S]*?<\/aside>/);
   assert.ok(m, "左栏在册");
   return m[0];
 };
@@ -1341,7 +1341,7 @@ describe("S4 底栏钉住", () => {
       // 滚动层里不再套内层滚动容器（唯一滚动层）
       assert.ok(!body.includes("rail-term-history-scroll"), "无内层滚动容器（滚动只发生在中段）");
       // 底栏：亮暗/返回在栏体下，是 .rail 的flex 子项（本 nav 之外）
-      const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
+      const rail = panelHtml.match(/<aside class="rail" id="panelRail"[\s\S]*?<\/aside>/)[0];
       assert.ok(rail.indexOf('id="railTerminalDir"') < rail.indexOf('class="rail-foot"'),
         "栏底行在终端会话栏之后（同一 flex 列的最后一项）");
       assert.ok(rail.includes('id="railThemeToggle"') && rail.includes('id="railBackBtn"'), "底栏＝亮暗 + 返回");
@@ -1372,7 +1372,7 @@ describe("S4 底栏钉住", () => {
     it("vm 真跑：进列清隐退、出列过了滞留期才隐，滞留期内回列不隐", async () => {
       const log = { attrs: [], timers: [] };
       const fn = new Function("log", `
-        const els = { railTerminalDir: { attr: "", toggleAttribute(name, force) { this.attr = force ? name : ""; log.attrs.push(this.attr); } }, v2Rail: { listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } } };
+        const els = { railTerminalDir: { attr: "", toggleAttribute(name, force) { this.attr = force ? name : ""; log.attrs.push(this.attr); } }, panelRail: { listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } } };
         const $ = (id) => els[id];
         let terminalRailQuietTimer = null;
         function setTerminalRailQuiet(quiet) {
@@ -1384,7 +1384,7 @@ describe("S4 底栏钉住", () => {
         const TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 40;
         ${extractFn("initTerminalRailScrollbarQuiet")}
         initTerminalRailScrollbarQuiet();
-        return { enter: () => els.v2Rail.listeners.pointerenter(), leave: () => els.v2Rail.listeners.pointerleave() };
+        return { enter: () => els.panelRail.listeners.pointerenter(), leave: () => els.panelRail.listeners.pointerleave() };
       `)(log);
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       assert.deepEqual(log.attrs, ["data-quiet"], "初态隐退（thumb 随指针进列才出现）");
@@ -1404,12 +1404,12 @@ describe("S4 底栏钉住", () => {
   describe("设置态不碰坏（共用骨架）", () => {
     it("设置态换血四条与栏底共用件原样，钉底改造只动终端会话栏内部", () => {
       for (const scope of [
-        ':root[data-ui-version="v2"] body.settings-mode',
-        ':root[data-ui-version="v2"] body.terminal-mode',
+        ':root body.settings-mode',
+        ':root body.terminal-mode',
       ]) {
-        assert.ok(panelCss.includes(`${scope} #v2Rail .rail-tabs { display: none; }`), `${scope} 收主 tab 组`);
-        assert.ok(panelCss.includes(`${scope} #v2Rail #railSettingsBtn { display: none; }`), `${scope} 收栏底齿轮`);
-        assert.ok(panelCss.includes(`${scope} #v2Rail #railBackBtn[hidden] { display: flex !important; }`), `${scope} 放「返回」`);
+        assert.ok(panelCss.includes(`${scope} #panelRail .rail-tabs { display: none; }`), `${scope} 收主 tab 组`);
+        assert.ok(panelCss.includes(`${scope} #panelRail #railSettingsBtn { display: none; }`), `${scope} 收栏底齿轮`);
+        assert.ok(panelCss.includes(`${scope} #panelRail #railBackBtn[hidden] { display: flex !important; }`), `${scope} 放「返回」`);
       }
       // 钉底靠的是 .rail 自身的 flex 列 + 底栏 flex:none，两个态共用，不为终端态另起炉灶
       assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏两个态共用同一 flex:none");
@@ -2641,7 +2641,7 @@ describe("评审必修 1：取消归档钮的行委托断链", () => {
       railTerminalDir: dirStub,
       railTermNewBtn: btnStub(),
       railTermSearchBtn: btnStub(), railTermSearchInput: btnStub(), railTermSearchClear: btnStub(),
-      railTermViewOptionsBtn: btnStub(), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+      railTermViewOptionsBtn: btnStub(), railBackBtn: null, panelRail: { addEventListener: () => {} },
     };
     const fn = new Function("els", "listeners", "log", `
       const terminalRailMenuEl = null;
@@ -2742,7 +2742,7 @@ describe("点击委托真跑：分支接线与判序（假 DOM 祖先链）", ()
       railTerminalDir: dirStub,
       railTermNewBtn: btnStub(),
       railTermSearchBtn: btnStub(), railTermSearchInput: btnStub(), railTermSearchClear: btnStub(),
-      railTermViewOptionsBtn: btnStub(), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+      railTermViewOptionsBtn: btnStub(), railBackBtn: null, panelRail: { addEventListener: () => {} },
     };
     const fn = new Function("els", "listeners", "log", `
       const terminalRailMenuEl = null;
@@ -2977,7 +2977,7 @@ describe("段头接线守卫：段头两钮点击必须接通（防「点了没�
       railTerminalDir: { addEventListener: (type, fn) => { listeners[`dir:${type}`] = fn; }, getBoundingClientRect: () => ({ top: 0, left: 0 }), scrollTop: 0 },
       railTermNewBtn: btn("newBtn"), railTermHistoryRefresh: null,
       railTermSearchBtn: btn("searchBtn"), railTermSearchInput: btn("searchInput"), railTermSearchClear: btn("searchClear"),
-      railTermViewOptionsBtn: btn("viewBtn"), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+      railTermViewOptionsBtn: btn("viewBtn"), railBackBtn: null, panelRail: { addEventListener: () => {} },
     };
     const fn = new Function("els", "listeners", "log", `
       let terminalRailViewMenuEl = null;
@@ -3146,7 +3146,7 @@ describe("评审必修：portal 后菜单项点击接线（真 DOM 守卫）", (
       railTerminalDir: { addEventListener: (type, fn) => { listeners["dir:" + type] = fn; }, getBoundingClientRect: () => ({ top: 0, left: 0 }), scrollTop: 0 },
       railTermNewBtn: btn("newBtn"), railTermHistoryRefresh: null,
       railTermSearchBtn: btn("searchBtn"), railTermSearchInput: btn("searchInput"), railTermSearchClear: btn("searchClear"),
-      railTermViewOptionsBtn: btn("viewBtn"), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+      railTermViewOptionsBtn: btn("viewBtn"), railBackBtn: null, panelRail: { addEventListener: () => {} },
       railTermHistoryList: {
         querySelectorAll: () => [{
           getAttribute: (name) => (name === "data-rail-term-group" ? "C:\\dev\\alpha" : null),
@@ -5455,7 +5455,7 @@ describe("视口化验收（页签＝视口）", () => {
         railTerminalDir: { addEventListener: (type, fn) => { listeners[type] = fn; } },
         railTermNewBtn: btn(), railTermSearchBtn: btn(), railTermSearchInput: btn(),
         railTermSearchClear: btn(), railTermViewOptionsBtn: btn(), railBackBtn: null,
-        v2Rail: { addEventListener: () => {} },
+        panelRail: { addEventListener: () => {} },
       };
       const sandbox = new Function("state", "els", "listeners", "log", `
         let terminalBackendReady = true;
