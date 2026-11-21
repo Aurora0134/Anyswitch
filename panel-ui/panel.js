@@ -16590,11 +16590,94 @@ async function api(method, path, body) {
       });
     }
     // 会话行/组头拖拽：行拖拽是行手序的唯一来源（draggable 只在非归档行上；同
-    // 列表内移动——只允许同父级兄弟，组/平铺都是一个父，落点＝目标行之前）；组头
-    // 拖拽是组序的唯一来源（拖到另一组头前落位）。两路各记各的 drag 键，落点互不
+    // 列表内移动——只允许同父级兄弟，组/平铺都是一个父，落点＝指针中线算的插入槽）；
+    // 组头拖拽是组序的唯一来源（拖到另一组头前落位）。两路各记各的 drag 键，落点互不
     // 相接：行拖不落组头、组拖不落行（拖拽中另一路的 drag 键恒空，选择器天然分流）。
+    // 拖动中列表完全静止：dragover 只算槽、指示线瞬移到位（置顶段隔离前置到此——
+    // 跨界槽不画线不放行）；drop 消费槽结论、重渲走 FLIP（他行让位＋落位行淡入）
+    // 并挂 300ms 落位高亮。
     let railDragId = "";
     let railGroupDragKey = "";
+    // 落点指示线状态：dragover 按指针中线实时算槽，drop 消费这里的结论而非重算。
+    // railDropToId＝槽位下一行的 id（槽在兄弟序列末尾则为 ""＝追加到尾）；null＝
+    // 当前指针下无可落槽（跨组/跨置顶端/落在非行区），dragover 不放行、drop 必不落。
+    // railDropGroupKey 同理记组头拖拽的目标组键。
+    let railDropToId = null;
+    let railDropGroupKey = null;
+    // 指示线挂在列表里（position:relative 由 CSS 保证），绝对定位不参与 flex 布局，
+    // 拖动中列表完全静止、只移线。渲染整批换写会带走它，下次 dragover 再补建。
+    const railDropIndicatorEl = () => {
+      const list = $("railTermHistoryList");
+      if (!list) return null;
+      let el = list.querySelector(".rail-term-drop-indicator");
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "rail-term-drop-indicator";
+        list.appendChild(el);
+      }
+      return el;
+    };
+    const railDropIndicatorHide = () => {
+      const list = $("railTermHistoryList");
+      const el = list ? list.querySelector(".rail-term-drop-indicator") : null;
+      if (el && typeof el.remove === "function") el.remove();
+    };
+    // 槽位 Y（offsetTop 系换算，滚动下仍正确；渠道列表 storeDragSlotY 同款）：
+    // 槽 0 → 首行顶减半间隙；槽 i → 第 i-1 行底与第 i 行顶的中点；末尾同理加半间隙。
+    const railDropSlotY = (rows, slot) => {
+      const gapBetween = (a, b) => (a && b ? b.offsetTop - (a.offsetTop + a.offsetHeight) : 0);
+      if (slot <= 0) return rows[0].offsetTop - gapBetween(rows[0], rows[1]) / 2;
+      if (slot >= rows.length) {
+        const last = rows[rows.length - 1];
+        return last.offsetTop + last.offsetHeight + gapBetween(rows[rows.length - 2], last) / 2;
+      }
+      const prev = rows[slot - 1];
+      return (prev.offsetTop + prev.offsetHeight + rows[slot].offsetTop) / 2;
+    };
+    // 被拖行的同父级兄弟可拖行序列（树模式＝同组、平铺＝全列）：落槽只在兄弟内取，
+    // 跨组指针不算槽（行拖不换组，换组走行菜单）。
+    const railDragRowSiblings = () => {
+      const list = $("railTermHistoryList");
+      if (!list) return [];
+      const all = Array.from(list.querySelectorAll('[data-rail-term-resume][draggable="true"]'));
+      const dragEl = all.find((el) => el.getAttribute("data-rail-term-resume") === railDragId);
+      if (!dragEl) return [];
+      const parent = dragEl.parentElement;
+      return all.filter((el) => el.parentElement === parent);
+    };
+    // 拖拽中段唯一滚动层的边缘自动滚动（渠道列表同款 48px 边缘带，越贴近越快）。
+    const railDragEdgeScroll = (clientY) => {
+      const list = $("railTermHistoryList");
+      const scroller = list && list.parentElement ? list.parentElement : null;
+      if (!scroller || typeof scroller.getBoundingClientRect !== "function") return;
+      const EDGE = 48;
+      const MAX_STEP = 18;
+      const rect = scroller.getBoundingClientRect();
+      const dTop = clientY - rect.top;
+      const dBottom = rect.bottom - clientY;
+      if (dTop < EDGE && scroller.scrollTop > 0) {
+        scroller.scrollTop -= Math.ceil(MAX_STEP * (1 - Math.max(dTop, 0) / EDGE));
+      } else if (dBottom < EDGE && scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight) {
+        scroller.scrollTop += Math.ceil(MAX_STEP * (1 - Math.max(dBottom, 0) / EDGE));
+      }
+    };
+    // 重渲后按属性值回查元素（行/组头落位高亮用；渲染是 innerHTML 整批换写，
+    // 拖动前的元素引用已失效）。
+    const railFindByAttr = (attr, value) => {
+      let found = null;
+      dir.querySelectorAll(`[${attr}]`).forEach((el) => {
+        if (!found && el.getAttribute(attr) === value) found = el;
+      });
+      return found;
+    };
+    // 落位高亮：300ms 描边闪烁（storeRowLanded 关键帧复用），reduced-motion 下
+    // 与渠道列表同口径——只压位移类动效，高亮闪烁保留。
+    const railMarkLanded = (attr, value) => {
+      const el = railFindByAttr(attr, value);
+      if (!el || !el.classList) return;
+      el.classList.add("rail-term-drag-landed");
+      setTimeout(() => { el.classList.remove("rail-term-drag-landed"); }, 300);
+    };
     // 组序重排：从当前 DOM 序读组键序列（树模式才有组头；未分组不在序列、恒垫
     // 底），把 fromKey 摘出插到 toKey 之前。落盘是合并式：序列之外的目录（别的
     // agent 的组、暂被滤掉的）保序垫尾——与 terminalRailSortGroups 同一合并口径，
@@ -16629,9 +16712,12 @@ async function api(method, path, body) {
       const closest = event.target && typeof event.target.closest === "function"
         ? event.target.closest.bind(event.target)
         : null;
+      railDropToId = null;
+      railDropGroupKey = null;
       const row = closest ? closest('[data-rail-term-resume][draggable="true"]') : null;
       if (row) {
         railDragId = row.getAttribute("data-rail-term-resume") || "";
+        row.classList.add("is-dragging"); // 激活既有半透样式（panel.css 719 行）
         if (event.dataTransfer && typeof event.dataTransfer.setData === "function") {
           event.dataTransfer.setData("text/plain", railDragId);
         }
@@ -16641,6 +16727,7 @@ async function api(method, path, body) {
       const head = closest ? closest('[data-rail-term-group-head][draggable="true"]') : null;
       if (!head) return;
       railGroupDragKey = head.getAttribute("data-rail-term-group-head") || "";
+      head.classList.add("is-dragging");
       if (event.dataTransfer && typeof event.dataTransfer.setData === "function") {
         event.dataTransfer.setData("text/plain", railGroupDragKey);
       }
@@ -16652,16 +16739,53 @@ async function api(method, path, body) {
         : null;
       if (railGroupDragKey) {
         const head = closest ? closest('[data-rail-term-group-head][draggable="true"]') : null;
-        if (head) {
-          event.preventDefault(); // 允许落在组头上（落自身＝无动作，见 drop）
-          if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        if (!head) {
+          railDropGroupKey = null;
+          railDropIndicatorHide();
+          return;
         }
+        event.preventDefault(); // 允许落在组头上（落自身＝无动作，见 drop）
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        railDropGroupKey = head.getAttribute("data-rail-term-group-head") || "";
+        const indicator = railDropIndicatorEl();
+        // 组头槽恒为「目标组头之前」，指示线贴组头上缘（1px 吃进上间隙）
+        if (indicator) indicator.style.transform = `translateY(${head.offsetTop - 1}px)`;
+        railDragEdgeScroll(event.clientY);
         return;
       }
+      if (!railDragId) return;
       const row = closest ? closest('[data-rail-term-resume][draggable="true"]') : null;
-      if (!row || !railDragId) return;
-      event.preventDefault(); // 允许落在非归档行上
+      const siblings = row ? railDragRowSiblings() : [];
+      // 指针在非行区（组头/水位线/间隙）或别的组的行上：无可落槽，藏线不放行
+      if (!row || !siblings.includes(row)) {
+        railDropToId = null;
+        railDropIndicatorHide();
+        return;
+      }
+      let slot = siblings.length;
+      for (let i = 0; i < siblings.length; i++) {
+        const rect = siblings[i].getBoundingClientRect();
+        if (event.clientY < rect.top + rect.height / 2) { slot = i; break; }
+      }
+      // 置顶段隔离前置到落点展示：槽两侧邻居与被拖行须同段（置顶＝「前置」是
+      // 模式无关的结构位，跨段落槽等于变相置顶/取消置顶）。跨界槽不画线、不
+      // preventDefault——drop 不会触发，「不可落」在拖动中即可见。
+      const pinned = terminalRailRowPinnedById(railDragId);
+      const before = slot > 0 ? siblings[slot - 1] : null;
+      const after = slot < siblings.length ? siblings[slot] : null;
+      const sameSegment = (!before || terminalRailRowPinnedById(before.getAttribute("data-rail-term-resume") || "") === pinned)
+        && (!after || terminalRailRowPinnedById(after.getAttribute("data-rail-term-resume") || "") === pinned);
+      if (!sameSegment) {
+        railDropToId = null;
+        railDropIndicatorHide();
+        return;
+      }
+      event.preventDefault(); // 允许落在该槽
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      railDropToId = after ? after.getAttribute("data-rail-term-resume") || "" : "";
+      const indicator = railDropIndicatorEl();
+      if (indicator) indicator.style.transform = `translateY(${railDropSlotY(siblings, slot)}px)`;
+      railDragEdgeScroll(event.clientY);
     });
     dir.addEventListener("drop", (event) => {
       const closest = event.target && typeof event.target.closest === "function"
@@ -16671,31 +16795,45 @@ async function api(method, path, body) {
         const head = closest ? closest('[data-rail-term-group-head][draggable="true"]') : null;
         const fromKey = railGroupDragKey;
         railGroupDragKey = "";
-        if (!head) return;
+        // 落点以 dragover 算好的槽为准：没算到（null）＝指针停在非组头区，不落
+        const toKey = railDropGroupKey;
+        railDropGroupKey = null;
+        railDropIndicatorHide();
+        if (!head || toKey === null) return;
         event.preventDefault();
-        if (!terminalRailMoveGroupOrder(fromKey, head.getAttribute("data-rail-term-group-head") || "")) return;
-        terminalRailFlipMode = "instant"; // 拖拽落位是 resetKey：瞬时跳变
+        if (!terminalRailMoveGroupOrder(fromKey, toKey)) return;
+        terminalRailFlipMode = "flip"; // 拖拽落位走 FLIP：他组让位 200ms＋落位组淡入
         renderTerminalRailHistory(terminalRailAgentId());
+        railMarkLanded("data-rail-term-group-head", fromKey);
         return;
       }
-      const row = closest ? closest('[data-rail-term-resume][draggable="true"]') : null;
-      if (!row || !railDragId) return;
+      if (!railDragId) return;
       event.preventDefault();
-      const toId = row.getAttribute("data-rail-term-resume") || "";
-      // 置顶段隔离：置顶行只与置顶行换位、非置顶行只与非置顶行换位——置顶＝
-      // 「前置」是模式无关的结构位，跨段拖拽会把段结构拖坏（把置顶行拖进普通
-      // 段等于变相取消置顶、反向等于变相置顶，两条都绕过了置顶清单的持久化）。
-      // 拒绝即静默收场（清 dragId 不重渲：画面本来就没变）。
-      if (terminalRailRowPinnedById(railDragId) !== terminalRailRowPinnedById(toId)) {
-        railDragId = "";
+      const fromId = railDragId;
+      railDragId = "";
+      // 落点以 dragover 算好的槽为准（""＝同父级兄弟序列末尾）；null＝跨界/越段，
+      // dragover 未放行，此处防御性拒落——拒绝即静默收场（不重渲：画面本来就没变）。
+      if (railDropToId === null) {
+        railDropIndicatorHide();
         return;
       }
-      terminalRailMoveInManualOrder(terminalRailAgentId(), railDragId, toId);
-      railDragId = "";
-      terminalRailFlipMode = "instant"; // 拖拽落位是 resetKey：瞬时跳变
+      const toId = railDropToId;
+      railDropToId = null;
+      railDropIndicatorHide();
+      terminalRailMoveInManualOrder(terminalRailAgentId(), fromId, toId);
+      terminalRailFlipMode = "flip"; // 拖拽落位走 FLIP：他行让位 200ms＋落位行淡入
       renderTerminalRailHistory(terminalRailAgentId());
+      railMarkLanded("data-rail-term-resume", fromId);
     });
-    dir.addEventListener("dragend", () => { railDragId = ""; railGroupDragKey = ""; });
+    dir.addEventListener("dragend", () => {
+      railDragId = "";
+      railGroupDragKey = "";
+      railDropToId = null;
+      railDropGroupKey = null;
+      railDropIndicatorHide();
+      // 拖动中 DOM 未变，未落位也无需重渲，只清理半透占位态
+      dir.querySelectorAll(".is-dragging").forEach((el) => el.classList.remove("is-dragging"));
+    });
     // 栏底「返回」一颗钮两态共用（设置态与终端态互斥）：终端态回进入终端前的视图，
     // 设置态仍由 initSettingsView 绑的 exitSettings 承担。
     const back = $("railBackBtn");
