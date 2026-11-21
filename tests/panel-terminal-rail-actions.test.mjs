@@ -4232,7 +4232,7 @@ describe("归档/撤销动效（FLIP）＋toast 引导钮", () => {
         assert.ok(keyFn.includes(prefix), `键前缀 ${prefix}（组头与水位线钮同吃组键，不加前缀会互撞）`);
       }
       const render = extractFn("renderTerminalRailHistory");
-      assert.ok(render.includes('class="rail-term-group-head" data-rail-term-group-head="${esc(group.key || TERMINAL_RAIL_UNGROUPED_HEAD)}"'),
+      assert.ok(render.includes('data-rail-term-group-head="${esc(group.key || TERMINAL_RAIL_UNGROUPED_HEAD)}"'),
         "组头容器自带身份属性（「未分组」组用哨兵键，空串＝不量）");
     });
 
