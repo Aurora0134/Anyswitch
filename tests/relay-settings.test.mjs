@@ -43,11 +43,6 @@ import {
   parseUpdateChannel,
   parsePoolLoadBalancing,
   DEFAULT_POOL_LOAD_BALANCING,
-  parseBalanceDisplayEnabled,
-  DEFAULT_BALANCE_DISPLAY_ENABLED,
-  parseBalanceDisplayUnit,
-  BALANCE_DISPLAY_UNITS,
-  DEFAULT_BALANCE_DISPLAY_UNIT,
   loadSettings,
   saveSettings,
 } from "../src/relay/relay-settings.mjs";
@@ -1100,49 +1095,6 @@ describe("updateChannel", () => {
       const onDisk = JSON.parse(readFileSync(path, "utf8"));
       assert.equal("bleedingEdgeMode" in onDisk, false);
       assert.equal(onDisk.updateChannel, "preview");
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-});
-
-
-describe("balanceDisplayEnabled / balanceDisplayUnit", () => {
-  it("balance display defaults on: only an explicit false turns it off", () => {
-    assert.equal(DEFAULT_BALANCE_DISPLAY_ENABLED, true);
-    assert.equal(parseBalanceDisplayEnabled(undefined), true);
-    assert.equal(parseBalanceDisplayEnabled("false"), true);
-    assert.equal(parseBalanceDisplayEnabled(0), true);
-    assert.equal(parseBalanceDisplayEnabled(true), true);
-    assert.equal(parseBalanceDisplayEnabled(false), false);
-  });
-
-  it("balance display unit defaults to usd: only usd/cny are units, anything else folds to usd", () => {
-    assert.equal(DEFAULT_BALANCE_DISPLAY_UNIT, "usd");
-    assert.deepEqual([...BALANCE_DISPLAY_UNITS], ["usd", "cny"]);
-    assert.equal(parseBalanceDisplayUnit(undefined), "usd");
-    assert.equal(parseBalanceDisplayUnit("rmb"), "usd");
-    assert.equal(parseBalanceDisplayUnit(true), "usd");
-    assert.equal(parseBalanceDisplayUnit("usd"), "usd");
-    assert.equal(parseBalanceDisplayUnit("cny"), "cny");
-  });
-
-  it("both round-trip through saveSettings and survive unrelated patches", () => {
-    const tmp = mkTestDir("anyswitch-balance-display-");
-    const path = join(tmp, "settings.json");
-    try {
-      const initial = loadSettings(path, {});
-      assert.equal(initial.settings.balanceDisplayEnabled, true, "先于该键存在的安装默认开");
-      assert.equal(initial.settings.balanceDisplayUnit, "usd");
-      const saved = saveSettings(path, { balanceDisplayEnabled: false, balanceDisplayUnit: "cny" }, {});
-      assert.equal(saved.settings.balanceDisplayEnabled, false);
-      assert.equal(saved.settings.balanceDisplayUnit, "cny");
-      const reloaded = loadSettings(path, {});
-      assert.equal(reloaded.settings.balanceDisplayEnabled, false);
-      assert.equal(reloaded.settings.balanceDisplayUnit, "cny");
-      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
-      assert.equal(other.settings.balanceDisplayEnabled, false, "改别的设置项不会把它们挤掉");
-      assert.equal(other.settings.balanceDisplayUnit, "cny");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

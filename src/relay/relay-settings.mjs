@@ -192,24 +192,6 @@ export function parsePoolLoadBalancing(raw) {
   return raw === true ? true : DEFAULT_POOL_LOAD_BALANCING;
 }
 
-// 渠道余额显示总开关：默认开——缺失、畸形、旧版本没有这个键，一律视为开，
-// 升级上来的安装直接显示余额；只有显式写入 false 才隐藏。面板轮询的活读
-// 闸门走 createBalanceDisplayEnabledGate。
-export const DEFAULT_BALANCE_DISPLAY_ENABLED = true;
-
-export function parseBalanceDisplayEnabled(raw) {
-  return raw === false ? false : DEFAULT_BALANCE_DISPLAY_ENABLED;
-}
-
-// 余额显示单位：面板把所有渠道的余额统一换算到该单位上屏，汇率固定 6.7
-// （换算在前端做，后端始终按原始币种返回）。畸形或缺失一律回默认。
-export const BALANCE_DISPLAY_UNITS = Object.freeze(["usd", "cny"]);
-export const DEFAULT_BALANCE_DISPLAY_UNIT = "usd";
-
-export function parseBalanceDisplayUnit(raw) {
-  return BALANCE_DISPLAY_UNITS.includes(raw) ? raw : DEFAULT_BALANCE_DISPLAY_UNIT;
-}
-
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -352,8 +334,6 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const autoDownloadUpdates = parseAutoDownloadUpdates(raw.autoDownloadUpdates);
   const updateChannel = parseUpdateChannel(raw.updateChannel, raw.bleedingEdgeMode);
   const poolLoadBalancing = parsePoolLoadBalancing(raw.poolLoadBalancing);
-  const balanceDisplayEnabled = parseBalanceDisplayEnabled(raw.balanceDisplayEnabled);
-  const balanceDisplayUnit = parseBalanceDisplayUnit(raw.balanceDisplayUnit);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -380,8 +360,6 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       autoDownloadUpdates,
       updateChannel,
       poolLoadBalancing,
-      balanceDisplayEnabled,
-      balanceDisplayUnit,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -401,8 +379,6 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     autoDownloadUpdates,
     updateChannel,
     poolLoadBalancing,
-    balanceDisplayEnabled,
-    balanceDisplayUnit,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -536,14 +512,6 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "poolLoadBalancing")) {
     updated.poolLoadBalancing = parsePoolLoadBalancing(patch.poolLoadBalancing);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(patch, "balanceDisplayEnabled")) {
-    updated.balanceDisplayEnabled = parseBalanceDisplayEnabled(patch.balanceDisplayEnabled);
-  }
-
-  if (Object.prototype.hasOwnProperty.call(patch, "balanceDisplayUnit")) {
-    updated.balanceDisplayUnit = parseBalanceDisplayUnit(patch.balanceDisplayUnit);
   }
 
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启

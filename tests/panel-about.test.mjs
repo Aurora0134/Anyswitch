@@ -850,9 +850,6 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
     // 「通用」子页会拉 store state 生成档位映射下拉的选项（与「自动路由」同源），
     // 本测试只验 About 生命周期，给一条已落地的 Promise 即可。
     refreshStoreState: () => Promise.resolve(), renderClaudeTierOptions() {},
-    // 渠道余额币种子卡：进「高级选项」时拉渠道清单，与数据搬迁/备份位置同批接线；
-    // 本测试只验生命周期计数，给个空壳计数即可。
-    loadBalanceCurrencyRows() {},
     // 子 tab 切换同帧要改写设置头行页题（装配在 initSettingsView 里，不在本测试切出的
     // 片段内）。这里只验生命周期计数，给个空壳即可；页题文字源由 panel.test.mjs 钉。
     syncSettingsHeadTitle() {},

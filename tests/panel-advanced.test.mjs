@@ -191,11 +191,11 @@ test("合并大卡结构：导出/导入并成「配置迁移」，按钮收进�
   assert.ok(exportRow.indexOf('id="dataExportStatus"') < exportRow.indexOf('id="dataExportBtn"'), "状态行在钮之前");
   const importRow = html.slice(html.indexOf('id="dataImportSummary"'), html.indexOf('id="dataImportPickBtn"'));
   assert.ok(importRow.includes("导入 zip 配置包，写入前自动备份当前配置。"), "导入行说明为定稿文案");
-  // 高级选项区六卡：更新通道、号池路由逻辑、余额显示、渠道余额币种、配置迁移、配置备份。
+  // 高级选项区四卡：更新通道、号池路由逻辑、配置迁移、配置备份。
   const section = html.slice(html.indexOf('id="settingsPanelAdvanced"'), html.indexOf('id="terminalView"'));
   const titles = [...section.matchAll(/<h2 class="card-title">[\s\S]*?<\/h2>/g)].map((m) => m[0]);
-  assert.equal(titles.length, 6, "高级选项区六张卡");
-  for (const t of ["更新通道", "号池路由逻辑", "余额显示", "渠道余额币种", "配置迁移", "配置备份"]) {
+  assert.equal(titles.length, 4, "高级选项区四张卡");
+  for (const t of ["更新通道", "号池路由逻辑", "配置迁移", "配置备份"]) {
     assert.ok(titles.some((x) => x.includes(t)), `缺卡：${t}`);
   }
 });
@@ -525,8 +525,8 @@ test("生命周期：控制器真的接进了设置页子 tab 机制，不留「
   // 这条是本次问题的根：控制器原先声明了 reset() 却零调用点，等于没有生命周期。
   assert.ok(source.includes('if (which !== "advanced") { dataBundle.leave(); backupLocation.leave(); }'),
     "切走高级选项时两个控制器都离开");
-  assert.ok(source.includes('if (which === "advanced") { dataBundle.enter(); loadBalanceCurrencyRows(); return backupLocation.enter(); }'),
-    "切回高级选项时两个控制器都进入，渠道币种行随子页刷新");
+  assert.ok(source.includes('if (which === "advanced") { dataBundle.enter(); return backupLocation.enter(); }'),
+    "切回高级选项时两个控制器都进入");
   assert.ok(source.includes("leaveSettingsView = () => { about.leave(); dataBundle.leave(); backupLocation.leave(); };"),
     "整个设置视图关掉时也要复位（否则从看板回来还挂着旧结果）");
   assert.ok(source.includes("enter() { away = false; awaitReturn = false; }"), "enter 消费「等切回」");
@@ -664,7 +664,7 @@ test("号池路由逻辑卡：定稿文案逐字落盘，双选钮结构，不�
   assert.ok(!html.includes("poolLoadBalancingToggle"), "旧开关退场");
   const seg = html.indexOf('id="poolRoutingSeg"');
   assert.ok(seg > 0, "双选钮有稳定 id 供读写");
-  const item = html.slice(html.lastIndexOf('<div class="modal-item">', seg), html.indexOf("<!-- 余额显示", seg));
+  const item = html.slice(html.lastIndexOf('<div class="modal-item">', seg), html.indexOf("<!-- 配置迁移", seg));
   assert.ok(item.includes('class="seg-switch"'), "沿用「UI版本」同款双选控件");
   assert.ok(item.includes('data-pool-routing-choice="backoff" role="radio" aria-checked="true">退避</button>'), "退避在左且为默认选中");
   assert.ok(item.includes('data-pool-routing-choice="balance" role="radio" aria-checked="false">分流</button>'), "分流在右");

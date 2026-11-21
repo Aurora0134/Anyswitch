@@ -81,7 +81,6 @@ function mockService(overrides = {}) {
     createPool: async () => ({ ok: true, poolId: "pool-x" }),
     deletePool: async () => ({ ok: true, poolId: "pool-x" }),
     renameProvider: async () => ({ ok: true, id: "prov", displayName: "新名字" }),
-    setBalanceCurrency: async (id, balanceCurrency) => ({ ok: true, id, balanceCurrency }),
     renamePool: async () => ({ ok: true, poolId: "pool-x", displayName: "备用号池" }),
     updatePoolMembers: async () => ({ ok: true, poolId: "pool-x" }),
     reorderProviders: async () => ({ ok: true }),
@@ -426,21 +425,6 @@ describe("panel router store routes", () => {
     await router.handle(req, res);
     assert.equal(res.statusCode, 400);
     assert.deepEqual(svc.calls, []);
-  });
-
-  it("POST /panel/api/store/balance-currency forwards the provider id and currency (null clears)", async () => {
-    const svc = mockService();
-    const router = storeRouter(svc);
-    const { req, res, json } = fakeReqRes("/panel/api/store/balance-currency", "POST", { id: "prov", balanceCurrency: "cny" });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(json(), { ok: true, id: "prov", balanceCurrency: "cny" });
-    assert.deepEqual(svc.calls[0], { name: "setBalanceCurrency", arg: ["prov", "cny"] });
-    // 省略 balanceCurrency = 自动：服务端收到 null，store 键被清掉
-    const clear = fakeReqRes("/panel/api/store/balance-currency", "POST", { id: "prov" });
-    await router.handle(clear.req, clear.res);
-    assert.equal(clear.res.statusCode, 200);
-    assert.deepEqual(svc.calls[1], { name: "setBalanceCurrency", arg: ["prov", null] });
   });
 
   it("POST /panel/api/store/pool/rename forwards the pool id and displayName", async () => {
