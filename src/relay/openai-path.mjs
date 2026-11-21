@@ -13,6 +13,13 @@ const PREFIX = "/openai/";
 // 单（白名单校验留在消费侧 openai-server，与 x-agent-id 同一条规则）。
 export const AGENT_SEGMENT_SEPARATOR = "~";
 
+// 聚合入口段：「Anyswitch」聚合供应商的地址段固定为它，不再借用链头渠道名
+// （链头写法让客户端报错地址随路由配置漂移并指错方向，裸模型还会静默按碰巧
+// 的链头路由）。schema 的虚拟模型保留名清单已含 "auto"（store-schema.mjs），
+// 与端点 id 撞不了；渠道/号池撞名时写入侧与 relay 按同一判据退场，该段回落
+// 经典/号池语义。
+export const AGGREGATE_ENTRY_SEGMENT = "auto";
+
 export const PARSE_REASON = {
   NOT_OPENAI: "not-an-openai-path",
   NOT_A_STRING: "path-not-a-string",

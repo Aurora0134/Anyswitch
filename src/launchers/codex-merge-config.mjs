@@ -62,6 +62,8 @@ export { extractManagedProviders } from "../channels/pool-providers.mjs";
 import { extractManagedProviders } from "../channels/pool-providers.mjs";
 import { catalogForRoot, resolveEndpointEfforts, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
 import { packChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "../channels/channel-model-slug.mjs";
+import { resolvePool } from "../channels/pool-routing.mjs";
+import { AGGREGATE_ENTRY_SEGMENT } from "../relay/openai-path.mjs";
 import { fallbackContextWindow } from "../catalog/context-fallback.mjs";
 
 const SIDECAR_FILENAME = "codex-sidecar.json";
@@ -101,6 +103,17 @@ function tomlString(value) {
 // Resolve the codex config.toml path from a process env-style base.
 export function codexConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".codex", "config.toml");
+}
+
+// Codex 聚合供应商的地址段固定为保留名 "auto"（relay 在 openai-path.mjs 认领
+// 该段做聚合分派），不再借用链头渠道名：链头写法让 codex 报错里的地址随路由
+// 配置漂移并指错方向，裸模型还会静默按碰巧的链头路由。存量渠道/号池撞名
+// auto 时回落链头段——relay 对同判据退场，两侧不会分叉。
+export function deriveCodexAggregateChannel(store) {
+  const channel = deriveAnyswitchChannel(store, "codex");
+  if (!channel) return null;
+  if (store?.providers?.[AGGREGATE_ENTRY_SEGMENT] !== undefined || resolvePool(store, AGGREGATE_ENTRY_SEGMENT)) return channel;
+  return { ...channel, baseUrlSegment: AGGREGATE_ENTRY_SEGMENT };
 }
 
 // The auto pseudo-channel lands on `anyswitch-auto` by construction
@@ -600,7 +613,7 @@ function removeCatalogFile(codexDir) {
 // never overwritten.
 export function writeCodexConfig(store, port, token, sidecarRoot, configPath = codexConfigPath(), catalog = null, effortsEnabled = null, catalogTemplateOverride = undefined) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAnyswitchChannel(store, "codex");
+  const autoChannel = deriveCodexAggregateChannel(store);
   const previousManaged = readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models", catalog: untouchedCatalog() };
