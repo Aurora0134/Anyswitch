@@ -9,7 +9,7 @@
 > *"Configure your channels once — every agent shares them."*
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.4](https://img.shields.io/badge/Version-0.7.4-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.4)
+[![Version: 0.7.5-preview](https://img.shields.io/badge/Version-0.7.5--preview-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.5-preview)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#boundaries-to-accept-first)
 [![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
 
@@ -24,13 +24,13 @@ The first agent is easy — five minutes, fill in a baseURL and a key. By the te
 The entire reason this tool exists is to make "configure once", "one sealed key", and "see at a glance who is running and which route they take" true at the same time.
 
 ```bat
-git clone --branch v0.7.4 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.5-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
 ```
 
-Runs locally on Windows · ships as source, no installer · panel and relay listen on loopback only
+Runs locally on Windows · Windows x64 installer or source · panel and relay listen on loopback only
 
 [Screenshots](#see-it-working-configuration-routing-and-readouts-in-one-window) · [Install](#install-and-run) · [Channels](#configure-once-ten-agents-plug-in) · [Failover](#one-dead-channel-should-not-stop-the-pipeline) · [Readouts](#whos-running-which-route-how-much-one-panel-answers) · [Terminal](#virtual-terminal-run-agents-inside-the-panel-readouts-beside-them) · [Boundaries](#boundaries-to-accept-first)
 
@@ -281,11 +281,12 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 ## Boundaries to accept first
 
 - **Windows only; no macOS or Linux.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows.
-- **No installer.** 0.7.4 ships as source. After that, the panel's About page can self-update.
+- **The installer is not code-signed.** From 0.7.5-preview, GitHub Releases carry a Windows x64 installer; SmartScreen will show an "unknown publisher" warning you need to click through once. After installation, the panel's About page can self-update, with update packages carrying an independent signature check; source installs keep upgrading via git (next section).
+- **This is a preview of the 0.7 line.** Installs running as stable will not be offered `v0.7.5-preview` — the stable line stays at `v0.7.4`; installs running as preview receive the upgrade prompt as usual.
 - **The virtual terminal is still preview.** It needs its own `npm install` once; the UI framework that imitates a GUI agent is still being polished.
 - **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions.
 - **The panel uses a sidebar.** Use it to switch views, open Settings, or enter the virtual terminal.
-- **The "bleeding edge" update channel is not stable yet.** If you are not a developer, or not someone who really wants to follow the project's latest progress, you are better off leaving the bleeding-edge mode off.
+- **The preview channel ships versions that have not graduated to stable.** The update channel has two settings, "stable" and "preview"; preview versions are newer and less time-tested, so everyday users are better off on stable.
 - **In-panel launching for the ten CLIs, virtual models in all ten client pickers, and the About page's real install button** are verified down to code and tests, but not walked through on every client for you.
 
 ---
@@ -317,7 +318,7 @@ Anyswitch/
 To check the actual change scope of this release:
 
 ```bat
-git log --no-merges --oneline v0.7.3..v0.7.4
+git log --no-merges --oneline v0.7.4..v0.7.5-preview
 ```
 
 ---
@@ -326,7 +327,9 @@ git log --no-merges --oneline v0.7.3..v0.7.4
 
 User data lives one level above `app` in `%LOCALAPPDATA%\Anyswitch\`: channels, credentials, settings, presets and usage records never follow the source directory.
 
-The preferred upgrade entry point is in the panel: **Settings → About → Check for updates**. Confirm once on "Update now" and download plus swap complete automatically; background pre-download ("auto-check and download updates") is off by default. Checks and downloads go direct first; on a direct-connection transport failure they retry once through your configured proxy (environment variables or git `http.proxy`). To walk the same path manually, first schedule a quiet moment for open sessions, then check the install directory's working tree:
+Installer installs upgrade from the panel: **Settings → About → Check for updates**. Confirm once on "Update now" and download, signature check and swap complete automatically; background pre-download ("auto-check and download updates") is off by default. Update checks go direct first and retry once through your configured proxy (environment variables or git `http.proxy`) when direct transfer fails; update-package downloads go direct.
+
+Source installs upgrade via git, or switch to the installer (the migration keeps the source directory and all user data in place). First schedule a quiet moment for open sessions, then check the install directory's working tree:
 
 ```bat
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
@@ -336,8 +339,8 @@ git status --short
 If there is output, deal with your own changes first — never discard them for an upgrade. With a clean tree, fetch only the target tag:
 
 ```bat
-git fetch --no-tags origin tag v0.7.4
-git switch --detach v0.7.4
+git fetch --no-tags origin tag v0.7.5-preview
+git switch --detach v0.7.5-preview
 npm install
 ```
 
