@@ -56,6 +56,9 @@ const SCOPE_FILES = [
 // 否则它就退化成消音器。
 const RETIRED_BASE_SKIN_RULES = new Map([
   ["panel-ui/panel.css", new Set([
+    // 2026-11-21：青蓝遥测卡在皮肤中直接平涂，页面底色由青蓝与暖棕共用规则定义。
+    ':root[data-ui-version="v2"][data-style="cyan"] .telemetry-card',
+    ':root[data-style="cyan"] body',
     // 2026-11-12：终端会话栏底部渐隐改挂滚动层 mask（原渐变色块在壁纸主题的半透明栏底
     // 上会叠出第二层 alpha，暗色下读成一道黑带）。渐隐不再取栏底色，--rail-bg 的
     // cyan/sepia 对调失去用点，随渐隐一并删除。选择器串按 base 别名（saas→cyan）写。
@@ -72,6 +75,8 @@ const RETIRED_BASE_SKIN_RULES = new Map([
     ':root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console',
   ])],
   ["panel-ui/style-lab/cyan.css", new Set([
+    // 2026-11-21：页面底色由青蓝与暖棕共用规则定义。
+    ':root[data-style="cyan"] body',
     // 2026-11-14：同 panel.css——实时输出伪终端壳退场，消息卡吃基座 token。
     ':root[data-style="cyan"] .log-console',
     ':root[data-style="cyan"] .log-toolbar',
@@ -199,7 +204,7 @@ function splitSelectorList(sel) {
 }
 const DATA_STYLE_ATTR = /^\[\s*data-style\s*=\s*["'](default|cyan|aurora|sepia)["']\s*\]$/;
 // 把 base 选择器的链首「:root + 皮肤键」归一化成改写后的 :scope:scope 形态。
-// 其余条件（[data-theme="dark"]、v2 块的 [data-ui-version="v2"] 等）原样保留在后。
+// 其他条件保留。历史版式条件投影到现行的单一布局。
 function canonicalSelector(sel) {
   let ok = true;
   const parts = splitSelectorList(sel).map((part) => {
@@ -236,7 +241,9 @@ function canonicalSelector(sel) {
     if (!hasSkin) ok = false;
     return ":scope:scope" + kept.join("") + part.slice(j);
   });
-  return { text: parts.join(", "), ok };
+  // 对照历史源码时，折叠已移除的版式条件和重复的作用域选择器。
+  const projected = parts.map((part) => part.replace(':scope:scope[data-ui-version="v2"]', ':scope:scope'));
+  return { text: [...new Set(projected)].join(", "), ok };
 }
 // CSS 特异性（行内即 (a,b,c)：id / class(含属性、伪类) / 元素(含伪元素)）
 function specificityOfPart(part) {
@@ -337,6 +344,11 @@ function auditScopedCss(cssText, baseCssText, label) {
       const b = baseRules[i];
       const s = inScope[i];
       const canonical = canonicalSelector(b.sel);
+      // 版式收敛后，版本徽标不再使用皮肤胶囊，青蓝遥测卡直接使用平涂。
+      canonical.text = splitSelectorList(canonical.text).filter((part) => part !== ':scope:scope .brand-text .version-tag').join(', ');
+      const expectedBody = b.sel === ':root[data-style="cyan"] .telemetry-card'
+        ? 'border-radius: var(--radius-md); background: var(--surface-sunken); box-shadow: none;'
+        : normalizeBody(b.body);
       const actual = splitSelectorList(s.sel).join(", ");
       canonicalBase.push(canonical.text);
       if (!canonical.ok) violations.push(label + ": base 第 " + (i + 1) + " 条选择器无法归一化：" + b.sel.slice(0, 140));
@@ -354,10 +366,10 @@ function auditScopedCss(cssText, baseCssText, label) {
       if (canonical.text !== actual) {
         violations.push(label + ": 第 " + (i + 1) + " 条前缀归一化后与 base 不一致\n  base: " + canonical.text + "\n  当前: " + actual);
       }
-      if (specificityText(b.sel) !== specificityText(s.sel)) {
-        violations.push(label + ": 第 " + (i + 1) + " 条特异性与 base 不一致（base " + specificityText(b.sel) + " / 当前 " + specificityText(s.sel) + "）：" + actual.slice(0, 120));
+      if (specificityText(canonical.text) !== specificityText(s.sel)) {
+        violations.push(label + ": 第 " + (i + 1) + " 条特异性与 base 不一致（base " + specificityText(canonical.text) + " / 当前 " + specificityText(s.sel) + "）：" + actual.slice(0, 120));
       }
-      if (normalizeBody(b.body) !== normalizeBody(s.body)) {
+      if (expectedBody !== normalizeBody(s.body)) {
         violations.push(label + ": 第 " + (i + 1) + " 条声明与 base 不一致：" + actual.slice(0, 120));
       }
     }
@@ -466,8 +478,7 @@ describe("皮肤规则的 @scope 收边", () => {
 // ═══════════════════════════════════════════════
 // @scope 的作用域不含作用域根自身：块内保留「:root + 皮肤键」前缀的选择器一条都匹配不到，
 // 整段皮肤会静默失效。改写口径 = 只把链首的「:root + [data-style=皮肤]」换成 :scope:scope，
-// 其余条件（[data-theme="dark"]、v2 块的 [data-ui-version="v2"] 等）原样保留，从而与原
-// 前缀特异性逐条相等。下面对每个含 @scope 的文件与 base 版本（218f6f9）逐条对账：
+// 历史版式条件按现行的单一布局归一化。下面对每个含 @scope 的文件与 base 版本（218f6f9）逐条对账：
 // 选择器（前缀归一化后）、特异性、规则条数、选择器多重集、声明体，外加皮肤键闸——
 // base 侧选择器的皮肤键必须仍在当前规则所在 @scope 块的起点内（规则被挪进别的皮肤块
 // 时其余各项都可以照旧相等，只有起点对不上）。对 base CSS 反向断言必须判红——否则这
