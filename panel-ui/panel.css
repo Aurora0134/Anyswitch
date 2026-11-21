@@ -715,8 +715,25 @@
   }
   .rail-term-empty-action:hover { background: var(--surface-hover); }
   /* 会话行拖拽：被拖行半透明（0ms 硬切，无过渡——栏内运动纪律） */
-  .rail-term-row-history[draggable="true"] { cursor: grab; }
-  .rail-term-row-history.is-dragging { opacity: 0.5; }
+  .rail-term-row-history[draggable="true"], .rail-term-group-head[draggable="true"] { cursor: grab; }
+  .rail-term-row-history.is-dragging, .rail-term-group-head.is-dragging { opacity: 0.5; }
+  /* 拖拽落点指示线：渠道/预设列表同款形制（主题变量同一套），
+     绝对定位挂在 .rail-term-history 里，不参与 flex 布局、拖动中列表静止。 */
+  .rail-term-drop-indicator {
+    position: absolute; left: 6px; right: 6px; top: 0; z-index: 2;
+    height: 3px; margin-top: -1px; border-radius: 2px;
+    background: var(--store-drag-accent);
+    box-shadow: var(--store-drag-glow);
+    pointer-events: none;
+  }
+  .rail-term-drop-indicator::before {
+    content: ""; position: absolute; left: -2px; top: 50%;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--store-drag-accent);
+    transform: translateY(-50%);
+  }
+  /* 落位高亮：300ms 描边闪烁（storeRowLanded 关键帧复用），行与组头共用。 */
+  .rail-term-drag-landed { animation: storeRowLanded 300ms var(--store-drag-ease); }
   .rail-term-icon-btn {
     appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
     width: 28px; height: 28px; padding: 0; border-radius: var(--radius-sm); flex: none;
@@ -725,7 +742,7 @@
   .rail-term-icon-btn:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-icon-btn:disabled { opacity: 0.5; cursor: default; }
   /* 树容器是内容高度的定高块（不参与收缩）；溢出由中段滚动层裁切，不越段。 */
-  .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; }
+  .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; position: relative; }
   /* ── 中段唯一滚动层 ──
      两个段都在里面滚：flex:1 + min-height:0 吃剩余空间，
      空间不够时它先缩——定高块（新建钮/段头/行）都不参与收缩，「行压段头」的旧缺陷
