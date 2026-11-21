@@ -5611,6 +5611,7 @@ async function api(method, path, body) {
         const on = item === selected;
         item.classList.toggle("active", on);
         item.setAttribute("aria-selected", String(on));
+        item.tabIndex = on ? 0 : -1;
         if (on) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current");
         $(item.getAttribute("aria-controls")).hidden = !on;
       }
@@ -5662,9 +5663,25 @@ async function api(method, path, body) {
       clearTimeout(mirrorResizeTimer);
       mirrorResizeTimer = setTimeout(captureSettingsMirror, 200);
     });
-    for (const [name, item] of Object.entries(settingsSubTabs)) {
+    const settingKeys = Object.keys(settingsSubTabs);
+    settingKeys.forEach((name, index) => {
+      const item = settingsSubTabs[name];
       item.onclick = () => activateSettingsSubTab(name, true);
-    }
+      item.onkeydown = (event) => {
+        let target;
+        switch (event.key) {
+          case "Home": target = 0; break;
+          case "End": target = settingKeys.length - 1; break;
+          case "ArrowDown": target = (index + 1) % settingKeys.length; break;
+          case "ArrowUp": target = (index + settingKeys.length - 1) % settingKeys.length; break;
+          default: return;
+        }
+        event.preventDefault();
+        const next = settingKeys[target];
+        activateSettingsSubTab(next, true);
+        settingsSubTabs[next].focus();
+      };
+    });
     enterSettingsView = () => {
       const restore = settingsSubTabToRestore;
       settingsSubTabToRestore = null;
@@ -6230,7 +6247,7 @@ async function api(method, path, body) {
     }
 
     // 号池路由双选：即改即存（布尔字段不变），中继每请求现读，改完下一请求即生效。
-    // 无成功 toast（2026-11-18 裁决）：选中项高亮当帧移动即反馈，同「UI版本」；
+    // 无成功 toast（2026-11-18 裁决）：选中项高亮即反馈。
     // 失败回滚选中态＋报错 toast。点已选中项与保存中的点击都忽略。
     async function savePoolRouting(next) {
       if (settingsSaving.poolLoadBalancing) return;

@@ -3866,7 +3866,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/<button class="rail-tab" id="railDirGeneral" role="tab" aria-selected="false"[^>]*>/.test(panelHtml),
       "「通用」目录项在册");
     for (const [name, label] of [["Advanced", "高级选项"], ["Route", "自动路由"], ["Theme", "主题"], ["About", "关于"]]) {
-      assert.ok(new RegExp(`<button class="rail-tab" id="railDir${name}" role="tab" aria-selected="false"[^>]*title="${label}">`).test(panelHtml), `${label}子 tab 默认未选`);
+      assert.ok(new RegExp(`<button class="rail-tab" id="railDir${name}" role="tab" aria-selected="false"[^>]*title="${label}" tabindex="-1">`).test(panelHtml), `${label}子 tab 默认未选`);
       assert.ok(panelHtml.includes(`id="settingsPanel${name}" hidden`), `${label}面板默认隐藏`);
     }
     assert.ok(panelHtml.includes('id="settingsPanelGeneral"'), "通用面板存在");
@@ -7823,12 +7823,12 @@ describe("侧栏布局", () => {
   it("设置子导航迁入左栏：设置态主 tab 组整组换目录、栏底齿轮换「返回」，首帧与运行时可交棒", () => {
     const rail = panelHtml.match(/<aside class="rail" id="panelRail"[\s\S]*?<\/aside>/)[0];
     // 目录组初始隐藏，在设置视图中显示
-    const dir = rail.match(/<nav class="rail-dir" id="railSettingsDir" role="tablist" aria-label="设置分类" hidden>([\s\S]*?)<\/nav>/);
+    const dir = rail.match(/<nav class="rail-dir" id="railSettingsDir" role="tablist" aria-label="设置分类" aria-orientation="vertical" hidden>([\s\S]*?)<\/nav>/);
     assert.ok(dir, "设置目录组在册（rail-tabs 与 rail-foot 之间）");
     assert.ok(rail.indexOf('class="rail-tabs"') < rail.indexOf('id="railSettingsDir"')
       && rail.indexOf('id="railSettingsDir"') < rail.indexOf('class="rail-foot"'),
       "目录组位置：主 tab 组之后、栏底行之前");
-    const items = [...dir[1].matchAll(/<button class="rail-tab" id="(railDir\w+)" role="tab" aria-selected="false" aria-controls="(settingsPanel\w+)" title="([^"]+)">([\s\S]*?)<\/button>/g)];
+    const items = [...dir[1].matchAll(/<button class="rail-tab" id="(railDir\w+)" role="tab" aria-selected="false" aria-controls="(settingsPanel\w+)" title="([^"]+)"(?: tabindex="-1")?>([\s\S]*?)<\/button>/g)];
     assert.deepEqual(items.map((m) => m[1]),
       ["railDirGeneral", "railDirAdvanced", "railDirRoute", "railDirTheme", "railDirAbout"],
       "目录五项依次在册");

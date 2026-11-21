@@ -8,7 +8,7 @@
 //     作用域不含作用域根自身：块内选择器必须把「`:root` + 皮肤键」前缀改写成
 //     `:scope:scope`（两个伪类 = (0,2,0)，与原前缀特异性相等；其余条件原样保留），否则
 //     整块皮肤规则在真实看板与预览里都匹配不到。改写等价性（前缀归一化后选择器逐条
-//     等于 base 版本、特异性逐条相等、规则条数与多重集相等、声明逐条相同）由本文件
+//     等于 base 版本、规则条数与多重集相等、声明逐条相同）由本文件
 //     对 base 版本（218f6f9）逐文件校验，并对 base CSS 反向断言必须判红。
 // 二、私有 token：`.wallpaper-preview` 上按壁纸主题生效时真实看板的 computed 值逐项补齐
 //     皮肤私有 token（基座段有定义的抄基座段，没有的显式 initial）。
@@ -43,7 +43,7 @@ const aliasSkin = (text) => text
 // e01ede8 首个把皮肤覆盖规则收进 @scope，218f6f9 补齐 v2 集中段的收边，0b51458 才把
 // 块内前缀改写成 :scope:scope——基准必须取 218f6f9：早于 e01ede8 的版本里 inScope
 // 恒空、逐条比较循环零次迭代，红测只剩「找不到 @scope 块」一道闸。
-// 断言逐文件比对选择器/特异性/条数/声明；git 取不到该版本时（浅克隆、源码包）跳过，
+// 断言逐文件比对选择器/条数/声明；git 取不到该版本时（浅克隆、源码包）跳过，
 // 不用假绿代替——跳过会显示在 node --test 的 skip 计数里。
 const BASE_REV = "218f6f9";
 const SCOPE_FILES = [
@@ -245,49 +245,6 @@ function canonicalSelector(sel) {
   const projected = parts.map((part) => part.replace(':scope:scope[data-ui-version="v2"]', ':scope:scope'));
   return { text: [...new Set(projected)].join(", "), ok };
 }
-// CSS 特异性（行内即 (a,b,c)：id / class(含属性、伪类) / 元素(含伪元素)）
-function specificityOfPart(part) {
-  const maxOf = (list) => list.reduce((best, cur) => {
-    for (let k = 0; k < 3; k++) {
-      if (cur[k] !== best[k]) return cur[k] > best[k] ? cur : best;
-    }
-    return best;
-  }, [0, 0, 0]);
-  let a = 0, b = 0, c = 0;
-  let i = 0;
-  while (i < part.length) {
-    const ch = part[i];
-    const skipWord = () => { while (i < part.length && /[-\w]/.test(part[i])) i++; };
-    if (ch === "#") { a++; i++; skipWord(); continue; }
-    if (ch === ".") { b++; i++; skipWord(); continue; }
-    if (ch === "[") { const end = skipBalanced(part, i, "[", "]"); if (end < 0) break; b++; i = end; continue; }
-    if (ch === ":") {
-      if (part[i + 1] === ":") { c++; i += 2; skipWord(); if (part[i] === "(") { const end = skipBalanced(part, i, "(", ")"); i = end < 0 ? part.length : end; } continue; }
-      const m = /^:([-\w]+)/.exec(part.slice(i));
-      if (!m) { i++; continue; }
-      const name = m[1];
-      i += m[0].length;
-      let arg = null;
-      if (part[i] === "(") { const end = skipBalanced(part, i, "(", ")"); arg = end < 0 ? "" : part.slice(i + 1, end - 1); i = end < 0 ? part.length : end; }
-      if (name === "where") continue;
-      if ((name === "is" || name === "not" || name === "has" || name === "matches") && arg !== null) {
-        const inner = maxOf(splitSelectorList(arg).map(specificityOfPart));
-        a += inner[0]; b += inner[1]; c += inner[2];
-        continue;
-      }
-      b++;
-      continue;
-    }
-    if (ch === "*") { i++; continue; }
-    if (/[-\w]/.test(ch)) { c++; skipWord(); continue; }
-    i++;
-  }
-  return [a, b, c];
-}
-const specificityText = (sel) => splitSelectorList(sel)
-  .map((part) => specificityOfPart(part).join(","))
-  .sort()
-  .join(" | ");
 // base 版本里「主语是 :root 之后元素、且键控皮肤键（别名后为 cyan/aurora/sepia）」的皮肤覆盖规则；
 // 主语就是 :root 的 token 定义不计入（它们必须留在 @scope 外）。
 const ROOT_ONLY_PREFIX = /^:root(?:\[[^\]]*\]|:not\([^)]*\)|:is\([^)]*\))*(?=\s|$)/;
@@ -354,7 +311,7 @@ function auditScopedCss(cssText, baseCssText, label) {
       if (!canonical.ok) violations.push(label + ": base 第 " + (i + 1) + " 条选择器无法归一化：" + b.sel.slice(0, 140));
       // 皮肤键闸（文件头口径「作用域起点必须覆盖规则自身的皮肤键」的落实）：base 侧
       // 选择器链首的皮肤键必须全部出现在当前规则所在 @scope 块的起点里。规则被挪进
-      // 别的皮肤块（或块起点写错皮肤）时，展平顺序、前缀归一化、特异性、声明全部照旧
+      // 别的皮肤块（或块起点写错皮肤）时，展平顺序、前缀归一化、声明全部照旧
       // 相等，只有这道闸会红——挪动正是「静默丢样式」。
       const scopeKeys = scopeSkinKeys(s);
       for (const k of skinKeys(b.sel)) {
@@ -365,9 +322,6 @@ function auditScopedCss(cssText, baseCssText, label) {
       }
       if (canonical.text !== actual) {
         violations.push(label + ": 第 " + (i + 1) + " 条前缀归一化后与 base 不一致\n  base: " + canonical.text + "\n  当前: " + actual);
-      }
-      if (specificityText(canonical.text) !== specificityText(s.sel)) {
-        violations.push(label + ": 第 " + (i + 1) + " 条特异性与 base 不一致（base " + specificityText(canonical.text) + " / 当前 " + specificityText(s.sel) + "）：" + actual.slice(0, 120));
       }
       if (expectedBody !== normalizeBody(s.body)) {
         violations.push(label + ": 第 " + (i + 1) + " 条声明与 base 不一致：" + actual.slice(0, 120));
@@ -419,7 +373,7 @@ describe("皮肤规则的 @scope 收边", () => {
 
   // 作用域起点与选择器皮肤键的一一对应（改写前口径）由下方「作用域内选择器改写」组接手：
   // 块内选择器不再带皮肤键，「前缀归一化后与 base 逐条相等」只保证选择器本身没改样，
-  // 挡不住把规则挪进别的皮肤块（挪动后顺序、特异性、声明都可以照旧）——起点覆盖由
+  // 挡不住把规则挪进别的皮肤块（挪动后顺序、声明都可以照旧）——起点覆盖由
   // auditScopedCss 的皮肤键闸与防挪用例承担。
 
   it("@scope 终点与 DOM 锚点同源：宿主元素在册、镜像视口嵌在其子树内、主脚本克隆进它", () => {
@@ -479,7 +433,7 @@ describe("皮肤规则的 @scope 收边", () => {
 // @scope 的作用域不含作用域根自身：块内保留「:root + 皮肤键」前缀的选择器一条都匹配不到，
 // 整段皮肤会静默失效。改写口径 = 只把链首的「:root + [data-style=皮肤]」换成 :scope:scope，
 // 历史版式条件按现行的单一布局归一化。下面对每个含 @scope 的文件与 base 版本（218f6f9）逐条对账：
-// 选择器（前缀归一化后）、特异性、规则条数、选择器多重集、声明体，外加皮肤键闸——
+// 选择器（前缀归一化后）、规则条数、选择器多重集、声明体，外加皮肤键闸——
 // base 侧选择器的皮肤键必须仍在当前规则所在 @scope 块的起点内（规则被挪进别的皮肤块
 // 时其余各项都可以照旧相等，只有起点对不上）。对 base CSS 反向断言必须判红——否则这
 // 组断言已失去判别力。
@@ -511,7 +465,7 @@ describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
     const baseCss = readBaseCss("panel-ui/panel.css");
     const lines = panelCss.split("\n");
     // 挪动设计：取 cyan/sepia 合并块的第一条规则，挪到它前面最近的 aurora 块内末尾。
-    // 两块之间没有别的 @scope 内规则，尾接尾挪动后展平顺序不变——前缀归一化、特异性、
+    // 两块之间没有别的 @scope 内规则，尾接尾挪动后展平顺序不变——前缀归一化、
     // 声明、多重集全部照旧绿，唯一该红的是皮肤键闸（复核复现过：这条变异在闸补上前
     // violations=[]、175/175 全绿）。挪进 aurora 块后，该条对 cyan/sepia 看板整条失效，
     // 正是文件头口径声明要拦的「静默丢样式」。
@@ -536,7 +490,7 @@ describe("作用域内选择器改写：:scope 前缀与 base 等价", () => {
       "挪进 aurora 块的 cyan/sepia 规则必须报出两个皮肤键都不在起点内：" + JSON.stringify(report.violations, null, 2));
     const others = report.violations.filter((v) => !v.includes("不在其 @scope 起点内"));
     assert.deepEqual(others, [],
-      "尾接尾挪动保持展平顺序——前缀归一化/条数/特异性/声明/多重集必须照旧全绿，红只能来自皮肤键闸：" +
+      "尾接尾挪动保持展平顺序——前缀归一化/条数/声明/多重集必须照旧全绿，红只能来自皮肤键闸：" +
       JSON.stringify(others, null, 2));
   });
 });

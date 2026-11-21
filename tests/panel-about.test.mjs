@@ -832,7 +832,7 @@ test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", (
 test("settings rail navigation runs the matching lifecycle and updates the title", () => {
   const h = harness();
   const settingsController = source.slice(source.indexOf("    const settingsSubTabs ="), source.indexOf("    function captureSettingsMirror()"));
-  const bind = source.match(/    for \(const \[name, item\] of Object.entries\(settingsSubTabs\)\) \{[\s\S]*?\n    \}/);
+  const bind = source.match(/    const settingKeys = Object.keys\(settingsSubTabs\);\n[\s\S]*?\n    \}\);/);
   assert.ok(settingsController.includes("function activateSettingsSubTab") && bind);
   for (const suffix of ["General", "Advanced", "Route", "Theme", "About"]) {
     const item = h.get(`railDir${suffix}`);
@@ -869,7 +869,12 @@ ${bind[0]}`, context);
   assert.equal(pageScrollResets, 1, "switching to About returns the page to the top");
   h.get("railDirAbout").click(); assert.equal(enters, 1); assert.equal(pageScrollResets, 1);
   h.get("railDirTheme").click(); assert.equal(leaves, 1); assert.equal(mirrors, 1); assert.equal(pageScrollResets, 2);
-  h.get("railDirAbout").click();
+  let prevented = false;
+  h.get("railDirTheme").onkeydown({ key: "ArrowDown", preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(h.get("railDirAbout").focused, true);
+  assert.equal(h.get("railDirAbout").tabIndex, 0);
+  assert.equal(h.get("railDirTheme").tabIndex, -1);
   assert.equal(enters, 2); assert.equal(pageScrollResets, 3);
   h.get("railDirGeneral").click();
   assert.equal(h.get("settingsPanelGeneral").hidden, false);
@@ -895,6 +900,12 @@ ${bind[0]}`, context);
   h.get("railDirGeneral").click();
   assert.equal(bundleLeaves, 5, "切走高级选项要让它离开");
   assert.equal(backupLeaves, 5, "切走高级选项也要让备份位置卡离开");
+  for (const [from, key, to] of [["General", "ArrowUp", "About"], ["About", "Home", "General"], ["General", "End", "About"], ["About", "ArrowDown", "General"]]) {
+    h.get(`railDir${from}`).onkeydown({ key, preventDefault() {} });
+    assert.equal(h.get(`railDir${to}`).getAttribute("aria-selected"), "true");
+    assert.equal(h.get(`railDir${to}`).tabIndex, 0);
+    assert.equal(h.get(`railDir${from}`).tabIndex, -1);
+  }
 });
 
 // ── 本地环境卡：安装/更新动作位 ───────────────────────

@@ -284,7 +284,7 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 - **No installer.** 0.7.4 ships as source. After that, the panel's About page can self-update.
 - **The virtual terminal is still preview.** It needs its own `npm install` once; the UI framework that imitates a GUI agent is still being polished.
 - **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions.
-- **The left-navigation UI is the default layout.** Browsers that never touched the UI toggle get the new UI; anyone who explicitly chose the classic layout keeps it. The switch lives under Settings → General → Display and takes effect instantly. The screenshots here show the default layout.
+- **The panel uses a sidebar.** Use it to switch views, open Settings, or enter the virtual terminal.
 - **The "bleeding edge" update channel is not stable yet.** If you are not a developer, or not someone who really wants to follow the project's latest progress, you are better off leaving the bleeding-edge mode off.
 - **In-panel launching for the ten CLIs, virtual models in all ten client pickers, and the About page's real install button** are verified down to code and tests, but not walked through on every client for you.
 
