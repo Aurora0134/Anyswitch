@@ -9,14 +9,14 @@ const
 
 var
   RemoveSettings: Boolean;
-  PreviousCurrent: String;
+  // LoadStringFromFile 的 var 形参是 AnsiString（引擎类型检查按精确匹配），这里必须同型。
+  PreviousCurrent: AnsiString;
   HadCurrent: Boolean;
   PointerChanged: Boolean;
   SetupComplete: Boolean;
   InstallRootValue: String;
   EnvRootValue: String;
   HadInstallRoot: Boolean;
-  HadEnvRoot: Boolean;
 
 function GetDriveType(RootPath: String): LongWord;
   external 'GetDriveTypeW@kernel32.dll stdcall';
