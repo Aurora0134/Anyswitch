@@ -9,7 +9,7 @@
 > *「渠道配一次，十个 agent 一起用。」*
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.4](https://img.shields.io/badge/Version-0.7.4-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.4)
+[![Version: 0.7.5-preview](https://img.shields.io/badge/Version-0.7.5--preview-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.5-preview)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#这些边界要先接受)
 [![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
 
@@ -24,13 +24,13 @@
 这个工具存在的全部理由，是让「只配一次」「只存一份密文」「一眼看到谁在跑、走的哪条路」三件事同时成立。
 
 ```bat
-git clone --branch v0.7.4 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.5-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
 ```
 
-Windows 本地运行 · 源码发行、无安装器 · 面板与 relay 只听环回地址
+Windows 本地运行 · 安装器或源码发行 · 面板与 relay 只听环回地址
 
 [看效果](#看效果一个窗口配置路由读数都在) · [安装](#装上就能用) · [渠道](#渠道只填一次十个-agent-各自接上) · [容灾](#挂了一个渠道流水线不该停) · [读数](#谁在跑走哪条路用了多少一个面板答完) · [终端](#虚拟终端在面板里跑-agent读数就在旁边) · [边界](#这些边界要先接受)
 
@@ -281,11 +281,12 @@ Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills �
 ## 这些边界要先接受
 
 - **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows。
-- **没有安装器。** 0.7.4 以源码发行。不过，安装好之后，面板「关于」页可以自更新。
+- **安装器未做代码签名。** 0.7.5-preview 起在 GitHub Releases 提供 Windows x64 安装器；首次运行会有「未知发布者」的 SmartScreen 警告，需要手动放行。装好后，面板「关于」页可以自更新，更新包带独立签名校验；源码安装的升级仍走 git（见下节）。
+- **这是 0.7 线的预览版。** 按正式版身份运行的安装不会收到 `v0.7.5-preview`，稳定线仍是 `v0.7.4`；按预览版身份运行的安装会照常收到升级提示。
 - **虚拟终端仍是预览功能。** 它要单独装依赖；如模拟GUI Agent的UI框架还在继续打磨。
 - **重启 relay 会中断在途请求，并结束当时所有终端进程。** 面板里的「重启」会先换 relay 再换面板宿主，请在空档执行。
 - **面板使用左侧导航。** 可以通过侧栏切换视图、进入设置和打开虚拟终端。
-- **「先行版」更新通道尚不稳定。** 如果你不是开发者或非常想要掌握项目最新进展的人，建议不要开启先行模式。
+- **预览通道发布未转正的版本。** 更新通道分「稳定版」「预览版」两档；预览版比稳定版新，未经长期使用验证，普通使用者建议留在稳定版。
 - **十 CLI 的面板内启动、虚拟模型在十个客户端选择器里的逐一显示、关于页的真实安装按钮**，都核到了代码与测试层，但没有替你在每台客户端上逐一走完。
 
 ---
@@ -317,7 +318,7 @@ Anyswitch/
 想核对这一版的实际改动范围：
 
 ```bat
-git log --no-merges --oneline v0.7.3..v0.7.4
+git log --no-merges --oneline v0.7.4..v0.7.5-preview
 ```
 
 ---
@@ -326,7 +327,9 @@ git log --no-merges --oneline v0.7.3..v0.7.4
 
 用户数据在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设、用量记录都不随源码目录替换。
 
-升级首选入口在面板里：**设置 → 关于 → 检查更新**。点「立即更新」确认一次，就自动完成下载与换装；后台预下载「自动检测并下载更新」默认是关的。检查与下载先走直连，直连传输失败时自动经你已配置的代理（环境变量或 git `http.proxy`）重试一次。想手动走同样的路径，先安排现有会话的空档，再检查安装目录的工作树：
+安装器安装的，升级首选入口在面板里：**设置 → 关于 → 检查更新**。点「立即更新」确认一次，就自动完成下载、验签与换装；后台预下载「自动检测并下载更新」默认是关的。检查更新先走直连，直连失败时自动经你已配置的代理（环境变量或 git `http.proxy`）重试一次，下载更新包走直连。
+
+源码安装的，升级走 git，或改用安装器（迁移保留源码目录与全部用户数据）。先安排现有会话的空档，再检查安装目录的工作树：
 
 ```bat
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
@@ -336,8 +339,8 @@ git status --short
 有输出就先处理自己的改动，别为了升级直接丢弃。工作树干净后，只取目标标签：
 
 ```bat
-git fetch --no-tags origin tag v0.7.4
-git switch --detach v0.7.4
+git fetch --no-tags origin tag v0.7.5-preview
+git switch --detach v0.7.5-preview
 npm install
 ```
 
