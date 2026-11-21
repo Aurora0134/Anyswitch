@@ -149,9 +149,14 @@ export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, root 
     await stageApp({ root: resolve(root), appDir: join(staging, "app"), version, publicKey: rawPublicKey });
     const archivePath = join(work, asset);
     run("tar.exe", ["-a", "-cf", archivePath, "app", "runtime"], staging);
+    // 提取目录用纯 ASCII 名：System32 的 bsdtar 按系统代码页解析参数，非中文区域
+    // 机器上带中文的 -C 路径会被折成问号（本地 GBK 码页过、英文 runner 必挂）。
+    // 提取完再 rename 进带中文与空格的冒烟目录——非 ASCII 安装根的健康检查照跑。
+    const extract = join(work, "extract");
+    await mkdir(extract);
+    run("tar.exe", ["-xf", archivePath, "-C", "extract"], work);
     const smoke = join(work, "smoke 空间");
-    await mkdir(smoke);
-    run("tar.exe", ["-xf", archivePath, "-C", smoke], root);
+    await rename(extract, smoke);
     const roots = (await readdir(smoke)).sort();
     if (roots.join(",") !== "app,runtime") throw new Error("Unexpected release archive layout");
     run(join(smoke, "runtime", "node.exe"), [join(smoke, "app", "package-health.mjs"), version], join(smoke, "app"));
