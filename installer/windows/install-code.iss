@@ -2,6 +2,7 @@ const
   PackageKey = 'Software\Anyswitch\WindowsPackage';
   DriveFixed = 3;
   AttrReparsePoint = $400;
+  AttrDirectory = $10;
   InvalidAttributes = $FFFFFFFF;
   MoveReplaceExisting = 1;
   MoveWriteThrough = 8;
@@ -23,6 +24,12 @@ function GetFileAttributes(FileName: String): LongWord;
   external 'GetFileAttributesW@kernel32.dll stdcall';
 function MoveFileEx(OldPath, NewPath: String; Flags: LongWord): Boolean;
   external 'MoveFileExW@kernel32.dll stdcall';
+
+// Inno 的脚本引擎不暴露 SysUtils 的 BoolToStr，布尔基线按读侧口径写 'True'/'False'。
+function BoolText(Value: Boolean): String;
+begin
+  if Value then Result := 'True' else Result := 'False';
+end;
 
 function NormalPath(Path: String): String;
 begin
@@ -149,8 +156,8 @@ begin
   HadBaselineEnvRoot := RegQueryStringValue(HKCU, 'Environment', 'ANYSWITCH_INSTALL_ROOT', BaselineEnvRoot);
   RegWriteStringValue(HKCU, PackageKey, 'PreviousInstallRoot', BaselineInstallRoot);
   RegWriteStringValue(HKCU, PackageKey, 'PreviousEnvRoot', BaselineEnvRoot);
-  RegWriteStringValue(HKCU, PackageKey, 'HadPreviousInstallRoot', BoolToStr(HadBaselineInstallRoot, True));
-  RegWriteStringValue(HKCU, PackageKey, 'HadPreviousEnvRoot', BoolToStr(HadBaselineEnvRoot, True));
+  RegWriteStringValue(HKCU, PackageKey, 'HadPreviousInstallRoot', BoolText(HadBaselineInstallRoot));
+  RegWriteStringValue(HKCU, PackageKey, 'HadPreviousEnvRoot', BoolText(HadBaselineEnvRoot));
   RegWriteStringValue(HKCU, PackageKey, 'ManagedInstallRoot', Root);
   Result := True;
 end;
@@ -209,7 +216,7 @@ begin
       repeat
         if (Entry.Name <> '.') and (Entry.Name <> '..') then begin
           Child := AddBackslash(Path) + Entry.Name;
-          if (Entry.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then DeleteOwnedTree(Child)
+          if (Entry.Attributes and AttrDirectory) <> 0 then DeleteOwnedTree(Child)
           else if not HasReparseAncestor(Child) then DeleteFile(Child);
         end;
       until not FindNext(Entry);
