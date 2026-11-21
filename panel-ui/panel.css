@@ -2201,6 +2201,13 @@
      本层第一个，不补的话这一段看着像悬在半空。 */
   #logLevelRows[hidden] { display: none; }
   #logLevelRows .modal-item:first-of-type { border-top: 1px solid var(--divider); }
+  /* 「显示单位」从属段：与「日志级别」同一套收起写法（显式 hidden 兜底＋段内
+     首行补回分隔线），理由见其注释。 */
+  #balanceUnitRows[hidden] { display: none; }
+  #balanceUnitRows .modal-item:first-of-type { border-top: 1px solid var(--divider); }
+  /* 渠道余额币种子卡：逐渠道三态行与卡内说明行共用 .modal-item 节奏；说明行
+     无边线（markup 里已带 border-top:none），渠道行从第二行起自然分隔。 */
+  #balanceCurrencyRows .modal-item:first-of-type { border-top: 1px solid var(--divider); }
   /* 级别图例：把实时输出里那三个大写标签和选项的中文对上。边框底色取全站「卡内小块」
      那一档（纯 token），标签文字色与实时输出行共用上面那组 .lvl 规则。 */
   .log-level-legend {
@@ -3216,6 +3223,14 @@
     font-family: var(--font-mono); font-size: 14px; font-weight: 700;
     color: var(--text); word-break: break-all; min-width: 0;
   }
+  /* 渠道/号池余额标签：挂在详情名右侧空白区。sans 小字号弱于名称主体（mono
+     粗体是渠道名本体的专属字重），颜色取次级文本档；取不到余额时 hidden，
+     不显示任何占位。 */
+  .store-balance {
+    margin-left: 10px; font-family: var(--font-sans); font-size: 12px;
+    font-weight: 500; color: var(--text-3); white-space: nowrap;
+  }
+  .store-balance[hidden] { display: none; }
   .skills-detail-relpath {
     font-family: var(--font-mono); font-size: 11px; color: var(--text-4);
     margin-top: 2px; word-break: break-all;

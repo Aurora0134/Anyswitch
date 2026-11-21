@@ -157,6 +157,12 @@ function validateProvider(providerId, provider, errors) {
   if (provider.protocol !== "openai-compatible") {
     errors.push(`${where}.protocol: must be "openai-compatible"`);
   }
+  // 渠道余额的手工币种覆盖：可选；present 时必须是受支持币种之一。面板
+  // 「渠道余额币种」子卡写入，balance-service 解析优先级最高的来源。
+  if (provider.balanceCurrency !== undefined &&
+      provider.balanceCurrency !== "usd" && provider.balanceCurrency !== "cny") {
+    errors.push(`${where}.balanceCurrency: must be "usd" or "cny" when present`);
+  }
   if (typeof provider.credentialFile !== "string" || provider.credentialFile.length === 0) {
     errors.push(`${where}.credentialFile: must be a non-empty string`);
   } else {

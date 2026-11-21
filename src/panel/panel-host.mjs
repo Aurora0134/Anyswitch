@@ -70,6 +70,11 @@ export function createPanelServer(options = {}) {
       interval.unref?.();
       return { first, interval };
     }),
+    // 渠道余额轮询的真实拍节：首开即一轮、之后每 60s 一轮，常驻 panel-host
+    // 进程才布——直建路由器的测试不传即不起定时器（注入语义见 panel.mjs）。
+    balancePollScheduleFn: options.balancePollScheduleFn ?? ((service) => {
+      service.start();
+    }),
     // 预设注入回填 / 技能补齐预热与冷扫预热同一接线纪律：直接建 server 的测试
     // 注入 mock 兜住（environmentService / promptsService / skillsService 透传，
     // 见 panel.mjs 注入语义），生产不传即走真懒加载。

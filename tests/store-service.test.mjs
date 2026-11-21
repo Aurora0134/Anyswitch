@@ -1539,6 +1539,46 @@ describe("store-service pools (号池)", () => {
     assert.equal(readStore(paths).store.providers["prov-a"].displayName, "prov-a");
   });
 
+  it("setBalanceCurrency sets, switches, and clears the manual override; getState reflects it", async () => {
+    const paths = makeRoot();
+    poolSeed(paths);
+    const svc = makeService(paths);
+
+    // 初始：无覆盖，getState 下发 null
+    let state = await svc.getState();
+    assert.equal(state.providers.find((p) => p.id === "prov-a").balanceCurrency, null);
+
+    const set = await svc.setBalanceCurrency("prov-a", "cny");
+    assert.equal(set.ok, true, set.error);
+    assert.equal(readStore(paths).store.providers["prov-a"].balanceCurrency, "cny");
+    state = await svc.getState();
+    assert.equal(state.providers.find((p) => p.id === "prov-a").balanceCurrency, "cny");
+
+    const switched = await svc.setBalanceCurrency("prov-a", "usd");
+    assert.equal(switched.ok, true, switched.error);
+    assert.equal(readStore(paths).store.providers["prov-a"].balanceCurrency, "usd");
+
+    // 清除后盘上键消失：清掉的行与从未配置过的行逐字节一致
+    const cleared = await svc.setBalanceCurrency("prov-a", null);
+    assert.equal(cleared.ok, true, cleared.error);
+    assert.equal(Object.hasOwn(readStore(paths).store.providers["prov-a"], "balanceCurrency"), false);
+    state = await svc.getState();
+    assert.equal(state.providers.find((p) => p.id === "prov-a").balanceCurrency, null);
+
+    // 其余字段原样保留
+    assert.deepEqual(Object.keys(readStore(paths).store.providers["prov-a"].models), ["m1", "m2"]);
+  });
+
+  it("setBalanceCurrency rejects a bad currency and an unknown provider", async () => {
+    const paths = makeRoot();
+    poolSeed(paths);
+    const svc = makeService(paths);
+    assert.match((await svc.setBalanceCurrency("prov-a", "eur")).error, /usd.*cny/);
+    assert.equal((await svc.setBalanceCurrency("prov-a", "auto")).ok, false);
+    assert.match((await svc.setBalanceCurrency("ghost", "usd")).error, /not managed/);
+    assert.equal(Object.hasOwn(readStore(paths).store.providers["prov-a"], "balanceCurrency"), false);
+  });
+
   it("renameProvider surfaces cas-conflict from the store write", async () => {
     const paths = makeRoot();
     poolSeed(paths);

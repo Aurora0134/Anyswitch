@@ -4250,7 +4250,7 @@ describe("panel.html 设置全页视图", () => {
       if (preActive) el(preActive).classes.add("active");
       const env = {
         restore, els,
-        calls: { store: 0, tiers: 0, aboutEnter: 0, bundleEnter: 0, backupEnter: 0 },
+        calls: { store: 0, tiers: 0, aboutEnter: 0, bundleEnter: 0, backupEnter: 0, balanceCurrencyRows: 0 },
         written: {},
         $: el,
         syncSettingsHeadTitle() {},
@@ -4261,6 +4261,7 @@ describe("panel.html 设置全页视图", () => {
         dataBundle: { enter() { env.calls.bundleEnter++; }, leave() {} },
         backupLocation: { enter() { env.calls.backupEnter++; }, leave() {} },
         refreshStoreState: () => { env.calls.store++; return Promise.resolve(); },
+        loadBalanceCurrencyRows: () => { env.calls.balanceCurrencyRows++; },
         renderClaudeTierOptions() { env.calls.tiers++; },
         loadSettingsState: () => Promise.resolve(),
         localStorage: { setItem: (k, v) => { env.written[k] = v; }, getItem: () => null },
@@ -4268,7 +4269,7 @@ describe("panel.html 设置全页视图", () => {
       new Function("env", `
         const { $, syncSettingsHeadTitle, resetPageScroll, replayViewEnter, captureSettingsMirror,
                 about, dataBundle, backupLocation, refreshStoreState, renderClaudeTierOptions,
-                loadSettingsState, localStorage } = env;
+                loadSettingsState, loadBalanceCurrencyRows, localStorage } = env;
         let settingsSubTabToRestore = env.restore;
         let mirrorAwaitRender = false;
 ${tabs[0]}
@@ -4299,6 +4300,7 @@ ${reset[0]}
     await flush();
     assert.equal(advanced.calls.bundleEnter, 1, "恢复进高级选项仍进入数据搬迁卡");
     assert.equal(advanced.calls.backupEnter, 1, "恢复进高级选项仍进入备份位置卡");
+    assert.equal(advanced.calls.balanceCurrencyRows, 1, "恢复进高级选项仍拉渠道币种行");
     // 无存档：走 resetSettingsSubTab 回落通用，行为与修复前一致
     const fallback = run(null, null);
     await flush();
