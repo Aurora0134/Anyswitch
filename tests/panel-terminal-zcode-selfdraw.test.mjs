@@ -131,6 +131,7 @@ const enrichSandbox = (sessions) => new Function("sessions", `
   ${extractFn("terminalInstanceRow")}
   ${extractFn("terminalMetricNum")}
   ${extractFn("terminalWorkTime")}
+  ${extractFn("rowRetryingCount")}
   ${extractFn("terminalMetricsFromInstance")}
   ${extractFn("terminalRouteForEndpoint")}
   ${extractFn("terminalBusyByOutput")}

@@ -2040,6 +2040,12 @@ function createAggregateState(sparkWindowPoints = DEFAULT_SPARK_WINDOW_POINTS) {
     keepAliveRecoveries: 0,
     keepAliveExhausted: 0,
     lastKeepAliveAt: null,
+    // 在途退避重试瞬态（进程存活期语义，不落盘）：retryingRequests 是「此刻
+    // 正有 N 条请求处于重试退避中」的在途计数，retrySample 保留最新一处置位
+    // 现场（reason/attempt/时刻），供面板把「生成中」细分为「重试中」。请求
+    // 出真内容或终结即清，重启归零。
+    retryingRequests: 0,
+    retrySample: null, // { reason, attempt, at } — 最新一次 recordRetry 的现场
     sparkWindowPoints: parseSparkWindowPoints(sparkWindowPoints),
   };
 }
@@ -2281,6 +2287,27 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   let ended = false;
   let endedWithAbort = false;
   let endedWithFault = false;
+  // 在途退避重试瞬态：recordRetry 置位（同一请求连续重试不重复计数），首个
+  // 真内容落地或请求终结时清除。镜像 tracker（实例行）共享同一套增减，聚合
+  // 与实例两行各自反映自己的在途重试。
+  let retryCtx = null;
+  const markRetrying = ({ reason, attempt, maxRetries } = {}) => {
+    if (ended) return;
+    const info = {
+      reason: typeof reason === "string" && reason ? reason : null,
+      attempt: Number.isInteger(attempt) && attempt > 0 ? attempt : null,
+      maxRetries: Number.isInteger(maxRetries) && maxRetries >= 0 ? maxRetries : null,
+      at: nowFn(),
+    };
+    if (retryCtx === null) state.retryingRequests += 1;
+    retryCtx = info;
+    if (!background) state.retrySample = info;
+  };
+  const clearRetrying = () => {
+    if (retryCtx === null) return;
+    retryCtx = null;
+    state.retryingRequests = Math.max(0, state.retryingRequests - 1);
+  };
   // Per-request TTFT for the usage journal: real first-chunk latency for
   // streams, the full-duration proxy for non-streaming successes (mirrors
   // the state.lastTtftMs rules below), null for failures/aborts.
@@ -2363,6 +2390,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // 真实 TTFT（journalTtftMs 照实结算，与展示面无关）。
       if (!background) clearMatchingAggregateFault(state, meta);
       if (firstChunkTime !== null || ended) return;
+      clearRetrying();
       firstChunkTime = nowFn();
       const ttft = Math.max(1, firstChunkTime - startTime);
       journalTtftMs = ttft;
@@ -2391,9 +2419,10 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     setAttributeResolver: (fn) => {
       attributeResolver = typeof fn === "function" ? fn : null;
     },
-    recordRetry: ({ reason, attempt, usage, memberId } = {}) => {
+    recordRetry: ({ reason, attempt, maxRetries, usage, memberId } = {}) => {
       state.keepAliveRetries += 1;
       state.lastKeepAliveAt = nowFn();
+      markRetrying({ reason, attempt, maxRetries });
       // A retry means the upstream attempt failed before delivering content.
       // Count that failed attempt in model-stability so silent recovery does
       // not paint a misleading 100% success rate for the model/provider pair.
@@ -2437,6 +2466,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       if (endedWithAbort) return;
       if (info?.aborted) endedWithAbort = true;
       else if (info?.error || (typeof info?.status === "number" && info.status >= 400)) endedWithFault = true;
+      clearRetrying();
       ended = true;
       state.activeRequests = Math.max(0, state.activeRequests - 1);
       if (state.activeRequests === 0) onTransition?.(0);
@@ -2767,6 +2797,10 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
       lastError: state.lastError,
       errorActive: state.errorActive,
       activeErrors,
+      // 在途退避重试瞬态：与 metrics 同源（「重试中」徽标数据源），
+      // 实例行消费者（终端归属 join 等）按行取用，不必回端点 metrics。
+      retryingRequests: state.retryingRequests,
+      retrySample: state.retrySample,
       tokens: {
         prompt: state.totalPromptTokens,
         completion: state.totalCompletionTokens,
@@ -2816,6 +2850,10 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
         exhausted: state.keepAliveExhausted,
         lastAt: state.lastKeepAliveAt,
       },
+      // 在途退避重试瞬态（「重试中」徽标数据源）：retryingRequests>0 即此刻
+      // 有请求卡在退避里；sample 携带最新一处的 reason/attempt 供终端页详情行。
+      retryingRequests: state.retryingRequests,
+      retrySample: state.retrySample,
       sparkHistory,
       tokens: {
         prompt: state.totalPromptTokens,
@@ -4929,6 +4967,13 @@ export function createAgentMetricsCollector(options = {}) {
       activityBoundary = (prevActive === 0) !== (session.activeRequests === 0);
     }
     if (typeof report.activeDurationMs === "number") session.activeDurationMs = report.activeDurationMs;
+    // 在途退避重试瞬态（「重试中」徽标数据源）：reporter 快照整段覆盖，
+    // 与 activeRequests 同语义——旧 launcher 缺字段按 0/无重试回落。
+    if (typeof report.retryingRequests === "number") session.retryingRequests = report.retryingRequests;
+    else session.retryingRequests = 0;
+    session.retrySample = report.retrySample && typeof report.retrySample === "object"
+      ? { ...report.retrySample }
+      : null;
     if (typeof report.promptTokens === "number") session.promptTokens = report.promptTokens;
     if (typeof report.completionTokens === "number") session.completionTokens = report.completionTokens;
     if (typeof report.cachedTokens === "number") session.cachedTokens = report.cachedTokens;
@@ -5056,6 +5101,9 @@ export function createAgentMetricsCollector(options = {}) {
       lastSeen: Math.max(...members.map((m) => m.lastSeen)),
       requests: members.reduce((sum, m) => sum + m.requests, 0),
       activeRequests: members.reduce((sum, m) => sum + m.activeRequests, 0),
+      // 在途重试：计数取成员和，现场取最新置位的成员（与展示字段同拍折叠）。
+      retryingRequests: members.reduce((sum, m) => sum + (m.retryingRequests || 0), 0),
+      retrySample: newestWith("retrySample")?.retrySample ?? null,
       activeDurationMs: members.reduce((sum, m) => sum + m.activeDurationMs, 0),
       promptTokens: members.reduce((sum, m) => sum + m.promptTokens, 0),
       completionTokens: members.reduce((sum, m) => sum + m.completionTokens, 0),
@@ -5152,6 +5200,9 @@ export function createAgentMetricsCollector(options = {}) {
         lastSeen: Math.max(...members.map((m) => m.lastSeen)),
         requests: members.reduce((sum, m) => sum + m.requests, 0),
         activeRequests: members.reduce((sum, m) => sum + m.activeRequests, 0),
+        // 在途重试：计数取成员和，现场取最新置位的成员（与展示字段同拍折叠）。
+        retryingRequests: members.reduce((sum, m) => sum + (m.retryingRequests || 0), 0),
+        retrySample: newestWith("retrySample")?.retrySample ?? null,
         activeDurationMs: members.reduce((sum, m) => sum + m.activeDurationMs, 0),
         promptTokens: members.reduce((sum, m) => sum + m.promptTokens, 0),
         completionTokens: members.reduce((sum, m) => sum + m.completionTokens, 0),
@@ -5364,6 +5415,8 @@ export function createAgentMetricsCollector(options = {}) {
         // settleAbandonedAggregateState. A genuinely generating session
         // heartbeats every ~10s, so its lastSeen never reaches this age.
         s.activeRequests = 0;
+        s.retryingRequests = 0;
+        s.retrySample = null;
         s.errorActive = false;
       }
       // Process classification is the source of client form. Reporter
@@ -5457,6 +5510,10 @@ export function createAgentMetricsCollector(options = {}) {
         state.currentProvider = null;
         state.activeModels.clear();
       }
+      // 在途重试是活动量的一部分：在飞请求清零时一并清（泄露的退避计数会把
+      // 「重试中」徽标永久钉死）。
+      state.retryingRequests = 0;
+      state.retrySample = null;
       if (state.activeFaults.size > 0 || state.keylessFaultAt !== null) {
         state.activeFaults.clear();
         state.keylessFaultAt = null;
@@ -6428,6 +6485,10 @@ export function createAgentMetricsCollector(options = {}) {
         activeDurationFormatted: formatDuration(s.activeDurationMs),
         requests: s.requests,
         activeRequests: s.activeRequests,
+        // 在途退避重试瞬态（「重试中」徽标数据源）：旧 launcher 的 report 缺
+        // 字段按 0/无重试回落（reportSession 已归一）。
+        retryingRequests: s.retryingRequests || 0,
+        retrySample: s.retrySample ?? null,
         lastError: s.lastError ?? null,
         errorActive: !!s.errorActive,
         tokens: {
@@ -7013,6 +7074,16 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       agentId,
       requests: state.requests,
       activeRequests: state.activeRequests,
+      // 在途退避重试瞬态（「重试中」徽标数据源，与常驻聚合快照同名字段）：
+      // 常驻侧把这行会话折叠回端点行时按两键 sum/取最新合并。
+      retryingRequests: openRequests.reduce((sum, r) => sum + (r.retrying ? 1 : 0), 0),
+      // 最新置位的那条（openRequests 尾部最新）。
+      retrySample: (() => {
+        for (let i = openRequests.length - 1; i >= 0; i -= 1) {
+          if (openRequests[i].retrying) return openRequests[i].retrying;
+        }
+        return null;
+      })(),
       activeDurationMs,
       promptTokens: state.promptTokens,
       completionTokens: state.completionTokens,
@@ -7077,6 +7148,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
 
   function recordFirstChunkCtx(ctx) {
     if (ctx.firstChunk !== null || ctx.ended) return;
+    ctx.retrying = null;
     ctx.firstChunk = nowFn();
     state.lastTtftMs = Math.max(1, ctx.firstChunk - ctx.startTime);
     // First genuine token recovers the session fault. Retry begin must
@@ -7089,9 +7161,18 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   // counting it keeps silent recovery from painting a misleading 100%
   // success rate on the 状态检测 card. Attempts carry no TTFT (they never
   // produced a first token) and zero latency, exactly like the resident side.
-  function recordRetryCtx(ctx, { usage, memberId } = {}) {
+  function recordRetryCtx(ctx, { reason, attempt, maxRetries, usage, memberId } = {}) {
     const u = usage && typeof usage === "object" ? usage : {};
     const attr = resolvedAttributeFor(ctx, memberId ?? null);
+    // 在途退避重试瞬态（与常驻聚合 tracker 的 markRetrying 同口径）：置位直到
+    // 首个真内容落地或请求终结，快照据此刻画「重试中」。
+    if (ctx && !ctx.ended) {
+      ctx.retrying = {
+        reason: typeof reason === "string" && reason ? reason : null,
+        attempt: Number.isInteger(attempt) && attempt > 0 ? attempt : null,
+        maxRetries: Number.isInteger(maxRetries) && maxRetries >= 0 ? maxRetries : null,
+      };
+    }
     pushStability({
       providerId: attr?.providerId || ctx?.meta?.providerId || memberId || "",
       model: attr?.model || ctx?.meta?.model || null,
@@ -7107,6 +7188,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   function recordEndCtx(ctx, { usage, error, status, aborted } = {}) {
     if (ctx.ended) return;
     ctx.ended = true;
+    ctx.retrying = null;
     const idx = openRequests.indexOf(ctx);
     if (idx !== -1) openRequests.splice(idx, 1);
     state.activeRequests = Math.max(0, state.activeRequests - 1);

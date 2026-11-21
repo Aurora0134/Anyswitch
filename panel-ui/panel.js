@@ -1256,15 +1256,64 @@ async function api(method, path, body) {
     }
   }
 
+  // ── 在途退避重试（「重试中」徽标） ──
+  // 数据源：relay 的 agent-metrics 在 recordRetry 置位 retryingRequests、首个
+  // 真内容落地或请求终结时清零，随 /api/agents 快照与终端归属行同源下发。
+  // 徽标三态判定优先级：重试中（黄）> 生成中（绿）> 待命（灰）——退避里的请求
+  // 仍占着 activeRequests，黄色细分正是要把这段「生成中但尚未出字」拆出来。
+  function rowRetryingCount(row) {
+    const n = Number(row && row.retryingRequests);
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+  }
+
+  // 端点级判定：聚合 metrics 或任一会话/实例行在退避中即整卡转黄。
+  function endpointRetrying(endpoint) {
+    if (!endpoint || typeof endpoint !== "object") return false;
+    if (rowRetryingCount(endpoint.metrics) > 0) return true;
+    const rows = Array.isArray(endpoint.sessions) ? endpoint.sessions : [];
+    return rows.some((s) => rowRetryingCount(s) > 0);
+  }
+
+  // 状态徽标三件套：类名 + 文案按（是否重试中, 是否生成中）一步取齐，
+  // 看板各卡与终端实况块共用同一口径。
+  function retryingBadgeState(isRetrying, isGenerating) {
+    if (isRetrying) return { cls: "badge badge-warn", text: "重试中" };
+    return isGenerating
+      ? { cls: "badge badge-ok", text: "生成中" }
+      : { cls: "badge badge-neutral", text: "待命" };
+  }
+
+  // relay 侧 reason 机读词 → 产品语义短语：HTTP 状态码类原样报码，
+  // 语义类断流翻成短语，未识别的新词兜底；不裸透下划线机读词。
+  const RETRY_REASON_LABELS = {
+    empty_stream: "首字前断流",
+    stream_error_before_content: "首字前报错",
+    stream_error_after_content: "生成中断",
+    upstream_error_event: "上游错误事件",
+    incomplete_tool_call: "工具调用截断",
+    truncated_tool_args: "响应截断",
+    malformed_json_chunk: "响应截断",
+    mid_word_truncation: "响应截断",
+    think_only_incomplete: "响应截断",
+  };
+
+  function retryReasonLabel(reason) {
+    if (typeof reason !== "string" || !reason) return "";
+    const http = reason.match(/^upstream_(\d{3})$/);
+    if (http) return `HTTP ${http[1]}`;
+    return RETRY_REASON_LABELS[reason] || "上游异常";
+  }
+
   // 收起态简要信息栏：与多实例端点实例行同构——名称行（标题 + 状态徽标 + 请求数徽标）+
   // tokens 行（Prompt/Completion/Cached）+ 胶囊行（tok/s、TTFT 灯、缓存命中率、工时）。
   // staleText 非空时（陈旧端点）隐藏速率类三枚，改显示相对时间胶囊；
   // tokens/请求数为累计量，陈旧态照常显示（与实例行同口径）。
-  function updateDetailBrief(prefix, { isGenerating, ttft, ttftColor, tps, hit, durationText, staleText, requests, tokensText }) {
+  function updateDetailBrief(prefix, { isRetrying, isGenerating, ttft, ttftColor, tps, hit, durationText, staleText, requests, tokensText }) {
     const state = $(prefix + "BriefState");
     if (!state) return;
-    state.className = "badge " + (isGenerating ? "badge-ok" : "badge-neutral");
-    state.textContent = isGenerating ? "生成中" : "待命";
+    const badge = retryingBadgeState(isRetrying, isGenerating);
+    state.className = badge.cls;
+    state.textContent = badge.text;
     const reqs = $(prefix + "BriefReqs");
     if (reqs) reqs.textContent = `${requests || 0} 请求`;
     const tokensLine = $(prefix + "BriefTokens");
@@ -1433,6 +1482,8 @@ async function api(method, path, body) {
     const dur = m.activeDurationMs || d.activeDurationMs;
     return {
       status: isGenerating ? "active" : "idle",
+      // 伪实例行同口径带上在途重试计数（徽标三态判定读行上的这个键）。
+      retryingRequests: rowRetryingCount(m) || rowRetryingCount(sess),
       tokens: m.tokens || sess.tokens || {},
       requests: m.totalRequests || d.totalRequests || 0,
       tps: (typeof tps === "number" && tps > 0) ? tps : null,
@@ -1566,10 +1617,10 @@ async function api(method, path, body) {
       const surfaceBadge = !isAggregate && showSurface && inst.surface
         ? `<span class="badge badge-neutral">${escapeHtml(String(inst.surface))}</span>`
         : "";
-      const stateBadge = isAggregate ? "" : (
-        isAct
-          ? `<span class="badge badge-ok">生成中</span>`
-          : `<span class="badge badge-neutral">待命</span>`
+      const stateBadge = isAggregate ? "" : ((b) => `<span class="${b.cls}">${b.text}</span>`)(
+        // 行级三态：退避重试中的行转黄（retryingRequests 由 relay 在
+        // recordRetry 置位、真内容落地清零）；其余两态维持原口径。
+        retryingBadgeState(rowRetryingCount(inst) > 0, isAct)
       );
       const row = document.createElement("div");
       row.className = "session-row";
@@ -2269,8 +2320,9 @@ async function api(method, path, body) {
       empty.hidden = true;
       metricsBlock.hidden = false;
       const isGenerating = (d.metrics && d.metrics.activeRequests > 0) || (d.activeRequests > 0);
-      stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
-      stateBadge.textContent = isGenerating ? "生成中" : "待命";
+      const dshBadge = retryingBadgeState(endpointRetrying(d), isGenerating);
+      stateBadge.className = dshBadge.cls;
+      stateBadge.textContent = dshBadge.text;
 
       const m = d.metrics || {};
       const sess = (d.sessions && d.sessions[0]) || {};
@@ -2399,8 +2451,9 @@ async function api(method, path, body) {
       empty.hidden = true;
       metricsBlock.hidden = false;
       const isGenerating = (p.metrics && p.metrics.activeRequests > 0) || (p.activeRequests > 0);
-      stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
-      stateBadge.textContent = isGenerating ? "生成中" : "待命";
+      const qoderBadge = retryingBadgeState(endpointRetrying(p), isGenerating);
+      stateBadge.className = qoderBadge.cls;
+      stateBadge.textContent = qoderBadge.text;
 
       const m = p.metrics || {};
       const sess = (p.sessions && p.sessions[0]) || {};
@@ -2430,6 +2483,7 @@ async function api(method, path, body) {
 
       const tokens = m.tokens || sess.tokens || {};
       updateDetailBrief("qoder", {
+        isRetrying: endpointRetrying(p),
         isGenerating,
         ttft: (typeof ttft === "number" && ttft > 0) ? ttft : null,
         ttftColor: m.ttftColor || "green",
@@ -7904,6 +7958,10 @@ async function api(method, path, body) {
     const fmt = (n) => (typeof n === "number" && Number.isFinite(n) ? n.toLocaleString("en-US") : "0");
     return {
       activeRequests: typeof inst.activeRequests === "number" ? inst.activeRequests : 0,
+      // 在途退避重试瞬态（「重试中」实况态）：与看板行同键，relay 在
+      // recordRetry 置位、真内容落地或请求终结清零；sample 供详情行。
+      retryingRequests: rowRetryingCount(inst),
+      retrySample: inst.retrySample && typeof inst.retrySample === "object" ? inst.retrySample : null,
       ttft: typeof inst.lastTtftMs === "number" && inst.lastTtftMs > 0 ? (inst.lastTtftMs / 1000).toFixed(2) : "—",
       ttftLamp: typeof inst.ttftColor === "string" ? inst.ttftColor : "gray",
       tps: terminalMetricNum(inst.tps),
@@ -7978,6 +8036,25 @@ async function api(method, path, body) {
       if (hop && usable(hop.node, hop.model)) return capsuleLabel(hop.node, hop.model);
     }
     return "";
+  }
+
+  // 「重试中」实况态的详情行：单行收口的三段——服务方 · 重试进度 · 断流原因。
+  // sample 缺 attempt（成员切换类重试没有次数预算）或缺 reason（旧 relay）
+  // 时对应段缺席，整段拼不出可说的内容才退「自动重试中」。文案与看板徽标
+  // 同一词汇表（retryReasonLabel）。
+  function terminalRetryDetail(serving, sample) {
+    const parts = [];
+    if (serving) parts.push(serving);
+    if (sample && Number.isInteger(sample.attempt) && sample.attempt > 0) {
+      const budget = Number.isInteger(sample.maxRetries) && sample.maxRetries > 0
+        ? `/${sample.maxRetries}`
+        : "";
+      parts.push(`重试第 ${sample.attempt}${budget} 次`);
+    }
+    const reason = retryReasonLabel(sample && sample.reason);
+    if (reason) parts.push(reason);
+    if (parts.length === 0) parts.push("自动重试中");
+    return parts.join(" · ");
   }
 
   // 最近请求：失败行的展开态集合（行键 = ts|providerId|model，与大板 logsRowKey
@@ -11265,15 +11342,21 @@ async function api(method, path, body) {
     }
     // 实况行同时答「忙不忙 + 谁在服务」：归属段实例身份优先、路由当前跳后备，
     // 没有可说的服务方（普通终端/身份未上报）就不出模型段。
+    // 第三态「重试中」（黄）：本会话归属行上有请求卡在退避重试里——标题换态、
+    // 详情行展开关键重试信息（服务方 · 重试进度 · 断流原因），单行收口。
     const serving = terminalServingLabel(session);
-    $("terminalLiveTitle").textContent = session.status === "working" ? "进行中" : "空闲";
     const metrics = session.metrics || null;
-    $("terminalLiveDetail").textContent = session.status === "working" && metrics
-      ? [serving, `${metrics.activeRequests} 个请求进行中`].filter(Boolean).join(" · ")
-      : serving
-        ? `最近由 ${serving} 服务`
-        : "当前没有进行中的请求";
-    $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
+    const retrying = Boolean(metrics && metrics.retryingRequests > 0);
+    $("terminalLiveTitle").textContent = retrying ? "重试中" : (session.status === "working" ? "进行中" : "空闲");
+    $("terminalLiveDetail").textContent = retrying
+      ? terminalRetryDetail(serving, metrics.retrySample)
+      : session.status === "working" && metrics
+        ? [serving, `${metrics.activeRequests} 个请求进行中`].filter(Boolean).join(" · ")
+        : serving
+          ? `最近由 ${serving} 服务`
+          : "当前没有进行中的请求";
+    $("terminalLiveStatus").classList.toggle("is-retrying", retrying);
+    $("terminalLiveStatus").classList.toggle("is-idle", !retrying && session.status !== "working");
     const metricsSection = $("terminalMetricsSection");
     metricsSection.hidden = !metrics;
     $("terminalFootStats").hidden = !metrics;

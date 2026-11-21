@@ -431,6 +431,64 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(zcode.lastError.message, "still down");
   });
 
+  it("在途重试瞬态：recordRetry 置位、连续重试不重复计数、真内容落地清零", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => cb(null, "");
+    const collector = testCollector({ execFn: mockExec, nowFn });
+
+    const req = collector.startRequest({ agentId: "zcode", providerId: "otter", model: "glm-5.3" });
+    mockTime = 1500;
+    req.recordRetry({ reason: "upstream_503", attempt: 1, maxRetries: 2 });
+    let status = await collector.getAgentsStatus();
+    let zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.retryingRequests, 1, "recordRetry 置位在途计数");
+    assert.deepEqual(
+      { reason: zcode.metrics.retrySample.reason, attempt: zcode.metrics.retrySample.attempt, maxRetries: zcode.metrics.retrySample.maxRetries },
+      { reason: "upstream_503", attempt: 1, maxRetries: 2 },
+      "现场带 reason/attempt/maxRetries",
+    );
+
+    // 同一请求的第二次退避：计数不重复累加，现场推进到最新一次
+    mockTime = 2000;
+    req.recordRetry({ reason: "upstream_503", attempt: 2, maxRetries: 2 });
+    status = await collector.getAgentsStatus();
+    zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.retryingRequests, 1, "同一请求连续重试不重复计数");
+    assert.equal(zcode.metrics.retrySample.attempt, 2, "现场推进到最新一次重试");
+
+    // 首个真内容落地：瞬态清零（成功路径）
+    mockTime = 3000;
+    req.recordFirstChunk();
+    status = await collector.getAgentsStatus();
+    zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.retryingRequests, 0, "真内容落地清零在途计数");
+    mockTime = 3500;
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 2 } });
+  });
+
+  it("在途重试瞬态：重试耗尽以失败终结同样清零（不把「重试中」钉死在失败卡上）", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => cb(null, "");
+    const collector = testCollector({ execFn: mockExec, nowFn });
+
+    const req = collector.startRequest({ agentId: "zcode", providerId: "otter", model: "glm-5.3" });
+    mockTime = 1500;
+    req.recordRetry({ reason: "empty_stream", attempt: 3, maxRetries: 2 });
+    let status = await collector.getAgentsStatus();
+    let zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.retryingRequests, 1);
+    assert.equal(zcode.metrics.retrySample.reason, "empty_stream");
+
+    mockTime = 2500;
+    req.recordEnd({ status: 502, error: { status: 502, message: "exhausted" } });
+    status = await collector.getAgentsStatus();
+    zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.retryingRequests, 0, "请求终结清零在途计数");
+    assert.equal(zcode.errorActive, true, "失败闩锁不受瞬态清理影响");
+  });
+
   it("keeps a keyless (no provider+model) fault latched through retry begin; first token clears it", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;

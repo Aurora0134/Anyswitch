@@ -3785,20 +3785,37 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
   });
 });
 
-describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归因换装）", () => {
-  // 实例行状态徽标只有生成中/待命两态：「这条请求走没走自动路由」由端点模型胶囊
-  // 上的 auto 角标单独表达，不由状态徽标换装承担；伪「全局汇总」行不挂状态徽标。
+describe("panel.html 实例行状态徽标三态（生成中/待命/重试中，不随链归因换装）", () => {
+  // 实例行状态徽标三态：在飞 badge-ok「生成中」、退避重试中 badge-warn「重试中」、
+  // 其余 badge-neutral「待命」；「这条请求走没走自动路由」由端点模型胶囊上的 auto
+  // 角标单独表达，不由状态徽标换装承担；伪「全局汇总」行不挂状态徽标。
   const panelJs = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
     "utf8",
   );
 
+  // 徽标三件套 + 行级重试计数（源码同口径注入，不手抄副本）
+  function extractFn(re, label) {
+    const m = panelJs.match(re);
+    assert.ok(m, label + " found in panel.js");
+    return m[0];
+  }
+  const rowRetryingCount = new Function(
+    `return (${extractFn(/function rowRetryingCount\(row\) \{[\s\S]*?\n  \}/, "rowRetryingCount")});`,
+  )();
+  const retryingBadgeState = new Function(
+    `return (${extractFn(/function retryingBadgeState\(isRetrying, isGenerating\) \{[\s\S]*?\n  \}/, "retryingBadgeState")});`,
+  )();
+
   function makeRenderStateBadge() {
     // 截「const stateBadge = 」到语句末（模板串内无分号，首个 ; 即语句尾），
-    // 整段三元（含 isAggregate 空串分支）作为表达式求值
+    // 整段三元（含 isAggregate 空串分支）作为表达式求值，行级重试判定依赖一并注入
     const m = panelJs.match(/const stateBadge = (isAggregate[\s\S]*?);/);
     assert.ok(m, "instance-row state badge expression found in panel.js");
-    return (ctx) => new Function("isAggregate", "isAct", `return (${m[1]});`)(ctx.isAggregate, ctx.isAct);
+    return (ctx) => new Function(
+      "isAggregate", "isAct", "rowRetryingCount", "retryingBadgeState", "inst",
+      `return (${m[1]});`,
+    )(ctx.isAggregate, ctx.isAct, rowRetryingCount, retryingBadgeState, ctx.inst || {});
   }
 
   it("在飞恒 badge-ok「生成中」、待命恒 badge-neutral「待命」、汇总行无状态徽标", () => {
@@ -3810,6 +3827,17 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
     assert.match(idle, /badge-neutral/);
     assert.match(idle, /待命/);
     assert.equal(badge({ isAggregate: true, isAct: true }), "");
+  });
+
+  it("行携带 retryingRequests>0 时转 badge-warn「重试中」（覆盖生成中）", () => {
+    const badge = makeRenderStateBadge();
+    const act = badge({ isAggregate: false, isAct: true, inst: { retryingRequests: 1 } });
+    assert.match(act, /badge-warn/);
+    assert.match(act, /重试中/);
+    assert.doesNotMatch(act, /生成中/);
+    // 计数缺位/为 0 的行回落两态（旧 relay 快照兼容）
+    assert.match(badge({ isAggregate: false, isAct: true, inst: {} }), /badge-ok/);
+    assert.match(badge({ isAggregate: false, isAct: true, inst: { retryingRequests: 0 } }), /badge-ok/);
   });
 
   it("实例行渲染器不留链归因分支（badge-auto 只归端点胶囊）", () => {
@@ -10234,11 +10262,14 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     const metrics = await vmFn("terminalMetricsFromInstance", [{
       activeRequests: 2, lastTtftMs: 860, ttftColor: "green", tps: 42.64, cacheHitRate: 60.9,
       activeDurationMs: 732000, requests: 14, model: "kimi-k3", providerId: "north-main",
+      retryingRequests: 1, retrySample: { reason: "upstream_503", attempt: 2, maxRetries: 2, at: 1000 },
       tokens: { prompt: 128460, completion: 31204, cached: 96080 },
       sparkHistory: { ttft: [0.8], tps: [40], cache: [55] },
-    }], ["terminalMetricNum", "terminalWorkTime"]);
+    }], ["terminalMetricNum", "terminalWorkTime", "rowRetryingCount"]);
     assert.deepEqual(metrics, {
-      activeRequests: 2, ttft: "0.86", ttftLamp: "green", tps: "42.6", cache: "61",
+      activeRequests: 2, retryingRequests: 1,
+      retrySample: { reason: "upstream_503", attempt: 2, maxRetries: 2, at: 1000 },
+      ttft: "0.86", ttftLamp: "green", tps: "42.6", cache: "61",
       workTime: "12", workTimeUnit: "分钟", requestCount: 14,
       model: "kimi-k3", providerId: "north-main",
       tokens: "Prompt: 128,460 · Completion: 31,204 · Cached: 96,080",
@@ -10247,7 +10278,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
   });
 
   it("terminalMetricsFromInstance 对空实例行不编造数字", async () => {
-    const metrics = await vmFn("terminalMetricsFromInstance", [{ activeRequests: 0, requests: 0, ttftColor: "gray" }], ["terminalMetricNum", "terminalWorkTime"]);
+    const metrics = await vmFn("terminalMetricsFromInstance", [{ activeRequests: 0, requests: 0, ttftColor: "gray" }], ["terminalMetricNum", "terminalWorkTime", "rowRetryingCount"]);
     assert.equal(metrics.ttft, "—");
     assert.equal(metrics.tps, "—");
     assert.equal(metrics.cache, "—");
@@ -10508,7 +10539,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       activeRequests: 1, requests: 7, currentModel: "glm-5.3", currentProvider: "demo-pool",
       tokens: {}, lastTtftMs: 1200, ttftColor: "green", tps: 12.3, cacheHitRate: 95.3,
       sparkHistory: { ttft: [1.2], tps: [12.3], cache: [95.3] },
-    }], ["terminalMetricNum", "terminalWorkTime"]);
+    }], ["terminalMetricNum", "terminalWorkTime", "rowRetryingCount"]);
     assert.equal(metrics.model, "glm-5.3", "实况行「谁在服务」拿到模型名");
     assert.equal(metrics.providerId, "demo-pool", "实况行「谁在服务」拿到来源 id");
   });
@@ -10517,7 +10548,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     const metrics = await vmFn("terminalMetricsFromInstance", [{
       activeRequests: 0, requests: 7, currentModel: null, currentProvider: null,
       lastModel: "glm-5.3", lastProvider: "demo-pool", tokens: {},
-    }], ["terminalMetricNum", "terminalWorkTime"]);
+    }], ["terminalMetricNum", "terminalWorkTime", "rowRetryingCount"]);
     assert.equal(metrics.model, "glm-5.3", "回合结束后实况行仍有「最近由谁服务」");
     assert.equal(metrics.providerId, "demo-pool");
   });
