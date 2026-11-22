@@ -669,6 +669,41 @@ test("deleteBackup：删掉指定备份目录；锚定外的名字与不存在�
   } finally { m.cleanup(); }
 });
 
+// 同秒撞名时写入侧给 pre-import 备份追加 -2/-3 序号（见 data-bundle.mjs
+// writePreImportBackup）：序号名要进列表、可删、内容可按名恢复读回。
+// byok 族由 byok-remove.mjs 逐文件改名防撞，不产序号名，不认后缀。
+test("带序号后缀的 pre-import 备份：进列表、可恢复读回、可删；byok 序号名与异形后缀不认", () => {
+  const rig = restoreRig();
+  try {
+    const { root, paths, service } = rig;
+    assert.equal(writeStore(bundleStore("beta"), { paths }).ok, true);
+    const backupsDir = join(root, "backups");
+    const suffixed = join(backupsDir, "pre-import-20261031-120000-2");
+    seedSnapshot(suffixed, { storeId: "alpha", followAgent: false, presets: [], repoPath: "C:\\old-skills", credential: "enc:sk-alpha" });
+    seed(join(backupsDir, "byok-import-20261031-120000-2"), { "config.toml": "x" });
+    seed(join(backupsDir, "pre-import-20261031-120000-x"), { "store.json": "{}" });
+
+    const items = listBackups(root);
+    assert.deepEqual(items.map((i) => i.name), ["pre-import-20261031-120000-2"], "带序号的 pre-import 进列表");
+    assert.equal(items[0].kind, "pre-import");
+    assert.equal(items[0].createdAt, "2026-10-31T04:00:00.000Z", "manifest createdAt 照常采用");
+
+    // 内容可读回：按序号名恢复，当前配置写回 alpha 快照。
+    const done = service.restoreBackup({ name: "pre-import-20261031-120000-2" });
+    assert.equal(done.ok, true, done.error);
+    assert.deepEqual(JSON.parse(readFileSync(paths.storeFile, "utf8")), bundleStore("alpha"), "序号备份内容可读回");
+
+    const deleted = deleteBackup(root, "pre-import-20261031-120000-2");
+    assert.deepEqual(deleted, { ok: true });
+    assert.equal(existsSync(suffixed), false);
+
+    for (const bad of ["byok-import-20261031-120000-2", "pre-import-20261031-120000-x", "pre-import-20261031-120000-"]) {
+      assert.equal(deleteBackup(root, bad).ok, false, `应拒绝：${bad}`);
+    }
+    assert.equal(existsSync(join(backupsDir, "byok-import-20261031-120000-2", "config.toml")), true, "byok 序号名删不到");
+  } finally { rig.cleanup(); }
+});
+
 // ── 备份恢复（配置回滚，数据面在 data-bundle.mjs restoreBackup）──────────────
 // 恢复是导入的逆操作：同一服务、同一份备份目录约定。全部在临时目录里跑，
 // 不注入 now——安全备份名由返回值带回，存在性按名断言即可。

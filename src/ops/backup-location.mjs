@@ -204,8 +204,25 @@ export function applyBackupRoot({ root, target = null }) {
 // byok-import-<ts>/（导入本地渠道并移除原配置前的原文件备份）。名字锚定全匹配，
 // 用户在备份根里自建的同名异物不进列表、也删不到；名字内嵌零填充时间戳，
 // 字典序即时间序，排序按名倒序（新→旧）。
+// pre-import 同秒撞名时写入侧追加 -2/-3 序号另起新名（见 data-bundle.mjs 的
+// writePreImportBackup），序号名与裸时间戳名同权：进列表、可删，与
+// RESTORE_NAME_RE 同口径。byok-import 由 byok-remove.mjs 逐文件改名防撞，
+// 不会产出序号名，不放宽。
 
-const BACKUP_DIR_NAME_RE = /^(pre-import|byok-import)-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/;
+const BACKUP_DIR_NAME_RES = [
+  ["pre-import", /^pre-import-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(?:-\d+)?$/],
+  ["byok-import", /^byok-import-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/],
+];
+
+// 名字 → { kind, match }；两族都不匹配返回 null。match 的捕获组 1-6 是时间戳段，
+// 供 backupCreatedAt 的名解析回退用。
+function matchBackupDirName(name) {
+  for (const [kind, re] of BACKUP_DIR_NAME_RES) {
+    const match = name.match(re);
+    if (match) return { kind, match };
+  }
+  return null;
+}
 
 // 与 data-bundle.mjs 的 MANIFEST_NAME 同一文件名约定：pre-import 备份落盘时
 // 写入 manifest.json（含 createdAt）；byok-import 备份没有 manifest。
@@ -238,7 +255,7 @@ function backupCreatedAt(dir, match) {
     const value = parsed?.createdAt;
     if (typeof value === "string" && !Number.isNaN(new Date(value).getTime())) return value;
   } catch { /* 无 manifest 或不可读：回退名解析 */ }
-  const [, , y, mo, d, h, mi, s] = match;
+  const [, y, mo, d, h, mi, s] = match;
   return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).toISOString();
 }
 
@@ -253,10 +270,10 @@ export function listBackups(root) {
   const items = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const match = entry.name.match(BACKUP_DIR_NAME_RE);
-    if (!match) continue;
+    const matched = matchBackupDirName(entry.name);
+    if (!matched) continue;
     const full = join(dir, entry.name);
-    items.push({ name: entry.name, kind: match[1], createdAt: backupCreatedAt(full, match), sizeBytes: dirSizeBytes(full) });
+    items.push({ name: entry.name, kind: matched.kind, createdAt: backupCreatedAt(full, matched.match), sizeBytes: dirSizeBytes(full) });
   }
   items.sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0));
   return items;
@@ -265,7 +282,7 @@ export function listBackups(root) {
 // 只删名字锚定匹配的那单个目录：名字过不了全匹配就拒绝，join 出的路径不可能
 // 越出备份根。
 export function deleteBackup(root, name) {
-  if (typeof name !== "string" || !BACKUP_DIR_NAME_RE.test(name)) return { ok: false, error: "备份名不可用" };
+  if (typeof name !== "string" || !matchBackupDirName(name)) return { ok: false, error: "备份名不可用" };
   const dir = join(readBackupRoot(root), name);
   if (!existsSync(dir)) return { ok: false, error: "备份不存在" };
   try {
