@@ -4,12 +4,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 import { ensureLayout, storePaths, writeStore } from "../src/store/store-io.mjs";
-import { assertSafeEntries, createDataBundleService, exportFileName, CREDENTIALS_NAME, TICKET_TTL_MS } from "../src/store/data-bundle.mjs";
+import { assertSafeEntries, createDataBundleService, exportFileName, CREDENTIALS_NAME, DEFAULT_TAR, TICKET_TTL_MS } from "../src/store/data-bundle.mjs";
 
 // 预览的暂存目录由产品写死落在 os.tmpdir()（%TEMP%）下、前缀固定，用调用前后的
 // 差集认出它——「密钥有没有留在盘上」这件事只能在真实文件系统上判，不能问返回值。
@@ -832,4 +833,148 @@ test("同秒两次恢复：安全备份撞名追加 -2/-3 序号另起新名，�
   const third = svc.restoreBackup({ name: "pre-import-20261122-120000-2" });
   assert.equal(third.ok, true, third.error);
   assert.equal(third.safetyName, "pre-import-20261122-120000-3");
+});
+
+// ── 失败契约：打包/预览/写回中途失败收口为业务失败 ─────────────
+// 路由层自述「业务失败一律 200 + { ok:false, error }」，这几条钉服务层守约：
+// 失败不抛穿、不留半截 zip、报文带安全备份位置。
+
+// 假 tar：不起真进程。runTar 只把返回值当 ChildProcess 用（stdout/stderr 数据、
+// close/error 事件、kill），EventEmitter 足够。writeZip 时把半截产物真的写进
+// -cf 点名的 zip 路径——「失败清半截」钉的是盘上行为，不是返回值。
+function stubSpawnTar({ exitCode = 0, stderr = "stub tar failed", writeZip = false, hang = false } = {}) {
+  return (cmd, args) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    queueMicrotask(() => {
+      if (writeZip) {
+        const cf = args.indexOf("-cf");
+        if (cf >= 0) writeFileSync(args[cf + 1], "half-written zip bytes");
+      }
+      if (hang) return;
+      child.stderr.emit("data", stderr);
+      child.emit("close", exitCode);
+    });
+    return child;
+  };
+}
+
+// 只读注入用过的文件连同它的备份副本（cp 会把只读属性一起拷走）一并还原，
+// 否则进程退出时的总清扫删不动它们、在 %TEMP% 里留尸。
+function forceWritableTree(dir) {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) forceWritableTree(p);
+    else {
+      try { chmodSync(p, 0o666); } catch { /* 清扫尽力即可 */ }
+    }
+  }
+}
+
+test("导出打包失败收口为业务失败：半截 zip 清掉，不抛穿", async () => {
+  const m = fakeMachine();
+  const service = createDataBundleService({
+    base: m.base, homeDir: m.homeDir, protect: fakeProtect, unprotect: fakeUnprotect,
+    tarPath: DEFAULT_TAR, spawnFn: stubSpawnTar({ exitCode: 1, writeZip: true }),
+  });
+  const result = await service.exportBundle({ targetDir: m.targetDir });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^打包失败：/, "打包本身失败走打包失败文案");
+  assert.match(result.error, /bsdtar 退出码 1/, "原始原因要带进报文");
+  assert.deepEqual(readdirSync(m.targetDir), [], "半截 zip 不许留在用户选择的目录里");
+});
+
+test("导出超时收口为业务失败：按 timeoutMs 报分钟数，半截 zip 清掉", async () => {
+  const m = fakeMachine();
+  const service = createDataBundleService({
+    base: m.base, homeDir: m.homeDir, protect: fakeProtect, unprotect: fakeUnprotect,
+    tarPath: DEFAULT_TAR, spawnFn: stubSpawnTar({ writeZip: true, hang: true }), timeoutMs: 50,
+  });
+  const result = await service.exportBundle({ targetDir: m.targetDir });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "打包超过 0 分钟未结束，可缩小 Skills 目录后重试", "分钟数按 Math.round(timeoutMs/60000) 代入，句式不动");
+  assert.deepEqual(readdirSync(m.targetDir), [], "超时留下的半截 zip 同样要清");
+});
+
+test("导出打包失败：目标目录里预置的同名文件一个字节不动", async () => {
+  const m = fakeMachine();
+  const fixed = new Date(2026, 10, 22, 12, 0, 0).getTime();
+  const preexisting = join(m.targetDir, exportFileName(fixed));
+  writeFileSync(preexisting, "keep\n", "utf8");
+  const service = createDataBundleService({
+    base: m.base, homeDir: m.homeDir, protect: fakeProtect, unprotect: fakeUnprotect,
+    tarPath: DEFAULT_TAR, spawnFn: stubSpawnTar({ exitCode: 1 }), now: () => fixed,
+  });
+  const result = await service.exportBundle({ targetDir: m.targetDir });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^打包失败：/);
+  assert.equal(readFileSync(preexisting, "utf8"), "keep\n", "同名文件打包前就在，那是用户自己的文件，失败清理动不到它");
+});
+
+test("预览：截断损坏的 zip 收口为业务失败，不抛穿", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+  assert.equal(exp.ok, true, exp.error);
+  const bytes = readFileSync(exp.path);
+  writeFileSync(exp.path, bytes.subarray(0, Math.floor(bytes.length / 2)));
+  const preview = await src.service().previewBundle(exp.path);
+  assert.equal(preview.ok, false);
+  assert.equal(preview.error, "压缩包读不出来，文件可能已损坏或不完整");
+  assert.equal(preview.token, undefined, "读不出来的包不能签发票据");
+});
+
+test("恢复写回中途失败收口为业务失败：报文带安全备份位置，store 已是备份内容", () => {
+  const dst = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
+  seedRestoreBackup(join(dst.root, "backups", "pre-import-20261031-120000"), { storeId: "alpha", settings: { followAgent: false } });
+  // settings.json 置只读：atomicWriteFile 的 rename 覆盖被 Windows 拒（EPERM），
+  // 命中写回段中途失败这一炸点；此时 store 已换备份版本、安全备份已落盘。
+  const settingsFile = join(dst.root, "settings.json");
+  chmodSync(settingsFile, 0o444);
+  try {
+    const done = dst.service().restoreBackup({ name: "pre-import-20261031-120000" });
+    assert.equal(done.ok, false);
+    assert.equal(done.partial, true);
+    assert.match(done.safetyName, /^pre-import-\d{8}-\d{6}$/);
+    assert.equal(done.backupId, done.safetyName.replace("pre-import-", ""), "backupId 与安全备份同名");
+    const safetyDir = join(dst.root, "backups", done.safetyName);
+    assert.ok(done.error.startsWith("部分配置写回未完成："), `实得：${done.error}`);
+    assert.ok(done.error.endsWith(`。渠道配置可能已是备份内容；安全备份在 ${safetyDir}，可从备份列表恢复。`), `实得：${done.error}`);
+    assert.equal(existsSync(safetyDir), true, "报文指的安全备份要真实在盘");
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["alpha"], "store 已换备份版本——正是 partial 语义");
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(safetyDir, "store.json"), "utf8")).providers), ["beta"], "安全备份装的是恢复前的配置");
+  } finally {
+    forceWritableTree(dst.root);
+  }
+});
+
+test("导入写回中途失败收口为业务失败：报文带安全备份位置，不抛穿", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+  assert.equal(exp.ok, true, exp.error);
+  const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
+  // prompts.json 置只读：settings 写回成功后 prompts 写回撞 EPERM，正好落在
+  // 写回段中段——渠道与设置已换、备份已落，正是「部分配置写回未完成」的形态。
+  const promptsFile = join(dst.root, "prompts.json");
+  chmodSync(promptsFile, 0o444);
+  try {
+    const importer = dst.service();
+    const preview = await importer.previewBundle(exp.path);
+    assert.equal(preview.ok, true, preview.error);
+    const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
+    assert.equal(applied.ok, false);
+    assert.equal(applied.partial, true);
+    assert.match(applied.safetyName, /^pre-import-\d{8}-\d{6}$/);
+    assert.equal(applied.backupId, applied.safetyName.replace("pre-import-", ""));
+    const safetyDir = join(dst.root, "backups", applied.safetyName);
+    assert.ok(applied.error.startsWith("部分配置写回未完成："), `实得：${applied.error}`);
+    assert.ok(applied.error.endsWith(`。渠道配置可能已是备份内容；安全备份在 ${safetyDir}，可从备份列表恢复。`), `实得：${applied.error}`);
+    assert.equal(existsSync(safetyDir), true, "报文指的安全备份要真实在盘");
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["alpha"], "store 已换包内版本——正是 partial 语义");
+    assert.deepEqual(JSON.parse(readFileSync(join(dst.root, "settings.json"), "utf8")), { followAgent: true }, "排在前面的 settings 已写回");
+  } finally {
+    forceWritableTree(dst.root);
+  }
 });
