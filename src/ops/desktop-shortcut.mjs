@@ -86,6 +86,16 @@ export function shortcutPayload({ installRoot = detectInstallRoot(), currentVers
 
 // Same PowerShell boundary shape as autostart.mjs: windowless, stdin-fed,
 // spawnFn injectable so tests never touch the real shell.
+//
+// node writes the JSON payload as UTF-8 bytes, but PowerShell decodes
+// [Console]::In with the console input code page (GBK on zh-CN machines)
+// unless the script pins it — the Chinese SHORTCUT_DESCRIPTION and any
+// non-ASCII install path would be mangled before the .lnk was written.
+// OutputEncoding is pinned too, keeping the boundary symmetric with
+// autostart.mjs.
+const PS_CONSOLE_UTF8 =
+  "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)";
+
 function runPS(script, stdin, spawnFn = spawn) {
   return new Promise((resolve) => {
     const child = spawnFn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -113,6 +123,7 @@ export async function createDesktopShortcut({ spawnFn = spawn } = {}) {
     return { ok: false, error: "desktop shortcut is only supported on Windows" };
   }
   const ps = [
+    PS_CONSOLE_UTF8,
     "$ErrorActionPreference = 'Stop'",
     "$p = [Console]::In.ReadToEnd() | ConvertFrom-Json",
     "$desktop = [Environment]::GetFolderPath('Desktop')",

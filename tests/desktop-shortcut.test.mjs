@@ -134,3 +134,51 @@ describe("desktop-shortcut packaged", () => {
     }
   });
 });
+
+// ── GBK 控制台仿真：快捷方式中文字段的编码钉 ───────────────────────────────
+// 与 tests/autostart.test.mjs 的替身同理：node 恒以 UTF-8 字节写 stdin，
+// 脚本没钉 [Console]::InputEncoding 时 PowerShell 按 GBK 解码，JSON 里的
+// 中文 description（SHORTCUT_DESCRIPTION 含中文）落盘前已乱码。
+function gbkConsolePS() {
+  const calls = [];
+  const spawnFn = (cmd, args, opts) => {
+    const call = { cmd, args, opts, stdin: null, decodedStdin: null };
+    calls.push(call);
+    const script = args[args.length - 1];
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      end: (data) => {
+        call.stdin = data ?? "";
+        const bytes = Buffer.from(call.stdin, "utf8");
+        call.decodedStdin = script.includes(PS_INPUT_UTF8) ? bytes.toString("utf8") : new TextDecoder("gbk").decode(bytes);
+      },
+    };
+    queueMicrotask(() => {
+      child.stdout.emit("data", Buffer.from("CREATED\r\n", "utf8"));
+      child.emit("close", 0);
+    });
+    return child;
+  };
+  return { spawnFn, calls };
+}
+
+const PS_INPUT_UTF8 = "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)";
+const PS_OUTPUT_UTF8 = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)";
+
+describe("desktop-shortcut console encoding", () => {
+  it("create pins UTF-8, so the Chinese description survives a GBK console", async () => {
+    const { spawnFn, calls } = gbkConsolePS();
+    const result = await createDesktopShortcut({ spawnFn });
+
+    assert.equal(result.ok, true);
+    const script = calls[0].args[3];
+    assert.ok(script.includes(PS_INPUT_UTF8), "create 脚本首部钉 InputEncoding");
+    assert.ok(script.includes(PS_OUTPUT_UTF8), "create 脚本首部钉 OutputEncoding");
+    const fed = JSON.parse(calls[0].decodedStdin);
+    assert.equal(fed.description, "Anyswitch 控制面板", "GBK 控制台下中文描述完好抵达");
+    // 控制组：同一段字节按 GBK 误解码必然乱码，替身不乱码断言才算数。
+    assert.ok(!new TextDecoder("gbk").decode(Buffer.from(calls[0].stdin, "utf8")).includes("控制面板"));
+  });
+});

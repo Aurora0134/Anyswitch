@@ -454,3 +454,104 @@ describe("autostart packaged", () => {
 function silentStartVbs() {
   return join("silent-start.vbs");
 }
+
+// ── GBK 控制台仿真：stdin/stdout 双向编码钉 ────────────────────────────────
+// zh-CN 控制台的真实行为：node 恒以 UTF-8 字节写管道，脚本没钉
+// [Console]::InputEncoding 时 PowerShell 按 OEM 码页（936/GBK）解码；stdout
+// 方向镜像，没钉 OutputEncoding 时 PS 按 GBK 发字节，node 又恒按 UTF-8 读。
+// 替身按脚本是否钉 UTF-8 前置选择编解码——没钉就真乱码，测试因此能抓住
+// 回归。GBK 编码只覆盖本组测试用到的几个字，码点经 TextDecoder('gbk') 核对。
+const GBK_BYTES = {
+  张: [0xd5, 0xc5],
+  三: [0xc8, 0xfd],
+  测: [0xb2, 0xe2],
+  试: [0xca, 0xd4],
+  机: [0xbb, 0xfa],
+};
+
+function gbkEncode(text) {
+  const bytes = [];
+  for (const ch of text) bytes.push(...(GBK_BYTES[ch] ?? Buffer.from(ch, "utf8")));
+  return Buffer.from(bytes);
+}
+
+const PS_INPUT_UTF8 = "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)";
+const PS_OUTPUT_UTF8 = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)";
+
+function gbkConsolePS({ probeStdout = "" } = {}) {
+  const calls = [];
+  const spawnFn = (cmd, args, opts) => {
+    const call = { cmd, args, opts, stdin: null, decodedStdin: null };
+    calls.push(call);
+    const script = args[args.length - 1];
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = {
+      end: (data) => {
+        call.stdin = data ?? "";
+        const bytes = Buffer.from(call.stdin, "utf8");
+        call.decodedStdin = script.includes(PS_INPUT_UTF8) ? bytes.toString("utf8") : new TextDecoder("gbk").decode(bytes);
+      },
+    };
+    queueMicrotask(() => {
+      let text = null;
+      if (script.includes("Get-ScheduledTask")) text = probeStdout;
+      else if (script.includes("Register-ScheduledTask")) text = "REGISTERED\r\n";
+      if (text) {
+        child.stdout.emit("data", script.includes(PS_OUTPUT_UTF8) ? Buffer.from(text, "utf8") : gbkEncode(text));
+      }
+      child.emit("close", 0);
+    });
+    return child;
+  };
+  return { spawnFn, calls };
+}
+
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+describe("PowerShell console encoding", () => {
+  it("register pins UTF-8, so a Chinese UserId survives a GBK console", async () => {
+    const savedUser = process.env.USERNAME;
+    const savedDomain = process.env.USERDOMAIN;
+    process.env.USERNAME = "张三";
+    process.env.USERDOMAIN = "测试机";
+    try {
+      const { spawnFn, calls } = gbkConsolePS();
+      const result = await enableAutostart({ spawnFn });
+
+      assert.equal(result.ok, true);
+      const script = psCommandOf(calls[0]);
+      assert.ok(script.includes(PS_INPUT_UTF8), "register 脚本首部钉 InputEncoding");
+      assert.ok(script.includes(PS_OUTPUT_UTF8), "register 脚本首部钉 OutputEncoding");
+      assert.ok(calls[0].decodedStdin.includes("<UserId>测试机\\张三</UserId>"), "GBK 控制台下 XML 中文字段完好抵达");
+      // 控制组：同一段字节按 GBK 误解码必然乱码，替身不乱码断言才算数。
+      assert.ok(!new TextDecoder("gbk").decode(Buffer.from(calls[0].stdin, "utf8")).includes("张三"));
+    } finally {
+      restoreEnv("USERNAME", savedUser);
+      restoreEnv("USERDOMAIN", savedDomain);
+    }
+  });
+
+  it("probe readback pins UTF-8, so Chinese stored paths reach reconcile unmangled", async () => {
+    const stale = {
+      command: taskAction().command,
+      arguments: '"C:\\Users\\张三\\silent-start.vbs" "C:\\Users\\张三\\relay-host.mjs"',
+    };
+    const probe = probeOutput({ AnyswitchRelay: stale, AnyswitchPanel: taskAction(PANEL_SCRIPT) });
+    const { spawnFn, calls } = gbkConsolePS({ probeStdout: probe });
+
+    const result = await reconcileAutostart({ spawnFn });
+
+    assert.equal(result.ok, true);
+    const relay = result.tasks.find((task) => task.task === "AnyswitchRelay");
+    assert.equal(relay.state, "healed");
+    assert.equal(relay.was, stale.arguments, "GBK 控制台读回的中文路径原样进入比对");
+    assert.ok(psCommandOf(calls[0]).includes(PS_OUTPUT_UTF8), "probe 脚本首部钉 OutputEncoding");
+    // 控制组：GBK 字节按 UTF-8 读必然乱码（node 侧恒按 UTF-8 解码管道）。
+    assert.ok(!gbkEncode(probe).toString("utf8").includes("张三"));
+  });
+});

@@ -183,6 +183,17 @@ export function buildTaskXml(script) {
 // Single-quoted PS literals below contain only the fixed task name — nothing
 // user-controlled reaches the command line. spawnFn is injectable so tests
 // can drive the PowerShell boundary without touching the real Task Scheduler.
+//
+// node writes stdin as UTF-8 bytes, but PowerShell decodes [Console]::In with
+// the console input code page (GBK on zh-CN machines) unless the script pins
+// it — every non-ASCII XML field (Chinese user names, install roots) would be
+// mangled before Register-ScheduledTask saw it, while the probe readback came
+// back GBK→UTF-8 round-tripped into matching literals, so reconcile could
+// neither see nor heal the corruption. OutputEncoding is pinned too: the
+// probe's stdout crosses the same code page in the other direction.
+const PS_CONSOLE_UTF8 =
+  "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)";
+
 function runPS(script, stdin, spawnFn = spawn) {
   return new Promise((resolve) => {
     const child = spawnFn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
@@ -206,6 +217,7 @@ function runPS(script, stdin, spawnFn = spawn) {
 
 async function registerTask(taskName, script, spawnFn = spawn) {
   const ps = [
+    PS_CONSOLE_UTF8,
     "$ErrorActionPreference = 'Stop'",
     "$xml = [Console]::In.ReadToEnd()",
     `Register-ScheduledTask -TaskName '${taskName}' -Xml $xml -Force | Out-Null`,
@@ -234,6 +246,7 @@ async function probeTaskActions(taskNames, spawnFn = spawn) {
   // did exactly what we asked. Under 'Stop' any real failure (missing module,
   // access denied) stays terminating, so a non-zero exit still means trouble.
   const ps = [
+    PS_CONSOLE_UTF8,
     "$ErrorActionPreference = 'Stop'",
     `$names = @(${list})`,
     "foreach ($n in $names) { $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; if ($t) { \"TASK=$n\"; \"COMMAND=\" + $t.Actions[0].Execute; \"ARGS=\" + $t.Actions[0].Arguments } }",
