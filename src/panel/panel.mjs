@@ -2613,7 +2613,9 @@ export function createPanelRouter({
   // 自杀换新共用的编排：拉起一次性 helper（等 47820 释放再拉起新 panel-host），
   // 并武装兜底退出。退出时机交给调用方——HTTP 重启钩在响应 flush 上，自更新
   // 监听器没有响应可等，进宽限即退。spawn 失败返回 null：调用方如实应答，不退出。
-  function startPanelHostReplacement({ onSpawnError } = {}) {
+  // helperOptions 只由自更新换装传入（目标版本的 helper 副本与 runtime node）；
+  // 手动重启不传，helper 维持自目录默认语义。
+  function startPanelHostReplacement({ onSpawnError, helperOptions } = {}) {
     let scheduled = false;
     let backstopTimer = null;
     const scheduleExit = () => {
@@ -2623,7 +2625,8 @@ export function createPanelRouter({
       setTimeout(() => exitPanelHostFn(0), PANEL_HOST_EXIT_GRACE_MS);
     };
     try {
-      spawnPanelHostRestartFn();
+      if (helperOptions) spawnPanelHostRestartFn(helperOptions);
+      else spawnPanelHostRestartFn();
     } catch (err) {
       onSpawnError?.(err);
       return null;
@@ -3061,6 +3064,8 @@ export function createPanelRouter({
     if (!run) {
       return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
     }
+    // 一键入口与 apply 入口同型：worker 一条道跑到换装点，等的就是监听器这一枪。
+    armSelfUpdateWatcher();
     return sendJson(res, 202, { ok: true, runId: run.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "download", channel: run.channel, targetVersion: run.targetVersion });
   }
 
@@ -3165,12 +3170,38 @@ export function createPanelRouter({
     }
   }
 
-  function firePanelSwap() {
+  function firePanelSwap(run) {
     stopSelfUpdateWatcher();
     logger?.info("Self update reached swap phase; scheduling panel host replacement");
-    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => logger?.error(`Self update restart helper failed: ${err?.message}`) });
+    const scheduleExit = startPanelHostReplacement({ helperOptions: swapHelperOptions(run), onSpawnError: (err) => logger?.error(`Self update restart helper failed: ${err?.message}`) });
     if (scheduleExit) scheduleExit(); // 没有响应 flush 可等：进宽限即退
     return true;
+  }
+
+  // 换装场景拉起的 helper 必须是目标版本的副本：自目录（旧版）helper 复活的是旧版
+  // 面板，与 worker 拉起的目标面板撞端口即 reused 静默退场，走向回滚删目录。
+  // 布局与 worker 同源：versions/<target>/app ＋ versions/<target>/runtime/node.exe
+  // （app-self-update.mjs 的 targetAppRoot/targetNodePath）。installRoot 解析不出来
+  // （开发检出、记录缺 installRoot）就回退自目录默认语义——helper 起码能把面板拉回
+  // 来，worker 的健康探测链随后如实判定结局。
+  function swapHelperOptions(run) {
+    const targetVersion = typeof run?.targetVersion === "string" ? run.targetVersion : null;
+    if (!targetVersion) return null;
+    let installRoot = null;
+    try {
+      installRoot = resolveInstallRoot({ appRoot: APP_DIR, env: { ...base, ANYSWITCH_INSTALL_ROOT: run?.installRoot ?? base?.ANYSWITCH_INSTALL_ROOT } });
+    } catch {
+      installRoot = null;
+    }
+    if (!installRoot) {
+      logger?.warn("Self update swap: install root unavailable; restart helper falls back to its own directory");
+      return null;
+    }
+    const versionRoot = join(installRoot, "versions", targetVersion);
+    return {
+      scriptPath: join(versionRoot, "app", "src", "panel", "panel-host-restart-helper.mjs"),
+      execPath: join(versionRoot, "runtime", "node.exe"),
+    };
   }
 
   // 换装监听器：worker 把阶段推到 ready-to-restart / waiting-panel 后，等的就是
@@ -3200,7 +3231,7 @@ export function createPanelRouter({
     const atSwap = run.phase === "ready-to-restart" || run.phase === "waiting-panel";
     if (!atSwap) return false;
     if (appInfo.version === run.targetVersion) return false;
-    return firePanelSwap();
+    return firePanelSwap(run);
   }
 
   function armSelfUpdateWatcher() {
