@@ -96,7 +96,7 @@ export function createAgentWatcher({
       const relay = await getRelayStatus();
 
       // 不在跑：这是原有的自愈路径，直接拉起。
-      if (relay?.status !== "running") {
+      if (relay?.status === "stopped") {
         onRelayHealthy();
         logger?.info("followAgent: coding agent running and relay down; auto-starting relay");
         try {
@@ -106,6 +106,7 @@ export function createAgentWatcher({
         }
         return;
       }
+      if (relay?.status !== "running") return;
 
       // 在跑且服务正常：结束当前这次降级（预算不动）。
       if (relay.degraded !== true) {

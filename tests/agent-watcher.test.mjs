@@ -5,12 +5,12 @@ import { createAgentWatcher } from "../src/agents/agent-watcher.mjs";
 // followAgent 的 anyAgent 求和必须把 WorkBuddy 算进去，只开
 // WorkBuddy 时 relay 也要被拉起，否则用户以为「跟随启动」坏了。
 describe("follow-agent watcher 的 anyAgent 求和", () => {
-  function makeWatcher(procs, calls) {
+  function makeWatcher(procs, calls, status = "stopped") {
     return createAgentWatcher({
       root: "C:/tmp/anyswitch-watcher-test",
       loadSettings: () => ({ settings: { followAgent: true } }),
       scanProcesses: async () => procs,
-      getRelayStatus: async () => ({ status: "down" }),
+      getRelayStatus: async () => ({ status }),
       startRelay: async () => { calls.push("start"); },
       restartRelay: async () => { calls.push("restart"); },
       now: () => 1000,
@@ -41,5 +41,13 @@ describe("follow-agent watcher 的 anyAgent 求和", () => {
     const calls = [];
     await makeWatcher({ workbuddy: 0, grok: 0 }, calls).tick();
     assert.deepEqual(calls, []);
+  });
+
+  it("waits when Relay is starting or its state cannot be confirmed", async () => {
+    for (const status of ["starting", "unknown"]) {
+      const calls = [];
+      await makeWatcher({ workbuddy: 1 }, calls, status).tick();
+      assert.deepEqual(calls, [], status);
+    }
   });
 });

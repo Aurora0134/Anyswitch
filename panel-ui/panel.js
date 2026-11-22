@@ -125,10 +125,11 @@
     return text === fallback ? text + PANEL_FAILURE_HINT : text;
   }
 
-async function api(method, path, body) {
+async function api(method, path, body, signal) {
     // server also accepts x-apicred-panel from resident processes spawned pre-rename
     const opts = { method, headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" } };
     if (body) opts.body = JSON.stringify(body);
+    if (signal) opts.signal = signal;
     const res = await fetch(API_BASE + path, opts);
     let data;
     try { data = await res.json(); } catch { data = { ok: res.ok }; }
@@ -614,7 +615,7 @@ async function api(method, path, body) {
   // relay 状态 → 顶栏与侧栏的呈现。抽成纯函数是为了这段判断能在测试里真跑一遍，
   // 而不是只对源码做正则断言。
   //
-  // 四种呈现：运行中 / 服务异常 / 启动中 / 已停止。「服务异常」这一态是因为
+  // 「服务异常」这一态是因为
   // 2026-10-05 那次连续 70 分钟的请求全败被显示成「运行中 / 运行正常」——进程在、
   // 端口在、探针也答得出来，但每一个真实请求都在失败。它不是「已停止」（进程还
   // 活着，停止按钮该给的是「停止」），也不是「正常」。
@@ -644,58 +645,68 @@ async function api(method, path, body) {
         badgeText: "启动中",
       };
     }
+    if (relay.status === "stopped") {
+      return {
+        dotClass: "pulse-dot stopped",
+        statusText: "Relay 已停止",
+        badgeClass: "badge badge-danger",
+        badgeText: "已停止",
+      };
+    }
     return {
-      dotClass: "pulse-dot stopped",
-      statusText: "Relay 已停止",
-      badgeClass: "badge badge-danger",
-      badgeText: "已停止",
+      dotClass: "pulse-dot",
+      statusText: "Relay 状态未知",
+      badgeClass: "badge badge-neutral",
+      badgeText: "状态未知",
     };
   }
 
+  const RELAY_STATUS_GRACE_MS = 5_000;
+  const PANEL_STATUS_TIMEOUT_MS = 8_000;
+  let statusRequestId = 0;
+  let appliedStatusRequestId = 0;
+  let lastConfirmedRelayAt = null;
+
   async function refreshStatus() {
+    if (panelRestarting) return;
+    const requestId = ++statusRequestId;
+    let res;
     try {
-      const res = await api("GET", "/api/status");
+      res = await api("GET", "/api/status", undefined, AbortSignal.timeout(PANEL_STATUS_TIMEOUT_MS));
+    } catch {
+      res = null;
+    }
+    if (panelRestarting || requestId <= appliedStatusRequestId) return;
+    appliedStatusRequestId = requestId;
+
+    if (res) {
       // 记住面板进程身份：请求重启面板后，靠 pid/startTime 变化判定新进程已接管。
       lastPanelIdentity = { pid: res?.pid ?? null, startTime: res?.startTime ?? null };
       // 自更新捎带帧喂给页面级观察者（旧版服务端没有这个字段：喂 null 即无任务）。
       selfUpdateWatcher.frame(res?.selfUpdate ?? null);
-      const dot = $("topDot");
-      const statusText = $("topRelayStatus");
-      const sbState = $("sbStateBadge");
-      const hostEl = $("sbHost");
-      const uptimeEl = $("sbUptime");
+    }
+    if (panelRestarting) return;
+    applyTerminalHostState(normalizeTerminalHostState(res?.terminalHost?.state));
 
-      const relay = res && res.relay ? res.relay : { status: res && res.running ? "running" : "stopped" };
-      // Drive the start/stop toggle (text + red/blue) from the relay's real state.
-      updateRelayControls(relay);
+    const relay = res?.relay ?? (typeof res?.running === "boolean"
+      ? { status: res.running ? "running" : "stopped" }
+      : { status: "unknown" });
+    const now = Date.now();
+    const confirmed = ["running", "starting", "stopped"].includes(relay.status);
+    updateRelayControls(relay);
+    if (confirmed) lastConfirmedRelayAt = now;
+    else if (lastConfirmedRelayAt !== null && now - lastConfirmedRelayAt < RELAY_STATUS_GRACE_MS) return;
 
-      // 四态呈现由 relayStatusPresentation 决定（含「服务异常」——在跑但每个请求
-      // 都在失败），这里只负责落到 DOM 上。
-      const presentation = relayStatusPresentation(relay, RELAY_PORT);
-      dot.className = presentation.dotClass;
-      statusText.textContent = presentation.statusText;
-      sbState.className = presentation.badgeClass;
-      sbState.textContent = presentation.badgeText;
-      if (relay.status === "running") {
-        hostEl.textContent = `127.0.0.1:${relay.port || RELAY_PORT}`;
-        if (res && res.startTime) {
-          uptimeEl.textContent = formatDurationSeconds(Date.now() - res.startTime);
-        }
+    const presentation = relayStatusPresentation(relay, RELAY_PORT);
+    $("topDot").className = presentation.dotClass;
+    $("topRelayStatus").textContent = presentation.statusText;
+    $("sbStateBadge").className = presentation.badgeClass;
+    $("sbStateBadge").textContent = presentation.badgeText;
+    if (relay.status === "running") {
+      $("sbHost").textContent = `127.0.0.1:${relay.port || RELAY_PORT}`;
+      if (res?.startTime) {
+        $("sbUptime").textContent = formatDurationSeconds(now - res.startTime);
       }
-      // 终端宿主状态随状态帧一起下发：驱动入口卡与终端页头的徽标与起停钮
-      applyTerminalHostState(normalizeTerminalHostState(res?.terminalHost?.state));
-    } catch {
-      // 面板服务正在换新进程：47820 整个不可达是预期内的，徽标已由
-      // watchPanelHostComeBack 写成「面板服务重启中…」，这里不能再把它改判成
-      // 「Relay 未运行」——relay 其实活着。
-      if (panelRestarting) return;
-      $("topDot").className = "pulse-dot stopped";
-      $("topRelayStatus").textContent = "Relay 未运行";
-      $("sbStateBadge").className = "badge badge-danger";
-      $("sbStateBadge").textContent = "已停止";
-      updateRelayControls({ status: "stopped" });
-      // 状态帧取不到时宿主状态同样不可知：徽标落「状态未知」、起停钮禁用
-      applyTerminalHostState("unknown");
     }
   }
 
@@ -12553,7 +12564,7 @@ async function api(method, path, body) {
 
   // 服务控制（启动 / 停止 / 重启）—— 按钮随 relay 状态动态切换
   // 运行中 → ⏹ 停止（红 btn-danger），停止 → ▶ 启动（蓝 btn-primary）。
-  let currentRelayState = { status: "stopped" };
+  let currentRelayState = { status: "unknown" };
 
   // 面板服务（panel-host, 47820）自身的重启窗口：true = 已请求它退出、正在等新
   // 进程接管 47820。这个窗口里页面的服务端整个没了，徽标和按钮的每秒重算全部
@@ -12616,14 +12627,14 @@ async function api(method, path, body) {
   });
 
   function updateRelayControls(relay) {
-    currentRelayState = relay || { status: "stopped" };
+    currentRelayState = relay || { status: "unknown" };
     const toggleBtn = $("sbRelayToggleBtn");
     const restartBtn = $("sbRelayRestartBtn");
     if (!toggleBtn) return;
 
     // 重启窗口内两个按钮一律按住：relay 一回来本函数就会被 1s 轮询再次调用，
     // 不在这里拦住，恢复期间重启键会重新可点，能再触发一次重启。
-    if (panelRestarting) {
+    if (panelRestarting || !["running", "starting", "stopped"].includes(currentRelayState.status)) {
       toggleBtn.disabled = true;
       if (restartBtn) restartBtn.disabled = true;
       return;
@@ -12724,7 +12735,7 @@ async function api(method, path, body) {
       } catch (e) {
         toast(panelError(e, "请求失败"), true);
       } finally {
-        toggleBtn.disabled = false;
+        updateRelayControls(currentRelayState);
       }
     }
 
@@ -12740,7 +12751,7 @@ async function api(method, path, body) {
       } catch (e) {
         toast(panelError(e, "请求失败"), true);
       } finally {
-        toggleBtn.disabled = false;
+        updateRelayControls(currentRelayState);
       }
     }
 
@@ -12767,7 +12778,7 @@ async function api(method, path, body) {
         await api("POST", "/api/relay/restart");
       } catch (e) {
         toast(panelError(e, "重启失败"), true);
-        restartBtn.disabled = false;
+        updateRelayControls(currentRelayState);
         dropStartupSplash();
         return;
       }
@@ -12790,7 +12801,7 @@ async function api(method, path, body) {
       }
       if (!restartStarted) {
         toast(`Relay 已重启；面板服务未重启（${refusal}）`, true);
-        restartBtn.disabled = false;
+        updateRelayControls(currentRelayState);
         dropStartupSplash();
         return;
       }
@@ -12802,6 +12813,7 @@ async function api(method, path, body) {
     // 旧面板上。检测到新身份即 location.reload()——页面 JS 也随磁盘上的新版对齐。
     function watchPanelHostComeBack() {
       panelRestarting = true;
+      appliedStatusRequestId = statusRequestId;
       const before = { ...lastPanelIdentity };
       const dot = $("topDot");
       const statusText = $("topRelayStatus");
@@ -12866,6 +12878,7 @@ async function api(method, path, body) {
     if (stopConfirmBtn) {
       stopConfirmBtn.onclick = async () => {
         closeStopModal();
+        if (panelRestarting || currentRelayState.status !== "running") return;
         if (pendingLifecycleAction === "restart") await executeRestartRelay();
         else await executeStopRelay();
       };
