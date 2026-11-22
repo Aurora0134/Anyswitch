@@ -3913,6 +3913,62 @@ describe("panel.html 实例行换代清折线暂存（firstSeen 变化＝换代�
   });
 });
 
+describe("panel.html 端点换代清折线暂存（runResetAt 首现/变更＝服务端重开运行账）", () => {
+  // 端点家族死过再回来＝新一轮运行：服务端清账连样本窗一起清（2026-11-22
+  // 裁决推翻 6fc6525 回填），本地为旧运行攒的折线暂存（实例行 buffer、出生
+  // 账本、qoder 端点级旧机制 buffer）随 runResetAt 印记换代一并作废——空数组
+  // 不覆盖整线，旧暂存会把上一轮运行的曲线从本地复活。
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
+    "utf8",
+  );
+
+  it("clearAgentSparkState：按卡 prefix 清实例行 buffer 与出生账本，qoder 端点级 buffer 同清、他卡不误伤", () => {
+    const clear = new Function(
+      "instanceSparkBuffers", "instanceRowFirstSeen", "historyBuffers", "ENDPOINT_SPARK_KEYS", "AGENT_SPARK_PREFIX",
+      `return (${extractFn("clearAgentSparkState", "agentId")});`,
+    );
+    const instanceSparkBuffers = { "zc:s1": {}, "zc:s2": {}, "cc:s1": {}, "kimi:s1": {}, "qoder:s1": {} };
+    const instanceRowFirstSeen = { "zc:s1": 1, "cc:s1": 1, "kimi:s1": 1 };
+    const historyBuffers = { qoder_ttft: [], qoder_tps: [], qoder_cache: [], other: [] };
+    const ENDPOINT_SPARK_KEYS = {
+      qoder: [["qoderSparkTtft", "qoder_ttft"], ["qoderSparkTps", "qoder_tps"], ["qoderSparkCache", "qoder_cache"]],
+    };
+    const AGENT_SPARK_PREFIX = { zcode: "zc", claude: "cc" };
+    clear(instanceSparkBuffers, instanceRowFirstSeen, historyBuffers, ENDPOINT_SPARK_KEYS, AGENT_SPARK_PREFIX)("zcode");
+    assert.deepEqual(Object.keys(instanceSparkBuffers).sort(), ["cc:s1", "kimi:s1", "qoder:s1"], "zcode 行 buffer 清、他卡不动");
+    assert.deepEqual(Object.keys(instanceRowFirstSeen).sort(), ["cc:s1", "kimi:s1"], "出生账本同清");
+    assert.deepEqual(Object.keys(historyBuffers).sort(), ["other", "qoder_cache", "qoder_tps", "qoder_ttft"], "非 qoder 端点级 buffer 不动");
+    clear(instanceSparkBuffers, instanceRowFirstSeen, historyBuffers, ENDPOINT_SPARK_KEYS, AGENT_SPARK_PREFIX)("qoder");
+    assert.ok(!("qoder:s1" in instanceSparkBuffers), "qoder 实例行 buffer 清");
+    assert.deepEqual(Object.keys(historyBuffers).sort(), ["other"], "qoder 端点级旧机制 buffer 同清");
+  });
+
+  it("trackAgentRunReset：印记首现与变更各清一次，同值不清、无印记不碰", () => {
+    const cleared = [];
+    const track = new Function(
+      "agentRunResetAt", "clearAgentSparkState",
+      `return (${extractFn("trackAgentRunReset", "agents")});`,
+    )({}, (id) => cleared.push(id));
+    track([{ id: "codex" }, { id: "kimi" }]);
+    assert.deepEqual(cleared, [], "无印记不碰");
+    track([{ id: "codex", runResetAt: 100 }]);
+    assert.deepEqual(cleared, ["codex"], "印记首现即清（本地可能攒着印记前的旧运行）");
+    track([{ id: "codex", runResetAt: 100 }]);
+    assert.deepEqual(cleared, ["codex"], "同值不清");
+    track([{ id: "codex", runResetAt: 500 }]);
+    assert.deepEqual(cleared, ["codex", "codex"], "变更再清");
+  });
+
+  it("轮询分发先于各卡渲染跑 trackAgentRunReset", () => {
+    const trackIdx = panelJs.indexOf("trackAgentRunReset(res.agents)");
+    const renderIdx = panelJs.indexOf('renderIfChanged("zcode"');
+    assert.ok(trackIdx !== -1, "轮询帧接 runResetAt 换代检测");
+    assert.ok(renderIdx !== -1, "各卡渲染入口在册");
+    assert.ok(trackIdx < renderIdx, "换代清暂存先于渲染：本帧即用清过账的暂存");
+  });
+});
+
 describe("panel.html 实例行状态徽标三态（生成中/待命/重试中，不随链归因换装）", () => {
   // 实例行状态徽标三态：在飞 badge-ok「生成中」、退避重试中 badge-warn「重试中」、
   // 其余 badge-neutral「待命」；「这条请求走没走自动路由」由端点模型胶囊上的 auto

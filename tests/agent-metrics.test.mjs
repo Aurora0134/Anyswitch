@@ -9779,21 +9779,27 @@ describe("已工作时间随端点关闭清零", () => {
     assert.equal(zcode.metrics.activeDurationMs, 0, "端点关闭过宽限，已工作时间清零");
     assert.equal(zcode.sessions[0].activeDurationMs, 0, "全局汇总行同步清零");
     assert.equal(zcode.metrics.totalRequests, 0, "进程全灭过宽限，本次运行的请求数一并清零");
-    // 折线样本窗是既成事实的历史，不随本次运行的账清零（行还在时端点折线也不清零，
-    // 见「已工作时间随端点关闭清零」套件里同款断言）。
-    assert.equal(zcode.metrics.sparkHistory.tps.length, 1, "run zeroing 保留端点折线历史");
-    assert.equal(zcode.metrics.sparkHistory.ttft.length, 1, "run zeroing 保留 TTFT 历史");
+    // 折线样本窗随运行账一并清零（2026-11-22 裁决，推翻 6fc6525 的跨重启回填）：
+    // 端点家族死过再回来＝新一轮运行，无会话行时「全局汇总」伪行的四宫格不得
+    // 带上一轮的速率残余。重开时刻印记随行下发，面板据此换代清本地折线暂存。
+    assert.equal(zcode.metrics.sparkHistory.tps.length, 0, "run zeroing 连折线样本窗一起清");
+    assert.equal(zcode.metrics.sparkHistory.ttft.length, 0, "TTFT 历史同窗清零");
+    assert.equal(typeof zcode.runResetAt, "number", "运行账重开时刻印记随行下发");
 
     // 重开（新 pid）：从 0 起，不接旧值。
     scan = zcodeScan(20604);
     t = 21000;
     await settleRound(collector);
     const r2 = collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 21000
+    r2.recordFirstChunk();
     t = 21500;
     r2.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 500ms
     zcode = await zcodeCard(collector);
     assert.equal(zcode.metrics.activeDurationMs, 500, "重开后从 0 重新累计");
     assert.equal(zcode.metrics.totalRequests, 1, "新运行从 0 计数，不接旧账");
+    assert.equal(zcode.metrics.sparkHistory.ttft.length, 1, "新运行折线从 0 攒起");
+    assert.equal(zcode.metrics.sparkHistory.tps.length, 1, "重开后的样本不与上一轮拼接");
+    assert.equal(zcode.runResetAt, 17000, "家族活着不再重置，印记保持首次重开值");
   });
 
   it("3s 宽限期内不清零，过宽限才清", async () => {
