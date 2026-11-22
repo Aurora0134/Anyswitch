@@ -4979,7 +4979,15 @@ export function createPanelRouter({
         if (path === "/panel/api/backups/restore") {
           if (!dataBundleService) dataBundleService = createDataBundleService({ base });
           const result = await dataBundleService.restoreBackup({ name: body.name });
-          return sendJson(res, 200, result.ok ? { ok: true, safetyName: result.safetyName } : { ok: false, error: result.error });
+          // 与导入路由同一判据：settings.json 真被换过才有对齐必要——备份里没带
+          // 设置文件时盘上还是原来那份，登录计划与自愈进程本来就和它对应，别去动。
+          if (result.ok && result.applied?.settings === true) {
+            result.watchdog = await reconcileFollowAgentAfterImport(result.applied.followAgent === true);
+            for (const w of result.watchdog.warnings) logger?.warn?.(`恢复后 followAgent 对齐：${w}`);
+          }
+          return sendJson(res, 200, result.ok
+            ? { ok: true, safetyName: result.safetyName, ...(result.watchdog ? { watchdog: result.watchdog } : {}) }
+            : { ok: false, error: result.error });
         }
         return sendJson(res, 404, { ok: false, error: "not found" });
       } catch (err) {

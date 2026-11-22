@@ -295,3 +295,100 @@ describe("panel backup location routes", () => {
     } finally { m.cleanup(); }
   });
 });
+
+// ── 恢复路由的 followAgent 对齐 ──────────────────────────────────────
+// 恢复整份写回 settings.json，与导入一样绕开设置路由的副作用链：路由按
+// 「settings 真被换才调」的判据，把备份里的 followAgent 对齐到登录计划与自愈进程。
+// 全程假计划假进程，绝不碰真任务计划程序。
+function watchdogSpy({ registered = false, alive = false, regOk = true, regError = "拒绝访问", spawnResult, stopResult } = {}) {
+  const calls = [];
+  return {
+    calls,
+    fns: {
+      isWatchdogAutostartEnabledFn: async () => { calls.push("isRegistered"); return registered; },
+      enableWatchdogAutostartFn: async () => { calls.push("enable"); return { ok: regOk, error: regOk ? undefined : regError }; },
+      disableWatchdogAutostartFn: async () => { calls.push("disable"); return { ok: regOk, error: regOk ? undefined : regError }; },
+      probeWatchdogFn: async () => { calls.push("probe"); return alive; },
+      spawnWatchdogFn: async () => { calls.push("spawn"); return spawnResult; },
+      stopWatchdogFn: async () => { calls.push("stop"); return stopResult; },
+    },
+  };
+}
+
+function restoreRouter({ restoreResult, ...watch }) {
+  const spy = watchdogSpy(watch);
+  const router = createPanelRouter({
+    storePaths: { root: "C:/fake/anyswitch" },
+    logger: null,
+    metricsCollector: null,
+    fetchRelayAgents: async () => null,
+    dataBundleService: { restoreBackup: async () => restoreResult },
+    ...spy.fns,
+  });
+  return { spy, router };
+}
+
+async function doRestore(router) {
+  const h = fakeReqRes("/panel/api/backups/restore", "POST", { name: "pre-import-20261031-120000" });
+  await router.handle(h.req, h.res);
+  return { json: h.json(), res: h.res };
+}
+
+describe("恢复后备份里的 followAgent 与本机登录计划/自愈进程对齐", () => {
+  it("备份开、本机没计划也没进程：注册并拉起，响应回传 watchdog 与 safetyName", async () => {
+    const { spy, router } = restoreRouter({
+      restoreResult: { ok: true, safetyName: "pre-import-20261122-120000", applied: { settings: true, followAgent: true } },
+      registered: false, alive: false,
+    });
+    const { json } = await doRestore(router);
+    assert.equal(json.ok, true);
+    assert.equal(json.safetyName, "pre-import-20261122-120000");
+    assert.deepEqual(spy.calls, ["isRegistered", "enable", "probe", "spawn"]);
+    assert.deepEqual(json.watchdog, { desired: true, task: "registered", process: "started", warnings: [], reasons: {} });
+  });
+
+  it("备份关、本机计划与进程都在：注销并停止（值相反必调，这条才是真正危险的方向）", async () => {
+    const { spy, router } = restoreRouter({
+      restoreResult: { ok: true, safetyName: "pre-import-20261122-120000", applied: { settings: true, followAgent: false } },
+      registered: true, alive: true,
+    });
+    const { json } = await doRestore(router);
+    assert.deepEqual(spy.calls, ["isRegistered", "disable", "probe", "stop"]);
+    assert.deepEqual(json.watchdog, { desired: false, task: "unregistered", process: "stopped", warnings: [], reasons: {} });
+  });
+
+  it("值与本机实际状态本就一致：一次写操作都不做", async () => {
+    const { spy, router } = restoreRouter({
+      restoreResult: { ok: true, safetyName: "pre-import-20261122-120000", applied: { settings: true, followAgent: true } },
+      registered: true, alive: true,
+    });
+    const { json } = await doRestore(router);
+    assert.deepEqual(spy.calls, ["isRegistered", "probe"]);
+    assert.equal(json.watchdog.task, "unchanged");
+    assert.equal(json.watchdog.process, "unchanged");
+  });
+
+  it("备份没带 settings.json：盘上设置未动，六个函数一个都不调，响应无 watchdog", async () => {
+    const { spy, router } = restoreRouter({
+      restoreResult: { ok: true, safetyName: "pre-import-20261122-120000", applied: { settings: false } },
+      registered: true, alive: true,
+    });
+    const { json } = await doRestore(router);
+    assert.equal(json.ok, true);
+    assert.equal(json.safetyName, "pre-import-20261122-120000", "无设置可对齐时恢复本身照常回执");
+    assert.equal(spy.calls.length, 0);
+    assert.equal(json.watchdog, undefined);
+  });
+
+  it("恢复被拒（ok:false）：不动计划与进程", async () => {
+    const { spy, router } = restoreRouter({
+      restoreResult: { ok: false, error: "备份不存在" },
+      registered: true, alive: true,
+    });
+    const { json } = await doRestore(router);
+    assert.equal(json.ok, false);
+    assert.equal(json.error, "备份不存在");
+    assert.equal(spy.calls.length, 0);
+    assert.equal(json.watchdog, undefined);
+  });
+});
