@@ -202,47 +202,36 @@ test("目标是既有文件：业务拒绝不抛错，源、目标文件、本�
   } finally { m.cleanup(); }
 });
 
-// 源条目被占的复现方式：子进程持有条目中一个文件的读句柄——Windows 上不带删除
-// 共享的打开句柄让 rmSync 在该条目上原地抛 EPERM，条目内容完整残留在源
-// （残留与原数据同源，这正是专用回滚「删副本」分支的前提）。
-// 注意 Node 的打开句柄共享读写、只挡删除：回滚的合并回填可以照常覆盖写，
-// 所以这类占用在回填路径上不阻塞（探针实测），要模拟回填失败见 holdFileExclusive。
-async function holdFile(filePath) {
-  const child = spawn(process.execPath, [
-    "-e",
-    `require("node:fs").openSync(${JSON.stringify(filePath)}, "r"); setInterval(() => {}, 1000);`,
-  ], { stdio: "ignore" });
-  await once(child, "spawn");
-  return async () => {
-    if (child.exitCode === null && !child.signalCode) {
-      const exited = once(child, "exit");
-      child.kill();
-      await exited.catch(() => {});
-    }
-  };
-}
-
-// 回填必败的占用：FileShare.Read 级打开把写和删一起挡掉——正向删源失败留下残留，
-// 回滚的 cpSync 合并回填写不进去同样失败。Node 自身开不出这个共享级别，
-// 用 powershell 持 FileStream；stdout 报 ready 才视为占用生效。
-async function holdFileExclusive(filePath) {
+// 占用手法一律走 PowerShell 持 FileStream：Node 的 openSync 打开带
+// FILE_SHARE_DELETE，rmSync 照删不误（本机与评审探针双实证），造不出真占用。
+// 共享级别决定挡什么：
+//   FileShare.ReadWrite 挡删除、放行写——正向删源撞上它真抛 EPERM 留下残留，
+//     回滚的合并回填（写）仍被放行，走回填成功路径；
+//   FileShare.Read 连写带删一起挡——回滚的 cpSync 合并回填同样失败，走 pending 路径。
+// stdout 报 ready 才视为占用生效，避免持锁竞态。
+function holdFileWithShare(filePath, share) {
   const child = spawn("powershell.exe", [
     "-NoProfile", "-NonInteractive", "-Command",
-    `$f = [System.IO.File]::Open('${filePath.replace(/'/g, "''")}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); Write-Output "ready"; Start-Sleep -Seconds 3600`,
+    `$f = [System.IO.File]::Open('${filePath.replace(/'/g, "''")}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::${share}); Write-Output "ready"; Start-Sleep -Seconds 3600`,
   ], { stdio: ["ignore", "pipe", "ignore"] });
-  await new Promise((resolve, reject) => {
+  const ready = new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", () => reject(new Error("占用进程在就绪前退出")));
     child.stdout.on("data", (chunk) => { if (String(chunk).includes("ready")) resolve(); });
   });
-  return async () => {
+  return ready.then(() => async () => {
     if (child.exitCode === null && !child.signalCode) {
       const exited = once(child, "exit");
       child.kill();
       await exited.catch(() => {});
     }
-  };
+  });
 }
+
+// 挡删除、放行写：制造真实残留（删源必败），回滚的合并回填照常执行。
+const holdFileDenyDelete = (filePath) => holdFileWithShare(filePath, "ReadWrite");
+// 连写带删一起挡：回滚回填必败，副本必须保留、条目进 pending。
+const holdFileExclusive = (filePath) => holdFileWithShare(filePath, "Read");
 
 test("换位置时记录写失败且有源条目被占：回滚后源齐全、目标无残留，松手后重试成功", async () => {
   const m = machine();
@@ -253,7 +242,10 @@ test("换位置时记录写失败且有源条目被占：回滚后源齐全、�
     seed(join(from, "pre-import-20261115-100000"), { "store.json": "{\"beta\":1}" });
     const occupied = join(from, "byok-import-20261115-101000");
     seed(occupied, { "config.toml": "x" });
-    release = await holdFile(join(occupied, "config.toml"));
+    release = await holdFileDenyDelete(join(occupied, "config.toml"));
+    // 对照：占用必须真实挡住删除（文件试删失败且仍在），否则本用例是在测空气。
+    assert.throws(() => rmSync(join(occupied, "config.toml")), /EPERM/, "对照：占用真实挡住删除");
+    assert.equal(existsSync(join(occupied, "config.toml")), true);
     // 摆一个目录占住记录路径：写记录必败，且之后还能断言「位置没被记住」。
     mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
 
@@ -299,7 +291,10 @@ test("记录写失败且源条目被部分删除：回滚合并回填后源条�
     const to = join(m.root, "elsewhere", "backups");
     const partial = join(from, "pre-import-20261115-100000");
     seed(partial, { "a.txt": "兄弟文件先被删", "z.txt": "被锁留下" });
-    release = await holdFile(join(partial, "z.txt"));
+    release = await holdFileDenyDelete(join(partial, "z.txt"));
+    // 对照：占用必须真实挡住删除（文件试删失败且仍在），否则本用例是在测空气。
+    assert.throws(() => rmSync(join(partial, "z.txt")), /EPERM/, "对照：占用真实挡住删除");
+    assert.equal(existsSync(join(partial, "z.txt")), true);
     mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
 
     const result = applyBackupRoot({ root: m.root, target: to });
@@ -341,6 +336,9 @@ test("记录写失败且回滚回填被占：副本保留在新位置，报文�
     const occupied = join(from, "pre-import-20261115-100000");
     seed(occupied, { "config.toml": "x" });
     release = await holdFileExclusive(join(occupied, "config.toml"));
+    // 对照：占用必须真实挡住删除（文件试删失败且仍在），否则本用例是在测空气。
+    assert.throws(() => rmSync(join(occupied, "config.toml")), /EPERM/, "对照：占用真实挡住删除");
+    assert.equal(existsSync(join(occupied, "config.toml")), true);
     mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
 
     const result = applyBackupRoot({ root: m.root, target: to });
