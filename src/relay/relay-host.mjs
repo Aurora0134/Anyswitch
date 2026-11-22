@@ -832,9 +832,6 @@ export async function startResidentRelay(options = {}) {
     } catch (err) {
       logger.warn?.(`sync status write failed: ${err.message}`);
     }
-    if (!syncResult.ok) {
-      logger.error(`initial agent config sync failed: ${syncResult.error ?? `runner exit ${syncResult.code}`}`);
-    }
   } catch (err) {
     logger.error(`initial agent config sync failed: ${err.message}`);
   }
@@ -847,17 +844,14 @@ export async function startResidentRelay(options = {}) {
     storeFile: paths.storeFile,
     logger,
     onStoreChange: async () => {
-      // B5 收口：store 变更本身不再单发首报行——成功路径由子进程 mirror 出来
-      // 的合并计数行承载，失败路径由下面的 error 行承载，同一事件只报一次。
+      // The runner reports written configs; the spawn helper reports failures.
+      // A store change itself does not need another log line.
       const syncResult = await spawnAgentSyncFn({ port, logger });
       // 同启动同步：结果落 sync-status.json 供面板上屏（详见上方注释）。
       try {
         writeSyncStatus(root, syncStatusFromResult(syncResult, "store-change"));
       } catch (err) {
         logger.warn?.(`sync status write failed: ${err.message}`);
-      }
-      if (!syncResult.ok) {
-        logger.error(`agent config sync failed: ${syncResult.error ?? `runner exit ${syncResult.code}`}`);
       }
     },
   });
@@ -884,9 +878,6 @@ export async function startResidentRelay(options = {}) {
         writeSyncStatus(root, syncStatusFromResult(syncResult, "token-rotation"));
       } catch (err) {
         logger.warn?.(`sync status write failed: ${err.message}`);
-      }
-      if (!syncResult.ok) {
-        logger.error(`post-rotation agent config sync failed: ${syncResult.error ?? `runner exit ${syncResult.code}`}`);
       }
     } catch (err) {
       logger.error(`post-rotation agent config sync failed: ${err.message}`);

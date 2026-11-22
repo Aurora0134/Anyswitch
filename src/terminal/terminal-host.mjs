@@ -2333,17 +2333,15 @@ export function createTerminalHost({
       const closed = new Promise((resolve) => server.close(resolve));
       const persisted = await flush;
       await closed;
-      // 「返回时盘上是整份状态」是一句需要能被检验的承诺：撞了全量冲净的轮次上限
-      // 或写失败还有欠账时，SIGTERM 处理器紧接着要 process.exit(0)，那批尾部就
-      // 没了。这里把结果**返回出去**并记一条 warn——静默返回等于让关停把自己丢了
-      // 数据这件事藏起来。
+      // 关停冲刷后仍有未保存的数据时，返回不完整的结果并记录错误。
+      // SIGTERM 处理器会在 close() 返回后退出，未保存的数据会丢失。
       // 判完整用 hasPendingWork()（会话脏 + 索引脏 + 待删除），不能只看会话数：
       // 索引写失败时会话集合是空的，但盘上的成员表仍可能是旧的那一份。
       const incomplete = persistStats.lastFullFlushIncomplete;
       const backlog = dirtySessions.size;
       const complete = !hasPendingWork();
       if (!complete) {
-        logger.warn?.(`[terminal-host] close() finished with ${backlog} session record(s) + `
+        logger.error?.(`[terminal-host] close() finished with ${backlog} session record(s) + `
           + `indexDirty=${indexDirty} removed=${removedSessionIds.size} still unsaved`
           + (incomplete ? ` (full flush stopped after ${incomplete.rounds} rounds)` : ""));
       }

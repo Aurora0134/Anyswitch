@@ -632,16 +632,22 @@ describe("自动检测并下载更新（设置项默认关）", () => {
     const capture = autoDownloadCapture();
     const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
     const spawned = [];
+    const entries = [];
     try {
       withSettings(baseDir, { autoDownloadUpdates: true });
       await withPanel({
         base: { LOCALAPPDATA: baseDir },
         releaseService: selfUpdateReleaseService(),
         spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        logger: {
+          info: (message) => entries.push(["info", message]),
+          warn: (message) => entries.push(["warn", message]),
+        },
         ...capture,
-      }, async (get, post, ctx) => {
+      }, async (get) => {
         assert.ok(capture.captured.pump, "the auto-download cadence must be armed on panel-host");
         await capture.captured.pump();
+        assert.deepEqual(entries, [["info", "Self update auto-download registered: v0.7.0"]]);
         const runs = (await get("/panel/api/self-update/active")).body;
         assert.equal(runs.runs.length, 1, "one download run must be registered");
         assert.equal(runs.runs[0].step, "download");
@@ -650,6 +656,30 @@ describe("自动检测并下载更新（设置项默认关）", () => {
         // 已有在跑任务时再泵一拍：不重复登记。
         await capture.captured.pump();
         assert.equal(spawned.length, 1);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("auto-download logs a warning if its worker fails to spawn", async () => {
+    const capture = autoDownloadCapture();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
+    const entries = [];
+    try {
+      withSettings(baseDir, { autoDownloadUpdates: true });
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: () => null,
+        logger: {
+          info: (message) => entries.push(["info", message]),
+          warn: (message) => entries.push(["warn", message]),
+        },
+        ...capture,
+      }, async () => {
+        await capture.captured.pump();
+        assert.deepEqual(entries, [["warn", "Self update auto-download failed to spawn its worker"]]);
       });
     } finally {
       rmSync(baseDir, { recursive: true, force: true });

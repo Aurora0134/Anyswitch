@@ -1916,13 +1916,20 @@ test("⑮ close() 返回「还有没有欠账」：正常关停 complete=true", 
 
 // ⑯ 全量冲净没能兑现时必须有可观测的记法，不许静默。
 // 构造必败：索引路径占成目录，每笔索引写都失败 → 欠账留到 close() 仍存在。
-// 该用例钉的是「结果被返回出来 + lastFullFlushIncomplete 有记录」这条可观测性，
-// 不是写失败本身的 500 语义（那条在 ⑤）。
-test("⑯ 全量冲净未完成时 close() 返回 complete=false 且留下可观测记录", async () => {
+test("⑯ 全量冲净未完成时 close() 返回 complete=false 并记录错误", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-incomplete-"));
   mkdirSync(join(root, TERMINAL_STATE_FILE)); // 占位目录：索引写必败
   const { calls, ptyModule } = capturingPtyModule();
-  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const logs = [];
+  const host = createTerminalHost({
+    root, port: 0, ptyModule,
+    killTreeFn: async () => {},
+    isAliveFn: () => false,
+    logger: {
+      warn: (line) => logs.push({ level: "warn", line }),
+      error: (line) => logs.push({ level: "error", line }),
+    },
+  });
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   let result = null;
@@ -1941,6 +1948,13 @@ test("⑯ 全量冲净未完成时 close() 返回 complete=false 且留下可观
       `欠账必须如实反映（backlog=${result.backlog}, indexDirty=${result.indexDirty}）`);
     assert.ok(host.persistStats.lastFullFlushIncomplete,
       "撞上限或写失败时 lastFullFlushIncomplete 必须有记录（这是「盘上不是整份状态」的机器可判信号）");
+    const closeLogs = logs.filter(({ line }) => line.startsWith("[terminal-host] close() finished with "));
+    assert.deepEqual(closeLogs.map(({ level }) => level), ["error"]);
+    assert.match(closeLogs[0].line, /indexDirty=true .*still unsaved/);
+    const indexLogs = logs.filter(({ line }) => line.startsWith("[terminal-host] state index persist failed:"));
+    assert.ok(indexLogs.length > 0 && indexLogs.every(({ level }) => level === "warn"));
+    const flushLogs = logs.filter(({ line }) => line.startsWith("[terminal-host] full flush incomplete"));
+    assert.ok(flushLogs.length > 0 && flushLogs.every(({ level }) => level === "warn"));
   } finally {
     if (!result) await host.close().catch(() => {});
     rmSync(root, { recursive: true, force: true });
