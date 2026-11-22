@@ -8566,6 +8566,8 @@ describe("设置项「运行日志」", () => {
     const on = fakeReqRes("/panel/api/logs", "GET");
     let flushed = 0;
     on.res.flushHeaders = () => { flushed += 1; };
+    // 建流即写对齐帧：通用 fake res 不带 write，就地补一个只管收下的。
+    on.res.write = () => true;
     await router.handle(on.req, on.res);
     assert.equal(on.res.statusCode, 200);
     assert.equal(flushed, 1,
@@ -8775,7 +8777,9 @@ describe("设置项「运行日志」", () => {
       logger.info("a"); logger.warn("b"); logger.error("c");
       const pair = ssePair("/panel/api/logs");
       await router.handle(pair.req, pair.res);
-      assert.deepEqual(pair.frames().map((f) => f.message), expected, `门槛 ${level} 时的重放结果`);
+      // 建流第一帧的对齐帧不是日志行，门槛只裁历史行与实时行。
+      assert.deepEqual(pair.frames().filter((f) => f.type !== "clear").map((f) => f.message), expected,
+        `门槛 ${level} 时的重放结果`);
       assert.equal(logger.getHistory().length, 3,
         "环形缓冲不因门槛变窄——档案与缓冲全量，只有显示出口在筛");
       rmSync(dir, { recursive: true, force: true });
@@ -8786,7 +8790,8 @@ describe("设置项「运行日志」", () => {
     const { router, logger, dir } = await routerWithLevels("info");
     const pair = ssePair("/panel/api/logs");
     await router.handle(pair.req, pair.res);
-    assert.equal(pair.frames().length, 0, "空缓冲建连，先什么都不给");
+    assert.deepEqual(pair.frames().map((f) => f.type), ["clear"],
+      "空缓冲建连只有对齐帧——它不是日志行，后续帧才是逐帧过闸的结果");
 
     const post = fakeReqRes("/panel/api/settings", "POST", { logLevel: "error" });
     await router.handle(post.req, post.res);
@@ -8794,7 +8799,7 @@ describe("设置项「运行日志」", () => {
     logger.info("noise");
     logger.warn("still-noise");
     logger.error("keep me");
-    assert.deepEqual(pair.frames().map((f) => f.message), ["keep me"],
+    assert.deepEqual(pair.frames().filter((f) => f.type !== "clear").map((f) => f.message), ["keep me"],
       "同一条连接当场按新门槛走，别的已打开窗口不必重连");
     rmSync(dir, { recursive: true, force: true });
   });
@@ -8809,8 +8814,30 @@ describe("设置项「运行日志」", () => {
     // 将来真加第四级时，它不该因为一个显示过滤器不认识它就从面板上消失。
     logger.log("debug", "future level");
     const frames = pair.frames();
-    assert.ok(frames.some((f) => f.type === "clear"), "清空帧照到");
+    assert.equal(frames.filter((f) => f.type === "clear").length, 2,
+      "建流对齐帧与 clear 广播帧都照到");
     assert.ok(frames.some((f) => f.message === "future level"), "未知级别不被吞掉");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("建流第一帧是清空对齐帧：断线重连后与其它窗口一起归零重放", async () => {
+    const { router, logger, dir } = await routerWithLevels("info");
+    logger.info("old-1");
+    logger.warn("old-2");
+
+    const pair = ssePair("/panel/api/logs");
+    await router.handle(pair.req, pair.res);
+    const frames = pair.frames();
+    assert.equal(frames[0].type, "clear", "第一帧是控制帧，不是历史行");
+    assert.equal(typeof frames[0].ts, "number", "与 logger.clear 广播帧同形（带 ts）");
+    assert.deepEqual(frames.slice(1).map((f) => f.message), ["old-1", "old-2"],
+      "其后才是历史行，顺序保持");
+
+    // 清空后（环=0）新建流：对齐帧照给，历史一行不剩——重连窗口不再滞留已清空的旧行。
+    logger.clear();
+    const fresh = ssePair("/panel/api/logs");
+    await router.handle(fresh.req, fresh.res);
+    assert.deepEqual(fresh.frames().map((f) => f.type), ["clear"], "只有对齐帧，零历史行");
     rmSync(dir, { recursive: true, force: true });
   });
 
