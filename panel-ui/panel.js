@@ -1209,6 +1209,8 @@ async function api(method, path, body, signal) {
         reorderAgentCards(res.agents);
         applyBoardLiveAgentIds(new Set(res.agents.filter((a) => a && a.status === "running").map((a) => a.id)));
         syncAgentEditionsSnapshot(res.agents);
+        // 端点换代清暂存先于各卡渲染：本帧就要用清过账的暂存重攒折线。
+        trackAgentRunReset(res.agents);
         const zc = res.agents.find(a => a.id === "zcode");
         const cc = res.agents.find(a => a.id === "claude");
         const dsh = res.agents.find(a => a.id === "dsh");
@@ -1399,6 +1401,34 @@ async function api(method, path, body, signal) {
     const prev = instanceRowFirstSeen[bufKey];
     instanceRowFirstSeen[bufKey] = firstSeen;
     return prev !== undefined && prev !== firstSeen;
+  }
+
+  // 端点换代清暂存：runResetAt 首现或变更＝服务端已重开运行账（端点家族死过，
+  // 账目与样本窗一并清——2026-11-22 裁决）。本地为旧运行攒的折线暂存（实例行
+  // buffer、出生账本、qoder 的端点级旧机制 buffer）随之作废——空数组不覆盖
+  // 已恢复的整线，旧暂存会把上一轮运行的曲线从本地复活。卡片未运行期间轮询
+  // 照跑、这里的判定每帧都过，后台页签恢复后的首帧也能追上换代。
+  const agentRunResetAt = {};
+  // 卡片实例行 prefix 表（renderInstanceRows 的分键口径）：与 agent id 不同
+  // 的只有 zcode→zc、claude→cc，其余同 id。
+  const AGENT_SPARK_PREFIX = { zcode: "zc", claude: "cc" };
+  function clearAgentSparkState(agentId) {
+    const prefix = AGENT_SPARK_PREFIX[agentId] ?? agentId;
+    for (const key of Object.keys(instanceSparkBuffers)) {
+      if (key.startsWith(prefix + ":")) delete instanceSparkBuffers[key];
+    }
+    for (const key of Object.keys(instanceRowFirstSeen)) {
+      if (key.startsWith(prefix + ":")) delete instanceRowFirstSeen[key];
+    }
+    for (const [, bufKey] of ENDPOINT_SPARK_KEYS[prefix] || []) delete historyBuffers[bufKey];
+  }
+  function trackAgentRunReset(agents) {
+    for (const agent of Array.isArray(agents) ? agents : []) {
+      if (!agent || typeof agent.runResetAt !== "number") continue;
+      if (agentRunResetAt[agent.id] === agent.runResetAt) continue;
+      agentRunResetAt[agent.id] = agent.runResetAt;
+      clearAgentSparkState(agent.id);
+    }
   }
 
   // 折叠状态机：prefix → 是否展开，惰性从 localStorage 初始化

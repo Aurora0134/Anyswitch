@@ -2818,6 +2818,9 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
     status: isRunning ? "running" : "stopped",
     processCount,
     sessionMode: "aggregate",
+    // 运行账重开时刻（家族死亡清账时印记）：面板据此判端点换代、清本地折线暂存。
+    // 实例行状态从不置位（行有各自的换代机制），端点也只在真重开过账后携带。
+    ...(state.runResetAt !== undefined ? { runResetAt: state.runResetAt } : {}),
     currentModel: state.currentModel,
     lastModel: state.lastModel,
     activeModels: Array.from(state.activeModels.keys()),
@@ -4248,19 +4251,19 @@ export function createAgentMetricsCollector(options = {}) {
   // 端点本次运行的账清零：原位重置（保住对象身份，在途请求/看板持有的引用随之
   // 归零），claude 连会话行与退役账一起清。实例桶不清——行有独立的生死机制
   //（见 settleAndResetRunAccount 注释），恢复的旧行（无活 pid）由逐行淘汰收走。
-  // sparkWindowPoints 是视窗设置、recentSamples / ttftHistory 是既成事实的历史，
-  // 两者都不是本次运行的账，清零后回填——与快照层 serializeAggregateState 同口径。
-  // 其余字段必须保持零态：settleAndResetRunAccount 的 hadAccount 幂等闸读
-  // totalRequests / activeRequests / lastRequestAt / lastModel，回填样本不会触发
-  // 每轮重复 reset。触发方一律自己负责「可信轮 + 过宽限」的门，这里只管清。
+  // 样本窗随运行账一起清零（2026-11-22 用户裁决，推翻 6fc6525 的跨重启回填）：
+  // 运行账由家族死亡重开时，上一轮的速率样本/TTFT 历史不得回填——无会话行的
+  // 端点以「全局汇总」伪行出面时，四宫格会带着已死一轮的数值与曲线出场。重开
+  // 时刻印记（runResetAt）随行下发，面板据此换代清本地折线暂存。快照层不受
+  // 影响：relay 重启期间家族未灭的运行，样本照常随快照还原续账（verdict 判重开
+  // 时经这里一并清）。其余字段必须保持零态：settleAndResetRunAccount 的
+  // hadAccount 幂等闸读 totalRequests / activeRequests / lastRequestAt /
+  // lastModel。触发方一律自己负责「可信轮 + 过宽限」的门，这里只管清。
   function resetEndpointRunAccount(id) {
     const state = endpointStates[id];
     if (state === undefined) return;
-    const samples = state.recentSamples.slice();
-    const ttft = state.ttftHistory.slice();
     Object.assign(state, createAggregateState(state.sparkWindowPoints));
-    state.recentSamples = samples;
-    state.ttftHistory = ttft;
+    state.runResetAt = nowFn();
     if (id === "claude") {
       claudeSessions.clear();
       sessionStabilitySeq.clear();
