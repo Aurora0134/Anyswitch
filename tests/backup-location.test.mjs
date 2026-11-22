@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -122,7 +124,7 @@ test("同一路径是空操作：不复制、不删源、成功返回", () => {
     const from = join(m.root, "backups");
     seed(join(from, "pre-import-1"), { "store.json": "{}" });
     const result = migrateBackups(from, from);
-    assert.deepEqual(result, { ok: true, moved: 0 });
+    assert.deepEqual(result, { ok: true, moved: 0, copied: [] });
     assert.equal(existsSync(join(from, "pre-import-1", "store.json")), true);
   } finally { m.cleanup(); }
 });
@@ -179,6 +181,109 @@ test("恢复默认时记录清除失败：备份已在默认位，整次拒绝�
     assert.equal(readFileSync(join(defaultBackupRoot(m.root), "pre-import-1", "store.json"), "utf8"), "{}", "备份原位不动");
     assert.equal(statSync(join(m.root, BACKUP_ROOT_FILE)).isDirectory(), true, "记录路径没被换成文件");
     assert.equal(backupRootInfo(m.root).isDefault, true);
+  } finally { m.cleanup(); }
+});
+
+test("目标是既有文件：业务拒绝不抛错，源、目标文件、本机记录一个字节不动", () => {
+  const m = machine();
+  try {
+    const from = join(m.root, "backups");
+    const to = join(m.root, "a-file");
+    seed(join(from, "pre-import-1"), { "store.json": "source" });
+    writeFileSync(to, "不是目录", "utf8");
+
+    const result = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(result.ok, false, "目标不可建要报业务错误，不让异常穿透成 500");
+    assert.match(result.error, /^路径不可用/);
+    assert.equal(readFileSync(join(from, "pre-import-1", "store.json"), "utf8"), "source", "源未动");
+    assert.equal(readFileSync(to, "utf8"), "不是目录", "目标文件原样保留");
+    assert.equal(existsSync(join(m.root, BACKUP_ROOT_FILE)), false, "失败不落盘新位置");
+    assert.equal(readBackupRoot(m.root), from);
+  } finally { m.cleanup(); }
+});
+
+// 源条目被占的复现方式：子进程持有条目中一个文件的读句柄——Windows 上不带删除
+// 共享的打开句柄让 rmSync 在该条目上原地抛 EPERM，条目内容完整残留在源
+// （残留与原数据同源，这正是专用回滚「删副本」分支的前提）。
+async function holdFile(filePath) {
+  const child = spawn(process.execPath, [
+    "-e",
+    `require("node:fs").openSync(${JSON.stringify(filePath)}, "r"); setInterval(() => {}, 1000);`,
+  ], { stdio: "ignore" });
+  await once(child, "spawn");
+  return async () => {
+    if (child.exitCode === null && !child.signalCode) {
+      const exited = once(child, "exit");
+      child.kill();
+      await exited.catch(() => {});
+    }
+  };
+}
+
+test("换位置时记录写失败且有源条目被占：回滚后源齐全、目标无残留，松手后重试成功", async () => {
+  const m = machine();
+  let release = async () => {};
+  try {
+    const from = join(m.root, "backups");
+    const to = join(m.root, "elsewhere", "backups");
+    seed(join(from, "pre-import-20261115-100000"), { "store.json": "{\"beta\":1}" });
+    const occupied = join(from, "byok-import-20261115-101000");
+    seed(occupied, { "config.toml": "x" });
+    release = await holdFile(join(occupied, "config.toml"));
+    // 摆一个目录占住记录路径：写记录必败，且之后还能断言「位置没被记住」。
+    mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
+
+    const result = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /位置记录失败/);
+    assert.equal(result.error.includes("备份现在在"), false, "回滚干净时不得报「留在新位置」的变体");
+
+    // 回滚后源齐全：被占条目靠同源残留保住，其余条目已搬回。
+    assert.equal(readFileSync(join(from, "pre-import-20261115-100000", "store.json"), "utf8"), "{\"beta\":1}");
+    assert.equal(readFileSync(join(occupied, "config.toml"), "utf8"), "x", "被占条目内容完整残留");
+    // 目标无残留：本次复制的副本全部清掉，连目标目录一起收走。
+    assert.equal(existsSync(to), false);
+    // 记录未变：仍是占位目录，读取仍回默认。
+    assert.equal(statSync(join(m.root, BACKUP_ROOT_FILE)).isDirectory(), true);
+    assert.equal(readBackupRoot(m.root), defaultBackupRoot(m.root));
+
+    // 松开占用、挪走占位后同会话重试：不再被任何残留堵死。
+    await release();
+    release = async () => {};
+    rmSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true, force: true });
+    const retry = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(retry.ok, true, retry.error);
+    assert.equal(retry.moved, 2);
+    assert.equal(existsSync(from), false, "源目录空了要移除");
+    assert.equal(readFileSync(join(to, "pre-import-20261115-100000", "store.json"), "utf8"), "{\"beta\":1}");
+    assert.equal(readFileSync(join(to, "byok-import-20261115-101000", "config.toml"), "utf8"), "x");
+    assert.deepEqual(JSON.parse(readFileSync(join(m.root, BACKUP_ROOT_FILE), "utf8")), { root: to });
+  } finally {
+    await release();
+    m.cleanup();
+  }
+});
+
+test("目标预置异名内容时记录写失败：回滚只动本次复制的，异名条目留在原位", () => {
+  const m = machine();
+  try {
+    const from = join(m.root, "backups");
+    const to = join(m.root, "elsewhere", "backups");
+    seed(join(from, "pre-import-20261115-100000"), { "store.json": "{}" });
+    seed(join(to, "user-keep"), { "note.txt": "用户自留" });
+    mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
+
+    const result = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /位置记录失败/);
+    assert.equal(result.error.includes("备份现在在"), false);
+    // 本次副本搬回源，目标侧不留副本。
+    assert.equal(readFileSync(join(from, "pre-import-20261115-100000", "store.json"), "utf8"), "{}");
+    assert.equal(existsSync(join(to, "pre-import-20261115-100000")), false, "新位置不留副本");
+    // 目标目录里的异名内容一个字节不动，目标目录本身也留在原位。
+    assert.equal(readFileSync(join(to, "user-keep", "note.txt"), "utf8"), "用户自留");
+    assert.equal(statSync(join(m.root, BACKUP_ROOT_FILE)).isDirectory(), true);
+    assert.equal(readBackupRoot(m.root), defaultBackupRoot(m.root));
   } finally { m.cleanup(); }
 });
 
