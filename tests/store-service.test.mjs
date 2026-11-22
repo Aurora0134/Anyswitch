@@ -1964,6 +1964,29 @@ describe("store-service virtualModels（虚拟模型）", () => {
     );
   });
 
+  it("saveVirtualModel 撞可见渠道的真实模型 id 拒存（号池并集与独立渠道同口径），不撞名正常保存", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    const chain = [{ node: "prov-c", model: "m4" }];
+    // prov-a/prov-b 被 pool-x 吸收，模型经号池并集上屏，报错标签取号池显示名。
+    assert.match((await svc.saveVirtualModel("m1", chain)).error, /已是渠道「主号池」的模型/);
+    assert.match((await svc.saveVirtualModel("m3", chain)).error, /已是渠道「主号池」的模型/, "被吸收成员的模型经号池并集拦");
+    assert.match((await svc.saveVirtualModel("m4", chain)).error, /已是渠道「prov-c」的模型/, "独立渠道按自身目录拦");
+    assert.equal(readStore(paths).store.virtualModels, undefined, "撞名全拒，不落盘");
+    const created = await svc.saveVirtualModel("vm-a", chain);
+    assert.equal(created.ok, true, created.error);
+    assert.match((await svc.saveVirtualModel("m2", chain, "vm-a")).error, /已是渠道「主号池」的模型/, "改名目标撞真实模型 id 同样拦");
+    assert.deepEqual(readStore(paths).store.virtualModels.map((v) => v.name), ["vm-a"], "拒了就不写盘、原条目原位保留");
+    assert.equal((await svc.saveVirtualModel("m5", chain)).ok, true, "不撞名正常保存");
+    assert.equal((await svc.saveVirtualModel("M1", chain)).ok, true, "仅大小写不同不算撞名（线上模型 id 精确匹配）");
+    assert.deepEqual(
+      readStore(paths).store.virtualModels.map((v) => v.name),
+      ["vm-a", "m5", "M1"],
+      "放行的逐条落盘、位次按序",
+    );
+  });
+
   it("saveVirtualModel 拒绝坏链：空链/超 8 节点/节点不存在/同节点同模型重复", async () => {
     const paths = makeRoot();
     vmSeed(paths);
