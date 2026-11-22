@@ -46,7 +46,9 @@ export const TICKET_TTL_MS = 15 * 60 * 1000;
 const CONFIG_FILES = ["store.json", "settings.json", "prompts.json", "skills.json"];
 // 恢复只认 pre-import 整份快照（byok-import 是按端点的部分文件，无回滚语义）；
 // saved[] 只可能装着这几种条目，清单里出现别的名字即不可信，整单拒绝。
-const RESTORE_NAME_RE = /^pre-import-\d{8}-\d{6}$/;
+// 序号后缀（-2/-3…）是同秒撞名时写入侧另起的新名（见 writePreImportBackup），
+// 与裸时间戳名同权，同样可恢复。
+const RESTORE_NAME_RE = /^pre-import-\d{8}-\d{6}(-\d+)?$/;
 const RESTORE_SAVED_ENTRIES = new Set([...CONFIG_FILES, "credentials/"]);
 // Skills 主仓库本身就是个 git 仓库：.git 既不是「人写的配置」，git 对象又是只读
 // 文件，回拷到已有目录会撞 Access denied。打包与落盘两端都按名字整段跳过。
@@ -453,8 +455,16 @@ export function createDataBundleService({
   // 当前配置之前先留一份可回滚的 pre-import 备份。saved[] 只记真实在盘的条目，
   // manifest 与导出包同文件名、不同形状（备份版只有 backupId/createdAt/saved）。
   function writePreImportBackup() {
-    const backupId = stamp(now());
-    const backupDir = join(backupRootFn(), `pre-import-${backupId}`);
+    // 时间戳只精确到秒：同秒两次导入/恢复会撞同名目录，mkdir recursive 复用旧目录、
+    // 逐文件覆盖，第一次留住的配置就被第二次静默抹掉。撞名时追加 -2/-3 序号另起
+    // 新名，backupId 随实际落点名走。
+    const baseId = stamp(now());
+    const backupRoot = backupRootFn();
+    let backupId = baseId;
+    for (let seq = 2; existsSync(join(backupRoot, `pre-import-${backupId}`)); seq += 1) {
+      backupId = `${baseId}-${seq}`;
+    }
+    const backupDir = join(backupRoot, `pre-import-${backupId}`);
     const saved = [];
     mkdirSync(backupDir, { recursive: true });
     for (const name of CONFIG_FILES) {
@@ -643,16 +653,28 @@ export function createDataBundleService({
         return { ok: false, error: `渠道配置写入被拒（${written.reason}），当前数据未改动；安全备份在 ${safety.backupDir}` };
       }
     }
+    const applied = { settings: false };
     for (const file of ["settings.json", "prompts.json", "skills.json"]) {
       if (!texts.has(file)) continue;
       const target = file === "settings.json" ? settingsPath : file === "prompts.json" ? promptsJsonPath : skillsConfigPath(base);
       atomicWriteFile(target, texts.get(file));
+      if (file === "settings.json") {
+        applied.settings = true;
+        // 与导入落定同一口径（见 applyBundle）：followAgent 背后挂着登录计划与常驻
+        // 自愈进程，刚写进盘的值要交回调用方对齐。解析不成按关处理——坏文件经
+        // loadSettings 就是空对象，读出来同样是关，两边不能给出不一致的答复。
+        try {
+          applied.followAgent = JSON.parse(texts.get(file))?.followAgent === true;
+        } catch {
+          applied.followAgent = false;
+        }
+      }
     }
     if (withCredentials) {
       mkdirSync(paths.credentialsDir, { recursive: true });
       copyTree(join(dir, "credentials"), paths.credentialsDir);
     }
-    return { ok: true, safetyName: `pre-import-${safety.backupId}` };
+    return { ok: true, safetyName: `pre-import-${safety.backupId}`, applied };
   }
 
   // 面板宿主退出时调用（见 panel-host.mjs 的 shutdown）：把还攥着明文密钥内存副本

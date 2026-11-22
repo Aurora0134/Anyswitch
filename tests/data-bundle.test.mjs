@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 import { ensureLayout, storePaths, writeStore } from "../src/store/store-io.mjs";
@@ -745,4 +745,91 @@ test("回归：无凭据包导入没有同名密钥文件的机器，照常导�
   const applied = await importer.applyBundle({ token: preview.token, skillsMode: "skip" });
   assert.equal(applied.ok, true, applied.error);
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["gamma"]);
+});
+
+// ── 恢复（restoreBackup）：followAgent 回传与同秒撞名 ─────────────────
+// 恢复路由按 applied.followAgent 对齐登录计划与自愈进程（见 panel.mjs 恢复路由）；
+// 同秒两次恢复/导入的安全备份撞名必须另起新名，首份内容一个字节不动。
+
+// 造一份可恢复的 pre-import 备份：store 必带；settings 为 null 时备份不含设置
+// 文件，为字符串时原样落盘（可造坏 JSON），其余按 JSON 序列化。
+function seedRestoreBackup(dir, { storeId = "alpha", settings = { followAgent: false } } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const saved = ["store.json"];
+  writeFileSync(join(dir, "store.json"), JSON.stringify(validStore(storeId), null, 2) + "\n", "utf8");
+  if (settings !== null) {
+    saved.push("settings.json");
+    writeFileSync(join(dir, "settings.json"), typeof settings === "string" ? settings : JSON.stringify(settings) + "\n", "utf8");
+  }
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({
+    backupId: basename(dir).replace(/^pre-import-/, ""),
+    createdAt: "2026-10-31T04:00:00.000Z",
+    saved,
+  }, null, 2) + "\n", "utf8");
+}
+
+test("恢复：settings 写回后按备份里的值回传 applied.followAgent", () => {
+  const dst = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
+  seedRestoreBackup(join(dst.root, "backups", "pre-import-20261031-120000"), { storeId: "alpha", settings: { followAgent: false } });
+  const done = dst.service().restoreBackup({ name: "pre-import-20261031-120000" });
+  assert.equal(done.ok, true, done.error);
+  assert.deepEqual(done.applied, { settings: true, followAgent: false }, "备份里的关要原样交回调用方，由它对齐登录计划与自愈进程");
+  assert.deepEqual(JSON.parse(readFileSync(join(dst.root, "settings.json"), "utf8")), { followAgent: false });
+});
+
+test("恢复：备份缺 followAgent 字段或 settings 是坏 JSON 都按关回传，与 loadSettings 读法一致", () => {
+  const noKey = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
+  seedRestoreBackup(join(noKey.root, "backups", "pre-import-20261031-120000"), { settings: { sparkWindowPoints: 60 } });
+  const doneNoKey = noKey.service().restoreBackup({ name: "pre-import-20261031-120000" });
+  assert.equal(doneNoKey.ok, true, doneNoKey.error);
+  assert.equal(doneNoKey.applied.followAgent, false, "盘上没有这个开关，等于是关");
+
+  const broken = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
+  seedRestoreBackup(join(broken.root, "backups", "pre-import-20261031-120000"), { settings: "not json at all{" });
+  const doneBroken = broken.service().restoreBackup({ name: "pre-import-20261031-120000" });
+  assert.equal(doneBroken.ok, true, doneBroken.error);
+  assert.equal(doneBroken.applied.followAgent, false, "坏文件经 loadSettings 同样是关，两侧答复要一致");
+  assert.equal(readFileSync(join(broken.root, "settings.json"), "utf8"), "not json at all{", "恢复按备份原文写回");
+});
+
+test("恢复：备份没带 settings.json 时 applied.settings 为 false，盘上设置不动", () => {
+  const dst = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
+  seedRestoreBackup(join(dst.root, "backups", "pre-import-20261031-120000"), { settings: null });
+  const done = dst.service().restoreBackup({ name: "pre-import-20261031-120000" });
+  assert.equal(done.ok, true, done.error);
+  assert.deepEqual(done.applied, { settings: false }, "设置文件没被换过，调用方不该去对齐");
+  assert.deepEqual(JSON.parse(readFileSync(join(dst.root, "settings.json"), "utf8")), { followAgent: true });
+});
+
+test("同秒两次恢复：安全备份撞名追加 -2/-3 序号另起新名，首份内容不被覆盖", () => {
+  const dst = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
+  seedRestoreBackup(join(dst.root, "backups", "pre-import-20261031-120000"), { storeId: "alpha", settings: { followAgent: false } });
+  const fixed = new Date(2026, 10, 22, 12, 0, 0).getTime();
+  const svc = createDataBundleService({ base: dst.base, homeDir: dst.homeDir, protect: fakeProtect, unprotect: fakeUnprotect, now: () => fixed });
+
+  const first = svc.restoreBackup({ name: "pre-import-20261031-120000" });
+  assert.equal(first.ok, true, first.error);
+  assert.equal(first.safetyName, "pre-import-20261122-120000");
+
+  const second = svc.restoreBackup({ name: "pre-import-20261031-120000" });
+  assert.equal(second.ok, true, second.error);
+  assert.equal(second.safetyName, "pre-import-20261122-120000-2", "同秒撞名要追加序号，不许复用同名目录静默覆盖");
+
+  const backupsDir = join(dst.root, "backups");
+  const safetyStore = (name) => Object.keys(JSON.parse(readFileSync(join(backupsDir, name, "store.json"), "utf8")).providers);
+  const safetySettings = (name) => readFileSync(join(backupsDir, name, "settings.json"), "utf8");
+  assert.deepEqual(safetyStore(first.safetyName), ["beta"], "首份安全备份装的仍是第一次恢复前的配置");
+  assert.equal(safetySettings(first.safetyName), JSON.stringify({ followAgent: true }) + "\n", "首份内容一个字节不动");
+  assert.deepEqual(safetyStore(second.safetyName), ["alpha"], "第二份装的是第一次恢复后的状态");
+  assert.equal(safetySettings(second.safetyName), JSON.stringify({ followAgent: false }) + "\n");
+  assert.equal(
+    JSON.parse(readFileSync(join(backupsDir, second.safetyName, "manifest.json"), "utf8")).backupId,
+    "20261122-120000-2",
+    "manifest 里的 backupId 随实际落点名走",
+  );
+
+  // 带序号的安全备份自身也能被恢复（RESTORE_NAME_RE 认序号后缀），再撞名继续递增。
+  const third = svc.restoreBackup({ name: "pre-import-20261122-120000-2" });
+  assert.equal(third.ok, true, third.error);
+  assert.equal(third.safetyName, "pre-import-20261122-120000-3");
 });
