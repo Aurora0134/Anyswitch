@@ -11,7 +11,7 @@ import { createServer } from "node:http";
 import { writeFileSync, existsSync, mkdirSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, spawnWatchdog, watchdogSpawnTarget, createWatchdogLogger, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
+import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, spawnWatchdog, watchdogSpawnTarget, watchdogVersionDrift, createWatchdogLogger, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
 import { createAgentWatcher, DEFAULT_INTERVAL_MS } from "../src/agents/agent-watcher.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
@@ -540,4 +540,105 @@ test("watchdogSpawnTarget 默认＝本进程 node + 本模块同版脚本；换�
   assert.equal(target.execPath, node, "自更新换装期：目标版本 node 优先于本进程");
   assert.equal(target.script, join(appRoot, "src", "agents", "agent-watchdog.mjs"));
   assert.equal(target.cwd, join(appRoot, "src", "agents"));
+});
+
+// ── M3: 版本指针漂移自查自退 ─────────────────────────────────────────────
+//
+// 换装前停狗被拒时旧狗常驻、指针已指向新版，旧狗的 watcher 会把 relay 拉回旧版
+// 目录。修复＝标记端口应答自报版本（探测方可识别看门狗版本）＋旧狗比对指针
+// 自退。指针替身全部落在测试临时目录，不触真实安装根与真实进程。
+
+test("标记端口应答带 version 字段，既有探针语义不变", async () => {
+  const localAppData = mkTestDir("anyswitch-wd-version-");
+  mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0, // ephemeral marker port — no collision with a live watchdog
+    logger: { info() {}, warn() {}, error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    watcherDeps: {
+      scanProcesses: async () => ({}),
+      getRelayStatus: async () => ({ status: "running" }),
+      loadSettings: () => ({ settings: {} }),
+    },
+  });
+  try {
+    const body = await fetch(`http://127.0.0.1:${host.port}/`).then((r) => r.json());
+    const expected = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+    assert.equal(body.ok, true);
+    assert.equal(body.watchdog, true);
+    assert.equal(body.version, expected, "应答自报的版本必须就是本模块所属 package.json 的版本");
+    assert.equal(await probeWatchdog(host.port), true, "加了字段后探针仍识别为看门狗");
+  } finally {
+    await host.close();
+  }
+});
+
+function makeInstallRoot() {
+  const root = mkTestDir("anyswitch-wd-install-");
+  mkdirSync(join(root, "versions", "1.0.0", "app"), { recursive: true });
+  mkdirSync(join(root, "versions", "2.0.0", "app"), { recursive: true });
+  return root;
+}
+
+test("watchdogVersionDrift: 指针指向其他版本目录即报告漂移", () => {
+  const root = makeInstallRoot();
+  writeFileSync(join(root, "current.json"), JSON.stringify({ schema: 1, version: "2.0.0" }) + "\n");
+  const own = join(root, "versions", "1.0.0", "app");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), "2.0.0");
+});
+
+test("watchdogVersionDrift: 指针指向自身版本目录则无漂移", () => {
+  const root = makeInstallRoot();
+  writeFileSync(join(root, "current.json"), JSON.stringify({ schema: 1, version: "1.0.0" }) + "\n");
+  const own = join(root, "versions", "1.0.0", "app");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null);
+});
+
+test("watchdogVersionDrift: 指针读不出或安装根解析不出时 fail-safe 不漂移", () => {
+  const root = makeInstallRoot();
+  const own = join(root, "versions", "1.0.0", "app");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null, "current.json 缺失");
+  writeFileSync(join(root, "current.json"), "not json");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null, "current.json 非法");
+  writeFileSync(join(root, "current.json"), JSON.stringify({ schema: 1, version: "bogus" }));
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null, "指针版本号非法");
+  const sourceTree = mkTestDir("anyswitch-wd-sourcetree-");
+  assert.equal(watchdogVersionDrift({ appRoot: sourceTree, env: {} }), null,
+    "源码/便携运行不在 versions 布局下且无 ANYSWITCH_INSTALL_ROOT，没有指针可查");
+});
+
+test("指针漂移后看门狗自查退场：记日志、清 pid、关标记端口、exit(0)", async () => {
+  const localAppData = mkTestDir("anyswitch-wd-drift-");
+  const dataRoot = join(localAppData, "Anyswitch");
+  mkdirSync(dataRoot, { recursive: true });
+  const installRoot = makeInstallRoot();
+  writeFileSync(join(installRoot, "current.json"), JSON.stringify({ schema: 1, version: "2.0.0" }) + "\n");
+  const ownAppRoot = join(installRoot, "versions", "1.0.0", "app");
+  const warnings = [];
+  const exits = [];
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0,
+    logger: { info() {}, warn: (m) => warnings.push(m), error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    watcherDeps: {
+      scanProcesses: async () => ({}),
+      getRelayStatus: async () => ({ status: "running" }),
+      loadSettings: () => ({ settings: {} }),
+    },
+    versionDrift: { appRoot: ownAppRoot, env: {}, intervalMs: 10, exit: (code) => exits.push(code) },
+  });
+  const pidPath = getWatchdogPidPath(dataRoot);
+  assert.equal(existsSync(pidPath), true, "宿主启动即写下自己的 pid");
+  const deadline = Date.now() + 2000;
+  while (exits.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.deepEqual(exits, [0], "漂移一经确认即优雅退场");
+  assert.equal(existsSync(pidPath), false, "退场前清掉自己的 pid 文件");
+  assert.equal(await probeWatchdog(host.port), false, "标记端口随退场关闭");
+  assert.equal(warnings.length, 1, "退场原因落一条日志");
+  assert.match(warnings[0], /2\.0\.0/);
+  await host.close(); // 幂等收尾（标记端口已关）
 });

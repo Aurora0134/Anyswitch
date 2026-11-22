@@ -17,10 +17,11 @@
 import { createServer } from "node:http";
 import { request } from "node:http";
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, writeFileSync, readFileSync, unlinkSync, realpathSync, appendFileSync, mkdirSync, openSync, closeSync, statSync, renameSync } from "node:fs";
 import { createAgentWatcher } from "./agent-watcher.mjs";
+import { parseCurrentPointer, resolveInstallRoot } from "../ops/update-trust.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { startRelay, restartRelay, getRelayStatus, findPortOwnerPid, isPidAlive, getProcessCommandLineAsync, isOwnProcess } from "../relay/relay-process-manager.mjs";
 import { loadSettings, defaultSettingsPath, relayDataRoot, createLoggingEnabledGate } from "../relay/relay-settings.mjs";
@@ -32,6 +33,10 @@ export const WATCHDOG_PORT = 47822;
 // 再宽就开始拖慢「发现 agent 起来了要把 relay 拉起来」那件事。
 export const WATCHDOG_PROCESS_SCAN_TTL_MS = 6000;
 const WATCHDOG_SCRIPT = fileURLToPath(new URL("agent-watchdog.mjs", import.meta.url));
+// 自身 app 根与版本：读法与同目录 client-update-worker.mjs 一致（package.json
+// 在 app 根，本模块在其下 src/agents/ 两级）。
+const WATCHDOG_APP_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const WATCHDOG_VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 
 const SPAWN_POLL_MS = 300;
 const SPAWN_TIMEOUT_MS = 8000;
@@ -318,6 +323,45 @@ export async function stopWatchdog(env = process.env, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// 版本指针漂移自查（自更新换装失败链的兜底）
+//
+// 换装前停狗可能被拒（stopWatchdog 的拒杀红线：身份未识别绝不杀），此时
+// app-self-update 的四条收尾路径都不再重拉看门狗，旧狗常驻；指针却已指向
+// 新版，旧狗的 watcher 只传数据根不传 env，relay 被拉回旧版目录运行，直到
+// 机器重启。旧狗按拍比对安装根 current.json 指向的版本目录与自身模块目录，
+// 漂移即优雅退场——新版面板的 spawnWatchdog 或下次登录自启自然拉起新狗。
+// fail-safe 口径与拒杀红线同源：指针读不到、指针非法、安装根解析不出（源码
+// 或便携运行）一律按无漂移处理，绝不因读盘异常退场。
+// ---------------------------------------------------------------------------
+export const VERSION_DRIFT_CHECK_INTERVAL_MS = 30_000;
+
+function sameDir(a, b) {
+  const norm = (p) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  return norm(a).toLowerCase() === norm(b).toLowerCase();
+}
+
+// 返回漂移目标版本（指针指向的版本）；无漂移或无法判定时返回 null。
+export function watchdogVersionDrift({ appRoot = WATCHDOG_APP_ROOT, env = process.env, readFile = readFileSync } = {}) {
+  const installRoot = resolveInstallRoot({ appRoot, env });
+  if (!installRoot) return null;
+  let pointer;
+  try {
+    pointer = parseCurrentPointer(readFile(join(installRoot, "current.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  // 版本目录布局与 app-self-update.mjs 的 targetAppRoot 推导一致。
+  const targetAppRoot = join(installRoot, "versions", pointer.version, "app");
+  return sameDir(targetAppRoot, appRoot) ? null : pointer.version;
+}
+
+// ---------------------------------------------------------------------------
 // Entry-point host: marker port + real-deps agent watcher.
 // ---------------------------------------------------------------------------
 
@@ -325,14 +369,14 @@ function listenMarkerPort(port = WATCHDOG_PORT) {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, watchdog: true }));
+      res.end(JSON.stringify({ ok: true, watchdog: true, version: WATCHDOG_VERSION }));
     });
     server.once("error", (err) => {
       if (err.code === "EADDRINUSE") resolve({ reused: true, close: async () => {} });
       else reject(err);
     });
     server.listen(port, "127.0.0.1", () => {
-      resolve({ reused: false, close: () => new Promise((r) => server.close(r)) });
+      resolve({ reused: false, port: server.address().port, close: () => new Promise((r) => server.close(r)) });
     });
   });
 }
@@ -343,7 +387,7 @@ export async function startWatchdogHost(options = {}) {
     ...(options.fetchFn ? { fetchFn: options.fetchFn } : {}),
     isEnabled: createLoggingEnabledGate(defaultSettingsPath(options.base ?? process.env)),
   });
-  const { reused, close } = await listenMarkerPort(options.port ?? WATCHDOG_PORT);
+  const { reused, port, close } = await listenMarkerPort(options.port ?? WATCHDOG_PORT);
   if (reused) {
     // Another watchdog owns the marker port; the HKCU Run entry starting a
     // second copy simply succeeds as a no-op, same as relay-host on 47821.
@@ -391,7 +435,36 @@ export async function startWatchdogHost(options = {}) {
     logger,
   }).start();
 
+  // 版本指针漂移自查（背景见 watchdogVersionDrift 上方）：指针指向的版本目录
+  // 与本模块目录不同即走与 SIGINT/SIGTERM 同一条优雅路径退场。exit 可注入
+  // 替身——测试里真退会把测试进程带走。自查自身抛错按无漂移处理。
+  const drift = options.versionDrift ?? {};
+  const driftExit = drift.exit ?? ((code) => process.exit(code));
+  const driftTimer = setInterval(() => {
+    let pointerVersion = null;
+    try {
+      pointerVersion = watchdogVersionDrift({
+        ...(drift.appRoot ? { appRoot: drift.appRoot } : {}),
+        env: drift.env ?? options.base ?? process.env,
+        ...(drift.readFile ? { readFile: drift.readFile } : {}),
+      });
+    } catch {
+      return;
+    }
+    if (pointerVersion === null) return;
+    clearInterval(driftTimer);
+    logger.warn(`version pointer moved to ${pointerVersion}; watchdog ${WATCHDOG_VERSION} is stale, exiting so the current version can take over`);
+    clearWatchdogPid(pidPath);
+    Promise.resolve()
+      .then(() => close())
+      .catch(() => { /* already closed */ })
+      .finally(() => driftExit(0));
+  }, drift.intervalMs ?? VERSION_DRIFT_CHECK_INTERVAL_MS);
+  // 与 watcher 的巡检计时器同款：常驻由标记端口监听兜底，自查计时器不顶事件循环。
+  driftTimer.unref();
+
   const shutdown = async (signal) => {
+    clearInterval(driftTimer);
     logger.info(`${signal} received, watchdog exiting`);
     clearWatchdogPid(pidPath);
     try {
@@ -406,7 +479,14 @@ export async function startWatchdogHost(options = {}) {
   // Windows 上 SIGTERM 未必送达（任务结束 / 注销），exit 兜住另一条路。
   process.on("exit", () => clearWatchdogPid(pidPath));
 
-  return { reused: false, close };
+  return {
+    reused: false,
+    port,
+    close: async () => {
+      clearInterval(driftTimer);
+      await close();
+    },
+  };
 }
 
 function isEntryModule(argv1, metaUrl) {
