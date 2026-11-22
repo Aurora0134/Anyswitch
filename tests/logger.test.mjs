@@ -1,7 +1,9 @@
 // logger.mjs tests: the two contracts the log bus holds — a persisted line carries
-// a wall-clock stamp, and the level lives in exactly ONE place (the entry field),
-// never duplicated into the message text — plus the live on/off gate that the
-// 运行日志 switch drives, and the level order a viewer uses to filter what it shows.
+// a wall-clock stamp (the bus's own now(), or a caller-supplied ts when the entry
+// is re-published from a foreign bus), and the level lives in exactly ONE place
+// (the entry field), never duplicated into the message text — plus the live
+// on/off gate that the 运行日志 switch drives, and the level order a viewer uses
+// to filter what it shows.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +20,19 @@ describe("logger line format", () => {
     const logger = createLogger({ sink: (line) => lines.push(line), now: () => FIXED_TS });
     logger.info("relay listening");
     assert.deepEqual(lines, ["[2026-09-28 14:42:16] [info] relay listening\n"]);
+  });
+
+  it("keeps a caller-supplied ts so a re-published entry persists its occurrence time", () => {
+    // The relay log bridge re-publishes foreign entries through a panel logger;
+    // stamping them with the bus's own now() would shift every bridged line to
+    // the bridging moment. The optional third argument carries the original ts
+    // through to the entry and the persisted line; now() stays the default.
+    const lines = [];
+    const logger = createLogger({ sink: (line) => lines.push(line), now: () => FIXED_TS + 60_000 });
+    logger.log("warn", "relay listening", FIXED_TS);
+    const [entry] = logger.getHistory();
+    assert.equal(entry.ts, FIXED_TS, "the entry keeps the caller's ts, not now()");
+    assert.deepEqual(lines, ["[2026-09-28 14:42:16] [warn] relay listening\n"], "the persisted line is stamped from the caller's ts");
   });
 
   it("keeps the level out of the message text — it is carried by the field alone", () => {
