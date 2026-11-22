@@ -441,6 +441,9 @@ async function api(method, path, body, signal) {
   // 子 tab 高亮/显隐的首帧前同步（实现在 initSettingsView）。与页题同理：真正的激活
   // 排在首帧之后，离开设置时旧格的 .active 还留着，不同步会让旧高亮先亮一帧。
   let syncSettingsSubTabUi = () => {};
+  // 设置页回填（实现在 initSettingsView）：模块层的停靠期触发器按视图调它，
+  // 与上面两个进/出钩子同一交接法。
+  let loadSettingsState = () => {};
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -559,10 +562,47 @@ async function api(method, path, body, signal) {
       resumeTerminalDataStream();
       return;
     }
+    // 停靠页（设置/渠道）同拍补拉：两页只在切入时取数，停靠期间收不到任何信号，
+    // 去抖与守卫集中在 refreshDockedView（见下）。
+    if (currentView === "settings" || currentView === "store") {
+      refreshDockedView();
+      return;
+    }
     if (!boardVisible()) return;
     refreshAgents();
     refreshModelStability();
   });
+
+  // 停靠页数据回灌：设置页与渠道页都只在切入时拉取数据，窗口 B 保存设置或增删渠道后，
+  // 停靠在这两页的窗口 A 收不到任何信号——开关选中态、说明句、渠道行与计数停在旧值，
+  // 重进该页才恢复（上面那个处理器补刷的是 stats/terminal/board，这两页是缺口）。
+  // 回前台（变可见或 focus）按当前视图补拉一次；写路径已各自带守卫，这里只补读面：
+  // 设置回灌有逐键 settingsSaving 守卫与数字输入焦点守卫；渠道刷新走串行链，拖拽重排
+  // 与弹窗开态各跳过本轮。不做轮询（用户未批），不做服务端推送。
+  let dockedRefreshAt = 0;
+  let dockedRefreshView = null;
+  function refreshDockedView() {
+    if (currentView !== "settings" && currentView !== "store") return;
+    // visibilitychange 与 focus 常同拍连发（切回标签页两拍前后脚），同一视图 2 秒内
+    // 只拉一次，免得双信号各发一轮请求。
+    const now = Date.now();
+    if (dockedRefreshView === currentView && now - dockedRefreshAt < 2000) return;
+    dockedRefreshAt = now;
+    dockedRefreshView = currentView;
+    if (currentView === "settings") {
+      loadSettingsState();
+      return;
+    }
+    // 拖拽重排进行中：渠道列表整批重建会换掉全部行元素，正在拖的那行就断了；弹窗
+    // 开态一并跳过（全部弹窗统一走 .modal-overlay.show，无需另立登记表）——人在弹窗
+    // 里办事，背后的列表不重排。两守卫都只弃本轮，下一拍信号（再切一次前台）照常补。
+    if (storeDragId) return;
+    if (document.querySelector(".modal-overlay.show")) return;
+    refreshStoreState();
+  }
+  // focus 与变可见是同一场景的两个信号：窗口间点击只发 focus，标签页切换两拍连发。
+  // 分发与去抖共用上面那一个口。
+  window.addEventListener("focus", refreshDockedView);
 
   // relay 状态 → 顶栏与侧栏的呈现。抽成纯函数是为了这段判断能在测试里真跑一遍，
   // 而不是只对源码做正则断言。
@@ -5706,7 +5746,9 @@ async function api(method, path, body, signal) {
       return loadSettingsState();
     };
 
-    async function loadSettingsState() {
+    // 赋值给模块层同名占位（见 visibilitychange 处理器上方）：停靠期触发器按视图
+    // 调它；函数体内引用照旧走闭包，语义与原声明版一致。
+    loadSettingsState = async function () {
       const gen = ++settingsLoadGen;
       try {
         const d = await api("GET", "/api/settings");
@@ -5717,7 +5759,9 @@ async function api(method, path, body, signal) {
         }
         if (!settingsSaving.keepAliveRetries && d.keepAlive) {
           keepAliveMaxRetries = clampKeepAliveRetries(d.keepAlive.maxRetries ?? keepAliveMaxRetries);
-          if (keepAliveRetriesInput) keepAliveRetriesInput.value = String(keepAliveMaxRetries);
+          // 数字输入焦点守卫：回灌是异步落地的，用户可能已点进框里敲到一半，此时赋值
+          // 会把半截数字盖掉；值模型照常更新，只跳过这个框的回显，失焦后下一轮回灌跟上。
+          if (keepAliveRetriesInput && document.activeElement !== keepAliveRetriesInput) keepAliveRetriesInput.value = String(keepAliveMaxRetries);
         }
         if (!settingsSaving.followAgent && followAgentToggle && d.settings && typeof d.settings.followAgent === "boolean") {
           followAgentToggle.checked = d.settings.followAgent;
@@ -5771,7 +5815,8 @@ async function api(method, path, body, signal) {
           const fromApi = d.sparkWindowPoints ?? d.settings?.sparkWindowPoints;
           sparkWindowPoints = clampSparkWindow(fromApi ?? sparkWindowPoints);
           resetAgentRenderFingerprints(); // B1：视窗宽度变了，卡片须重渲
-          if (sparkWindowInput) sparkWindowInput.value = String(sparkWindowPoints);
+          // 焦点守卫同 keepAliveRetriesInput：只跳过输入框回显，值模型与卡片重渲照常。
+          if (sparkWindowInput && document.activeElement !== sparkWindowInput) sparkWindowInput.value = String(sparkWindowPoints);
           Object.values(historyBuffers).forEach(pruneSparkBuffer);
         }
         // 档位接管总开关：正在保存的那次切换不被轮询回灌盖回。
