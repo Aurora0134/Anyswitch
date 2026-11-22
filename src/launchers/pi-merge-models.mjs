@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
+import { contentHash, atomicWriteFile, pruneBackups, withFileLock, LockTimeoutError } from "../store/atomic-write.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
@@ -161,30 +161,49 @@ export function readModelsJson(filePath) {
   }
 }
 
-export function writeModelsJsonWithBackup(filePath, data) {
+// The unchanged-check → backup → write sequence runs inside the cross-process
+// file lock (atomic-write.mjs withFileLock) keyed on models.json — the same
+// lock the launch-time retag/restore below take. A sync and a launcher's
+// per-launch rewrite can run at once, so the check-and-write must not
+// interleave with their read-modify-write. A lock timeout fails the round
+// closed ({ok:false}, nothing written) — the next store change retries.
+export function writeModelsJsonWithBackup(filePath, data, { lockWaitMs } = {}) {
   const dir = dirname(filePath);
   mkdirSync(dir, { recursive: true });
 
-  const text = JSON.stringify(data, null, 2) + "\n";
-  const hash = contentHash(text);
+  try {
+    return withFileLock(
+      filePath,
+      () => {
+        const text = JSON.stringify(data, null, 2) + "\n";
+        const hash = contentHash(text);
 
-  if (existsSync(filePath)) {
-    const existing = readFileSync(filePath, "utf8");
-    if (contentHash(existing) === hash) return { ok: true, unchanged: true };
+        if (existsSync(filePath)) {
+          const existing = readFileSync(filePath, "utf8");
+          if (contentHash(existing) === hash) return { ok: true, unchanged: true };
+        }
+
+        let backupPath;
+        if (existsSync(filePath)) {
+          backupPath = join(dir, `models.backup.${timestamp()}.json`);
+          copyFileSync(filePath, backupPath);
+        }
+
+        atomicWriteFile(filePath, text);
+        // Trim to the newest 5 backups. The prefix is exactly "models.backup." so
+        // pi's own models-store.backup.* files in the same directory are never
+        // touched (a loose "models.backup"-style match would risk catching them).
+        pruneBackups(dir, "models.backup.");
+        return { ok: true, unchanged: false, backupPath };
+      },
+      lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },
+    );
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      return { ok: false, unchanged: true, reason: error.message };
+    }
+    throw error;
   }
-
-  let backupPath;
-  if (existsSync(filePath)) {
-    backupPath = join(dir, `models.backup.${timestamp()}.json`);
-    copyFileSync(filePath, backupPath);
-  }
-
-  atomicWriteFile(filePath, text);
-  // Trim to the newest 5 backups. The prefix is exactly "models.backup." so
-  // pi's own models-store.backup.* files in the same directory are never
-  // touched (a loose "models.backup"-style match would risk catching them).
-  pruneBackups(dir, "models.backup.");
-  return { ok: true, unchanged: false, backupPath };
 }
 
 // A managed entry is recognized by the double marker mergeModelsJson writes:
@@ -206,19 +225,28 @@ function writeModelsJsonAtomic(modelsPath, config) {
 // Retag the managed providers' auth pair with this launch's values right before
 // pi starts: the static on-disk values (DIRECT_INSTANCE_ID) keep direct
 // launches crash-free, while a launcher run still gets its per-instance tag
-// onto the wire. Fail-soft — a tagging problem must never stop a launch.
-export function tagManagedProvidersForLaunch(modelsPath, { token, instanceId }) {
+// onto the wire. The read-modify-write runs inside the models.json file lock —
+// the same lock the sync writer takes — so a concurrent sync can no longer land
+// between the read and the write and be overwritten by this stale view.
+// Fail-soft — a tagging problem (lock timeout included) must never stop a launch.
+export function tagManagedProvidersForLaunch(modelsPath, { token, instanceId }, { lockWaitMs } = {}) {
   try {
-    const config = readModelsJson(modelsPath);
-    const tagged = [];
-    for (const [key, provider] of Object.entries(config.providers ?? {})) {
-      if (!isManagedEntry(key, provider)) continue;
-      provider.apiKey = token;
-      provider.headers["x-agent-instance"] = instanceId;
-      tagged.push(key);
-    }
-    if (tagged.length > 0) writeModelsJsonAtomic(modelsPath, config);
-    return { ok: true, tagged };
+    return withFileLock(
+      modelsPath,
+      () => {
+        const config = readModelsJson(modelsPath);
+        const tagged = [];
+        for (const [key, provider] of Object.entries(config.providers ?? {})) {
+          if (!isManagedEntry(key, provider)) continue;
+          provider.apiKey = token;
+          provider.headers["x-agent-instance"] = instanceId;
+          tagged.push(key);
+        }
+        if (tagged.length > 0) writeModelsJsonAtomic(modelsPath, config);
+        return { ok: true, tagged };
+      },
+      lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },
+    );
   } catch (error) {
     return { ok: false, tagged: [], reason: error.message };
   }
@@ -228,22 +256,30 @@ export function tagManagedProvidersForLaunch(modelsPath, { token, instanceId }) 
 // carrying THIS launch's values: a concurrent launcher may have retagged the
 // same entry with its own instance id, and that newer tag must win (last one
 // out restores; the attribution overlap under concurrency is a precision
-// issue, not a correctness one).
-export function restoreManagedProvidersAfterLaunch(modelsPath, { token, instanceId }) {
+// issue, not a correctness one). Same models.json file lock as the retag and
+// the sync writer: without it a sync landing between this read and write would
+// be overwritten by the stale view, resurrecting whatever the sync removed.
+export function restoreManagedProvidersAfterLaunch(modelsPath, { token, instanceId }, { lockWaitMs } = {}) {
   try {
-    const config = readModelsJson(modelsPath);
-    const restored = [];
-    for (const [key, provider] of Object.entries(config.providers ?? {})) {
-      if (!isManagedEntry(key, provider)) continue;
-      if (provider.headers["x-agent-instance"] !== instanceId || provider.apiKey !== token) continue;
-      // The token this launch wrote equals the static value sync writes (same
-      // loadOrGenerateToken source), so only the instance header needs
-      // restoring.
-      provider.headers["x-agent-instance"] = DIRECT_INSTANCE_ID;
-      restored.push(key);
-    }
-    if (restored.length > 0) writeModelsJsonAtomic(modelsPath, config);
-    return { ok: true, restored };
+    return withFileLock(
+      modelsPath,
+      () => {
+        const config = readModelsJson(modelsPath);
+        const restored = [];
+        for (const [key, provider] of Object.entries(config.providers ?? {})) {
+          if (!isManagedEntry(key, provider)) continue;
+          if (provider.headers["x-agent-instance"] !== instanceId || provider.apiKey !== token) continue;
+          // The token this launch wrote equals the static value sync writes (same
+          // loadOrGenerateToken source), so only the instance header needs
+          // restoring.
+          provider.headers["x-agent-instance"] = DIRECT_INSTANCE_ID;
+          restored.push(key);
+        }
+        if (restored.length > 0) writeModelsJsonAtomic(modelsPath, config);
+        return { ok: true, restored };
+      },
+      lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },
+    );
   } catch (error) {
     return { ok: false, restored: [], reason: error.message };
   }
