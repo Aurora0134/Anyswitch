@@ -93,10 +93,14 @@ export function probePanelAppInfo(port = 47820, fetchFn = fetch, timers = {}) {
 export function defaultSpawnPanelHost({ installRoot, appRoot, appDir, nodePath, env = process.env, spawnFn = spawnDefault }) {
   const root = installRoot ?? resolveInstallRoot({ appRoot: appRoot ?? appDir, env });
   if (!root) throw new Error("packaged install root unavailable");
-  const launcher = join(root, "anyswitch.cmd");
-  const child = spawnFn("cmd.exe", ["/d", "/s", "/c", "start \"\" \"" + launcher + "\" src\\panel\\panel-host.mjs"], {
+  // 直拉目标版本的 node 跑面板宿主真身（同 panel-launcher/panel-host-restart-helper
+  // 形态）：旧的 cmd /s /c "start \"\" ..." 单串形态在 Windows 上引号被转义后必挂死。
+  const hostAppRoot = appRoot ?? appDir ?? env.ANYSWITCH_APP_ROOT ?? env.ANYSWITCH_APP_DIR;
+  if (!hostAppRoot) throw new Error("packaged app root unavailable");
+  const nodeBin = nodePath ?? env.ANYSWITCH_NODE_PATH ?? null;
+  const child = spawnFn(nodeBin ?? process.execPath, [join(hostAppRoot, "src", "panel", "panel-host.mjs")], {
     detached: true, windowsHide: true, stdio: "ignore", shell: false,
-    env: { ...env, ANYSWITCH_INSTALL_ROOT: root, ...(appRoot ? { ANYSWITCH_APP_ROOT: appRoot } : {}), ...(nodePath ? { PATH: [dirname(nodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") } : {}) },
+    env: { ...env, ANYSWITCH_INSTALL_ROOT: root, ...(hostAppRoot ? { ANYSWITCH_APP_ROOT: hostAppRoot } : {}), ...(nodeBin ? { ANYSWITCH_NODE_PATH: nodeBin, PATH: [dirname(nodeBin), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") } : {}) },
   });
   child.unref?.();
   return child.pid;
@@ -149,6 +153,14 @@ export async function runSelfUpdate({
   const names = assetNames(targetVersion), stageDir = join(installRoot, "staging", runId);
   const archivePath = join(stageDir, names.zip), manifestPath = join(stageDir, names.manifest), signaturePath = join(stageDir, names.signature);
   let watchdogStopped = false;
+  // 收尾清理一律 best-effort：删不动（EPERM/EBUSY 占用）不翻 outcome，残留路径记进 result。
+  const bestEffortRm = (paths) => {
+    const residue = [];
+    for (const path of paths) {
+      try { io.rmSync(path, { recursive: true, force: true }); } catch { residue.push(path); }
+    }
+    return residue;
+  };
   try {
     if (run.step !== "apply") {
       setPhase("staging");
@@ -184,20 +196,27 @@ export async function runSelfUpdate({
     const archive = io.readFileSync(archivePath);
     const digest = "sha256:" + createHash("sha256").update(archive).digest("hex");
     if ((release.assets.zip.digest != null && digest !== release.assets.zip.digest) || archive.length !== manifest.size || digest !== "sha256:" + manifest.sha256) throw new Error("staged release digest mismatch");
-    const stageRoot = join(installRoot, "staging");
-    io.mkdirSync(stageRoot, { recursive: true });
-    const extractRoot = io.mkdtempSync(join(stageRoot, runId + "-"));
-    let payload;
-    try {
-      payload = extractReleaseArchive(archive, extractRoot);
-      if (payload.version !== targetVersion) throw new Error("package version mismatch");
-      const targetDir = join(installRoot, "versions", targetVersion);
-      if (io.existsSync(targetDir)) throw new Error("version already exists");
-      io.mkdirSync(dirname(targetDir), { recursive: true });
-      io.renameSync(extractRoot, targetDir);
-    } catch (error) {
-      io.rmSync(extractRoot, { recursive: true, force: true });
-      throw error;
+    const targetDir = join(installRoot, "versions", targetVersion);
+    if (io.existsSync(targetDir)) {
+      // 指针感知断点续传：上一尝试已把目标目录落成（app+runtime 齐全）且 current.json
+      // 已指向目标版，随后被瞬时异常打断收场——同版本重试跳过安装直接进健康验证；
+      // 目录不完整或指针未指向目标仍按冲突硬抛。
+      let pointerVersion = null;
+      try { pointerVersion = parseCurrentPointer(io.readFileSync(currentPath(installRoot), "utf8"))?.version ?? null; } catch { pointerVersion = null; }
+      if (pointerVersion !== targetVersion || !io.existsSync(join(targetDir, "app")) || !io.existsSync(join(targetDir, "runtime"))) throw new Error("version already exists");
+    } else {
+      const stageRoot = join(installRoot, "staging");
+      io.mkdirSync(stageRoot, { recursive: true });
+      const extractRoot = io.mkdtempSync(join(stageRoot, runId + "-"));
+      try {
+        const payload = extractReleaseArchive(archive, extractRoot);
+        if (payload.version !== targetVersion) throw new Error("package version mismatch");
+        io.mkdirSync(dirname(targetDir), { recursive: true });
+        io.renameSync(extractRoot, targetDir);
+      } catch (error) {
+        io.rmSync(extractRoot, { recursive: true, force: true });
+        throw error;
+      }
     }
 
     const pointerFile = currentPath(installRoot);
@@ -226,34 +245,43 @@ export async function runSelfUpdate({
       if (identity.version === targetVersion) { panelDown = true; targetPanelAlreadyUp = true; break; }
       await delay(pollMs);
     }
-    if (panelDown && !targetPanelAlreadyUp) {
+    const maxPanelSpawnAttempts = Math.max(1, Math.floor(panelUpTimeoutMs / pollMs));
+    let panelSpawnAttempts = 0;
+    const spawnTargetPanel = () => {
+      if (panelSpawnAttempts >= maxPanelSpawnAttempts) return;
+      panelSpawnAttempts += 1;
       try { spawnPanelHostFn({ installRoot, appRoot: targetAppRoot, appDir: targetAppRoot, nodePath: targetNodePath, env: targetEnv }); } catch { /* health probe reports failure */ }
-    }
+    };
+    if (panelDown && !targetPanelAlreadyUp) spawnTargetPanel();
     let targetPanelHealthy = targetPanelAlreadyUp;
     const upDeadline = nowMs() + panelUpTimeoutMs;
     while (!targetPanelHealthy && nowMs() < upDeadline) {
       const identity = await probePanelFn(panelPort);
       targetPanelHealthy = identity?.version === targetVersion;
-      if (!targetPanelHealthy) await delay(pollMs);
+      if (!targetPanelHealthy) {
+        // 目标 panel-host 可能撞 EADDRINUSE 静默退场：上线窗内按探测节拍有界重拉。
+        if (panelDown) spawnTargetPanel();
+        await delay(pollMs);
+      }
     }
     if (targetPanelHealthy && relay?.ok === true) {
       if (watchdogStopped) await spawnWatchdogFn(targetEnv).catch(() => {});
-      io.rmSync(stageDir, { recursive: true, force: true });
-      return finish({ outcome: "updated", message: "已更新到 " + targetVersion, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion, relayRestartFailed: false });
+      const residue = bestEffortRm([stageDir]);
+      return finish({ outcome: "updated", message: "已更新到 " + targetVersion, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion, relayRestartFailed: false, ...(residue.length ? { residue } : {}) });
     }
     if (previous && previous.version !== targetVersion) {
       writePointer(pointerFile, previous.version);
       const previousAppRoot = join(installRoot, "versions", previous.version, "app");
       const previousNodePath = join(installRoot, "versions", previous.version, "runtime", "node.exe");
       const previousEnv = { ...env, ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_ROOT: previousAppRoot, ANYSWITCH_NODE_PATH: previousNodePath, PATH: [dirname(previousNodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") };
-      await restartRelayFn(dataRoot, previousEnv).catch(() => ({ ok: false }));
-      try { spawnPanelHostFn({ installRoot, appRoot: previousAppRoot, appDir: previousAppRoot, nodePath: previousNodePath, env: previousEnv }); } catch { /* best effort */ }
+      const rollbackRelay = await restartRelayFn(dataRoot, previousEnv).catch(() => ({ ok: false }));
+      let panelRelaunchFailed = false;
+      try { spawnPanelHostFn({ installRoot, appRoot: previousAppRoot, appDir: previousAppRoot, nodePath: previousNodePath, env: previousEnv }); } catch { panelRelaunchFailed = true; }
       if (watchdogStopped) await spawnWatchdogFn(previousEnv).catch(() => {});
       // 本轮换装失败：目标目录是本 run 刚落成的（指针已回退、必不指向它），留着
-      // 会让同版本重试永远撞 "version already exists"——删掉，staging 同理。
-      io.rmSync(join(installRoot, "versions", targetVersion), { recursive: true, force: true });
-      io.rmSync(stageDir, { recursive: true, force: true });
-      return finish({ outcome: "rolled_back", message: "新面板未能启动，已恢复到更新前版本", beforeVersion, afterVersion: previous.version, latestVersion: targetVersion });
+      // 会让同版本重试永远撞 "version already exists"——尽力清掉，清不动记 residue。
+      const residue = bestEffortRm([join(installRoot, "versions", targetVersion), stageDir]);
+      return finish({ outcome: "rolled_back", message: "新面板未能启动，已恢复到更新前版本", beforeVersion, afterVersion: previous.version, latestVersion: targetVersion, relayRestartFailed: relay?.ok !== true || rollbackRelay?.ok !== true, ...(panelRelaunchFailed ? { panelRelaunchFailed } : {}), ...(residue.length ? { residue } : {}) });
     }
     io.rmSync(pointerFile, { force: true });
     if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
@@ -265,7 +293,10 @@ export async function runSelfUpdate({
     // 停了的看门狗不能因异常收场而无人拉起（对齐 62e69f9 旧版的 restoreWatchdog）：
     // apply 阶段同步 I/O 异常时面板已换装或已回滚，等面板重启才拉起会留自愈空窗。
     if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
+    // staging 是本 run 的暂存，异常收场尽力清掉；versions/<target> 绝不动——
+    // catch 也可能发生在指针已切新版的邻域。
+    const residue = bestEffortRm([stageDir]);
     const keyUnavailable = error?.message === "release signing key unavailable";
-    return finish({ outcome: "failed", message: keyUnavailable ? "更新验证失败，请稍后重试" : "更新失败，请重新检查更新后重试", detail: error?.message ?? undefined, beforeVersion, latestVersion: targetVersion });
+    return finish({ outcome: "failed", message: keyUnavailable ? "更新验证失败，请稍后重试" : "更新失败，请重新检查更新后重试", detail: error?.message ?? undefined, beforeVersion, latestVersion: targetVersion, ...(residue.length ? { residue } : {}) });
   }
 }

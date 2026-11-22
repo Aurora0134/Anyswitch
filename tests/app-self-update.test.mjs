@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractReleaseArchive } from "../src/ops/update-archive.mjs";
@@ -152,9 +152,13 @@ test("panel probe aborts a stalled request after its real timeout", async () => 
   timeout(); assert.equal(await pending, null); assert.equal(seen.url, "http://127.0.0.1:47820/panel/api/app-info"); assert.equal(seen.signal.aborted, true);
 });
 
-test("default panel replacement dispatches app-relative path via stable root wrapper", () => {
-  let call, detached = false; const pid = defaultSpawnPanelHost({ installRoot: "C:/Tools/Anyswitch", appDir: "C:/Tools/Anyswitch/versions/1.2.3/app", spawnFn: (...args) => { call = args; return { pid: 7, unref() { detached = true; } }; } });
-  assert.equal(pid, 7); assert.equal(call[0], "cmd.exe"); assert.ok(call[1].some((arg) => String(arg).includes("anyswitch.cmd"))); assert.ok(call[1].some((arg) => String(arg).includes("src\\panel\\panel-host.mjs"))); assert.equal(call[2].env.ANYSWITCH_INSTALL_ROOT, "C:/Tools/Anyswitch"); assert.equal(detached, true);
+test("default panel replacement spawns the target node with the app panel entry directly", () => {
+  let call, detached = false; const pid = defaultSpawnPanelHost({ installRoot: "C:/Tools/Anyswitch", appDir: "C:/Tools/Anyswitch/versions/1.2.3/app", env: { PATH: "C:/Windows" }, spawnFn: (...args) => { call = args; return { pid: 7, unref() { detached = true; } }; } });
+  assert.equal(pid, 7); assert.equal(call[0], process.execPath);
+  assert.deepEqual(call[1], [join("C:/Tools/Anyswitch/versions/1.2.3/app", "src", "panel", "panel-host.mjs")]);
+  assert.ok([call[0], ...call[1]].every((arg) => !String(arg).includes('\\"')), "spawn argv 不得含内嵌 \\\"（cmd /s 剥引号后残留的旧形态）");
+  assert.equal(call[2].shell, false); assert.equal(call[2].detached, true);
+  assert.equal(call[2].env.ANYSWITCH_INSTALL_ROOT, "C:/Tools/Anyswitch"); assert.equal(detached, true);
 });
 
 test("existing target version directory is rejected rather than trusted by filename", async () => {
@@ -181,6 +185,126 @@ test("rolled-back activation removes the failed target dir and staging so the sa
     let retryProbes = 0;
     const retry = await runSelfUpdate({ ...s.fns, probePanelFn: async () => ++retryProbes === 1 ? null : { version: "1.2.3" } });
     assert.equal(retry.outcome, "updated");
+  } finally { s.cleanup(); }
+});
+
+test("staging cleanup failure after a healthy swap still reports updated and carries residue", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    const stageDir = join(s.installRoot, "staging", RUN_ID);
+    const io = { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync, rmSync: (path, opts) => { if (String(path) === stageDir) throw Object.assign(new Error("EPERM (injected)"), { code: "EPERM" }); return rmSync(path, opts); } };
+    let probes = 0;
+    const result = await runSelfUpdate({ ...s.fns, io, probePanelFn: async () => ++probes === 1 ? null : { version: "1.2.3" } });
+    assert.equal(result.outcome, "updated", JSON.stringify(result));
+    assert.deepEqual(result.residue, [stageDir]);
+    assert.ok(existsSync(stageDir), "注入 EPERM 后 staging 应真实残留");
+    assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.3" });
+  } finally { s.cleanup(); }
+});
+
+test("rollback cleanup failure keeps rolled_back outcome and reports residue", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
+  try {
+    const targetDir = join(s.installRoot, "versions", "1.2.3"), stageDir = join(s.installRoot, "staging", RUN_ID);
+    const io = { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync, rmSync: (path, opts) => { if ((String(path) === targetDir || String(path) === stageDir) && existsSync(path)) throw Object.assign(new Error("EPERM (injected)"), { code: "EPERM" }); return rmSync(path, opts); } };
+    let probes = 0;
+    const result = await runSelfUpdate({ ...s.fns, io, probePanelFn: async () => ++probes === 1 ? null : { version: "1.2.2" } });
+    assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
+    assert.deepEqual(result.residue, [targetDir, stageDir]);
+    assert.equal(result.relayRestartFailed, false);
+    assert.ok(existsSync(targetDir), "注入 EPERM 后目标目录应真实残留");
+    assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" });
+  } finally { s.cleanup(); }
+});
+
+test("rolled_back result carries relay restart and panel relaunch failure flags", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
+  try {
+    let probes = 0;
+    const result = await runSelfUpdate({ ...s.fns,
+      restartRelayFn: async () => ({ ok: false }),
+      spawnPanelHostFn: () => { throw new Error("spawn refused"); },
+      probePanelFn: async () => { probes += 1; return probes === 1 ? null : { version: "1.2.2" }; } });
+    assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
+    assert.equal(result.relayRestartFailed, true);
+    assert.equal(result.panelRelaunchFailed, true);
+  } finally { s.cleanup(); }
+});
+
+test("apply-stage failure cleans staging in the catch path", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    const stagedManifest = join(s.installRoot, "staging", RUN_ID, f.release.assets[1].name);
+    writeFileSync(stagedManifest, Buffer.concat([readFileSync(stagedManifest), Buffer.from(" ")]));
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    const result = await runSelfUpdate(s.fns);
+    assert.equal(result.outcome, "failed");
+    assert.match(result.detail, /staged release metadata changed/);
+    assert.equal(existsSync(join(s.installRoot, "staging", RUN_ID)), false, "异常收场应尽力清掉本 run 的 staging");
+  } finally { s.cleanup(); }
+});
+
+test("same-version retry resumes to health verification when the pointer already switched and the target dir is complete", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    // 模拟上一尝试：目标目录已落成、指针已切新版，随后被瞬时异常打断收场。
+    const target = join(s.installRoot, "versions", "1.2.3");
+    mkdirSync(join(target, "app"), { recursive: true }); mkdirSync(join(target, "runtime"), { recursive: true });
+    writeFileSync(join(target, "app", "package.json"), JSON.stringify({ version: "1.2.3" }));
+    writeFileSync(join(target, "runtime", "node.exe"), "node");
+    writeFileSync(join(s.installRoot, "current.json"), JSON.stringify({ schema: 1, version: "1.2.3" }));
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    let probes = 0;
+    const result = await runSelfUpdate({ ...s.fns, probePanelFn: async () => ++probes === 1 ? null : { version: "1.2.3" } });
+    assert.equal(result.outcome, "updated", JSON.stringify(result));
+    assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.3" });
+  } finally { s.cleanup(); }
+});
+
+test("same-version retry still rejects an incomplete target dir even when the pointer switched", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    const target = join(s.installRoot, "versions", "1.2.3");
+    mkdirSync(join(target, "app"), { recursive: true });
+    writeFileSync(join(target, "app", "package.json"), JSON.stringify({ version: "1.2.3" }));
+    writeFileSync(join(s.installRoot, "current.json"), JSON.stringify({ schema: 1, version: "1.2.3" }));
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    const result = await runSelfUpdate(s.fns);
+    assert.equal(result.outcome, "failed");
+    assert.match(result.detail, /version already exists/);
+  } finally { s.cleanup(); }
+});
+
+test("target panel launch retries within the up window until the new identity answers", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
+  try {
+    let probes = 0, spawns = 0;
+    const result = await runSelfUpdate({ ...s.fns, panelUpTimeoutMs: 2000, pollMs: 100,
+      spawnPanelHostFn: () => { spawns += 1; return 55; },
+      probePanelFn: async () => { probes += 1; return probes <= 3 ? null : { version: "1.2.3" }; } });
+    assert.equal(result.outcome, "updated", JSON.stringify(result));
+    assert.equal(spawns, 3, "探测持续为空时应按节拍重拉，直到新身份应答");
+  } finally { s.cleanup(); }
+});
+
+test("target panel launch retries are capped inside the up window", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
+  try {
+    let spawns = 0;
+    const result = await runSelfUpdate({ ...s.fns, panelUpTimeoutMs: 500, pollMs: 100,
+      spawnPanelHostFn: (request) => { if (String(request.appRoot).includes(join("versions", "1.2.3"))) spawns += 1; return 55; },
+      probePanelFn: async () => null });
+    assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
+    assert.equal(spawns, Math.max(1, Math.floor(500 / 100)), "重拉次数应有界且不超 UP 窗（回滚拉旧面板不计入）");
   } finally { s.cleanup(); }
 });
 
