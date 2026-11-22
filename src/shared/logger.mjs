@@ -13,7 +13,11 @@
 //
 //   * A persisted line carries a wall-clock stamp. The on-disk log gets read
 //     next to a user's report of when something broke, and a line with no time
-//     on it cannot be lined up against that report at all.
+//     on it cannot be lined up against that report at all. The stamp is the
+//     bus's own now(), except when the caller re-publishes an entry from a
+//     foreign bus (the panel-host bridging relay frames): log()'s optional
+//     third argument then carries the original occurrence time through, so a
+//     re-published line still lines up with the events it describes.
 //   * The level lives in exactly ONE place — the entry's `level` field. The
 //     message text is bare prose. An earlier shape kept the level in both, which
 //     is how a line reading `[info] ... WARN ...` became possible: the field and
@@ -97,11 +101,13 @@ export function createLogger(options = {}) {
     return `[${formatLogStamp(ts)}] [${level}] ${text}\n`;
   }
 
-  function log(level, message) {
+  function log(level, message, ts) {
     if (!isEnabled()) return;
-    const ts = now();
-    sink(format(level, message, ts));
-    const entry = { ts, level, message: typeof message === "string" ? message : String(message) };
+    // A re-published entry (the relay log bridge) passes the frame's original
+    // ts so the occurrence time survives; everything else stamps now().
+    const entryTs = typeof ts === "number" ? ts : now();
+    sink(format(level, message, entryTs));
+    const entry = { ts: entryTs, level, message: typeof message === "string" ? message : String(message) };
     ring[head] = entry;
     head = (head + 1) % capacity;
     if (size < capacity) size++;

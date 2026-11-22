@@ -782,14 +782,21 @@ function normalizeTerminalHostStatus(data) {
 //
 // 首连与重连不对称（审计 A3）：首连用 ?live=1 不拿历史——面板进程刚起时把中继侧
 // 500 条存量倒灌进本进程总线，只会与各自落盘文件里的旧账重复。首连之后的重连
-// 改要全量历史并按 (ts, level, message) 去重：中继重启窗口里的启动段（listening、
-// 初始同步、terminal host 结果）只存在于那次历史里，不要就永远缺这一段；而中继
-// 没重启、只是连接断了一下时，重放的全是桥过的旧条目，去重簿整条滤掉，界面无感。
+// 改要全量历史，重放行过两道闸。第一道是出世水位线（首连成功那一刻的
+// Date.now()）：早于它的行是本面板进程出生前就躺在中继环里的存量，判重簿只认
+// 本进程桥接过的行，分不清它们与断线窗口的新行，不滤的话面板「清空」只清自己
+// 的环，下一次重连时这批旧账会整批涌回。第二道按 (ts, level, message) 查判重簿
+// 滤掉已桥过的行；断窗新行与中继重启窗口的启动段（listening、初始同步、
+// terminal host 结果）晚于水位线、不在簿里，照常补回。桥接透传帧内 ts：补回段与
+// 断窗行带真实发生时刻进环、SSE 帧与落盘行，跨面板宿主重启后同一条中继行时间
+// 戳不漂移，浏览器端 (ts, level, message) 去重键保持稳定。
 export function startRelayLogBridge(logger, relayRoot) {
   let stopped = false;
   let controller = null;
   let retryTimer = null;
   let hasConnected = false;
+  // 出世水位线：首连成功那一刻才取值，此后的重连不重置（语义见函数头注释）。
+  let birthWatermark = Number.POSITIVE_INFINITY;
   // 去重簿覆盖中继侧 500 条环形缓冲的一轮全量重放，留一倍余量；Set 按插入序
   // 迭代，超容淘汰最旧一枚。同键判重 = 同一条日志（时间戳到毫秒＋级别＋全文）。
   const BRIDGED_KEY_CAP = 1000;
@@ -828,9 +835,14 @@ export function startRelayLogBridge(logger, relayRoot) {
         scheduleRetry();
         return;
       }
-      hasConnected = true;
+      if (!hasConnected) {
+        birthWatermark = Date.now();
+        hasConnected = true;
+      }
       // Re-publish relay entries through this process's bus: log() writes to
-      // this sink AND fans out to the panel's SSE subscribers.
+      // this sink AND fans out to the panel's SSE subscribers. The frame's own
+      // ts rides along (third argument) so every outlet carries the occurrence
+      // time, not the bridging moment.
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -847,6 +859,10 @@ export function startRelayLogBridge(logger, relayRoot) {
           try {
             const entry = JSON.parse(line.slice(5).trim());
             if (entry && entry.level && entry.message) {
+              // 出世水位线在判重簿之前：早于首连成功一刻的行是本面板进程订阅前
+              // 的存量，重放时整批滤掉，不因重连复活。恰等于水位线的行放行——
+              // live 送达过的行已在簿里，由簿兜底。
+              if (typeof entry.ts === "number" && entry.ts < birthWatermark) continue;
               // 重连重放里已经桥过的条目不再进总线：内容本就收敛，再放行只会让
               // 面板窗口与落盘文件各多一列重复行。
               const key = `${entry.ts}|${entry.level}|${entry.message}`;
@@ -859,7 +875,7 @@ export function startRelayLogBridge(logger, relayRoot) {
               // 面板可能先重启、对面还是旧进程，旧格式的消息自带 "[level] " 前缀；
               // 原样透传会让窗口里出现两个级别标签，所以这里剥掉一个前导级别标记。
               const message = entry.message.replace(/^\[(info|warn|error)\]\s?/, "");
-              logger.log(entry.level, message);
+              logger.log(entry.level, message, entry.ts);
             }
           } catch {
             // Malformed frame: skip it, never kill the bridge.
