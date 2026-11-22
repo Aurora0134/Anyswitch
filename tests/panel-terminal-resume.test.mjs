@@ -471,7 +471,7 @@ describe("内切切换会话（terminal sessions switch）", () => {
       restartTerminalSessionFn: async (id, body, options) => {
         calls.restart.push({ id, body, options });
         return restarted === undefined
-          ? { status: 200, body: { id, status: "running", pid: 99, label: body.label, agentId: body.agentId, agentName: body.agentName, resume: body.resume } }
+          ? { status: 200, body: { id, status: "running", pid: 99, cwd: body.cwd, label: body.label, agentId: body.agentId, agentName: body.agentName, resume: body.resume } }
           : restarted;
       },
       scanAgentConversationsFn: scanAgentConversations ?? (async () => []),

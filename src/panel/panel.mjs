@@ -1810,7 +1810,7 @@ export function createPanelRouter({
   // 或已失效 → 生命周期重叠兜底扫描；还判不出 → null（维持现状空白复活）。
   // 扫描本身失败时：有绑定按绑定用（它先前是对的，扫描失败多半是暂时的），
   // 没绑定就是不接。
-  async function resolveResumeArgsForRevive(session) {
+  async function resolveBindingForRevive(session) {
     if (!RESUMABLE_AGENTS.has(session.agentId)) return null;
     const store = terminalBindings();
     const identity = { agentId: session.agentId, cwd: session.cwd };
@@ -1824,42 +1824,40 @@ export function createPanelRouter({
     if (existing) {
       const staleIdentity = existing.agentId !== session.agentId || !sameCwd(existing.cwd, session.cwd);
       if (!staleIdentity) {
-        if (metas === null) return resumeArgsFor(session.agentId, existing);
+        if (metas === null) return { existing, binding: existing };
         const found = metas.find((meta) => meta && meta.id === existing.conversationId);
         if (found) {
           const refreshed = { ...existing, file: typeof found.file === "string" && found.file !== "" ? found.file : existing.file };
-          if (refreshed.file !== existing.file) store.set(session.id, refreshed);
-          return resumeArgsFor(session.agentId, refreshed);
+          return { existing, binding: refreshed };
         }
         // 绑定的存档已从盘上消失：绑定失效，落兜底。
       }
-      store.delete(session.id);
     }
-    if (metas === null) return null;
+    if (metas === null) return { existing, binding: null };
     const picked = pickConversationMeta(metas, {
       ...identity,
       createdAt: session.createdAt ?? null,
       lastActiveAt: session.lastActiveAt ?? null,
       edition: sessionEditionForBinding(session),
     });
-    if (!picked) return null;
-    const binding = store.set(session.id, bindingFromMeta(picked, identity, "scanned"));
-    return resumeArgsFor(session.agentId, binding);
+    return { existing, binding: picked ? bindingFromMeta(picked, identity, "scanned") : null };
   }
 
   // 复活成功后的自愈换绑：有的 agent resume 会另起新对话存档（绑定里的旧 id
   // 从此不再前进）。延迟一拍重扫，复活时刻之后「唯一活跃」的存档若是新 id
   // 就换绑；零条（还没落笔）或多条（同目录另有对话）都维持原绑定。
   function scheduleBindingRefresh(session, sinceMs) {
+    const generation = terminalBindingGenerations.get(session.id) ?? 0;
     bindingRefreshScheduleFn(() => {
       Promise.resolve()
         .then(() => scanAgentConversationsShared(session.agentId))
         .then((metas) => {
+          if ((terminalBindingGenerations.get(session.id) ?? 0) !== generation) return;
           const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs, edition: sessionEditionForBinding(session) });
           if (!picked) return;
           const store = terminalBindings();
           const current = store.get(session.id);
-          if (current && current.conversationId !== picked.id) {
+          if (current?.agentId === session.agentId && sameCwd(current.cwd, session.cwd) && current.conversationId !== picked.id) {
             store.set(session.id, bindingFromMeta(picked, { agentId: session.agentId, cwd: session.cwd }, current.source));
           }
         })
@@ -2125,6 +2123,18 @@ export function createPanelRouter({
       slog("fail", { id, reason: "terminal_host_unavailable", stage: "restart" });
       return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     }
+    if (restarted.status !== 200) {
+      slog("fail", { id, reason: "restart-failed", status: restarted.status });
+      return sendJson(res, restarted.status || 500, restarted.body ?? { ok: false });
+    }
+    const switched = restarted.body;
+    const resumeMatches = resume === null ? switched?.resume == null
+      : switched?.resume?.endpoint === endpoint && switched.resume.id === conversationId;
+    if (switched?.id !== id || switched.status !== "running" || switched.agentId !== launch.agentId
+        || !sameCwd(switched.cwd, launch.cwd) || !resumeMatches) {
+      slog("fail", { id, reason: "restart-identity-mismatch" });
+      return sendJson(res, 409, { ok: false, error: "terminal_session_conflict" });
+    }
     // 每次切换都开启新代：在飞的旧代扫描不得把上一段身份绑回来。全新内切
     // 须清旧对话绑定，否则复活会接回旧会话；历史续接把绑定改写到目标身份
     // ——绑定语义是「这条终端现在实际在跑的对话」，切换落地后它就是目标会
@@ -2248,6 +2258,7 @@ export function createPanelRouter({
     if (!session) return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
     let body = {};
     let resumeArgs = null;
+    let bindingPlan = null;
     if (session.agentId) {
       if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, session.agentId)) {
         return sendJson(res, 400, { ok: false, error: "unknown_agent" });
@@ -2276,10 +2287,11 @@ export function createPanelRouter({
       // resume 接线：绑定/兜底扫描判得出原对话就追加续会参数，判不出维持
       // 空白复活——接线失败绝不挡复活本身（catch 回落 null）。只在控制面
       // 进程接（绑定库单写入方，同列表捕获的门）。
-      resumeArgs = hostKind === "panel-host" ? await resolveResumeArgsForRevive(session).catch(() => null) : null;
+      bindingPlan = hostKind === "panel-host" ? await resolveBindingForRevive(session).catch(() => null) : null;
       // 已确认要续接的对话同时写回宿主身份：进程生日随复活前移后，
       // 兜底行若只看无 resume 会把旧对话误显示成「新会话」。
-      const binding = resumeArgs ? terminalBindings().get(session.id) : null;
+      const binding = bindingPlan?.binding;
+      resumeArgs = resumeArgsFor(session.agentId, binding);
       // qoder 双区域版：续接目标落在哪个根（或这条会话本是哪个区域版 CLI 起
       // 的）决定重组装的 launch 用哪个执行体——拿 qodercli 续 qoderclicn 根下
       // 的存档只会续空，反之亦然；判不出归属则维持组装层解析的原样。
@@ -2287,21 +2299,42 @@ export function createPanelRouter({
         const edition = (binding && qoderEditionForPath(binding.file)) || qoderSessionEdition(session);
         launch = retargetQoderLaunchEdition(launch, edition);
       }
-      const resumeIdentity = binding && binding.agentId === session.agentId && sameCwd(binding.cwd, session.cwd)
+      const resumeIdentity = resumeArgs && binding.agentId === session.agentId && sameCwd(binding.cwd, session.cwd)
         ? { endpoint: session.agentId, id: binding.conversationId } : null;
       body = {
         launch: resumeArgs ? { ...launch.launch, args: [...launch.launch.args, ...resumeArgs] } : launch.launch,
         cwd: launch.cwd,
         env: launch.env,
-        ...(resumeIdentity ? { resume: resumeIdentity } : {}),
+        ...(resumeIdentity ? { resume: resumeIdentity } : { clearResume: true }),
       };
     }
     const reviveStartedAt = Date.now();
     const restarted = await restartTerminalSessionFn(id, body, { token });
     if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    if (restarted.status !== 200) return sendJson(res, restarted.status || 500, restarted.body ?? { ok: false });
+    const revived = restarted.body;
+    const resumeMatches = body.resume ? revived?.resume?.endpoint === body.resume.endpoint && revived.resume.id === body.resume.id
+      : !body.clearResume || revived?.resume == null;
+    if (revived?.id !== id || revived.status !== "running" || (body.cwd && !sameCwd(revived.cwd, body.cwd))
+        || (session.agentId && revived.agentId !== session.agentId) || !resumeMatches) {
+      return sendJson(res, 409, { ok: false, error: "terminal_session_conflict" });
+    }
+    terminalBindingGenerations.set(session.id, (terminalBindingGenerations.get(session.id) ?? 0) + 1);
+    if (bindingPlan) {
+      try {
+        const store = terminalBindings();
+        // A concurrent capture may have supplied a newer binding while the host restarted.
+        if (store.get(session.id) === bindingPlan.existing) {
+          if (body.resume && bindingPlan.binding !== bindingPlan.existing) store.set(session.id, bindingPlan.binding);
+          else if (!body.resume && bindingPlan.existing) store.delete(session.id);
+        }
+      } catch {
+        /* A binding write failure does not undo a successful restart. */
+      }
+    }
     // 有的 agent resume 会另起新对话存档：复活落稳后延迟重扫，唯一活跃的新
     // 存档换绑进绑定库；判不出就维持原绑定。
-    if (resumeArgs) scheduleBindingRefresh(session, reviveStartedAt);
+    if (body.resume) scheduleBindingRefresh(revived, reviveStartedAt);
     return sendJson(res, restarted.status || 200, restarted.body ?? {});
   }
 

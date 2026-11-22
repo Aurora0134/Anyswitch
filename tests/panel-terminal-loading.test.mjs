@@ -986,9 +986,9 @@ describe("T13 后台切回：兜底只在前台计时，旧帧挂到重建出字
     assert.ok(hiddenReturn >= 0, "隐藏早退原样保留（既有钉子按这一句定位）");
     const pause = vis.indexOf("pauseTerminalStaleScreenCap()");
     const resume = vis.indexOf("resumeTerminalStaleScreenCap()");
-    const poll = vis.indexOf("pollTerminalSessions()");
+    const recovery = vis.indexOf("resumeTerminalDataStream()");
     assert.ok(pause > 0 && pause < hiddenReturn, "停表排在隐藏早退之前");
-    assert.ok(resume > hiddenReturn && resume < poll, "重起排在回前台分支、画面重建之前");
+    assert.ok(resume > hiddenReturn && resume < recovery, "重起排在回前台分支、画面重建之前");
     const park = extractFn("parkTerminalScreen");
     assert.match(park, /capToken/, "老计时器代次作废（冻结回调落到前台也不能撤图）");
     assert.match(park, /foregroundRebuildPending/, "等待重建期间不撤");

@@ -56,7 +56,7 @@ const LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024;
 const TERMINAL_STATE_FILE = "terminal-sessions.json";
 // stop({clearSessions}) asks the live host to wipe its sessions first; a wedged
 // host must not hold the relay's stop route open, so the call is capped.
-const CLEAR_SESSIONS_TIMEOUT_MS = 2000;
+const CLEAR_SESSIONS_TIMEOUT_MS = 9000;
 // A healthy host dies on kill() immediately; this only caps a wedged child so a
 // stop can never hang the relay shutdown path.
 const TERMINAL_HOST_STOP_TIMEOUT_MS = 5000;
@@ -377,12 +377,12 @@ function isLoopbackAddress(address) {
 async function requestClearAllSessions({ token, fetchFn, hostPort, timeoutMs }) {
   const response = await fetchFn(`http://127.0.0.1:${hostPort}/terminal/sessions/clear-all`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-anyswitch-terminal-stop": "1" },
     body: "{}",
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw new Error(`clear-all answered ${response.status}`);
-  return response.json();
+  const body = await response.json().catch(() => null);
+  return { ok: response.ok && body?.ok === true, status: response.status, body };
 }
 
 // Readiness probe for the start route: the sessions endpoint answering 200 is
@@ -464,29 +464,42 @@ export function createTerminalHostRoutes({
     "POST /terminal-host/stop": async (req, res) => {
       const body = await readRouteBody(req);
       const clearSessions = body?.clearSessions === true;
+      let clearIndexAfterStop = false;
+      if (clearSessions) {
+        let clear;
+        try {
+          clear = await requestClearAllSessions({ token: currentToken(), fetchFn, hostPort, timeoutMs: clearSessionsTimeoutMs });
+        } catch (error) {
+          const refused = (error.cause?.code ?? error.code) === "ECONNREFUSED";
+          if (!refused || supervisor.status().state === "running") {
+            logger.warn?.(`terminal sessions clear-all failed (${error.message})`);
+            return sendRouteJson(res, 503, { ok: false, error: "terminal_host_stop_failed" });
+          }
+          clearIndexAfterStop = true;
+          logger.warn?.(`terminal sessions clear-all unavailable (${error.message})`);
+        }
+        if (clear && !clear.ok) {
+          // This error is sent only after every tree has been terminated.
+          if (clear.status === 500 && clear.body?.error === "state_persist_failed") {
+            clearIndexAfterStop = true;
+          } else {
+            return sendRouteJson(res, clear.status >= 400 ? clear.status : 502, {
+              ok: false, error: "terminal_host_stop_failed",
+            });
+          }
+        }
+      }
       try {
         persistManualStop(true);
       } catch (error) {
         return sendRouteJson(res, 500, { ok: false, error: error.message });
       }
-      let clearFailed = false;
-      if (clearSessions) {
-        try {
-          await requestClearAllSessions({ token: currentToken(), fetchFn, hostPort, timeoutMs: clearSessionsTimeoutMs });
-        } catch (error) {
-          clearFailed = true;
-          logger.warn?.(`terminal sessions clear-all failed (${error.message}); will delete the state file after the host is down`);
-        }
-      }
       await supervisor.stop();
-      // The host was unreachable, so its persisted session records may still
-      // name live tabs: with the child dead, deleting the file is the only
-      // remaining way to honour the clear.
-      if (clearSessions && clearFailed) {
+      if (clearIndexAfterStop) {
         try {
           unlinkSync(join(root, TERMINAL_STATE_FILE));
-        } catch {
-          /* nothing persisted — nothing to delete */
+        } catch (error) {
+          if (error?.code !== "ENOENT") return sendRouteJson(res, 500, { ok: false, error: "terminal_host_stop_failed" });
         }
       }
       return sendRouteJson(res, 200, { ok: true, host: supervisor.status() });

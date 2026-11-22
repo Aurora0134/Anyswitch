@@ -556,55 +556,7 @@ async function api(method, path, body, signal) {
       return;
     }
     if (currentView === "terminal") {
-      const retained = terminalHiddenBacklog;
-      if (terminalEventSource?.readyState === 1 && terminalXterm && terminalStreamWrite
-          && terminalBoundSessionId === activeTerminalPreviewId && !terminalReplayFramePending
-          && !terminalGeometryRealignPending && !terminalGeometryReplayDrop
-          && (!retained || (!retained.overflow && retained.bytes <= TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES))) {
-        terminalHiddenBacklog = null;
-        // 同一条流内，先写隐藏前等候的输出，再写隐藏期的增量。两者都保留同步帧边界。
-        if (retained?.chunks.length) {
-          flushTerminalBurst();
-          terminalStreamWrite(retained.chunks.join(""));
-        }
-        void pollTerminalSessions();
-        return;
-      }
-      // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。画面重建排在
-      // 这拍数据之后——生死判定（terminalSessionShouldRevive）要用宿主现值，拿
-      // 隐藏前的旧「running」去判会把死于重启的会话漏成死屏干等。轮询早退（未
-      // 就绪/在飞）时这拍照旧立即重建，漏判由 1s 轮询里的
-      // maybeAutoReviveTerminalSession 兜住。
-      pollTerminalSessions().finally(() => {
-        // 按积压量分流（积压字节全在这一拍收进 terminalHiddenBacklog，见
-        // syncTerminalDataStream 与 data 帧处理器）：
-        //   · 缓冲为空 → 画面零漂移：流还健在同会话闸自动短路、零重建直接复用；
-        //     流已断则由 renderTerminalPreviewSession 自建一条（实例缺失场景）。
-        //   · 小量 → 逐条回灌合并器（突发窗口把整段合成一次落屏），同会话健存闸
-        //     命中后零重建——阅读位与外层滚动位原样，交接单到点自然作废。
-        //   · 超量/作废 → 画面已不可信，穿透健存闸整屏重建（force 的语义见
-        //     renderTerminalPreviewSession 的闸注释）。
-        const backlog = typeof terminalHiddenBacklog !== "undefined" ? terminalHiddenBacklog : null;
-        // 超量/作废是唯一必须穿透重建的路径：缓冲已丢、画面已不可信。
-        const mustRebuild = !!backlog && (backlog.overflow || backlog.bytes > (typeof TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES === "number" ? TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES : 0));
-        if (mustRebuild) {
-          terminalHiddenBacklog = null;
-          renderTerminalPreviewSession({ revive: false, force: true });
-          return;
-        }
-        if (!backlog || backlog.bytes === 0) {
-          // 零积压：屏面内容就是活的，不带 force——同会话流健在时健存闸短路掉重建，
-          // 阅读位零扰动；流不在（实例缺失/被回收）时该调用自己建流补齐。
-          terminalHiddenBacklog = null;
-          renderTerminalPreviewSession({ revive: false });
-          return;
-        }
-        const term = terminalXterm;
-        const chunks = backlog.chunks.slice();
-        terminalHiddenBacklog = null;
-        for (const chunk of chunks) queueTerminalChunk(term, chunk);
-        renderTerminalPreviewSession({ revive: false });
-      });
+      resumeTerminalDataStream();
       return;
     }
     if (!boardVisible()) return;
@@ -7207,7 +7159,7 @@ async function api(method, path, body, signal) {
       // 计数只认实例行：聚合端点的 <endpoint>-global 是整机合计，不是这条终端的在途量。
       const instance = terminalInstanceRow(typeof terminalAgentsPayload !== "undefined" ? terminalAgentsPayload : null, session.agent);
       const count = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
-      if (count > 0) continue;
+      if (count > 0 || terminalRequestInFlight(session)) continue;
       if (terminalCommandRunning(session)) continue;
       const state = session.backendState || null;
       const visibleAt = Number.isFinite(session.lastVisibleAt)
@@ -7516,10 +7468,10 @@ async function api(method, path, body, signal) {
   // 量与「内存里攒了多少」直接成正比；回前台按 bytes 分流——小量逐条回灌
   // 合并器一次落屏，超量/作废则整屏重建（见 visibilitychange 处理器的终端分支）。
   let terminalHiddenBacklog = null;
+  let terminalForegroundRecoverySeq = 0;
   const TERMINAL_HIDDEN_BACKLOG_MAX_BYTES = 8 * 1024 * 1024;
   const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = 2 * 1024 * 1024;
-  // 快照照吸收（快照是状态不是画面字节），只有这几处画面基线转折会让缓冲失效：
-  // 几何重对齐 / 作废整屏回放 / 拆流挂起（见 absorbTerminalSnapshot 的三处调用）。
+  // 几何无法对齐时，丢弃这批字节并禁止继续收帧，直到下一份有效快照或整屏重建。
   function terminalHiddenBacklogInvalidate() {
     if (!terminalHiddenBacklog || terminalHiddenBacklog.overflow) return;
     terminalHiddenBacklog.chunks.length = 0;
@@ -7555,10 +7507,10 @@ async function api(method, path, body, signal) {
   // 1s 轮询与用户意图拉锯）。
   let terminalInspectorHollowCollapsed = false;
   const terminalInspectorUserPinned = new Set();
-  // inspector 开机首渲染标记：开机第一拍直接按当前归属数据落定收拢形态（见
-  // renderTerminalSessionData 空壳分支），此后运行期的闪断防抖照旧。页面级
-  // 内存态，刷新即复位。
+  // 冷启动时，宿主已标记为 Agent 的会话可能晚一拍才有归属。只对首屏会话
+  // 暂缓写入 PTY 尺寸，归属恢复或连续缺席到阈值时解除。
   let terminalInspectorBootRendered = false;
+  let terminalInspectorBootPendingId = null;
   // 空壳塌缩防抖：归属轮询在「归属丢失/恢复」的边界上会闪一帧空 agent——面板按
   // 进程祖先链认领会话，检测面一拍缺席（agent 进程起落、relay 短暂没喂检测数据）
   // 这一拍整批会话就变空壳。原逻辑当拍即收拢、下一拍归属回来又展开，340↔48px 的
@@ -9171,6 +9123,18 @@ async function api(method, path, body, signal) {
       terminalImeFitPending = true;
       return;
     }
+    const session = terminalBoundSessionId ? terminalSessionFor(terminalBoundSessionId) : null;
+    if (terminalXterm && session?.backend && typeof terminalInspectorBootPendingId !== "undefined"
+      && terminalInspectorBootPendingId === session.id) {
+      const state = session.backendState;
+      const cols = state?.screenCols ?? state?.cols;
+      const rows = state?.screenRows ?? state?.rows;
+      if (Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0) {
+        if (terminalXterm.cols !== cols || terminalXterm.rows !== rows) terminalXterm.resize(cols, rows);
+        if (typeof terminalSettledCols === "number") terminalSettledCols = cols;
+        return null; // 用宿主回放尺寸建流，不把暂定的侧栏布局写回 PTY。
+      }
+    }
     terminalFitAddon?.fit();
     // 列宽记账必须排在下面几处「尺寸已对齐」的早退之前：残行恰好在「客户端已经
     // 变宽、PTY 侧还是旧值」的这一拍最容易留下，而那一拍正好被同值闸早退掉。
@@ -9179,7 +9143,6 @@ async function api(method, path, body, signal) {
     // fit 后 POST 的目标是建连时固化的定投会话，不读页级活跃指针：避免
     // 「别窗关掉当前会话、活跃指针已回落而流未拆」的窗口期向未在观看
     // 的新会话误投 resize。
-    const session = terminalBoundSessionId ? terminalSessionFor(terminalBoundSessionId) : null;
     if (!session?.backend || !terminalXterm) {
       // 挂起中的流在这里补挂：deferTerminalStream 拆流时连同实例一起收掉了，
       // terminalBoundSessionId 也归零，于是这条「没有可对齐目标」的早退是它唯一
@@ -10339,6 +10302,14 @@ async function api(method, path, body, signal) {
     // 旧宿主没有这两个字段时退回 cols/rows（PTY 尺寸，正常与镜像一致）。
     const hostCols = Number(state?.screenCols ?? state?.cols);
     const hostRows = Number(state?.screenRows ?? state?.rows);
+    // 清单与建流之间宿主可能已改尺寸。归属待定期间以最新回放坐标为准。
+    if (typeof terminalInspectorBootPendingId !== "undefined" && terminalInspectorBootPendingId === session.id
+      && Number.isInteger(hostCols) && hostCols > 0 && Number.isInteger(hostRows) && hostRows > 0
+      && terminalHostMeasurable() && !terminalImeHold
+      && (term.cols !== hostCols || term.rows !== hostRows)) {
+      term.resize(hostCols, hostRows);
+      if (typeof terminalSettledCols === "number") terminalSettledCols = hostCols;
+    }
     const clientCols = Number(term?.cols);
     const clientRows = Number(term?.rows);
     const hostSized = Number.isFinite(hostCols) && Number.isFinite(hostRows);
@@ -10425,16 +10396,30 @@ async function api(method, path, body, signal) {
     // 攒着未落屏的突发属于上一条连接：新连接的整屏重绘会把同样的内容重发一遍，
     // 落屏反而画成双份，直接丢弃。
     discardTerminalBurst();
-    term.reset();
+    if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog) {
+      if (document.hidden && currentView === "terminal") {
+        // 仍在后台：保留缓冲入口，只让新基线的回放和增量入队。
+        terminalHiddenBacklog.chunks.length = 0;
+        terminalHiddenBacklog.bytes = 0;
+        terminalHiddenBacklog.overflow = false;
+        delete terminalHiddenBacklog.startsWithReplay;
+      } else {
+        // 可见时新基线直接接管写入，不再让旧轮询回灌。
+        terminalHiddenBacklog = null;
+      }
+    }
+    if (typeof terminalForegroundRecoverySeq === "number") terminalForegroundRecoverySeq += 1;
+    // 回放期间的滚动不参与跟随判定。reset() 排在旧写入之后、回放之前，
+    // 防止旧字节在 2J 清屏前滚进历史。
+    if (terminalReplayRestoreArm) terminalReplayRestoring = true;
+    term.write("", () => {
+      if (typeof terminalXterm !== "undefined" && term !== terminalXterm) return;
+      if (terminalReplayRestoreArm) terminalReplayRestoring = true;
+      term.reset();
+      terminalReplayRestoreArm?.();
+    });
     // 拿到一份可画的整屏基线：连续重建账清零（typeof 闸护单测桩环境）。
     if (typeof terminalFrameRebuildStreak === "number") terminalFrameRebuildStreak = 0;
-    // reset() 后的回放是整段重写：闩到写入静默，期间的滚动与逐块写入都不参与
-    // 跟随判定（见 installTerminalFollowBottomGuard）。护栏未装上（无宿主/无
-    // viewport）时不置闩，避免闩住后无人清理。
-    if (terminalReplayRestoreArm) {
-      terminalReplayRestoring = true;
-      terminalReplayRestoreArm();
-    }
     // 紧随 snapshot 的第一帧是宿主的自足整屏重绘（stream() 只发一帧 replay，镜像
     // 与原始字节两条路径都是单帧），它本身就是一次完整落屏——走合并器只会平白多
     // 等一个静默窗口。标记出来让 data 监听直写。
@@ -10816,23 +10801,17 @@ async function api(method, path, body, signal) {
       // 占位一起撤走。撤层判据是「新画面真的出字」，见 watchTerminalBootingOverlay。
       try {
         const text = JSON.parse(event.data);
-        // 隐藏期字节闸：窗口藏着、人还在终端页时一个字节都不喂 xterm（xterm 的解析
-        // 在这一侧被节流到每秒一片、rAF 零帧，喂了就只进不出；离开终端页的活流是
-        // 既有保留策略，照常直写）。首帧回放 / 同步合帧 / 突发合并在此全部不动作，
-        // 它们服务的「新画面就绪才揭幕」判据因而自然不成立。
-        // 入闸口径是「backlog 仍在 + 终端页」，不看 document.hidden：隐藏转折只负责
-        // 建闸（syncTerminalDataStream），backlog 在台前的存活窗口只有「回前台到
-        // pollTerminalSessions 分流落定」这一段（finally 回灌 / 建流 / 拆流三处清它）。
-        // 这段窗口里新帧若绕闸直写，finally 回灌的旧字节就会排在新帧之后，字节流时序
-        // 倒挂——TUI 相对重绘帧序被拆乱，屏面即错位/重复/残框（2026-11-16 切回错屏
-        // 事故，f96fafec 注释写明本意却在条件里漏写了「backlog 仍在」）。入闸把新帧
-        // 追加在旧字节之后，回灌时序才守得住。
-        // overflow 兜底照旧：超上限后本帧及后续帧直接丢（恢复必走整屏重建，写的
-        // 是注定被替换的屏）。typeof 与常量存在性双闸护单测桩环境。
+        if (typeof text !== "string" || !text) return;
+        // 恢复轮询未落定时，增量也要在缓冲中排队。若缓冲含新基线，切去别页后
+        // 仍保留该缓冲，避免绕过未落屏的整屏回放去画后续增量。
         if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog
             && typeof TERMINAL_HIDDEN_BACKLOG_MAX_BYTES === "number"
-            && currentView === "terminal") {
+            && (currentView === "terminal" || terminalReplayFramePending || terminalHiddenBacklog.startsWithReplay)) {
           if (terminalHiddenBacklog.overflow) return;
+          if (terminalReplayFramePending) {
+            terminalHiddenBacklog.startsWithReplay = true;
+            terminalReplayFramePending = false;
+          }
           terminalHiddenBacklog.bytes += text.length;
           if (terminalHiddenBacklog.bytes > TERMINAL_HIDDEN_BACKLOG_MAX_BYTES) {
             terminalHiddenBacklog.chunks.length = 0;
@@ -10844,9 +10823,7 @@ async function api(method, path, body, signal) {
         }
         // 走到这里还带着 backlog，只可能是「页已不在终端页」（入闸第三条不满足）：
         // 活流照常直写（既有保留策略），屏面就此越过积压内容——旧字节此后任何时刻
-        // 回灌都必乱序，作废掉。等价于把这轮积压推给整屏重建路径，下次隐藏转折从零
-        // 攒。回前台 poll 窗口内的极速切页-切回（走这里直写过）就是这条作废在兜。
-        // typeof 闸护单测桩环境（那些沙箱不声明模块级变量）。
+        // 回灌都必乱序，作废掉，下次隐藏转折重新积累。
         if (typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog
             && currentView !== "terminal") {
           terminalHiddenBacklog = null;
@@ -10856,10 +10833,6 @@ async function api(method, path, body, signal) {
         // 它自带完整画面，进合并器只会平白多等一个静默窗口。
         if (terminalReplayFramePending) {
           terminalReplayFramePending = false;
-          // 首帧回放落地即记一拍。它只是「宿主已经交代过一屏」的可观测内部信号，
-          // 垫片的揭幕判据已经不用它了——换绑清屏帧同样走这条路，拿它揭幕就等于在
-          // 擦除那一刻撤垫片（2026-11-05 A4，见 terminalStaleScreenReady）。typeof 闸
-          // 护只切本函数真跑的单测桩环境（那些沙箱不声明模块级变量）。
           if (typeof terminalReplayEpoch === "number") terminalReplayEpoch += 1;
           term.write(text);
           return;
@@ -11166,6 +11139,13 @@ async function api(method, path, body, signal) {
     const workspace = $("terminalWorkspace");
     if (inspector && workspace) {
       const hollow = !session.agent && !session.aggregateSource;
+      const hollowStreak = terminalHollowStreak.get(session.id) || 0;
+      const wasBootPending = terminalInspectorBootPendingId === session.id;
+      const bootPending = (wasBootPending || !terminalInspectorBootRendered)
+        && hollow && session.backend && session.backendState?.status === "running"
+        && !!session.agentId && hollowStreak > 0 && hollowStreak < TERMINAL_HOLLOW_COLLAPSE_STREAK
+        && !terminalInspectorUserPinned.has(session.id);
+      terminalInspectorBootPendingId = bootPending ? session.id : null;
       const wasEmpty = workspace.classList.contains("is-empty");
       const wasCollapsed = inspector.classList.contains("is-collapsed");
       let collapsed = wasCollapsed;
@@ -11177,17 +11157,9 @@ async function api(method, path, body, signal) {
           // 用户在此会话空壳态拉回过：保持展开，换页签回来也不缩回
           collapsed = false;
           terminalInspectorHollowCollapsed = false;
-        } else if (!terminalInspectorBootRendered) {
-          // 开机首渲染直接按当前数据落定：防抖护的是运行期闪断，开机前没有任何
-          // 可见形态要保护；等 3 拍的代价是监测列先按展开出画再收拢 292px——刷新
-          // 时建流前 fit 正好量到这个过渡宽度 POST 进 PTY，宽度一收一放，ConPTY
-          // 折行把承载的 TUI 画面绞进滚动区（Claude Code 品牌块每刷新成对入史，
-          // 2026-11-16）。开机即细条，终端区宽度当帧就是终值，建流前 fit 与其后
-          // 的同值早退都按终值走，PTY 不吃翻转。
-          collapsed = true;
-          terminalInspectorHollowCollapsed = true;
-        } else if ((terminalHollowStreak.get(session.id) || 0) >= TERMINAL_HOLLOW_COLLAPSE_STREAK) {
-          // 连续 3 拍归属观测都空壳才认「真丢了归属」，系统收拢标记也只在此时落
+        } else if ((!terminalInspectorBootRendered && !bootPending)
+          || hollowStreak >= TERMINAL_HOLLOW_COLLAPSE_STREAK) {
+          // 首屏的普通外壳直接收拢。归属暂缺的 Agent 会话等连续三拍缺席再收拢。
           collapsed = true;
           terminalInspectorHollowCollapsed = true;
         }
@@ -11202,7 +11174,6 @@ async function api(method, path, body, signal) {
         }
         terminalInspectorHollowCollapsed = false;
       }
-      // 开机态只消费一次：此后空壳/恢复走运行期防抖（闪断保护照旧）。
       terminalInspectorBootRendered = true;
       inspector.classList.toggle("is-collapsed", collapsed);
       workspace.classList.toggle("is-inspector-collapsed", collapsed);
@@ -11220,7 +11191,7 @@ async function api(method, path, body, signal) {
       // State，is-empty 单列只属零会话/未连接两态的退场机制，在此摘掉。
       inspector.style.display = "";
       workspace.classList.remove("is-empty");
-      if (wasEmpty || wasCollapsed !== collapsed) scheduleTerminalFit();
+      if (wasEmpty || wasCollapsed !== collapsed || (wasBootPending && !bootPending)) scheduleTerminalFit();
     }
     // 实况行同时答「忙不忙 + 谁在服务」：归属段实例身份优先、路由当前跳后备，
     // 没有可说的服务方（普通终端/身份未上报）就不出模型段。
@@ -12237,8 +12208,54 @@ async function api(method, path, body, signal) {
     if (!document.hidden) return;
     if (currentView !== "terminal") return;
     if (typeof terminalHiddenBacklog === "undefined") return;
+    terminalForegroundRecoverySeq += 1;
     if (terminalHiddenBacklog) return;
     terminalHiddenBacklog = { chunks: [], bytes: 0, overflow: false };
+  }
+
+  function resumeTerminalDataStream() {
+    const recoverySeq = ++terminalForegroundRecoverySeq;
+    const viewSeq = viewEntrySeq;
+    const streamSeq = terminalFrameRebuildSeq;
+    const sessionId = activeTerminalPreviewId;
+    const source = terminalEventSource;
+    const term = terminalXterm;
+    const backlog = terminalHiddenBacklog;
+    const needsRebuild = () => backlog && (backlog.overflow || backlog.bytes > TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES);
+    const drain = (writeDeltas) => {
+      terminalHiddenBacklog = null;
+      if (!term || !backlog?.chunks.length) return;
+      // 回放是新基线的首帧，先直写；后续增量仍经同步块合并器。
+      flushTerminalBurst();
+      const chunks = backlog.chunks;
+      const firstDelta = backlog.startsWithReplay ? 1 : 0;
+      if (firstDelta) {
+        terminalReplayEpoch += 1;
+        term.write(chunks[0]);
+      }
+      if (chunks.length > firstDelta) writeDeltas(chunks.slice(firstDelta).join(""));
+    };
+    if (source?.readyState === 1 && term && terminalStreamWrite
+        && terminalBoundSessionId === sessionId && !terminalReplayFramePending
+        && !terminalGeometryRealignPending && !terminalGeometryReplayDrop && !needsRebuild()) {
+      drain(terminalStreamWrite);
+      void pollTerminalSessions();
+      return;
+    }
+    // 重建前补一拍会话状态，以宿主现值判定是否需要复活。
+    pollTerminalSessions().finally(() => {
+      if (document.hidden || currentView !== "terminal" || viewEntrySeq !== viewSeq
+          || terminalForegroundRecoverySeq !== recoverySeq || terminalFrameRebuildSeq !== streamSeq
+          || activeTerminalPreviewId !== sessionId || terminalEventSource !== source
+          || terminalXterm !== term || terminalHiddenBacklog !== backlog) return;
+      if (needsRebuild()) {
+        terminalHiddenBacklog = null;
+        renderTerminalPreviewSession({ revive: false, force: true });
+      } else {
+        drain((text) => queueTerminalChunk(term, text));
+        renderTerminalPreviewSession({ revive: false });
+      }
+    });
   }
 
   // 活跃真值流的活性门控与轮询完全一致：terminal-backend 就绪、窗口可见、
@@ -17232,6 +17249,9 @@ async function api(method, path, body, signal) {
     // 不能再拿同步返回的那个 promise（它此刻还没开工）。被后续切换作废的按已兑现处理，
     // 不吊住开屏层的退场判据。
     const entryReady = scheduleViewEntry(runViewEntry);
+    if (terminal && !document.hidden && typeof terminalHiddenBacklog !== "undefined" && terminalHiddenBacklog) {
+      resumeTerminalDataStream();
+    }
     if (window.panelStartupController) startupViewReady = entryReady;
   }
 

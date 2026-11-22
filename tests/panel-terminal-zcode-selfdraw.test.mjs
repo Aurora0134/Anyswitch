@@ -245,6 +245,7 @@ function recycleSandbox({ sessions, agents = [], apiImpl, viewportIds = [] } = {
     ${extractFn("terminalViewportRefDrop")}
     ${extractFn("terminalInstanceRow")}
     ${extractFn("terminalCommandRunning")}
+    ${extractFn("terminalRequestInFlight")}
     ${extractFn("maybeRecycleTerminalBackground")}
     return {
       scan: (now) => maybeRecycleTerminalBackground(now),
@@ -320,6 +321,22 @@ describe("P-D 后台回收器（agent 会话）", () => {
     orphan.fn.scan(NOW);
     assert.deepEqual(orphan.calls.posts, ["POST /api/terminal/sessions/t-z/close"],
       "聚合汇总数（9）不进回收判据，否则永不触发");
+  });
+
+  it("实例行计数为零时，进程级请求在途不回收，结束后恢复回收", async () => {
+    const agent = { endpointId: "kimi", instanceId: "kimi-7", busy: false, requestsInFlight: 1 };
+    const sessions = { "t-z": agentBack({ agentId: "kimi", agent }) };
+    const agents = [{ id: "kimi", instances: [{ id: "kimi-7", activeRequests: 0 }] }];
+    const { calls, fn } = recycleSandbox({ sessions, agents });
+    fn.mark("t-z", NOW - 20 * MIN);
+    fn.scan(NOW);
+    assert.deepEqual(calls.posts, [], "实例未记请求时也按进程级信号保活");
+
+    agent.requestsInFlight = 0;
+    fn.scan(NOW + 1000);
+    assert.deepEqual(calls.posts, ["POST /api/terminal/sessions/t-z/close"]);
+    await flush();
+    assert.deepEqual(fn.background(), []);
   });
 
   it("进后台不满 10min 不回收", () => {

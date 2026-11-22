@@ -10262,6 +10262,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
       let terminalInspectorHollowCollapsed = false;
       let terminalInspectorBootRendered = false;
+      let terminalInspectorBootPendingId = null;
       const terminalInspectorUserPinned = new Set();
       let terminalRequestListRenderedHtml = "";
       const scheduleTerminalFit = () => {};
@@ -10514,7 +10515,7 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
     const streakSrc = panelJs.match(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = \d+;\n  const terminalHollowStreak = new Map\(\);/)?.[0];
     assert.ok(streakSrc, "空壳塌缩防抖的阈值与计数表可从 panel.js 取到");
     // 开机首渲染标记同样从源码取样进沙箱：开机态语义改了这里就红。
-    const bootDecl = panelJs.match(/let terminalInspectorBootRendered = false;/)?.[0];
+    const bootDecl = panelJs.match(/let terminalInspectorBootRendered = false;\s+let terminalInspectorBootPendingId = null;/)?.[0];
     assert.ok(bootDecl, "inspector 开机首渲染标记可从 panel.js 取到");
     const state = { session: null, fits: 0 };
     const sandbox = new Function("state", `
@@ -10559,10 +10560,7 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
     `)(state);
     const { render, el, pin, unpin, pinned, streak, beat } = sandbox;
 
-    // ① 开机首渲染直接按当前数据落定空壳收拢：防抖护的是运行期「归属闪断一帧就
-    //    收拢再展开」的抽搐，开机前没有任何可见形态要保护；等 3 拍的代价是终端区
-    //    先按展开出画再收拢 292px——刷新时建流前 fit 正好量到这个过渡宽度，PTY
-    //    宽度一收一放把 TUI 画面绞进滚动区（品牌块成对入史）。
+    // ① 普通外壳首次打开直接收拢。Agent 归属待定的首帧由几何测试覆盖。
     state.session = { id: "s1", label: "外壳", cwd: "C:\\", branch: "", shell: { name: "PowerShell" }, status: "idle", metrics: null, requests: [], agent: null };
     beat("s1", 1);
     render();
@@ -10683,6 +10681,7 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
       const terminalInspectorUserPinned = new Set();
       ${streakSrc}
       let terminalInspectorBootRendered = false;
+      let terminalInspectorBootPendingId = null;
       let terminalRequestListRenderedHtml = "";
       function scheduleTerminalFit() {}
       function updateSparkline() {}
@@ -10751,7 +10750,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
     const src = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "absorbTerminalSnapshot found in panel.js");
     const seen = { resets: 0 };
-    const term = { cols: 120, rows: 34, reset: () => { seen.resets += 1; } };
+    const term = { cols: 120, rows: 34, reset: () => { seen.resets += 1; }, write(_text, done) { done(); } };
     const session = { id: "S1", backend: true, backendState: null, shell: { pid: null } };
     const fn = new Function(`
       let terminalReplayRestoring = false;
@@ -10816,8 +10815,8 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
   it("回放闩接线：snapshot reset 与建流 reset 之后都置闩并排静默清闩", () => {
     const absorb = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
     assert.ok(absorb, "absorbTerminalSnapshot found in panel.js");
-    assert.ok(/term\.reset\(\);[\s\S]*?terminalReplayRestoring = true;[\s\S]*?terminalReplayRestoreArm\(\)/.test(absorb),
-      "snapshot reset 之后置回放闩（reset 的滚动不误判成用户离底）");
+    assert.ok(/term\.write\("", \(\) => \{[\s\S]*?terminalReplayRestoring = true;[\s\S]*?term\.reset\(\);[\s\S]*?terminalReplayRestoreArm\?\.\(\)/.test(absorb),
+      "snapshot 在写入队列中置闩再 reset，之后启动静默清闩计时");
     const body = panelJs.match(/async function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(body, "connectTerminalStream found in panel.js");
     assert.ok(/term\.reset\(\);[\s\S]*?terminalReplayRestoring = true;[\s\S]*?terminalReplayRestoreArm\(\)/.test(body),
@@ -10925,7 +10924,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
         open(hostEl) { this.hostEl = hostEl; }
         onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
         fire(data) { this._fire?.(data); }
-        write(text) { this.writes.push(text); }
+        write(text, done) { if (text) this.writes.push(text); done?.(); }
         reset() { this.resetCount += 1; }
         dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
         attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
@@ -13070,6 +13069,9 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
       function boardVisible() { return state.view === "board"; }
       let currentView = state.view;
       let terminalVisibilityWasHidden = false;
+      let terminalForegroundRecoverySeq = 0;
+      const viewEntrySeq = 0;
+      const terminalFrameRebuildSeq = 0;
       const activeTerminalPreviewId = "a";
       const terminalBoundSessionId = opts.healthy ? "a" : null;
       const terminalEventSource = opts.healthy ? { readyState: 1 } : null;
@@ -13081,6 +13083,7 @@ describe("虚拟终端后台转折：进后台立缓冲闸、切回按积压量�
       const terminalStreamWrite = (text) => state.calls.push("write:" + text);
       let terminalHiddenBacklog = ${JSON.stringify(opts.backlog ?? null)};
       const TERMINAL_HIDDEN_BACKLOG_WRITE_BYTES = 2 * 1024 * 1024;
+      ${extractFn("resumeTerminalDataStream")}
       ${handlerBody}
     `)(state, { hidden }, opts);
     return state.calls;
@@ -13648,6 +13651,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let terminalStaleScreen = null;
       // 隐藏期字节缓冲：隐藏闸的本体，生产模块级同名声明。桩按真跑取用。
       let terminalHiddenBacklog = null;
+      let terminalForegroundRecoverySeq = 0;
       // data 处理器的其他既存引用（只被读不被写时 typeof 即可，这里摆真值以真跑）。
       let terminalGeometryReplayDrop = false;
       let terminalGeometryRealignPending = false;
@@ -14658,6 +14662,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       let terminalInspectorHollowCollapsed = false;
       const terminalInspectorUserPinned = new Set();
       let terminalInspectorBootRendered = false;
+      let terminalInspectorBootPendingId = null;
       const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
       const terminalHollowStreak = new Map();
       let terminalRequestListRenderedHtml = "";
@@ -15984,7 +15989,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       fetchTerminalSessionFn: fetchSession ?? (async (id) => ({ ...session, id })),
       restartTerminalSessionFn: restartSession ?? (async (id, body, options) => {
         restarts.push({ id, body, options });
-        return { status: 200, body: { id, status: "running", pid: 4242 } };
+        return { status: 200, body: { id, status: "running", pid: 4242, agentId: session?.agentId, cwd: body.cwd, resume: body.resume } };
       }),
       // resume 接线的对话存档扫描：默认空表（=判不出、维持现状），不碰真存档。
       scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
@@ -16072,6 +16077,59 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
   });
 
   // ---- resume 接线：复活带回原对话（绑定优先，兜底扫描，判不出不接） ----
+
+  it("复活失败保留原绑定，也不安排自愈", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-revive-failed-");
+      const id = "5e55b001";
+      const cwd = root;
+      const original = { agentId: "kimi", cwd, conversationId: "old", file: null, boundAt: 1, source: "bound" };
+      writeTerminalBindings(root, { [id]: original });
+      const { router, scheduled } = reviveRouter({
+        root, base: { ...process.env, LOCALAPPDATA: root },
+        session: { agentId: "kimi", cwd, shell: "cmd" },
+        scanAgentConversations: async () => [{ id: "old", endpoint: "kimi", project: cwd, file: join(root, "updated") }],
+        restartSession: async () => ({ status: 409, body: { error: "terminal_session_conflict" } }),
+      });
+      const { req, res } = fakeReqRes(`/panel/api/terminal/sessions/${id}/revive`, "POST", {});
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 409);
+      assert.deepEqual(readTerminalBindings(root)[id], original);
+      assert.equal(scheduled.length, 0);
+    });
+  });
+
+  it("内切只在宿主确认目标身份后改绑并安排自愈", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-switch-result-");
+      const id = "5e55b001";
+      const original = { agentId: "kimi", cwd: root, conversationId: "old", file: null, boundAt: 1, source: "bound" };
+      writeTerminalBindings(root, { [id]: original });
+      let result;
+      const { router, scheduled } = reviveRouter({
+        root, base: { ...process.env, LOCALAPPDATA: root },
+        session: { agentId: "kimi", cwd: root, status: "exited" },
+        restartSession: async () => result,
+      });
+      const switchTo = async (resume) => {
+        const { req, res } = fakeReqRes(`/panel/api/terminal/sessions/${id}/switch`, "POST", { agentId: "kimi", cwd: root, resume });
+        await router.handle(req, res);
+        return res.statusCode;
+      };
+      const target = { endpoint: "kimi", id: "target" };
+      result = { status: 500, body: { error: "spawn failed" } };
+      assert.equal(await switchTo(null), 500);
+      assert.deepEqual(readTerminalBindings(root)[id], original);
+      result = { status: 200, body: { id, agentId: "kimi", cwd: root, status: "running", resume: { ...target, id: "wrong" } } };
+      assert.equal(await switchTo(target), 409);
+      assert.deepEqual(readTerminalBindings(root)[id], original);
+      assert.equal(scheduled.length, 0);
+      result.body.resume = target;
+      assert.equal(await switchTo(target), 200);
+      assert.equal(readTerminalBindings(root)[id].conversationId, "target");
+      assert.equal(scheduled.length, 1);
+    });
+  });
 
   it("有绑定：按绑定对话追加 resume 参数，并布一拍复活后自愈重扫", async () => {
     await withFakeKimiExecutable(async () => {
@@ -16572,7 +16630,7 @@ parentPort.on("message", (message) => {
       probeTerminalCommandTreeFn: async () => false,
       restartTerminalSessionFn: async (id, body) => {
         scans.push({ id, body });
-        return { status: 200, body: { id, status: "running", pid: 4242 } };
+        return { status: 200, body: { id, status: "running", pid: 4242, agentId: body.agentId, cwd: body.cwd } };
       },
       scanAgentConversationsFn: async () => {
         if (!matchable) return [];
@@ -16671,7 +16729,7 @@ describe("内切杀前复核（switch-guard 双探）", () => {
     let restarts = 0;
     const { switchOnce } = switchFixture({
       probeTerminalCommandTreeFn: async () => false,
-      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id, status: "running" } }; },
+      restartTerminalSessionFn: async (id, body) => { restarts += 1; return { status: 200, body: { id, status: "running", agentId: body.agentId, cwd: body.cwd } }; },
     });
     const { res } = await switchOnce();
     assert.equal(res.statusCode, 200);
@@ -16718,7 +16776,7 @@ describe("内切杀前复核（switch-guard 双探）", () => {
         firstSawRecheckStarted = recheckStarted;
         return true;
       },
-      restartTerminalSessionFn: async (id) => ({ status: 200, body: { id } }),
+      restartTerminalSessionFn: async (id, body) => ({ status: 200, body: { id, status: "running", agentId: body.agentId, cwd: body.cwd } }),
     });
     await switchOnce();
     assert.equal(firstSawRecheckStarted, true, "复探必须先于首探返回发起，否则又退回串行两次启动");
@@ -16736,7 +16794,7 @@ describe("内切杀前复核（switch-guard 双探）", () => {
           opts.signal?.addEventListener("abort", () => { clearTimeout(pendingTimer); resolve(null); });
         });
       },
-      restartTerminalSessionFn: async (id) => ({ status: 200, body: { id } }),
+      restartTerminalSessionFn: async (id, body) => ({ status: 200, body: { id, status: "running", agentId: body.agentId, cwd: body.cwd } }),
     });
     const guard = new Promise((_, reject) => {
       const t = setTimeout(() => reject(new Error("首探判干净后复探没有被掐掉（白等了一拍）")), 1500);
