@@ -1378,6 +1378,18 @@ async function api(method, path, body) {
     pushOne(buf.ttft, vals ? vals.ttft : null);
   }
 
+  // 行换代检测：同一行 id 的服务端出生时间（firstSeen）变化＝服务端已换新行
+  //（端点换代后同名会话行重开账）。本地为旧行攒的折线暂存随之作废——空数组
+  // 不覆盖已恢复的整线，旧暂存会把上一轮运行的曲线从本地复活。出生时间缺失
+  // （伪「全局汇总」行等）不触发也不记账。
+  const instanceRowFirstSeen = {};
+  function instanceRowTurnedOver(bufKey, firstSeen) {
+    if (typeof firstSeen !== "number") return false;
+    const prev = instanceRowFirstSeen[bufKey];
+    instanceRowFirstSeen[bufKey] = firstSeen;
+    return prev !== undefined && prev !== firstSeen;
+  }
+
   // 折叠状态机：prefix → 是否展开，惰性从 localStorage 初始化
   // （key 与旧机制同语义：agent-detail-fold-<prefix>，claude 用 cc）。
   const detailFoldState = {};
@@ -1690,6 +1702,13 @@ async function api(method, path, body) {
       `;
       listEl.appendChild(grid);
 
+      // 行换代：服务端出生时间变了就是换代的全新行，本地旧折线暂存一并作废，
+      // 免得上一轮运行的曲线经本地 buffer 复活（服务端新行没有历史可播种）。
+      const bufKey = prefix + ":" + iid;
+      if (!isAggregate && instanceRowTurnedOver(bufKey, inst.firstSeen)) {
+        delete instanceSparkBuffers[bufKey];
+      }
+
       // 实例级 sparkline：按 `${prefix}:${instanceId}` 分键累积后绘制（缓存锁定 0-100 量程）
       pushInstanceSpark(prefix, iid, {
         tps: typeof tps === "number" ? tps : null,
@@ -1715,6 +1734,9 @@ async function api(method, path, body) {
     // 实例消失：清理其 spark buffer，防内存泄漏
     for (const key of Object.keys(instanceSparkBuffers)) {
       if (key.startsWith(prefix + ":") && !seenKeys[key]) delete instanceSparkBuffers[key];
+    }
+    for (const key of Object.keys(instanceRowFirstSeen)) {
+      if (key.startsWith(prefix + ":") && !seenKeys[key]) delete instanceRowFirstSeen[key];
     }
   }
 

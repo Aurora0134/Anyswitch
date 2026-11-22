@@ -3785,6 +3785,51 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
   });
 });
 
+describe("panel.html 实例行换代清折线暂存（firstSeen 变化＝换代的全新行）", () => {
+  // 端点重启后同名会话行在服务端重开账（firstSeen 换新）。空数组不覆盖已
+  // 恢复的整线，本地为旧行攒的折线暂存若不清，上一轮运行的曲线会从本地
+  // 复活——四宫格残余的前端半边。
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../panel-ui", "panel.js"),
+    "utf8",
+  );
+
+  it("instanceRowTurnedOver：出生时间变化才算换代，缺省/非数值不触发也不记账", () => {
+    const ctx = { instanceRowFirstSeen: {} };
+    vm.createContext(ctx);
+    const fn = vm.runInContext(
+      extractFn("instanceRowTurnedOver", "bufKey, firstSeen") + "\ninstanceRowTurnedOver",
+      ctx,
+    );
+    assert.equal(fn("codex:s1", 100), false, "首见只记账，不算换代");
+    assert.equal(fn("codex:s1", 100), false, "同值持续不算换代");
+    assert.equal(fn("codex:s1", 5000), true, "出生时间变化＝换代");
+    assert.equal(fn("codex:s1", 5000), false, "换代后新出生时间已记账");
+    assert.equal(fn("codex:s2", undefined), false, "出生时间缺省不触发");
+    assert.equal(fn("codex:s2", "x"), false, "非数值不触发");
+    assert.equal(ctx.instanceRowFirstSeen["codex:s1"], 5000);
+    assert.equal("codex:s2" in ctx.instanceRowFirstSeen, false, "缺省不记账");
+  });
+
+  it("renderInstanceRows 换代检测先于 spark 播种，命中即清本地 buffer；出生账本随行消失清理", () => {
+    const render = panelJs.match(/function renderInstanceRows\(\{[^}]*\}\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(render, "renderInstanceRows found in panel.js");
+    const turnoverIdx = render.indexOf("instanceRowTurnedOver(bufKey");
+    const pushIdx = render.indexOf("pushInstanceSpark(prefix, iid");
+    assert.ok(turnoverIdx !== -1, "renderInstanceRows 接换代检测");
+    assert.ok(pushIdx !== -1, "renderInstanceRows 接 spark 播种");
+    assert.ok(turnoverIdx < pushIdx, "换代检测先于播种，命中行的旧 buffer 不再进本轮绘制");
+    assert.ok(
+      /if \(!isAggregate && instanceRowTurnedOver\(bufKey, inst\.firstSeen\)\) \{\s*\n\s*delete instanceSparkBuffers\[bufKey\];/.test(render),
+      "命中换代即清本地折线暂存",
+    );
+    assert.ok(
+      /for \(const key of Object\.keys\(instanceRowFirstSeen\)\) \{/.test(render),
+      "实例消失时出生账本与 spark buffer 同步清理",
+    );
+  });
+});
+
 describe("panel.html 实例行状态徽标三态（生成中/待命/重试中，不随链归因换装）", () => {
   // 实例行状态徽标三态：在飞 badge-ok「生成中」、退避重试中 badge-warn「重试中」、
   // 其余 badge-neutral「待命」；「这条请求走没走自动路由」由端点模型胶囊上的 auto

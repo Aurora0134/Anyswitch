@@ -4042,10 +4042,19 @@ export function createAgentMetricsCollector(options = {}) {
   // has no session reporter and the socket reverse lookup is its only identity.
   const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map(), workbuddy: new Map(), zcode: new Map() };
 
+  // 会话行桶的家族在场状态（最近一次可信扫描）与连续缺席轮计数。行全灭后
+  // per-row misses 表已无条目可推，家族回场判据按桶另行记账。三处消费：
+  // retire 印记、bindInstance 继承闸、家族回场整桶清仓。写入点唯一：
+  // settleSessionRowFamilyMisses（可信扫描轮落地）。
+  const sessionFamilyPresent = new Map();
+  const sessionFamilyAbsentRounds = new Map();
+
   // 实例行换代继承：行被淘汰时把它的样本窗按 `${bucket}:${instId}` 留一拍，同名
   // 新行在 bindInstance 建立时播种，避免「行换代 = 折线历史蒸发」。只存既成事实
   // 的历史样本，不存累计量/身份/在途。快照一次性消费（播种即删）+ 容量上限防
   // 无界增长；播种后新请求照常 push，超窗裁剪沿用既有 keep，不另造第二套窗口。
+  // 会话行桶（行 id 是会话，端点重启后同名重逢）的快照加盖家族印记，消费闸见
+  // bindInstance；pid/desktop 行桶不盖，6fc6525 的换代继承语义原样。
   const retiredInstanceSamples = new Map();
   const RETIRED_INSTANCE_SAMPLES_MAX = 256;
   function rememberRetiredInstanceSamples(bucket, instId, state) {
@@ -4055,6 +4064,8 @@ export function createAgentMetricsCollector(options = {}) {
     retiredInstanceSamples.set(key, {
       recentSamples: state.recentSamples.slice(),
       ttftHistory: state.ttftHistory.slice(),
+      ...(SESSION_ROW_PREFIXES[bucket] !== undefined
+        ? { familyPresent: sessionFamilyPresent.get(bucket) === true } : {}),
     });
     while (retiredInstanceSamples.size > RETIRED_INSTANCE_SAMPLES_MAX) {
       const oldest = retiredInstanceSamples.keys().next();
@@ -4068,6 +4079,14 @@ export function createAgentMetricsCollector(options = {}) {
     if (snap === undefined) return null;
     retiredInstanceSamples.delete(key); // 一次性消费：同名新行只播种一次
     return snap;
+  }
+  // 家族回场整桶清退休样本：缺席满淘汰档后转在场＝端点换代（家族死过再回来），
+  // 桶内旧样本不再可播种。只在淘汰档缺席后触发——单轮漏看不清账，与行淘汰
+  // 同一确认口径；扫描不完整的轮不推进缺席计数（settle 侧同纪律）。
+  function purgeRetiredInstanceSamples(bucket) {
+    for (const key of retiredInstanceSamples.keys()) {
+      if (key.startsWith(`${bucket}:`)) retiredInstanceSamples.delete(key);
+    }
   }
 
   // 预留会话行的起账时刻，按桶记忆。它只服务一件事：同一条预留行在轮询之间
@@ -4095,10 +4114,23 @@ export function createAgentMetricsCollector(options = {}) {
   // 从 0 起算，下一轮才轮得到缺席判定，新行不会一出生就被判死。
   function settleSessionRowFamilyMisses(counts) {
     for (const bucket of Object.keys(SESSION_ROW_PREFIXES)) {
+      const count = counts[bucket] || 0;
+      // 桶级在场记账先于行循环：行全灭后 misses 表已空，家族回场判据不能跟着断。
+      // 缺席满淘汰档后转在场＝端点换代，桶内退休样本整桶作废（见
+      // purgeRetiredInstanceSamples）。
+      if (count === 0) {
+        sessionFamilyPresent.set(bucket, false);
+        sessionFamilyAbsentRounds.set(bucket, (sessionFamilyAbsentRounds.get(bucket) ?? 0) + 1);
+      } else {
+        if ((sessionFamilyAbsentRounds.get(bucket) ?? 0) >= SESSION_ROW_FAMILY_MISS_ROUNDS) {
+          purgeRetiredInstanceSamples(bucket);
+        }
+        sessionFamilyAbsentRounds.delete(bucket);
+        sessionFamilyPresent.set(bucket, true);
+      }
       const instMap = instanceBuckets[bucket];
       if (instMap === undefined || instMap.size === 0) continue;
       const prefix = SESSION_ROW_PREFIXES[bucket];
-      const count = counts[bucket] || 0;
       for (const instId of instMap.keys()) {
         if (!instId.startsWith(prefix)) continue;
         const missKey = `${bucket}:${instId}`;
@@ -4754,8 +4786,18 @@ export function createAgentMetricsCollector(options = {}) {
         entry = { state: createAggregateState(sparkWindowPoints), firstSeen: nowFn(), label: null };
         const inherited = takeRetiredInstanceSamples(bucketAgentId, instanceId);
         if (inherited !== null) {
-          entry.state.recentSamples = inherited.recentSamples;
-          entry.state.ttftHistory = inherited.ttftHistory;
+          // 会话行桶的退休样本两端家族在场才播种：退休时在场（同场运行的行换代）
+          // 且消费时在场（样本没经历过家族死回）。任一端缺席＝端点换过代，同名
+          // 会话行属于新一轮运行，上一轮的速率样本不进场——四宫格不带上一轮的
+          // 旧账。消费闸兼收「家族回场扫描未落地时请求先到」的竞态（此时最近
+          // 可信扫描仍报缺席）。pid/desktop 行桶没有此判（6fc6525 语义原样）。
+          const sessionRowBucket = SESSION_ROW_PREFIXES[bucketAgentId] !== undefined;
+          const inheritable = !sessionRowBucket
+            || (inherited.familyPresent === true && sessionFamilyPresent.get(bucketAgentId) === true);
+          if (inheritable) {
+            entry.state.recentSamples = inherited.recentSamples;
+            entry.state.ttftHistory = inherited.ttftHistory;
+          }
         }
         if (isDesktopStableRow) {
           ensureDesktopGen(entry);
