@@ -129,9 +129,12 @@ export function migrateBackups(from, to) {
 
 // 位置落盘失败后的专用回滚：只处理本次 copied 点名的条目，目标目录里的异名
 // 内容（用户预置、其他写入方）一个字节都不碰。源有同名残留说明正向迁移删源时
-// 它没删掉（undeleted），残留即原数据、与副本同源，删掉目标副本即可；否则把
-// 副本搬回源（rename 优先，跨卷 EXDEV 退回复制＋删副本）。逐条尽力而为；
-// 没收尾的条目名交回调用方，由它决定要不要报「备份现在在 <next>」。
+// 它没删掉（undeleted）——但残留未必完整：删源是逐个子项进行的，撞上被锁文件
+// 时前面的兄弟文件已经删掉，所以不能直接删副本，要先把副本合并回填（同内容
+// 覆盖无害、缺失文件补回），再删副本；回填失败说明残留仍被占用，副本必须保留。
+// 无残留的条目把副本搬回源（rename 优先，跨卷 EXDEV 退回复制＋删副本）。
+// 逐条尽力而为；没收尾的条目名交回调用方，由它决定要不要报「备份现在在 <next>」。
+// 任何路径都不丢数据。
 function rollbackMigration(src, dst, copied) {
   const pending = [];
   // 正向迁移在删净后会顺手移除源目录，搬回去之前先把它建回来。
@@ -140,6 +143,7 @@ function rollbackMigration(src, dst, copied) {
     const copyAt = join(dst, name);
     try {
       if (existsSync(join(src, name))) {
+        cpSync(copyAt, join(src, name), { recursive: true });
         rmSync(copyAt, { recursive: true, force: true });
       } else {
         try {
@@ -154,7 +158,9 @@ function rollbackMigration(src, dst, copied) {
       pending.push(name);
     }
   }
-  // 只收空目录：里面还有异名内容或占用时 rmdir 自然失败，目标目录原样留给用户。
+  // 只收空目录：里面还有异名内容、未回滚完的副本或占用时 rmdir 自然失败，目标
+  // 目录原样留下。已知取舍：迁移前就存在的空目标目录会被一并收走——空目录不
+  // 承载数据，正向迁移本就会按需重建，不值得为它单记「目标是否预先存在」。
   try { rmdirSync(dst); } catch { /* 非空或被占用就留着 */ }
   return pending;
 }

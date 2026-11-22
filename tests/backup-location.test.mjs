@@ -205,12 +205,36 @@ test("目标是既有文件：业务拒绝不抛错，源、目标文件、本�
 // 源条目被占的复现方式：子进程持有条目中一个文件的读句柄——Windows 上不带删除
 // 共享的打开句柄让 rmSync 在该条目上原地抛 EPERM，条目内容完整残留在源
 // （残留与原数据同源，这正是专用回滚「删副本」分支的前提）。
+// 注意 Node 的打开句柄共享读写、只挡删除：回滚的合并回填可以照常覆盖写，
+// 所以这类占用在回填路径上不阻塞（探针实测），要模拟回填失败见 holdFileExclusive。
 async function holdFile(filePath) {
   const child = spawn(process.execPath, [
     "-e",
     `require("node:fs").openSync(${JSON.stringify(filePath)}, "r"); setInterval(() => {}, 1000);`,
   ], { stdio: "ignore" });
   await once(child, "spawn");
+  return async () => {
+    if (child.exitCode === null && !child.signalCode) {
+      const exited = once(child, "exit");
+      child.kill();
+      await exited.catch(() => {});
+    }
+  };
+}
+
+// 回填必败的占用：FileShare.Read 级打开把写和删一起挡掉——正向删源失败留下残留，
+// 回滚的 cpSync 合并回填写不进去同样失败。Node 自身开不出这个共享级别，
+// 用 powershell 持 FileStream；stdout 报 ready 才视为占用生效。
+async function holdFileExclusive(filePath) {
+  const child = spawn("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-Command",
+    `$f = [System.IO.File]::Open('${filePath.replace(/'/g, "''")}', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); Write-Output "ready"; Start-Sleep -Seconds 3600`,
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => reject(new Error("占用进程在就绪前退出")));
+    child.stdout.on("data", (chunk) => { if (String(chunk).includes("ready")) resolve(); });
+  });
   return async () => {
     if (child.exitCode === null && !child.signalCode) {
       const exited = once(child, "exit");
@@ -258,6 +282,78 @@ test("换位置时记录写失败且有源条目被占：回滚后源齐全、�
     assert.equal(readFileSync(join(to, "pre-import-20261115-100000", "store.json"), "utf8"), "{\"beta\":1}");
     assert.equal(readFileSync(join(to, "byok-import-20261115-101000", "config.toml"), "utf8"), "x");
     assert.deepEqual(JSON.parse(readFileSync(join(m.root, BACKUP_ROOT_FILE), "utf8")), { root: to });
+  } finally {
+    await release();
+    m.cleanup();
+  }
+});
+
+// 不完整残留：删源逐个子项进行，前面的兄弟文件已删、撞上被锁文件即抛——
+// 回滚必须先合并回填再删副本，否则目标侧唯一完整副本会被静默销毁。
+// 条目内 readdir 按字典序：a.txt 先被删，z.txt 被锁留下，残留缺 a.txt。
+test("记录写失败且源条目被部分删除：回滚合并回填后源条目字节级齐全", async () => {
+  const m = machine();
+  let release = async () => {};
+  try {
+    const from = join(m.root, "backups");
+    const to = join(m.root, "elsewhere", "backups");
+    const partial = join(from, "pre-import-20261115-100000");
+    seed(partial, { "a.txt": "兄弟文件先被删", "z.txt": "被锁留下" });
+    release = await holdFile(join(partial, "z.txt"));
+    mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
+
+    const result = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /位置记录失败/);
+    assert.equal(result.error.includes("备份现在在"), false, "回填成功、副本清掉，不得报「留在新位置」");
+
+    // 源条目字节级齐全：已删的兄弟文件由副本回填，被锁文件内容原样。
+    assert.equal(readFileSync(join(partial, "a.txt"), "utf8"), "兄弟文件先被删", "缺失文件必须回填");
+    assert.equal(readFileSync(join(partial, "z.txt"), "utf8"), "被锁留下");
+    assert.equal(existsSync(join(to, "pre-import-20261115-100000")), false, "新位置不留副本");
+    assert.equal(statSync(join(m.root, BACKUP_ROOT_FILE)).isDirectory(), true);
+    assert.equal(readBackupRoot(m.root), defaultBackupRoot(m.root));
+
+    // 松开占用、挪走占位后重试可成。
+    await release();
+    release = async () => {};
+    rmSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true, force: true });
+    const retry = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(retry.ok, true, retry.error);
+    assert.equal(readFileSync(join(to, "pre-import-20261115-100000", "a.txt"), "utf8"), "兄弟文件先被删");
+    assert.equal(readFileSync(join(to, "pre-import-20261115-100000", "z.txt"), "utf8"), "被锁留下");
+    assert.deepEqual(JSON.parse(readFileSync(join(m.root, BACKUP_ROOT_FILE), "utf8")), { root: to });
+  } finally {
+    await release();
+    m.cleanup();
+  }
+});
+
+// 回填失败：残留文件被 FileShare.Read 级持续占用，合并回填写不进去——
+// 副本必须保留（它是唯一完整副本），条目进 pending，报文追加「备份现在在」。
+// 此后同会话重试会被目标侧同名副本按既有「同名项整次拒绝」拦下，交用户裁决。
+test("记录写失败且回滚回填被占：副本保留在新位置，报文告知备份现在在", async () => {
+  const m = machine();
+  let release = async () => {};
+  try {
+    const from = join(m.root, "backups");
+    const to = join(m.root, "elsewhere", "backups");
+    const occupied = join(from, "pre-import-20261115-100000");
+    seed(occupied, { "config.toml": "x" });
+    release = await holdFileExclusive(join(occupied, "config.toml"));
+    mkdirSync(join(m.root, BACKUP_ROOT_FILE), { recursive: true });
+
+    const result = applyBackupRoot({ root: m.root, target: to });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /位置记录失败/);
+    assert.match(result.error, /备份现在在 /, "回填没收尾必须告知备份去向");
+    assert.ok(result.error.includes(to), "报文点名新位置");
+
+    // 数据两侧俱在、一份不丢：源残留原样，目标副本完整保留。
+    assert.equal(readFileSync(join(occupied, "config.toml"), "utf8"), "x", "源残留原样");
+    assert.equal(readFileSync(join(to, "pre-import-20261115-100000", "config.toml"), "utf8"), "x", "副本必须保留");
+    assert.equal(statSync(join(m.root, BACKUP_ROOT_FILE)).isDirectory(), true, "记录未变");
+    assert.equal(readBackupRoot(m.root), defaultBackupRoot(m.root));
   } finally {
     await release();
     m.cleanup();
