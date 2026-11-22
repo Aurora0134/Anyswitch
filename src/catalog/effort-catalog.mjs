@@ -371,34 +371,6 @@ export function intersectEffortVocabulary(levels, agent) {
   return EFFORT_LEVELS_ORDER.filter((level) => levels?.includes(level) && vocabulary.includes(level));
 }
 
-// The level codex's picker tops out at, and the library level it stands in for.
-// Ordinary models — every row whose deepest level is max and which has no ultra
-// of its own — would otherwise hand codex a word its picker does not render.
-// The config face renames max to ultra; the request face renames it back
-// (effort-injection.mjs) so the upstream still receives max. GPT-class rows
-// already carry ultra and are left alone: renaming there would put two names on
-// one depth.
-const CODEX_TOP_ALIAS = Object.freeze({ from: "max", to: "ultra" });
-
-/**
- * Whether this ladder needs the codex top-level rename: max present, ultra
- * absent. Both faces read the same predicate, so the name codex sends back is
- * exactly the one the config face invented.
- */
-export function codexTopLevelAliased(levels) {
-  const list = Array.isArray(levels) ? levels : [];
-  return list.includes(CODEX_TOP_ALIAS.from) && !list.includes(CODEX_TOP_ALIAS.to);
-}
-
-/**
- * The ladder as codex should hear it. A depth that is only max becomes ultra;
- * every other level, and every ladder that already speaks ultra, passes as-is.
- */
-export function codexSurfaceLevels(levels) {
-  if (!codexTopLevelAliased(levels)) return [...levels ?? []];
-  return levels.map((level) => (level === CODEX_TOP_ALIAS.from ? CODEX_TOP_ALIAS.to : level));
-}
-
 /**
  * What one endpoint should be told about one model's thinking depth, already
  * clipped to what that endpoint can render.
@@ -470,17 +442,9 @@ export function resolveDeclaredEfforts(rawId, { catalog, model, provider } = {})
 /** Vocabulary-clip a resolved effort set and name its default. Shared by both entry points. */
 function clipEffortSurface(resolved, rawId, agent) {
   if (resolved.kind === "non-text" || resolved.levels.length === 0) return null;
-  const clipped = intersectEffortVocabulary(resolved.levels, agent);
-  if (clipped.length === 0) return null;
-  // The codex face renames an ordinary model's deepest max to ultra (see
-  // CODEX_TOP_ALIAS); a default sitting on that depth follows the rename, or it
-  // would fall out of the ladder it was chosen from.
-  const levels = agent === "codex" ? codexSurfaceLevels(clipped) : clipped;
-  const wantedDefault =
-    agent === "codex" && codexTopLevelAliased(clipped) && resolved.default === CODEX_TOP_ALIAS.from
-      ? CODEX_TOP_ALIAS.to
-      : resolved.default;
-  const level = levels.includes(wantedDefault) ? wantedDefault : pickDefaultEffort(levels);
+  const levels = intersectEffortVocabulary(resolved.levels, agent);
+  if (levels.length === 0) return null;
+  const level = levels.includes(resolved.default) ? resolved.default : pickDefaultEffort(levels);
   if (!level) return null;
   return {
     levels,

@@ -1439,15 +1439,15 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "wire": {
         "xhigh": "xhigh",
-        "ultra": "ultra",
         "light": "light",
         "medium": "medium",
-        "high": "high"
+        "high": "high",
+        "max": "max"
       },
       "thinkingFormat": "openrouter",
       "source": "operator-rule",
@@ -1456,12 +1456,15 @@
       "userEdited": false,
       "preOperator": {
         "levels": [
+          "light",
+          "medium",
+          "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-5.6-sol": {
       "levels": [
@@ -1469,16 +1472,16 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "wire": {
         "off": null,
         "xhigh": "xhigh",
-        "ultra": "ultra",
         "light": "light",
         "medium": "medium",
-        "high": "high"
+        "high": "high",
+        "max": "max"
       },
       "source": "operator-rule",
       "confidence": "high",
@@ -1486,12 +1489,15 @@
       "userEdited": false,
       "preOperator": {
         "levels": [
+          "light",
+          "medium",
+          "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-5.6-terra": {
       "levels": [
@@ -1499,16 +1505,16 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "wire": {
         "off": null,
         "xhigh": "xhigh",
-        "ultra": "ultra",
         "light": "light",
         "medium": "medium",
-        "high": "high"
+        "high": "high",
+        "max": "max"
       },
       "source": "operator-rule",
       "confidence": "high",
@@ -1516,12 +1522,15 @@
       "userEdited": false,
       "preOperator": {
         "levels": [
+          "light",
+          "medium",
+          "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-6-astra": {
       "levels": [
@@ -1529,7 +1538,7 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "wire": {
@@ -1537,7 +1546,7 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "ultra": "ultra"
+        "max": "max"
       },
       "source": "operator-rule",
       "confidence": "high",
@@ -1545,14 +1554,15 @@
       "userEdited": false,
       "preOperator": {
         "levels": [
-          "none",
+          "light",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-6-luna": {
       "levels": [
@@ -1560,7 +1570,7 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "source": "operator-rule",
@@ -1572,19 +1582,19 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "ultra": "ultra"
+        "max": "max"
       },
       "preOperator": {
         "levels": [
-          "low",
+          "light",
           "medium",
           "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-6-sol": {
       "levels": [
@@ -1592,7 +1602,7 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "source": "operator-rule",
@@ -1604,19 +1614,19 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "ultra": "ultra"
+        "max": "max"
       },
       "preOperator": {
         "levels": [
-          "low",
+          "light",
           "medium",
           "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-6.1-sol": {
       "levels": [
@@ -1624,7 +1634,7 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "source": "operator-rule",
@@ -1636,19 +1646,19 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "ultra": "ultra"
+        "max": "max"
       },
       "preOperator": {
         "levels": [
-          "low",
+          "light",
           "medium",
           "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-6.2-astra": {
       "levels": [
@@ -1656,7 +1666,7 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "source": "operator-rule",
@@ -1668,19 +1678,19 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "ultra": "ultra"
+        "max": "max"
       },
       "preOperator": {
         "levels": [
-          "low",
+          "light",
           "medium",
           "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-6.2-sol": {
       "levels": [
@@ -1688,7 +1698,7 @@
         "medium",
         "high",
         "xhigh",
-        "ultra"
+        "max"
       ],
       "default": "high",
       "source": "operator-rule",
@@ -1700,19 +1710,19 @@
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
-        "ultra": "ultra"
+        "max": "max"
       },
       "preOperator": {
         "levels": [
-          "low",
+          "light",
           "medium",
           "high",
           "xhigh",
-          "max"
+          "ultra"
         ],
         "kind": "reasoning"
       },
-      "rule": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/ultra"
+      "rule": "gpt-5.6 及以上顶档改回 max"
     },
     "gpt-image-2": {
       "levels": null,
