@@ -60,7 +60,7 @@ export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.m
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "../channels/pool-providers.mjs";
 import { extractManagedProviders } from "../channels/pool-providers.mjs";
-import { catalogForRoot, resolveEndpointEfforts, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
+import { catalogForRoot, resolveEndpointEfforts, effortSupplementEnabled, isNonTextModel } from "../catalog/effort-catalog.mjs";
 import { packChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "../channels/channel-model-slug.mjs";
 import { resolvePool } from "../channels/pool-routing.mjs";
 import { AGGREGATE_ENTRY_SEGMENT } from "../relay/openai-path.mjs";
@@ -226,6 +226,12 @@ export function buildCodexModelCatalog(models, template, catalog = null) {
     // what the switch governs; the catalog's required fields are not ours to
     // blank (codex reads reasoning support off this list, and an empty one
     // would remove the picker rather than restore a default).
+    //
+    // One exception with the switch on: the library's non-text check naming
+    // the model means there is no thinking picker to offer at all, so both
+    // fields are deleted from the entry instead of being left holding the
+    // template's GPT set. Deleting is not blanking — the field goes away
+    // entirely rather than stating an empty level list.
     const efforts = catalog
       ? resolveEndpointEfforts(modelId, { catalog, agent: "codex", model, provider })
       : null;
@@ -236,6 +242,9 @@ export function buildCodexModelCatalog(models, template, catalog = null) {
           ?? `${level} reasoning effort`,
       }));
       entry.default_reasoning_level = efforts.default;
+    } else if (catalog && isNonTextModel(modelId)) {
+      delete entry.supported_reasoning_levels;
+      delete entry.default_reasoning_level;
     }
     entry.priority = index + 1;
     entry.multi_agent_version = "v2";

@@ -648,6 +648,47 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(frozen.default_reasoning_level, CATALOG_TEMPLATE.default_reasoning_level);
   });
 
+  it("writes a store-declared defaultEffort as default_reasoning_level when it names a declared level", () => {
+    // 声明 [low,high]+defaultEffort:low → 目录 default_reasoning_level === low，
+    // 与请求面（effort-injection.mjs defaultLevelFor）同一判据。
+    const providers = {
+      alpha: { models: { "probe-9-thinker": { reasoningEffortLevels: ["low", "high"], defaultEffort: "low" } } },
+    };
+    const entry = buildCodexModelCatalog(
+      collectCodexCatalogModels(providers), CATALOG_TEMPLATE, { models: new Map() },
+    ).models[0];
+    assert.deepEqual(entry.supported_reasoning_levels.map((level) => level.effort), ["low", "high"]);
+    assert.equal(entry.default_reasoning_level, "low");
+  });
+
+  it("drops both reasoning-level fields for a non-text model when the switch is on", () => {
+    // 库显式判定非文本（isNonTextModel 命中）时删字段本身，不是置空数组：
+    // 继承模板的 GPT 冻结集会给图像模型挂上一个思考档位选择器。
+    const providers = {
+      alpha: { models: { "agnes-image-2.0-flash": {}, "brand-new-gateway-model": {} } },
+    };
+    const bySlug = new Map(
+      buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE, { models: new Map() }).models
+        .map((entry) => [entry.slug, entry]),
+    );
+    const image = bySlug.get("alpha~agnes-image-2.0-flash");
+    assert.equal("supported_reasoning_levels" in image, false);
+    assert.equal("default_reasoning_level" in image, false);
+    // 乐观兜底对照：开关开但库无记录的文本模型照旧拿到乐观档位，字段不删。
+    const optimistic = bySlug.get("alpha~brand-new-gateway-model");
+    assert.deepEqual(optimistic.supported_reasoning_levels.map((level) => level.effort), ["high", "xhigh", "max"]);
+    assert.equal(optimistic.default_reasoning_level, "high");
+  });
+
+  it("keeps the template's frozen level set for a non-text model when the switch is off", () => {
+    // 开关关闭对照：无库可循时一切皆模板原样——删字段是开关开启后库判定
+    // 非文本的专属分支。
+    const providers = { alpha: { models: { "agnes-image-2.0-flash": {} } } };
+    const entry = buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE).models[0];
+    assert.deepEqual(entry.supported_reasoning_levels, CATALOG_TEMPLATE.supported_reasoning_levels);
+    assert.equal(entry.default_reasoning_level, CATALOG_TEMPLATE.default_reasoning_level);
+  });
+
   it("writes the catalog file and anchors the pointer in the top-level key region", () => {
     const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
