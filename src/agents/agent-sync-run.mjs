@@ -7,11 +7,10 @@
 // panel — the resident processes spawn this script, they never run the merge
 // logic in-memory again.
 //
-// Exit code 0 = the sync ran (every endpoint synced, or only some of them);
-// non-zero = the store was unreadable or the runner itself crashed. Stdout
-// carries one human-readable line per outcome for the spawner's logger plus a
-// single machine-readable summary line (see SYNC_RESULT_PREFIX) the panel
-// parses — a lone endpoint failure must not sink the whole run.
+// Exit code 0 means the runner finished evaluating the endpoints, whether or
+// not their writes succeeded. A nonzero exit means the runner could not finish
+// (for example, the store was unreadable). The parent uses the structured
+// summary to log the batch outcome separately from per-endpoint diagnostics.
 
 import { join } from "node:path";
 import { syncAllAgentConfigs, buildSyncSummary, formatSyncSummaryLine } from "./agent-sync.mjs";
@@ -62,14 +61,8 @@ async function main() {
     logger.error(`sync failed: ${result.reason ?? "unknown"}`);
     process.exit(1);
   }
-  if (summary.failed.length > 0) {
-    // 个别端点写不进去：其余端点已经同步好，整体仍算跑完，退出码留给真失败。
-    logger.warn(`sync finished with failures: ${summary.failed.join(", ")}`);
-    process.exit(0);
-  }
-  // 全员成功的落行已并入 syncAllAgentConfigs 末尾的合并计数行（逐端点
-  // 「synced」+ 本行曾让一轮 store 变更刷约 10 行同义复读）；本轮没有端点
-  // 写盘时一行都不落——成功是无新闻。
+  // Endpoint diagnostics and the count of rewritten configs are emitted by
+  // syncAllAgentConfigs. The parent owns the batch failure summary.
   process.exit(0);
 }
 

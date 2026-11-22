@@ -380,7 +380,10 @@ function makeImageGuardHandler(responses, { gates = {}, store = imageGuardStore(
         return next;
       },
     }),
-    logger: { info: (line) => lines.push(line) },
+    logger: {
+      info: (message) => lines.push({ level: "info", message }),
+      warn: (message) => lines.push({ level: "warn", message }),
+    },
     effortInjector: createEffortInjector({ catalog: effortCatalog }),
     ...gates,
   });
@@ -399,9 +402,10 @@ test("预判：store 声明纯文本时，send 前把图替换为占位标记（
     { type: "text", text: "[Unsupported Image]" },
   ]);
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /图片降级（预判）/);
-  assert.match(lines[0], /"declared-text"/);
-  assert.match(lines[0], /1 张图片/);
+  assert.equal(lines[0].level, "info");
+  assert.match(lines[0].message, /图片降级（预判）/);
+  assert.match(lines[0].message, /"declared-text"/);
+  assert.match(lines[0].message, /1 张图片/);
 });
 
 test("预判：内置名单命中时剥图，且单图 content 折叠为字符串形态", async () => {
@@ -457,8 +461,9 @@ test("兜底：漏判后上游报「只支持文本」，剥图重试一次并�
     { type: "text", text: "[Unsupported Image]" },
   ]);
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /图片降级（兜底）/);
-  assert.match(lines[0], /"mystery-model"/);
+  assert.equal(lines[0].level, "warn");
+  assert.match(lines[0].message, /图片降级（兜底）/);
+  assert.match(lines[0].message, /"mystery-model"/);
 });
 
 test("兜底：总开关关着时不重试，错误原样透传", async () => {

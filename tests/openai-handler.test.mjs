@@ -761,7 +761,10 @@ describe("openai handler 图片降级", () => {
       },
       recordGeneration: (value) => { generation = value; },
       readGeneration: () => generation,
-      logger: { info: (line) => lines.push(line) },
+      logger: {
+        info: (message) => lines.push({ level: "info", message }),
+        warn: (message) => lines.push({ level: "warn", message }),
+      },
       effortInjector: createEffortInjector({ catalog: EMPTY_EFFORT_CATALOG }),
       ...gates,
     });
@@ -786,9 +789,10 @@ describe("openai handler 图片降级", () => {
       { type: "text", text: "[Unsupported Image]" },
     ]);
     assert.equal(lines.length, 1);
-    assert.match(lines[0], /图片降级（预判）/);
-    assert.match(lines[0], /"declared-text"/);
-    assert.match(lines[0], /1 张图片/);
+    assert.equal(lines[0].level, "info");
+    assert.match(lines[0].message, /图片降级（预判）/);
+    assert.match(lines[0].message, /"declared-text"/);
+    assert.match(lines[0].message, /1 张图片/);
   });
 
   it("预判：内置名单命中，单图 content 折叠为字符串形态", async () => {
@@ -849,8 +853,9 @@ describe("openai handler 图片降级", () => {
       { type: "text", text: "[Unsupported Image]" },
     ]);
     assert.equal(lines.length, 1);
-    assert.match(lines[0], /图片降级（兜底）/);
-    assert.match(lines[0], /"mystery-model"/);
+    assert.equal(lines[0].level, "warn");
+    assert.match(lines[0].message, /图片降级（兜底）/);
+    assert.match(lines[0].message, /"mystery-model"/);
   });
 
   it("兜底：总开关关着时不重试，错误原样透传", async () => {

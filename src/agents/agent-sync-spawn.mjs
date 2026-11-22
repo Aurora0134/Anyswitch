@@ -12,20 +12,39 @@ import { fileURLToPath } from "node:url";
 // Single source of truth for the machine-readable summary marker: the runner
 // prints one such line per sync for the panel to parse. It carries endpoint
 // names and counts, not prose, so the mirror below keeps it out of log views.
-import { SYNC_RESULT_PREFIX } from "./agent-sync.mjs";
+import { parseSyncSummaryLine, SYNC_RESULT_PREFIX } from "./agent-sync.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const AGENT_SYNC_RUN_SCRIPT = join(here, "agent-sync-run.mjs");
 
 // Resolves (never rejects) with { ok, code?, error?, timeout?, stdout, stderr }.
-// ok === true only when the runner exited 0. stdout/stderr lines are mirrored
-// into the caller's logger so both resident processes' log views see them.
-// timeout === true marks the 120s 超时分支：超时被 SIGTERM 掐掉的子进程在 close
-// 事件里同样报 code null，没有这个标记的话「超时」与「崩溃」会压成同一句
-// runner exit null；error 文案由这里直接给出，呈现处（relay-host / 面板路由）
-// 的模板原样渲染即可。
+// ok === true only when the runner exited 0. The parent logs the batch outcome
+// from the process result and endpoint summary, without changing the result.
+// timeout distinguishes a timed-out runner from other signal exits (code null).
 export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000, spawnFn = spawn }) {
   return new Promise((resolve) => {
+    let settled = false;
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      if (!result.ok) {
+        logger?.error?.(`agent config sync failed: ${result.error ?? `runner exit ${result.code}`}`);
+      } else {
+        const summary = parseSyncSummaryLine(result.stdout);
+        if (summary && !summary.ok) {
+          logger?.error?.("agent config sync failed: runner reported failure");
+        } else if (summary?.failed.length) {
+          const failed = summary.failed.join(", ");
+          if (!summary.synced.length) {
+            logger?.error?.(`agent config sync failed for all applicable endpoints: ${failed}`);
+          } else {
+            logger?.warn?.(`[agent-sync] sync finished with failures: ${failed}`);
+          }
+        }
+      }
+      resolve(result);
+    }
+
     let child;
     try {
       child = spawnFn(process.execPath, [AGENT_SYNC_RUN_SCRIPT, "--port", String(port)], {
@@ -36,7 +55,7 @@ export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000, spawn
         windowsHide: true,
       });
     } catch (err) {
-      resolve({ ok: false, error: err.message, stdout: "", stderr: "" });
+      finish({ ok: false, error: err.message, stdout: "", stderr: "" });
       return;
     }
 
@@ -61,23 +80,21 @@ export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000, spawn
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ ok: false, error: err.message, stdout, stderr });
+      finish({ ok: false, error: err.message, stdout, stderr });
     });
 
     child.on("close", (code) => {
       clearTimeout(timer);
       const lines = (text) => text.trim().split(/\r?\n/).filter(Boolean);
       const humanLines = (text) => lines(text).filter((line) => !line.includes(SYNC_RESULT_PREFIX));
-      // 级别由流决定，不由退出码决定：stderr 一律是 warn。原来只在退出码非 0 时才
-      // 转 stderr，于是「退出码 0 但个别端点没同步上」那条警告整条丢掉——而它恰恰
-      // 是最需要被看到的一类。
+      // Keep diagnostics even on exit 0, where an individual endpoint can fail.
       for (const line of humanLines(stdout)) logger?.info?.(line);
       for (const line of humanLines(stderr)) logger?.warn?.(line);
       if (timedOut) {
-        resolve({ ok: false, code, timeout: true, error: `runner timed out after ${Math.round(timeoutMs / 1000)}s`, stdout, stderr });
+        finish({ ok: false, code, timeout: true, error: `runner timed out after ${Math.round(timeoutMs / 1000)}s`, stdout, stderr });
         return;
       }
-      resolve({ ok: code === 0, code, stdout, stderr });
+      finish({ ok: code === 0, code, stdout, stderr });
     });
   });
 }

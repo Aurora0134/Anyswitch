@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { spawnAgentSync } from "../src/agents/agent-sync-spawn.mjs";
+import { createLogger, logLevelAllows } from "../src/shared/logger.mjs";
 
 // 无视 spawnAgentSync 传来的 runner 脚本路径，换成测试脚本；其余（execPath、
 // stdio 三元组、windowsHide）原样保留，走完真实进程生命周期。
@@ -76,4 +77,52 @@ test("子进程行按流定级 mirror 进调用方 logger，摘要标记行不�
   assert.deepEqual(lines.info, ["[agent-sync] all good"]);
   assert.deepEqual(lines.warn, ["[agent-sync] partial trouble"]);
   assert.ok(result.stdout.includes("__ANYSWITCH_SYNC_RESULT__"), "摘要行留在 result.stdout 供面板解析");
+});
+
+test("端点全失败即使 runner 退出 0，错误档也能看到一条整轮结论", async () => {
+  const logger = createLogger({ sink() {} });
+  const summary = { ok: true, synced: [], failed: ["zcode", "claude"] };
+  const result = await spawnAgentSync({
+    port: 47821,
+    logger,
+    spawnFn: spawnScript(
+      `console.log(${JSON.stringify(`__ANYSWITCH_SYNC_RESULT__${JSON.stringify(summary)}`)});` +
+      "console.error('[agent-sync] zcode config write rejected');",
+    ),
+  });
+  assert.equal(result.ok, true, "进程成功收尾的契约不变");
+  assert.deepEqual(logger.getHistory().filter(({ level }) => logLevelAllows(level, "error"))
+    .map(({ message }) => message), ["agent config sync failed for all applicable endpoints: zcode, claude"]);
+  assert.ok(logger.getHistory().some(({ level, message }) => level === "warn" && message.includes("write rejected")));
+});
+
+for (const [label, synced, failed, expected] of [
+  ["部分成功", ["pi"], ["claude"], [{ level: "warn", message: "[agent-sync] sync finished with failures: claude" }]],
+  ["无适用端点", [], [], []],
+  ["没有重新写入的成功同步", ["pi"], [], []],
+]) {
+  test(`${label}按实际批次结果记录`, async () => {
+    const logger = createLogger({ sink() {} });
+    const summary = { ok: true, synced, failed };
+    await spawnAgentSync({
+      port: 47821,
+      logger,
+      spawnFn: spawnScript(`console.log(${JSON.stringify(`__ANYSWITCH_SYNC_RESULT__${JSON.stringify(summary)}`)})`),
+    });
+    assert.deepEqual(logger.getHistory().map(({ level, message }) => ({ level, message })), expected);
+  });
+}
+
+test("runner 失败时只记录一条整轮错误，诊断仍可查看", async () => {
+  const logger = createLogger({ sink() {} });
+  const result = await spawnAgentSync({
+    port: 47821,
+    logger,
+    spawnFn: spawnScript("console.error('[agent-sync] could not read store'); process.exitCode = 1;"),
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(logger.getHistory().map(({ level, message }) => ({ level, message })), [
+    { level: "warn", message: "[agent-sync] could not read store" },
+    { level: "error", message: "agent config sync failed: runner exit 1" },
+  ]);
 });

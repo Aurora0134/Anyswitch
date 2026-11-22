@@ -231,6 +231,34 @@ function installCrashLog(logPath) {
   });
 }
 
+// Backfill the watchdog logon task for older installations with followAgent enabled.
+export async function migrateWatchdogAutostart({
+  logger,
+  settingsFile,
+  isWatchdogAutostartEnabledFn = isWatchdogAutostartEnabled,
+  enableWatchdogAutostartFn = enableWatchdogAutostart,
+  probeWatchdogFn = probeWatchdog,
+  spawnWatchdogFn = spawnWatchdog,
+}) {
+  try {
+    const followAgent = loadSettings(settingsFile ?? defaultSettingsPath())?.settings?.followAgent === true;
+    if (!followAgent || await isWatchdogAutostartEnabledFn()) return;
+    const reg = await enableWatchdogAutostartFn();
+    if (!reg.ok) {
+      logger.warn(`followAgent migration: failed to register watchdog logon task (non-fatal): ${reg.error}`);
+      return;
+    }
+    const ready = (await probeWatchdogFn()) || (await spawnWatchdogFn()).ok;
+    if (ready) {
+      logger.info("followAgent migration: watchdog logon task registered and watchdog responded");
+    } else {
+      logger.warn("followAgent migration: watchdog logon task registered, but watchdog readiness could not be confirmed");
+    }
+  } catch (err) {
+    logger.warn(`followAgent migration check failed (non-fatal): ${err.message}`);
+  }
+}
+
 export async function startPanelHost(options = {}) {
   // logPath 是纯测试注入口：装配测试把 stderr tee 与崩溃记录引进临时沙箱，
   // 默认落数据根 logs/panel-host.log（跨版本连续，2026-11-20 用户裁决：清版本
@@ -270,23 +298,7 @@ export async function startPanelHost(options = {}) {
   // for why the relay-host must never start one.
   const stopLogBridge = startRelayLogBridge(logger, paths.root);
 
-  // One-time migration: followAgent used to be hosted in THIS process, so
-  // older machines have settings.json followAgent=true but no watchdog
-  // registry entry. Backfill the HKCU Run key + start the watchdog now. This
-  // is a bootstrap fix-up only — afterwards the watchdog lives or dies with
-  // its own registry entry, never with the panel host.
-  try {
-    const followAgent = loadSettings(defaultSettingsPath())?.settings?.followAgent === true;
-    if (followAgent && !(await isWatchdogAutostartEnabled())) {
-      const reg = await enableWatchdogAutostart();
-      if (reg.ok && !(await probeWatchdog())) {
-        await spawnWatchdog();
-        logger.info("followAgent migration: watchdog registry entry backfilled and watchdog started");
-      }
-    }
-  } catch (err) {
-    logger.warn(`followAgent migration check failed (non-fatal): ${err.message}`);
-  }
+  await migrateWatchdogAutostart({ logger });
 
   // Autostart tasks store an absolute path snapshot. When the source tree moves
   // (the 2026-11 src/ split did), the task keeps pointing at the old location

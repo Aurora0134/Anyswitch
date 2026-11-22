@@ -1610,7 +1610,7 @@ export function createPanelRouter({
     } catch (error) {
       // 落盘失败如实回 500：视图状态没存上，前端要能知道（否则本地显示已归档、
       // 刷新回来还在，比报错更难理解）。
-      logger?.warn?.(`terminal rail prefs persist failed: ${error?.message}`);
+      logger?.error?.(`terminal rail prefs persist failed: ${error?.message}`);
       return sendJson(res, 500, { ok: false, error: "视图状态保存失败，请重试" });
     }
   }
@@ -3158,9 +3158,11 @@ export function createPanelRouter({
     if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) return;
     if (await findStagedSelfUpdate()) return;
     const run = registerSelfUpdateDownload({ channel: update.channel, targetVersion: update.release.version, targetTag: update.release.tag });
-    logger?.info(run
-      ? `Self update auto-download registered: ${run.targetTag}`
-      : "Self update auto-download failed to spawn its worker");
+    if (run) {
+      logger?.info(`Self update auto-download registered: ${run.targetTag}`);
+    } else {
+      logger?.warn("Self update auto-download failed to spawn its worker");
+    }
   }
 
   function firePanelSwap() {

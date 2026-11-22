@@ -176,7 +176,7 @@ export async function syncAllAgentConfigs({
     }
   } catch (err) {
     results.zcode = { ok: false, error: err.message };
-    logger?.error?.(`zcode config sync failed: ${err.message}`);
+    logger?.warn?.(`zcode config sync failed: ${err.message}`);
   }
 
   // 2. DSH profile patches (~/.dsh/profiles/<name>/cordis.patch.yml). 0.1.7
@@ -346,7 +346,7 @@ export async function syncAllAgentConfigs({
     }
   } catch (err) {
     results.claude = { ok: false, error: err.message };
-    logger?.error?.(`claude config sync failed: ${err.message}`);
+    logger?.warn?.(`claude config sync failed: ${err.message}`);
   }
 
   // 完整性守卫：AGENT_ENDPOINTS 登记的每个端点都必须有写手结果。写手块漏写

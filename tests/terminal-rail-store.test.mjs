@@ -43,7 +43,7 @@ function fakeReqRes(url, method = "GET", body = null) {
   return { req, res, json };
 }
 
-function railRouter({ root, store }) {
+function railRouter({ root, store, logger = null }) {
   // base 一并隔离：不传 base 时 createPanelRouter 落到 process.env，settingsFile
   // 会指到真机 %LOCALAPPDATA%\Anyswitch\settings.json（logLevelGate 每拍真读），
   // 测试结果随宿主机设置漂移。这里把 settings 落点也圈进用例自己的临时目录
@@ -51,7 +51,7 @@ function railRouter({ root, store }) {
   return createPanelRouter({
     base: { LOCALAPPDATA: root },
     storePaths: { root },
-    logger: null, metricsCollector: null,
+    logger, metricsCollector: null,
     fetchRelayAgents: async () => null,
     terminalRailStore: store,
   });
@@ -405,6 +405,23 @@ describe("终端会话栏视图状态存储", () => {
         }
         assert.deepEqual(store.list(), { archived: [], removedGroups: [], groupOrder: [], pinned: [] }, "一条都不进");
       });
+    });
+
+    it("rail persistence failure logs an error and keeps the save failure response", async () => {
+      const entries = [];
+      const router = railRouter({
+        root: mkTestDir("anyswitch-rail-route-"),
+        store: { archive: () => { throw new Error("write blocked"); } },
+        logger: {
+          warn: (message) => entries.push(["warn", message]),
+          error: (message) => entries.push(["error", message]),
+        },
+      });
+      const { req, res, json } = fakeReqRes("/panel/api/terminal/rail/archive", "POST", { endpoint: "kimi", id: "s-1" });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 500);
+      assert.deepEqual(json(), { ok: false, error: "视图状态保存失败，请重试" });
+      assert.deepEqual(entries, [["error", "terminal rail prefs persist failed: write blocked"]]);
     });
 
     it("未注入 store 时走 panel.mjs 惰性装配：落点 relayRoot 下 terminal-rail.json，跨实例读回", async () => {

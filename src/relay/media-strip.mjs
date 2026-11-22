@@ -9,7 +9,7 @@
 //
 // Pure transforms only (no IO, no logger): requestHasImages / stripImages.
 // The note/stats pair at the bottom is the process-internal degradation
-// ledger — one info log per degraded request plus counters for a future
+// ledger — one log per degraded request plus counters for a future
 // panel surface — and is deliberately module-level so both relay handlers
 // (anthropic / openai) share one process-wide count.
 
@@ -68,18 +68,17 @@ export function stripImages(body, marker = UNSUPPORTED_IMAGE_MARKER) {
 const ledger = { requests: 0, images: 0 };
 
 /**
- * Record one degraded request: one info log (渠道 / 模型 / 张数 / 预判或兜底
- * 路径) plus the process counters. `via` is "predict" (send 前预判剥图) or
- * "fallback" (上游报错后剥图重试).
+ * Count one degraded request and log at info for prediction or warn for fallback.
  */
 export function noteImageFallback({ providerId, modelId, count, via, logger = null }) {
   ledger.requests += 1;
   ledger.images += count;
-  const headline = via === "fallback" ? "图片降级（兜底）" : "图片降级（预判）";
-  const tail = via === "fallback"
-    ? "上游回报只支持文本，已把图替换为占位标记后重试一次"
+  const fallback = via === "fallback";
+  const headline = fallback ? "图片降级（兜底）" : "图片降级（预判）";
+  const tail = fallback
+    ? "上游回报只支持文本，已将图片替换为占位标记，将重试一次"
     : "该模型只接受文本，已把图替换为占位标记后发送";
-  logger?.info?.(
+  logger?.[fallback ? "warn" : "info"]?.(
     `${headline}：渠道 "${providerId}" 的模型 "${modelId}" 本次请求 ${count} 张图片，${tail}`,
   );
 }

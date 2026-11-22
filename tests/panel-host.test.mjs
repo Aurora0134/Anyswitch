@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createPanelServer, discoverTerminalBackend, rotateLogIfNeeded, teeStderrToFile } from "../src/panel/panel-host.mjs";
+import { createPanelServer, discoverTerminalBackend, migrateWatchdogAutostart, rotateLogIfNeeded, teeStderrToFile } from "../src/panel/panel-host.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 function recordingLogger() {
@@ -56,6 +56,59 @@ test("discoverTerminalBackend swallows a throwing probe so panel startup never b
   assert.equal(logger.warnings.length, 1);
   assert.match(logger.warnings[0], /token store locked/);
 });
+
+const watchdogResponded = ["info", "followAgent migration: watchdog logon task registered and watchdog responded"];
+
+for (const { name, registration, probe, spawn, expected } of [
+  {
+    name: "registration fails",
+    registration: async () => ({ ok: false, error: "registration denied" }),
+    expected: ["warn", "followAgent migration: failed to register watchdog logon task (non-fatal): registration denied"],
+  },
+  {
+    name: "the watchdog does not respond after startup",
+    spawn: async () => ({ ok: false, reused: false }),
+    expected: ["warn", "followAgent migration: watchdog logon task registered, but watchdog readiness could not be confirmed"],
+  },
+  {
+    name: "an already-running watchdog responds",
+    probe: async () => true,
+    expected: watchdogResponded,
+  },
+  {
+    name: "a reused watchdog responds",
+    spawn: async () => ({ ok: true, reused: true }),
+    expected: watchdogResponded,
+  },
+  {
+    name: "a newly started watchdog responds",
+    spawn: async () => ({ ok: true, reused: false }),
+    expected: watchdogResponded,
+  },
+  {
+    name: "the watchdog probe throws",
+    probe: async () => { throw new Error("probe failed"); },
+    expected: ["warn", "followAgent migration check failed (non-fatal): probe failed"],
+  },
+]) {
+  test(`watchdog migration logs the outcome when ${name}`, async () => {
+    const settingsFile = join(mkTestDir("anyswitch-watchdog-migration-"), "settings.json");
+    writeFileSync(settingsFile, JSON.stringify({ followAgent: true }));
+    const entries = [];
+    await migrateWatchdogAutostart({
+      settingsFile,
+      logger: {
+        info: (message) => entries.push(["info", message]),
+        warn: (message) => entries.push(["warn", message]),
+      },
+      isWatchdogAutostartEnabledFn: async () => false,
+      enableWatchdogAutostartFn: registration ?? (async () => ({ ok: true })),
+      probeWatchdogFn: probe ?? (async () => false),
+      spawnWatchdogFn: spawn ?? (async () => { throw new Error("unexpected watchdog start"); }),
+    });
+    assert.deepEqual(entries, [expected]);
+  });
+}
 
 // 接线兜底用例：createPanelServer 必须在启动时调 prewarmPromptsBackfill——
 // 注入文件唯一写入触发面原本是预设变更，漏掉这行接线则启动回填失效（面板

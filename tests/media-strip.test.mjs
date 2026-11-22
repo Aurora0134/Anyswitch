@@ -141,18 +141,18 @@ describe("degradation ledger", () => {
     assert.deepEqual(imageFallbackStats(), { requests: 0, images: 0 });
   });
 
-  it("logs one info line per degraded request, wording the via path", () => {
-    const lines = [];
-    const logger = { info: (line) => lines.push(line) };
+  it("logs predicted image degradation at info and the planned fallback retry at warn", () => {
+    const logs = [];
+    const logger = {
+      info: (line) => logs.push({ level: "info", line }),
+      warn: (line) => logs.push({ level: "warn", line }),
+    };
     noteImageFallback({ providerId: "ch-a", modelId: "glm-5.3", count: 2, via: "predict", logger });
     noteImageFallback({ providerId: "ch-b", modelId: "deepseek-v4.1-flash", count: 1, via: "fallback", logger });
     noteImageFallback({ providerId: "ch-c", modelId: "m", count: 1, via: "predict", logger: null });
-    assert.equal(lines.length, 2);
-    assert.match(lines[0], /图片降级（预判）/);
-    assert.match(lines[0], /"ch-a"/);
-    assert.match(lines[0], /"glm-5.3"/);
-    assert.match(lines[0], /2 张图片/);
-    assert.match(lines[1], /图片降级（兜底）/);
-    assert.match(lines[1], /重试一次/);
+    assert.deepEqual(logs, [
+      { level: "info", line: '图片降级（预判）：渠道 "ch-a" 的模型 "glm-5.3" 本次请求 2 张图片，该模型只接受文本，已把图替换为占位标记后发送' },
+      { level: "warn", line: '图片降级（兜底）：渠道 "ch-b" 的模型 "deepseek-v4.1-flash" 本次请求 1 张图片，上游回报只支持文本，已将图片替换为占位标记，将重试一次' },
+    ]);
   });
 });
