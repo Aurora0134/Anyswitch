@@ -1985,7 +1985,9 @@
   .data-backup-row-main { min-width: 0; }
   .data-backup-name { font-family: var(--font-mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
   .data-backup-row-meta { font-size: 11px; color: var(--text-3); margin-top: 2px; }
-  .data-backup-restore { flex: none; }
+  /* 「恢复」钮用 auto 左边距把自己与其后的删除钮一并收拢到行右缘：space-between
+     会把三子件的中件悬在行中，动作钮按惯例成组靠右 */
+  .data-backup-restore { flex: none; margin-left: auto; }
   .data-backup-del { background: transparent; border: none; color: var(--text-3); cursor: pointer; padding: 4px; border-radius: 4px; display: flex; align-items: center; justify-content: center; flex: none; }
   .data-backup-del:hover { color: var(--danger); background: var(--danger-soft); }
   .data-backup-del:disabled { opacity: .45; cursor: default; }
