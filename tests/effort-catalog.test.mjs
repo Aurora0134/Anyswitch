@@ -462,8 +462,9 @@ describe("modelEffortSurface", () => {
   });
 
   it("lists ultra for a GPT row on the codex face and clips it for dsh/pi", () => {
-    // gpt-5.6+ 库内行的最深档是 ultra：codex 词表含 ultra，原样列出；
-    // dsh/pi 的固定档位集停在 max，ultra 与 light 一样被裁掉。
+    // 真 ultra 行（库词表的最高档，现库已无此形态，留作透传覆盖）：codex
+    // 词表含 ultra，原样列出；dsh/pi 的固定档位集停在 max，ultra 与 light
+    // 一样被裁掉。
     const gpt = {
       models: new Map([["gpt-5.6-luna", normalizeEffortEntry({
         kind: "reasoning", levels: ["light", "medium", "high", "xhigh", "ultra"], default: "high", wire: { ultra: "ultra" },
@@ -485,23 +486,18 @@ describe("modelEffortSurface", () => {
     );
   });
 
-  it("renames an ordinary model's deepest max to ultra on the codex face only", () => {
-    // 普通模型（库内最高档是 max、没有 ultra）在 codex 词典里最深的一档叫
-    // ultra；目录面改名后 codex 的选择器才列得出来，请求面再折回 max。
+  it("keeps an ordinary max-topped row's deepest level as max on the codex face", () => {
+    // 普通模型（库内最高档是 max、没有 ultra）在 codex 面照原名列出：目录面
+    // 不替 codex 选择器发明档名（max→ultra 改名已拆除，ultra 是 codex 桌面端
+    // 远程门控的档位，改名只会让顶档跟着门一起消失）。
     const ordinary = {
       models: new Map([["kimi-k3", normalizeEffortEntry({
         kind: "reasoning", levels: ["low", "high", "max"], default: "max",
       })]]),
     };
     const codex = modelEffortSurface("kimi-k3", { catalog: ordinary, agent: "codex" });
-    assert.deepEqual(codex.levels, ["low", "high", "ultra"]);
-    assert.equal(codex.default, "ultra", "默认档落在改名的这一档上时同步改名");
-    // 其余端点的词表没有 ultra，档位名与默认档都不动。
-    for (const agent of ["dsh", "pi", "grok", "kimi", "zcode"]) {
-      const surface = modelEffortSurface("kimi-k3", { catalog: ordinary, agent });
-      assert.deepEqual(surface.levels, ["low", "high", "max"], agent);
-      assert.equal(surface.default, "max", agent);
-    }
+    assert.deepEqual(codex.levels, ["low", "high", "max"]);
+    assert.equal(codex.default, "max", "默认档照原名保留");
   });
 
   it("says nothing for a non-text model", () => {

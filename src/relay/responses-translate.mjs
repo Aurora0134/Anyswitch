@@ -55,12 +55,10 @@ const RESPONSE_REQUEST_COPY_FIELDS = [
 ];
 
 // codex's effort vocabulary onto the library's EFFORT_LEVELS_ORDER (see
-// effort-catalog.mjs): "none" is the library's "off". "ultra" stays as-is
-// here — whether it names a real ultra tier or the codex-face rename of max is
-// a per-model question the injector answers (effort-injection.mjs), and folding
-// it globally would downgrade the GPT-class rows that genuinely take ultra.
-// "persistent" is codex-only with no library level and still folds down to
-// "max".
+// effort-catalog.mjs): "none" is the library's "off"; ultra now has a
+// library level (GPT-class upstreams take it natively) and passes through
+// as-is; "persistent" is codex-only with no library level and still folds
+// down to "max".
 const CODEX_EFFORT_FOLD = { none: "off", persistent: "max" };
 
 // ── shared leaf helpers ────────────────────────────────────────────────────

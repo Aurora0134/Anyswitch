@@ -578,18 +578,17 @@ describe("codex model catalog (model_catalog_json)", () => {
     const providers = { alpha: { models: { "probe-9-thinker": {} } } };
     const entry = buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE, catalog).models[0];
     // codex 的档位词表没有 off（codex 拼零档为 none），写入前必须裁掉；
-    // low/high 落表，最深档 max 在 codex 面改名为 ultra（普通模型没有自己的
-    // ultra，见 effort-catalog.mjs 的 CODEX_TOP_ALIAS）。
+    // low/high/max 全部落表。
     assert.deepEqual(
       entry.supported_reasoning_levels.map((level) => level.effort),
-      ["low", "high", "ultra"],
+      ["low", "high", "max"],
     );
     // 模板已为认识的档位写好描述：沿用；库独有的档位给通用描述。
     assert.deepEqual(
       entry.supported_reasoning_levels.map((level) => level.description),
-      ["Fast responses with lighter reasoning", "Greater reasoning depth for complex problems", "ultra reasoning effort"],
+      ["Fast responses with lighter reasoning", "Greater reasoning depth for complex problems", "max reasoning effort"],
     );
-    assert.equal(entry.default_reasoning_level, "ultra", "默认档落在改名的这一档上时同步改名");
+    assert.equal(entry.default_reasoning_level, "max", "库指名的默认档在词表内时原样写入");
   });
 
   it("carries the store's input_modalities through to the catalog entry verbatim", () => {
@@ -634,10 +633,9 @@ describe("codex model catalog (model_catalog_json)", () => {
     const astra = onDisk.models.find((m) => m.slug === "poke-api~gpt-6-astra");
     assert.deepEqual(astra.supported_reasoning_levels.map((level) => level.effort), ["low", "high"]);
     assert.equal(astra.default_reasoning_level, "high");
-    // 伪渠道的 auto 模型在库里没有行：走乐观兜底，最深档 max 在 codex 面同
-    // 样改名为 ultra，档位照旧可达。
+    // 伪渠道的 auto 模型在库里没有行：走乐观兜底，档位照旧可达。
     const auto = onDisk.models.find((m) => m.slug === "auto");
-    assert.deepEqual(auto.supported_reasoning_levels.map((level) => level.effort), ["high", "xhigh", "ultra"]);
+    assert.deepEqual(auto.supported_reasoning_levels.map((level) => level.effort), ["high", "xhigh", "max"]);
     assert.equal(auto.default_reasoning_level, "high");
 
     const offDir = mkTestDir("codex-catalog-efforts-off-");

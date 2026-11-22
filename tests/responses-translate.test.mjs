@@ -260,9 +260,6 @@ describe("translateResponsesRequest", () => {
   it("folds codex reasoning.effort into reasoning_effort on the library vocabulary", () => {
     assert.equal(translateResponsesRequest({ reasoning: { effort: "high" } }).reasoning_effort, "high");
     assert.equal(translateResponsesRequest({ reasoning: { effort: "none" } }).reasoning_effort, "off");
-    // ultra 原样透到注入层：它可能是 GPT 类的真档，也可能是 codex 面对普通
-    // 模型最深档的改名。按模型条目折回是注入器的职责（effort-injection），
-    // 翻译层没有模型上下文，全局折回会把 GPT 类一起降级。
     assert.equal(translateResponsesRequest({ reasoning: { effort: "ultra" } }).reasoning_effort, "ultra");
     assert.equal(translateResponsesRequest({ reasoning: { effort: "persistent" } }).reasoning_effort, "max");
     assert.equal("reasoning" in translateResponsesRequest({ reasoning: { effort: "high", summary: "auto" } }), false);
