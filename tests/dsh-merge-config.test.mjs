@@ -525,6 +525,110 @@ test("patch 能解析但不是条目数组时只跳过这一个 profile，其它
   }
 });
 
+// 跳过窗的 sidecar 记账：有界面被跳过时它没吃到本轮增删，sidecar 只记本轮键会把
+// 「上一轮托管、本轮已删」的渠道销账，被跳过界面里的残留条目从此无人清。跳过窗内
+// 续记 previousManaged 的并集（保守多记），待全量可写轮再精确收敛。
+test("部分界面被跳过时 sidecar 续记上一轮托管键，不丢未确认的渠道", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-skip-sidecar-");
+  try {
+    const profiles = join(dir, "profiles");
+    for (const name of ["dsh-tui", "web"]) mkdirSync(join(profiles, name), { recursive: true });
+    writeFileSync(join(profiles, "dsh-tui", "cordis.patch.yml"), "just a scalar, not a loader patch array\n", "utf8");
+    writeFileSync(join(profiles, "web", "cordis.patch.yml"), yaml.dump([
+      { id: "ui-theme", name: "@deepseek-ai/dsh-client-ui-theme", config: { preference: "dark" } },
+    ], { lineWidth: -1 }), "utf8");
+    writeSidecar(dir, ["gone", "poke"]);
+
+    const result = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.skipped.length, 1);
+    assert.deepEqual(readSidecar(dir), { providers: ["gone", "poke"] }, "gone 本轮已不在 store，但跳过的界面没确认删除，必须续记");
+
+    const again = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, dir);
+    assert.equal(again.unchanged, true, "第二轮无改动，走 unchanged 分支");
+    assert.deepEqual(readSidecar(dir), { providers: ["gone", "poke"] }, "unchanged 分支同样续记并集");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("跳过窗内删除的渠道在 profile 修回原字节后仍被清出", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-skip-window-");
+  try {
+    const profiles = join(dir, "profiles");
+    for (const name of ["dsh-tui", "web"]) mkdirSync(join(profiles, name), { recursive: true });
+    const tuiPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const store = {
+      version: 2,
+      providers: {
+        alpha: { models: { "model-a": {} } },
+        beta: { models: { "model-b": {} } },
+      },
+    };
+    const first = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
+    assert.equal(first.ok, true, first.reason);
+    const healthyBytes = readFileSync(tuiPath, "utf8");
+    assert.ok(yaml.load(healthyBytes).find((entry) => entry.id === "llm-pi-ai").config.providers._beta);
+
+    // 坏窗口：dsh-tui 被裹成可解析的非数组，同一轮 store 删掉 beta。
+    writeFileSync(tuiPath, "just a scalar, not a loader patch array\n", "utf8");
+    const second = await writeDshProfilePatches({ version: 2, providers: { alpha: store.providers.alpha } }, 47821, TOKEN, dir, dir);
+    assert.equal(second.ok, true, second.reason);
+    assert.deepEqual(second.skipped.map((p) => p.replace(/\\/g, "/")), [tuiPath.replace(/\\/g, "/")]);
+    assert.deepEqual(readSidecar(dir), { providers: ["alpha", "beta"] }, "跳过窗内 beta 不销账");
+    assert.equal(readFileSync(tuiPath, "utf8"), "just a scalar, not a loader patch array\n", "坏窗口里的文件一字节不动");
+    const webProviders = yaml.load(readFileSync(join(profiles, "web", "cordis.patch.yml"), "utf8"))
+      .find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(webProviders._beta, undefined, "健康的 web 本轮就清掉 beta");
+
+    // 窗口修回原字节再同步：beta 必须从 dsh-tui 清出，不能永久残留。
+    writeFileSync(tuiPath, healthyBytes, "utf8");
+    const third = await writeDshProfilePatches({ version: 2, providers: { alpha: store.providers.alpha } }, 47821, TOKEN, dir, dir);
+    assert.equal(third.ok, true, third.reason);
+    const tuiProviders = yaml.load(readFileSync(tuiPath, "utf8"))
+      .find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(tuiProviders._beta, undefined, "修回后的这一轮把 beta 从 dsh-tui 清出");
+    assert.ok(tuiProviders._alpha, "在管的 alpha 保留");
+    assert.deepEqual(readSidecar(dir), { providers: ["alpha"] }, "全量可写轮精确收敛");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("对照：全程完好时 sidecar 按本轮渠道精确收敛，不多记", async (t) => {
+  const yaml = await requireYamlModule(t);
+  if (yaml === null) return;
+  const dir = mkTestDir("dsh-patch-sidecar-exact-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const store = {
+      version: 2,
+      providers: {
+        alpha: { models: { "model-a": {} } },
+        beta: { models: { "model-b": {} } },
+      },
+    };
+    const first = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
+    assert.equal(first.ok, true, first.reason);
+    assert.deepEqual(readSidecar(dir), { providers: ["alpha", "beta"] });
+
+    const second = await writeDshProfilePatches({ version: 2, providers: { alpha: store.providers.alpha } }, 47821, TOKEN, dir, dir);
+    assert.equal(second.ok, true, second.reason);
+    assert.deepEqual(readSidecar(dir), { providers: ["alpha"] }, "没有跳过窗时删掉即销账");
+    const providers = yaml.load(readFileSync(join(profiles, "dsh-tui", "cordis.patch.yml"), "utf8"))
+      .find((entry) => entry.id === "llm-pi-ai").config.providers;
+    assert.equal(providers._beta, undefined);
+    assert.ok(providers._alpha);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // 失联不得伪装成功的另一半：一个界面坏掉是「跳过＋照常写」，全部界面坏掉就是
 // 「一个渠道都没写进去」——必须报 ok:false 交给 failed 名单接管，而不是顶着一
 // 个「成功跳过」把同步计成完成。
