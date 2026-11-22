@@ -259,6 +259,84 @@ test("restored detail rows land right after their own parent row when several ro
   assert.deepEqual(shape, ["row:a", "det:a", "row:b", "det:b", "row:c", "det:c", "row:d"], "每条详情行挂在其正确父行后");
 });
 
+test("same-ms retry pair with rid expands independently on click and poll-restore", () => {
+  // 同毫秒同渠道同模型的成对结算（典型：一次 200 一次 429 的重试对）旧行键完全
+  // 重复：点击第 2 行展开出第 1 行的详情、单行收起清共用键拖累另一行、轮询重建
+  // 详情堆挂同键首行。rid 把行键身份收窄到每笔结算唯一；点击取详情与轮询重建
+  // 恢复两条路径都用真身 logsRowKey 验证。
+  const keyLine = js.match(/const logsRowKey = \(r\) => (.+);$/m);
+  assert.ok(keyLine, "logsRowKey 在册");
+  const logsRowKey = new Function("r", `return ${keyLine[1]};`);
+  const ok = { ts: 1763800000000, providerId: "pool-1", model: "kimi-k3", ok: true, status: 200, rid: "m1-7" };
+  const fail = { ts: 1763800000000, providerId: "pool-1", model: "kimi-k3", ok: false, status: 429, rid: "m1-8" };
+  assert.equal(logsRowKey(ok), "1763800000000|pool-1|kimi-k3|m1-7");
+  assert.equal(logsRowKey(fail), "1763800000000|pool-1|kimi-k3|m1-8");
+  assert.notEqual(logsRowKey(ok), logsRowKey(fail), "同毫秒重试对两行键不同");
+  // 旧行（无 rid）：三段旧键形不变，不挂空尾段（回退 2026-11-19 决策的旧行为）
+  assert.equal(logsRowKey({ ts: 1, providerId: "p", model: "m" }), "1|p|m");
+  assert.equal(logsRowKey({ ts: 1 }), "1||");
+
+  // ── 点击路径：toggleLogsDetail 按行键找数据行 ──
+  const toggleFn = js.match(/function toggleLogsDetail\(tr\) \{([\s\S]*?)\n  \}/);
+  assert.ok(toggleFn, "toggleLogsDetail 在册");
+  const appended = [];
+  const logsExpanded = new Set();
+  const toggleLogsDetail = new Function("logsRows", "logsRowKey", "logsExpanded", "appendLogsDetail",
+    `return function toggleLogsDetail(tr) {${toggleFn[1]}\n  }`)(
+    [ok, fail], logsRowKey, logsExpanded, (tr, row) => appended.push(row));
+  const mkTr = (key) => {
+    const tr = {
+      detail: null,
+      get nextElementSibling() { return tr.detail; },
+      getAttribute: () => key,
+    };
+    return tr;
+  };
+  const trFail = mkTr(logsRowKey(fail));
+  toggleLogsDetail(trFail); // 点击第 2 行（429）：展开的必须是第 2 行自己的详情
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].rid, "m1-8", "点击第 2 行展开第 2 行的详情（旧行为：首次命中展开第 1 行的）");
+  assert.deepEqual([...logsExpanded], [logsRowKey(fail)], "展开态只记第 2 行的键");
+  const trOk = mkTr(logsRowKey(ok));
+  toggleLogsDetail(trOk); // 第 1 行也展开
+  assert.equal(appended[1].rid, "m1-7");
+  trFail.detail = { classList: { contains: () => true }, remove() { trFail.detail = null; } };
+  toggleLogsDetail(trFail); // 再点第 2 行 → 收起
+  assert.deepEqual([...logsExpanded], [logsRowKey(ok)], "收起第 2 行只清自己的键，第 1 行保持展开（旧行为：共用一键，收起拖累另一行）");
+
+  // ── 轮询恢复路径：整幅重建＋详情行恢复段（与上一用例同一段源码）──
+  const seg = js.match(/(tbody\.innerHTML = logsRows\.map\(\(r\) => logsRowHtml\(r\)\)\.join\(""\);[\s\S]*?)\n    if \(shifts\) \{/);
+  assert.ok(seg, "整幅重建＋详情行恢复段在册");
+  const detailFn = js.match(/function appendLogsDetail\(tr, row\) \{([\s\S]*?)\n  \}/);
+  assert.ok(detailFn, "appendLogsDetail 在册");
+  const kids = [];
+  const mkEl = (key) => ({
+    key, className: "", cells: [], parentList: kids,
+    getAttribute: (name) => (name === "data-logs-key" ? key : null),
+    appendChild(c) { this.cells.push(c); },
+    after(el) { this.parentList.splice(this.parentList.indexOf(this) + 1, 0, el); },
+  });
+  const tbody = {
+    children: kids,
+    set innerHTML(html) {
+      kids.length = 0;
+      for (const m of html.matchAll(/data-logs-key="([^"]+)"/g)) kids.push(mkEl(m[1]));
+    },
+  };
+  const appendLogsDetail = new Function("document", "logsDetailHtml",
+    `return function appendLogsDetail(tr, row) {${detailFn[1]}\n  }`)(
+    { createElement: () => mkEl(null) },
+    (row) => row.rid,
+  );
+  new Function("tbody", "logsRows", "logsRowHtml", "enter", "logsExpanded", "logsRowKey", "appendLogsDetail", seg[1])(
+    tbody, [ok, fail],
+    (r) => `<tr class="logs-row" data-logs-key="${logsRowKey(r)}"></tr>`, null,
+    new Set([logsRowKey(ok), logsRowKey(fail)]), logsRowKey, appendLogsDetail);
+  const restored = kids.map((el) => (el.className === "logs-detail-row" ? "det:" + el.cells[0].innerHTML : "row:" + el.key));
+  assert.deepEqual(restored, ["row:1763800000000|pool-1|kimi-k3|m1-7", "det:m1-7", "row:1763800000000|pool-1|kimi-k3|m1-8", "det:m1-8"],
+    "同毫秒两行同展：各详情行挂各父行（旧行为：同键两行，详情堆挂首行后、末行丢失）");
+});
+
 test("code comments do not name external products as the origin of implementation choices", () => {
   const pattern = /cc[-_ .]?switch/i;
   const offenders = [];

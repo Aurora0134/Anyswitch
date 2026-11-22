@@ -10163,6 +10163,22 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(!panelJs.includes("terminalRelTime"), "相对时间函数已退役");
   });
 
+  it("terminalRequestsFromRows 行键随 rid 收窄：同毫秒重试对两行不同键，旧行三段键形不变", async () => {
+    // 展开态记忆（terminalRequestExpanded）与轮询恢复都吃这个 key：rid 条件追加
+    // 第四段后，同毫秒同渠道同模型的成对结算互不串扰；无 rid 旧行保持旧键形。
+    const ts = 1763800000000;
+    const out = await vmFn("terminalRequestsFromRows", [[
+      { ts, providerId: "pool-1", model: "kimi-k3", ok: true, status: 200, rid: "m1-7" },
+      { ts, providerId: "pool-1", model: "kimi-k3", ok: false, status: 429, rid: "m1-8" },
+      { ts, providerId: "pool-1", model: "kimi-k3", ok: false, status: 500 },
+    ]], ["terminalTtftColor"]);
+    assert.deepEqual(out.map((r) => r.key), [
+      `${ts}|pool-1|kimi-k3|m1-7`,
+      `${ts}|pool-1|kimi-k3|m1-8`,
+      `${ts}|pool-1|kimi-k3`,
+    ], "带 rid 行键四段（同毫秒两行不同键），无 rid 旧行三段旧键形");
+  });
+
   it("terminalTtftColor 与看板 TTFT 灯同源（逐边界对齐 agent-metrics 分档）", async () => {
     for (const ms of [null, undefined, 0, -5, NaN, 1, 4999, 5000, 5001, 9999, 15000, 15001, 60000]) {
       assert.equal(await vmFn("terminalTtftColor", [ms]), getTtftColor(ms),

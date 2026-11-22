@@ -16,7 +16,7 @@ function tempDir() {
 
 test("appendRequest/appendSession round-trip through read", () => {
   const dir = tempDir();
-  const journal = createUsageJournal({ dir });
+  const journal = createUsageJournal({ dir, ridSeed: "seed" });
 
   const req = {
     ts: 1724900000000, agentId: "kimi", providerId: "pool-1", model: "kimi-k3",
@@ -32,14 +32,58 @@ test("appendRequest/appendSession round-trip through read", () => {
   journal.appendSession(sess);
 
   assert.deepEqual(journal.readRequests(), [
-    req,
-    { ...req, ts: 1724900001000, ok: false, status: 429, errKind: "http_429" },
+    { ...req, rid: "seed-1" },
+    { ...req, ts: 1724900001000, ok: false, status: 429, errKind: "http_429", rid: "seed-2" },
   ]);
   assert.deepEqual(journal.readSessions(), [sess]);
   // kinds stay in separate files
   const names = readdirSync(dir).sort();
   assert.equal(names.filter((n) => n.startsWith("requests-")).length, 1);
   assert.equal(names.filter((n) => n.startsWith("sessions-")).length, 1);
+});
+
+test("appendRequest mints a distinguishable rid for same-ms same-channel same-model rows", () => {
+  const dir = tempDir();
+  // 同毫秒重试对（一次 200 一次 429）：旧行键「毫秒+渠道+模型」三段完全重复，
+  // rid 是唯一的区分分量。ridCounterStart 可注入（缺省 1），计数器自注入值起递增。
+  const journal = createUsageJournal({ dir, ridSeed: "s", ridCounterStart: 41 });
+  const row = {
+    ts: 1724900000000, agentId: "kimi", providerId: "pool-1", model: "kimi-k3",
+    ok: true, status: 200, errKind: null,
+  };
+  journal.appendRequest(row);
+  journal.appendRequest({ ...row, ok: false, status: 429, errKind: "http_429" });
+
+  const rows = journal.readRequests();
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.rid), ["s-41", "s-42"], "rid 自注入初值起递增，两行互不相同");
+  // 前端行键口径（logsRowKey 尾段追加 rid）：两行键必须互不相同
+  assert.notEqual(
+    `${rows[0].ts}|${rows[0].providerId}|${rows[0].model}|${rows[0].rid}`,
+    `${rows[1].ts}|${rows[1].providerId}|${rows[1].model}|${rows[1].rid}`,
+  );
+
+  // 跨写者（常驻中继与 per-launch 中继并发写同一目录）：种子区分写者，同毫秒互不撞
+  const other = createUsageJournal({ dir, ridSeed: "o" });
+  other.appendRequest(row);
+  const all = journal.readRequests();
+  assert.equal(all.length, 3);
+  assert.equal(new Set(all.map((r) => r.rid)).size, 3, "跨实例同毫秒三行 rid 仍互不相同");
+});
+
+test("legacy rows without rid round-trip untouched", () => {
+  const dir = tempDir();
+  // 手工构造的旧数据行（写侧还没有 rid 的年代）：读侧原样返回，不发明 rid——
+  // 前端行键回退「毫秒|渠道|模型」旧键形（2026-11-19 登记决策的旧行为）。
+  const day = dayKey(Date.now());
+  writeFileSync(join(dir, `requests-${day}.jsonl`),
+    '{"ts":1724900000000,"agentId":"kimi","providerId":"pool-1","model":"kimi-k3","ok":true,"status":200,"errKind":null}\n'
+      + '{"ts":1724900000000,"agentId":"kimi","providerId":"pool-1","model":"kimi-k3","ok":false,"status":429,"errKind":"http_429"}\n');
+  const journal = createUsageJournal({ dir });
+  assert.deepEqual(journal.readRequests(), [
+    { ts: 1724900000000, agentId: "kimi", providerId: "pool-1", model: "kimi-k3", ok: true, status: 200, errKind: null },
+    { ts: 1724900000000, agentId: "kimi", providerId: "pool-1", model: "kimi-k3", ok: false, status: 429, errKind: "http_429" },
+  ], "无 rid 旧行读写往返原样，不发明键");
 });
 
 test("read returns entries sorted by ts ascending even across files", () => {
@@ -300,8 +344,8 @@ test("errMsg key is dropped for success rows, non-strings and blanks; old keyles
     assert.ok(!("errMsg" in row), `no errMsg key on ${JSON.stringify(row)}`);
   }
   assert.equal(rows[4].errMsg, "boom");
-  // 旧行（无 errMsg 键）原样读回，形状不变
-  assert.deepEqual(Object.keys(rows[0]).sort(), ["ok", "ts"]);
+  // 无 errMsg 键的成功行：写侧只补铸 rid，其余形状不变
+  assert.deepEqual(Object.keys(rows[0]).sort(), ["ok", "rid", "ts"]);
 });
 
 // ── readRequestsLog（请求日志查询面） ──

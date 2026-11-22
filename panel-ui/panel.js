@@ -7966,8 +7966,9 @@ async function api(method, path, body, signal) {
     return parts.join(" · ");
   }
 
-  // 最近请求：失败行的展开态集合（行键 = ts|providerId|model，与大板 logsRowKey
-  // 同形）；点击失败行切换展开，1s 轮询重建列表时按此集合恢复。
+  // 最近请求：失败行的展开态集合（行键 = ts|providerId|model，新行带 rid 再追加
+  // 一段，与大板 logsRowKey 同形）；点击失败行切换展开，1s 轮询重建列表时按此
+  // 集合恢复。
   const terminalRequestExpanded = new Set();
 
   // 最近请求：usage journal 的结算行，与统计页请求日志同一份字段口径
@@ -7975,7 +7976,8 @@ async function api(method, path, body, signal) {
   // 成形：成功行 io=输入/输出 tokens、cache=缓存命中（cached 为 0 不出灰字）；
   // 失败行只留 fail=失败类型码，不出 token 行（对齐请求日志大板「失败 429」
   // 徽标）。失败行额外保留 status/errMsg/durationMs，供点击展开的错误详情
-  // 使用；key 即大板 logsRowKey 同形，用于跨轮询记忆展开态。
+  // 使用；key 即大板 logsRowKey 同形（rid 条件追加同款：有则加第四段，旧行
+  // 三段旧键形），用于跨轮询记忆展开态。
   function terminalRequestsFromRows(rows) {
     if (!Array.isArray(rows)) return [];
     return rows.map((row) => {
@@ -8004,7 +8006,7 @@ async function api(method, path, body, signal) {
         fail: failed ? `失败${statusText ? " · " + statusText : ""}` : "",
         state: failed ? "failed" : "ok",
         rel,
-        key: `${row?.ts ?? ""}|${typeof row?.providerId === "string" ? row.providerId : ""}|${typeof row?.model === "string" ? row.model : ""}`,
+        key: `${row?.ts ?? ""}|${typeof row?.providerId === "string" ? row.providerId : ""}|${typeof row?.model === "string" ? row.model : ""}${row?.rid != null ? `|${row.rid}` : ""}`,
         errMsg: typeof row?.errMsg === "string" ? row.errMsg : "",
         at,
         duration: typeof row?.durationMs === "number" && row.durationMs > 0 ? `${(row.durationMs / 1000).toFixed(1)}s` : "",
@@ -24980,7 +24982,10 @@ async function api(method, path, body, signal) {
   let logsLastSig = null; // 最近一次落地渲染的签名（loadLogs 同签名跳过重渲）
   let logsShown = null; // 最近一次落地渲染的视图串与行键序（新行入场与旧行滑位的判定基准）
   const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
-  const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
+  // 行键的身份粒度＝「毫秒|渠道|模型」＋新行的 rid（journal 写侧给每笔结算铸的
+  // 唯一分量），同毫秒重试对两行不再同键；旧数据无 rid，键形保持不变（回退到
+  // 完全重复时详情挂同键最后一行的既有边界，2026-11-19 登记决策）。
+  const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}${r.rid != null ? `|${r.rid}` : ""}`;
 
   const LOG_RANGE_PRESETS = { today: "今天", "1d": "近 24 小时", "7d": "近 7 天", "14d": "近 14 天", "30d": "近 30 天", all: "全部" };
   const LOG_RANGE_DAY_MS = 86_400_000;

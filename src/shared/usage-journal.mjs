@@ -16,7 +16,9 @@
 //     "ttftMs": 850, "durationMs": 5200, "ok": true, "status": 200,
 //     "errKind": null, "stream": true, "path": "openai|anthropic",
 //     "errMsg": "上游错误原文（可选：仅失败行；消毒：折叠空白/trim/截 200 字符）",
-//     "instanceId": "ws-1" /* 可选：多实例端点的实例标签，有则写 */ }
+//     "instanceId": "ws-1" /* 可选：多实例端点的实例标签，有则写 */,
+//     "rid": "m1abc-7" /* 行唯一分量：写侧铸造「种子-计数器」，旧行无此键（读侧
+//       按可缺省处理，缺省时行键回退旧键形） */ }
 //   agentId: null 表示「未知来源」（认不出归属的请求）：行照记作审计账，
 //   但不进任何端点维度——看板卡与统计页端点行/端点趋势/端点用量都不显示它。
 //   errKind enum: null | "http_429" | "http_5xx" | "http_4xx" | "network" | "timeout" | "abort"
@@ -77,12 +79,21 @@ function num(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.now(), logger } = {}) {
+export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.now(), logger, ridSeed, ridCounterStart = 1 } = {}) {
   // 落盘失败的告警出口：默认 console（既有调用方行为逐字节不变）；装配点注入
   // 各自 logger 时，告警随之进入对应的总线/转发通道（[ts] [level] 封套由
   // logger 承载，不再裸写 stderr）。
   const log = logger ?? console;
   let lastCleanupDay = null;
+
+  // 行唯一分量 rid 的铸造材料：常驻中继与 per-launch 中继并发写同一 usage 目录
+  //（跨进程行级追加原已成立，见 launch.mjs 的落账注释），「毫秒+渠道+模型」在
+  // 同毫秒重试对上必然重复，行身份还需要一个每行唯一的分量。种子默认取实例
+  // 创建时刻＋pid 的 36 进制组合区分并发写者；计数器自 ridCounterStart 起单调
+  // 递增。两者都可注入（测试定值）；种子与初值非法时回落默认。
+  const ridBase = ridSeed ?? `${Date.now().toString(36)}-${process.pid.toString(36)}`;
+  let ridCounter = Math.floor(Number(ridCounterStart));
+  if (!Number.isFinite(ridCounter) || ridCounter < 1) ridCounter = 1;
 
   // Parse cache for read(): path -> { mtimeMs, size, lines }. Validated by
   // stat on every read — any append changes the file size, so staleness is
@@ -173,6 +184,8 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
 
   // 请求行写入：errMsg 在 journal 内统一消毒（写侧单点，各写点传原值即可）。
   // 消毒结果为空则整键摘除——成功行与无消息失败行的落盘形状与旧版完全一致。
+  // rid 在此附加：journal 全权铸造，调用方传入值被覆写；非对象入参保持旧行为
+  // 原样落账（不添 rid）。
   function appendRequest(entry) {
     const errMsg = sanitizeErrMsg(entry?.errMsg);
     let row = entry;
@@ -183,6 +196,9 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
       }
     } else {
       row = { ...entry, errMsg };
+    }
+    if (entry && typeof entry === "object") {
+      row = { ...row, rid: `${ridBase}-${ridCounter++}` };
     }
     append("requests", row);
   }
