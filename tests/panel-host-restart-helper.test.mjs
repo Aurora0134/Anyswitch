@@ -2,6 +2,7 @@ import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { rmSync, writeSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   runPanelHostRestartHelper,
   spawnPanelHostRestartHelper,
@@ -180,6 +181,50 @@ describe("spawnPanelHostRestartHelper (the call the dying host makes)", () => {
       });
       assert.equal(calls.length, 1, "a missing diagnostic trail must never block the restart");
       assert.deepEqual(calls[0].opts.stdio, ["ignore", "ignore", "ignore"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Real-wiring regression: the module header defaults (SELF_SCRIPT / process.execPath)
+  // are what the manual restart route relies on — the injected unit tests above never
+  // exercise them.
+  it("defaults to its own script and the running node (self-directory restart)", async () => {
+    const dir = mkTestDir("anyswitch-restart-defaults-");
+    try {
+      const calls = [];
+      const child = fakeChild();
+      spawnPanelHostRestartHelper({
+        spawnFn: (exec, args, opts) => { calls.push({ exec, args }); return child; },
+        logPath: join(dir, "panel-host-restart.log"),
+      });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].exec, process.execPath, "default execPath is the running node");
+      // 自目录默认语义：不注入 scriptPath 时拉起的就是这份模块自己——与 panel-host.mjs
+      // 同目录的 helper 副本。钉住它，手动重启路由才不会被换装注入带偏。
+      assert.deepEqual(calls[0].args, [fileURLToPath(new URL("../src/panel/panel-host-restart-helper.mjs", import.meta.url))]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes an injected target-version script and runtime node through verbatim (self-update swap)", async () => {
+    const dir = mkTestDir("anyswitch-restart-target-");
+    try {
+      const calls = [];
+      const child = fakeChild();
+      // 换装链注入的形态（panel.mjs swapHelperOptions）：helper 副本与 node 都取
+      // 目标版本目录下的那份，复活的是新面板而不是旧面板。
+      const versionRoot = join(dir, "install", "versions", "9.9.9");
+      spawnPanelHostRestartHelper({
+        spawnFn: (exec, args, opts) => { calls.push({ exec, args }); return child; },
+        execPath: join(versionRoot, "runtime", "node.exe"),
+        scriptPath: join(versionRoot, "app", "src", "panel", "panel-host-restart-helper.mjs"),
+        logPath: join(dir, "panel-host-restart.log"),
+      });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].exec, join(versionRoot, "runtime", "node.exe"));
+      assert.deepEqual(calls[0].args, [join(versionRoot, "app", "src", "panel", "panel-host-restart-helper.mjs")]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

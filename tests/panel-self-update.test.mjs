@@ -191,6 +191,20 @@ describe("POST /panel/api/self-update（下载）", () => {
     });
   });
 
+  test("一键入口拉起 worker 后武装换装监听器（与 apply 入口同型，缺了它换装永不点火）", async () => {
+    const watch = { scheduled: 0 };
+    await withPanel({
+      releaseService: selfUpdateReleaseService(),
+      spawnSelfUpdateWorkerFn: () => 424242,
+      selfUpdateWatchScheduleFn: (fn) => { watch.scheduled += 1; return 42; },
+      selfUpdateWatchCancelFn: () => {},
+    }, async (get, post) => {
+      const result = await post("/panel/api/self-update", {});
+      assert.equal(result.status, 202);
+      assert.equal(watch.scheduled, 1, "the swap watcher must be armed");
+    });
+  });
+
   test("没有可用更新：409 no_update，不登记不拉起", async () => {
     const spawned = [];
     await withPanel({
@@ -545,21 +559,27 @@ describe("更新渠道（updateChannel）", () => {
 
 describe("自更新换装监听器", () => {
   function watchCapture() {
-    const watch = { pumps: [], canceled: 0, restarts: 0, exits: [] };
+    const watch = { pumps: [], canceled: 0, restarts: 0, exits: [], helperCalls: [] };
     return {
       watch,
       selfUpdateWatchScheduleFn: (fn) => { watch.pumps.push(fn); return 42; },
       selfUpdateWatchCancelFn: () => { watch.canceled += 1; },
-      spawnPanelHostRestartFn: () => { watch.restarts += 1; return 99; },
+      spawnPanelHostRestartFn: (options) => { watch.restarts += 1; watch.helperCalls.push(options); return 99; },
       exitPanelHostFn: (code) => { watch.exits.push(code); },
     };
   }
 
   test("phase 到 ready-to-restart：泵一次 = helper 拉起 + 本进程宽限后退，且只此一次", async () => {
     const capture = watchCapture();
+    const entries = [];
     await withPanel({
       releaseService: selfUpdateReleaseService(),
       spawnSelfUpdateWorkerFn: () => process.pid,
+      logger: {
+        info: (message) => entries.push(["info", message]),
+        warn: (message) => entries.push(["warn", message]),
+        error: (message) => entries.push(["error", message]),
+      },
       ...capture,
     }, async (get, post, ctx) => {
       // 应用入口才布监听器：先落一条已下载记录，走 /apply 翻回 running。
@@ -573,6 +593,13 @@ describe("自更新换装监听器", () => {
       capture.watch.pumps[0]();
       assert.equal(capture.watch.restarts, 1, "the restart helper must be spawned");
       assert.equal(capture.watch.canceled, 1, "the watcher must be withdrawn after firing");
+      // 记录没有 installRoot（开发检出形态）：helper 回退自目录默认语义（零注入），
+      // 并如实记一行 warn——这条链随后由 worker 的健康探测判定结局。
+      assert.equal(capture.watch.helperCalls[0], undefined, "install root 不可解析：helper 按自目录默认语义拉起");
+      assert.deepEqual(
+        entries.filter(([level]) => level === "warn"),
+        [["warn", "Self update swap: install root unavailable; restart helper falls back to its own directory"]],
+      );
       // 退场是真实墙钟定时器（宽限 150ms，panel.mjs PANEL_HOST_EXIT_GRACE_MS）：
       // 固定 sleep(300) 对 150ms 只有 2 倍余量，机器忙时断言可能先于定时器跑。
       // 轮询等到它触发再断言，断言本身不变。
@@ -584,6 +611,35 @@ describe("自更新换装监听器", () => {
       // 定时器已撤（canceled=1），监听器不会再次自动点火；手动再调 pump 属于测试
       // 之外的路径，不在此断言。
     });
+  });
+
+  test("换装点火：helper 指向目标版本目录的副本与 runtime node（自目录副本复活的只会是旧面板）", async () => {
+    const capture = watchCapture();
+    // 打包安装形态：installRoot 记录在 run 上（登记时解析落盘），换装按它推目标目录。
+    const installRoot = mkdtempSync(join(tmpdir(), "anys-swap-install-"));
+    try {
+      await withPanel({
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: () => process.pid,
+        ...capture,
+      }, async (get, post, ctx) => {
+        writeClientUpdateRun(ctx.journalDir, stagedRun({ installRoot }));
+        const started = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+        assert.equal(started.status, 202);
+        const run = readClientUpdateRun(ctx.journalDir, started.body.runId);
+        writeClientUpdateRun(ctx.journalDir, { ...run, phase: "ready-to-restart" });
+        capture.watch.pumps[0]();
+        assert.equal(capture.watch.restarts, 1, "the restart helper must be spawned");
+        // 布局与 worker 同源（app-self-update.mjs 的 targetAppRoot/targetNodePath）。
+        const versionRoot = join(installRoot, "versions", "0.7.0");
+        assert.deepEqual(capture.watch.helperCalls[0], {
+          scriptPath: join(versionRoot, "app", "src", "panel", "panel-host-restart-helper.mjs"),
+          execPath: join(versionRoot, "runtime", "node.exe"),
+        });
+      });
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
   });
 
   test("本进程已是目标版本（换装后的新面板）：绝不点火", async () => {
@@ -811,14 +867,18 @@ describe("staged 有效性判定", () => {
 // ── worker 拉起失败（spawn_failed 守卫）────────────────────────────────
 describe("自更新 worker 拉起失败", () => {
   test("下载段拉起失败（spawn 抛错）：500 spawn_failed，登记如实落 failed，单飞锁没有卡死", async () => {
+    const watch = { scheduled: 0 };
     await withPanel({
       releaseService: selfUpdateReleaseService(),
       spawnSelfUpdateWorkerFn: () => { throw new Error("spawn broken"); },
+      selfUpdateWatchScheduleFn: () => { watch.scheduled += 1; return 42; },
+      selfUpdateWatchCancelFn: () => {},
     }, async (get, post, ctx) => {
       const result = await post("/panel/api/self-update", {});
       assert.equal(result.status, 500);
       assert.equal(result.body.error, "spawn_failed");
       assert.equal(result.body.message, "更新未能启动，请稍后重试");
+      assert.equal(watch.scheduled, 0, "拉起失败不布换装监听器（与 apply 入口同一守卫）");
       const runs = listClientUpdateRuns(ctx.journalDir);
       assert.equal(runs.length, 1, "登记已落盘");
       assert.equal(runs[0].state, "done", "拉起失败不能留下 running 锁");
