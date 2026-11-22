@@ -73,7 +73,7 @@ describe("relay port consistency", () => {
     // status object carries that constant's real value.
     const status = await getRelayStatus(mkTestDir("relay-port-"), {
       probe: async () => false,
-      findPortOwnerPid: async () => undefined,
+      findPortOwnerPid: async () => null,
       isPidAlive: () => false,
     });
     assert.equal(status.status, "stopped");

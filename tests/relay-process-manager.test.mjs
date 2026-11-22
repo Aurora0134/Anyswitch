@@ -28,6 +28,7 @@ import {getRelayPidPath,
   getProcessCommandLine,
   getProcessCommandLineAsync,
   getRelayStatus,
+  startRelay,
   stopRelay,
   restartRelay,
   findPortOwnerPid,
@@ -65,10 +66,10 @@ function makeStopDeps({
   return {
     killed,
     deps: {
-      findPortOwnerPid: () => ownerPid,
+      findPortOwnerPid: () => killed.includes(ownerPid) ? null : ownerPid,
       isPidAlive: (pid) => aliveSet.has(pid),
       getProcessCommandLine: (pid) => commandLines[pid] ?? null,
-      terminatePid: (pid) => killed.push(pid),
+      terminatePid: (pid) => { killed.push(pid); aliveSet.delete(pid); },
       probe: async () => portAnswering,
       delay: async () => {},
       stopPollMs: 1,
@@ -399,7 +400,8 @@ test("stopRelay kills an owner PID that arrives as a Promise (a Promise owner mu
     commandLines: { 111: OWN_RELAY_CMD, 222: OWN_LAUNCHER_CMD },
     portAnswering: false,
   });
-  deps.findPortOwnerPid = async () => 222; // async mock — the old sync filter would silently drop this
+  const findOwner = deps.findPortOwnerPid;
+  deps.findPortOwnerPid = async () => findOwner();
 
   const result = await stopRelay(root, deps);
 
@@ -561,8 +563,63 @@ test("getRelayStatus reports no degradation while the port is not serving", asyn
     isPidAlive: () => true,
   });
 
-  assert.equal(status.status, "starting", "pid 还活着但端口不答 = 启动中");
+  assert.equal(status.status, "unknown", "仅凭存活 PID 无法确认是否在启动");
   assert.equal(status.degraded, false, "没在服务的进程不该被报成服务异常");
+});
+
+test("a missed health response cannot report a listening Relay as stopped", async () => {
+  const root = makeRoot();
+  const deps = {
+    probe: async () => ({ serving: false }),
+    findPortOwnerPid: async () => 4242,
+    isPidAlive: () => false,
+  };
+  assert.equal((await getRelayStatus(root, deps)).status, "unknown");
+  writeRelayPid(555, getRelayPidPath(root));
+  assert.equal((await getRelayStatus(root, deps)).status, "unknown");
+});
+
+test("Relay reports stopped only after a completed scan finds no listener and no live registered process", async () => {
+  const root = makeRoot();
+  writeRelayPid(555, getRelayPidPath(root));
+  const deps = {
+    probe: async () => false,
+    probePidLiveness: () => "dead",
+  };
+  const getStatus = (code) => getRelayStatus(root, {
+    ...deps, netstatSpawn: () => fakeNetstatChild({ stdout: "\r\n", code }),
+  });
+  assert.equal((await getStatus(1)).status, "unknown");
+  assert.equal((await getStatus(0)).status, "stopped");
+});
+
+test("startRelay waits for a confirmed stop and leaves PID registration to the listening process", async () => {
+  const root = makeRoot();
+  const pidPath = getRelayPidPath(root);
+  writeRelayPid(4242, pidPath);
+  let state = "unknown";
+  let spawnCount = 0;
+  const deps = {
+    getRelayStatus: async () => ({ status: state }),
+    spawnRelayHost: () => { spawnCount++; return { pid: 555 }; },
+    waitForRelayUp: async () => { state = "running"; return true; },
+  };
+  assert.equal((await startRelay(root, {}, deps)).ok, false);
+  assert.equal(spawnCount, 0);
+  state = "stopped";
+  assert.equal((await startRelay(root, {}, deps)).ok, true);
+  assert.equal(spawnCount, 1);
+  assert.equal(readRelayPid(pidPath), 4242);
+});
+
+test("a missed health response does not complete a stop while the port is occupied", async () => {
+  const root = makeRoot();
+  const { deps, killed } = makeStopDeps({ ownerPid: 222, alive: [222], commandLines: { 222: OWN_RELAY_CMD } });
+  deps.findPortOwnerPid = () => 222;
+  const result = await stopRelay(root, deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.relay.status, "unknown");
+  assert.deepEqual(killed, [222]);
 });
 
 test("stopRelay normalizes an object probe: a still-serving relay is not 'down'", async () => {
@@ -614,6 +671,7 @@ test("parsePortOwnerPid 丢弃没有属主的形态：非 LISTENING、坏 PID、
   assert.equal(parsePortOwnerPid("TCP 127.0.0.1:139 0.0.0.0:0 LISTENING 4", 47821), null, "别的端口的行不算");
   assert.equal(parsePortOwnerPid("", 47821), null);
   assert.equal(parsePortOwnerPid(NETSTAT_SAMPLE, 49999), null, "没有该端口的行返回 null");
+  assert.equal(parsePortOwnerPid("TCP 127.0.0.1:478210 0.0.0.0:0 LISTENING 4242", 47821), null);
 });
 
 test("findPortOwnerPid 经注入的 spawn 解析属主；非零退出、spawn 抛出、error 事件都返回 null", async () => {
@@ -671,12 +729,13 @@ test("stopRelay 生产默认链：uncached 属主查询 + async 命令行查询�
 
   let netstatSpawns = 0;
   let powershellSpawns = 0;
+  const alive = new Set([111, 222]);
   const netstatSpawn = (file, args) => {
     netstatSpawns += 1;
     assert.equal(file, "netstat");
     assert.deepEqual(args, ["-ano", "-p", "tcp"]);
     return fakeNetstatChild({
-      stdout: `TCP    127.0.0.1:47821        0.0.0.0:0              LISTENING       222\r\n`,
+      stdout: alive.has(222) ? `TCP    127.0.0.1:47821        0.0.0.0:0              LISTENING       222\r\n` : "\r\n",
       code: 0,
     });
   };
@@ -691,8 +750,8 @@ test("stopRelay 生产默认链：uncached 属主查询 + async 命令行查询�
   const first = await stopRelay(root, {
     netstatSpawn,
     powershellSpawn,
-    isPidAlive: (pid) => pid === 111 || pid === 222,
-    terminatePid: (pid) => killed.push(pid),
+    isPidAlive: (pid) => alive.has(pid),
+    terminatePid: (pid) => { killed.push(pid); alive.delete(pid); },
     probe: async () => false,
     delay: async () => {},
     stopPollMs: 1,
@@ -705,11 +764,12 @@ test("stopRelay 生产默认链：uncached 属主查询 + async 命令行查询�
   // uncached 的正字：第二次停用必须重新查询属主。若默认被换回 cached 包装，
   // 这里的查询会绕过注入的 netstat（直连真机）——netstatSpawns 停在 1，断言变红。
   const killedAgain = [];
+  alive.add(222);
   const second = await stopRelay(root, {
     netstatSpawn,
     powershellSpawn,
-    isPidAlive: () => true,
-    terminatePid: (pid) => killedAgain.push(pid),
+    isPidAlive: (pid) => alive.has(pid),
+    terminatePid: (pid) => { killedAgain.push(pid); alive.delete(pid); },
     probe: async () => false,
     delay: async () => {},
     stopPollMs: 1,
@@ -717,7 +777,7 @@ test("stopRelay 生产默认链：uncached 属主查询 + async 命令行查询�
   });
   assert.equal(second.ok, true);
   assert.deepEqual(killedAgain, [222], "pid 文件已清，只剩端口属主可杀");
-  assert.equal(netstatSpawns, 2, "kill 决策不吃缓存：第二次停用重新查询属主");
+  assert.equal(netstatSpawns, 4, "两次停用都重新查询属主，停用后再检查端口是否释放");
 });
 
 test("stopRelay 生产默认链对查不到命令线的 PID 拒杀（fail-safe 经真实默认函数生效）", async () => {

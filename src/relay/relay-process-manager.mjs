@@ -64,8 +64,9 @@ export function writeRelayPid(pid, pidPath) {
   }
 }
 
-export function clearRelayPid(pidPath) {
+export function clearRelayPid(pidPath, expectedPid) {
   try {
+    if (expectedPid !== undefined && readRelayPid(pidPath) !== expectedPid) return;
     if (existsSync(pidPath)) unlinkSync(pidPath);
   } catch {
     /* already gone or locked */
@@ -166,12 +167,10 @@ export const PORT_OWNER_CACHE_TTL_MS = 5000;
 // Pure parser: `netstat -ano -p tcp` output → the PID LISTENING on `port`,
 // or null when no such row exists.
 export function parsePortOwnerPid(out, port) {
-  const needle = `:${port}`;
   for (const line of out.split(/\r?\n/)) {
-    if (!line.includes(needle)) continue;
-    if (!/LISTENING/i.test(line)) continue;
-    const cols = line.trim().split(/\s+/);
-    const pid = Number.parseInt(cols[cols.length - 1], 10);
+    const [protocol, localAddress, , state, rawPid] = line.trim().split(/\s+/);
+    if (protocol !== "TCP" || !localAddress?.endsWith(`:${port}`) || state !== "LISTENING") continue;
+    const pid = Number(rawPid);
     if (Number.isFinite(pid) && pid > 0) return pid;
   }
   return null;
@@ -183,7 +182,8 @@ export function parsePortOwnerPid(out, port) {
 // event loop for tens of ms each time. The spawnSync semantics are rebuilt
 // by hand: timeout via timer + child.kill, maxBuffer via streaming
 // accumulation (kills the child on overflow, no backpressure stall), and any
-// error / non-zero exit resolves null.
+// error / non-zero exit resolves null for PID-only callers. Status callers
+// request undefined for a failed query so only a completed scan proves absence.
 //
 // This is the robust fallback when relay.pid is stale or absent (e.g. the
 // relay was started by an older build that didn't write the pid file, or a
@@ -200,12 +200,13 @@ export function findPortOwnerPid(port, deps = {}) {
   if (!port) return Promise.resolve(null);
   const spawnFn = deps.spawn ?? spawn;
   const timeoutMs = deps.timeoutMs ?? NETSTAT_TIMEOUT_MS;
+  const unavailable = deps.distinguishFailure ? undefined : null;
   return new Promise((resolve) => {
     let child;
     try {
       child = spawnFn("netstat", ["-ano", "-p", "tcp"], { windowsHide: true });
     } catch {
-      resolve(null);
+      resolve(unavailable);
       return;
     }
     let settled = false;
@@ -221,7 +222,7 @@ export function findPortOwnerPid(port, deps = {}) {
       } catch {
         /* already gone */
       }
-      finish(null);
+      finish(unavailable);
     }, timeoutMs);
     let out = "";
     child.stdout.setEncoding("utf8");
@@ -234,12 +235,12 @@ export function findPortOwnerPid(port, deps = {}) {
         } catch {
           /* already gone */
         }
-        finish(null);
+        finish(unavailable);
       }
     });
-    child.on("error", () => finish(null));
+    child.on("error", () => finish(unavailable));
     child.on("close", (code) => {
-      if (code !== 0) return finish(null);
+      if (code !== 0) return finish(unavailable);
       finish(parsePortOwnerPid(out, port));
     });
   });
@@ -275,6 +276,12 @@ findPortOwnerPid.cached = createCachedPortOwnerFinder(findPortOwnerPid);
 // Kill-decision lookup (stopRelay/stopWatchdog): the raw function itself —
 // completely bypasses the cache and the in-flight table, no shared slot.
 findPortOwnerPid.uncached = findPortOwnerPid;
+// Share a scan with overlapping status polls without reusing an old verdict.
+const scanCurrentPortOwner = createCachedPortOwnerFinder(
+  (port) => findPortOwnerPid(port, { distinguishFailure: true }),
+  { ttlMs: 0 },
+);
+const startingRelays = new Set();
 
 // Read a process's command line via PowerShell Get-CimInstance (wmic is gone
 // on Win11 24H2, so it must not be used). Returns null whenever the query
@@ -434,7 +441,13 @@ export async function getRelayStatus(root, deps = {}) {
   // feeds a kill decision — startRelay's reuse short-circuit is guarded by
   // the live HTTP probe, not by this PID.
   const findOwner = deps.findPortOwnerPid ?? findPortOwnerPid.cached;
-  const isAlive = deps.isPidAlive ?? isPidAlive;
+  const findCurrentOwner = deps.findPortOwnerPid ?? (deps.netstatSpawn || deps.netstatTimeoutMs !== undefined
+    ? (port) => findPortOwnerPid(port, {
+      spawn: deps.netstatSpawn, timeoutMs: deps.netstatTimeoutMs, distinguishFailure: true,
+    })
+    : scanCurrentPortOwner);
+  const pidLiveness = deps.probePidLiveness
+    ?? (deps.isPidAlive ? (pid) => deps.isPidAlive(pid) ? "alive" : "dead" : probePidLiveness);
 
   const pidPath = getRelayPidPath(root);
   const filePid = readRelayPid(pidPath);
@@ -459,40 +472,41 @@ export async function getRelayStatus(root, deps = {}) {
       lastFailureKind: health.lastFailureKind ?? null,
     };
   }
-  // Port not answering. Distinguish starting (pid alive) from stopped
-  // (no live pid) and clean a stale pid file so a later start is clean.
-  if (filePid && isAlive(filePid)) {
-    return { status: "starting", pid: filePid, port: RELAY_PORT, degraded: false };
+  if (startingRelays.has(root)) {
+    return { status: "starting", pid: null, port: RELAY_PORT, degraded: false };
   }
-  if (filePid) clearRelayPid(pidPath);
+  const ownerPid = await findCurrentOwner(RELAY_PORT);
+  const registeredPid = readRelayPid(pidPath);
+  if (ownerPid !== null || (registeredPid && pidLiveness(registeredPid) !== "dead")) {
+    return { status: "unknown", pid: ownerPid ?? registeredPid, port: RELAY_PORT, degraded: false };
+  }
   return { status: "stopped", pid: null, port: RELAY_PORT, degraded: false };
 }
 
-export async function startRelay(root, env = process.env) {
-  const existing = await getRelayStatus(root);
+export async function startRelay(root, env = process.env, deps = {}) {
+  const readStatus = deps.getRelayStatus ?? getRelayStatus;
+  const existing = await readStatus(root);
   if (existing.status === "running") {
     return { ok: true, relay: existing, reused: true };
   }
-  // Clear any stale pid so the new child's pid is authoritative.
-  clearRelayPid(getRelayPidPath(root));
+  if (existing.status !== "stopped" || startingRelays.has(root)) {
+    return { ok: false, relay: existing, reused: false };
+  }
 
-  const child = spawnRelayHost(env);
-  if (child.pid) writeRelayPid(child.pid, getRelayPidPath(root));
-
-  const up = await waitForRelayUp();
-  const status = await getRelayStatus(root);
+  const spawnHost = deps.spawnRelayHost ?? spawnRelayHost;
+  startingRelays.add(root);
+  let up;
+  try {
+    spawnHost(env);
+    up = await (deps.waitForRelayUp ?? waitForRelayUp)();
+  } finally {
+    startingRelays.delete(root);
+  }
+  const status = await readStatus(root);
   return { ok: up, relay: status, reused: false };
 }
 
 export async function stopRelay(root, deps = {}) {
-  // 停用路径只关心「还答不答」，所以这里把探针统一压成布尔：注入的替身可能返回
-  // 完整自检对象，而下面的等待轮询写的是 `!probe(...)`——对象恒为真值，会把
-  // 「已经停了」误判成「还在答」。
-  const rawProbe = deps.probe ?? ((port) => probeRelay(port));
-  const probe = async (port) => {
-    const raw = await rawProbe(port);
-    return typeof raw === "object" && raw !== null ? raw.serving === true : raw === true;
-  };
   // Kill path: UNCACHED port-owner lookup — the kill gate must see the fresh
   // owner PID, never a cached one, and must not share the display cache's
   // in-flight slot. When the caller does not replace the whole lookup, the
@@ -502,6 +516,9 @@ export async function stopRelay(root, deps = {}) {
   // underneath — same convention as isPidAlive's deps passthrough.
   const findOwner = deps.findPortOwnerPid
     ?? ((port) => findPortOwnerPid.uncached(port, { spawn: deps.netstatSpawn, timeoutMs: deps.netstatTimeoutMs }));
+  const scanStoppedPort = deps.findPortOwnerPid ?? ((port) => findPortOwnerPid.uncached(port, {
+    spawn: deps.netstatSpawn, timeoutMs: deps.netstatTimeoutMs, distinguishFailure: true,
+  }));
   const isAlive = deps.isPidAlive ?? isPidAlive;
   // Async by default so a fallback query never blocks the panel event loop.
   // Injected test doubles are plain sync mappers; awaiting a non-promise is a
@@ -544,13 +561,13 @@ export async function stopRelay(root, deps = {}) {
   }
 
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!(await probe(RELAY_PORT))) break;
+  let status;
+  do {
+    status = await getRelayStatus(root, { ...deps, findPortOwnerPid: scanStoppedPort });
+    if (status.status === "stopped" || refused.length > 0 || Date.now() >= deadline) break;
     await delay(pollMs);
-  }
-
-  clearRelayPid(pidPath);
-  const status = await getRelayStatus(root, { probe, findPortOwnerPid: findOwner, isPidAlive: isAlive });
+  } while (Date.now() < deadline);
+  if (status.status === "stopped" && filePid) clearRelayPid(pidPath, filePid);
   const result = { ok: status.status === "stopped" && refused.length === 0, relay: status };
   if (refused.length > 0) {
     result.reason = `refused to kill PID ${refused.join(", ")}: command line does not identify it as an Anyswitch app process`;

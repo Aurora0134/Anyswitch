@@ -2502,7 +2502,7 @@ export function createPanelRouter({
     // Relay lifecycle is owned by relay-process-manager (a separate process).
     // The panel (this process, 47820) reports its own PID + the relay's
     // live status so the UI can render running/stopped/starting + a start button.
-    let relay = { status: "stopped", pid: null, port: RELAY_PORT };
+    let relay = { status: "unknown", pid: null, port: RELAY_PORT };
     try {
       relay = await getRelayStatusFn(relayRoot);
     } catch (err) {

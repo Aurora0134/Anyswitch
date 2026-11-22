@@ -765,7 +765,7 @@ export async function startResidentRelay(options = {}) {
   const root = relayDataRoot(options.base ?? process.env);
   const pidPath = getRelayPidPath(root);
   writeRelayPid(process.pid, pidPath);
-  const clearPid = () => clearRelayPid(pidPath);
+  const clearPid = () => clearRelayPid(pidPath, process.pid);
 
   // The terminal host lives and dies with THIS relay (see
   // createTerminalHostSupervisor): swept-and-spawned here, killed in

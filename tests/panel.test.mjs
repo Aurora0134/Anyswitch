@@ -96,6 +96,77 @@ const sliceBetween = (src, startAnchor, endAnchor) => {
 // 单测按函数名切源码进 new Function，模块级符号不会跟着来。视口纯函数用生产实现，
 // 这里只补状态量与存档键；外部依赖（api / terminalSessionFor / renderer…）各沙盒自备。
 const panelFnSrc = extractFn;
+
+function relayStatusHarness() {
+  let now = 10_000;
+  const requests = [];
+  const elements = Object.fromEntries([
+    "topDot", "topRelayStatus", "sbStateBadge", "sbHost", "sbUptime", "sbRelayToggleBtn", "sbRelayRestartBtn",
+  ].map((id) => [id, {}]));
+  const context = vm.createContext({
+    $: (id) => elements[id],
+    Date: { now: () => now },
+    AbortSignal,
+    RELAY_PORT: 47821,
+    panelRestarting: false,
+    lastPanelIdentity: null,
+    currentRelayState: { status: "unknown" },
+    selfUpdateWatcher: { frame() {} },
+    applyTerminalHostState() {},
+    normalizeTerminalHostState: (state) => state,
+    api: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
+  });
+  const source = sliceBetween(panelJs, '  // relay 状态 → 顶栏与侧栏', '  // 端点卡排序语义');
+  const refresh = vm.runInContext(`${source}\n${extractFn("updateRelayControls")}\nrefreshStatus`, context);
+  function start() {
+    const ready = refresh();
+    return { ready, ...requests.shift() };
+  }
+  async function send(status) {
+    const request = start();
+    if (status instanceof Error) request.reject(status);
+    else request.resolve({ relay: { status } });
+    await request.ready;
+  }
+  return { context, elements, start, send, advance: (ms) => { now += ms; } };
+}
+
+test("the Relay badge holds through a brief outage, then reports uncertainty until a confirmed update", async () => {
+  const { elements, send, advance } = relayStatusHarness();
+  const badge = elements.sbStateBadge;
+  const toggle = elements.sbRelayToggleBtn;
+  const restart = elements.sbRelayRestartBtn;
+  await send("running");
+  await send(new Error("panel unavailable"));
+  assert.equal(badge.textContent, "运行正常");
+  assert.equal(toggle.disabled, true);
+  assert.equal(restart.disabled, true);
+  advance(5_000);
+  await send("unknown");
+  assert.equal(badge.textContent, "状态未知");
+  assert.equal(elements.topRelayStatus.textContent, "Relay 状态未知");
+  await send("running");
+  assert.equal(badge.textContent, "运行正常");
+  assert.equal(restart.disabled, false);
+  await send("stopped");
+  assert.equal(badge.textContent, "已停止");
+  assert.equal(toggle.disabled, false);
+});
+
+test("older status responses and responses during a panel restart cannot replace the current Relay display", async () => {
+  const { context, elements, start, send } = relayStatusHarness();
+  const older = start();
+  await send("running");
+  older.resolve({ relay: { status: "stopped" } });
+  await older.ready;
+  assert.equal(elements.sbStateBadge.textContent, "运行正常");
+  const pending = start();
+  context.panelRestarting = true;
+  elements.sbStateBadge.textContent = "重启中";
+  pending.reject(new Error("panel restarting"));
+  await pending.ready;
+  assert.equal(elements.sbStateBadge.textContent, "重启中");
+});
 const VIEWPORT_FNS = [
   "terminalViewportNextId", "loadTerminalViewports", "saveTerminalViewports",
   "terminalViewportActive", "terminalViewportById", "terminalViewportForTerminal",
@@ -717,6 +788,18 @@ describe("panel router relay control + pull-mode agents", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("GET /panel/api/status reports unknown when the Relay check throws", async () => {
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-status-") },
+      getRelayStatusFn: async () => { throw new Error("probe failed"); },
+      fetchTerminalHostStatus: async () => null,
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().relay.status, "unknown");
   });
 
   it("GET /panel/api/status reports relay status + panelPort + panel pid", async () => {
@@ -6331,15 +6414,6 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(recovery.includes("identity.startTime !== before.startTime"), "startTime 作为辅助身份信号");
   });
 
-  it("panelRestarting 同时压住徽标误报与按钮重新启用", () => {
-    assert.ok(panelJs.includes("let panelRestarting = false;"));
-    // 徽标：refreshStatus 的 catch 在窗口内不得改判
-    assert.ok(/if \(panelRestarting\) return;\s*\n\s*\$\("topDot"\)\.className = "pulse-dot stopped";/.test(panelJs),
-      "面板重启期间 47820 不可达是预期，不能把徽标写成「Relay 未运行」");
-    // 按钮：1s 轮询会重新调用 updateRelayControls，不拦住恢复期能再点一次重启
-    assert.ok(/function updateRelayControls\(relay\) \{[\s\S]{0,600}?if \(panelRestarting\) \{[\s\S]{0,200}?return;\s*\}/.test(panelJs),
-      "updateRelayControls 必须在重启窗口内按住两个按钮后直接返回");
-  });
 
   it("面板重启请求用裸 fetch，区分连接掐断与服务端拒绝", () => {
     const execStart = panelJs.indexOf("async function executeRestartRelay()");
