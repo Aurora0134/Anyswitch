@@ -327,6 +327,24 @@ describe("[models] default protection", () => {
     assert.match(text, /^default = "anyswitch-poke-api~gpt-6-astra"$/m);
   });
 
+  it("re-points a quoted-key stale managed default onto auto when a chain exists, keeping the key quoting", () => {
+    const existing = '[models]\n"default" = "anyswitch-gone-model" # 我选的\n';
+    const { text } = mergeGrokConfigToml(
+      existing,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      "tok",
+      deriveAutoRouteChannel(CHAIN_STORE, "grok"),
+    );
+    assert.match(text, /^"default" = "anyswitch-auto" # 我选的$/m);
+    assert.doesNotMatch(text, /anyswitch-gone-model/);
+  });
+
+  it("re-points a quoted-key stale managed default onto the first catalog entry when no chain exists", () => {
+    const { text } = mergeGrokConfigToml('[models]\n"default" = "anyswitch-gone-model"\n', extractManagedProviders(STORE), 47821, "tok");
+    assert.match(text, /^"default" = "anyswitch-poke-api~gpt-6-astra"$/m);
+  });
+
   it("leaves a current managed default, a user's own model id, and an absent default alone", () => {
     const current = mergeGrokConfigToml('[models]\ndefault = "anyswitch-poke-api~gpt-6-astra"\n', extractManagedProviders(STORE), 47821, "tok");
     assert.match(current.text, /^default = "anyswitch-poke-api~gpt-6-astra"$/m);

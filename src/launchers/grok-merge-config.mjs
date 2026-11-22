@@ -270,7 +270,7 @@ export function stripManagedBlock(text) {
 }
 
 const MODELS_HEADER_RE = /^\s*\[models\]\s*(?:#.*)?$/;
-const MODELS_DEFAULT_RE = /^(\s*default\s*=\s*)(["'])([^"']*)\2(\s*(?:#.*)?)$/;
+const MODELS_DEFAULT_RE = /^(\s*(?:"default"|'default'|default)\s*=\s*)(["'])([^"']*)\2(\s*(?:#.*)?)$/;
 
 // Default-model protection, run on the fully merged text (so current managed
 // tables count as defined). The [models] default key is the user's own choice
