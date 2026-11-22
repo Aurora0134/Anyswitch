@@ -229,7 +229,10 @@ async function registerTask(taskName, script, spawnFn = spawn) {
 async function unregisterTask(taskName, spawnFn = spawn) {
   // SilentlyContinue: deleting an absent task is success (idempotent disable),
   // same semantics the old reg delete fallback had.
+  // PS_CONSOLE_UTF8 前置与 register/probe 同款：中文机上失败时 stderr 的
+  // 中文错误文本按 UTF-8 出字节，node 侧读回不乱码。
   const ps = [
+    PS_CONSOLE_UTF8,
     `Unregister-ScheduledTask -TaskName '${taskName}' -Confirm:$false -ErrorAction SilentlyContinue`,
     "'UNREGISTERED'",
   ].join("; ");

@@ -554,4 +554,18 @@ describe("PowerShell console encoding", () => {
     // 控制组：GBK 字节按 UTF-8 读必然乱码（node 侧恒按 UTF-8 解码管道）。
     assert.ok(!gbkEncode(probe).toString("utf8").includes("张三"));
   });
+
+  it("unregister pins UTF-8 too, so failure text stays readable on a GBK console", async () => {
+    const { spawnFn, calls } = gbkConsolePS();
+    const result = await disableAutostart({ spawnFn });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 3);
+    for (const call of calls) {
+      const script = psCommandOf(call);
+      assert.ok(script.includes("Unregister-ScheduledTask"));
+      assert.ok(script.includes(PS_INPUT_UTF8), "unregister 脚本首部钉 InputEncoding");
+      assert.ok(script.includes(PS_OUTPUT_UTF8), "unregister 脚本首部钉 OutputEncoding");
+    }
+  });
 });
