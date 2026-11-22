@@ -244,7 +244,7 @@ export function takeOverKimiThinkingTable(text) {
   const bodyEnd = lines.findIndex((line, index) => index > headerIndex && /^\s*\[/.test(line));
   const end = bodyEnd === -1 ? lines.length : bodyEnd;
   for (let index = headerIndex + 1; index < end; index += 1) {
-    const match = lines[index].match(/^(\s*enabled\s*=\s*)(true|false)(.*)$/);
+    const match = lines[index].match(/^(\s*(?:"enabled"|'enabled'|enabled)\s*=\s*)(true|false)(.*)$/);
     if (!match) continue;
     if (match[2] === "true") return { text, status: "present", changed: false };
     const updated = [...lines];
@@ -252,7 +252,7 @@ export function takeOverKimiThinkingTable(text) {
     return { text: updated.join("\n"), status: "updated", changed: true };
   }
 
-  const declared = lines.slice(headerIndex + 1, end).some((line) => /^\s*enabled\s*=/.test(line));
+  const declared = lines.slice(headerIndex + 1, end).some((line) => /^\s*(?:"enabled"|'enabled'|enabled)\s*=/.test(line));
   if (declared) {
     // Present but not a bare boolean (a string, an expression, a table): this
     // is the user's own wording and rewriting it blind risks breaking the file.

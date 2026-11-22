@@ -598,4 +598,48 @@ describe("takeOverKimiThinkingTable", () => {
     const result = takeOverKimiThinkingTable('[kimi.thinking]\nenabled = false\n');
     assert.equal(result.status, "absent");
   });
+
+  it("flips a double-quoted key in place and keeps the user's quoting", () => {
+    const result = takeOverKimiThinkingTable('[thinking]\n"enabled" = false\n');
+    assert.equal(result.status, "updated");
+    assert.equal(result.changed, true);
+    assert.equal(result.text, '[thinking]\n"enabled" = true\n');
+  });
+
+  it("flips a single-quoted key in place and keeps the user's quoting", () => {
+    const result = takeOverKimiThinkingTable("[thinking]\n'enabled' = false\n");
+    assert.equal(result.status, "updated");
+    assert.equal(result.changed, true);
+    assert.equal(result.text, "[thinking]\n'enabled' = true\n");
+  });
+
+  it("reports present when a double-quoted key is already on", () => {
+    const source = '[thinking]\n"enabled" = true\n';
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "present");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("reports present when a single-quoted key is already on", () => {
+    const source = "[thinking]\n'enabled' = true\n";
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "present");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("refuses a quoted key whose value is not a bare boolean", () => {
+    const source = '[thinking]\n"enabled" = "off"\n';
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "invalid");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("still flips the bare key verbatim (regression)", () => {
+    const result = takeOverKimiThinkingTable("[thinking]\nenabled = false\n");
+    assert.equal(result.status, "updated");
+    assert.equal(result.text, "[thinking]\nenabled = true\n");
+  });
 });
