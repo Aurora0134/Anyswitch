@@ -19,7 +19,7 @@ export const APP_REPO_URL = "https://github.com/Aurora0134/Anyswitch.git";
 export const MAX_RELEASE_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const API_URL = "https://api.github.com/repos/Aurora0134/Anyswitch/releases/tags/";
 const API_HEADERS = { accept: "application/vnd.github+json", "user-agent": "anyswitch-self-update" };
-const DOWN_MS = 20_000, UP_MS = 30_000, POLL_MS = 500;
+const DOWN_MS = 20_000, UP_MS = 30_000, ROLLBACK_PROBE_MS = 10_000, POLL_MS = 500;
 
 const assetNames = (version) => {
   const zip = "anyswitch-v" + version + "-win-x64.zip";
@@ -130,7 +130,7 @@ export async function runSelfUpdate({
   publicKey = UPDATE_SIGNING_PUBLIC_KEY,
   delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => new Date().toISOString(), nowMs = Date.now,
-  panelDownTimeoutMs = DOWN_MS, panelUpTimeoutMs = UP_MS, pollMs = POLL_MS, panelPort = 47820,
+  panelDownTimeoutMs = DOWN_MS, panelUpTimeoutMs = UP_MS, rollbackProbeMs = ROLLBACK_PROBE_MS, pollMs = POLL_MS, panelPort = 47820,
 } = {}) {
   const run = readClientUpdateRun(journalDir, runId);
   if (!run || run.state !== "running" || run.clientId !== SELF_UPDATE_CLIENT_ID) return null;
@@ -153,6 +153,8 @@ export async function runSelfUpdate({
   const names = assetNames(targetVersion), stageDir = join(installRoot, "staging", runId);
   const archivePath = join(stageDir, names.zip), manifestPath = join(stageDir, names.manifest), signaturePath = join(stageDir, names.signature);
   let watchdogStopped = false;
+  // staging/<runId>-XXXXXX 解压临时目录：成功后 rename 走，任何异常收场都纳入清理半径。
+  let extractRoot = null;
   // 收尾清理一律 best-effort：删不动（EPERM/EBUSY 占用）不翻 outcome，残留路径记进 result。
   const bestEffortRm = (paths) => {
     const residue = [];
@@ -207,16 +209,11 @@ export async function runSelfUpdate({
     } else {
       const stageRoot = join(installRoot, "staging");
       io.mkdirSync(stageRoot, { recursive: true });
-      const extractRoot = io.mkdtempSync(join(stageRoot, runId + "-"));
-      try {
-        const payload = extractReleaseArchive(archive, extractRoot);
-        if (payload.version !== targetVersion) throw new Error("package version mismatch");
-        io.mkdirSync(dirname(targetDir), { recursive: true });
-        io.renameSync(extractRoot, targetDir);
-      } catch (error) {
-        io.rmSync(extractRoot, { recursive: true, force: true });
-        throw error;
-      }
+      extractRoot = io.mkdtempSync(join(stageRoot, runId + "-"));
+      const payload = extractReleaseArchive(archive, extractRoot);
+      if (payload.version !== targetVersion) throw new Error("package version mismatch");
+      io.mkdirSync(dirname(targetDir), { recursive: true });
+      io.renameSync(extractRoot, targetDir);
     }
 
     const pointerFile = currentPath(installRoot);
@@ -226,6 +223,9 @@ export async function runSelfUpdate({
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
+    // 断点续传（resume）时指针已指目标版：旧版身份改取 run.beforeVersion，
+    // 否则回滚分支被跳过，resume 再失败会落首装失败分支误删指针与目标目录。
+    if (previous?.version === targetVersion && typeof run.beforeVersion === "string" && run.beforeVersion !== targetVersion) previous = { schema: 1, version: run.beforeVersion };
     setPhase("ready-to-restart");
     writePointer(pointerFile, targetVersion);
     const dataRoot = run.relayRoot ?? join(env.LOCALAPPDATA ?? "", "Anyswitch");
@@ -266,7 +266,7 @@ export async function runSelfUpdate({
     }
     if (targetPanelHealthy && relay?.ok === true) {
       if (watchdogStopped) await spawnWatchdogFn(targetEnv).catch(() => {});
-      const residue = bestEffortRm([stageDir]);
+      const residue = bestEffortRm(extractRoot ? [stageDir, extractRoot] : [stageDir]);
       return finish({ outcome: "updated", message: "已更新到 " + targetVersion, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion, relayRestartFailed: false, ...(residue.length ? { residue } : {}) });
     }
     if (previous && previous.version !== targetVersion) {
@@ -278,24 +278,37 @@ export async function runSelfUpdate({
       let panelRelaunchFailed = false;
       try { spawnPanelHostFn({ installRoot, appRoot: previousAppRoot, appDir: previousAppRoot, nodePath: previousNodePath, env: previousEnv }); } catch { panelRelaunchFailed = true; }
       if (watchdogStopped) await spawnWatchdogFn(previousEnv).catch(() => {});
-      // 本轮换装失败：目标目录是本 run 刚落成的（指针已回退、必不指向它），留着
-      // 会让同版本重试永远撞 "version already exists"——尽力清掉，清不动记 residue。
-      const residue = bestEffortRm([join(installRoot, "versions", targetVersion), stageDir]);
-      return finish({ outcome: "rolled_back", message: "新面板未能启动，已恢复到更新前版本", beforeVersion, afterVersion: previous.version, latestVersion: targetVersion, relayRestartFailed: relay?.ok !== true || rollbackRelay?.ok !== true, ...(panelRelaunchFailed ? { panelRelaunchFailed } : {}), ...(residue.length ? { residue } : {}) });
+      // 回滚后短窗探测旧面板身份：relay 没拉起或旧面板在窗内不应答都算服务未自动
+      // 恢复——如实报 failed，不冒称 rolled_back。
+      let previousPanelHealthy = false;
+      const rollbackDeadline = nowMs() + rollbackProbeMs;
+      while (!previousPanelHealthy && nowMs() < rollbackDeadline) {
+        const identity = await probePanelFn(panelPort);
+        previousPanelHealthy = identity?.version === previous.version;
+        if (!previousPanelHealthy) await delay(pollMs);
+      }
+      // 本轮换装失败：目标目录是本 run 或上一断点尝试落成的（指针已回退、必不指向
+      // 它），留着会让同版本重试永远撞 "version already exists"——尽力清掉，清不动记 residue。
+      const residue = bestEffortRm(extractRoot ? [join(installRoot, "versions", targetVersion), stageDir, extractRoot] : [join(installRoot, "versions", targetVersion), stageDir]);
+      const relayRestartFailed = relay?.ok !== true || rollbackRelay?.ok !== true;
+      const residueNote = residue.length ? "残留目录未清走：" + residue.join("、") + "，可手动删除。" : "";
+      if (rollbackRelay?.ok !== true || !previousPanelHealthy) {
+        return finish({ outcome: "failed", message: "已恢复到更新前版本，但服务未能自动恢复。请从开始菜单启动 Anyswitch。" + residueNote, beforeVersion, afterVersion: previous.version, latestVersion: targetVersion, relayRestartFailed, ...(panelRelaunchFailed ? { panelRelaunchFailed } : {}), ...(residue.length ? { residue } : {}) });
+      }
+      return finish({ outcome: "rolled_back", message: "新面板未能启动，已恢复到更新前版本" + (residueNote ? "。" + residueNote : ""), beforeVersion, afterVersion: previous.version, latestVersion: targetVersion, relayRestartFailed, ...(panelRelaunchFailed ? { panelRelaunchFailed } : {}), ...(residue.length ? { residue } : {}) });
     }
-    io.rmSync(pointerFile, { force: true });
     if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
-    // 首装失败同理：目标目录与 staging 都是本 run 的残留，清掉再收场。
-    io.rmSync(join(installRoot, "versions", targetVersion), { recursive: true, force: true });
-    io.rmSync(stageDir, { recursive: true, force: true });
-    return finish({ outcome: "failed", message: "新面板未能启动，且没有可恢复的旧版本", beforeVersion, afterVersion: null, latestVersion: targetVersion, relayRestartFailed: relay?.ok !== true });
+    // 首装失败同理：指针、目标目录与 staging 都是本 run 的残留，尽力清掉再收场，
+    // 清不动记 residue，不翻 outcome。
+    const residue = bestEffortRm(extractRoot ? [pointerFile, join(installRoot, "versions", targetVersion), stageDir, extractRoot] : [pointerFile, join(installRoot, "versions", targetVersion), stageDir]);
+    return finish({ outcome: "failed", message: "新面板未能启动，且没有可恢复的旧版本" + (residue.length ? "。残留目录未清走：" + residue.join("、") + "，可手动删除。" : ""), beforeVersion, afterVersion: null, latestVersion: targetVersion, relayRestartFailed: relay?.ok !== true, ...(residue.length ? { residue } : {}) });
   } catch (error) {
     // 停了的看门狗不能因异常收场而无人拉起（对齐 62e69f9 旧版的 restoreWatchdog）：
     // apply 阶段同步 I/O 异常时面板已换装或已回滚，等面板重启才拉起会留自愈空窗。
     if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
-    // staging 是本 run 的暂存，异常收场尽力清掉；versions/<target> 绝不动——
-    // catch 也可能发生在指针已切新版的邻域。
-    const residue = bestEffortRm([stageDir]);
+    // staging 与解压临时目录是本 run 的暂存，异常收场尽力清掉；versions/<target>
+    // 绝不动——catch 也可能发生在指针已切新版的邻域。
+    const residue = bestEffortRm(extractRoot ? [stageDir, extractRoot] : [stageDir]);
     const keyUnavailable = error?.message === "release signing key unavailable";
     return finish({ outcome: "failed", message: keyUnavailable ? "更新验证失败，请稍后重试" : "更新失败，请重新检查更新后重试", detail: error?.message ?? undefined, beforeVersion, latestVersion: targetVersion, ...(residue.length ? { residue } : {}) });
   }

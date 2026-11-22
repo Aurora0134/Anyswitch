@@ -80,8 +80,8 @@ test("preview release requires prerelease metadata and matching signed channel",
 
 test("downloaded archive hash is verified even without GitHub asset.digest", async () => { const f = fixture({ digestMetadata: false }), s = setup({ fetchFn: fakeFetch(f).fetchFn }); try { assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded"); } finally { s.cleanup(); } });
 
-test("health success activates pointer; failed relay or panel health restores prior pointer", async () => { const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn }); try { assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded"); const staged = readClientUpdateRun(s.journalDir, RUN_ID); writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", finishedAt: null, result: null }); let probe = 0; const apply = { ...s.fns, probePanelFn: async () => ++probe === 1 ? null : { version: "1.2.3" }, restartRelayFn: async () => ({ ok: true }) }; const activated = await runSelfUpdate(apply); assert.equal(activated.outcome, "updated", JSON.stringify(activated)); assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.3" }); } finally { s.cleanup(); }
-  const f2 = fixture(), s2 = setup({ fetchFn: fakeFetch(f2).fetchFn }); try { await runSelfUpdate(s2.fns); const staged = readClientUpdateRun(s2.journalDir, RUN_ID); writeClientUpdateRun(s2.journalDir, { ...staged, state: "running", step: "apply", finishedAt: null, result: null }); let probes = 0; const failed = await runSelfUpdate({ ...s2.fns, restartRelayFn: async () => ({ ok: false }), probePanelFn: async () => { probes++; return probes === 1 ? null : { version: "1.2.3" }; } }); assert.equal(failed.outcome, "rolled_back"); assert.deepEqual(parseCurrentPointer(readFileSync(join(s2.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" }); } finally { s2.cleanup(); }
+test("health success activates pointer; failed relay or panel health restores prior pointer", async () => { const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn }); try { assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded"); const staged = readClientUpdateRun(s.journalDir, RUN_ID); writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", finishedAt: null, result: null }); let probe = 0; const apply = { ...s.fns, probePanelFn: async () => ++probe === 1 ? null : { version: "1.2.3" }, restartRelayFn: async () => ({ ok: true }) }; const activated = await runSelfUpdate(apply); assert.equal(activated.outcome, "updated", JSON.stringify(activated)); assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.3" }); assert.deepEqual(readdirSync(join(s.installRoot, "staging")), [], "成功路径不得留 staging 暂存（stageDir 与 extractRoot 都不留）"); } finally { s.cleanup(); }
+  const f2 = fixture(), s2 = setup({ fetchFn: fakeFetch(f2).fetchFn }); try { await runSelfUpdate(s2.fns); const staged = readClientUpdateRun(s2.journalDir, RUN_ID); writeClientUpdateRun(s2.journalDir, { ...staged, state: "running", step: "apply", finishedAt: null, result: null }); let probes = 0; const failed = await runSelfUpdate({ ...s2.fns, restartRelayFn: async () => ({ ok: false }), probePanelFn: async () => { probes++; return probes === 1 ? null : { version: "1.2.3" }; } }); assert.equal(failed.outcome, "failed"); assert.equal(failed.message, "已恢复到更新前版本，但服务未能自动恢复。请从开始菜单启动 Anyswitch。"); assert.deepEqual(parseCurrentPointer(readFileSync(join(s2.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" }); } finally { s2.cleanup(); }
 });
 
 test("worker rejects invalid journal, panel probe is bounded, and worker remains detached", async () => { assert.equal(await runSelfUpdate({ runId: RUN_ID, journalDir: "missing" }), null); const seen = []; assert.deepEqual(await probePanelAppInfo(undefined, async (url) => { seen.push(url); return { ok: true, json: async () => ({ version: "1.2.3", commit: "abc" }) }; }), { version: "1.2.3", commit: "abc" }); assert.equal(seen[0], "http://127.0.0.1:47820/panel/api/app-info"); let spawn, unref = false; spawnSelfUpdateWorker({ runId: RUN_ID, journalDir: "C:/data/client-updates", workerPath: "worker.mjs", spawnFn: (...args) => { spawn = args; return { unref() { unref = true; } }; } }); assert.equal(spawn[2].detached, true); assert.equal(spawn[2].stdio, "ignore"); assert.equal(unref, true); });
@@ -175,8 +175,9 @@ test("rolled-back activation removes the failed target dir and staging so the sa
   const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
   try {
     let probes = 0;
-    const rolled = await runSelfUpdate({ ...s.fns, probePanelFn: async () => ++probes === 1 ? null : { version: "0.0.0" } });
+    const rolled = await runSelfUpdate({ ...s.fns, probePanelFn: async () => ++probes === 1 ? null : { version: "1.2.2" } });
     assert.equal(rolled.outcome, "rolled_back");
+    assert.equal(rolled.message, "新面板未能启动，已恢复到更新前版本", "无残留时既有回滚句原样保留");
     assert.equal(existsSync(join(s.installRoot, "versions", "1.2.3")), false, "失败目标目录必须清走（否则同版本重试永远撞 version already exists）");
     assert.equal(existsSync(join(s.installRoot, "staging", RUN_ID)), false, "staging 一并清走");
     assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" });
@@ -214,6 +215,7 @@ test("rollback cleanup failure keeps rolled_back outcome and reports residue", a
     const result = await runSelfUpdate({ ...s.fns, io, probePanelFn: async () => ++probes === 1 ? null : { version: "1.2.2" } });
     assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
     assert.deepEqual(result.residue, [targetDir, stageDir]);
+    assert.equal(result.message, "新面板未能启动，已恢复到更新前版本。残留目录未清走：" + [targetDir, stageDir].join("、") + "，可手动删除。");
     assert.equal(result.relayRestartFailed, false);
     assert.ok(existsSync(targetDir), "注入 EPERM 后目标目录应真实残留");
     assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" });
@@ -225,12 +227,83 @@ test("rolled_back result carries relay restart and panel relaunch failure flags"
   try {
     let probes = 0;
     const result = await runSelfUpdate({ ...s.fns,
-      restartRelayFn: async () => ({ ok: false }),
+      restartRelayFn: async (dataRoot, env) => ({ ok: !String(env.ANYSWITCH_APP_ROOT).includes(join("versions", "1.2.3")) }),
       spawnPanelHostFn: () => { throw new Error("spawn refused"); },
       probePanelFn: async () => { probes += 1; return probes === 1 ? null : { version: "1.2.2" }; } });
     assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
     assert.equal(result.relayRestartFailed, true);
     assert.equal(result.panelRelaunchFailed, true);
+  } finally { s.cleanup(); }
+});
+
+test("rollback that cannot restore relay or panel health reports failed with manual-start guidance", async () => {
+  for (const scenario of [{ rollbackRelayOk: false, panelAnswers: true }, { rollbackRelayOk: true, panelAnswers: false }]) {
+    const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
+    try {
+      let probes = 0;
+      const result = await runSelfUpdate({ ...s.fns,
+        restartRelayFn: async (dataRoot, env) => ({ ok: String(env.ANYSWITCH_APP_ROOT).includes(join("versions", "1.2.3")) || scenario.rollbackRelayOk }),
+        probePanelFn: async () => { probes += 1; if (probes === 1) return null; return { version: scenario.panelAnswers ? "1.2.2" : "0.0.0" }; } });
+      assert.equal(result.outcome, "failed", JSON.stringify(result));
+      assert.equal(result.message, "已恢复到更新前版本，但服务未能自动恢复。请从开始菜单启动 Anyswitch。");
+      assert.equal(result.afterVersion, "1.2.2");
+      assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" }, "回滚指针必须已退回旧版");
+    } finally { s.cleanup(); }
+  }
+});
+
+test("resumed apply rolls back to beforeVersion instead of deleting the pointer when health fails again", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    // 模拟上一尝试断点：目标目录完整、指针已切目标版，随后被瞬时异常打断收场。
+    const target = join(s.installRoot, "versions", "1.2.3");
+    mkdirSync(join(target, "app"), { recursive: true }); mkdirSync(join(target, "runtime"), { recursive: true });
+    writeFileSync(join(target, "app", "package.json"), JSON.stringify({ version: "1.2.3" }));
+    writeFileSync(join(target, "runtime", "node.exe"), "node");
+    writeFileSync(join(s.installRoot, "current.json"), JSON.stringify({ schema: 1, version: "1.2.3" }));
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    let probes = 0;
+    const result = await runSelfUpdate({ ...s.fns, probePanelFn: async () => { probes += 1; return probes === 1 ? null : { version: "1.2.2" }; } });
+    assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
+    assert.equal(result.beforeVersion, "1.2.2");
+    assert.equal(result.afterVersion, "1.2.2");
+    assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.2" }, "resume 再失败必须回滚到 beforeVersion，不得删指针");
+    assert.ok(existsSync(join(s.installRoot, "versions", "1.2.2")), "旧版目录不动");
+    assert.equal(existsSync(target), false, "失败目标目录照常清走");
+  } finally { s.cleanup(); }
+});
+
+test("first-install failure cleanup is best-effort and keeps the failed outcome with residue", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    const noPointer = join(s.installRoot, "current.json"); rmSync(noPointer, { force: true });
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    const targetDir = join(s.installRoot, "versions", "1.2.3");
+    const io = { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync, rmSync: (path, opts) => { if (String(path) === targetDir && existsSync(path)) throw Object.assign(new Error("EPERM (injected)"), { code: "EPERM" }); return rmSync(path, opts); } };
+    const result = await runSelfUpdate({ ...s.fns, io, probePanelFn: async () => null });
+    assert.equal(result.outcome, "failed", JSON.stringify(result));
+    assert.deepEqual(result.residue, [targetDir]);
+    assert.ok(existsSync(targetDir), "注入 EPERM 后目标目录应真实残留");
+    assert.equal(existsSync(noPointer), false, "指针清理不受目标目录占用影响");
+    assert.equal(result.message, "新面板未能启动，且没有可恢复的旧版本。残留目录未清走：" + targetDir + "，可手动删除。");
+  } finally { s.cleanup(); }
+});
+
+test("extract temp dir joins the cleanup radius when activation fails after extraction", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn });
+  try {
+    assert.equal((await runSelfUpdate(s.fns)).outcome, "downloaded");
+    const staged = readClientUpdateRun(s.journalDir, RUN_ID);
+    writeClientUpdateRun(s.journalDir, { ...staged, state: "running", step: "apply", result: null, finishedAt: null });
+    const io = { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, renameSync: () => { throw new Error("rename denied"); } };
+    const result = await runSelfUpdate({ ...s.fns, io });
+    assert.equal(result.outcome, "failed", JSON.stringify(result));
+    assert.match(result.detail, /rename denied/);
+    assert.deepEqual(readdirSync(join(s.installRoot, "staging")), [], "stageDir 与 extractRoot 都必须进 catch 清理半径");
   } finally { s.cleanup(); }
 });
 
@@ -299,10 +372,10 @@ test("target panel launch retries within the up window until the new identity an
 test("target panel launch retries are capped inside the up window", async () => {
   const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
   try {
-    let spawns = 0;
+    let spawns = 0, rolledBack = false;
     const result = await runSelfUpdate({ ...s.fns, panelUpTimeoutMs: 500, pollMs: 100,
-      spawnPanelHostFn: (request) => { if (String(request.appRoot).includes(join("versions", "1.2.3"))) spawns += 1; return 55; },
-      probePanelFn: async () => null });
+      spawnPanelHostFn: (request) => { if (String(request.appRoot).includes(join("versions", "1.2.3"))) spawns += 1; else rolledBack = true; return 55; },
+      probePanelFn: async () => rolledBack ? { version: "1.2.2" } : null });
     assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
     assert.equal(spawns, Math.max(1, Math.floor(500 / 100)), "重拉次数应有界且不超 UP 窗（回滚拉旧面板不计入）");
   } finally { s.cleanup(); }
