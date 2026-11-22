@@ -147,7 +147,10 @@ function runTar(tarPath, args, { spawnFn, timeoutMs = 120000 }) {
     child.stderr?.on("data", (c) => (stderr += c));
     const timer = setTimeout(() => {
       try { child.kill(); } catch { /* already gone */ }
-      rejectPromise(new Error(`打包或解包超过 ${timeoutMs}ms 未结束`));
+      // timedOut 标记给调用方区分失败类型：超时与打包本身失败的收口文案不同。
+      const error = new Error(`打包或解包超过 ${timeoutMs}ms 未结束`);
+      error.timedOut = true;
+      rejectPromise(error);
     }, timeoutMs);
     child.on("error", (error) => { clearTimeout(timer); rejectPromise(error); });
     child.on("close", (code) => {
@@ -254,6 +257,9 @@ export function createDataBundleService({
 
     const staging = newStaging("export");
     const zipPath = join(target, exportFileName(now()));
+    // zip 落在用户自选的目录里：同名文件打包前就在，那是用户自己的文件，
+    // 失败清理只能清这次自己产出的半截包，动不到它。
+    const zipExistedBefore = existsSync(zipPath);
     try {
       writeFileSync(join(staging, "store.json"), loaded.text, "utf8");
       const settingsText = readTextIfExists(settingsPath);
@@ -316,6 +322,12 @@ export function createDataBundleService({
 
       await runTar(tarPath, ["--format=zip", "-cf", zipPath, "-C", staging, "."], { spawnFn, timeoutMs });
       return { ok: true, path: zipPath, sizeBytes: statSync(zipPath).size, counts: manifest.counts, skippedCredentials: manifest.skippedCredentials };
+    } catch (error) {
+      if (!zipExistedBefore) rmSafe(zipPath);
+      if (error?.timedOut) {
+        return { ok: false, error: `打包超过 ${Math.round(timeoutMs / 60000)} 分钟未结束，可缩小 Skills 目录后重试` };
+      }
+      return { ok: false, error: `打包失败：${error?.message ?? String(error)}` };
     } finally {
       rmSafe(staging);
     }
@@ -342,7 +354,14 @@ export function createDataBundleService({
     if (!zipPath || !/\.zip$/i.test(zipPath)) return { ok: false, error: "只能选择 .zip 导出包" };
     if (!existsSync(zipPath) || !statSync(zipPath).isFile()) return { ok: false, error: "所选文件不存在" };
 
-    const listed = await runTar(tarPath, ["-tf", zipPath], { spawnFn, timeoutMs });
+    // 列表步本身就可能失败（截断、损坏的包）：与扩展名/存在性守卫同列，收口为
+    // 业务失败，不能让它穿透路由落 500。
+    let listed;
+    try {
+      listed = await runTar(tarPath, ["-tf", zipPath], { spawnFn, timeoutMs });
+    } catch {
+      return { ok: false, error: "压缩包读不出来，文件可能已损坏或不完整" };
+    }
     const safety = assertSafeEntries(listed.stdout.split(/\r?\n/));
     if (!safety.ok) return { ok: false, error: safety.error };
 
@@ -512,83 +531,96 @@ export function createDataBundleService({
         return { ok: false, error: `渠道配置写入被拒（${written.reason}），当前数据未改动；备份在 ${backupDir}`, backupId };
       }
 
-      const applied = { store: true, settings: false, prompts: false, skills: false, credentials: 0, credentialFailures: [] };
-      const settingsText = readTextIfExists(join(dir, "settings.json"));
-      if (settingsText !== null) {
-        atomicWriteFile(settingsPath, settingsText);
-        applied.settings = true;
-        // followAgent 不只是盘上一个字段：它背后挂着登录计划 AnyswitchWatchdog
-        // 和常驻自愈进程，而那串副作用归设置路由所有，导入绕开了它。把刚写进盘
-        // 的值原样交回调用方对齐。解析不成按关处理——坏文件经 loadSettings 就是
-        // 空对象，读出来同样是关，两边不能给出不一致的答复。
-        try {
-          applied.followAgent = JSON.parse(settingsText)?.followAgent === true;
-        } catch {
-          applied.followAgent = false;
-        }
-      }
-      const promptsText = readTextIfExists(join(dir, "prompts.json"));
-      if (promptsText !== null) { atomicWriteFile(promptsJsonPath, promptsText); applied.prompts = true; }
-
-      if (entries.length) {
-        mkdirSync(paths.credentialsDir, { recursive: true });
-        for (const entry of entries) {
-          const plaintext = Buffer.from(String(entry.plaintextBase64 ?? ""), "base64");
+      // 写回段任一抛错时，store 已换成包内版本、安全备份已落盘：收口为业务失败
+      // 并把备份位置报给界面（与上面 writeStore 被拒的 graceful 出口同形状），
+      // 不能让异常穿透路由落 500、用户对盘上已有的安全备份一无所知。
+      try {
+        const applied = { store: true, settings: false, prompts: false, skills: false, credentials: 0, credentialFailures: [] };
+        const settingsText = readTextIfExists(join(dir, "settings.json"));
+        if (settingsText !== null) {
+          atomicWriteFile(settingsPath, settingsText);
+          applied.settings = true;
+          // followAgent 不只是盘上一个字段：它背后挂着登录计划 AnyswitchWatchdog
+          // 和常驻自愈进程，而那串副作用归设置路由所有，导入绕开了它。把刚写进盘
+          // 的值原样交回调用方对齐。解析不成按关处理——坏文件经 loadSettings 就是
+          // 空对象，读出来同样是关，两边不能给出不一致的答复。
           try {
-            // 写入前终检：预览已过 validateCredentialRef（见 inspectBundle），这里
-            // 与 store 条目的「writeStore 前必过 validateStore」结构等价——测试替
-            // 身票据带越界条目时单条跳过、计入 credentialFailures，不掀翻整单。
-            const resolved = resolveCredentialPath(entry.credentialFile, paths);
-            if (!resolved.ok) { applied.credentialFailures.push(entry.providerId); continue; }
-            const ciphertext = await protect(plaintext, entry.providerId);
-            atomicWriteFile(resolved.path, ciphertext);
-            applied.credentials += 1;
+            applied.followAgent = JSON.parse(settingsText)?.followAgent === true;
           } catch {
-            applied.credentialFailures.push(entry.providerId);
-          } finally {
-            plaintext.fill(0);
+            applied.followAgent = false;
           }
         }
-      }
+        const promptsText = readTextIfExists(join(dir, "prompts.json"));
+        if (promptsText !== null) { atomicWriteFile(promptsJsonPath, promptsText); applied.prompts = true; }
 
-      const bundledSkills = join(dir, SKILLS_DIR_NAME);
-      const skillDirs = topLevelDirs(bundledSkills);
-      if (skillDirs.length) {
-        const cfg = skillsConfigFn();
-        const mode = typeof skillsMode === "string" ? skillsMode : "skip";
-        let target = null;
-        if (mode === "repo") target = cfg?.repoPath || null;
-        else if (mode === "default") target = join(homeDir, ".agents", "skills");
-        else if (mode === "custom") target = (skillsTarget && String(skillsTarget).trim()) || null;
-        if (mode === "skip") {
-          applied.skillsSkippedReason = "未导入 Skills";
-        } else if (!target) {
-          applied.skillsSkippedReason = mode === "repo" ? "本机未配置 Skills 仓库" : "Skills 落点为空";
-        } else {
-          // Skills 落盘失败不掀翻整单：渠道/设置/密钥已换完、备份已落，把原因
-          // 如实记进 applied 交界面呈现，而不是把半完成报成整单失败。
-          try {
-            mkdirSync(target, { recursive: true });
-            copyTree(bundledSkills, target);
-            applied.skills = true;
-            applied.skillsTarget = target;
-            applied.skillDirs = skillDirs.length;
-            // 改指规则：落点是已配仓库、或本机未配过仓库 → skills.json 指过去；
-            // 已配仓库但自选别处 → 只落盘，主仓库指向不动。
-            if (!cfg?.repoPath || cfg.repoPath === target) {
-              if (cfg?.repoPath !== target) saveSkillsConfig({ repoPath: target }, { base });
-              applied.skillsRepoChanged = cfg?.repoPath !== target;
-            } else {
-              applied.skillsRepoChanged = false;
+        if (entries.length) {
+          mkdirSync(paths.credentialsDir, { recursive: true });
+          for (const entry of entries) {
+            const plaintext = Buffer.from(String(entry.plaintextBase64 ?? ""), "base64");
+            try {
+              // 写入前终检：预览已过 validateCredentialRef（见 inspectBundle），这里
+              // 与 store 条目的「writeStore 前必过 validateStore」结构等价——测试替
+              // 身票据带越界条目时单条跳过、计入 credentialFailures，不掀翻整单。
+              const resolved = resolveCredentialPath(entry.credentialFile, paths);
+              if (!resolved.ok) { applied.credentialFailures.push(entry.providerId); continue; }
+              const ciphertext = await protect(plaintext, entry.providerId);
+              atomicWriteFile(resolved.path, ciphertext);
+              applied.credentials += 1;
+            } catch {
+              applied.credentialFailures.push(entry.providerId);
+            } finally {
+              plaintext.fill(0);
             }
-          } catch (error) {
-            applied.skills = false;
-            applied.skillsSkippedReason = `Skills 落盘未完成：${error.message}`;
           }
         }
-      }
 
-      return { ok: true, backupId, backupDir, applied, counts: got.ticket.summary.counts };
+        const bundledSkills = join(dir, SKILLS_DIR_NAME);
+        const skillDirs = topLevelDirs(bundledSkills);
+        if (skillDirs.length) {
+          const cfg = skillsConfigFn();
+          const mode = typeof skillsMode === "string" ? skillsMode : "skip";
+          let target = null;
+          if (mode === "repo") target = cfg?.repoPath || null;
+          else if (mode === "default") target = join(homeDir, ".agents", "skills");
+          else if (mode === "custom") target = (skillsTarget && String(skillsTarget).trim()) || null;
+          if (mode === "skip") {
+            applied.skillsSkippedReason = "未导入 Skills";
+          } else if (!target) {
+            applied.skillsSkippedReason = mode === "repo" ? "本机未配置 Skills 仓库" : "Skills 落点为空";
+          } else {
+            // Skills 落盘失败不掀翻整单：渠道/设置/密钥已换完、备份已落，把原因
+            // 如实记进 applied 交界面呈现，而不是把半完成报成整单失败。
+            try {
+              mkdirSync(target, { recursive: true });
+              copyTree(bundledSkills, target);
+              applied.skills = true;
+              applied.skillsTarget = target;
+              applied.skillDirs = skillDirs.length;
+              // 改指规则：落点是已配仓库、或本机未配过仓库 → skills.json 指过去；
+              // 已配仓库但自选别处 → 只落盘，主仓库指向不动。
+              if (!cfg?.repoPath || cfg.repoPath === target) {
+                if (cfg?.repoPath !== target) saveSkillsConfig({ repoPath: target }, { base });
+                applied.skillsRepoChanged = cfg?.repoPath !== target;
+              } else {
+                applied.skillsRepoChanged = false;
+              }
+            } catch (error) {
+              applied.skills = false;
+              applied.skillsSkippedReason = `Skills 落盘未完成：${error.message}`;
+            }
+          }
+        }
+
+        return { ok: true, backupId, backupDir, applied, counts: got.ticket.summary.counts };
+      } catch (error) {
+        return {
+          ok: false,
+          error: `部分配置写回未完成：${error?.message ?? String(error)}。渠道配置可能已是备份内容；安全备份在 ${backupDir}，可从备份列表恢复。`,
+          backupId,
+          safetyName: `pre-import-${backupId}`,
+          partial: true,
+        };
+      }
     } finally {
       rmSafe(dir);
     }
@@ -647,34 +679,46 @@ export function createDataBundleService({
 
     const safety = writePreImportBackup();
 
-    if (restoredStore) {
-      const written = writeStore(restoredStore, { paths });
-      if (!written.ok) {
-        return { ok: false, error: `渠道配置写入被拒（${written.reason}），当前数据未改动；安全备份在 ${safety.backupDir}` };
-      }
-    }
-    const applied = { settings: false };
-    for (const file of ["settings.json", "prompts.json", "skills.json"]) {
-      if (!texts.has(file)) continue;
-      const target = file === "settings.json" ? settingsPath : file === "prompts.json" ? promptsJsonPath : skillsConfigPath(base);
-      atomicWriteFile(target, texts.get(file));
-      if (file === "settings.json") {
-        applied.settings = true;
-        // 与导入落定同一口径（见 applyBundle）：followAgent 背后挂着登录计划与常驻
-        // 自愈进程，刚写进盘的值要交回调用方对齐。解析不成按关处理——坏文件经
-        // loadSettings 就是空对象，读出来同样是关，两边不能给出不一致的答复。
-        try {
-          applied.followAgent = JSON.parse(texts.get(file))?.followAgent === true;
-        } catch {
-          applied.followAgent = false;
+    // 写回段任一抛错时，store 可能已换成备份内容、安全备份已落盘：收口为业务
+    // 失败并把安全备份位置报给界面，不能让异常穿透路由落 500。
+    try {
+      if (restoredStore) {
+        const written = writeStore(restoredStore, { paths });
+        if (!written.ok) {
+          return { ok: false, error: `渠道配置写入被拒（${written.reason}），当前数据未改动；安全备份在 ${safety.backupDir}` };
         }
       }
+      const applied = { settings: false };
+      for (const file of ["settings.json", "prompts.json", "skills.json"]) {
+        if (!texts.has(file)) continue;
+        const target = file === "settings.json" ? settingsPath : file === "prompts.json" ? promptsJsonPath : skillsConfigPath(base);
+        atomicWriteFile(target, texts.get(file));
+        if (file === "settings.json") {
+          applied.settings = true;
+          // 与导入落定同一口径（见 applyBundle）：followAgent 背后挂着登录计划与常驻
+          // 自愈进程，刚写进盘的值要交回调用方对齐。解析不成按关处理——坏文件经
+          // loadSettings 就是空对象，读出来同样是关，两边不能给出不一致的答复。
+          try {
+            applied.followAgent = JSON.parse(texts.get(file))?.followAgent === true;
+          } catch {
+            applied.followAgent = false;
+          }
+        }
+      }
+      if (withCredentials) {
+        mkdirSync(paths.credentialsDir, { recursive: true });
+        copyTree(join(dir, "credentials"), paths.credentialsDir);
+      }
+      return { ok: true, safetyName: `pre-import-${safety.backupId}`, applied };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `部分配置写回未完成：${error?.message ?? String(error)}。渠道配置可能已是备份内容；安全备份在 ${safety.backupDir}，可从备份列表恢复。`,
+        backupId: safety.backupId,
+        safetyName: `pre-import-${safety.backupId}`,
+        partial: true,
+      };
     }
-    if (withCredentials) {
-      mkdirSync(paths.credentialsDir, { recursive: true });
-      copyTree(join(dir, "credentials"), paths.credentialsDir);
-    }
-    return { ok: true, safetyName: `pre-import-${safety.backupId}`, applied };
   }
 
   // 面板宿主退出时调用（见 panel-host.mjs 的 shutdown）：把还攥着明文密钥内存副本
