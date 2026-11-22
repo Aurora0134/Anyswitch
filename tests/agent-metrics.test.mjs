@@ -2638,6 +2638,151 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(rowB.title, "shop", "titleless session falls back to the cwd basename");
   });
 
+  // ── codex 会话行退休样本的端点换代继承闸 ──────────────────────────
+  // 行 id 是会话（prompt_cache_key），端点重启后同名重逢；退休样本快照若照单
+  // 播种，重开后的四宫格会带着上一轮运行的速率/曲线出场。三道闸一起拦：
+  // 退休印记（缺席档退休不带可继承章）、消费闸（两端家族在场才播种）、家族
+  // 回场整桶清仓。家族在场时的行换代（空闲档收行）照旧播种——折线历史不
+  // 蒸发是原语义（见 cold-start spark history retention 的 C 项）。
+  describe("codex 会话行退休样本的端点换代继承闸", () => {
+    const HEADER = "Node,CommandLine,Name,ProcessId\r\n";
+    const ENGINE_ROW = "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100";
+    const SESS = "codex-sess-01932abc-7f6e-7a01-9c8e-1a2b3c4d5e6f";
+
+    // 一轮缺席/回场＝t 前移过扫描缓存窗＋一读触发后台扫描＋等它落地（读取
+    // 不阻塞在重扫上，下一读才见到；与 pid 行淘汰测试同一驱动法）。
+    async function scanRound(collector, state) {
+      state.t += 3000;
+      await collector.getAgentsStatus();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    function makeCollector(state) {
+      return testCollector({
+        execFn: (cmd, opts, cb) => cb(null, HEADER + (state.familyAlive ? ENGINE_ROW + "\r\n" : "")),
+        nowFn: () => state.t,
+      });
+    }
+
+    function measured(collector, state, usage) {
+      const r = collector.startRequest({ agentId: "codex", instanceId: SESS, model: "m1", path: "openai" });
+      r.recordFirstChunk();
+      state.t += 250; // ≥ TPS_MIN_GEN_MS：折线上真的有点
+      r.recordEnd({ status: 200, usage });
+    }
+
+    it("端点换代（家族缺席满淘汰档后回场）后，同名会话行不带上一轮退休样本", async () => {
+      const state = { t: 3000, familyAlive: true };
+      const collector = makeCollector(state);
+      measured(collector, state, { prompt_tokens: 100, completion_tokens: 40 });
+
+      let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances.length, 1);
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 1, "第一代折线 1 点");
+
+      // 家族全灭：连续缺席两轮可信扫描（行淘汰的同一确认口径）。
+      state.familyAlive = false;
+      await scanRound(collector, state);
+      await scanRound(collector, state);
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.deepEqual(codex.instances.map((i) => i.id), [], "家族缺席满淘汰档收走会话行");
+
+      // 家族回场＋重开同一会话：退休样本已随回场作废，新行重开账。
+      state.familyAlive = true;
+      await scanRound(collector, state);
+      measured(collector, state, { prompt_tokens: 50, completion_tokens: 20 });
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances.length, 1);
+      assert.equal(codex.instances[0].requests, 1, "累计量是新账");
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 1, "折线只有本代 1 点，不带上一轮残余");
+      assert.equal(codex.instances[0].sparkHistory.ttft.length, 1);
+    });
+
+    it("回场扫描未落地时重开请求先到：消费闸按「消费端家族缺席」照拦", async () => {
+      const state = { t: 3000, familyAlive: true };
+      const collector = makeCollector(state);
+      measured(collector, state, { prompt_tokens: 100, completion_tokens: 40 });
+      await collector.getAgentsStatus(); // 首帧＋首轮在场扫描落地
+
+      state.familyAlive = false;
+      await scanRound(collector, state);
+      await scanRound(collector, state);
+      let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.deepEqual(codex.instances.map((i) => i.id), [], "行已被家族缺席收走");
+
+      // 不前移时间：重开后的第一笔请求先于家族回场扫描落地（最近可信扫描
+      // 仍报缺席），退休样本不播种。
+      state.familyAlive = true;
+      measured(collector, state, { prompt_tokens: 50, completion_tokens: 20 });
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 1, "折线只有本代 1 点");
+      assert.equal(codex.instances[0].requests, 1, "累计量是新账");
+    });
+
+    it("家族在场时的行换代（空闲档收行）照旧播种折线历史", async () => {
+      const state = { t: 3000, familyAlive: true };
+      const collector = makeCollector(state);
+      measured(collector, state, { prompt_tokens: 100, completion_tokens: 40 });
+
+      let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 1);
+
+      // 家族一直在场：会话行静置 5 分钟被空闲档收走（退休印记＝在场）。
+      state.t += 5 * 60 * 1000 + 1;
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.deepEqual(codex.instances.map((i) => i.id), [], "空闲档收走会话行");
+
+      measured(collector, state, { prompt_tokens: 50, completion_tokens: 20 });
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 2, "上一代 1 点＋本代 1 点（原语义保留）");
+      assert.equal(codex.instances[0].requests, 1, "累计量是新账，不继承旧账");
+    });
+
+    it("在场档退休的样本随端点换代整桶作废（清仓是唯一拦截）", async () => {
+      const state = { t: 3000, familyAlive: true };
+      const collector = makeCollector(state);
+      measured(collector, state, { prompt_tokens: 100, completion_tokens: 40 });
+      await collector.getAgentsStatus();
+
+      // 家族在场时被空闲档收走：退休印记＝在场，单靠消费闸拦不住。
+      state.t += 5 * 60 * 1000 + 1;
+      await collector.getAgentsStatus();
+      let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.deepEqual(codex.instances.map((i) => i.id), [], "空闲档收走会话行");
+
+      // 家族死回（缺席满淘汰档后回场）：退休样本整桶清仓。
+      state.familyAlive = false;
+      await scanRound(collector, state);
+      await scanRound(collector, state);
+      state.familyAlive = true;
+      await scanRound(collector, state);
+      measured(collector, state, { prompt_tokens: 50, completion_tokens: 20 });
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 1, "清仓后折线只有本代 1 点");
+    });
+
+    it("家族单轮漏看不清退休样本（淘汰档缺席才作废）", async () => {
+      const state = { t: 3000, familyAlive: true };
+      const collector = makeCollector(state);
+      measured(collector, state, { prompt_tokens: 100, completion_tokens: 40 });
+      await collector.getAgentsStatus();
+
+      state.t += 5 * 60 * 1000 + 1;
+      await collector.getAgentsStatus();
+      let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.deepEqual(codex.instances.map((i) => i.id), [], "空闲档收走会话行");
+
+      // 单轮漏看（缺席 1 轮后回场）：未满淘汰档，退休样本不作废。
+      state.familyAlive = false;
+      await scanRound(collector, state);
+      state.familyAlive = true;
+      await scanRound(collector, state);
+      measured(collector, state, { prompt_tokens: 50, completion_tokens: 20 });
+      codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+      assert.equal(codex.instances[0].sparkHistory.tps.length, 2, "折线照旧播种上一代（单轮漏看不作废）");
+    });
+  });
+
   // ── codex 后台请求（meta.background）的面板隔离 ─────────────────────
   // openai-server 的分类器把引擎/GUI 自发流量（记忆整理、guardian、预热、
   // 线程标题/摘要生成等）标成 background；这一侧的约定：不出实例行（即便

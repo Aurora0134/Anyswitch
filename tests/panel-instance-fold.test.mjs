@@ -60,6 +60,11 @@ const rowRetryingCount = new Function(
 const retryingBadgeState = new Function(
   `return (${extractSrc(/function retryingBadgeState\(isRetrying, isGenerating\) \{[\s\S]*?\n  \}/, "retryingBadgeState")});`,
 )();
+// 行换代检测（真实现注入）：出生账本闭包经参数按 env 隔离，桩间互不串台。
+const instanceRowTurnedOverFor = new Function(
+  "instanceRowFirstSeen",
+  `return (${extractSrc(/function instanceRowTurnedOver\(bufKey, firstSeen\) \{[\s\S]*?\n  \}/, "instanceRowTurnedOver")});`,
+);
 
 function fakeElement() {
   return {
@@ -104,8 +109,11 @@ function makeEnv() {
     formatTokens: () => "0",
     isInstanceStale,
     formatRelativeAge,
+    instanceRowFirstSeen: {},
     document: { createElement: () => { const el = fakeElement(); created.push(el); return el; } },
   };
+  // 行换代检测绑定 env 自己的出生账本：render 的清理循环与检测函数读同一份。
+  env.instanceRowTurnedOver = instanceRowTurnedOverFor(env.instanceRowFirstSeen);
   return env;
 }
 
@@ -115,12 +123,12 @@ function makeRenderInstanceRows(env) {
   return new Function(
     "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
     "formatDurationSeconds", "escapeHtml", "formatTokens", "isInstanceStale", "formatRelativeAge", "document",
-    "seedInstanceSparkHistory", "rowRetryingCount", "retryingBadgeState",
+    "seedInstanceSparkHistory", "rowRetryingCount", "retryingBadgeState", "instanceRowTurnedOver", "instanceRowFirstSeen",
     `return (${m[0]});`,
   )(
     env.isDetailOpen, env.pushInstanceSpark, env.updateSparkline, env.sparkValues, env.instanceSparkBuffers,
     env.formatDurationSeconds, env.escapeHtml, env.formatTokens, env.isInstanceStale, env.formatRelativeAge, env.document,
-    env.seedInstanceSparkHistory, rowRetryingCount, retryingBadgeState,
+    env.seedInstanceSparkHistory, rowRetryingCount, retryingBadgeState, env.instanceRowTurnedOver, env.instanceRowFirstSeen,
   );
 }
 
@@ -171,6 +179,23 @@ describe("panel.js 实例栏收起态不画折线（buffer 照常累积）", () 
     const cache = env.calls.update.find((c) => c.id === "kimiInstSparkCache-inst-1");
     assert.equal(cache.minVal, 0);
     assert.equal(cache.maxVal, 100);
+  });
+});
+
+describe("panel.js 实例行换代清折线暂存（端点重启后同名行重开账）", () => {
+  // 端点重启后同名会话行在服务端重开账（firstSeen 换新）。空数组不覆盖已
+  // 恢复的整线，本地为旧行攒的折线暂存若不在换代那一拍清掉，上一轮运行的
+  // 曲线会从本地复活——四宫格残余的前端半边。
+  it("同一行 id 的 firstSeen 变化＝换代：渲染前清掉本地旧 buffer，旧点不复活", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [{ ...KIMI_INSTANCE, firstSeen: 100 }] });
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [{ ...KIMI_INSTANCE, firstSeen: 5000 }] });
+    assert.equal(env.instanceSparkBuffers["kimi:inst-1"].tps.length, 1, "换代行的本地 buffer 只攒本代样本");
+    // 对照：firstSeen 不变（同一条行持续渲染）时 buffer 照常累积。
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [{ ...KIMI_INSTANCE, firstSeen: 5000 }] });
+    assert.equal(env.instanceSparkBuffers["kimi:inst-1"].tps.length, 2, "非换代行的 buffer 照常累积");
   });
 });
 
