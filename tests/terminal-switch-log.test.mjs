@@ -220,7 +220,7 @@ describe("/switch 处理器埋点", () => {
       switchGuardRecheckDelayMs: 0,
       restartTerminalSessionFn: async (id, body) => ({
         status: 200,
-        body: { id, status: "running", pid: 99, label: body.label, agentId: body.agentId, agentName: body.agentName, resume: body.resume },
+        body: { id, status: "running", pid: 99, cwd: body.cwd, label: body.label, agentId: body.agentId, agentName: body.agentName, resume: body.resume },
       }),
       scanAgentConversationsFn: async () => [],
       opencodeBusyFn: () => null,

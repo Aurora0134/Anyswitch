@@ -35,7 +35,7 @@ const registry = {};
 // 桩世界：真跑 closeTerminalStream / absorbTerminalSnapshot / connectTerminalStream，
 // 只把 xterm 构造、EventSource、resize POST 面替成桩。真实几何由 state.client 决定
 // （桩 xterm 建出来就带着它，等价于「建流那次 fit 已经落定」的稳态）。
-function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
+function makeGeometryWorld({ docHidden = false, viewHidden = false, startupFit = false } = {}) {
   for (const id of Object.keys(registry)) delete registry[id];
   const state = {
     client: { cols: 120, rows: 34 },
@@ -51,7 +51,24 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     measurable: true,
     fitImpl: () => null,
     postImpl: () => Promise.resolve({}),
+    raf: [],
   };
+  const elements = new Map();
+  function element(id) {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, {
+        style: {},
+        classList: {
+          contains: (cls) => classes.has(cls),
+          remove: (cls) => classes.delete(cls),
+          toggle: (cls, on) => on ? classes.add(cls) : classes.delete(cls),
+        },
+        setAttribute() {},
+      });
+    }
+    return elements.get(id);
+  }
   // 可控时钟：几何账的冷却窗（Date.now）与挂起兜底定时器共用同一条时间线，测试里
   // 用 advance() 显式推进，不依赖墙钟。
   const clock = {
@@ -72,8 +89,8 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
   };
   const factory = new Function(
     "state", "EventSource", "API_BASE", "document", "$",
-    "ensureTerminalXterm", "fitTerminalXterm", "sendTerminalInput", "reviveTerminalSession",
-    "postTerminalResize", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst",
+    "ensureTerminalXterm", "fitStub", "sendTerminalInput", "reviveTerminalSession",
+    "postStub", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst",
     "disarmTerminalDprWatch", "cancelAnimationFrame", "console",
     "Date", "setTimeout", "clearTimeout", "terminalHostMeasurable",
     "terminalSessionFor", "activeTerminalPreviewId",
@@ -125,6 +142,34 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     ${extractFn("scheduleTerminalGeometryRealign")}
     ${extractFn("terminalSessionShouldRevive")}
     ${extractFn("connectTerminalStream")}
+    ${startupFit ? `
+      let terminalBackendSessions = state.sessions;
+      const terminalHollowStreak = new Map();
+      const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
+      let terminalInspectorHollowCollapsed = false;
+      let terminalInspectorBootRendered = false;
+      let terminalInspectorBootPendingId = null;
+      const terminalInspectorUserPinned = new Set();
+      let terminalRequestListRenderedHtml = "";
+      const currentView = "terminal";
+      const terminalDefaultCwd = "";
+      const TERMINAL_REFLOW_REPAINT_DELAY_MS = 260;
+      let terminalReflowRepaintTimer = null;
+      let terminalReflowRepaintMuteUntil = 0;
+      let terminalSettledCols = 0;
+      function terminalServingLabel() { return ""; }
+      function pruneTerminalHollowStreak() {}
+      function pruneTerminalDoneState() {}
+      function terminalViewportSyncFromHost() {}
+      function requestAnimationFrame(cb) { state.raf.push(cb); }
+      function api(method, path, { cols, rows }) {
+        state.hostSize = { cols, rows };
+        return postStub(terminalSessionFor(activeTerminalPreviewId), cols, rows);
+      }
+      ${["terminalBackendSession", "rebuildTerminalBackendSessions", "renderTerminalSessionData",
+        "fitTerminalXterm", "postTerminalResize", "scheduleTerminalFit", "noteTerminalFittedCols",
+        "armTerminalReflowRepaint", "runTerminalReflowRepaint", "resetTerminalReflowRepaint"].map(extractFn).join("\n")}
+    ` : `const fitTerminalXterm = fitStub; const postTerminalResize = postStub;`}
     return {
       connect: connectTerminalStream,
       term: () => terminalXterm,
@@ -143,7 +188,22 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
       measurable: (v) => { state.measurable = v; },
       imeHold: (v) => { terminalImeHold = v; },
       setStreak: (v) => { terminalGeometryRealignStreak = v; },
-      swapTerm: (term) => { terminalXterm = term; },
+      swapTerm: (term) => {
+        terminalXterm = term;
+        ${startupFit ? `terminalFitAddon = { fit() {
+          const collapsed = $("terminalWorkspace").classList.contains("is-inspector-collapsed");
+          const cols = state.client.cols + (collapsed ? 32 : 0);
+          if (term.cols !== cols || term.rows !== state.client.rows) term.resize(cols, state.client.rows);
+        } };` : ""}
+      },
+      ${startupFit ? `
+        observe: (item) => {
+          rebuildTerminalBackendSessions([item]);
+          state.sessions = terminalBackendSessions;
+          renderTerminalSessionData();
+        },
+        fit: scheduleTerminalFit,
+      ` : ""}
     };
     `
   );
@@ -162,18 +222,21 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     },
     "/panel",
     { get hidden() { return state.docHidden; } },
-    (id) => (id === "terminalView" ? { hidden: state.viewHidden } : null),
+    (id) => (id === "terminalView" ? { hidden: state.viewHidden } : (startupFit ? element(id) : null)),
     () => {
       const term = {
-        cols: state.client.cols,
-        rows: state.client.rows,
+        cols: startupFit ? 80 : state.client.cols,
+        rows: startupFit ? 24 : state.client.rows,
         disposed: false,
         focus() {},
         // reset 落记录：「弃帧即清屏」那半边行为（dropTerminalReplayFrame 的
         // term?.reset?.()）由此可断言，空实现会把清屏腿变成不可观测。
         reset() { state.resets.push(1); },
         onData() { return { dispose() {} }; },
-        write(text) { state.writes.push(text); },
+        write(text, done) {
+          if (text) state.writes.push(text);
+          done?.();
+        },
         resize(cols, rows) { state.resizes.push({ cols, rows }); term.cols = cols; term.rows = rows; },
         dispose() { term.disposed = true; state.disposed += 1; },
       };
@@ -202,11 +265,12 @@ function makeGeometryWorld({ docHidden = false, viewHidden = false } = {}) {
     },
     (id) => { clock.timers = clock.timers.filter((timer) => timer.id !== id); },
     () => state.measurable,
-    (id) => registry[id] || null,
+    (id) => (startupFit ? state.sessions?.[id] : registry[id]) || null,
     "S1",
   );
   world.state = state;
   world.clock = clock;
+  world.runFrame = () => { for (const cb of state.raf.splice(0)) cb(); };
   return world;
 }
 
@@ -227,6 +291,98 @@ const sessionOf = (id) => {
 async function flushMicrotasks() {
   for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
+
+describe("冷启动归属与 PTY 尺寸", () => {
+  const owner = { endpointId: "kimi", instanceId: "kimi-200" };
+
+  async function open({ agent, agentId = "kimi", hostCols = 115, snapshotCols = hostCols } = {}) {
+    const world = makeGeometryWorld({ startupFit: true });
+    const { state } = world;
+    state.client = { cols: 115, rows: 34 };
+    state.hostSize = { cols: hostCols, rows: 34 };
+    state.postImpl = (cols, rows) => Promise.resolve({ cols, rows });
+    world.beat = (nextOwner) => world.observe({
+      id: "S1", pid: 100, status: "running", agentId, agent: nextOwner, ...state.hostSize,
+    });
+    world.beat(agent);
+    const connecting = world.connect(state.sessions.S1, { revive: false });
+    world.runFrame();
+    await connecting;
+    if (snapshotCols !== hostCols) state.hostSize.cols = snapshotCols;
+    const es = state.sources.at(-1);
+    es.emit("snapshot", { pid: 100, ...state.hostSize });
+    es.emit("data", "first-replay");
+    return world;
+  }
+
+  it("归属晚一拍时沿用宿主 115 列接首帧，归属恢复时无需 resize", async () => {
+    const world = await open();
+    assert.equal(world.term().cols, 115);
+    assert.deepEqual(world.state.writes, ["first-replay"]);
+    assert.deepEqual(world.state.posts, []);
+
+    world.beat(owner);
+    world.runFrame();
+    assert.deepEqual(world.state.posts, [], "不会向 PTY 送 147→115 的过渡序列");
+  });
+
+  it("归属恢复但真实布局不同，按最终布局对齐一次", async () => {
+    const world = await open({ hostCols: 140 });
+    assert.equal(world.term().cols, 140, "宿主宽度与展开或收拢的测量都不相同时，仍沿用宿主");
+    assert.deepEqual(world.state.writes, ["first-replay"]);
+    assert.deepEqual(world.state.posts, []);
+
+    world.beat(owner);
+    world.runFrame();
+    assert.deepEqual(world.state.posts, [{ id: "S1", cols: 115, rows: 34 }]);
+    await flushMicrotasks();
+    world.clock.advance(300);
+    assert.equal(world.state.sources.length, 2, "真实列宽变化后重取宿主按新尺寸绘制的整屏");
+  });
+
+  it("归属持续缺席，到第三个数据拍才按细条布局对齐", async () => {
+    const world = await open();
+    assert.deepEqual(world.state.posts, []);
+    world.beat(undefined);
+    world.fit();
+    world.runFrame();
+    assert.deepEqual(world.state.posts, []);
+
+    world.beat(undefined);
+    world.runFrame();
+    await flushMicrotasks();
+    assert.deepEqual(world.state.posts, [{ id: "S1", cols: 147, rows: 34 }]);
+    world.beat(undefined);
+    world.fit();
+    world.runFrame();
+    assert.equal(world.state.posts.length, 1);
+  });
+
+  it("归属待定时首个快照尺寸更新，按快照尺寸接回放", async () => {
+    const world = await open({ hostCols: 140, snapshotCols: 145 });
+    assert.equal(world.term().cols, 145);
+    assert.deepEqual(world.state.writes, ["first-replay"]);
+    world.runFrame();
+    assert.deepEqual(world.state.posts, []);
+  });
+
+  it("首拍已有归属时按实测尺寸接首帧，运行中调整尺寸仍生效", async () => {
+    const world = await open({ agent: owner, hostCols: 140 });
+    assert.deepEqual(world.state.posts, [{ id: "S1", cols: 115, rows: 34 }]);
+    assert.deepEqual(world.state.writes, ["first-replay"]);
+
+    world.state.client = { cols: 100, rows: 28 };
+    world.fit();
+    world.runFrame();
+    assert.deepEqual(world.state.posts.at(-1), { id: "S1", cols: 100, rows: 28 });
+  });
+
+  it("普通外壳首次打开直接使用细条布局", async () => {
+    const world = await open({ agentId: null });
+    assert.deepEqual(world.state.posts, [{ id: "S1", cols: 147, rows: 34 }]);
+    assert.deepEqual(world.state.writes, ["first-replay"]);
+  });
+});
 
 describe("快照几何闸：宿主列宽与客户端不一致时先对齐再回放", () => {
   it("错配的 snapshot 不写回放，按客户端尺寸发一次 resize，落定后重连一次", async () => {

@@ -1049,7 +1049,7 @@ test("② SSE 待发缓冲超 32KB 立即冲刷：不等窗口定时器", async 
 test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-dirty-"));
   const { calls, ptyModule } = capturingPtyModule();
-  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, killTreeFn: async () => {}, logger: { warn() {} } });
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   try {
@@ -1077,11 +1077,20 @@ test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
     await host.persistNow();
     assert.equal(statSync(host.sessionStatePath(created.id)).mtimeMs, afterExit, "PTY 已退出的同尺寸 resize（无实际变化）不写盘");
 
-    // 对照组：emit 一块输出 → 置脏 → 真写盘，盘上带得上这块。
-    calls[0].pty.dataListener("新输出");
+    calls[0].pty.dataListener("迟到输出");
+    await host.persistNow();
+    assert.equal(statSync(host.sessionStatePath(created.id)).mtimeMs, afterExit, "已退出进程的迟到输出不写盘");
+
+    // 对照组：当前进程出字，记录随之更新。
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+    });
+    assert.equal(restarted.status, 200);
+    calls[1].pty.dataListener("新输出");
     await host.persistNow();
     const persisted = readSessionRecord(host, created.id);
     assert.ok(recordScreenText(persisted).includes("新输出"), "置脏后的变更落盘");
+    assert.ok(!recordScreenText(persisted).includes("迟到输出"), "旧进程的迟到输出不混入新记录");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -2546,10 +2555,14 @@ test("迟到退出不判死新一代：旧进程的 onExit 晚到时只记一笔
   }
 });
 
-test("并发 restart 合并成一次 spawn：两个请求拿到同一份快照", async () => {
+test("同代等价 restart 合并成一次 spawn：两个请求拿到同一份快照", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-restart-merge-"));
   const { calls, ptyModule } = capturingPtyModule();
-  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => true, logger: { warn() {} },
+    killTreeFn: async () => { entered.resolve(); await release.promise; },
+  });
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   try {
@@ -2559,13 +2572,132 @@ test("并发 restart 合并成一次 spawn：两个请求拿到同一份快照",
     }).then((r) => r.json());
     assert.equal(calls.length, 1, "前置：建会话 spawn 一次");
 
-    const [a, b] = await Promise.all([
-      fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) }).then((r) => r.json()),
-      fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) }).then((r) => r.json()),
-    ]);
+    const first = JSON.stringify({ env: { FIRST: "one", SECOND: "two" } });
+    const second = JSON.stringify({ env: { SECOND: "two", FIRST: "one" }, cwd: root });
+    const [a, b] = await Promise.all([first, second].map(async (body) => {
+      const response = await fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host), body });
+      assert.equal(response.status, 200);
+      return response.json();
+    }).concat(entered.promise.then(() => sleep(100)).then(release.resolve)));
     assert.equal(calls.length, 2, "两个并发重启只允许一次重新 spawn");
-    assert.equal(a.pid, b.pid, "两个响应指向同一个新进程");
+    assert.deepEqual(a, b, "两个响应指向同一个新进程");
     assert.equal(a.status, "running");
+  } finally {
+    release.resolve();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("同代分歧 restart 返回冲突，目标可在第一笔完成后重试", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-restart-conflict-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => true, logger: { warn() {} },
+    killTreeFn: async () => { entered.resolve(); await release.promise; },
+  });
+  const port = await listen(host);
+  const post = (path, body, signal) => fetch(`http://127.0.0.1:${port}/terminal/sessions${path}`, {
+    method: "POST", headers: headers(host), body: JSON.stringify(body), signal,
+  });
+  try {
+    const created = await post("", { cwd: root, agentId: "kimi" }).then((r) => r.json());
+    const path = `/${created.id}/restart`;
+    const old = { resume: { endpoint: "kimi", id: "old" } };
+    const target = { resume: { endpoint: "kimi", id: "target" } };
+    const first = post(path, old);
+    await entered.promise;
+    const second = await post(path, target, AbortSignal.timeout(1000)).catch(() => null);
+    release.resolve();
+    assert.deepEqual((await (await first).json()).resume, old.resume);
+    assert.equal(second?.status, 409);
+    assert.equal(calls.length, 2);
+    assert.deepEqual((await (await post(path, target)).json()).resume, target.resume);
+  } finally {
+    release.resolve();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const clearing of [false, true]) {
+  test(`${clearing ? "clear-all" : "关闭同一会话"} 等待在飞的 restart 并终结新进程`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-close-race-"));
+    const entered = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    const alive = new Set();
+    const terminated = [];
+    let nextPid = 5001;
+    const host = createTerminalHost({
+      root, port: 0, logger: { warn() {} },
+      ptyModule: { spawn: () => {
+        const child = new FakePty();
+        child.pid = nextPid++;
+        alive.add(child.pid);
+        return child;
+      } },
+      isAliveFn: (pid) => alive.has(pid),
+      killTreeFn: async (pid) => {
+        terminated.push(pid);
+        if (pid === 5001) {
+          entered.resolve();
+          await release.promise;
+        }
+        alive.delete(pid);
+      },
+    });
+    const port = await listen(host);
+    const post = (path = "", body = {}) => fetch(`http://127.0.0.1:${port}/terminal/sessions${path}`, {
+      method: "POST", headers: headers(host), body: JSON.stringify(body),
+    });
+    try {
+      const created = await post("", { cwd: root }).then((r) => r.json());
+      const restartPath = `/${created.id}/restart`;
+      const restart = post(restartPath);
+      await entered.promise;
+      const closePath = clearing ? "/clear-all" : `/${created.id}/close`;
+      const close = post(closePath);
+      // Wait until the synthetic host has received the close request before competing with it.
+      await new Promise((resolve) => {
+        const observe = (req) => {
+          if (!req.url.endsWith(closePath)) return;
+          host.server.off("request", observe);
+          resolve();
+        };
+        host.server.prependListener("request", observe);
+      });
+      assert.equal((await post(restartPath)).status, 409);
+      if (clearing) assert.equal((await post()).status, 409);
+      release.resolve();
+      assert.equal((await restart).status, 200);
+      assert.equal((await close).status, 200);
+      assert.deepEqual(terminated, [5001, 5002]);
+      assert.deepEqual([...alive], []);
+      assert.deepEqual(JSON.parse(readFileSync(host.statePath, "utf8")).sessions, []);
+      assert.equal(existsSync(host.sessionStatePath(created.id)), false);
+    } finally {
+      release.resolve();
+      await host.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("relay 清场回执之后，宿主关停前仍拒绝新建", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-clear-stop-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, killTreeFn: async () => {}, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = `http://127.0.0.1:${port}/terminal/sessions`;
+  try {
+    const clear = await fetch(`${url}/clear-all`, {
+      method: "POST", headers: { ...headers(host), "x-anyswitch-terminal-stop": "1" },
+    });
+    assert.equal(clear.status, 200);
+    const create = await fetch(url, { method: "POST", headers: headers(host), body: JSON.stringify({ cwd: root }) });
+    assert.equal(create.status, 409);
+    assert.equal(calls.length, 0);
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -3397,17 +3529,16 @@ test("真实入口（isMain）启动失败路径 exit(1) 且写 stderr；import 
 // pty.kill()，而 ConPTY 的 DLL 模式 kill 只销毁输入句柄＋关伪控制台——kimi 的
 // node 主进程与控制台生命周期解耦，会话记录删了、页签没了，进程还挂在看板
 // 卡上永「待命」，用户找不到任何关它的入口。修法是宿主收回「进程死没死」的
-// 所有权：close / clear-all / restart 统一走「pty.kill 关控制台 → 对登记的
-// shell pid 树杀」，树杀不依赖 node-pty 内部行为（父子链不随控制台解耦而断）。
+// close、clear-all 和 restart 都在关控制台之前对登记的根进程执行树杀。
 // 测试注入 killTreeFn（记录 pid 列表，不动真进程）与 isAliveFn（控制 pid 死活）。
 
-test("close 路由在 pty.kill 之后对会话 shell 树杀，会话照常删除", async () => {
+test("close 先对会话 shell 树杀，再关闭 PTY 和删除会话", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-"));
-  const { ptyModule } = capturingPtyModule();
-  const killed = [];
+  const { calls, ptyModule } = capturingPtyModule();
+  const order = [];
   const host = createTerminalHost({
     root, port: 0, ptyModule, logger: { warn() {} },
-    killTreeFn: async (pid) => { killed.push(pid); },
+    killTreeFn: async (pid) => { order.push(pid); },
     isAliveFn: () => true,
   });
   const port = await listen(host);
@@ -3418,17 +3549,71 @@ test("close 路由在 pty.kill 之后对会话 shell 树杀，会话照常删除
       body: JSON.stringify({ label: "树杀", cwd: root, shell: "cmd" }),
     }).then((r) => r.json());
     const shellPid = created.pid;
+    const child = calls[0].pty;
+    child.kill = () => { order.push("pty"); child.exitListener?.({ exitCode: 0 }); };
     const res = await fetch(url(`/terminal/sessions/${created.id}/close`), {
       method: "POST", headers: headers(host),
     });
     assert.equal(res.status, 200);
-    assert.deepEqual(killed, [shellPid], "close 必须对登记的 shell pid 补树杀");
+    assert.deepEqual(order, [shellPid, "pty"]);
     assert.equal(host.sessions.has(created.id), false, "会话照常从表里删除");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const outcome of ["retry", "reused", "absent"]) {
+  test(`默认树杀经异步退出通知仍正确处理 ${outcome}`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-default-kill-"));
+    const { calls, ptyModule } = capturingPtyModule();
+    const entered = Promise.withResolvers();
+    let completeKill;
+    let liveness = "alive";
+    let startTime;
+    let killCalls = 0;
+    const host = createTerminalHost({
+      root, port: 0, ptyModule, logger: { warn() {} },
+      isAliveFn: () => liveness,
+      getProcessStartTimeFn: async () => startTime,
+      execFileFn: (file, args, options, complete) => {
+        assert.equal(file, "taskkill");
+        killCalls += 1;
+        if (killCalls === 1) { completeKill = complete; entered.resolve(); }
+        else complete(null);
+      },
+    });
+    const port = await listen(host);
+    const url = `http://127.0.0.1:${port}/terminal/sessions`;
+    const post = (suffix, body = {}) => fetch(`${url}${suffix}`, { method: "POST", headers: headers(host), body: JSON.stringify(body) });
+    try {
+      const created = await post("", { cwd: root }).then((r) => r.json());
+      startTime = BigInt(created.spawnedAt) * 10000n + 116444736000000000n;
+      const path = `/${created.id}/close`;
+      const closing = post(path);
+      await entered.promise;
+      if (outcome === "absent") liveness = "dead";
+      else liveness = "unknown";
+      completeKill(Object.assign(new Error("synthetic taskkill failure"), { code: outcome === "absent" ? 128 : 1 }), "");
+      assert.equal((await closing).status, outcome === "absent" ? 200 : 500);
+      if (outcome !== "absent") {
+        await new Promise((resolve) => setImmediate(() => { calls[0].pty.exitListener({ exitCode: 7 }); resolve(); }));
+        const stopped = await fetch(`${url}/${created.id}`, { headers: headers(host) }).then((r) => r.json());
+        assert.equal(stopped.status, "exited");
+        assert.equal(stopped.exitCode, 7);
+        liveness = "alive";
+        if (outcome === "reused") startTime += 10000000n;
+        assert.equal((await post(path)).status, 200);
+      }
+      assert.equal(killCalls, outcome === "retry" ? 2 : 1);
+      assert.equal(existsSync(host.sessionStatePath(created.id)), false);
+    } finally {
+      completeKill?.(new Error("test finished"));
+      await host.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("树杀失败时 close/clear-all/restart 不删除记录或启动新进程，恢复后可重试", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-failure-"));
@@ -3448,15 +3633,21 @@ test("树杀失败时 close/clear-all/restart 不删除记录或启动新进程�
   try {
     const created = await fetch(url("/terminal/sessions"), {
       method: "POST", headers: headers(host),
-      body: JSON.stringify({ label: "可重试", cwd: root, shell: "cmd" }),
+      body: JSON.stringify({ label: "可重试", cwd: root, shell: "cmd", agentId: "kimi", resume: { endpoint: "kimi", id: "old" } }),
     }).then((r) => r.json());
     const recordBefore = readSessionRecord(host, created.id);
     for (const path of [`/terminal/sessions/${created.id}/close`, "/terminal/sessions/clear-all", `/terminal/sessions/${created.id}/restart`]) {
-      const response = await fetch(url(path), { method: "POST", headers: headers(host), body: "{}" });
+      const response = await fetch(url(path), {
+        method: "POST", headers: headers(host), body: JSON.stringify({ agentId: "claude", clearResume: true }),
+      });
       assert.equal(response.status, 500, `${path} must fail closed when a live tree survives`);
       assert.equal(host.sessions.has(created.id), true, `${path} must retain the session`);
       assert.equal(readSessionRecord(host, created.id).id, recordBefore.id, "落盘记录仍可重试");
     }
+    const retained = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) }).then((r) => r.json());
+    assert.equal(retained.status, "running");
+    assert.equal(retained.agentId, "kimi");
+    assert.deepEqual(retained.resume, { endpoint: "kimi", id: "old" });
     assert.equal(calls.length, 1, "restart 不得在旧树仍活着时 spawn");
     assert.equal(host.sessions.get(created.id).livePids.has(created.pid), true, "pid 登记保留");
 
@@ -3584,6 +3775,41 @@ test("恢复时一键启动会话的进程还活着→杀树后按已退出恢�
     assert.deepEqual(killed, [ghostShellPid], "恢复即对上代泄漏的 shell 树杀");
     const session = host.sessions.get("ghost-session-1");
     assert.equal(session.pty, null, "恢复的会话保持已退出态，不自动复活");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复清扫失败后，关闭重试已确认属于会话的进程", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-restore-kill-retry-"));
+  const pid = 5001;
+  const id = "restore-kill-retry";
+  writeFileSync(join(root, TERMINAL_STATE_FILE), JSON.stringify({
+    version: 1, sessions: [{ id, pid, cwd: root, shell: "cmd", agentId: "kimi", label: "Synthetic" }],
+  }));
+  let alive = true;
+  let calls = 0;
+  const host = createTerminalHost({
+    root, port: 0, ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    isAliveFn: () => alive,
+    getCommandLineFn: async () => "cmd.exe /c synthetic.cmd",
+    getProcessStartTimeFn: async () => 116444736000010000n,
+    killTreeFn: async (target) => {
+      assert.equal(target, pid);
+      if (++calls === 1) throw new Error("synthetic restore termination failure");
+      alive = false;
+    },
+  });
+  const port = await listen(host);
+  try {
+    await host.restoreSweep;
+    assert.equal(calls, 1);
+    assert.equal(alive, true);
+    const response = await fetch(`http://127.0.0.1:${port}/terminal/sessions/${id}/close`, { method: "POST", headers: headers(host) });
+    assert.equal(response.status, 200);
+    assert.equal(alive, false);
+    assert.equal(existsSync(host.sessionStatePath(id)), false);
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -4442,7 +4668,7 @@ test("无 resume 的普通创建不新增字段；坏 resume 一律 400 不建�
 test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留（失败不留不可逆空白）", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-switch-spawn-fail-`);
   const { calls, ptyModule } = capturingPtyModule();
-  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, killTreeFn: async () => {}, logger: { warn() {} } });
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   // 在线客户端的 SSE 流是常开的：不掐掉，server.close 会一直等这条连接（整个文件
@@ -4457,6 +4683,8 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
       body: JSON.stringify({
         label: "老会话", cwd: root, shell: "cmd", cols: 20, rows: 4,
         agentId: "claude", agentName: "Claude Code",
+        env: { SYNTHETIC_MARKER: "original" },
+        resume: { endpoint: "claude", id: "old" },
         launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:////////fake////////claude.cmd"] },
       }),
     }).then((r) => r.json());
@@ -4480,10 +4708,14 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
 
     // 换身份：这一拍本该走 resetSessionScreen（旧顺序下先清屏再 spawn）。
     // spawn 抛错（可执行文件没了/权限被拒/ConPTY 起不来）。
+    const spawn = ptyModule.spawn;
     ptyModule.spawn = () => { throw new Error("spawn failed"); };
     const switched = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
       method: "POST", headers: headers(host),
-      body: JSON.stringify({ agentId: "kimi", agentName: "Kimi Code", clearResume: true }),
+      body: JSON.stringify({
+        agentId: "kimi", agentName: "Kimi Code", label: "目标", clearResume: true,
+        env: { SYNTHETIC_MARKER: "target" }, launch: { file: join(root, "synthetic.exe"), args: [] },
+      }),
     });
     assert.equal(switched.status, 500, "spawn 失败回 500（面板有 toast，不是静默）");
 
@@ -4497,11 +4729,17 @@ test("换绑时 spawn 抛错：零清屏字节、镜像与字节窗原样保留�
     const clearedFrames = after.filter((frame) => frame.event === "data" && JSON.parse(frame.data).includes("\u001b[2J"));
     assert.deepEqual(clearedFrames, [], `在线客户端没收到任何清屏帧（收到 ${clearedFrames.length} 帧）`);
 
-    // ② 会话记录里的画面原料完好：下一次重挂/恢复仍然拿得到这一屏。
-    // 身份字段的改写发生在 terminate/spawn 之前（/switch 的既有语义，本改动不碰），
-    // 所以这里只钉画面，不钉身份——那个语义有它自己的一组用例。
-    assert.equal(session.pty, null, "原地那一代已经 terminate 掉了（这是 /switch 的既有语义）");
-    assert.ok(session.screen.toReplay().includes("CLAUDE帧-2"), "镜像仍带着旧画面");
+    const retained = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) }).then((r) => r.json());
+    assert.equal(retained.status, "exited");
+    const record = readSessionRecord(host, created.id);
+    for (const state of [retained, record]) {
+      for (const field of ["pid", "spawnedAt", "agentId", "agentName", "resume", "label", "cwd", "launch"]) {
+        assert.deepEqual(state[field], created[field], field);
+      }
+    }
+    ptyModule.spawn = spawn;
+    assert.equal((await fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) })).status, 200);
+    assert.equal(calls[1].options.env.SYNTHETIC_MARKER, "original");
   } finally {
     streamAbort.abort();
     await collector?.settled;

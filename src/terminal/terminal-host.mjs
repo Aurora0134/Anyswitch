@@ -11,6 +11,7 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import * as pty from "node-pty";
 import { loadOrGenerateToken, createRelayTokenValidator } from "../launchers/pi-relay-token.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
@@ -590,18 +591,31 @@ const STATE_RENAME_RETRY_BASE_MS = 25;
 
 const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 默认树杀实现：taskkill /T /F 整棵树连根拔。宿主拥有会话时就拥有「这棵树
-// 该在哪天死」的决定权，关伪控制台只是给守规矩的进程一个优雅退出的机会，
-// 解耦进程必须由宿主亲手终结。杀失败（进程刚好自己退了、权限不够）只记日志
-// 不抛——关闭路径的语义是「尽力终结」，一个杀不动的进程不值得把 close 打成 500。
-function defaultKillTree(pid, logger) {
-  return new Promise((resolve) => {
-    execFile("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true }, (error) => {
-      if (error) logger?.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
-      resolve();
+function defaultKillTree(pid, execFileFn) {
+  return new Promise((resolve, reject) => {
+    execFileFn("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true, timeout: 5000 }, (error) => {
+      if (error) reject(error);
+      else resolve();
     });
   });
 }
+
+// Compare creation time as well as PID, including on retries after onExit.
+function getProcessStartTime(pid, execFileFn) {
+  return new Promise((resolve) => {
+    execFileFn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`],
+    { windowsHide: true, timeout: 3000 }, (error, stdout) => {
+      const value = stdout?.trim();
+      resolve(!error && /^\d+$/.test(value ?? "") ? BigInt(value) : null);
+    });
+  });
+}
+
+const fileTimeAt = (time) => BigInt(time) * 10000n + 116444736000000000n;
+const TASKKILL_NOT_FOUND = 128;
+const lifecycleConflict = () => Object.assign(new Error("terminal_session_conflict"), { statusCode: 409 });
+const STOP_CLEAR_GRACE_MS = 10000;
 
 async function renameWithRetry(temp, target) {
   let lastError;
@@ -697,12 +711,12 @@ export function createTerminalHost({
   // （kimi 的 node 主进程）不会随它退——会话记录删了进程还活着，看板卡永远
   // 失去关闭入口。宿主是会话的拥有者，「进程死没死」不能外包给 node-pty 的
   // 内部行为：树杀直接对登记的 shell pid 动手，父子链不随控制台解耦而断。
-  // 测试注入记录桩，不动真进程。默认实现走宿主自己的 logger（落盘封套与面板
-  // 转发都挂在它上面），不直接写 console。
-  killTreeFn = (pid) => defaultKillTree(pid, logger),
-  // 树杀前的误杀闸：pid 可被系统复用，「宁漏勿错」。复活判据复用 relay 的
-  // 死活探针（原生 kill(0) + tasklist 交叉验证），测试注入布尔桩控制死活。
-  isAliveFn = (pid) => probePidLiveness(pid) === "alive",
+  // Tests can substitute the command runner without replacing defaultKillTree.
+  execFileFn = execFile,
+  killTreeFn = (pid) => defaultKillTree(pid, execFileFn),
+  // Boolean verdicts are accepted for synthetic fixtures. Production also checks creation time.
+  isAliveFn = probePidLiveness,
+  getProcessStartTimeFn = ptyModule === pty ? (pid) => getProcessStartTime(pid, execFileFn) : null,
   // 恢复清扫的身份校验：只有命令行对得上本会话启动执行体的 pid 才允许树杀。
   // 查询失败（null）按「对不上」处理，测试注入固定字符串。
   getCommandLineFn = (pid) => getProcessCommandLineAsync(pid),
@@ -721,6 +735,10 @@ export function createTerminalHost({
   const statePath = join(dataRoot, TERMINAL_STATE_FILE);
   const sessionStateDir = join(dataRoot, TERMINAL_SESSION_DIR);
   const sessions = new Map();
+  let clearInFlight = false;
+  let clearGeneration = 0;
+  let stopClearUntil = 0;
+  const startingBlocked = () => clearInFlight || Date.now() < stopClearUntil || shuttingDown;
   const token = loadOrGenerateToken(dataRoot);
   // Rotation-aware incoming auth: callers read the token file at use time and
   // present the current generation, but after an in-flight rotation a strict
@@ -873,6 +891,7 @@ export function createTerminalHost({
       ...(buffer ? { buffer } : {}),
       status: session.pty ? "running" : "exited",
       exitCode: session.exitCode,
+      ...(session.deathObserved ? { deathObserved: true } : {}),
       ...agentMetadata(session),
     };
   }
@@ -1207,11 +1226,7 @@ export function createTerminalHost({
   }
 
   // 删除级路由的落盘等待：失败必须以 500 拒答，不能答一个「盘上其实没清」的
-  // 200。relay 的 stop({clearSessions}) 收到 200 就杀宿主子进程（它对非 2xx 才
-  // 走 clearFailed → 宿主停稳后删除状态文件的兜底，见 relay-host.mjs 的
-  // requestClearAllSessions），面板关页签同理拿 200 当凭据——写失败藏在 200
-  // 里，已关的页签就会在下次宿主重启时从盘上复活。这恢复了旧同步写的防线：
-  // writeFileSync 当年在这里抛出去，路由答的本来就是 500。
+  // 200。relay 仅在确认树已终结、索引写入失败时允许走停宿主后的索引清理兜底。
   async function persistIndexNowOrThrow() {
     const persisted = await persistIndexNow();
     if (!persisted) throw Object.assign(new Error("state_persist_failed"), { statusCode: 500 });
@@ -1326,13 +1341,12 @@ export function createTerminalHost({
           // 崩溃）都会在记录里留下退出码，不在此列。快照随此字段下发，面板拿它决定
           // 被动重挂要不要替用户复活；本代 spawn/onExit 即清标（见那两处），此后再死
           // 只能是被观察到的死或下一次宿主换代的死（下次 restore 重算）。
-          deathUnobserved: item.exitCode == null,
+          deathUnobserved: item.exitCode == null && item.deathObserved !== true,
           // 进程代际：每次 spawn 换一个记号，onExit/onData 只认自己那一代。
           // 盘上恢复的会话没有活进程，代际从 0 起。
           ptyGeneration: 0,
-          // 本代宿主见过并可能还活着的 shell pid（含已被 onExit 摘掉的代）。
-          // 树杀按这份清单走：session.pty 为空不代表上一代进程已经死了。
-          livePids: new Set(),
+          // Unfinished tree terminations keep their identity after the shell exits.
+          livePids: new Map(),
           listeners: new Set(),
           buffer,
           bufferBytes: buffer.reduce((total, chunk) => total + chunkBytes(String(chunk)), 0),
@@ -1346,8 +1360,9 @@ export function createTerminalHost({
         // 会话（无 agentId）的面不同：控制台死亡时 shell 必随之死，不存在
         // 泄漏面，不碰。pid 已死的也不碰（pid 复用，宁漏勿错）；pid 活着但
         // 命令行对不上本会话启动执行体的同样不碰——那是系统把号发给了别人。
-        if (item.agentId && Number.isInteger(item.pid) && item.pid > 0 && isAliveFn(item.pid)) {
-          sweeps.push(verifyAndSweep(session, item.pid));
+        if (item.agentId && Number.isInteger(item.pid) && item.pid > 0 && pidLiveness(item.pid) === "alive") {
+          session.restoreTermination = verifyAndSweep(session, item.pid);
+          sweeps.push(session.restoreTermination);
         }
         // 恢复分派：v2 记录带渲染快照——loadSnapshot 直接重建镜像，画面与上一代
         // 宿主死掉那一刻逐格一致（在线回放同一条正确性来源）。老记录（v1 字节尾、
@@ -1402,16 +1417,14 @@ export function createTerminalHost({
   // restore 的同步循环里做——宿主启动会因此卡住。查不到（null）按「不是本会话」
   // 处理，绝不动手。
   async function verifyAndSweep(session, pid) {
-    let commandLine = null;
     try {
-      commandLine = await getCommandLineFn(pid);
-    } catch {
-      commandLine = null;
-    }
-    if (!commandLineOwnsSession(commandLine, session)) return;
-    if (!isAliveFn(pid)) return;
-    try {
-      await killTreeFn(pid);
+      const startTime = getProcessStartTimeFn ? await getProcessStartTimeFn(pid) : null;
+      if (getProcessStartTimeFn && startTime == null) return;
+      if (startTime !== null && Number.isSafeInteger(session.spawnedAt)
+          && startTime >= fileTimeAt(session.spawnedAt + 1)) return;
+      if (!commandLineOwnsSession(await getCommandLineFn(pid), session)) return;
+      session.livePids.set(pid, { startTime, requested: true });
+      await terminateRegisteredTree(session);
     } catch (error) {
       logger.warn?.(`[terminal-host] restore sweep pid=${pid} failed: ${error.message}`);
     }
@@ -1638,11 +1651,13 @@ export function createTerminalHost({
     session.ptyGeneration = generation;
     session.pty = child;
     session.pid = child.pid ?? session.pid;
-    if (Number.isInteger(session.pid) && session.pid > 0) {
-      if (!session.livePids) session.livePids = new Set();
-      session.livePids.add(session.pid);
-    }
-    const isCurrent = () => session.ptyGeneration === generation;
+    const pid = child.pid;
+    const termination = { startTime: null, requested: false };
+    if (Number.isInteger(pid) && pid > 0) session.livePids.set(pid, termination);
+    const forget = () => {
+      if (session.livePids.get(pid) === termination) session.livePids.delete(pid);
+    };
+    const isCurrent = () => session.ptyGeneration === generation && session.pty === child;
     // 首字节归因（2026-11-05 A6）：空白屏的下一次现场只能靠日志分辨「进程根本没起
     // 来 / 起来了但一个字节都没画 / 画了又被清掉」。这里只在**本代**第一次收到数据
     // 时记一拍，退出日志与首帧超时日志都读它。
@@ -1664,12 +1679,8 @@ export function createTerminalHost({
       emit(session, data, true);
     });
     child.onExit(({ exitCode }) => {
-      // 这一代进程已经结束：无论是不是当前代，都把它从待杀清单里摘掉——死 pid
-      // 会被系统复用，留在清单里就等于把号发给别人的进程当成本会话的树。
-      if (Number.isInteger(child.pid)) session.livePids?.delete(child.pid);
-      // 死被看到了（哪怕只是上一代迟到的退出通知）：「死于重启」资格就此失效，
-      // 之后的复活只认主动点击（见 restore 内 deathUnobserved 的注释）。
-      session.deathUnobserved = false;
+      // A shell exit during termination does not confirm that its tree was killed.
+      if (!termination.requested) forget();
       clearTimeout(firstFrameTimer);
       if (!isCurrent()) {
         logger.warn?.(`[terminal-host] stale exit ignored (pid=${child.pid}, generation=${generation}, current=${session.ptyGeneration})`);
@@ -1684,99 +1695,110 @@ export function createTerminalHost({
         + `msSinceSpawn=${Date.now() - (session.spawnedAt ?? Date.now())}, `
         + `firstByte=${firstByteAt !== null})`,
       );
-      session.exitCode = exitCode;
-      session.pty = null;
-      session.lastActiveAt = nowFn();
-      // 退出改写的是落盘记录里的 exitCode/状态/lastActiveAt 三样：置脏后再触发
-      // 立即写，退出码不能只活在内存里（宿主随后被杀时盘上还是 running）。
-      markSessionDirty(session);
-      persistSession(session);
-      for (const listener of session.listeners) listener(null);
+      recordSessionExit(session, exitCode);
     });
     // spawn 落定了 pid 与运行状态（新建与 restart 共用这条路径）：置脏。
     markSessionDirty(session);
     persistSession(session);
   }
 
-  // 终结一个会话的进程树：先 pty.kill 关伪控制台（守规矩的进程拿
-  // CTRL_CLOSE 优雅退出），再对**本代宿主 spawn 过、且还没见到退出通知**的
-  // 每一代 shell pid 树杀（控制台解耦的进程由这一步终结）。清单而不是
-  // session.pid：迟到退出或上一代解耦进程都可能还挂着，只看当前句柄正是孤儿
-  // 泄漏的来源；反过来也不碰清单外的 pid——pid 可被系统复用，宁漏勿错。
+  function recordSessionExit(session, exitCode) {
+    session.deathUnobserved = false;
+    session.deathObserved = exitCode == null;
+    session.exitCode = exitCode;
+    session.pty = null;
+    session.lastActiveAt = nowFn();
+    markSessionDirty(session);
+    persistSession(session);
+    for (const listener of session.listeners) listener(null);
+  }
+
+  function pidLiveness(pid) {
+    const verdict = isAliveFn(pid);
+    if (verdict === false || verdict === "dead") return "dead";
+    if (verdict === true || verdict === "alive") return "alive";
+    return "unknown";
+  }
+
   async function terminateSessionTree(session) {
-    if (!session) return;
-    // 候选清单必须在 kill 之前取：pty.kill() 会同步触发这一代的 onExit，
-    // 而 onExit 会把 pid 从清单里摘掉——先 kill 再读清单等于什么都没杀。
-    // 树杀要收的正是「控制台已经关了、解耦的 agent 还活着」这类进程，
-    // 它们不会随 pty 一起死，所以这一代的 pid 无论如何都要过一遍树杀。
-    const candidates = [...(session.livePids ?? [])];
-    try {
-      session.pty?.kill();
-    } catch {
-      /* 已经死了的 pty 杀第二次不拦后面的树杀 */
-    }
-    for (const pid of candidates) {
-      if (!Number.isInteger(pid) || pid <= 0) continue;
-      if (!isAliveFn(pid)) {
-        session.livePids?.delete(pid);
-        continue;
-      }
+    await session.restoreTermination;
+    await terminateRegisteredTree(session);
+  }
+
+  async function terminateRegisteredTree(session) {
+    // Kill the tree while the root can still be identified and enumerated.
+    const child = session.pty;
+    for (const [pid, termination] of session.livePids) {
+      termination.requested = true;
       try {
-        await killTreeFn(pid);
-        session.livePids?.delete(pid);
+        if (pidLiveness(pid) !== "dead") {
+          let ownsPid = true;
+          if (getProcessStartTimeFn) {
+            const startTime = await getProcessStartTimeFn(pid);
+            if (pidLiveness(pid) === "dead") ownsPid = false;
+            else if (startTime == null) throw new Error("process identity unavailable");
+            else if (termination.startTime !== null) ownsPid = startTime === termination.startTime;
+            else {
+              if (startTime < termination.startedAfter) throw new Error("process creation time predates spawn");
+              ownsPid = startTime < termination.startedBefore;
+            }
+            if (ownsPid) termination.startTime = startTime;
+          }
+          if (ownsPid) {
+            try {
+              await killTreeFn(pid);
+            } catch (error) {
+              if (error?.code !== TASKKILL_NOT_FOUND || pidLiveness(pid) !== "dead") throw error;
+            }
+          }
+        }
+        session.livePids.delete(pid);
       } catch (error) {
-        // 杀失败保留登记：下一轮重启/关闭还要再试一次，丢了登记就等于放弃
-        // 那棵树（pid 可被复用，之后想杀也不敢动手了）。
         logger.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
-        // pty.kill 可能同步发退出通知并摘掉 pid；但独立树杀明确失败时，
-        // 控制台解耦的后代仍可能存活，必须恢复这一代登记供重试。
-        session.livePids?.add(pid);
         throw Object.assign(new Error("terminal process tree termination failed"), { cause: error });
       }
     }
+    try {
+      child?.kill();
+    } catch {
+      // The tree is gone. The PTY may have closed while termination was pending.
+    }
+    if (child && session.pty === child) recordSessionExit(session, null);
   }
 
-  // 重开一个会话的进程。并发重启（面板轮询 + 用户点击同时打进来）必须合并成
-  // 一次 spawn：两次 terminate+spawn 交错时，后一次的树杀会落在前一次刚起来的
-  // 新进程上，最终留下的进程与响应里的 pid 对不上，多出来的那个成了孤儿。
-  // 同会话的重启请求串成一条：在飞时直接返回同一份结果快照。
-  function restartSession(session, { envDelta = null, launch = null, cwd = null, resume = null, clearResume = false, label = null, agentId = null, agentName = null } = {}) {
-    if (session.restartInFlight) return session.restartInFlight;
-    const run = (async () => {
-      if (envDelta) session.env = mergeInjectedEnv(session.env ?? {}, envDelta);
-      // 启动参数可按当前安装与设置追平（可执行文件升级、权限开关变更、工作目录
-      // 漂移）。只认调用方校验过的值，缺失则沿用会话原值。
-      if (launch) session.launch = launch;
-      if (cwd) session.cwd = cwd;
-      // 身份同步（内切）：这条终端就地换成目标会话——label/agentId/agentName
-      // 与 resume 身份（endpoint＋会话 id）一并改写，落盘随本轮的 persistNow 走。
-      // 缺省字段一律沿用原值（restart 的既有语义：只更新带来的）。clearResume 是
-      // 全新内切的显式清除位：内切成新会话时旧 resume 必须清空，残留会让面板的
-      // 去重聚焦与「新会话」兜底行拿旧身份误判。
-      // 在改写身份字段之前算「身份是否真的换了」：agentId 不同、resume 换了
-      // 另一段会话、clearResume 清掉旧 resume，三种都意味着这条终端交给了另一个
-      // 身份——旧 agent 画在镜像里的那一屏对新 agent 是纯回填污染。同身份字段的
-      // 重开（复活/重挂带全量字段）与不带身份字段的普通重开都不算，继续保史。
-      const identityChanged =
-        (agentId && agentId !== session.agentId) ||
-        (resume && (!session.resume || resume.endpoint !== session.resume.endpoint || resume.id !== session.resume.id)) ||
-        (clearResume && session.resume !== null);
-      if (label) session.label = label;
-      if (agentId) session.agentId = agentId;
-      if (agentName) session.agentName = agentName;
-      if (resume) session.resume = resume;
-      if (clearResume) session.resume = null;
-      // 重 spawn 前必须把旧树终结干净：控制台解耦的旧 agent（kimi）不会被
-      // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
+  // Resolve both requests against the same pre-restart configuration before comparing them.
+  function restartSession(session, generation, update) {
+    if (session.closeInFlight) throw lifecycleConflict();
+    const pending = session.restartInFlight;
+    const original = pending?.original ?? {
+      env: session.env ?? {}, launch: session.launch ?? null, cwd: session.cwd,
+      resume: session.resume ?? null, label: session.label,
+      agentId: session.agentId ?? null, agentName: session.agentName ?? null,
+    };
+    const target = {
+      // Null remains a deletion marker until merged with the process environment.
+      env: { ...original.env, ...update.envDelta },
+      launch: update.launch ?? original.launch,
+      cwd: update.cwd ?? original.cwd,
+      resume: update.clearResume ? null : (update.resume ?? original.resume),
+      label: update.label ?? original.label,
+      agentId: update.agentId ?? original.agentId,
+      agentName: update.agentName ?? original.agentName,
+    };
+    if (pending) {
+      if (pending.generation === generation && isDeepStrictEqual(pending.target, target)) return pending.promise;
+      throw lifecycleConflict();
+    }
+    if (generation !== session.ptyGeneration) throw lifecycleConflict();
+    const identityChanged = target.agentId !== original.agentId || !isDeepStrictEqual(target.resume, original.resume);
+    const promise = (async () => {
       await terminateSessionTree(session);
-      session.exitCode = null;
       // 回滚历史归页签（2026-10-18 拍板：重启/清回滚不丢史）：重开只是换进程，
       // 字节窗与镜像原地保留、新进程输出续写在旧画面下方（与 VS Code 同屏重开
       // 终端同一语义）；宿主重启后恢复的深度以盘上尾窗预算为限（既有上限）。
       // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。唯一例外是
       // 内切换身份变了：旧画面整屏作废、换一只新镜像，否则新会话页上方
       // 会回填老会话的完整内容——见 resetSessionScreen。
-      if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
       // 清屏/衔接卫生排在 spawn 成功之后（2026-11-05 A1）：旧实现的顺序是「先擦屏再
       // 起进程」，spawn 一抛（可执行文件没了、权限被拒、ConPTY 起不来）就只剩一块
       // 不可逆的空白——路由回 500 时面板虽有 toast，屏上却已经什么都没有了，之后任何
@@ -1784,23 +1806,50 @@ export function createTerminalHost({
       // 用户看到的仍是上一屏（失败是显式的 toast，不是静默空屏）。
       // 同步语义不变：hygiene 的合成字节仍早于新 PTY 的首块数据——onData 是异步回调，
       // 本函数在 spawn 之后同步跑完（见 attach 的 onData 注册）。
-      spawnSession(session);
+      try {
+        spawnSession(session, target);
+      } catch (error) {
+        session.deathUnobserved = false;
+        session.deathObserved = session.exitCode == null;
+        markSessionDirty(session);
+        await persistSession(session);
+        throw error;
+      }
+      if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
       if (identityChanged) resetSessionScreen(session);
       else restartHygiene(session);
       // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
       // 只等这一条会话的记录——重开不改成员表，不必替别的会话的尾部欠账付账。
       await persistSession(session);
       return snapshot(session);
-    })();
-    session.restartInFlight = run.finally(() => {
+    })().finally(() => {
       session.restartInFlight = null;
     });
-    return session.restartInFlight;
+    session.restartInFlight = { generation, original, target, promise };
+    return promise;
   }
 
-  function spawnSession(session) {
+  function spawnSession(session, target = session) {
+    const spec = target.launch ?? shellSpec(session.shell);
+    const env = mergeInjectedEnv(process.env, target.env);
+    env.TERM = "xterm-256color";
+    env.ANYSWITCH_TERMINAL_SESSION = session.id;
+    const cwd = safeCwd(target.cwd);
+    const spawnedAfter = Date.now();
+    const child = ptyModule.spawn(spec.file, spec.args, {
+      name: "xterm-256color",
+      cols: session.cols,
+      rows: session.rows,
+      cwd,
+      env,
+      useConpty: true,
+      useConptyDll: true,
+      windowsHide: true,
+    });
+    if (target !== session) Object.assign(session, target);
+    session.exitCode = null;
+    session.deathObserved = false;
     // 进程换代即清「死于重启」标：这代宿主已接手过这条会话的死（复活即处置），
-    // 复活失败也照清——起不来的进程留给显式点击重试，被动回来不再反复自动拉
     // （见 restore 内 deathUnobserved 的注释）。
     session.deathUnobserved = false;
     // 进程生日（新建与 restart/内切/复活都走这一咽喉）：面板的孵化豁免窗锚点。
@@ -1815,32 +1864,27 @@ export function createTerminalHost({
     session.themeNotify = false;
     session.queryScanner = null;
     session.echoUntil = 0;
-    // An agent launch replaces the shell spec entirely (the cmd /c wrapper is
-    // already in the launch args); a plain shell session behaves exactly as
-    // before. The env delta is merged over this process's environment with
-    // injected values winning, then the two terminal-identity variables are
-    // pinned last so nothing inherited or injected can shadow them.
-    const spec = session.launch ?? shellSpec(session.shell);
-    const env = mergeInjectedEnv(process.env, session.env);
-    env.TERM = "xterm-256color";
-    env.ANYSWITCH_TERMINAL_SESSION = session.id;
-    const child = ptyModule.spawn(spec.file, spec.args, {
-      name: "xterm-256color",
-      cols: session.cols,
-      rows: session.rows,
-      cwd: safeCwd(session.cwd),
-      env,
-      useConpty: true,
-      useConptyDll: true,
-      windowsHide: true,
-    });
     attach(session, child);
+    const termination = session.livePids.get(child.pid);
+    if (termination) {
+      termination.startedAfter = fileTimeAt(spawnedAfter);
+      termination.startedBefore = fileTimeAt(session.spawnedAt + 1);
+    }
   }
 
   function requireSession(id) {
     const session = sessions.get(id);
     if (!session) throw Object.assign(new Error("terminal session not found"), { statusCode: 404 });
     return session;
+  }
+
+  function removeSession(session) {
+    sessions.delete(session.id);
+    session.listeners.clear();
+    dirtySessions.delete(session);
+    unpersistedIds.delete(session.id);
+    removedSessionIds.add(session.id);
+    markIndexDirty();
   }
 
   function authorized(req) {
@@ -1977,7 +2021,10 @@ export function createTerminalHost({
         return json(res, 200, { sessions: [...sessions.values()].map(snapshot) });
       }
       if (url.pathname === "/terminal/sessions" && req.method === "POST") {
+        const generation = clearGeneration;
+        if (startingBlocked()) throw lifecycleConflict();
         const body = await readBody(req);
+        if (startingBlocked() || generation !== clearGeneration) throw lifecycleConflict();
         const launch = normalizeLaunch(body.launch);
         const env = normalizeInjectedEnv(body.env);
         // 续接身份：先校验再建——坏形状连会话都不建（面板那边已按模板
@@ -2009,7 +2056,7 @@ export function createTerminalHost({
           screen: createScreenMirror({ cols: Math.max(2, Math.min(240, Number(body.cols) || 120)), rows: Math.max(1, Math.min(120, Number(body.rows) || 34)) }),
           pty: null,
           ptyGeneration: 0,
-          livePids: new Set(),
+          livePids: new Map(),
           listeners: new Set(),
           // 续接身份随会话记录一起进内存/落盘（见 normalizeResume）
           ...(resumeInput && resumeInput.resume ? { resume: resumeInput.resume } : {}),
@@ -2087,36 +2134,41 @@ export function createTerminalHost({
       // 内存表与落盘文件一起归零。必须在下面的按 id 匹配之前，否则 "clear-all"
       // 会被当成会话 id 走到 404。
       if (url.pathname === "/terminal/sessions/clear-all" && req.method === "POST") {
-        let cleared = 0;
-        let terminationError = null;
-        for (const session of [...sessions.values()]) {
-          // 先终结全部旧树；任何一棵仍存活就整体拒绝清场，绝不删掉其它
-          // 会话的记录造成半清场。下一轮只重试仍登记的 pid。
-          try {
-            await terminateSessionTree(session);
-          } catch (error) {
-            terminationError ??= error;
+        if (clearInFlight) throw lifecycleConflict();
+        clearInFlight = true;
+        clearGeneration += 1;
+        try {
+          const current = [...sessions.values()];
+          await Promise.allSettled(current.flatMap((session) => [session.closeInFlight, session.restartInFlight?.promise]));
+          const remaining = [...sessions.values()];
+          const alreadyExited = new Set(remaining.filter((session) => !session.pty));
+          let terminationError = null;
+          for (const session of remaining) {
+            try {
+              await terminateSessionTree(session);
+            } catch (error) {
+              terminationError ??= error;
+            }
           }
+          if (terminationError) throw terminationError;
+          for (const session of remaining) {
+            if (alreadyExited.has(session)) {
+              for (const listener of session.listeners) listener(null);
+            }
+            removeSession(session);
+          }
+          markIndexDirty();
+          try {
+            await persistIndexNowOrThrow();
+            return json(res, 200, { ok: true, cleared: remaining.length });
+          } finally {
+            // Allow the relay to stop this host after receiving the clear receipt.
+            // Expire the guard if the caller disappears before stopping it.
+            if (req.headers["x-anyswitch-terminal-stop"] === "1") stopClearUntil = Date.now() + STOP_CLEAR_GRACE_MS;
+          }
+        } finally {
+          clearInFlight = false;
         }
-        if (terminationError) throw terminationError;
-        for (const session of [...sessions.values()]) {
-          for (const listener of session.listeners) listener(null);
-          session.listeners.clear();
-          sessions.delete(session.id);
-          // 每个被清掉的会话都要连记录文件一起消失：索引写空之后盘上若还留着这些
-          // 文件，它们就成了永远读不到的孤儿（下次启动由 restore 的清理收尾）。
-          dirtySessions.delete(session);
-          unpersistedIds.delete(session.id);
-          removedSessionIds.add(session.id);
-          cleared += 1;
-        }
-        // 清场是删除级变化：置脏后这笔写必须真的把空表落上盘，并在响应前等它
-        // 写完——relay 的 stop({clearSessions}) 收到 200 就杀宿主子进程，盘上
-        // 残留旧会话会让下次启动凭空复活一排已关的页签。写失败走 500 拒答，
-        // relay 才会转进「宿主停稳后删除状态文件」的兜底。
-        markIndexDirty();
-        await persistIndexNowOrThrow();
-        return json(res, 200, { ok: true, cleared });
       }
       const match = url.pathname.match(/^\/terminal\/sessions\/([^/]+)(?:\/(input|resize|stream|restart|close))?$/);
       if (!match) return json(res, 404, { error: "not_found" });
@@ -2202,10 +2254,14 @@ export function createTerminalHost({
         });
       }
       if (action === "restart" && req.method === "POST") {
+        const generation = session.ptyGeneration;
+        const clearEpoch = clearGeneration;
+        if (startingBlocked() || session.closeInFlight) throw lifecycleConflict();
         // Optional env re-injection: a caller that holds fresh credentials
         // (e.g. a relay restart) merges them in before the respawn. Merged,
         // never echoed — the response snapshot carries no env.
         const body = await readBody(req);
+        if (startingBlocked() || clearEpoch !== clearGeneration || sessions.get(session.id) !== session) throw lifecycleConflict();
         const envDelta = body?.env !== undefined && body.env !== null ? normalizeInjectedEnv(body.env) : null;
         // 复活通路会带上按当前安装重新组装的 launch 与 cwd：可执行文件升级、
         // 权限开关变更、工作目录漂移都在重开时追平。缺省则沿用会话原值。
@@ -2216,21 +2272,19 @@ export function createTerminalHost({
         // 视为「不更新」沿用原值；形状不对拒 400，不静默忽略（换绑是显式动作）。
         const identity = normalizeIdentityUpdate(body);
         if (identity.error) return json(res, 400, { error: identity.error });
-        const restarted = await restartSession(session, { envDelta, launch, cwd, ...identity.fields });
+        const restarted = await restartSession(session, generation, { envDelta, launch, cwd, ...identity.fields });
         return json(res, 200, restarted);
       }
       if (action === "close" && req.method === "POST") {
-        await terminateSessionTree(session);
-        sessions.delete(session.id);
-        // 会话从内存表移除是删除级变化：置脏后等这笔写落定再答——响应到达时
-        // 盘上已经没有这个会话（与旧同步写的外部时序契约一致）。写失败走 500
-        // 拒答：面板拿 200 当「盘上已清」的凭据，假 200 会让已关页签在宿主下
-        // 次重启时从盘上复活。记录文件与索引在同一笔里清：先 rm 文件再写索引。
-        dirtySessions.delete(session);
-        unpersistedIds.delete(session.id);
-        removedSessionIds.add(session.id);
-        markIndexDirty();
-        await persistIndexNowOrThrow();
+        if (clearInFlight) throw lifecycleConflict();
+        session.closeInFlight ??= (async () => {
+          // Closing also owns any replacement whose restart was already accepted.
+          await Promise.allSettled([session.restartInFlight?.promise]);
+          await terminateSessionTree(session);
+          removeSession(session);
+          await persistIndexNowOrThrow();
+        })().finally(() => { session.closeInFlight = null; });
+        await session.closeInFlight;
         return json(res, 200, { ok: true });
       }
       return json(res, 405, { error: "method_not_allowed" });

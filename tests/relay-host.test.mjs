@@ -850,6 +850,7 @@ test("POST /terminal-host/stop sets the flag, clears sessions via the host, then
       observed.url = url;
       observed.method = options.method;
       observed.authorization = options.headers.authorization;
+      observed.stop = options.headers["x-anyswitch-terminal-stop"];
       observed.stateAtClear = h.supervisor.status().state;
       order.push("clear-all");
       return { ok: true, json: async () => ({ ok: true, cleared: 3 }) };
@@ -871,6 +872,7 @@ test("POST /terminal-host/stop sets the flag, clears sessions via the host, then
     assert.equal(observed.url, "http://127.0.0.1:47823/terminal/sessions/clear-all");
     assert.equal(observed.method, "POST");
     assert.equal(observed.authorization, "Bearer test-token");
+    assert.equal(observed.stop, "1");
     assert.equal(observed.stateAtClear, "running", "清场调用发生在 kill 子进程之前");
     assert.equal(JSON.parse(readFileSync(h.settingsPath, "utf8")).terminalHostManualStop, true);
 
@@ -886,7 +888,7 @@ test("POST /terminal-host/stop sets the flag, clears sessions via the host, then
 test("POST /terminal-host/stop with clearSessions deletes the state file when the host is unreachable", async () => {
   const h = routeHarness({
     fetchFn: async () => {
-      throw new Error("connect ECONNREFUSED");
+      throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
     },
   });
   const stateFile = join(h.root, "terminal-sessions.json");
@@ -902,6 +904,52 @@ test("POST /terminal-host/stop with clearSessions deletes the state file when th
     assert.equal((await res.json()).ok, true);
     assert.equal(existsSync(stateFile), false, "the leftover session records are deleted best-effort");
     assert.equal(h.logger.logged.warn.some((line) => line.includes("clear-all")), true, "the failed clear reaches the log");
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/stop preserves the host and index when clear-all refuses termination", async () => {
+  let refused = true;
+  const h = routeHarness({
+    fetchFn: async () => refused
+      ? { ok: false, status: 500, json: async () => ({ error: "terminal process tree termination failed" }) }
+      : { ok: true, status: 200, json: async () => ({ ok: true, cleared: 1 }) },
+  });
+  const stateFile = join(h.root, "terminal-sessions.json");
+  writeFileSync(stateFile, JSON.stringify({ version: 2, sessions: ["retained"] }));
+  const port = await h.listen();
+  const stop = () => fetch(`http://127.0.0.1:${port}/terminal-host/stop`, {
+    method: "POST", headers: h.auth, body: JSON.stringify({ clearSessions: true }),
+  });
+  try {
+    await h.supervisor.start();
+    assert.equal((await stop()).status, 500);
+    assert.equal(h.supervisor.status().state, "running");
+    assert.equal(h.supervisor.isManualStop(), false);
+    assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")).sessions, ["retained"]);
+    refused = false;
+    assert.equal((await stop()).status, 200);
+    assert.equal(h.supervisor.status().state, "stopped-manual");
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/stop preserves the index when clear-all times out", async () => {
+  const h = routeHarness({ fetchFn: async () => { throw new DOMException("synthetic timeout", "TimeoutError"); } });
+  const stateFile = join(h.root, "terminal-sessions.json");
+  writeFileSync(stateFile, JSON.stringify({ version: 2, sessions: ["retained"] }));
+  const port = await h.listen();
+  try {
+    await h.supervisor.start();
+    const response = await fetch(`http://127.0.0.1:${port}/terminal-host/stop`, {
+      method: "POST", headers: h.auth, body: JSON.stringify({ clearSessions: true }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal(h.supervisor.status().state, "running");
+    assert.equal(h.supervisor.isManualStop(), false);
+    assert.equal(existsSync(stateFile), true);
   } finally {
     await h.close();
   }
