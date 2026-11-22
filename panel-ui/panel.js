@@ -20782,10 +20782,15 @@ async function api(method, path, body, signal) {
   }
 
   // ── 模型字段测试：模型行右键「测试模型字段」→ 窗内确认 → 真实请求 → 双框对比 ──
-  // 真实请求消耗极少额度，确认态内嵌在弹窗里（不开独立确认框）。进行中禁关窗防
-  // 误触；失败原因复用 storeTestErrorText 的翻译口径。弹窗单例，state 即互斥锁。
+  // 真实请求消耗极少额度，确认态内嵌在弹窗里（不开独立确认框）。进行中点关闭
+  // （✕/遮罩/Esc/取消）弹中止确认（复用 showSkillsModal 单例），确认后关窗并作废
+  // 在飞请求：中止只到前端为止，渠道侧那次请求自然跑完，迟到的结果按代次不符
+  // 丢弃、不再上屏。失败原因复用 storeTestErrorText 的翻译口径。弹窗单例，
+  // state 即互斥锁。
   let modelTestState = "idle"; // idle | confirm | running | result
   let modelTestCtx = null;     // { providerId, providerName, mid }
+  let modelTestGen = 0;        // 在飞请求代次：关窗/中止即 ++，迟到的回调按代次不符丢弃
+  let modelTestAbortConfirmOpen = false; // 中止确认单例正挂在测试窗上（结果落地时顺手收掉）
 
   function modelTestCompareHtml(state, rightHtml) {
     return `
@@ -20818,12 +20823,16 @@ async function api(method, path, body, signal) {
     modelTestState = "running";
     $("modelTestBody").innerHTML = modelTestCompareHtml("running", `<span class="mft-box-value placeholder">测试后显示</span>`);
     $("modelTestFoot").innerHTML = `
-      <button class="btn" disabled>取消</button>
+      <button class="btn" id="modelTestCancelBtn">取消</button>
       <button class="btn btn-primary" disabled>测试中…</button>`;
+    // 进行中「取消」可用：与 ✕/遮罩/Esc 同走 closeModelTestModal 的中止确认
+    $("modelTestCancelBtn").onclick = closeModelTestModal;
   }
 
   function renderModelTestResult(r) {
     modelTestState = "result";
+    // 结果落地时已无可中止之物：若中止确认还挂着（用户在确认期间等到了结果），顺手收掉
+    dismissModelTestAbortConfirm();
     let state, rightHtml, verdict;
     if (!r.ok) {
       verdict = `<div class="mft-verdict neg">${escapeHtml(r.reason)}</div>`;
@@ -20853,10 +20862,14 @@ async function api(method, path, body, signal) {
 
   async function runModelTest() {
     renderModelTestRunning();
+    const gen = modelTestGen; // 中止/关窗会 ++ 代次：回调返回时先对代次，不符即丢弃
+    const stale = () => gen !== modelTestGen || modelTestState !== "running";
     try {
       const r = await api("POST", "/api/store/test-model", { id: modelTestCtx.providerId, model: modelTestCtx.mid });
+      if (stale()) return;
       renderModelTestResult({ ok: true, returned: r.returned ?? null, match: r.match === true, latencyMs: r.latencyMs });
     } catch (e) {
+      if (stale()) return;
       renderModelTestResult({ ok: false, reason: storeTestErrorText(e) });
     }
   }
@@ -20868,10 +20881,39 @@ async function api(method, path, body, signal) {
   }
 
   function closeModelTestModal() {
-    if (modelTestState === "running") return; // 进行中禁关窗，防误触
+    if (modelTestState === "running") { confirmAbortModelTest(); return; } // 进行中先问是否中止
+    dismissModelTestAbortConfirm(); // 防御：非常态路径关窗时确认层不该残留
+    modelTestGen++; // 作废任何在飞回调
     modelTestState = "idle";
     modelTestCtx = null;
     $("modelTestModal").classList.remove("show");
+  }
+
+  // 中止确认：复用 showSkillsModal 单例（z-340 本就为叠在其他弹窗上设计）。
+  // onRequestClose 接管 ✕/遮罩/Esc 之外的单例自带收层——hideSkillsModal 会问它，
+  // 故确认后自动收层也走这里，处理器必须自己 forceHide。
+  function confirmAbortModelTest() {
+    modelTestAbortConfirmOpen = true;
+    showSkillsModal({
+      title: "中止测试？",
+      bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">测试尚未完成，退出后本次测试将中止。</div>`,
+      confirmText: "中止并退出",
+      cancelText: "继续测试",
+      onConfirm: () => {
+        modelTestGen++; // 中止：迟到的结果不再上屏
+        modelTestState = "idle";
+        modelTestCtx = null;
+        $("modelTestModal").classList.remove("show");
+      },
+      onCancel: dismissModelTestAbortConfirm,
+      onRequestClose: dismissModelTestAbortConfirm,
+    });
+  }
+
+  function dismissModelTestAbortConfirm() {
+    if (!modelTestAbortConfirmOpen) return;
+    modelTestAbortConfirmOpen = false;
+    forceHideSkillsModal();
   }
 
   // ── 新增模型待读态：刷新后把本轮 added 记入 localStorage；该渠道详情第一次带着
@@ -23370,13 +23412,16 @@ async function api(method, path, body, signal) {
     // scroll 不冒泡：捕获阶段监听，模型列表滚动时收起菜单
     $("storeDetailBody").addEventListener("scroll", hideSkillsContextMenu, true);
 
-    // 模型字段测试弹窗：✕/遮罩点击/Esc 关闭（进行中由 closeModelTestModal 挡住）
+    // 模型字段测试弹窗：✕/遮罩点击/Esc 关闭（进行中改走中止确认）；中止确认
+    // 单例压在顶层时 Esc 归它，不穿透到测试窗
     $("modelTestCloseBtn").onclick = closeModelTestModal;
     $("modelTestModal").addEventListener("click", (e) => {
       if (e.target === $("modelTestModal")) closeModelTestModal();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && $("modelTestModal").classList.contains("show")) closeModelTestModal();
+      if (e.key !== "Escape" || !$("modelTestModal").classList.contains("show")) return;
+      if ($("skillsModal").classList.contains("show")) return; // 中止确认在顶，Esc 不穿透
+      closeModelTestModal();
     });
 
     // 组建号池弹窗：关闭/取消/确认/遮罩点击
