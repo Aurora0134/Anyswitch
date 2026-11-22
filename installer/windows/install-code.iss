@@ -19,6 +19,7 @@ var
   InstallRootValue: String;
   EnvRootValue: String;
   HadInstallRoot: Boolean;
+  UninstallResidueRoot: String;
 
 function GetDriveType(RootPath: String): LongWord;
   external 'GetDriveTypeW@kernel32.dll stdcall';
@@ -82,9 +83,55 @@ begin
   end;
 end;
 
+// 返回是否删净：目标本就不在视为已净（RemoveDir 对不存在路径报失败，不能据此误判）；
+// 任何一项删不掉（占用等）返回 False。reparse 防护性跳过不算失败——那是刻意保留。
+// 定义须在 ValidateInstallRoot 之前：Inno Pascal 不支持前置声明。
+function DeleteOwnedTree(Path: String): Boolean;
+var
+  Entry: TFindRec;
+  Child: String;
+begin
+  Result := True;
+  if HasReparseAncestor(Path) then Exit;
+  if FindFirst(AddBackslash(Path) + '*', Entry) then begin
+    try
+      repeat
+        if (Entry.Name <> '.') and (Entry.Name <> '..') then begin
+          Child := AddBackslash(Path) + Entry.Name;
+          if (Entry.Attributes and AttrDirectory) <> 0 then begin
+            if not DeleteOwnedTree(Child) then Result := False;
+          end else if not HasReparseAncestor(Child) then begin
+            if not DeleteFile(Child) then Result := False;
+          end;
+        end;
+      until not FindNext(Entry);
+    finally
+      FindClose(Entry);
+    end;
+  end;
+  if DirExists(Path) and not RemoveDir(Path) then Result := False;
+end;
+
+// 卸载末尾的占用残留指引只报一个根：先记先赢，调用顺序即优先级（安装根残留
+// 阻断重装，排在数据根之前）。
+procedure NoteUninstallResidue(Path: String);
+begin
+  if UninstallResidueRoot = '' then UninstallResidueRoot := Path;
+end;
+
+// 卸载专用的整树删除：删不净时记一笔残留，供末尾统一指引。安装期调用方
+// （ValidateInstallRoot / DeinitializeSetup）直接用 DeleteOwnedTree 的返回值。
+procedure UninstallDeleteOwnedTree(Path: String);
+begin
+  if not DeleteOwnedTree(Path) then NoteUninstallResidue(Path);
+end;
+
 function ValidateInstallRoot(Path: String): String;
 var
-  Root, DataRoot, GitRoot, PriorRoot: String;
+  Root, DataRoot, GitRoot, PriorRoot, VersionTree, ActiveText: String;
+  HadPriorRoot: Boolean;
+  // LoadStringFromFile 的 var 形参是 AnsiString（同上方 PreviousCurrent 的口径）。
+  ActiveCurrent: AnsiString;
 begin
   Result := 'Choose a dedicated installation folder on a local fixed drive.';
   if (Length(Path) < 4) or (Copy(Path, 2, 2) <> ':\') or (Pos(':', Copy(Path, 3, Length(Path))) > 0) then Exit;
@@ -93,19 +140,32 @@ begin
   DataRoot := NormalPath(ExpandConstant('{localappdata}\Anyswitch'));
   GitRoot := NormalPath(ExpandConstant('{localappdata}\Anyswitch-git'));
   if IsWithin(Root, DataRoot) or IsWithin(DataRoot, Root) or IsWithin(Root, GitRoot) or IsWithin(GitRoot, Root) then Exit;
-  if RegQueryStringValue(HKCU, PackageKey, 'InstallRoot', PriorRoot) then begin
+  HadPriorRoot := RegQueryStringValue(HKCU, PackageKey, 'InstallRoot', PriorRoot);
+  if HadPriorRoot then begin
     Result := 'Use the existing Anyswitch installation folder.';
     if CompareText(Root, NormalPath(PriorRoot)) <> 0 then Exit;
-  end else if DirExists(Root) and not IsEmptyFolder(Root) then begin
-    Result := 'Choose an empty folder for Anyswitch.';
-    Exit;
   end;
   Result := 'Anyswitch cannot use this installation folder.';
   if HasReparseAncestor(Root + '\versions') or HasReparseAncestor(Root + '\current.json') or
      (GetFileAttributes(Root + '\current.json.setup') <> InvalidAttributes) then Exit;
-  if GetFileAttributes(Root + '\versions\{#ReleaseVersion}') <> InvalidAttributes then begin
+  // 同版本目录在＝上次安装或卸载留了残，给一次确认清理的机会；但指针仍指向本版本
+  // 时那是在用的活动版本而非残留，维持硬拒（清理会删活版本）。清理失败（占用等）
+  // 或防护性跳过后目录仍在，同样维持拒绝。清理后顺手收掉空的 versions 壳目录，
+  // 否则下方空目录闸仍会被它拦住。
+  VersionTree := Root + '\versions\{#ReleaseVersion}';
+  if GetFileAttributes(VersionTree) <> InvalidAttributes then begin
     Result := 'This version is already present in the installation folder.';
-    Exit;
+    ActiveText := '';
+    if LoadStringFromFile(Root + '\current.json', ActiveCurrent) then ActiveText := ActiveCurrent;
+    if Pos('"version":"{#ReleaseVersion}"', ActiveText) > 0 then Exit;
+    if MsgBox('A leftover from a previous incomplete installation of this version was found. Remove it and continue?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) <> IDYES then Exit;
+    if not DeleteOwnedTree(VersionTree) then Exit;
+    if GetFileAttributes(VersionTree) <> InvalidAttributes then Exit;
+    RemoveDir(Root + '\versions');
+  end;
+  if not HadPriorRoot then begin
+    Result := 'Choose an empty folder for Anyswitch.';
+    if DirExists(Root) and not IsEmptyFolder(Root) then Exit;
   end;
   Result := '';
 end;
@@ -194,30 +254,8 @@ function InitializeUninstall: Boolean;
 begin
   RemoveSettings := False;
   if not UninstallSilent then
-    RemoveSettings := MsgBox('Also delete Anyswitch settings and stored credentials? The source installation and its Git history will be kept.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+    RemoveSettings := MsgBox('Also delete Anyswitch settings, stored credentials and backups? The source installation and its Git history will be kept.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
   Result := True;
-end;
-
-procedure DeleteOwnedTree(Path: String);
-var
-  Entry: TFindRec;
-  Child: String;
-begin
-  if HasReparseAncestor(Path) then Exit;
-  if FindFirst(AddBackslash(Path) + '*', Entry) then begin
-    try
-      repeat
-        if (Entry.Name <> '.') and (Entry.Name <> '..') then begin
-          Child := AddBackslash(Path) + Entry.Name;
-          if (Entry.Attributes and AttrDirectory) <> 0 then DeleteOwnedTree(Child)
-          else if not HasReparseAncestor(Child) then DeleteFile(Child);
-        end;
-      until not FindNext(Entry);
-    finally
-      FindClose(Entry);
-    end;
-  end;
-  RemoveDir(Path);
 end;
 
 procedure DeleteOwnedFile(Root, Name: String);
@@ -225,7 +263,10 @@ var
   Path: String;
 begin
   Path := Root + '\' + Name;
-  if not HasReparseAncestor(Path) then DeleteFile(Path);
+  if HasReparseAncestor(Path) then Exit;
+  // 目标本就不在不算失败（DeleteFile 对缺失文件报失败，不能据此误报残留）；
+  // 占用等删不掉时记残留根，供卸载末尾统一指引。
+  if FileExists(Path) and not DeleteFile(Path) then NoteUninstallResidue(Root);
 end;
 
 procedure RestoreOwnedRegistry(Root: String);
@@ -286,13 +327,32 @@ var
   Code: Integer;
 begin
   // 同机源码安装也注册同名任务（Exec 指源码树 silent-start.vbs）：只注销
-  // Actions[0].Arguments 含本安装根的任务，其余保留。失败静默——卸载不可因
-  // 清理失败而失败。
+  // Actions[0].Arguments 含本安装根的任务，其余保留。子串命中后还须过前缀边界
+  // （命中点之后是路径分隔符或串尾才算），防 C:\Anyswitch 误伤 C:\Anyswitch-src。
+  // 失败静默——卸载不可因清理失败而失败。
   Params := '-NoProfile -ExecutionPolicy Bypass -Command "$r=$args[0].ToLower();' +
     'foreach($n in @(''AnyswitchRelay'',''AnyswitchWatchdog'',''AnyswitchPanel'',''ApiCredRelay'',''ApiCredWatchdog'')){' +
     'try{$t=Get-ScheduledTask -TaskName $n -ErrorAction Stop;$a=$t.Actions[0].Arguments;' +
-    'if($a -and $a.ToLower().Contains($r)){Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop}}catch{}}" "' + Root + '"';
+    'if($a){$al=$a.ToLower();$i=$al.IndexOf($r);' +
+    'if($i -ge 0 -and ($i+$r.Length -eq $al.Length -or $al[$i+$r.Length] -eq ''\'')){' +
+    'Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop}}}catch{}}" "' + Root + '"';
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+// 前缀边界：命中点之后必须是路径分隔符或串尾，防 C:\Anyswitch 误伤
+// C:\Anyswitch-src。只验首个命中——病态的多根参数宁肯不删（读回校验整体保守）。
+function PathMentionsRoot(Haystack, LowerRoot: String): Boolean;
+var
+  Hit: Integer;
+  Lower: String;
+begin
+  Result := False;
+  Lower := Lowercase(Haystack);
+  Hit := Pos(LowerRoot, Lower);
+  if Hit = 0 then Exit;
+  Hit := Hit + Length(LowerRoot);
+  if Hit > Length(Lower) then begin Result := True; Exit; end;
+  Result := (Lower[Hit] = '\') or (Lower[Hit] = '/');
 end;
 
 procedure DeleteOwnedDesktopShortcut(Root: String);
@@ -302,8 +362,8 @@ var
 begin
   LinkPath := ExpandConstant('{userdesktop}\Anyswitch.lnk');
   if not FileExists(LinkPath) then Exit;
-  // 读回校验：target/arguments 至少一处指本安装根才删——源码安装的同名快捷
-  // 方式指源码树 silent-start.vbs，不符不删。任何读回失败都静默保留。
+  // 读回校验：target/arguments 至少一处指本安装根（带前缀边界）才删——源码安装
+  // 的同名快捷方式指源码树 silent-start.vbs，不符不删。任何读回失败都静默保留。
   try
     Shell := CreateOleObject('WScript.Shell');
     Shortcut := Shell.CreateShortcut(LinkPath);
@@ -313,7 +373,7 @@ begin
     Exit;
   end;
   LowerRoot := Lowercase(NormalPath(Root));
-  if (Pos(LowerRoot, Lowercase(Target)) = 0) and (Pos(LowerRoot, Lowercase(Arguments)) = 0) then Exit;
+  if not PathMentionsRoot(Target, LowerRoot) and not PathMentionsRoot(Arguments, LowerRoot) then Exit;
   if HasReparseAncestor(LinkPath) then Exit;
   DeleteFile(LinkPath);
 end;
@@ -356,6 +416,7 @@ var
 begin
   if CurUninstallStep <> usUninstall then Exit;
   Root := ExpandConstant('{app}');
+  UninstallResidueRoot := '';
   if not HasReparseAncestor(Root + '\current.json') then DeleteFile(Root + '\current.json');
   RestoreOwnedRegistry(Root);
   // 自启任务与桌面快捷方式都指 {app}\anyswitch-silent.vbs（[Files] 装入项，
@@ -365,9 +426,9 @@ begin
   // versions 树是安装器自有产物（全部位于安装根，远离数据根与 Git 对象库）：
   // Inno 卸载日志只记本次 [Files]，升级换代后旧版本目录会整树残留并阻断该
   // 版本重装；运行时日志已按 2026-11-20 裁决迁至数据根 logs\，删树无日志顾虑。
-  DeleteOwnedTree(Root + '\versions');
+  UninstallDeleteOwnedTree(Root + '\versions');
   // staging 是自更新落盘暂存（安装根下），同样不在卸载日志内。
-  DeleteOwnedTree(Root + '\staging');
+  UninstallDeleteOwnedTree(Root + '\staging');
   if RemoveSettings then begin
     DataRoot := ExpandConstant('{localappdata}\Anyswitch');
     DeleteOwnedFile(DataRoot, 'store.json');
@@ -389,18 +450,36 @@ begin
     DeleteOwnedFile(DataRoot, 'terminal-host.pid');
     DeleteOwnedFile(DataRoot, 'agent-metrics-snapshot.json');
     DeleteOwnedFile(DataRoot, 'model-stability.json');
+    // 各端点 sidecar（渠道托管记忆）：家族全量以 src/launchers/*merge-config*.mjs
+    // 的 SIDECAR_FILENAME 常量为准，契约测试双向钉住防漂移。
+    DeleteOwnedFile(DataRoot, 'codex-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'dsh-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'grok-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'kimi-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'opencode-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'pi-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'qoder-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'workbuddy-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'zcode-sidecar.json');
+    DeleteOwnedFile(DataRoot, 'zcode-cli-sidecar.json');
     // 自选备份根：按弹窗承诺备份不保留。默认根 backups\ 由下方 DeleteOwnedTree
     // 覆盖，这里只处理非默认且存在的根，复用 DeleteOwnedTree 的 reparse 防护。
     BackupRoot := ExtractBackupRoot(DataRoot);
     if (BackupRoot <> '') and DirExists(BackupRoot) and
        (CompareText(NormalPath(BackupRoot), NormalPath(DataRoot + '\backups')) <> 0) then
-      DeleteOwnedTree(BackupRoot);
+      UninstallDeleteOwnedTree(BackupRoot);
     DeleteOwnedFile(DataRoot, 'backup-root.json');
-    DeleteOwnedTree(DataRoot + '\credentials');
-    DeleteOwnedTree(DataRoot + '\logs');
-    DeleteOwnedTree(DataRoot + '\backups');
-    DeleteOwnedTree(DataRoot + '\client-updates');
-    DeleteOwnedTree(DataRoot + '\usage');
-    DeleteOwnedTree(DataRoot + '\bin');
+    UninstallDeleteOwnedTree(DataRoot + '\credentials');
+    UninstallDeleteOwnedTree(DataRoot + '\logs');
+    UninstallDeleteOwnedTree(DataRoot + '\backups');
+    UninstallDeleteOwnedTree(DataRoot + '\client-updates');
+    UninstallDeleteOwnedTree(DataRoot + '\usage');
+    UninstallDeleteOwnedTree(DataRoot + '\bin');
+    // zcode-cli 槽位目录：Anyswitch 自有的 CLI 槽位（provider_config.json），
+    // 与用户桌面版 ~/.zcode 完全隔离（zcode-cli-launcher.mjs），整树清。
+    UninstallDeleteOwnedTree(DataRoot + '\zcode-cli');
   end;
+  // 占用残留（文件在用删不掉）在末尾指引一次，静默卸载不弹；全删净时不弹。
+  if (UninstallResidueRoot <> '') and not UninstallSilent then
+    MsgBox('Some files could not be removed because they are in use. After closing Anyswitch, delete them manually from: ' + UninstallResidueRoot, mbInformation, MB_OK);
 end;

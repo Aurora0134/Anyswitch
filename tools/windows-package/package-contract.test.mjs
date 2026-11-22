@@ -118,7 +118,7 @@ test("uninstall hook unregisters owned scheduled tasks and the desktop shortcut"
 
 test("RemoveSettings manifest stays in sync with the data-root write surface", async () => {
   const code = await readFile(join(here, "..", "..", "installer", "windows", "install-code.iss"), "utf8");
-  // 数据根写入面常量表：卸载弹窗承诺删除设置与凭据，清单须覆盖运行时全部落盘物。
+  // 数据根写入面常量表：卸载弹窗承诺删除设置、凭据与备份，清单须覆盖运行时全部落盘物。
   // 每条附一处源码证据文件，漂移时测试双向报错。
   const files = [
     ["store.json", "src/agents/agent-sync.mjs"],
@@ -141,6 +141,19 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
     ["agent-metrics-snapshot.json", "src/agents/agent-metrics.mjs"],
     ["model-stability.json", "src/catalog/model-stability.mjs"],
     ["backup-root.json", "src/ops/backup-location.mjs"],
+    // sidecar 家族（渠道托管记忆）：与 src/ops/uninstall-agent.mjs 的
+    // ENDPOINT_DEFS 逐条对上，root 均为 relayDataRoot（各 launcher 的
+    // sidecarRoot = relayDataRoot(base) 传参）。
+    ["codex-sidecar.json", "src/launchers/codex-merge-config.mjs"],
+    ["dsh-sidecar.json", "src/launchers/dsh-merge-config.mjs"],
+    ["grok-sidecar.json", "src/launchers/grok-merge-config.mjs"],
+    ["kimi-sidecar.json", "src/launchers/kimi-merge-config.mjs"],
+    ["opencode-sidecar.json", "src/launchers/opencode-merge-config.mjs"],
+    ["pi-sidecar.json", "src/launchers/pi-merge-models.mjs"],
+    ["qoder-sidecar.json", "src/launchers/qoder-merge-config.mjs"],
+    ["workbuddy-sidecar.json", "src/launchers/workbuddy-merge-models.mjs"],
+    ["zcode-sidecar.json", "src/launchers/zcode-merge-config.mjs"],
+    ["zcode-cli-sidecar.json", "src/launchers/zcode-merge-config.mjs"],
   ];
   const trees = [
     ["credentials", "src/store/data-bundle.mjs"],
@@ -149,6 +162,9 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
     ["client-updates", "src/agents/client-update-journal.mjs"],
     ["usage", "src/launchers/codex-launcher.mjs"],
     ["bin", "src/agents/agent-skills.mjs"],
+    // zcode-cli 槽位目录：Anyswitch 自有 CLI 槽位（provider_config.json），
+    // zcode-cli-launcher.mjs 的 zcodeCliDataDir = relayDataRoot\zcode-cli。
+    ["zcode-cli", "src/launchers/zcode-cli-launcher.mjs"],
   ];
   for (const [name, evidence] of files) {
     assert.ok(code.includes(`DeleteOwnedFile(DataRoot, '${name}');`), `RemoveSettings 缺文件 ${name}`);
@@ -168,6 +184,52 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
   assert.ok(backupIdx >= 0 && backupIdx < code.indexOf("DeleteOwnedFile(DataRoot, 'backup-root.json');"), "必须先读自选备份根再删 backup-root.json");
   // {app}\staging 是自更新落盘暂存，不在卸载日志内，须显式清。
   assert.ok(code.includes("DeleteOwnedTree(Root + '\\staging');"), "卸载必须清安装根 staging");
+});
+
+test("same-version leftover offers cleanup confirmation, active version stays hard-rejected", async () => {
+  const code = await readFile(join(here, "..", "..", "installer", "windows", "install-code.iss"), "utf8");
+  const validator = /function ValidateInstallRoot\(Path: String\): String;([\s\S]*?)\nend;/.exec(code);
+  assert.ok(validator, "ValidateInstallRoot 必须存在");
+  // 文案③逐字（用户已批）：确认→DeleteOwnedTree 清理后继续；拒绝维持硬拒句式。
+  assert.ok(validator[1].includes("if MsgBox('A leftover from a previous incomplete installation of this version was found. Remove it and continue?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) <> IDYES then Exit;"), "残留确认框文案③必须逐字在位");
+  // 指针仍指向本版本＝在用的活动版本而非残留：确认框之前必须先过指针闸。
+  const guard = validator[1].indexOf(`Pos('"version":"{#ReleaseVersion}"', ActiveText) > 0`);
+  const prompt = validator[1].indexOf("A leftover from a previous incomplete installation");
+  assert.ok(guard >= 0 && guard < prompt, "活动版本指针闸必须先于残留确认框");
+  // 清理失败（占用等）或防护跳过后目录仍在，都维持拒绝，不新造文案。
+  assert.ok(validator[1].includes("if not DeleteOwnedTree(VersionTree) then Exit;"), "清理失败必须维持拒绝");
+  assert.ok(validator[1].includes("if GetFileAttributes(VersionTree) <> InvalidAttributes then Exit;"), "清理后必须复核目录确已不在");
+  assert.ok(validator[1].includes("Result := 'This version is already present in the installation folder.';"), "拒绝句式复用既有错误文案");
+  // Inno Pascal 无前置声明：DeleteOwnedTree 必须定义在 ValidateInstallRoot 之前。
+  assert.ok(code.indexOf("function DeleteOwnedTree(Path: String): Boolean;") >= 0, "DeleteOwnedTree 必须带成败返回");
+  assert.ok(code.indexOf("function DeleteOwnedTree(Path: String): Boolean;") < code.indexOf("function ValidateInstallRoot(Path: String): String;"), "DeleteOwnedTree 必须先于 ValidateInstallRoot 定义");
+  // 双闸语义一致：目录页 Next 与 PrepareToInstall 都过同一 ValidateInstallRoot。
+  assert.ok(/function NextButtonClick[\s\S]*?ValidateInstallRoot\(WizardDirValue\)/.test(code), "NextButtonClick 闸必须在位");
+  assert.ok(/function PrepareToInstall[\s\S]*?ValidateInstallRoot\(WizardDirValue\)/.test(code), "PrepareToInstall 闸必须在位");
+});
+
+test("uninstall prompts: backups in settings copy and one in-use leftover guidance", async () => {
+  const code = await readFile(join(here, "..", "..", "installer", "windows", "install-code.iss"), "utf8");
+  // 文案④逐字（用户已批）：删除面扩到备份，弹窗承诺对齐。
+  assert.ok(code.includes("MsgBox('Also delete Anyswitch settings, stored credentials and backups? The source installation and its Git history will be kept.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2)"), "卸载弹窗文案④必须逐字在位");
+  assert.ok(!code.includes("Also delete Anyswitch settings and stored credentials?"), "旧卸载文案必须替换干净");
+  // 文案⑤逐字（用户已批）：占用残留末尾指引一次，路径为实际残留根；静默卸载不弹，全删净不弹。
+  assert.ok(code.includes("MsgBox('Some files could not be removed because they are in use. After closing Anyswitch, delete them manually from: ' + UninstallResidueRoot, mbInformation, MB_OK)"), "残留指引文案⑤必须逐字在位");
+  assert.ok(code.includes("if (UninstallResidueRoot <> '') and not UninstallSilent then"), "指引必须只在有残留且非静默时弹");
+  // 残留记账：整树删除与单文件删除的失败都汇入同一残留根（先记先赢）。
+  assert.ok(/procedure UninstallDeleteOwnedTree\(Path: String\);[\s\S]*?if not DeleteOwnedTree\(Path\) then NoteUninstallResidue\(Path\);/.test(code), "整树删除失败必须记残留");
+  assert.ok(/procedure DeleteOwnedFile\(Root, Name: String\);[\s\S]*?NoteUninstallResidue\(Root\);/.test(code), "单文件删除失败必须记残留");
+});
+
+test("path-prefix boundary protects task unregister and desktop shortcut cleanup", async () => {
+  const code = await readFile(join(here, "..", "..", "installer", "windows", "install-code.iss"), "utf8");
+  // 子串命中后须校验命中点之后是路径分隔符或串尾，防 C:\Anyswitch 误伤 C:\Anyswitch-src。
+  assert.ok(code.includes("$al.IndexOf($r)"), "任务比对必须先定位命中点");
+  assert.ok(code.includes("$i+$r.Length -eq $al.Length -or $al[$i+$r.Length]"), "任务比对必须校验命中点后字符");
+  assert.ok(!code.includes(".Contains($r)"), "裸 Contains 子串比对必须下线");
+  // 桌面快捷方式走同口径帮手：串尾或路径分隔符才算命中。
+  assert.ok(/function PathMentionsRoot\(Haystack, LowerRoot: String\): Boolean;[\s\S]*?Pos\(LowerRoot, Lower\)[\s\S]*?\nend;/.test(code), "PathMentionsRoot 帮手必须在位");
+  assert.ok(code.includes("if not PathMentionsRoot(Target, LowerRoot) and not PathMentionsRoot(Arguments, LowerRoot) then Exit;"), "快捷方式读回校验必须过边界帮手");
 });
 test("Windows CMD dispatcher preserves empty arguments, spaces and exit code", { skip: process.platform !== "win32" }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "Anyswitch 中文 空格 "));
