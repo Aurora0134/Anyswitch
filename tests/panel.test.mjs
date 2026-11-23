@@ -1753,24 +1753,11 @@ describe("panel.html sessions tab", () => {
     assert.ok(panelJs.includes('block: "center"'), "跳转居中对齐，避开吸顶头行");
     assert.ok(/const SESS_RENDER_CHUNK = 120/.test(panelJs), "消息流按帧建节点");
     assert.ok(panelJs.includes("function ensureSessMessageRendered"), "跳转前补齐未渲染的帧");
-    assert.ok(
-      panelJs.includes('document.body.classList.toggle("sessions-mode", sessions)'),
-      "☰ 与弹层随会话页在场",
-    );
+    const sessionsHtml = panelHtml.match(/<section class="sessions-view"[\s\S]*?(?=<section class="settings-view")/)[0];
+    assert.match(sessionsHtml, /id="sessTocFab"[\s\S]*id="sessTocPop"/, "目录入口与弹层随会话页隐藏");
     const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
-    assert.ok(
-      /@media \(max-width: 1119px\) \{[\s\S]*?\.toc-side \{ display: none; \}/.test(css),
-      "窄窗收右栏",
-    );
-    assert.ok(
-      css.includes("body.sessions-mode .toc-fab.has-toc { display: flex; }"),
-      "窄窗目录备用入口挂在会话页在场，不再绑死媒体查询",
-    );
-    assert.ok(
-      /@media \(min-width: 1024px\) \{[\s\S]*?\.toc-fab\.has-toc \{ display: none; \}/.test(css),
-      "宽窗走右栏，不留两个入口",
-    );
-    assert.ok(!/@media \(max-width: 1279px\)/.test(css), "1280 断点已下调到 1024");
+    assert.match(css, /@container sessions \(width < 1030px\) \{\s*\.sessions-detail-wrap[^\n]*\n\s*\.toc-side \{ display: none; \}\s*\.toc-fab\.has-toc \{ display: flex; \}/,
+      "正文宽度不足时用浮动目录替代右栏");
   });
 
   it("resets page scroll to the top on every main or settings sub-tab switch", () => {
@@ -3895,7 +3882,7 @@ describe("panel.html 设置全页视图", () => {
   });
 
   it("瓦片墙样式：三列网格 + 卡内小块质感（内陷面、自身无投影），质感与配置状态解耦（未配置仅文字降色）", () => {
-    assert.ok(panelCss.includes(".route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr);"),
+    assert.ok(panelCss.includes(".route-ep-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));"),
       "三列瓦片网格");
     const tileRule = panelCss.match(/\.route-ep-tile \{([^}]*)\}/);
     assert.ok(tileRule, ".route-ep-tile 静止规则存在");
@@ -7758,15 +7745,8 @@ describe("统计页布局", () => {
   });
 
   it("统计页网格、图表和日志高度随侧栏布局", () => {
-    // a) 上下半区同档塌缩：quad 补窄档 1057–1096 与宽档自动态 1200–1240 两段
-    const mid = [...panelCss.matchAll(/@media \(min-width: 1057px\) and \(max-width: 1096px\) \{([\s\S]*?)\n  \}/g)].map((m) => m[0])
-      .find((b) => b.includes(".skills-grid.stats-quad"));
-    assert.ok(mid && mid.includes("grid-template-columns: 1fr;") && mid.includes("height: auto;"),
-      "quad 窄档 1057–1096 塌缩补齐（与 top-grid 同档）");
-    const wide = [...panelCss.matchAll(/@media \(min-width: 1200px\) and \(max-width: 1240px\) \{([\s\S]*?)\n  \}/g)].map((m) => m[0])
-      .find((b) => b.includes(".skills-grid.stats-quad"));
-    assert.ok(wide && wide.includes(':not([data-rail="collapsed"]) .skills-grid.stats-quad { grid-template-columns: 1fr; }'),
-      "quad 宽档自动态 1200–1240 塌缩补齐（collapsed 手动态摘出同 top-grid）");
+    assert.match(panelCss, /@container stats \(width < 900px\) \{\s*\.stats-top-grid, \.skills-grid\.stats-quad \{ grid-template-columns: minmax\(0, 1fr\); \}\s*\.skills-grid\.stats-quad \.panel-card \{ height: auto; \}/,
+      "总览上下半区按同一内容宽度换栏");
     // b) 热力图单列态封顶 340（侧栏设计宽），v1 基座 width:100% 原样
     assert.ok(panelCss.includes(`${S3} .stats-heatmap svg { max-width: 340px; margin: 0 auto; }`), "热力图 svg 封顶居中");
     assert.ok(panelCss.includes(".stats-heatmap svg { display: block; width: 100%; height: auto; }"), "v1 热力图基座原样");
@@ -7786,6 +7766,8 @@ describe("统计页布局", () => {
       && panelJs.includes("const anim = statsTrendSnapOnce ? null :"),
       "ResizeObserver 防抖重渲在册（snap 标记瞬时落地不播动画，renderStatsTrend 签名不动）");
     assert.ok(panelCss.includes(".stats-view.logs-fixed { height: calc(100vh - 88px); height: calc(100dvh - 88px); overflow: hidden; }"));
+    assert.match(panelCss, /@media \(height < 540px\) \{\s*\.stats-view\.logs-fixed \{ height: auto; overflow: visible; \}/,
+      "矮窗释放页面高度，让日志表参与整页滚动");
   });
 
   it("回归：statsTrendChartHeight 必须是外层作用域声明（嵌套进渲染器则调用处 ReferenceError、趋势图整图空白）", () => {
@@ -7890,42 +7872,11 @@ describe("面板页头和侧栏", () => {
     assert.ok(panelCss.includes(':scope:scope .rail { background: var(--bg-page); }'));
   });
 
-  it("布局断点按栏态校准：宽档 +240 / 窄栏 +96（栏常驻，窄栏块无下界）；只校准真挤压的布局断点", () => {
-    // 校准清单（v1 阈值 → v2 宽档/窄栏）：看板双栏 1107→1347/1203、统计上半区 1000→1240/1096、
-    // 会话详情+目录 1023→1263/1119（目录浮动钮显隐随同一条）、Skills 双栏/统计四宫格 960→仅窄栏
-    // 1056（宽档阈值 960+240=1200 恰为档界：v1 口径的塌缩内容宽在宽档本就够不到，宽档无需补）。
-    // 手动态修正：collapsed（宽档栏收 72、内容只让 96）时宽档三块收 :not() 摘出——≥1200 内容
-    // 恒 ≥1104 盖过全部 v1 阈值；expanded（窄栏栏展 216）的窄栏全档塌缩块在下方另钉。
-    const expectBlock = (mq, rules) => {
-      const text = `${mq} {\n${rules.map((r) => `    ${r}`).join("\n")}\n  }`;
-      assert.ok(panelCss.includes(text), `校准块在册：${mq}`);
-    };
-    expectBlock("@media (min-width: 1200px) and (max-width: 1347px)",
-      [':root:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }']);
-    expectBlock("@media (max-width: 1203px)",
-      [':root .telemetry-layout-grid { grid-template-columns: 1fr; }']);
-    expectBlock("@media (max-width: 1056px)",
-      [':root .skills-grid { grid-template-columns: 1fr; }',
-        ':root .skills-grid.stats-quad { grid-template-columns: 1fr; }',
-        ':root .skills-grid.stats-quad .panel-card { height: auto; }']);
-    expectBlock("@media (min-width: 1200px) and (max-width: 1240px)",
-      [':root:not([data-rail="collapsed"]) .stats-top-grid { grid-template-columns: 1fr; }']);
-    expectBlock("@media (max-width: 1096px)",
-      [':root .stats-top-grid { grid-template-columns: 1fr; }']);
-    expectBlock("@media (min-width: 1200px) and (max-width: 1263px)",
-      [':root:not([data-rail="collapsed"]) .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
-        ':root:not([data-rail="collapsed"]) .toc-side { display: none; }',
-        ':root:not([data-rail="collapsed"]) body.sessions-mode .toc-fab.has-toc { display: flex; }']);
-    expectBlock("@media (max-width: 1119px)",
-      [':root .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
-        ':root .toc-side { display: none; }',
-        ':root body.sessions-mode .toc-fab.has-toc { display: flex; }']);
-    // 不动清单：瓦片类小网格（弹性吸收，塌晚仅瓦片略窄）与排版/紧凑类断点一律沿用 v1
-    // （.terminal-head 带 {：v2 另有 .terminal-head-divider 隐藏规则，不带花括号会误伤）
-    for (const sel of [".telemetry-grid", ".instance-telemetry-grid", ".route-ep-grid", ".stats-rank-cols",
-      ".settings-theme-grid", ".about-client-main", ".terminal-workspace", ".terminal-head {"]) {
-      assert.ok(!panelCss.includes(`:root ${sel}`), `${sel} 不做 v2 校准`);
-    }
+  it("看板及主题预览按内容宽度换栏，窄幅卡片不能撑宽网格", () => {
+    assert.match(panelCss, /\.telemetry-view \{ container: board \/ inline-size; \}/);
+    assert.match(panelCss, /\.telemetry-layout-grid \{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\);/);
+    assert.match(panelCss, /@container board \(width >= 890px\) \{\s*\.telemetry-layout-grid \{ grid-template-columns: 347px minmax\(0, 1fr\); \}/);
+    assert.doesNotMatch(panelCss, /data-rail[^\n]*\.telemetry-layout-grid/);
   });
 
   it("左栏手动收/展：栏顶收起钮、手动态持久化绘制前读回、双态 CSS 镜像与校准跟手", () => {
@@ -7985,13 +7936,7 @@ describe("面板页头和侧栏", () => {
       '[data-rail="expanded"] #railThemeToggle { display: inline-flex; }']) {
       assert.ok(expandedBlock.includes(pin), `expanded 块缺：${pin}`);
     }
-    // expanded 窄栏内容让 240、v1 阈值全程真挤压：四项布局全档塌缩同块在册
-    for (const pin of ['[data-rail="expanded"] .telemetry-layout-grid { grid-template-columns: 1fr; }',
-      '[data-rail="expanded"] .stats-top-grid { grid-template-columns: 1fr; }',
-      '[data-rail="expanded"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
-      '[data-rail="expanded"] body.sessions-mode .toc-fab.has-toc { display: flex; }']) {
-      assert.ok(expandedBlock.includes(pin), `expanded 校准缺：${pin}`);
-    }
+    assert.doesNotMatch(expandedBlock, /grid-template-columns/, "手动展开只调整导航占位，页面自行换栏");
     // 终端页首帧：手静态下同链两条分档左让按属性分支修正（首帧即手动态）
     assert.ok(panelCss.includes('html[data-prepaint-view="terminal"][data-rail="collapsed"] body main.layout-container { padding-left: 72px; }'),
       "终端首帧 collapsed 让 72");
@@ -13070,6 +13015,14 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
     const { sandbox, fire, inputPosts } = keydownSandbox();
     sandbox.setView("sessions");
     assert.equal(fire({ key: "a" }), false);
+    assert.deepEqual(inputPosts(), []);
+  });
+
+  it("终端状态面板按钮的回车与空格保持原生按钮操作", () => {
+    const { sandbox, fire, inputPosts } = keydownSandbox();
+    sandbox.document.activeElement = { tagName: "BUTTON", id: "terminalInspectorDrawerBtn" };
+    assert.equal(fire({ key: "Enter" }), false);
+    assert.equal(fire({ key: " " }), false);
     assert.deepEqual(inputPosts(), []);
   });
 

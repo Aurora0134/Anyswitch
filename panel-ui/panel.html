@@ -690,7 +690,7 @@ if (window.panelStartupController) panelStartupPlay();
                 </label>
               </div>
             </div>
-            <div style="display:flex; gap:8px; margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
+            <div class="board-service-actions">
               <button class="btn btn-mini btn-danger" id="sbRelayToggleBtn" style="flex:1; justify-content:center;" disabled>⏹ 停止</button>
               <button class="btn btn-mini" id="sbRelayRestartBtn" style="justify-content:center;" disabled>🔄 重启</button>
             </div>
@@ -1922,7 +1922,7 @@ if (window.panelStartupController) panelStartupPlay();
     <!-- 页头：视图标题 + 刷新 / 批量管理 -->
     <div class="sessions-pagehead">
       <h2 class="sessions-pagehead-title">
-        <button class="icon-btn sessions-drawer-open-btn" id="sessDrawerOpenBtn" title="打开会话列表">☰</button>
+        <button class="icon-btn sessions-drawer-open-btn" id="sessDrawerOpenBtn" title="打开会话列表" aria-label="打开会话列表" aria-controls="sessListCard" aria-expanded="false">☰</button>
         会话管理
         <span class="badge badge-neutral" id="sessTotalBadge">0 个会话</span>
       </h2>
@@ -2054,6 +2054,11 @@ if (window.panelStartupController) panelStartupPlay();
           <div id="sessTocList"></div>
         </nav>
       </div>
+    </div>
+    <button class="toc-fab" id="sessTocFab" title="消息目录">☰</button>
+    <div class="toc-pop" id="sessTocPop" hidden>
+      <h4>消息目录</h4>
+      <div id="sessTocPopList"></div>
     </div>
   </section>
 
@@ -2583,6 +2588,9 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="terminal-head-right">
           <span class="badge" id="terminalHostHeadBadge"><span class="badge-text">状态未知</span></span>
           <button type="button" class="btn btn-mini" title="启动终端服务" aria-label="启动终端服务" id="terminalHostToggleBtn" disabled>启动终端服务</button>
+          <button type="button" class="icon-btn terminal-head-icon terminal-inspector-trigger" id="terminalInspectorDrawerBtn" title="展开状态面板" aria-label="展开状态面板" aria-controls="terminalInspector" aria-expanded="false">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
+          </button>
           <button type="button" class="icon-btn terminal-head-icon" title="终端设置" aria-label="终端设置" id="terminalSettingsBtn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="3"/>
@@ -2734,13 +2742,6 @@ if (window.panelStartupController) panelStartupPlay();
   </section>
 
 </main>
-
-<!-- 会话管理：TOC 浮动按钮 + 弹层（小屏） -->
-<button class="toc-fab" id="sessTocFab" title="消息目录">☰</button>
-<div class="toc-pop" id="sessTocPop" hidden>
-  <h4>消息目录</h4>
-  <div id="sessTocPopList"></div>
-</div>
 
 <!-- 客户端更新：目标客户端正在运行时的确认（复用 .modal-overlay/.modal-card 体系） -->
 <div class="modal-overlay" id="clientUpdateModal">

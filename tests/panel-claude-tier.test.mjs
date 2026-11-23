@@ -303,7 +303,7 @@ describe("panel.css · 档位行只管版式", () => {
   it("新增类不引入任何颜色取值，因此主题片段无需特化", () => {
     const rule = sliceBetween(css, ".settings-tier-input {", "\n  }\n", ".settings-tier-input");
     assert.equal(/(background|border|color|outline|box-shadow)\s*:/.test(rule), false);
-    assert.match(rule, /width: min\(320px, 46vw\)/);
+    assert.match(rule, /width: min\(320px, 100%\)/);
     assert.match(rule, /text-align: left/);
     // select 形态没有 placeholder，输入框时代的占位规则不得回潮成死代码。
     assert.equal(css.includes(".settings-tier-input::placeholder"), false);
