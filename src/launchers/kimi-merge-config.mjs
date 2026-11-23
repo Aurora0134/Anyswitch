@@ -66,10 +66,15 @@ export function kimiProviderId(providerId, provider) {
 // pseudo-channel: aliases are never rendered (the picker shows the model's
 // display name), and the user's default_model plus old session records still
 // reference "_auto/..." — renaming them would strand every stored reference.
-// A real channel named "auto" shares the same "_auto/<model>" alias namespace
-// by the ordinary rule; the two coexist because their model ids differ.
+// A real channel named "auto" takes the same "_auto/<model>" namespace by the
+// ordinary rule, so once a collision moves the placeholder off the "auto" map
+// key its aliases must follow that key instead: a real model whose id also
+// sits on the placeholder (the trigger word "auto", a shared virtual model
+// name) would otherwise produce two identical [models.*] tables and kimi
+// rejects the whole file.
 export function kimiModelAlias(providerId, modelId, provider) {
-  return `${prefixedProviderId(isAggregatePlaceholder(provider) ? AUTO_CHANNEL_KEY : providerId)}/${modelId}`;
+  const namespace = isAggregatePlaceholder(provider) && providerId === AUTO_CHANNEL_KEY ? AUTO_CHANNEL_KEY : providerId;
+  return `${prefixedProviderId(namespace)}/${modelId}`;
 }
 
 export function buildKimiManagedToml(managedProviders, port, token, effort = null) {

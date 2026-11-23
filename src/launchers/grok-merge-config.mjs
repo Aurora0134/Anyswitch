@@ -131,10 +131,13 @@ export function managedModelKey(channelId, modelId, provider) {
   // AUTO_MODEL_KEY 会被去重门整条跳过，虚拟模型从 grok 目录里消失。键保持
   // anyswitch- 前缀 + 渠道限定 slug，陈表清理与真渠道同一套机制。
   // 伪渠道按 aggregatePlaceholder 标记识别而非键名：撞名时它的 map 键是
-  // fallback（"anyswitch"…），slug 段仍钉 "auto" 保持键形稳定；此时真实
-  // 渠道 auto 走普通分支拿 "anyswitch-auto~<model>"。
+  // fallback（"anyswitch"…），此时真实渠道 auto 走普通分支拿
+  // "anyswitch-auto~<model>"——占位的 slug 段也随之改取实际键，否则真实渠道
+  // 里与虚拟模型同名的模型会和占位行撞成同名表，去重门会把占位行整条跳过。
   if (isAggregatePlaceholder(provider)) {
-    return modelId === AUTO_CHANNEL_KEY ? AUTO_MODEL_KEY : `${MANAGED_ID_PREFIX}${packChannelModelSlug(AUTO_CHANNEL_KEY, modelId)}`;
+    if (modelId === AUTO_CHANNEL_KEY) return AUTO_MODEL_KEY;
+    const namespace = channelId === AUTO_CHANNEL_KEY ? AUTO_CHANNEL_KEY : channelId;
+    return `${MANAGED_ID_PREFIX}${packChannelModelSlug(namespace, modelId)}`;
   }
   return `${MANAGED_ID_PREFIX}${packChannelModelSlug(channelId, modelId)}`;
 }

@@ -241,6 +241,23 @@ describe("grok catalog key packing", () => {
     assert.deepEqual(skipped, [], "虚拟模型不再被当作重复键跳过");
   });
 
+  it("撞名时占位模型键随实际键走，不与真实渠道 auto 的同名模型撞键跳过", () => {
+    // 真实渠道 auto 挂了与虚拟模型同名的 vm-a：占位骑在 fallback 键 anyswitch
+    // 上，其 slug 段若仍钉 auto，两边会撞成同一个 anyswitch-auto~vm-a，去重门
+    // 把占位行整条跳过——虚拟模型从 grok 目录里消失。
+    const { modelKeys, skipped } = buildGrokManagedToml(
+      {
+        auto: { displayName: "Auto", models: { "vm-a": {} } },
+        anyswitch: { channelName: "Anyswitch", aggregatePlaceholder: true, baseUrlSegment: "poke-api", models: { auto: {}, "vm-a": {} } },
+      },
+      47821,
+      "tok",
+    );
+    assert.deepEqual(skipped, []);
+    assert.ok(modelKeys.includes("anyswitch-auto~vm-a"), "真实渠道 auto 的模型照常占限定键");
+    assert.ok(modelKeys.includes("anyswitch-anyswitch~vm-a"), "占位虚拟模型随实际键占键");
+  });
+
   it("packs the key with codex's ~ separator so the first ~ is the only channel/model boundary", () => {
     const store = { version: 2, providers: { "poke-api": { models: { "openai/gpt-5.6-luna": {}, "m~x": {} } } } };
     const key = managedModelKey("poke-api", "openai/gpt-5.6-luna");

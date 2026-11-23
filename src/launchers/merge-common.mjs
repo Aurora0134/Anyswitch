@@ -159,6 +159,22 @@ export function isAggregatePlaceholderKey(id) {
   );
 }
 
+// The providers-map key withAggregateChannel would give the placeholder for
+// this managed map: AUTO_CHANNEL_KEY when free, else the first open fallback
+// of the AGGREGATE_FALLBACK_KEY family. Exported so consumers that only see
+// the merged result's key list (zcode's CLI slot default selection) can find
+// the placeholder without re-running the merge.
+export function aggregateMapKey(managedProviders) {
+  if (managedProviders?.[AUTO_CHANNEL_KEY] === undefined) return AUTO_CHANNEL_KEY;
+  let key = AGGREGATE_FALLBACK_KEY;
+  let n = 2;
+  while (managedProviders?.[key] !== undefined) {
+    key = `${AGGREGATE_FALLBACK_KEY}-${n}`;
+    n += 1;
+  }
+  return key;
+}
+
 // Append the aggregate placeholder to the managed providers map — the shared
 // form of every merge module's old
 // `autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders`
@@ -173,14 +189,5 @@ export function isAggregatePlaceholderKey(id) {
 // builders never have to know which key it landed on.
 export function withAggregateChannel(managedProviders, aggregateChannel) {
   if (!aggregateChannel) return managedProviders;
-  if (managedProviders?.[AUTO_CHANNEL_KEY] === undefined) {
-    return { ...managedProviders, [AUTO_CHANNEL_KEY]: aggregateChannel };
-  }
-  let key = AGGREGATE_FALLBACK_KEY;
-  let n = 2;
-  while (managedProviders?.[key] !== undefined) {
-    key = `${AGGREGATE_FALLBACK_KEY}-${n}`;
-    n += 1;
-  }
-  return { ...managedProviders, [key]: aggregateChannel };
+  return { ...managedProviders, [aggregateMapKey(managedProviders)]: aggregateChannel };
 }

@@ -521,7 +521,7 @@ async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, d
   if (skipped.length === paths.length) {
     return { ok: false, unchanged: true, reason: "every dsh profile patch is unparseable" };
   }
-  // 有界面被跳过时它没吃到本轮增删：只记本轮键会让该界面里上一轮托管、本轮已删
+  // 有界面被跳过时它未经手本轮增删：只记本轮键会让该界面里上一轮托管、本轮已删
   // 的渠道永远清不出去。续记 previousManaged 的并集，待全量可写轮精确收敛。
   const sidecarIds = skipped.length > 0
     ? [...new Set([...Object.keys(providers), ...previousManaged])]
