@@ -11296,6 +11296,17 @@ async function api(method, path, body, signal) {
     if (inspector) inspector.style.display = mode;
     const workspace = $("terminalWorkspace");
     if (workspace) workspace.classList.toggle("is-empty", !visible);
+    if (!visible && workspace?.classList.contains("is-inspector-drawer-open")) setTerminalInspectorDrawer(false);
+  }
+
+  function setTerminalInspectorDrawer(open) {
+    const workspace = $("terminalWorkspace");
+    const button = $("terminalInspectorDrawerBtn");
+    if (!button || !workspace) return;
+    workspace.classList.toggle("is-inspector-drawer-open", open);
+    button.setAttribute("aria-expanded", String(open));
+    button.title = open ? "收起状态面板" : "展开状态面板";
+    button.setAttribute("aria-label", button.title);
   }
 
   // 零会话空态：终端页一个终端都没有时（关掉最后一个标签、或回归时本就是零
@@ -12426,6 +12437,23 @@ async function api(method, path, body, signal) {
       // 时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。
       scheduleTerminalFit();
     };
+    const drawerButton = $("terminalInspectorDrawerBtn");
+    if (drawerButton) {
+      const drawerOpen = () => drawerButton.getAttribute("aria-expanded") === "true";
+      drawerButton.onclick = () => setTerminalInspectorDrawer(!drawerOpen());
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || !drawerOpen() || event.defaultPrevented) return;
+        if (document.querySelector(".modal-overlay.show") || !$("terminalAddMenu").hidden) return;
+        event.preventDefault();
+        setTerminalInspectorDrawer(false);
+        drawerButton.focus({ preventScroll: true });
+      });
+      if (typeof ResizeObserver === "function") {
+        new ResizeObserver(() => {
+          if (drawerOpen() && !drawerButton.getClientRects().length) setTerminalInspectorDrawer(false);
+        }).observe(drawerButton);
+      }
+    }
     // 页签条收展偏好恢复：只落 DOM/文案（apply 不触发 fit，终端流未建，进页时
     // scheduleTerminalFit 会按含本态的布局量准）；点击翻转走 setTerminalTabsHidden
     //（持久化 + 补一次尺寸适配）。
@@ -12487,6 +12515,7 @@ async function api(method, path, body, signal) {
       // 焦点守卫：xterm 自持输入时不劫持；其它输入控件（新建菜单 cwd 框等）不劫持。
       const active = document.activeElement;
       if (active?.classList?.contains("xterm-helper-textarea")) return;
+      if (active?.id === "terminalInspectorDrawerBtn" && (event.key === "Enter" || event.key === " ")) return;
       if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
       const session = terminalSessionFor(activeTerminalPreviewId);
       if (!session?.backend) return;
@@ -17010,6 +17039,7 @@ async function api(method, path, body, signal) {
       }
       renderSkillsList();
       renderSkillDetail();
+      if (skillsFocusKey === key && !e.ctrlKey && !e.metaKey) revealStackedDetail("skillsDetailBody");
     });
     // 右键菜单（伪资源管理器）：按目标行是否在选中集合中分流
     $("skillsList").addEventListener("contextmenu", (e) => {
@@ -17164,6 +17194,13 @@ async function api(method, path, body, signal) {
     document.body.scrollTop = 0;
   }
 
+  function revealStackedDetail(bodyId) {
+    const detail = $(bodyId).closest(".panel-card");
+    const detailColumn = detail.closest(".skills-col");
+    const listColumn = detailColumn.previousElementSibling;
+    if (detailColumn.offsetTop > listColumn.offsetTop) detail.scrollIntoView({ block: "start" });
+  }
+
   function switchView(name) {
     // 点的就是当前这一页：高亮已经在、内容也在，再走一遍只会把整棵列表重建一次、
     // 再发一轮请求、再回一次顶——用户看到的是一次闪动。设置子 tab 那边是同款先例
@@ -17187,9 +17224,6 @@ async function api(method, path, body, signal) {
     $("settingsView").hidden = !settings;
     $("terminalView").hidden = !terminal;
     document.body.classList.toggle("terminal-mode", terminal);
-    // 目录的窄屏入口（☰ 与弹层）挂在 </main> 之外，不随视图 hidden 一起消失；
-    // 用同一个 body 类把它收进会话页，离开即不可见也不可达。
-    document.body.classList.toggle("sessions-mode", sessions);
     // 设置态栏换血标记：左栏主 tab 组换设置目录、栏底齿轮换「返回」（CSS 收权，与
     // terminal-mode 同型；首帧由 data-prepaint-view="settings" 那四条同值规则承担）。
     document.body.classList.toggle("settings-mode", settings);
@@ -19359,6 +19393,7 @@ async function api(method, path, body, signal) {
       }
       renderPresetsList();
       renderPresetDetail();
+      if (presetsFocusId === id && !e.ctrlKey && !e.metaKey) revealStackedDetail("presetsDetailBody");
     });
     // 右键菜单（复用 skills 菜单基建 popSkillsContextMenu）：按目标行是否在选中
     // 集合分流——集合外行重置为单选弹单选菜单；集合内行集合不变，多成员弹多选
@@ -21889,7 +21924,7 @@ async function api(method, path, body, signal) {
 
   // ── 焦点切换（含脏过滤确认）：详情渠道将变化且有未保存勾选改动时先确认 ──
   let storePendingFocus = null;
-  function applyStoreFocus(focusId, poolTab) {
+  function applyStoreFocus(focusId, poolTab, revealDetail) {
     storeFocusId = focusId;
     if (poolTab !== undefined) storePoolTab = poolTab;
     const pid = storeDetailProviderIdFor(focusId, storePoolTab);
@@ -21900,11 +21935,12 @@ async function api(method, path, body, signal) {
     }
     renderStoreList();
     renderStoreDetail();
+    if (focusId && revealDetail) revealStackedDetail("storeDetailBody");
   }
-  function requestStoreFocus(focusId, poolTab) {
+  function requestStoreFocus(focusId, poolTab, revealDetail) {
     const pid = storeDetailProviderIdFor(focusId, poolTab === undefined ? storePoolTab : poolTab);
     if (storeFilterDirty && pid !== storeFilterProviderId) {
-      storePendingFocus = { focusId, poolTab };
+      storePendingFocus = { focusId, poolTab, revealDetail };
       showSkillsModal({
         title: "放弃未保存的过滤改动？",
         confirmText: "放弃并切换",
@@ -21912,12 +21948,12 @@ async function api(method, path, body, signal) {
         onConfirm: async () => {
           const pending = storePendingFocus;
           storePendingFocus = null;
-          if (pending) applyStoreFocus(pending.focusId, pending.poolTab);
+          if (pending) applyStoreFocus(pending.focusId, pending.poolTab, pending.revealDetail);
         },
       });
       return;
     }
-    applyStoreFocus(focusId, poolTab);
+    applyStoreFocus(focusId, poolTab, revealDetail);
   }
 
 
@@ -23366,7 +23402,7 @@ async function api(method, path, body, signal) {
       // 普通左键：集合 = {该行}，焦点 = 该行
       storeSelection.clear();
       storeSelection.add(id);
-      requestStoreFocus(id);
+      requestStoreFocus(id, undefined, true);
     });
     $("storeList").addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -26152,9 +26188,18 @@ async function api(method, path, body, signal) {
     sessState.selectedId = id;
     syncSessSelection();   // 刷新选中态：只切行的类，不整树重铺
     renderSessDetail();
-    // 移动端：选中后收起抽屉
-    $("sessListCard").classList.remove("drawer-open");
-    $("sessDrawerMask").classList.remove("show");
+    setSessionListDrawer(false, true);
+  }
+
+  function setSessionListDrawer(open, restoreFocus = false) {
+    const button = $("sessDrawerOpenBtn");
+    const list = $("sessListCard");
+    const wasOpen = list.classList.contains("drawer-open");
+    list.classList.toggle("drawer-open", open);
+    $("sessDrawerMask").classList.toggle("show", open);
+    button.setAttribute("aria-expanded", String(open));
+    if (open) $("sessSearchInput").focus({ preventScroll: true });
+    else if (wasOpen && restoreFocus) button.focus({ preventScroll: true });
   }
 
   function currentSession() { return sessState.sessions.find((s) => s.id === sessState.selectedId) || null; }
@@ -26520,7 +26565,7 @@ async function api(method, path, body, signal) {
   function leaveSessionsView() {
     if (sessTimer) { clearInterval(sessTimer); sessTimer = null; }
     if (sessMsgObserver) { sessMsgObserver.disconnect(); sessMsgObserver = null; }
-    // ☰ 靠 body 类随视图收起，弹层是属性控制的：不收就会在回来时挂着开着的空层。
+    setSessionListDrawer(false);
     $("sessTocPop").hidden = true;
     // 列表节点不跟着视图一起留在 DOM 里：三千行、一万八千个节点，隐藏状态下浏览器仍要
     // 为它们做样式与布局结算，切回来那一帧还得整棵重排一遍。滚动位先记下，回来再兑现。
@@ -26680,15 +26725,22 @@ async function api(method, path, body, signal) {
       appendSessMessageChunk(cur);
     }, { passive: true });
 
-    // 移动端抽屉
-    $("sessDrawerOpenBtn").addEventListener("click", () => {
-      $("sessListCard").classList.add("drawer-open");
-      $("sessDrawerMask").classList.add("show");
-    });
-    $("sessDrawerMask").addEventListener("click", () => {
-      $("sessListCard").classList.remove("drawer-open");
-      $("sessDrawerMask").classList.remove("show");
-    });
+    const drawerButton = $("sessDrawerOpenBtn");
+    drawerButton.addEventListener("click", () => setSessionListDrawer(true));
+    $("sessDrawerMask").addEventListener("click", () => setSessionListDrawer(false, true));
+    $("sessionsView").addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || drawerButton.getAttribute("aria-expanded") !== "true") return;
+      if ($("sessCtxMenu") || $("sessDlgMask").classList.contains("show")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setSessionListDrawer(false, true);
+    }, { capture: true });
+    new ResizeObserver(() => {
+      if (drawerButton.getAttribute("aria-expanded") === "true" && !drawerButton.getClientRects().length) {
+        setSessionListDrawer(false);
+      }
+      if (!$("sessTocPop").hidden && !$("sessTocFab").getClientRects().length) $("sessTocPop").hidden = true;
+    }).observe($("sessionsView"));
 
     // 右键菜单：委托挂常驻滚动容器（行节点逐帧铺入，逐行绑会失效）；
     // 命中会话行 → 先选中该行再弹单项删除菜单；空白处/组头/骨架空态不弹。
@@ -26703,8 +26755,7 @@ async function api(method, path, body, signal) {
         sessState.selectedId = id;
         syncSessSelection(); // 同 selectSession：只切类，滚动位一动不动
         renderSessDetail();
-        $("sessListCard").classList.remove("drawer-open");
-        $("sessDrawerMask").classList.remove("show");
+        setSessionListDrawer(false, true);
       }
       showSessContextMenu(e.clientX, e.clientY, id);
     });

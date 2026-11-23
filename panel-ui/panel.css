@@ -400,36 +400,6 @@
   }
   }
 
-  /* 双栏折叠阈值计入侧栏占宽：宽栏 240px，窄栏 96px。
-     宽档手动收起时，内容宽度由下方的窄栏规则判断。 */
-  @media (min-width: 1200px) and (max-width: 1347px) {
-    :root:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }
-  }
-  @media (max-width: 1203px) {
-    :root .telemetry-layout-grid { grid-template-columns: 1fr; }
-  }
-  @media (max-width: 1056px) {
-    :root .skills-grid { grid-template-columns: 1fr; }
-    :root .skills-grid.stats-quad { grid-template-columns: 1fr; }
-    :root .skills-grid.stats-quad .panel-card { height: auto; }
-  }
-  @media (min-width: 1200px) and (max-width: 1240px) {
-    :root:not([data-rail="collapsed"]) .stats-top-grid { grid-template-columns: 1fr; }
-  }
-  @media (max-width: 1096px) {
-    :root .stats-top-grid { grid-template-columns: 1fr; }
-  }
-  @media (min-width: 1200px) and (max-width: 1263px) {
-    :root:not([data-rail="collapsed"]) .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
-    :root:not([data-rail="collapsed"]) .toc-side { display: none; }
-    :root:not([data-rail="collapsed"]) body.sessions-mode .toc-fab.has-toc { display: flex; }
-  }
-  @media (max-width: 1119px) {
-    :root .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
-    :root .toc-side { display: none; }
-    :root body.sessions-mode .toc-fab.has-toc { display: flex; }
-  }
-
   /* 设置页描边卡片。仅覆盖有设置项的子页，主题预览中的看板卡片沿用原样式。 */
   :root[data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {
     background: transparent; border: 1px solid var(--border); border-radius: var(--radius-md);
@@ -864,9 +834,7 @@
      窄栏基座（阶段 1 段）没有上界、<1200 全程生效，宽档块在 ≥1200 逐项撤销成
      216：collapsed 只需在 ≥1200 把宽档的撤销再撤回去（取值逐项抄宽档块撤销前的
      窄栏态）；expanded 只需在 <1200 把窄栏的收起逐项撤销（取值抄宽档块）。栏多宽
-     内容让多少：collapsed 时三处宽档校准块已由 :not() 摘出（见阶段 1 校准段注释）；
-     expanded 时窄栏内容让 240，块内尾部补一条 <1200 全档塌缩
-     （四项布局取值与阶段 1 校准块逐项同源，目录浮动钮随同）。 */
+     内容区按实测宽度排栏，侧栏只管理自身宽度和页面让位。 */
 
   .icon-btn.rail-collapse-btn { margin-left: auto; flex-shrink: 0; }
 
@@ -884,8 +852,7 @@
     :root[data-rail="collapsed"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
     :root[data-rail="collapsed"] #railThemeToggle { display: none; }
   }
-  /* 手动态 expanded：<1200 把窄栏收起逐项撤销成 216 全栏（栏底亮暗钮召回——
-     收窄态才隐藏它，全栏形态照旧在）；尾部是该态的窄栏全档塌缩校准 */
+  /* 手动态 expanded：<1200 把窄栏收起逐项撤销成 216 全栏。 */
   @media (max-width: 1199px) {
     :root[data-rail="expanded"] .rail { width: 216px; padding: 8px 12px 16px; }
     :root[data-rail="expanded"] .rail-brand { justify-content: flex-start; padding: 0 6px; flex-direction: row; gap: 12px; }
@@ -898,14 +865,6 @@
     :root[data-rail="expanded"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }
     :root[data-rail="expanded"] body.terminal-mode main.layout-container { max-width: none; padding-left: 216px; }
     :root[data-rail="expanded"] #railThemeToggle { display: inline-flex; }
-    :root[data-rail="expanded"] .telemetry-layout-grid { grid-template-columns: 1fr; }
-    :root[data-rail="expanded"] .skills-grid { grid-template-columns: 1fr; }
-    :root[data-rail="expanded"] .skills-grid.stats-quad { grid-template-columns: 1fr; }
-    :root[data-rail="expanded"] .skills-grid.stats-quad .panel-card { height: auto; }
-    :root[data-rail="expanded"] .stats-top-grid { grid-template-columns: 1fr; }
-    :root[data-rail="expanded"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
-    :root[data-rail="expanded"] .toc-side { display: none; }
-    :root[data-rail="expanded"] body.sessions-mode .toc-fab.has-toc { display: flex; }
   }
   /* 收窄态（<1200 自动档）同口径：栏底亮暗钮隐、单钮居中防歪；品牌行保持横排但
      收紧——图标与收起钮各收 24px（见下方收窄两态尺寸块），24+4+24=52 ≤ 栏内容宽 56，
@@ -1129,16 +1088,6 @@
   :root[data-style] .logs-table td:nth-child(5),
   :root[data-style] .logs-table th:nth-child(6),
   :root[data-style] .logs-table td:nth-child(6) { text-align: right; }
-  /* 上下半区同档塌缩：补 quad 在窄档 1057–1096、宽档自动态 1200–1240 两段
-     （取值抄阶段 1 校准块的 quad 条目） */
-  @media (min-width: 1057px) and (max-width: 1096px) {
-    :root .skills-grid.stats-quad { grid-template-columns: 1fr; }
-    :root .skills-grid.stats-quad .panel-card { height: auto; }
-  }
-  @media (min-width: 1200px) and (max-width: 1240px) {
-    :root:not([data-rail="collapsed"]) .skills-grid.stats-quad { grid-template-columns: 1fr; }
-    :root:not([data-rail="collapsed"]) .skills-grid.stats-quad .panel-card { height: auto; }
-  }
   /* 热力图单列态封顶：340=侧栏卡设计宽（--stats-side-w 缺省值），居中防满幅悬空 */
   :root[data-style] #statsView .stats-heatmap svg { max-width: 340px; margin: 0 auto; }
   /* 环形图窄屏等比缩（viewBox 208 恒定，CSS 只封顶不放大） */
@@ -1188,21 +1137,38 @@
     padding-bottom: 48px;
   }
 
-  /* 左栏 347px 是状态检测柱图的槽位甜点（容器 309px = 48 柱 ×4px + 47 间隙 ×2px
-     + 行 padding 4px + 柱图缩进 19px，恰整除零余量，机制见 .ms-cell 注释）；改左栏
-     宽度时同步调整侧栏各档的折叠阈值。 */
+  .telemetry-view { container: board / inline-size; }
+  /* 347px 给状态检测留足 48 根柱，双栏时端点区至少保留 523px。 */
   .telemetry-layout-grid {
     display: grid;
-    grid-template-columns: 347px 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
     align-items: start;
   }
-
+  @container board (width >= 890px) {
+    .telemetry-layout-grid { grid-template-columns: 347px minmax(0, 1fr); }
+  }
   .sidebar-col, .main-col {
     display: flex;
     flex-direction: column;
     gap: 20px;
+    min-width: 0;
   }
+  @container board (width < 890px) {
+    .telemetry-layout-grid, .sidebar-col, .main-col { gap: 12px; }
+    .sidebar-col .card-body { padding-block: 10px; }
+    .sidebar-col .card-header { padding-block: 8px; }
+    .sidebar-col .prop-list { gap: 6px; }
+    .live-log-bar, .live-log-actions { flex-wrap: wrap; }
+  }
+  @container board (660px <= width < 890px) {
+    .sidebar-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+    .sidebar-col .live-log-region { grid-column: 1 / -1; }
+  }
+
+  .board-service-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .sidebar-col .prop-row { gap: 8px; }
+  .sidebar-col .prop-val { min-width: 0; overflow-wrap: anywhere; text-align: right; }
 
   /* 卡片通用组件 */
   .panel-card {
@@ -1669,9 +1635,6 @@
   }
   /* 类选择器的 display:grid 会盖掉 UA 的 [hidden] 规则，折叠收起须显式声明 */
   .telemetry-grid[hidden] { display: none; }
-  @media (max-width: 860px) {
-    .telemetry-grid { grid-template-columns: repeat(2, 1fr); }
-  }
 
   /* 实例行内嵌四宫格（多实例栏展开态）：作为 session-row 的相邻兄弟挂在列表里，
      与简要行同内边距、顶部虚线分隔；[hidden] 同样要显式 display:none 才能收起 */
@@ -1685,8 +1648,11 @@
   .instance-telemetry-grid[hidden] { display: none; }
   /* 仅展开态显示的元素（如多实例栏的「全局汇总」行）：hidden 时盖掉 session-row 的 display:flex */
   .detail-open-only[hidden] { display: none; }
-  @media (max-width: 860px) {
-    .instance-telemetry-grid { grid-template-columns: repeat(2, 1fr); }
+  .main-col { container: endpoints / inline-size; }
+  @container endpoints (width < 530px) {
+    .telemetry-grid, .instance-telemetry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .agent-brand, .agent-headings, .agent-actions { min-width: 0; flex-wrap: wrap; }
+    .agent-headings h3 { overflow-wrap: anywhere; }
   }
 
   .telemetry-card {
@@ -2005,7 +1971,7 @@
      主题 token），这里只把它从「右对齐的小数字框」改成「左对齐的模型名框」——
      不引入任何颜色声明，因此三套主题与亮暗都无需特化片段。 */
   .settings-tier-input {
-    width: min(320px, 46vw); text-align: left;
+    width: min(320px, 100%); text-align: left;
     font-family: var(--font-mono); font-weight: 500;
   }
   /* 四档行的收起容器：总开关关掉时整块藏起（显式声明打底，防止将来给容器加
@@ -2075,8 +2041,13 @@
   }
   .settings-theme-desc { margin: 0 0 12px; font-size: 12px; color: var(--text-3); }
   .settings-theme-grid { display: grid; grid-template-columns: 180px 1fr; gap: 16px; align-items: start; }
-  @media (max-width: 960px) {
+  .settings-view { container: settings / inline-size; }
+  @container settings (width < 830px) {
     .settings-theme-grid { grid-template-columns: 1fr; }
+  }
+  @container settings (width < 480px) {
+    .settings-panel .modal-item { flex-wrap: wrap; gap: 8px; }
+    .settings-panel .modal-item > * { min-width: 0; max-width: 100%; }
   }
   .settings-theme-list { display: flex; flex-direction: column; gap: 4px; }
   .settings-theme-item {
@@ -2347,8 +2318,9 @@
   body.terminal-mode header.site-head { display: none; }
   body.terminal-mode main.layout-container { padding-block: 0; padding-right: 0; margin: 0; }
   body.terminal-mode > footer { display: none; }
-  .terminal-view { height: 100vh; overflow: hidden; background: var(--bg-page); }
-  .terminal-shell { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  .terminal-view { height: 100vh; overflow: hidden; background: var(--bg-page); container: terminal / inline-size; }
+  .terminal-shell { height: 100vh; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  .terminal-inspector-trigger { display: none; }
   .terminal-head {
     min-height: 58px; display: flex; align-items: center; justify-content: space-between;
     gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border);
@@ -2716,25 +2688,28 @@
   }
   .terminal-request-err { color: var(--danger); overflow-wrap: anywhere; }
   .terminal-request-expand-meta { color: var(--text-4); margin-top: 2px; }
-  @media (max-width: 900px) {
-    .terminal-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
-    .terminal-head { padding: 0 16px; }
-  }
-  @media (max-width: 700px) {
-    .terminal-head { min-height: 52px; padding: 0 10px; }
+  @container terminal (width < 850px) {
+    .terminal-head { min-height: 52px; padding: 6px 10px; flex-wrap: wrap; gap: 6px; }
+    .terminal-head-left, .terminal-head-right { flex-wrap: wrap; gap: 6px; }
+    .terminal-head-right { margin-inline-start: auto; }
     .terminal-page-title span:not(.terminal-page-title-mark) { display: none; }
-    /* 窄屏头行：徽标省略文字只留圆点（色即状态），让位给起停钮与设置齿轮 */
-    .terminal-head-right { gap: 8px; }
     #terminalHostHeadBadge { padding-left: 6px; padding-right: 6px; }
     #terminalHostHeadBadge .badge-text { display: none; }
     #terminalHostHeadBadge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-    .terminal-workspace { display: flex; flex-direction: column; }
-    .terminal-main-pane { min-height: calc(100vh - 52px); }
-    .terminal-inspector { max-height: 330px; border-top: 1px solid var(--border); }
-    .terminal-inspector.is-collapsed { width: auto; max-height: 49px; }
-    .terminal-inspector.is-collapsed .terminal-inspector-head { justify-content: space-between; padding: 10px 14px; }
-    .terminal-inspector.is-collapsed .terminal-inspector-head > div { display: block; }
-    .terminal-inspector.is-collapsed .terminal-inspector-body { display: none; }
+    .terminal-workspace, .terminal-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr); position: relative; }
+    .terminal-shell:has(.terminal-workspace:not(.is-empty)) .terminal-inspector-trigger { display: inline-flex; }
+    .terminal-inspector { display: none; }
+    .terminal-workspace.is-inspector-drawer-open:not(.is-empty) .terminal-inspector {
+      display: flex; position: absolute; z-index: 25; inset: 0 0 0 auto;
+      width: min(100%, 340px); border-left: 1px solid var(--border); box-shadow: var(--shadow-lg);
+    }
+    .terminal-inspector .terminal-inspector-head { justify-content: space-between; padding: 10px 14px; flex-shrink: 0; }
+    .terminal-inspector.is-collapsed .terminal-inspector-head > div,
+    .terminal-inspector.is-collapsed .terminal-inspector-body { display: block; }
+    .terminal-inspector .terminal-inspector-toggle { display: none; }
+    .terminal-session-bar { flex-wrap: wrap; gap: 4px 12px; padding-block: 4px; }
+    .terminal-session-actions { flex-wrap: wrap; }
+    .terminal-session-name { overflow: hidden; text-overflow: ellipsis; }
     .terminal-screen { padding: 16px 14px 12px; font-size: 12px; }
     .terminal-session-path { display: none; }
     .terminal-foot-tokens-wrap { display: none; }
@@ -2791,9 +2766,15 @@
 
   /* Skills 视图：左右分栏布局（左：主仓库+skill 列表；右：详情+异常聚合） */
   .skills-grid {
-    display: grid; grid-template-columns: minmax(320px, 5fr) 7fr; gap: 16px;
+    display: grid; grid-template-columns: minmax(320px, 5fr) minmax(0, 7fr); gap: 16px;
     align-items: start;
   }
+  .skills-view { container: management / inline-size; }
+  @container management (width < 860px) {
+    .skills-grid { grid-template-columns: minmax(0, 1fr); }
+    .skills-grid .skills-list { max-height: min(34vh, 340px); }
+  }
+  .skills-col .panel-card:has(> :is(#skillsDetailBody, #presetsDetailBody, #storeDetailBody)) { scroll-margin-top: 64px; }
   .skills-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   /* Skills 视图：主仓库卡片 */
   .skills-repo-path {
@@ -3019,8 +3000,9 @@
   }
 
   /* Skills 视图：详情卡（右列上） */
-  .skills-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  .skills-detail-actions { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .skills-detail-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+  .skills-detail-head > div { min-width: 0; overflow-wrap: anywhere; }
+  .skills-detail-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
   /* 收藏钮（详情卡）：与删除钮同规格的 btn（基样由 .btn 提供），.on 时 accent
      高亮；行内星标（列表行）基座默认——实心金色星，sepia
      在其主题区覆盖 */
@@ -3480,9 +3462,9 @@
      token，三套主题 × 亮暗各自取值且方向恒为内陷。质感与配置状态解耦：九枚瓦片
      同面同影，状态只由徽标/按钮/文字明暗表达（未配置仅名称与徽标降为三级色）。 */
   #settingsPanelRoute { display: flex; flex-direction: column; gap: 20px; }
-  .route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  @media (max-width: 900px) { .route-ep-grid { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 600px) { .route-ep-grid { grid-template-columns: 1fr; } }
+  .route-ep-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  @container settings (width < 770px) { .route-ep-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @container settings (width < 500px) { .route-ep-grid { grid-template-columns: minmax(0, 1fr); } }
   .route-ep-tile {
     min-width: 0; padding: 14px 16px;
     border: 1px solid var(--border); border-radius: var(--radius-md, 8px);
@@ -3728,7 +3710,7 @@
   .rc-side-cd:empty { display: none; }
 
   /* 使用统计视图（布局复用 .skills-grid/.panel-card/.seg-control，此处仅 stats 专属件） */
-  .stats-view { display: flex; flex-direction: column; gap: 16px; }
+  .stats-view { display: flex; flex-direction: column; gap: 16px; container: stats / inline-size; }
   /* 上半区双栏：左=概览+热力图侧栏，右=趋势卡挂满剩余宽度；窄屏折回单列 */
   .stats-top-grid { display: grid; grid-template-columns: var(--stats-side-w, 340px) minmax(0, 1fr); gap: 16px; }
   .stats-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
@@ -3748,6 +3730,10 @@
   .skills-grid.stats-quad { align-items: stretch; }
   .skills-grid.stats-quad .panel-card { height: 100%; display: flex; flex-direction: column; }
   .skills-grid.stats-quad .stats-quad-body { flex: 1; display: flex; flex-direction: column; }
+  @container stats (width < 900px) {
+    .stats-top-grid, .skills-grid.stats-quad { grid-template-columns: minmax(0, 1fr); }
+    .skills-grid.stats-quad .panel-card { height: auto; }
+  }
   #statsTtftBars, #statsTpsBars { flex: 1; align-content: start; }
   /* C 区卡头：标题 + 三组 seg 同行放不下时换行 */
   .card-header.stats-trend-head { flex-wrap: wrap; gap: 8px; }
@@ -4030,13 +4016,17 @@
   .stats-view.logs-fixed #statsLogsPane .stats-table-wrap { flex: 1; min-height: 0; overflow-y: auto; }
   .stats-view.logs-fixed .logs-table thead th { position: sticky; top: 0; z-index: 1; }
   .stats-view.logs-fixed .list-pager { flex-shrink: 0; }
+  @media (height < 540px) {
+    .stats-view.logs-fixed { height: auto; overflow: visible; }
+    .stats-view.logs-fixed .stats-table-wrap { flex: auto; }
+  }
 
   /* ═══════════════════════════════════════════════
      会话管理视图（sessions- 前缀为布局/容器作用域类；
      sess / msg / toc 三族为原型特有组件类，与全站零冲突原样保留；
      .btn/.badge/.icon-btn/.seg-control/.modal-overlay 复用全站现有样式）
      ═══════════════════════════════════════════════ */
-  .sessions-view { display: flex; flex-direction: column; gap: 16px; }
+  .sessions-view { display: flex; flex-direction: column; gap: 16px; container: sessions / inline-size; }
   /* 页头：视图标题 + 刷新/批量管理操作 */
   .sessions-pagehead { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .sessions-pagehead-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 10px; }
@@ -4133,10 +4123,10 @@
   /* 恢复命令预览条 */
   .sess-resume-bar { display: flex; align-items: center; gap: 12px; margin: 14px 22px 0; background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 10px 14px; }
   .sess-resume-bar .rb-label { font-size: 11.5px; font-weight: 700; color: var(--text-3); flex: none; }
-  .sess-resume-bar code { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-resume-bar code { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-resume-bar .btn { flex: none; }
   /* 操作按钮行 */
-  .sess-action-row { display: flex; align-items: center; gap: 10px; padding: 14px 22px; border-bottom: 1px solid var(--border); }
+  .sess-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 22px; border-bottom: 1px solid var(--border); }
   /* 消息流 */
   .msg-flow { padding: 18px 22px 26px; display: flex; flex-direction: column; gap: 14px; }
   .msg { display: flex; flex-direction: column; gap: 5px; max-width: 86%; position: relative; }
@@ -4188,22 +4178,22 @@
   /* 搜索关键词高亮 */
   .sessions-view mark, .toc-pop mark { background: var(--warn-soft); color: var(--warn); border-radius: 3px; padding: 0 1px; }
   /* 移动端抽屉遮罩与开启按钮（开启按钮在 sessions 页头，仅小屏显示） */
-  .sessions-drawer-mask { position: fixed; inset: 0; z-index: 100; background: rgba(15,23,42,.45); opacity: 0; pointer-events: none; transition: opacity 200ms; }
-  .sessions-drawer-mask.show { opacity: 1; pointer-events: auto; }
+  .sessions-drawer-mask { position: fixed; inset: 0; z-index: 100; display: none; background: rgba(15,23,42,.45); opacity: 0; pointer-events: none; transition: opacity 200ms; }
   .sessions-drawer-open-btn { display: none; }
-  /* 响应式：<1024px TOC 转浮动按钮；<768px 左栏转抽屉。
-     门槛原先是 1280：这台机器 150% 缩放下满屏折合约 1707 CSS px，面板窗常落在
-     1024–1280 之间，那一档里右栏整条消失、又没有备用入口，等于没有目录。
-     浮动按钮不再绑死媒体查询，改绑「会话页在场」（panel.js 的 body.sessions-mode），
-     宽屏则由下面那条关回右栏的查询收掉，两个入口不同时出现。 */
-  body.sessions-mode .toc-fab.has-toc { display: flex; }
-  @media (min-width: 1024px) {
-    body.sessions-mode .toc-fab.has-toc { display: none; }
+  @container sessions (width < 1030px) {
+    .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
+    .toc-side { display: none; }
+    .toc-fab.has-toc { display: flex; }
   }
-  @media (max-width: 767px) {
+  @container sessions (width >= 1030px) {
+    .toc-pop { display: none; }
+  }
+  @container sessions (width < 720px) {
     .sessions-master-detail { grid-template-columns: minmax(0, 1fr); }
-    .sessions-list-card { position: fixed; left: 0; top: 0; bottom: 0; z-index: 110; width: 300px; max-height: none; border-radius: 0; transform: translateX(-100%); transition: transform 240ms var(--ease-out); }
-    .sessions-list-card.drawer-open { transform: none; box-shadow: var(--shadow-lg); }
+    .sessions-list-card { position: fixed; left: 0; top: 0; bottom: 0; z-index: 110; width: min(300px, 100vw); max-height: none; border-radius: 0; visibility: hidden; transform: translateX(-100%); transition: transform 240ms var(--ease-out), visibility 240ms; }
+    .sessions-list-card.drawer-open { visibility: visible; transform: none; box-shadow: var(--shadow-lg); }
+    .sessions-drawer-mask { display: block; }
+    .sessions-drawer-mask.show { opacity: 1; pointer-events: auto; }
     .sessions-drawer-open-btn { display: inline-flex; }
     .msg { max-width: 96%; }
   }
