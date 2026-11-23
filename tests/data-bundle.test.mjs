@@ -316,7 +316,6 @@ test("落定：整体覆盖、先备份、凭据重新加密、skills 落进已�
   const imported = JSON.parse(readFileSync(dst.paths.storeFile, "utf8"));
   assert.deepEqual(Object.keys(imported.providers), ["alpha"], "导入应整体覆盖目标机已有渠道");
   assert.equal(applied.applied.settings, true);
-  assert.equal(applied.applied.followAgent, true, "刚写进盘的 followAgent 值要交回调用方，由它对齐登录计划与自愈进程");
   assert.equal(applied.applied.prompts, true);
   assert.equal(applied.applied.credentials, 1);
   assert.equal(applied.applied.skills, true);
@@ -337,7 +336,7 @@ test("落定：整体覆盖、先备份、凭据重新加密、skills 落进已�
   assert.ok(JSON.parse(readFileSync(join(backupDir, "manifest.json"), "utf8")).saved.includes("store.json"));
 });
 
-test("包内 settings 没提 followAgent 时按关交回，与 loadSettings 的读法一致", async () => {
+test("导入只回报是否写入设置", async () => {
   const src = fakeMachine({ settings: { sparkWindowPoints: 60 } });
   const exp = await src.service().exportBundle({ targetDir: src.targetDir });
   const dst = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
@@ -345,7 +344,6 @@ test("包内 settings 没提 followAgent 时按关交回，与 loadSettings 的�
   const preview = await importer.previewBundle(exp.path);
   const applied = await importer.applyBundle({ token: preview.token });
   assert.equal(applied.ok, true, applied.error);
-  assert.equal(applied.applied.followAgent, false, "导入后盘上没有这个开关，等于是关");
   assert.deepEqual(JSON.parse(readFileSync(join(dst.root, "settings.json"), "utf8")), { sparkWindowPoints: 60 });
 });
 
@@ -769,27 +767,25 @@ function seedRestoreBackup(dir, { storeId = "alpha", settings = { followAgent: f
   }, null, 2) + "\n", "utf8");
 }
 
-test("恢复：settings 写回后按备份里的值回传 applied.followAgent", () => {
+test("恢复：回报设置已写入", () => {
   const dst = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
   seedRestoreBackup(join(dst.root, "backups", "pre-import-20261031-120000"), { storeId: "alpha", settings: { followAgent: false } });
   const done = dst.service().restoreBackup({ name: "pre-import-20261031-120000" });
   assert.equal(done.ok, true, done.error);
-  assert.deepEqual(done.applied, { settings: true, followAgent: false }, "备份里的关要原样交回调用方，由它对齐登录计划与自愈进程");
+  assert.deepEqual(done.applied, { settings: true });
   assert.deepEqual(JSON.parse(readFileSync(join(dst.root, "settings.json"), "utf8")), { followAgent: false });
 });
 
-test("恢复：备份缺 followAgent 字段或 settings 是坏 JSON 都按关回传，与 loadSettings 读法一致", () => {
+test("恢复可以写入没有旧开关或无法解析的设置备份", () => {
   const noKey = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
   seedRestoreBackup(join(noKey.root, "backups", "pre-import-20261031-120000"), { settings: { sparkWindowPoints: 60 } });
   const doneNoKey = noKey.service().restoreBackup({ name: "pre-import-20261031-120000" });
   assert.equal(doneNoKey.ok, true, doneNoKey.error);
-  assert.equal(doneNoKey.applied.followAgent, false, "盘上没有这个开关，等于是关");
 
   const broken = fakeMachine({ store: validStore("beta"), settings: { followAgent: true }, skills: 0 });
   seedRestoreBackup(join(broken.root, "backups", "pre-import-20261031-120000"), { settings: "not json at all{" });
   const doneBroken = broken.service().restoreBackup({ name: "pre-import-20261031-120000" });
   assert.equal(doneBroken.ok, true, doneBroken.error);
-  assert.equal(doneBroken.applied.followAgent, false, "坏文件经 loadSettings 同样是关，两侧答复要一致");
   assert.equal(readFileSync(join(broken.root, "settings.json"), "utf8"), "not json at all{", "恢复按备份原文写回");
 });
 

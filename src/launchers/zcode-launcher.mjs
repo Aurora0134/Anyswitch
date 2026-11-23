@@ -29,7 +29,7 @@ export { ZCODE_CLI_SLOT_DIRNAME, ZCODE_CLI_SIDECAR_FILENAME, zcodeCliSlotDir, zc
 import { catalogForRoot, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
 import { syncZcodePersonalConfig, defaultCliModelSelection, PERSONAL_CONFIG_FILENAME } from "./zcode-personal-config.mjs";
 import { readSidecar as readSidecarFile, aggregateMapKey } from "./merge-common.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function zcodeConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".zcode", "v2", "config.json");
@@ -398,7 +398,7 @@ export async function main(argv = process.argv.slice(2)) {
     // 回退中继（居民中继宕机时本进程接管）没有自己的日志文件：日志行转发给
     // 面板 ingest（47820），重试/故障才进得了面板「运行日志」（Claude 启动器
     // 同款转发，见 shared/logger.mjs 的 createPanelForwardingLogger）。
-    startRelay: () => startOpenAIRelay({ logger: createPanelForwardingLogger() }),
+    startRelay: connectResidentRelay,
     writeConfig: (store, port, token, sidecarRoot) => writeZcodeConfig(store, port, token, sidecarRoot),
     spawnZcode: realSpawnZcode,
     isZcodeRunning: realIsZcodeRunning,

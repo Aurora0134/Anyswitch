@@ -1,3 +1,20 @@
+import { readFileSync } from "node:fs";
+import { DEFAULT_RELAY_PORT, probeRelay as probeResidentRelay } from "../relay/openai-server.mjs";
+import { relayDataRoot } from "../relay/relay-settings.mjs";
+import { getTokenPath } from "./pi-relay-token.mjs";
+
+export async function connectResidentRelay({
+  root = relayDataRoot(),
+  probe = probeResidentRelay,
+  readToken = (path) => readFileSync(path, "utf8").trim(),
+} = {}) {
+  const port = DEFAULT_RELAY_PORT;
+  if (!await probe(port)) throw new Error("Anyswitch Relay is not running. Start Relay in Anyswitch to use its channels.");
+  const token = readToken(getTokenPath(root));
+  if (!token) throw new Error("Anyswitch Relay is unavailable.");
+  return { port, token, reused: true, close: async () => {} };
+}
+
 // Shared relay acquisition for the OpenAI-family launchers
 // (grok / codex / qoder / opencode / dsh / zcode).
 //

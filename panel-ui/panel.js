@@ -3876,16 +3876,6 @@ async function api(method, path, body, signal) {
         // 业务失败（HTTP 200 + ok:false）由 api() 统一抛出并把服务端原文挂到 err.code，
         // 这里不再判一次 ok，否则重造出的 Error 会丢掉原文。
         const result = await request("POST", "/api/data/import-apply", { token: usedTicket, ...decision });
-        // 「跟随 Coding Agent 启动」的登录自启或自愈进程没对齐回来时，数据已经换完，
-        // 坏的是那一层：状态行仍报导入完成、只是转成提醒色，没跟上的具体是什么写进明细。
-        const wd = result.watchdog;
-        const reason = (r) => (r ? `（${r}）` : "");
-        let note = "";
-        if (wd && (wd.task === "failed" || wd.task === "unknown")) {
-          note = `「跟随 Coding Agent 启动」已按包里的设置更新，但登录自启没跟着改，重启电脑后的行为可能和设置显示的不一致${reason(wd.reasons?.task)}。可以在设置里把它拨一次再拨回来重试。`;
-        } else if (wd && (wd.process === "failed" || wd.process === "unknown")) {
-          note = `「跟随 Coding Agent 启动」的开关已更新，但自愈进程没跟上${reason(wd.reasons?.process)}。当前实际行为可能和设置显示的不一致。`;
-        }
         // Skills 落点结果如实进明细：落到哪、主仓库指向动没动、没导是为什么。
         const applied = result.applied ?? {};
         let summary = `导入完成 · 备份号 ${result.backupId}`;
@@ -3901,9 +3891,8 @@ async function api(method, path, body, signal) {
         preview = null;
         customPath = null;
         modal.classList.remove("show");
-        showCardLine(summaryLine, note ? "warn" : "ok",
-          `${summary}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
-        showMeta(importMeta, [...metaParts, note].filter(Boolean).join(" · "));
+        showCardLine(summaryLine, "ok", summary);
+        showMeta(importMeta, metaParts.filter(Boolean).join(" · "));
         resultLanded();
         notify(result.backupDir
           ? `导入完成，已备份到 ${result.backupDir}`
@@ -5497,7 +5486,6 @@ async function api(method, path, body, signal) {
     const keepAliveEndpointsWrap = $("keepAliveEndpoints");
     const keepAliveTitle = $("keepAliveTitle");
     const keepAliveDesc = $("keepAliveDesc");
-    const followAgentToggle = $("followAgentToggle");
     const startupAnimationToggle = $("startupAnimationToggle");
     const boardLayoutSeg = $("boardLayoutSeg");
     const boardLayoutDesc = $("boardLayoutDesc");
@@ -5561,7 +5549,7 @@ async function api(method, path, body, signal) {
       on: { title: "抗截断", desc: KEEP_ALIVE_DESC, toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, poolLoadBalancing: false, updateChannel: false };
+    const settingsSaving = { keepAlive: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, poolLoadBalancing: false, updateChannel: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -5762,9 +5750,6 @@ async function api(method, path, body, signal) {
           // 数字输入焦点守卫：回灌是异步落地的，用户可能已点进框里敲到一半，此时赋值
           // 会把半截数字盖掉；值模型照常更新，只跳过这个框的回显，失焦后下一轮回灌跟上。
           if (keepAliveRetriesInput && document.activeElement !== keepAliveRetriesInput) keepAliveRetriesInput.value = String(keepAliveMaxRetries);
-        }
-        if (!settingsSaving.followAgent && followAgentToggle && d.settings && typeof d.settings.followAgent === "boolean") {
-          followAgentToggle.checked = d.settings.followAgent;
         }
         // 「从上次中断的地方继续」：运行时缓存归终端生命周期区所有，这里只回填；
         // 正在保存的那次切换不被回灌盖回。
@@ -6102,36 +6087,6 @@ async function api(method, path, body, signal) {
         if (e.key === "Enter") {
           e.preventDefault();
           persistKeepAliveRetries(keepAliveRetriesInput.value);
-        }
-      };
-    }
-
-    if (followAgentToggle) {
-      followAgentToggle.onchange = async () => {
-        if (settingsSaving.followAgent) {
-          followAgentToggle.checked = !followAgentToggle.checked;
-          return;
-        }
-        const next = followAgentToggle.checked;
-        settingsSaving.followAgent = true;
-        settingsLoadGen += 1;
-        followAgentToggle.setAttribute("aria-busy", "true");
-        try {
-          const d = await api("POST", "/api/settings", { followAgent: next });
-          if (!d.ok) {
-            followAgentToggle.checked = !next;
-            toast("设置保存失败", true);
-          } else {
-            const saved = d.settings?.followAgent;
-            if (typeof saved === "boolean") followAgentToggle.checked = saved;
-            toast(next ? "已开启跟随 Agent 启动" : "已关闭跟随 Agent 启动");
-          }
-        } catch (e) {
-          followAgentToggle.checked = !next;
-          toast(panelError(e, "请求失败"), true);
-        } finally {
-          settingsSaving.followAgent = false;
-          followAgentToggle.removeAttribute("aria-busy");
         }
       };
     }

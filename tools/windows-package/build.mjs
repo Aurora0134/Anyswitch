@@ -4,9 +4,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parseVersion } from "../../src/ops/version-check.mjs";
+import { desktopReleaseArchiveName } from "../../src/ops/update-trust.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const APP_ENTRIES = ["panel-host.mjs", "panel-host-restart-helper.mjs", "relay-host.mjs", "agent-watchdog.mjs"];
+const APP_ENTRIES = ["panel-host.mjs", "panel-host-restart-helper.mjs", "relay-host.mjs"];
 const TOOLS = dirname(fileURLToPath(import.meta.url));
 const NODE_VERSION = "22.15.0";
 const REQUIRED_FILES = ["dpapi.ps1", "codex-model-catalog-template.json", "thinking-efforts-baseline.json", "package.json", "panel-app.vbs", "silent-start.vbs", "anyswitch.ico", "LICENSE", "docs/assets/logo.png"];
@@ -27,7 +28,7 @@ export function releaseChannel(version) {
 export function manifestBytes({ version, channel, asset, sha256, size }) {
   const expectedChannel = releaseChannel(version);
   if (channel !== expectedChannel) throw new Error("Release channel does not match SemVer prerelease state");
-  const expectedAsset = `anyswitch-v${version}-win-x64.zip`;
+  const expectedAsset = desktopReleaseArchiveName(version);
   if (asset !== expectedAsset) throw new Error("Archive name does not match version");
   if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error("Invalid SHA-256 digest");
   if (!Number.isSafeInteger(size) || size < 1) throw new Error("Invalid archive size");
@@ -103,9 +104,9 @@ export async function stageApp({ root, appDir, version, publicKey }) {
   await writeFile(join(appDir, "package.json"), JSON.stringify({ ...packageJson, version }) + "\n", "utf8");
 }
 
-function run(file, args, cwd) {
+function run(file, args, cwd, overrides) {
   const { ANYSWITCH_UPDATE_SIGNING_KEY: _secret, NODE_OPTIONS: _nodeOptions, ...env } = process.env;
-  const result = spawnSync(file, args, { cwd, env, encoding: "utf8", timeout: 120_000, windowsHide: true });
+  const result = spawnSync(file, args, { cwd, env: { ...env, ...overrides }, encoding: "utf8", timeout: 120_000, windowsHide: true });
   if (result.error || result.status !== 0) throw new Error(result.stderr || result.error?.message || file + " failed with exit " + result.status);
   return result.stdout;
 }
@@ -127,7 +128,7 @@ export async function publishBuild(out, build) {
   }
 }
 
-export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, root = ROOT }) {
+export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, desktopBuild, root = ROOT, desktopCopy = join(root, "installer", "windows", "desktop", "copy.json") }) {
   const version = versionFromTag(tag);
   const channel = releaseChannel(version);
   const key = privateKeyFromSeed(signingSeed);
@@ -139,7 +140,7 @@ export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, root 
   const runtime = resolve(nodeExe);
   const nodeInfo = run(runtime, ["-p", "process.platform + ':' + process.arch + ':' + process.versions.node"], root).trim();
   if (nodeInfo !== "win32:x64:" + NODE_VERSION) throw new Error("Incorrect bundled Node runtime: " + nodeInfo);
-  const asset = "anyswitch-v" + version + "-win-x64.zip";
+  const asset = desktopReleaseArchiveName(version);
   return publishBuild(outputDir, async (work) => {
     const staging = join(work, "staging");
     const runtimeDir = join(staging, "runtime");
@@ -147,6 +148,14 @@ export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, root 
     await cp(runtime, join(runtimeDir, "node.exe"));
     await cp(join(dirname(runtime), "LICENSE"), join(runtimeDir, "LICENSE"));
     await stageApp({ root: resolve(root), appDir: join(staging, "app"), version, publicKey: rawPublicKey });
+    if (!desktopBuild) throw new Error("Compiled Windows desktop assets are required");
+    await cp(join(desktopBuild, "desktop"), join(staging, "app", "desktop"), { recursive: true });
+    const copy = JSON.parse(await readFile(desktopCopy, "utf8"));
+    for (const key of ["open", "browser", "exit", "exitTitle", "exitBody"]) {
+      if (typeof copy?.[key] !== "string" || !copy[key].trim()) throw new Error(`Missing desktop copy: ${key}`);
+    }
+    await cp(desktopCopy, join(staging, "app", "desktop", "copy.json"));
+    await cp(join(desktopBuild, "Anyswitch.exe"), join(staging, "Anyswitch.exe"));
     const archivePath = join(work, asset);
     run("tar.exe", ["-a", "-cf", archivePath, "app", "runtime"], staging);
     // 提取目录用纯 ASCII 名：System32 的 bsdtar 按系统代码页解析参数，非中文区域
@@ -159,7 +168,8 @@ export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, root 
     await rename(extract, smoke);
     const roots = (await readdir(smoke)).sort();
     if (roots.join(",") !== "app,runtime") throw new Error("Unexpected release archive layout");
-    run(join(smoke, "runtime", "node.exe"), [join(smoke, "app", "package-health.mjs"), version], join(smoke, "app"));
+    // An installer launched by the previous version may inherit its app root.
+    run(join(smoke, "runtime", "node.exe"), [join(smoke, "app", "package-health.mjs"), version], work, { ANYSWITCH_APP_ROOT: root });
     await rm(smoke, { recursive: true, force: true });
     const archive = await readFile(archivePath);
     const sha256 = createHash("sha256").update(archive).digest("hex");
@@ -176,10 +186,10 @@ async function main() {
     const [key, ...rest] = arg.replace(/^--/, "").split("=");
     return [key, rest.join("=")];
   }));
-  if (!args.tag || !args.output || !args.nodeExe) throw new Error("Usage: build.mjs --tag=v1.2.3 --output=DIR --nodeExe=PATH");
+  if (!args.tag || !args.output || !args.nodeExe || !args.desktopBuild) throw new Error("Usage: build.mjs --tag=v1.2.3 --output=DIR --nodeExe=PATH --desktopBuild=DIR");
   const signingSeed = process.env.ANYSWITCH_UPDATE_SIGNING_KEY;
   delete process.env.ANYSWITCH_UPDATE_SIGNING_KEY;
-  console.log(JSON.stringify(await buildRelease({ tag: args.tag, outputDir: args.output, nodeExe: args.nodeExe, signingSeed })));
+  console.log(JSON.stringify(await buildRelease({ tag: args.tag, outputDir: args.output, nodeExe: args.nodeExe, signingSeed, desktopBuild: args.desktopBuild })));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((error) => {

@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createPanelServer, discoverTerminalBackend, migrateWatchdogAutostart, rotateLogIfNeeded, teeStderrToFile } from "../src/panel/panel-host.mjs";
+import { createPanelServer, discoverTerminalBackend, rotateLogIfNeeded, teeStderrToFile } from "../src/panel/panel-host.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 function recordingLogger() {
@@ -57,69 +57,7 @@ test("discoverTerminalBackend swallows a throwing probe so panel startup never b
   assert.match(logger.warnings[0], /token store locked/);
 });
 
-const watchdogResponded = ["info", "followAgent migration: watchdog logon task registered and watchdog responded"];
-
-for (const { name, registration, probe, spawn, expected } of [
-  {
-    name: "registration fails",
-    registration: async () => ({ ok: false, error: "registration denied" }),
-    expected: ["warn", "followAgent migration: failed to register watchdog logon task (non-fatal): registration denied"],
-  },
-  {
-    name: "the watchdog does not respond after startup",
-    spawn: async () => ({ ok: false, reused: false }),
-    expected: ["warn", "followAgent migration: watchdog logon task registered, but watchdog readiness could not be confirmed"],
-  },
-  {
-    name: "an already-running watchdog responds",
-    probe: async () => true,
-    expected: watchdogResponded,
-  },
-  {
-    name: "a reused watchdog responds",
-    spawn: async () => ({ ok: true, reused: true }),
-    expected: watchdogResponded,
-  },
-  {
-    name: "a newly started watchdog responds",
-    spawn: async () => ({ ok: true, reused: false }),
-    expected: watchdogResponded,
-  },
-  {
-    name: "the watchdog probe throws",
-    probe: async () => { throw new Error("probe failed"); },
-    expected: ["warn", "followAgent migration check failed (non-fatal): probe failed"],
-  },
-]) {
-  test(`watchdog migration logs the outcome when ${name}`, async () => {
-    const settingsFile = join(mkTestDir("anyswitch-watchdog-migration-"), "settings.json");
-    writeFileSync(settingsFile, JSON.stringify({ followAgent: true }));
-    const entries = [];
-    await migrateWatchdogAutostart({
-      settingsFile,
-      logger: {
-        info: (message) => entries.push(["info", message]),
-        warn: (message) => entries.push(["warn", message]),
-      },
-      isWatchdogAutostartEnabledFn: async () => false,
-      enableWatchdogAutostartFn: registration ?? (async () => ({ ok: true })),
-      probeWatchdogFn: probe ?? (async () => false),
-      spawnWatchdogFn: spawn ?? (async () => { throw new Error("unexpected watchdog start"); }),
-    });
-    assert.deepEqual(entries, [expected]);
-  });
-}
-
-// 接线兜底用例：createPanelServer 必须在启动时调 prewarmPromptsBackfill——
-// 注入文件唯一写入触发面原本是预设变更，漏掉这行接线则启动回填失效（面板
-// 重启后注入文件仍不落盘）。四条预热腿的全部依赖来源都注入 mock：注入回填
-// （environmentService/promptsService）、冷扫（environmentService/sessionScanService）、
-// watchdog 快照（isWatchdogAutostartEnabledFn/probeWatchdogFn）与技能补齐
-// （environmentService/skillsService）。未注入的腿直建 server 的测试会真的起
-// worker 扫全机会话存档、真的跑 reg.exe/PowerShell 探针、真读真实 skills.json
-// 真扫技能仓（panel-host.mjs 的透传缝是为此开的）；断言打到注入桩上＝预热确实
-// 走注入面，没有偷跑真探测。
-test("createPanelServer 启动即预热四条腿：注入回填 resync 一次、冷扫扫一次、watchdog 探一轮、技能补齐 catchUp 一次，全部走注入桩", async () => {
+test("createPanelServer 启动即预热三条腿：注入回填 resync 一次、冷扫扫一次、技能补齐 catchUp 一次，全部走注入桩", async () => {
   let getStateCalls = 0;
   const env = {
     getState: async () => {
@@ -131,7 +69,6 @@ test("createPanelServer 启动即预热四条腿：注入回填 resync 一次、
   const promptsService = { resync: () => { resyncs += 1; } };
   let scanAlls = 0;
   const sessionScanService = { scanAll: async () => { scanAlls += 1; return []; } };
-  let autostartProbes = 0, watchdogProbes = 0;
   let catchUps = 0;
   const skillsService = { catchUp: async () => { catchUps += 1; return { ok: true, created: [], skipped: [] }; } };
   createPanelServer({
@@ -140,8 +77,6 @@ test("createPanelServer 启动即预热四条腿：注入回填 resync 一次、
     promptsService,
     sessionScanService,
     skillsService,
-    isWatchdogAutostartEnabledFn: async () => { autostartProbes += 1; return false; },
-    probeWatchdogFn: async () => { watchdogProbes += 1; return false; },
   });
   const waitFor = async (value) => {
     const deadline = Date.now() + 100;
@@ -152,13 +87,10 @@ test("createPanelServer 启动即预热四条腿：注入回填 resync 一次、
   await waitFor(() => resyncs);
   await waitFor(() => getStateCalls);
   await waitFor(() => scanAlls);
-  await waitFor(() => autostartProbes);
   await waitFor(() => catchUps);
   assert.equal(resyncs, 1, "启动即一次注入回填");
   assert.ok(getStateCalls >= 1, "冷扫预热消费注入的环境检测（不触真检测）");
   assert.equal(scanAlls, 1, "冷扫预热把会话首扫提前一拍：走注入的扫描服务");
-  assert.equal(autostartProbes, 1, "watchdog 预热探一轮自启状态：走注入桩，不跑真 reg.exe");
-  assert.equal(watchdogProbes, 1, "watchdog 预热探一轮存活：走注入桩，不跑真探测");
   assert.equal(catchUps, 1, "技能补齐预热走注入桩，不读真实 skills.json、不扫真实技能仓");
 });
 
@@ -180,8 +112,6 @@ test("createPanelServer 启动即预热技能补齐（漏接线则 catchUp 计�
     // 路径副作用，接线断言面归上面的四腿用例。
     promptsService: { resync: () => {} },
     sessionScanService: { scanAll: async () => [] },
-    isWatchdogAutostartEnabledFn: async () => false,
-    probeWatchdogFn: async () => false,
   });
   const deadline = Date.now() + 100;
   while (catchUps === 0 && Date.now() < deadline) {
