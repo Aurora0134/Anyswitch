@@ -67,6 +67,9 @@ test("buildDshProviderEntry creates valid dsh profile", () => {
 
 test("buildDshProviderEntry declares image input for every managed model", () => {
   const provider = {
+    // 伪渠道按 aggregatePlaceholder 标记识别（撞名时它的 map 键是 fallback），
+    // fixture 与 deriveAnyswitchChannel 的产物同形。
+    aggregatePlaceholder: true,
     models: {
       "vision-route": { contextWindow: 16000 },
       "text-only-route": { contextWindow: 8000 },
@@ -80,6 +83,9 @@ test("buildDshProviderEntry declares image input for every managed model", () =>
     ["text", "image"],
     ["text", "image"],
   ]);
+  // 对照：同键无标记 = 真实渠道 auto，落普通托管键。
+  const real = buildDshProviderEntry(AUTO_CHANNEL_KEY, { models: { m1: {} } }, 47821, TOKEN);
+  assert.ok(real._auto, "a real channel named auto takes the ordinary managed key");
 });
 
 test("buildDshProviderEntry omits the credential header when no token is available", () => {

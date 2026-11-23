@@ -34,7 +34,7 @@ import { join, dirname, basename, isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
 import { modalitiesFromStoreModel } from "../catalog/modalities-fallback.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, deriveAnyswitchChannel, withAggregateChannel } from "./merge-common.mjs";
 // Re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "../catalog/context-fallback.mjs";
@@ -258,7 +258,7 @@ export function mergeQoderSettings(existing, managedProviders, port, token, auto
   // it flows through the same cleanup/inject loops as any real channel, so
   // deleting the endpoint's chain makes the next sync drop it via the ordinary
   // namespace cleanup.
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const providers = withAggregateChannel(managedProviders, autoChannel);
 
   const managedMap = buildQoderProviders(providers, port, token, catalog);
 

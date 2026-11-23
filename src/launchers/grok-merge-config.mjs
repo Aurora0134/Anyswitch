@@ -41,7 +41,7 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel, isAggregatePlaceholder, withAggregateChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "../catalog/context-fallback.mjs";
 import { resolveEndpointEfforts, catalogForRoot, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
@@ -125,13 +125,16 @@ export function grokConfigPath(base = process.env) {
 // PROVIDER_ID is [A-Za-z0-9._-], pools included), so the first "~" is the one
 // and only channel/model boundary whatever the model id itself contains ("/",
 // even another "~").
-export function managedModelKey(channelId, modelId) {
+export function managedModelKey(channelId, modelId, provider) {
   // Anyswitch 伪渠道：唯一的裸触发词模型 "auto" 落 AUTO_MODEL_KEY；旗下虚拟
   // 模型（同名分组下的其余模型）是独立请求名，必须各占一键——塌到同一个
   // AUTO_MODEL_KEY 会被去重门整条跳过，虚拟模型从 grok 目录里消失。键保持
   // anyswitch- 前缀 + 渠道限定 slug，陈表清理与真渠道同一套机制。
-  if (channelId === AUTO_CHANNEL_KEY) {
-    return modelId === AUTO_CHANNEL_KEY ? AUTO_MODEL_KEY : `${MANAGED_ID_PREFIX}${packChannelModelSlug(channelId, modelId)}`;
+  // 伪渠道按 aggregatePlaceholder 标记识别而非键名：撞名时它的 map 键是
+  // fallback（"anyswitch"…），slug 段仍钉 "auto" 保持键形稳定；此时真实
+  // 渠道 auto 走普通分支拿 "anyswitch-auto~<model>"。
+  if (isAggregatePlaceholder(provider)) {
+    return modelId === AUTO_CHANNEL_KEY ? AUTO_MODEL_KEY : `${MANAGED_ID_PREFIX}${packChannelModelSlug(AUTO_CHANNEL_KEY, modelId)}`;
   }
   return `${MANAGED_ID_PREFIX}${packChannelModelSlug(channelId, modelId)}`;
 }
@@ -155,7 +158,7 @@ export function buildGrokManagedToml(managedProviders, port, token, effort = nul
     const baseUrl = `http://127.0.0.1:${port}/openai/${encodeURIComponent(segment)}/v1`;
     const channelLabel = provider?.channelName ?? provider?.displayName ?? providerId;
     for (const [modelId, model] of Object.entries(provider?.models ?? {})) {
-      const key = managedModelKey(providerId, modelId);
+      const key = managedModelKey(providerId, modelId, provider);
       if (seenKeys.has(key)) {
         skipped.push({
           key,
@@ -312,7 +315,7 @@ export function mergeGrokConfigToml(existingText, managedProviders, port, token,
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `anyswitch-auto`.
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const providers = withAggregateChannel(managedProviders, autoChannel);
   const { text: managedText, managed, modelKeys, skipped } = buildGrokManagedToml(providers, port, token, effort);
   const trimmedHead = preserved.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;

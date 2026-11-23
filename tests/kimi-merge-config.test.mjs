@@ -398,10 +398,17 @@ describe("auto routing channel (Anyswitch)", () => {
 
 describe("kimi provider id mapping", () => {
   it("maps the pseudo-channel to its display name and keeps real channels under the managed prefix", () => {
-    assert.equal(kimiProviderId("auto"), "Anyswitch");
+    // 占位按 aggregatePlaceholder 标记识别，与 map 键名无关：撞名时占位的键是
+    // fallback（"anyswitch"），真实渠道 auto 走普通 "_auto"。
+    const placeholder = { aggregatePlaceholder: true };
+    assert.equal(kimiProviderId("auto", placeholder), "Anyswitch");
+    assert.equal(kimiProviderId("anyswitch", placeholder), "Anyswitch");
     assert.equal(kimiProviderId("poke-api"), "_poke-api");
+    assert.equal(kimiProviderId("auto"), "_auto", "真实渠道 auto 落普通托管前缀");
     // aliases keep the historical prefix regardless of the provider-id mapping
-    assert.equal(kimiModelAlias("auto", "auto"), "_auto/auto");
+    assert.equal(kimiModelAlias("auto", "auto", placeholder), "_auto/auto");
+    assert.equal(kimiModelAlias("anyswitch", "auto", placeholder), "_auto/auto");
+    assert.equal(kimiModelAlias("auto", "m-1"), "_auto/m-1", "真实渠道 auto 的别名同前缀、按模型 id 区分");
     assert.equal(kimiModelAlias("poke-api", "m-1"), "_poke-api/m-1");
   });
 });

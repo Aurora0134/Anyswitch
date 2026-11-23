@@ -522,8 +522,13 @@ describe("auto routing channel (Anyswitch)", () => {
 
 describe("pi provider id mapping", () => {
   it("maps the pseudo-channel to the display name and real channels to the managed prefix", () => {
-    assert.equal(piProviderId("auto"), "Anyswitch");
+    // 占位按 aggregatePlaceholder 标记识别，与 map 键名无关：撞名时占位的键是
+    // fallback（"anyswitch"），真实渠道 auto 走普通 "_auto"。
+    const placeholder = { aggregatePlaceholder: true };
+    assert.equal(piProviderId("auto", placeholder), "Anyswitch");
+    assert.equal(piProviderId("anyswitch", placeholder), "Anyswitch");
     assert.equal(piProviderId("poke-api"), "_poke-api");
+    assert.equal(piProviderId("auto"), "_auto", "真实渠道 auto 落普通托管前缀");
   });
 });
 describe("static on-disk auth values (direct-launch decoupling)", () => {

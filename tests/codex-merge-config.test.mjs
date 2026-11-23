@@ -23,6 +23,8 @@ import {
   MANAGED_BEGIN,
   MANAGED_END,
 } from "../src/launchers/codex-merge-config.mjs";
+import { withAggregateChannel } from "../src/launchers/merge-common.mjs";
+import { buildChannelModelSlugCatalog } from "../src/channels/channel-model-slug.mjs";
 import { mkTestDir } from "../test-helpers/tmp.mjs";
 
 const CATALOG_TEMPLATE = loadCodexCatalogTemplate();
@@ -397,12 +399,47 @@ describe("auto routing channel (anyswitch-auto)", () => {
       ...CHAIN_STORE,
       providers: {
         ...CHAIN_STORE.providers,
-        auto: { displayName: "Auto", baseURL: "https://auto.example/v1", protocol: "openai-compatible", credentialFile: "auto.dpapi", models: { m: {} } },
+        auto: { displayName: "Auto", baseURL: "https://auto.example/v1", protocol: "openai-compatible", credentialFile: "auto.dpapi", models: { m1: {}, m2: {} } },
       },
     };
-    const { text } = mergeCodexConfigToml("", extractManagedProviders(collisionStore), 47821, "tok", deriveCodexAggregateChannel(collisionStore));
-    const autoBlock = text.match(/\[model_providers\."anyswitch-auto"\][^[]*/)[0];
-    assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/, "撞名时回落链头段，与 relay 的退场判据同口径");
+    const providers = extractManagedProviders(collisionStore);
+    const { text, catalogModels } = mergeCodexConfigToml("", providers, 47821, "tok", deriveCodexAggregateChannel(collisionStore), CATALOG_TEMPLATE);
+    // 撞名时真实渠道 auto 留在自己的表（段恒为 auto，relay 同判据按经典语义
+    // 解析它）；聚合占位换到 fallback 键，段回落链头。
+    const realAutoBlock = text.match(/\[model_providers\."anyswitch-auto"\][^[]*/)[0];
+    assert.match(realAutoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/auto\/v1"/, "真实渠道 auto 的表段是自己的 id");
+    const placeholderBlock = text.match(/\[model_providers\."anyswitch-anyswitch"\][^[]*/)[0];
+    assert.match(placeholderBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/, "撞名时占位回落链头段，与 relay 的退场判据同口径");
+    // 目录三口径：真实渠道行带渠道限定 slug（relay 的 slug 剥离与 /models 同
+    // 形），占位行仍是裸触发词/虚拟模型名。
+    assert.ok(catalogModels.has("auto~m1") && catalogModels.has("auto~m2"), "真实渠道 auto 的模型行以 auto~m1/auto~m2 形态在目录里");
+    assert.ok(catalogModels.has("auto"), "占位触发词行仍是裸名");
+    assert.equal(catalogModels.get("auto").channelLabel, "Anyswitch");
+    assert.equal(catalogModels.get("auto~m1").channelLabel, "Auto");
+    // 默认 provider 锚到占位表，不被真实渠道 auto 顶位。
+    assert.match(text, /^model_provider = "anyswitch-anyswitch"$/m);
+  });
+
+  it("keeps the codex catalog in the same vocabulary as the relay /models surface under a collision", () => {
+    // relay 的 codex /models（openai-handler.mjs handleModels）= 全部可见渠道的
+    // 渠道限定 slug 并集 + 裸 auto（有链时）+ 裸虚拟模型名；写入侧目录必须同
+    // 一份词表，否则选择器列出 relay 不认的 id（或反过来）。
+    const collisionStore = {
+      ...CHAIN_STORE,
+      providers: {
+        ...CHAIN_STORE.providers,
+        auto: { displayName: "Auto", baseURL: "https://auto.example/v1", protocol: "openai-compatible", credentialFile: "auto.dpapi", models: { m1: {}, m2: {} } },
+      },
+      virtualModels: [{ name: "vm-a", chain: [{ node: "poke-api", model: "gpt-6-astra" }] }],
+    };
+    const providers = withAggregateChannel(extractManagedProviders(collisionStore), deriveCodexAggregateChannel(collisionStore));
+    const writerSlugs = new Set(collectCodexCatalogModels(providers).keys());
+    const relaySlugs = new Set([
+      ...buildChannelModelSlugCatalog(collisionStore).map((entry) => entry.slug),
+      "auto", // AUTO_MODEL，relay 在端点有链时追加
+      "vm-a",
+    ]);
+    assert.deepEqual([...writerSlugs].sort(), [...relaySlugs].sort());
   });
 
   it("does not inject anyswitch-auto when the endpoint has no route chain", () => {
@@ -526,6 +563,9 @@ describe("codex model catalog (model_catalog_json)", () => {
   it("shows the Anyswitch channel name on the pseudo-channel rows while keeping request slugs bare", () => {
     const providers = {
       auto: {
+        // 占位按标记识别（撞名时它的 map 键是 fallback），fixture 与
+        // deriveAnyswitchChannel 的产物同形。
+        aggregatePlaceholder: true,
         channelName: "Anyswitch",
         baseUrlSegment: "poke-api",
         models: { auto: { displayName: "auto" }, "vm-a": { displayName: "vm-a" } },

@@ -52,7 +52,7 @@ import { readFileSync, existsSync, copyFileSync, mkdirSync, rmSync } from "node:
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel, isAggregatePlaceholder, withAggregateChannel } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -116,8 +116,10 @@ export function deriveCodexAggregateChannel(store) {
   return { ...channel, baseUrlSegment: AGGREGATE_ENTRY_SEGMENT };
 }
 
-// The auto pseudo-channel lands on `anyswitch-auto` by construction
-// (AUTO_CHANNEL_KEY is "auto").
+// The auto pseudo-channel lands on `anyswitch-auto` whenever its map key is
+// the historical AUTO_CHANNEL_KEY; under a name collision with a real "auto"
+// channel the real channel owns this table id and the placeholder's table id
+// follows its fallback key instead (see withAggregateChannel).
 export function managedProviderId(providerId) {
   return `${MANAGED_ID_PREFIX}${providerId}`;
 }
@@ -151,7 +153,11 @@ export function loadCodexCatalogTemplate() {
 // slug: "auto" is the chain-routing trigger word (body.model === "auto" walks
 // the chain) and virtual models are the request names, so neither takes the
 // channel prefix. Their display names still carry the Anyswitch channel label,
-// exactly like every real channel's rows.
+// exactly like every real channel's rows. The pseudo-channel is recognized by
+// its aggregatePlaceholder mark, not its map key: when a real channel already
+// holds the "auto" key the placeholder rides a fallback key, and a key check
+// would mis-slug its rows ("anyswitch~auto") while stripping the real
+// channel's rows of their "auto~" prefix.
 export function collectCodexCatalogModels(providers) {
   const models = new Map();
   for (const [providerId, provider] of Object.entries(providers ?? {})) {
@@ -160,7 +166,7 @@ export function collectCodexCatalogModels(providers) {
       // The owning provider rides along with the model: the declaration check
       // needs both (provider-level reasoningVariants sits on the provider,
       // per-model levels on the model).
-      if (providerId === AUTO_CHANNEL_KEY) {
+      if (isAggregatePlaceholder(provider)) {
         models.set(modelId, { modelId, model: model ?? {}, provider, channelLabel });
         continue;
       }
@@ -313,23 +319,25 @@ const SELECTOR_KEY_LINE_RE = /^\s*(?:"model_provider"|'model_provider'|model_pro
 // Fresh installs never carried a manual config, so codex resolves its
 // built-in "openai" provider and sends every catalog model to
 // api.openai.com — persistent "request timed out" (2026-11-20). Anchor the
-// default selector (auto when present, else the first managed id; the relay
-// routes by the channel-qualified model slug, so one global selector serves
-// every channel). Runs on the head, before the pointer writer and the
+// default selector (the aggregate placeholder when present — aggregateKey is
+// its providers-map key — else the first managed id; the relay routes by the
+// channel-qualified model slug, so one global selector serves every channel). Runs on the head, before the pointer writer and the
 // managed block: the pointer line is stripped and re-inserted every sync,
 // so anchoring on the merged text would flip the two keys' order on the
 // second merge, and anchoring inside the managed block would be dropped by
 // the next stripManagedBlock. Any selector the head already carries —
 // bare or quoted, parseable or not — blocks the anchor, so no duplicate
 // key can be created; protectModelProvider owns re-pointing and removal.
-function anchorDefaultModelProvider(head, managed) {
+function anchorDefaultModelProvider(head, managed, aggregateKey) {
   if (managed.length === 0) return head;
   const lines = head.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     if (/^\s*\[/.test(lines[index])) break; // top-level keys end at the first table
     if (SELECTOR_KEY_LINE_RE.test(lines[index])) return head;
   }
-  const target = managed.includes(AUTO_CHANNEL_KEY) ? AUTO_PROVIDER_ID : managedProviderId(managed[0]);
+  const target = aggregateKey !== null && managed.includes(aggregateKey)
+    ? managedProviderId(aggregateKey)
+    : managedProviderId(managed[0]);
   const keyLine = `model_provider = ${tomlString(target)}`;
   const tableMatch = head.match(/^[ \t]*\[/m);
   if (!tableMatch) {
@@ -436,9 +444,16 @@ function dropLegacyKeys(text) {
 // entirely, our own stale selector is dropped instead of left dangling: a
 // dangling id fails codex's config load outright, and falling back to
 // codex's default provider is the removal semantics.
-export function protectModelProvider(text, managed) {
+//
+// aggregateKey is the aggregate placeholder's providers-map key (null when the
+// sync has no placeholder): the re-point target prefers it, so a real channel
+// that happens to be named "auto" never inherits the placeholder's preferred
+// slot under a collision.
+export function protectModelProvider(text, managed, aggregateKey = AUTO_CHANNEL_KEY) {
   const managedIds = managed.map(managedProviderId);
-  const target = managedIds.length === 0 ? null : (managedIds.includes(AUTO_PROVIDER_ID) ? AUTO_PROVIDER_ID : managedIds[0]);
+  const target = managedIds.length === 0
+    ? null
+    : (managed.includes(aggregateKey) ? managedProviderId(aggregateKey) : managedIds[0]);
 
   const defined = new Set(managedIds);
   for (const match of text.matchAll(/^\s*\[model_providers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))(?:\.[^\]]*)?\]\s*$/gm)) {
@@ -513,8 +528,12 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   // The managed block is regenerated wholesale on every merge, so appending
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
-  // next sync's block simply no longer contains `anyswitch-auto`.
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  // next sync's block simply no longer contains the placeholder's table.
+  const providers = withAggregateChannel(managedProviders, autoChannel);
+  // The placeholder's providers-map key (null when absent): under a collision
+  // it does not sit on "auto", and the anchor/protect passes below locate its
+  // table by this key instead of assuming AUTO_CHANNEL_KEY.
+  const aggregateKey = Object.keys(providers).find((key) => isAggregatePlaceholder(providers[key])) ?? null;
   const { text: managedText, managed } = buildCodexManagedToml(providers, port, token);
   // The catalog pointer is regenerated from the same channel view as the
   // provider tables. A null catalogTemplate (asset unreadable) keeps the
@@ -522,7 +541,7 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   const catalogModels = catalogTemplate ? collectCodexCatalogModels(providers) : new Map();
   const pointer = extractCatalogPointer(preserved);
   let head = collapseTopLevelBlankRun(pointer.text);
-  head = anchorDefaultModelProvider(head, managed);
+  head = anchorDefaultModelProvider(head, managed, aggregateKey);
   let catalogPointer = "none";
   if (pointer.userPointer !== null) {
     catalogPointer = "user";
@@ -532,7 +551,7 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   }
   const trimmedHead = head.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;
-  const protectedText = protectModelKey(protectModelProvider(merged, managed), catalogModels, catalogPointer);
+  const protectedText = protectModelKey(protectModelProvider(merged, managed, aggregateKey), catalogModels, catalogPointer);
   return { text: protectedText, managed, catalogModels, catalogPointer, effortCatalog };
 }
 

@@ -74,6 +74,7 @@ export function deriveAutoRouteChannel(store, endpointId) {
   const head = chain[0]?.node;
   if (typeof head !== "string" || head.length === 0) return null;
   return {
+    aggregatePlaceholder: true,
     channelName: ANYSWITCH_CHANNEL_NAME,
     baseUrlSegment: head,
     models: { [AUTO_CHANNEL_KEY]: { displayName: AUTO_CHANNEL_KEY } },
@@ -116,8 +117,70 @@ export function deriveAnyswitchChannel(store, endpointId) {
     models[vm.name] = { displayName: vm.name };
   }
   return {
+    // 聚合占位标记：写入器靠它（而不是 map 键名）识别伪渠道——撞名场景下
+    // 占位的 map 键已换成 AGGREGATE_FALLBACK_KEY，键名不再是身份。
+    aggregatePlaceholder: true,
     channelName: ANYSWITCH_CHANNEL_NAME,
     baseUrlSegment: auto?.baseUrlSegment ?? vms[0].chain[0].node,
     models,
   };
+}
+
+// The providers-map key the aggregate placeholder moves to when a real channel
+// (or pool) already holds AUTO_CHANNEL_KEY in the visible channel view.
+// "anyswitch" reads as the product name in the writers that expose the key to
+// users (opencode's provider/model references, zcode's raw provider list), and
+// matches the placeholder's display name ANYSWITCH_CHANNEL_NAME.
+export const AGGREGATE_FALLBACK_KEY = "anyswitch";
+// Numeric-suffix members of the fallback family ("anyswitch-2", …), built once
+// from the constant so the two never drift.
+const AGGREGATE_FALLBACK_SUFFIX_RE = new RegExp(`^${AGGREGATE_FALLBACK_KEY}-\\d+$`);
+
+// The Anyswitch pseudo-channel as derived by deriveAnyswitchChannel /
+// deriveAutoRouteChannel. Keyed off the marker property rather than the map
+// key: under a name collision the placeholder no longer sits on
+// AUTO_CHANNEL_KEY, so a key comparison cannot tell it apart from a real
+// channel named "auto" (whose rows must keep their normal channel-qualified
+// shape instead).
+export function isAggregatePlaceholder(provider) {
+  return provider?.aggregatePlaceholder === true;
+}
+
+// Every providers-map key the placeholder may have been recorded under in a
+// sidecar: AUTO_CHANNEL_KEY normally, AGGREGATE_FALLBACK_KEY on collision, and
+// a numeric suffix of it when the fallback itself was also taken. Cleanup
+// translations (dshManagedKeys, piManagedKeys) treat the whole family as
+// possibly naming the placeholder's display-name disk key.
+export function isAggregatePlaceholderKey(id) {
+  return (
+    id === AUTO_CHANNEL_KEY ||
+    id === AGGREGATE_FALLBACK_KEY ||
+    (typeof id === "string" && AGGREGATE_FALLBACK_SUFFIX_RE.test(id))
+  );
+}
+
+// Append the aggregate placeholder to the managed providers map — the shared
+// form of every merge module's old
+// `autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders`
+// line. Without a collision the result is byte-identical to that line: the
+// placeholder keeps the historical "auto" key. When the visible view already
+// surfaces a channel under "auto" (a real provider with models, or a pool —
+// the same store facts openai-path.mjs's AGGREGATE_ENTRY_SEGMENT deference
+// keys off), the placeholder moves to AGGREGATE_FALLBACK_KEY so the real
+// channel's rows stay in the map; a taken fallback walks a numeric suffix
+// rather than silently overwriting a second real channel. The placeholder
+// object carries the aggregatePlaceholder mark either way, so downstream
+// builders never have to know which key it landed on.
+export function withAggregateChannel(managedProviders, aggregateChannel) {
+  if (!aggregateChannel) return managedProviders;
+  if (managedProviders?.[AUTO_CHANNEL_KEY] === undefined) {
+    return { ...managedProviders, [AUTO_CHANNEL_KEY]: aggregateChannel };
+  }
+  let key = AGGREGATE_FALLBACK_KEY;
+  let n = 2;
+  while (managedProviders?.[key] !== undefined) {
+    key = `${AGGREGATE_FALLBACK_KEY}-${n}`;
+    n += 1;
+  }
+  return { ...managedProviders, [key]: aggregateChannel };
 }

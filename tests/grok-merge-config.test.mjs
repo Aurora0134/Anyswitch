@@ -194,7 +194,7 @@ describe("grok-merge-config", () => {
     assert.match(autoBlock, /name = "auto · Anyswitch"/);
     assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
     assert.ok(managed.includes("auto"), "sidecar tracks the auto channel as managed");
-    assert.equal(managedModelKey("auto", "auto"), AUTO_MODEL_KEY);
+    assert.equal(managedModelKey("auto", "auto", auto), AUTO_MODEL_KEY);
 
     const second = mergeGrokConfigToml(text, extractManagedProviders(STORE), 47821, "tok", deriveAutoRouteChannel(STORE, "grok"));
     assert.doesNotMatch(second.text, /anyswitch-auto/, "stale auto removed once the chain is gone");
@@ -229,7 +229,7 @@ describe("grok catalog key packing", () => {
     // 旗下虚拟模型按渠道限定 slug 各占一键——塌到同一键会被去重门整条跳过，
     // 虚拟模型从 grok 目录里消失。两条显示名都带渠道名。
     const { text, managed, modelKeys, skipped } = buildGrokManagedToml(
-      { auto: { channelName: "Anyswitch", models: { auto: {}, "m-2": {} } } },
+      { auto: { channelName: "Anyswitch", aggregatePlaceholder: true, models: { auto: {}, "m-2": {} } } },
       47821,
       "tok",
     );
@@ -258,7 +258,7 @@ describe("grok catalog key packing", () => {
     });
     assert.equal(unpackChannelModelSlug(managedModelKey("poke-api", "m~x").slice("anyswitch-".length), store)?.modelId, "m~x");
     // auto 伪渠道仍是裸触发词键；真渠道里叫 auto 的模型仍带渠道限定。
-    assert.equal(managedModelKey("auto", "auto"), AUTO_MODEL_KEY);
+    assert.equal(managedModelKey("auto", "auto", { aggregatePlaceholder: true }), AUTO_MODEL_KEY);
     assert.equal(managedModelKey("poke-api", "auto").includes(CHANNEL_MODEL_SEPARATOR), true);
   });
 });
@@ -474,20 +474,21 @@ describe("writeGrokConfig", () => {
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 
-  it("渠道 id 叫 auto 时触发词与虚拟模型各占一键，无跳过", () => {
+  it("渠道 id 叫 auto 时各模型按限定 slug 各占一键，无跳过", () => {
     const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
-    // 渠道 id 就叫 auto 且挂了多条模型：裸触发词占 AUTO_MODEL_KEY，其余模型
-    // 按限定 slug 各占一键——同名表不再出现，配置始终可加载。
+    // 真实渠道 id 就叫 auto 且挂了多条模型：占位身份改由标记识别后，它不再
+    // 被当作伪渠道分组，每条模型按渠道限定 slug 各占一键——同名表不出现，
+    // 配置始终可加载。
     const store = { version: 2, providers: { auto: { displayName: "Auto", models: { auto: {}, "m-2": {} } } } };
     const result = writeGrokConfig(store, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
     assert.deepEqual(result.skipped, []);
     const text = readFileSync(configPath, "utf8");
     const tables = text.match(/^\[model\..*\]$/gm) ?? [];
-    assert.equal(tables.length, 2, "auto 触发词与虚拟模型各一张表");
-    assert.ok(tables.includes('[model."anyswitch-auto"]'), "触发词占裸键");
-    assert.ok(tables.includes('[model."anyswitch-auto~m-2"]'), "虚拟模型占限定键");
+    assert.equal(tables.length, 2, "auto 渠道的两条模型各一张表");
+    assert.ok(tables.includes('[model."anyswitch-auto~auto"]'), "名为 auto 的模型占限定键");
+    assert.ok(tables.includes('[model."anyswitch-auto~m-2"]'), "其余模型占限定键");
   });
 
   it("fails closed on a truncated managed block and leaves the file untouched", () => {
