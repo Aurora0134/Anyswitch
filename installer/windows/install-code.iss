@@ -184,10 +184,38 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Exe: String;
+  Code: Integer;
 begin
   Result := ValidateInstallRoot(WizardDirValue);
   if (Result = '') and FileExists(ExpandConstant('{localappdata}\Anyswitch\app\package.json')) then
     Log('Existing source installation detected. Source and data are retained.');
+  Exe := AddBackslash(WizardDirValue) + 'Anyswitch.exe';
+  if (Result = '') and FileExists(Exe) then begin
+    if not Exec(Exe, '--shutdown', WizardDirValue, SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+      Result := 'Anyswitch cannot use this installation folder.';
+  end;
+end;
+
+function HasWebView2: Boolean;
+var
+  Version: String;
+  Key: String;
+begin
+  Key := 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  Result := (RegQueryStringValue(HKLM32, Key, 'pv', Version) and (Version <> '') and (Version <> '0.0.0.0')) or
+            (RegQueryStringValue(HKCU, Key, 'pv', Version) and (Version <> '') and (Version <> '0.0.0.0'));
+end;
+
+procedure PrepareWebView2;
+var
+  Code: Integer;
+begin
+  if HasWebView2 then Exit;
+  ExtractTemporaryFile('MicrosoftEdgeWebview2Setup.exe');
+  if not Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+    Log('WebView2 is unavailable; the panel can still open in the browser.');
 end;
 
 function CheckCandidate: Boolean;
@@ -229,12 +257,14 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Root, Pending, ExistingInstallRoot: String;
+  Root, Pending, VersionRoot: String;
+  Code: Integer;
 begin
   if CurStep = ssPostInstall then begin
     Root := ExpandConstant('{app}');
     FilesInstalled := True;
     if not CheckCandidate then RaiseException('Anyswitch did not pass its installation check. The previous version remains active.');
+    PrepareWebView2;
     if not PrepareRegistryOwnership(Root) then RaiseException('Anyswitch cannot replace a different registered installation.');
     HadCurrent := LoadStringFromFile(Root + '\current.json', PreviousCurrent);
     Pending := Root + '\current.json.setup';
@@ -246,12 +276,25 @@ begin
     PointerChanged := True;
     RegWriteStringValue(HKCU, PackageKey, 'InstallRoot', Root);
     RegWriteStringValue(HKCU, 'Environment', 'ANYSWITCH_INSTALL_ROOT', Root);
+    VersionRoot := Root + '\versions\{#ReleaseVersion}';
+    if not Exec(VersionRoot + '\runtime\node.exe', '"' + VersionRoot + '\app\src\ops\desktop-lifecycle.mjs" migrate', VersionRoot + '\app', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+      RaiseException('Anyswitch did not pass its installation check. The previous version remains active.');
     SetupComplete := True;
   end;
 end;
 
 function InitializeUninstall: Boolean;
+var
+  Root: String;
+  Code: Integer;
 begin
+  Root := ExpandConstant('{app}');
+  if FileExists(Root + '\Anyswitch.exe') then begin
+    if not Exec(Root + '\Anyswitch.exe', '--shutdown', Root, SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then begin
+      Result := False;
+      Exit;
+    end;
+  end;
   RemoveSettings := False;
   if not UninstallSilent then
     RemoveSettings := MsgBox('Also delete Anyswitch settings, stored credentials and backups? The source installation and its Git history will be kept.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
@@ -333,6 +376,8 @@ begin
   Params := '-NoProfile -ExecutionPolicy Bypass -Command "$r=$args[0].ToLower();' +
     'foreach($n in @(''AnyswitchRelay'',''AnyswitchWatchdog'',''AnyswitchPanel'',''ApiCredRelay'',''ApiCredWatchdog'')){' +
     'try{$t=Get-ScheduledTask -TaskName $n -ErrorAction Stop;$a=$t.Actions[0].Arguments;' +
+    'if($t.Actions[0].Execute -ieq ($r+''\Anyswitch.exe'') -and $a -eq ''--tray''){' +
+    'Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop;continue};' +
     'if($a){$al=$a.ToLower();$i=$al.IndexOf($r);' +
     'if($i -ge 0 -and ($i+$r.Length -eq $al.Length -or $al[$i+$r.Length] -eq ''\'')){' +
     'Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop}}}catch{}}" "' + Root + '"';
@@ -419,8 +464,7 @@ begin
   UninstallResidueRoot := '';
   if not HasReparseAncestor(Root + '\current.json') then DeleteFile(Root + '\current.json');
   RestoreOwnedRegistry(Root);
-  // 自启任务与桌面快捷方式都指 {app}\anyswitch-silent.vbs（[Files] 装入项，
-  // 卸载必删），不带走就是死入口；两处都按安装根比对，失败一律静默。
+  // 只清理指向本安装根的自启任务与桌面快捷方式。
   UnregisterOwnedTasks(Root);
   DeleteOwnedDesktopShortcut(Root);
   // versions 树是安装器自有产物（全部位于安装根，远离数据根与 Git 对象库）：
@@ -471,6 +515,7 @@ begin
     DeleteOwnedFile(DataRoot, 'backup-root.json');
     UninstallDeleteOwnedTree(DataRoot + '\credentials');
     UninstallDeleteOwnedTree(DataRoot + '\logs');
+    UninstallDeleteOwnedTree(DataRoot + '\webview');
     UninstallDeleteOwnedTree(DataRoot + '\backups');
     UninstallDeleteOwnedTree(DataRoot + '\client-updates');
     UninstallDeleteOwnedTree(DataRoot + '\usage');

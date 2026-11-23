@@ -14,7 +14,7 @@ import { createUsageJournal } from "../shared/usage-journal.mjs";
 import { writeDshProfilePatches, writeDshCredentialsRef } from "./dsh-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "../catalog/reasoning-fallback.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function dshSettingsPath(base = process.env) {
   return join(base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh"), "settings.yaml");
@@ -208,7 +208,7 @@ export async function main(argv = process.argv.slice(2)) {
     // 回退中继（居民中继宕机时本进程接管）没有自己的日志文件：日志行转发给
     // 面板 ingest（47820），重试/故障才进得了面板「运行日志」（Claude 启动器
     // 同款转发，见 shared/logger.mjs 的 createPanelForwardingLogger）。
-    startRelay: () => startOpenAIRelay({ logger: createPanelForwardingLogger() }),
+    startRelay: connectResidentRelay,
     writeConfig: (store, port, token, sidecarRoot) => writeDshConfig(store, port, token, sidecarRoot),
     spawnDsh: realSpawnDsh,
     log: (line) => process.stderr.write(`${line}\n`),

@@ -22,7 +22,7 @@ import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function codexConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".codex", "config.toml");
@@ -208,7 +208,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     ? { writeCodexConfig: deps.writeCodexConfig }
     : await import("./codex-merge-config.mjs");
   const code = await runCodexLauncher({
-    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    startRelay: deps.startRelay ?? connectResidentRelay,
     writeConfig: deps.writeConfig ?? ((store, port, token, sidecarRoot, configPath) =>
       writeCodexConfig(store, port, token, sidecarRoot, configPath)),
     loadStore: deps.loadStore ?? loadStore,

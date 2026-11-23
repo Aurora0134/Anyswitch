@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 import { atomicWriteFile } from "../store/atomic-write.mjs";
 import { readClientUpdateRun, writeClientUpdateRun } from "../agents/client-update-journal.mjs";
 import { restartRelay } from "../relay/relay-process-manager.mjs";
-import { probeWatchdog, spawnWatchdog, stopWatchdog } from "../agents/agent-watchdog.mjs";
+import { probeRelay, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { storePaths } from "../store/store-io.mjs";
-import { UPDATE_SIGNING_PUBLIC_KEY, isValidReleaseVersion, parseCurrentPointer, resolveInstallRoot, verifyReleaseManifest } from "./update-trust.mjs";
+import { UPDATE_SIGNING_PUBLIC_KEY, desktopReleaseArchiveName, isValidReleaseVersion, parseCurrentPointer, resolveInstallRoot, verifyReleaseManifest } from "./update-trust.mjs";
 import { extractReleaseArchive } from "./update-archive.mjs";
 
 export { verifyReleaseManifest, parseCurrentPointer, resolveInstallRoot } from "./update-trust.mjs";
@@ -22,7 +22,7 @@ const API_HEADERS = { accept: "application/vnd.github+json", "user-agent": "anys
 const DOWN_MS = 20_000, UP_MS = 30_000, ROLLBACK_PROBE_MS = 10_000, POLL_MS = 500;
 
 const assetNames = (version) => {
-  const zip = "anyswitch-v" + version + "-win-x64.zip";
+  const zip = desktopReleaseArchiveName(version);
   return { zip, manifest: zip.replace(/\.zip$/, ".manifest.json"), signature: zip.replace(/\.zip$/, ".manifest.sig") };
 };
 const releaseTag = (run) => run.targetTag ?? "v" + run.targetVersion;
@@ -122,9 +122,7 @@ export async function runSelfUpdate({
   fetchFn = fetch,
   env = process.env,
   restartRelayFn = (root, targetEnv = env) => restartRelay(root, targetEnv),
-  stopWatchdogFn = (e) => stopWatchdog(e),
-  probeWatchdogFn = () => probeWatchdog(),
-  spawnWatchdogFn = (e) => spawnWatchdog(e),
+  relayRunning = () => probeRelay(DEFAULT_RELAY_PORT),
   spawnPanelHostFn = defaultSpawnPanelHost,
   probePanelFn = (port) => probePanelAppInfo(port, fetchFn),
   publicKey = UPDATE_SIGNING_PUBLIC_KEY,
@@ -152,7 +150,6 @@ export async function runSelfUpdate({
   if (!installRoot || typeof targetVersion !== "string" || !isValidReleaseVersion(targetVersion)) return finish({ outcome: "failed", message: "更新信息不完整，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion ?? null });
   const names = assetNames(targetVersion), stageDir = join(installRoot, "staging", runId);
   const archivePath = join(stageDir, names.zip), manifestPath = join(stageDir, names.manifest), signaturePath = join(stageDir, names.signature);
-  let watchdogStopped = false;
   // staging/<runId>-XXXXXX 解压临时目录：成功后 rename 走，任何异常收场都纳入清理半径。
   let extractRoot = null;
   // 收尾清理一律 best-effort：删不动（EPERM/EBUSY 占用）不翻 outcome，残留路径记进 result。
@@ -226,15 +223,14 @@ export async function runSelfUpdate({
     // 断点续传（resume）时指针已指目标版：旧版身份改取 run.beforeVersion，
     // 否则回滚分支被跳过，resume 再失败会落首装失败分支误删指针与目标目录。
     if (previous?.version === targetVersion && typeof run.beforeVersion === "string" && run.beforeVersion !== targetVersion) previous = { schema: 1, version: run.beforeVersion };
+    const relayWasRunning = await relayRunning();
     setPhase("ready-to-restart");
     writePointer(pointerFile, targetVersion);
     const dataRoot = run.relayRoot ?? join(env.LOCALAPPDATA ?? "", "Anyswitch");
     const targetAppRoot = join(installRoot, "versions", targetVersion, "app");
     const targetNodePath = join(installRoot, "versions", targetVersion, "runtime", "node.exe");
     const targetEnv = { ...env, ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_ROOT: targetAppRoot, ANYSWITCH_NODE_PATH: targetNodePath, PATH: [dirname(targetNodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") };
-    const watchdogWasUp = await probeWatchdogFn().catch(() => false);
-    if (watchdogWasUp) watchdogStopped = (await stopWatchdogFn(env).catch(() => ({ ok: false })))?.ok === true;
-    const relay = await restartRelayFn(dataRoot, targetEnv).catch(() => ({ ok: false }));
+    const relay = relayWasRunning ? await restartRelayFn(dataRoot, targetEnv).catch(() => ({ ok: false })) : { ok: true };
     setPhase("waiting-panel");
     const deadline = nowMs() + panelDownTimeoutMs;
     let panelDown = false;
@@ -265,7 +261,6 @@ export async function runSelfUpdate({
       }
     }
     if (targetPanelHealthy && relay?.ok === true) {
-      if (watchdogStopped) await spawnWatchdogFn(targetEnv).catch(() => {});
       const residue = bestEffortRm(extractRoot ? [stageDir, extractRoot] : [stageDir]);
       return finish({ outcome: "updated", message: "已更新到 " + targetVersion, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion, relayRestartFailed: false, ...(residue.length ? { residue } : {}) });
     }
@@ -274,10 +269,9 @@ export async function runSelfUpdate({
       const previousAppRoot = join(installRoot, "versions", previous.version, "app");
       const previousNodePath = join(installRoot, "versions", previous.version, "runtime", "node.exe");
       const previousEnv = { ...env, ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_ROOT: previousAppRoot, ANYSWITCH_NODE_PATH: previousNodePath, PATH: [dirname(previousNodePath), env.PATH].filter(Boolean).join(process.platform === "win32" ? ";" : ":") };
-      const rollbackRelay = await restartRelayFn(dataRoot, previousEnv).catch(() => ({ ok: false }));
+      const rollbackRelay = relayWasRunning ? await restartRelayFn(dataRoot, previousEnv).catch(() => ({ ok: false })) : { ok: true };
       let panelRelaunchFailed = false;
       try { spawnPanelHostFn({ installRoot, appRoot: previousAppRoot, appDir: previousAppRoot, nodePath: previousNodePath, env: previousEnv }); } catch { panelRelaunchFailed = true; }
-      if (watchdogStopped) await spawnWatchdogFn(previousEnv).catch(() => {});
       // 回滚后短窗探测旧面板身份：relay 没拉起或旧面板在窗内不应答都算服务未自动
       // 恢复——如实报 failed，不冒称 rolled_back。
       let previousPanelHealthy = false;
@@ -297,15 +291,11 @@ export async function runSelfUpdate({
       }
       return finish({ outcome: "rolled_back", message: "新面板未能启动，已恢复到更新前版本" + (residueNote ? "。" + residueNote : ""), beforeVersion, afterVersion: previous.version, latestVersion: targetVersion, relayRestartFailed, ...(panelRelaunchFailed ? { panelRelaunchFailed } : {}), ...(residue.length ? { residue } : {}) });
     }
-    if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
     // 首装失败同理：指针、目标目录与 staging 都是本 run 的残留，尽力清掉再收场，
     // 清不动记 residue，不翻 outcome。
     const residue = bestEffortRm(extractRoot ? [pointerFile, join(installRoot, "versions", targetVersion), stageDir, extractRoot] : [pointerFile, join(installRoot, "versions", targetVersion), stageDir]);
     return finish({ outcome: "failed", message: "新面板未能启动，且没有可恢复的旧版本" + (residue.length ? "。残留目录未清走：" + residue.join("、") + "，可手动删除。" : ""), beforeVersion, afterVersion: null, latestVersion: targetVersion, relayRestartFailed: relay?.ok !== true, ...(residue.length ? { residue } : {}) });
   } catch (error) {
-    // 停了的看门狗不能因异常收场而无人拉起（对齐 62e69f9 旧版的 restoreWatchdog）：
-    // apply 阶段同步 I/O 异常时面板已换装或已回滚，等面板重启才拉起会留自愈空窗。
-    if (watchdogStopped) await spawnWatchdogFn(env).catch(() => {});
     // staging 与解压临时目录是本 run 的暂存，异常收场尽力清掉；versions/<target>
     // 绝不动——catch 也可能发生在指针已切新版的邻域。
     const residue = bestEffortRm(extractRoot ? [stageDir, extractRoot] : [stageDir]);

@@ -26,12 +26,25 @@ jobs:
           exit $LASTEXITCODE
       - name: Test Windows release contracts
         run: node --test tools/windows-package/package-contract.test.mjs
+      - name: Build desktop launcher and WebView2 host
+        shell: pwsh
+        run: |
+          $sdk = "$env:RUNNER_TEMP\webview2-sdk"
+          $sdkZip = "$env:RUNNER_TEMP\webview2.zip"
+          $version = '1.0.2903.40'
+          Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg" -OutFile $sdkZip
+          if ((Get-FileHash $sdkZip).Hash -ne 'EF128016DD1E51C59178C827ED5B8AA3322C57AFA8675D930F8109505542AD74') { throw 'WebView2 SDK hash mismatch' }
+          Expand-Archive -LiteralPath $sdkZip -DestinationPath $sdk
+          ./installer/windows/desktop/build.ps1 -Sdk $sdk -Output "$env:RUNNER_TEMP\anyswitch-desktop"
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
+          $signature = Get-AuthenticodeSignature "$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe"
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation(?:,|$)') { throw 'WebView2 installer signature invalid' }
       - name: Build and validate signed release assets
         shell: pwsh
         env:
           ANYSWITCH_UPDATE_SIGNING_KEY: ${{ secrets.ANYSWITCH_UPDATE_SIGNING_KEY }}
         run: |
-          node tools/windows-package/build.mjs "--tag=$env:GITHUB_REF_NAME" "--output=$env:RUNNER_TEMP\anyswitch-package" "--nodeExe=$((Get-Command node.exe).Source)"
+          node tools/windows-package/build.mjs "--tag=$env:GITHUB_REF_NAME" "--output=$env:RUNNER_TEMP\anyswitch-package" "--nodeExe=$((Get-Command node.exe).Source)" "--desktopBuild=$env:RUNNER_TEMP\anyswitch-desktop"
           exit $LASTEXITCODE
       - name: Build unsigned per-user setup
         shell: pwsh
@@ -40,14 +53,14 @@ jobs:
           if (-not (Test-Path $iscc)) { Write-Error "Inno Setup compiler not found: $iscc"; exit 1 }
           $output = Join-Path $env:RUNNER_TEMP 'anyswitch-package'
           $version = $env:GITHUB_REF_NAME.Substring(1)
-          & $iscc "/DPayloadDir=$output\staging" "/DReleaseVersion=$version" "/DOutputDir=$output" installer/windows/anyswitch.iss
+          & $iscc "/DPayloadDir=$output\staging" "/DReleaseVersion=$version" "/DOutputDir=$output" "/DWebViewSetup=$env:RUNNER_TEMP\MicrosoftEdgeWebview2Setup.exe" installer/windows/anyswitch.iss
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         with:
           name: anyswitch-windows-x64-release-assets
           if-no-files-found: error
           path: |
-            ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64.zip
-            ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64.manifest.json
-            ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64.manifest.sig
+            ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64-desktop.zip
+            ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64-desktop.manifest.json
+            ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64-desktop.manifest.sig
             ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64-setup.exe

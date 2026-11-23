@@ -30,7 +30,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, createSessionReporter, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
 import { writeWorkbuddyModels, workbuddyModelsPath, workbuddyConfigRoot } from "./workbuddy-merge-models.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 import { resolveWorkbuddyExecutable } from "../agents/agent-discovery.mjs";
 import { compareVersions, parseVersion } from "../ops/version-check.mjs";
 export { resolveWorkbuddyExecutable, workbuddyModelsPath, workbuddyConfigRoot };
@@ -277,7 +277,7 @@ export function realSpawnWorkbuddy({ env, args, onPid = () => {}, node, cli, spa
 // 由 runWorkbuddyLauncher 的参数默认值接管。
 export async function main(argv = process.argv.slice(2), deps = {}) {
   return runWorkbuddyLauncher({
-    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    startRelay: deps.startRelay ?? connectResidentRelay,
     writeConfig: deps.writeConfig ?? ((store, port, token, sidecarRoot, modelsPath) =>
       writeWorkbuddyModels(store, port, token, sidecarRoot, modelsPath)),
     loadStore: deps.loadStore ?? loadStore,

@@ -507,6 +507,7 @@ export async function startRelay(root, env = process.env, deps = {}) {
 }
 
 export async function stopRelay(root, deps = {}) {
+  const ownsProcess = deps.ownsProcess ?? isOwnProcess;
   // Kill path: UNCACHED port-owner lookup — the kill gate must see the fresh
   // owner PID, never a cached one, and must not share the display cache's
   // in-flight slot. When the caller does not replace the whole lookup, the
@@ -553,7 +554,7 @@ export async function stopRelay(root, deps = {}) {
   const refused = [];
   for (const pid of new Set([filePid, ownerPid].filter((p) => Number.isFinite(p) && p > 0))) {
     if (!isAlive(pid)) continue; // dead PID: taskkill would no-op, not a refusal
-    if (!isOwnProcess(await getCommandLine(pid))) {
+    if (!ownsProcess(await getCommandLine(pid))) {
       refused.push(pid);
       continue;
     }

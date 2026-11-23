@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, DEFAULT_RELAY_PORT } from "../relay/openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { connectResidentRelay } from "./launcher-native-fallback.mjs";
 import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
@@ -247,7 +248,7 @@ function realSpawnPi({ env, args }) {
 // retag 会拿桩 token 写满真文件（main() 用例 2026-11-17 就这样打过真文件）。
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runPiLauncher({
-    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    startRelay: deps.startRelay ?? connectResidentRelay,
     writeModels: deps.writeModels ?? ((store, port, sidecarRoot) => writePiModels(store, port, sidecarRoot)),
     spawnPi: deps.spawnPi ?? realSpawnPi,
     log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),

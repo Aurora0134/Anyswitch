@@ -318,6 +318,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     }
   }
 
+  delete raw.followAgent;
   const keepAlive = parseKeepAliveConfig(raw.keepAlive, env);
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
   const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
@@ -418,6 +419,7 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     ...current.raw,
     ...patch,
   };
+  delete updated.followAgent;
 
   // keepAlive patches merge field-by-field because the panel PATCHes one field at
   // a time: anything not in the patch has to survive untouched. `mode` is the

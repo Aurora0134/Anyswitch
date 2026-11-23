@@ -56,6 +56,10 @@ function spyBundle() {
   };
 }
 
+function json2(handle) {
+  return handle.json();
+}
+
 describe("panel data routes", () => {
   it("导出与导入都要过面板变更守卫（缺请求头 = 403 csrf）", async () => {
     const { service } = spyBundle();
@@ -203,127 +207,3 @@ describe("panel data routes", () => {
     broken.dropDataBundleTickets(); // 退出路径上不能被一次清理失败卡住
   });
 });
-
-// 导入整份覆盖 settings.json 会绕开设置路由上那条 followAgent 副作用链（登录
-// 计划 + 常驻自愈进程）。这里验的正是导入后有没有把两者对齐回包里的值——
-// 全程假计划假进程，绝不碰真任务计划程序。
-function watchdogSpy({ registered = false, alive = false, regOk = true, regError = "拒绝访问", spawnResult, stopResult } = {}) {
-  const calls = [];
-  return {
-    calls,
-    fns: {
-      isWatchdogAutostartEnabledFn: async () => { calls.push("isRegistered"); return registered; },
-      enableWatchdogAutostartFn: async () => { calls.push("enable"); return { ok: regOk, error: regOk ? undefined : regError }; },
-      disableWatchdogAutostartFn: async () => { calls.push("disable"); return { ok: regOk, error: regOk ? undefined : regError }; },
-      probeWatchdogFn: async () => { calls.push("probe"); return alive; },
-      spawnWatchdogFn: async () => { calls.push("spawn"); return spawnResult; },
-      stopWatchdogFn: async () => { calls.push("stop"); return stopResult; },
-    },
-  };
-}
-
-function applyRouter({ followAgent, settings = true, ...watch }) {
-  const spy = watchdogSpy(watch);
-  const router = dataRouter({
-    dataBundleService: {
-      applyBundle: async () => ({
-        ok: true,
-        backupId: "20260923-120500",
-        applied: { store: true, settings, ...(settings ? { followAgent } : {}) },
-      }),
-    },
-    ...spy.fns,
-  });
-  return { spy, router };
-}
-
-async function doApply(router) {
-  const h = fakeReqRes("/panel/api/data/import-apply", "POST", { token: "t1" });
-  await router.handle(h.req, h.res);
-  return { json: json2(h), res: h.res };
-}
-
-describe("导入落定后把 followAgent 的登录计划与自愈进程对齐回来", () => {
-  it("包内开、本机没计划也没进程：注册并拉起，不碰注销与停止", async () => {
-    const { spy, router } = applyRouter({ followAgent: true, registered: false, alive: false });
-    const { json } = await doApply(router);
-    assert.equal(json.ok, true);
-    assert.deepEqual(spy.calls, ["isRegistered", "enable", "probe", "spawn"]);
-    assert.deepEqual(json.watchdog, { desired: true, task: "registered", process: "started", warnings: [], reasons: {} });
-  });
-
-  it("包内关、本机计划与进程都在：注销并停止（这条才是真正危险的方向）", async () => {
-    const { spy, router } = applyRouter({ followAgent: false, registered: true, alive: true });
-    const { json } = await doApply(router);
-    assert.deepEqual(spy.calls, ["isRegistered", "disable", "probe", "stop"]);
-    assert.deepEqual(json.watchdog, { desired: false, task: "unregistered", process: "stopped", warnings: [], reasons: {} });
-  });
-
-  it("值与本机实际状态本就一致：一次写操作都不做", async () => {
-    const { spy, router } = applyRouter({ followAgent: true, registered: true, alive: true });
-    const { json } = await doApply(router);
-    assert.deepEqual(spy.calls, ["isRegistered", "probe"]);
-    assert.equal(json.watchdog.task, "unchanged");
-    assert.equal(json.watchdog.process, "unchanged");
-  });
-
-  it("计划写失败就停在计划这一层：不动进程，只把警告交回去，导入本身不回滚", async () => {
-    const { spy, router } = applyRouter({ followAgent: true, registered: false, alive: false, regOk: false });
-    const { json, res } = await doApply(router);
-    assert.equal(res.statusCode, 200, "数据已落定，这属于要告知、不属于失败");
-    assert.equal(json.ok, true);
-    assert.equal(json.backupId, "20260923-120500");
-    assert.deepEqual(spy.calls, ["isRegistered", "enable"], "计划没写成就不该去动进程");
-    assert.equal(json.watchdog.task, "failed");
-    assert.equal(json.watchdog.process, "unchanged");
-    assert.equal(json.watchdog.warnings.length, 1);
-    assert.match(json.watchdog.warnings[0], /登录计划未同步.*拒绝访问/);
-    assert.equal(json.watchdog.reasons.task, "拒绝访问", "裸原因要单独交出去，成句文案归前端");
-  });
-
-  it("包里没带 settings.json：盘上还是原来那份，六个函数一个都不该调", async () => {
-    const { spy, router } = applyRouter({ settings: false, registered: true, alive: true });
-    const { json } = await doApply(router);
-    assert.equal(spy.calls.length, 0);
-    assert.equal(json.watchdog, undefined);
-  });
-
-  it("进程答「没做成」（等端口等不到）就是 failed，不能算已对齐", async () => {
-    const { spy, router } = applyRouter({ followAgent: true, registered: false, alive: false, spawnResult: { ok: false } });
-    const { json } = await doApply(router);
-    assert.deepEqual(spy.calls, ["isRegistered", "enable", "probe", "spawn"]);
-    assert.equal(json.watchdog.task, "registered");
-    assert.equal(json.watchdog.process, "failed");
-    assert.match(json.watchdog.warnings[0], /自愈进程未拉起/);
-    assert.equal(json.watchdog.reasons.process, "未达到预期状态");
-  });
-
-  it("停进程被安全红线挡下时，把带的 reason 原样交回", async () => {
-    const { router } = applyRouter({ followAgent: false, registered: true, alive: true, stopResult: { ok: false, reason: "refused to kill PID 1234" } });
-    const { json } = await doApply(router);
-    assert.equal(json.watchdog.process, "failed");
-    assert.match(json.watchdog.warnings[0], /未停止：refused to kill PID 1234/);
-    assert.equal(json.watchdog.reasons.process, "refused to kill PID 1234");
-  });
-
-  it("探测计划状态本身就失败：不再往下写，警告照实带回", async () => {
-    const calls = [];
-    const router = dataRouter({
-      dataBundleService: { applyBundle: async () => ({ ok: true, applied: { store: true, settings: true, followAgent: true } }) },
-      isWatchdogAutostartEnabledFn: async () => { calls.push("isRegistered"); throw new Error("PowerShell 启动失败"); },
-      enableWatchdogAutostartFn: async () => { calls.push("enable"); return { ok: true }; },
-      disableWatchdogAutostartFn: async () => { calls.push("disable"); return { ok: true }; },
-      probeWatchdogFn: async () => { calls.push("probe"); return false; },
-      spawnWatchdogFn: async () => { calls.push("spawn"); },
-      stopWatchdogFn: async () => { calls.push("stop"); },
-    });
-    const { json } = await doApply(router);
-    assert.deepEqual(calls, ["isRegistered"]);
-    assert.equal(json.watchdog.task, "unknown");
-    assert.match(json.watchdog.warnings[0], /读不出来/);
-  });
-});
-
-function json2(handle) {
-  return handle.json();
-}

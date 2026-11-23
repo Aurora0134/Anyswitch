@@ -815,121 +815,12 @@ describe("panel router relay control + pull-mode agents", () => {
   });
 });
 
-// Watchdog coordination for followAgent: registry FIRST (durable), then
-// settings.json, then process control. All watchdog deps are injected so no
-// reg.exe and no real watchdog process is touched here.
-describe("panel router followAgent watchdog coordination", () => {
-  function watchdogRouter(calls, opts = {}) {
-    // GET /api/settings 按 base 解析 settings.json：不传 base 会落到真实
-    // %LOCALAPPDATA%\Anyswitch，读的是本机安装产品的设置文件。给临时 base
-    // 隔离掉（mkTestDir 的进程退出清扫兜底回收）；用例只断言注入的
-    // watchdog 探针值，settings 落盘内容不参与断言。
-    const { base } = tempBase();
-    return createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null,
-      metricsCollector: null,
-      enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
-      disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: opts.regDisableFails ? false : true, ...(opts.regDisableFails ? { error: "boom" } : {}) }; },
-      isWatchdogAutostartEnabledFn: async () => opts.registryEnabled ?? false,
-      spawnWatchdogFn: async () => { calls.push("spawn"); return { ok: true }; },
-      stopWatchdogFn: async () => { calls.push("stop"); return { ok: true }; },
-      probeWatchdogFn: async () => opts.probe ?? false,
-      fetchRelayAgents: async () => null,
-    });
-  }
-  // Point settings.json at a temp dir so POSTs do not touch the real one.
-  // mkdir first: atomicWriteFile writes settings.json.<uuid>.tmp next to the
-  // target and cannot create intermediate directories itself.
+describe("panel settings", () => {
   function tempBase() {
-    const dir = mkTestDir("anyswitch-panel-wd-");
-    const relayDataRoot = join(dir, "Anyswitch");
-    mkdirSync(relayDataRoot, { recursive: true });
+    const dir = mkTestDir("anyswitch-panel-settings-");
+    mkdirSync(join(dir, "Anyswitch"), { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
   }
-
-  it("POST followAgent=true: registry key first, then save, then spawn watchdog", async () => {
-    const calls = [];
-    const { base } = tempBase();
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
-      disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => { calls.push("spawn"); return { ok: true }; },
-      stopWatchdogFn: async () => { calls.push("stop"); return { ok: true }; },
-      probeWatchdogFn: async () => false,
-      fetchRelayAgents: async () => null,
-    });
-    const { req, res, json } = fakeReqRes("/panel/api/settings", "POST", { followAgent: true });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.equal(json().ok, true);
-    assert.deepEqual(calls, ["reg-enable", "spawn"]);
-    // and the setting persisted with followAgent true
-    const getRes = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(getRes.req, getRes.res);
-    assert.equal(JSON.parse(getRes.res.body).settings.followAgent, true);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("POST followAgent=false: registry removal first, then save, then stop watchdog", async () => {
-    const calls = [];
-    const { base } = tempBase();
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
-      disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
-      isWatchdogAutostartEnabledFn: async () => true,
-      spawnWatchdogFn: async () => { calls.push("spawn"); return { ok: true }; },
-      stopWatchdogFn: async () => { calls.push("stop"); return { ok: true }; },
-      probeWatchdogFn: async () => true,
-      fetchRelayAgents: async () => null,
-    });
-    const { req, res } = fakeReqRes("/panel/api/settings", "POST", { followAgent: false });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(calls, ["reg-disable", "stop"]);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("registry failure refuses the save (500) and no watchdog spawn", async () => {
-    const calls = [];
-    const { base } = tempBase();
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: false, error: "reg.exe exploded" }),
-      disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => { calls.push("spawn"); return { ok: true }; },
-      stopWatchdogFn: async () => { calls.push("stop"); return { ok: true }; },
-      probeWatchdogFn: async () => false,
-      fetchRelayAgents: async () => null,
-    });
-    const { req, res, json } = fakeReqRes("/panel/api/settings", "POST", { followAgent: true });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 500);
-    assert.equal(json().ok, false);
-    assert.match(json().error, /watchdog autostart/);
-    assert.deepEqual(calls, []);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("GET settings exposes watchdog drift (registry vs process)", async () => {
-    const router = watchdogRouter([], { registryEnabled: true, probe: false });
-    const { req, res, json } = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(json().watchdog, { autostart: true, running: false });
-  });
-
   it("GET settings returns keepAlive.mode from disk instead of the default", async () => {
     const { base, dir } = tempBase();
     // 「off」是出厂默认的反面：读盘失败或回落默认时这里会变成 on。
@@ -941,17 +832,12 @@ describe("panel router followAgent watchdog coordination", () => {
       base,
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
     });
     const { req, res, json } = fakeReqRes("/panel/api/settings", "GET");
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
+    assert.equal(json().settings.followAgent, undefined);
     assert.equal(json().keepAlive.mode, "off");
     assert.equal(json().keepAlive.enabled, false, "off 档即停用");
     assert.equal(json().settings.keepAlive.mode, "off");
@@ -968,12 +854,6 @@ describe("panel router followAgent watchdog coordination", () => {
       base,
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
     });
     const { req, res, json } = fakeReqRes("/panel/api/settings", "GET");
@@ -985,40 +865,12 @@ describe("panel router followAgent watchdog coordination", () => {
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
 
-  it("POST without followAgent patch does not touch watchdog coordination", async () => {
-    const calls = [];
-    const { base } = tempBase();
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
-      disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => { calls.push("spawn"); return { ok: true }; },
-      stopWatchdogFn: async () => { calls.push("stop"); return { ok: true }; },
-      probeWatchdogFn: async () => false,
-      fetchRelayAgents: async () => null,
-    });
-    const { req, res } = fakeReqRes("/panel/api/settings", "POST", { keepAlive: { enabled: false } });
-    await router.handle(req, res);
-    assert.equal(res.statusCode, 200);
-    assert.deepEqual(calls, []);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
   it("POST keepAlive.maxRetries persists, clamps to 0-10, and is returned by GET", async () => {
     const { base } = tempBase();
     const router = createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
     });
 
@@ -1049,12 +901,6 @@ describe("panel router followAgent watchdog coordination", () => {
       base,
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
     });
 
@@ -1073,181 +919,6 @@ describe("panel router followAgent watchdog coordination", () => {
     await router.handle(getRes.req, getRes.res);
     assert.deepEqual(getRes.json().keepAlive.endpoints, { claude: { enabled: false }, kimi: { enabled: false } });
 
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-});
-
-// GET /api/settings decorates its response with watchdog drift visibility
-// (registry task present vs watchdog process answering). Both probes are
-// expensive — a PowerShell Get-ScheduledTask spawn plus an
-// HTTP liveness probe — and the panel frontend fetches /api/settings on every
-// page load to hydrate the per-endpoint 抗截断 toggle, so paying the probes on
-// every GET delayed that toggle ~1.4s. The snapshot serves the probes
-// stale-while-revalidate: GETs never wait once a snapshot has settled.
-describe("panel router watchdog probe snapshot", () => {
-  function tempBase() {
-    const dir = mkTestDir("anyswitch-panel-wd-snap-");
-    const relayDataRoot = join(dir, "Anyswitch");
-    mkdirSync(relayDataRoot, { recursive: true });
-    return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
-  }
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  // 探针计数在轮次开始时同步自增，但轮次起跑要过真实定时器/微任务——固定 50ms
-  // 的 sleep 是在赌调度。改成有界轮询等计数到位，下面的精确断言原样保留。
-  const untilCount = async (get, target) => {
-    const deadline = Date.now() + 2_000;
-    while (get() < target && Date.now() < deadline) await sleep(5);
-  };
-
-  it("prewarm at router creation kicks the first probe round before any request", async () => {
-    const { base } = tempBase();
-    let calls = 0;
-    const hang = new Promise(() => {});
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => { calls++; await hang; return false; },
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => { calls++; await hang; return false; },
-      fetchRelayAgents: async () => null,
-    });
-    router.prewarmWatchdogProbes();
-    await untilCount(() => calls, 2);
-    assert.equal(calls, 2); // one shared round: registry probe + liveness probe
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("once a probe round has settled, GETs are served from the snapshot without re-probing", async () => {
-    const { base } = tempBase();
-    let autoCalls = 0, probeCalls = 0;
-    const hang = new Promise(() => {});
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => { autoCalls++; if (autoCalls > 1) await hang; return false; },
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => { probeCalls++; if (probeCalls > 1) await hang; return false; },
-      fetchRelayAgents: async () => null,
-    });
-    router.prewarmWatchdogProbes();
-    // First GET may cold-wait the settling prewarm round...
-    const first = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(first.req, first.res);
-    assert.deepEqual(JSON.parse(first.res.body).watchdog, { autostart: false, running: false });
-    // ...the second must come off the snapshot: these probes would hang forever.
-    const second = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(second.req, second.res);
-    assert.deepEqual(JSON.parse(second.res.body).watchdog, { autostart: false, running: false });
-    assert.equal(autoCalls, 1);
-    assert.equal(probeCalls, 1);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("expired snapshot serves stale immediately while concurrent GETs share one background refresh", async () => {
-    const { base } = tempBase();
-    let rounds = 0; // each probe round increments this twice (registry + liveness)
-    let release = null;
-    const gate = new Promise((r) => { release = r; });
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => { rounds++; if (rounds > 2) await gate; return false; },
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => { rounds++; if (rounds > 2) await gate; return false; },
-      fetchRelayAgents: async () => null,
-      watchdogSnapshotTtlMs: 0, // every GET sees an expired snapshot
-    });
-    router.prewarmWatchdogProbes();
-    // Prime: cold-waits the settling prewarm round.
-    const prime = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(prime.req, prime.res);
-    assert.deepEqual(JSON.parse(prime.res.body).watchdog, { autostart: false, running: false });
-    assert.equal(rounds, 2);
-    // Two concurrent GETs against the expired snapshot: both return the stale
-    // value at once (the refresh gate is still shut)...
-    const g2 = fakeReqRes("/panel/api/settings", "GET");
-    const g3 = fakeReqRes("/panel/api/settings", "GET");
-    await Promise.all([router.handle(g2.req, g2.res), router.handle(g3.req, g3.res)]);
-    assert.deepEqual(JSON.parse(g2.res.body).watchdog, { autostart: false, running: false });
-    assert.deepEqual(JSON.parse(g3.res.body).watchdog, { autostart: false, running: false });
-    // ...and exactly one background refresh was shared between them.
-    release();
-    await untilCount(() => rounds, 4);
-    assert.equal(rounds, 4);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("failed cold probe round fails soft to the legacy nulls and is not cached", async () => {
-    const { base } = tempBase();
-    let fail = true;
-    let calls = 0;
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => { calls++; if (fail) throw new Error("reg.exe exploded"); return false; },
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
-      fetchRelayAgents: async () => null,
-    });
-    router.prewarmWatchdogProbes();
-    const first = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(first.req, first.res);
-    assert.equal(first.res.statusCode, 200);
-    assert.deepEqual(JSON.parse(first.res.body).watchdog, { autostart: null, running: null });
-    // The failure must not poison the snapshot: after recovery the next GET
-    // re-probes and reports real values.
-    fail = false;
-    const second = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(second.req, second.res);
-    assert.deepEqual(JSON.parse(second.res.body).watchdog, { autostart: false, running: false });
-    assert.equal(calls, 2);
-    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
-  });
-
-  it("POST followAgent invalidates the snapshot: the next GET repopulates synchronously", async () => {
-    const { base, dir } = tempBase();
-    let regOn = false;
-    let autoCalls = 0;
-    const router = createPanelRouter({
-      base,
-      storePaths: { root: "C:/fake/anyswitch" },
-      logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => { regOn = true; return { ok: true }; },
-      disableWatchdogAutostartFn: async () => { regOn = false; return { ok: true }; },
-      isWatchdogAutostartEnabledFn: async () => { autoCalls++; return regOn; },
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
-      fetchRelayAgents: async () => null,
-    });
-    router.prewarmWatchdogProbes();
-    const prime = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(prime.req, prime.res);
-    assert.equal(JSON.parse(prime.res.body).watchdog.autostart, false);
-    const post = fakeReqRes("/panel/api/settings", "POST", { followAgent: true });
-    await router.handle(post.req, post.res);
-    assert.equal(post.res.statusCode, 200);
-    // Without invalidation this GET would serve the pre-POST stale snapshot.
-    const after = fakeReqRes("/panel/api/settings", "GET");
-    await router.handle(after.req, after.res);
-    assert.deepEqual(JSON.parse(after.res.body).watchdog, { autostart: true, running: false });
-    assert.equal(autoCalls, 2); // primed once, re-probed once after invalidation
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
 });
@@ -4061,35 +3732,22 @@ describe("panel.html 设置全页视图", () => {
     const iRoute = panelHtml.indexOf('id="settingsPanelRoute"');
     assert.ok(iGeneral > 0 && iRoute > iGeneral, "通用面板在自动路由面板之前");
     const general = panelHtml.slice(iGeneral, iRoute);
-    for (const id of ["followAgentToggle", "startupAnimationToggle", "keepAliveToggle", "keepAliveEndpoints", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
+    for (const id of ["startupAnimationToggle", "keepAliveToggle", "keepAliveEndpoints", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
       assert.ok(general.includes(`id="${id}"`), `通用面板保留控件 #${id}`);
     }
   });
 
-  // 裁决②定稿：跟随说明弃枚举式（旧句枚举 7 个端点，anyAgent 实际计 10——
-  // 枚举必然再漂移），改用户逐字确认的概括式定稿句（注意逗号）。
-  it("「跟随 Coding Agent 启动」说明为概括式定稿句，不再枚举端点", () => {
-    const iTitle = panelHtml.indexOf("跟随 Coding Agent 启动");
-    assert.ok(iTitle > 0, "说明行在设置页内");
-    const desc = panelHtml.slice(iTitle, iTitle + 400).match(/<div class="modal-item-desc">([\s\S]*?)<\/div>/)?.[1] ?? "";
-    assert.ok(
-      desc.includes("检测到受支持的 Coding Agent 运行时，自动保持 Relay 链路就绪。"),
-      "概括式定稿句逐字在场（含逗号）",
-    );
-    assert.doesNotMatch(desc, /ZCode.*Claude Code.*Qoder/, "不再枚举端点名（枚举式必然再漂移）");
+  it("does not offer a setting to start Relay when an Agent launches", () => {
+    assert.doesNotMatch(panelHtml, /followAgentToggle|跟随 Coding Agent 启动/);
   });
 
-  it("「通用」子 tab 分六张卡：启动/显示/抗截断/Claude Code/运行日志 带图标卡头，其余未归类平卡", () => {
+  it("「通用」子 tab 分五张卡：显示/抗截断/Claude Code/运行日志带图标卡头", () => {
     const general = panelHtml.slice(
       panelHtml.indexOf('id="settingsPanelGeneral"'),
       panelHtml.indexOf('id="settingsPanelRoute"'),
     );
-    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 6,
-      "通用面板恰六张 panel-card");
-    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 5,
-      "五张卡有 card-header（杂项卡保持无头）");
-    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*启动\s*<\/h2>/.test(general),
-      "「启动」卡带 stroke 图标卡头");
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 5);
+    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 4);
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*显示\s*<\/h2>/.test(general),
       "「显示」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*抗截断\s*<\/h2>/.test(general),
@@ -6843,12 +6501,6 @@ describe("设置项「注入推理强度」", () => {
       // 写死固定真实路径等于每次跑测试都在临时目录外落一个共享可变文件。
       storePaths: { root: join(base.LOCALAPPDATA, "Anyswitch") },
       logger: null, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
       // Never let a test spawn the real sync runner: it rewrites the user's
       // own endpoint configs under ~/.zcode, ~/.pi, ~/.codex and friends.
@@ -7026,10 +6678,9 @@ describe("设置项「开屏动画」", () => {
       "新行落在「显示」卡内、「抗截断」卡之前，卡内顺序 开屏动画 → 折线视窗节点数");
     const row = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atStartup), atStartup + 200);
     assert.ok(row.includes('<label class="toggle">'), "沿用设置页既有开关控件");
-    // 卡数口径不变：开屏动画与折线视窗节点数两行只是搬进「显示」卡，通用仍是六张卡。
+    // 开屏动画与折线视窗在同一张「显示」卡内。
     const general = panelHtml.slice(panelHtml.indexOf('id="settingsPanelGeneral"'), panelHtml.indexOf('id="settingsPanelRoute"'));
-    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 6, "通用六张卡");
-    assert.ok(panelHtml.includes("「通用」：按语义分六张卡"), "卡上注释的卡数跟着改到六张");
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 5);
   });
 
   it("说明文案就是用户拍板的那两句，不出现字段名也不替用户判断", () => {
@@ -8493,12 +8144,6 @@ describe("设置项「运行日志」", () => {
       base,
       storePaths: { root: "C:/fake/anyswitch" },
       logger, metricsCollector: null,
-      enableWatchdogAutostartFn: async () => ({ ok: true }),
-      disableWatchdogAutostartFn: async () => ({ ok: true }),
-      isWatchdogAutostartEnabledFn: async () => false,
-      spawnWatchdogFn: async () => ({ ok: true }),
-      stopWatchdogFn: async () => ({ ok: true }),
-      probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
       spawnAgentSyncFn: async () => ({ ok: true, stdout: "" }),
     });

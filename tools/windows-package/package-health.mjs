@@ -20,6 +20,8 @@ for (const path of [
   "node_modules/@xterm/addon-webgl/lib/addon-webgl.js", "node_modules/node-pty/package.json",
   "test-helpers/vendor/js-yaml/index.js", "src/panel/panel-host.mjs", "src/relay/relay-host.mjs",
   "src/terminal/terminal-host.mjs", "src/ops/update-trust.mjs",
+  "src/ops/desktop-lifecycle.mjs", "desktop/Anyswitch.Desktop.exe", "desktop/copy.json",
+  "desktop/Microsoft.Web.WebView2.Core.dll", "desktop/Microsoft.Web.WebView2.WinForms.dll", "desktop/WebView2Loader.dll",
 ]) await access(join(appRoot, path));
 const trust = await import(new URL("./src/ops/update-trust.mjs", `file:///${appRoot.replaceAll("\\", "/")}/`));
 assert.equal(typeof trust.UPDATE_SIGNING_PUBLIC_KEY, "string");

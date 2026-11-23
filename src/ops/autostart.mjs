@@ -41,6 +41,7 @@
 // the launcher opens a browser window, which has no business firing at logon.
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveInstallRoot } from "./update-trust.mjs";
@@ -62,7 +63,6 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // Entry points, relative to this file. Kept in one place because three things
 // must agree on them: the registration, the staleness probe, and the tests.
 const RELAY_SCRIPT = join("..", "relay", "relay-host.mjs");
-const WATCHDOG_SCRIPT = join("..", "agents", "agent-watchdog.mjs");
 const PANEL_SCRIPT = join("..", "panel", "panel-host.mjs");
 
 // 本进程的打包安装根（分发器注入的 ANYSWITCH_* 推导；源码安装 null）。
@@ -117,6 +117,9 @@ function currentUser() {
 // interpolates it and reconcileAutostart compares against it — one source, so
 // the two can never disagree about what "correct" means.
 export function taskAction(script = RELAY_SCRIPT, installRoot = detectInstallRoot()) {
+  if (script === RELAY_SCRIPT && installRoot && existsSync(join(installRoot, "Anyswitch.exe"))) {
+    return { command: join(installRoot, "Anyswitch.exe"), arguments: "--tray" };
+  }
   const wscript = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
   if (installRoot) {
     // 打包安装：Exec 指安装根的静默分发器，参数是 app 相对入口。分发器每次
@@ -288,6 +291,7 @@ function actionPaths(text) {
 
 function actionMatches(stored, expected) {
   if (stored.command && stored.command.toLowerCase() !== expected.command.toLowerCase()) return false;
+  if (expected.arguments === "--tray") return String(stored.arguments).trim() === "--tray";
   const actual = actionPaths(stored.arguments);
   const wanted = actionPaths(expected.arguments);
   return actual.length === wanted.length && actual.every((path, index) => path === wanted[index]);
@@ -318,13 +322,20 @@ async function reconcileTask({ taskName, legacyTaskName, script, register }, byN
 // autostart is off and both stay absent.
 export async function reconcileAutostart({ spawnFn = spawn } = {}) {
   const probed = await probeTaskActions(
-    [TASK_NAME, WATCHDOG_TASK_NAME, PANEL_TASK_NAME, LEGACY_TASK_NAME, LEGACY_WATCHDOG_TASK_NAME],
+    [TASK_NAME, PANEL_TASK_NAME, LEGACY_TASK_NAME],
     spawnFn,
   );
   if (!probed.ok) return { ok: false, error: probed.error, tasks: [] };
+  const expected = taskAction();
+  if (expected.arguments === "--tray") {
+    const relay = probed.byName.get(TASK_NAME);
+    const legacy = probed.byName.has(LEGACY_TASK_NAME) || probed.byName.has(PANEL_TASK_NAME);
+    if ((!relay && !legacy) || (relay && !legacy && actionMatches(relay, expected))) return { ok: true, tasks: [] };
+    const registered = await enableAutostart({ spawnFn });
+    return { ok: registered.ok, error: registered.error, tasks: [] };
+  }
   const entries = [
     { taskName: TASK_NAME, legacyTaskName: LEGACY_TASK_NAME, script: RELAY_SCRIPT, register: enableRelayAutostartOnly },
-    { taskName: WATCHDOG_TASK_NAME, legacyTaskName: LEGACY_WATCHDOG_TASK_NAME, script: WATCHDOG_SCRIPT, register: enableWatchdogAutostart },
     { taskName: PANEL_TASK_NAME, legacyTaskName: null, script: PANEL_SCRIPT, register: enablePanelAutostart },
   ];
   const tasks = [];
@@ -356,6 +367,11 @@ async function enableRelayAutostartOnly({ spawnFn = spawn } = {}) {
 export async function enableAutostart({ spawnFn = spawn } = {}) {
   const relay = await enableRelayAutostartOnly({ spawnFn });
   if (!relay.ok) return relay;
+  if (taskAction().arguments === "--tray") {
+    const panel = await unregisterTask(PANEL_TASK_NAME, spawnFn);
+    if (!panel.ok) return panel;
+    return unregisterTask(LEGACY_TASK_NAME, spawnFn);
+  }
   const panel = await enablePanelAutostart({ spawnFn });
   if (!panel.ok) return { ok: false, error: `panel task: ${panel.error}` };
   return relay;
@@ -375,22 +391,18 @@ export async function isAutostartEnabled({ spawnFn = spawn } = {}) {
   return isTaskPresent(LEGACY_TASK_NAME, spawnFn);
 }
 
-// Watchdog variant: the followAgent entry starts agent-watchdog.mjs (NOT the
-// relay) so the relay stays lazily started until a coding agent appears.
-export async function enableWatchdogAutostart({ spawnFn = spawn } = {}) {
-  return registerTask(WATCHDOG_TASK_NAME, WATCHDOG_SCRIPT, spawnFn);
-}
-
-export async function disableWatchdogAutostart({ spawnFn = spawn } = {}) {
-  const result = await unregisterTask(WATCHDOG_TASK_NAME, spawnFn);
-  await unregisterTask(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
-  return result;
-}
-
-export async function isWatchdogAutostartEnabled({ spawnFn = spawn } = {}) {
-  const present = await isTaskPresent(WATCHDOG_TASK_NAME, spawnFn);
-  if (present) return true;
-  return isTaskPresent(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
+export async function removeWatchdogTasks(spawnFn = spawn) {
+  const names = [WATCHDOG_TASK_NAME, LEGACY_WATCHDOG_TASK_NAME];
+  const owns = (action) => /(?:^|\\)(?:wscript|node)\.exe$/i.test(action.command) && /\bagent-watchdog\.mjs["\s]*$/i.test(action.arguments);
+  const probed = await probeTaskActions(names, spawnFn);
+  if (!probed.ok) return false;
+  const owned = [...probed.byName].filter(([, action]) => owns(action));
+  if (owned.length === 0) return true;
+  for (const [name] of owned) {
+    if (!(await unregisterTask(name, spawnFn)).ok) return false;
+  }
+  const remaining = await probeTaskActions(names, spawnFn);
+  return remaining.ok && ![...remaining.byName.values()].some(owns);
 }
 
 // Panel variant: registers the panel-host.mjs task itself — the control plane

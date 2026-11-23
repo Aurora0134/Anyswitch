@@ -1,9 +1,32 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createDesktopShortcut, shortcutPayload } from "../src/ops/desktop-shortcut.mjs";
+
+it("migrates an old Anyswitch desktop shortcut while preserving a different same-name link", { skip: process.platform !== "win32" }, async (t) => {
+  const { migrateDesktopShortcut } = await import("../src/ops/desktop-shortcut.mjs");
+  const folder = mkdtempSync(join(tmpdir(), "anyswitch-links-"));
+  t.after(() => rmSync(folder, { force: true, recursive: true }));
+  const linkPath = join(folder, "Anyswitch.lnk");
+  const exe = join(folder, "Anyswitch.exe");
+  writeFileSync(exe, "");
+  const shell = (cmd, linkEnv = {}) => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", cmd], {
+    encoding: "utf8", windowsHide: true, env: { ...process.env, LINK: linkPath, ...linkEnv },
+  }).trim();
+  const create = '$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LINK); $s.TargetPath=$env:TARGET; $s.Arguments=$env:LINK_ARGS; $s.Save()';
+  const target = '$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LINK); $s.TargetPath';
+  const wscript = join(process.env.SystemRoot, "System32", "wscript.exe");
+  shell(create, { TARGET: wscript, LINK_ARGS: '"C:\\Other App\\panel-app.vbs"' });
+  assert.equal((await migrateDesktopShortcut({ installRoot: folder, linkPath })).ok, true);
+  assert.equal(shell(target).toLowerCase(), wscript.toLowerCase());
+  shell(create, { TARGET: wscript, LINK_ARGS: `"${join(folder, "anyswitch-silent.vbs")}" "src\\panel\\panel-launcher.mjs"` });
+  assert.equal((await migrateDesktopShortcut({ installRoot: folder, linkPath })).ok, true);
+  assert.equal(shell(target).toLowerCase(), exe.toLowerCase());
+});
 
 // Fake powershell child, same shape as tests/autostart.test.mjs: records the
 // invocation, replays stdout/stderr, then closes (or errors) asynchronously.

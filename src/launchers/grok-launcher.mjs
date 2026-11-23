@@ -39,7 +39,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, createSessionReporter, INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import { createUsageJournal } from "../shared/usage-journal.mjs";
 import { writeGrokConfig, grokConfigPath } from "./grok-merge-config.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 import { resolveGrokExecutable } from "../agents/agent-discovery.mjs";
 export { resolveGrokExecutable, grokConfigPath };
 
@@ -257,7 +257,7 @@ export function realSpawnGrok({ env, args, onPid = () => {} }) {
 // ——缺省路径的行为与注入前逐字节相同。
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runGrokLauncher({
-    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
+    startRelay: deps.startRelay ?? connectResidentRelay,
     writeConfig: deps.writeConfig ?? ((store, port, token, sidecarRoot, configPath) =>
       writeGrokConfig(store, port, token, sidecarRoot, configPath)),
     loadStore: deps.loadStore ?? loadStore,
