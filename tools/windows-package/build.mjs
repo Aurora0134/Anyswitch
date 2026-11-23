@@ -104,9 +104,9 @@ export async function stageApp({ root, appDir, version, publicKey }) {
   await writeFile(join(appDir, "package.json"), JSON.stringify({ ...packageJson, version }) + "\n", "utf8");
 }
 
-function run(file, args, cwd) {
+function run(file, args, cwd, overrides) {
   const { ANYSWITCH_UPDATE_SIGNING_KEY: _secret, NODE_OPTIONS: _nodeOptions, ...env } = process.env;
-  const result = spawnSync(file, args, { cwd, env, encoding: "utf8", timeout: 120_000, windowsHide: true });
+  const result = spawnSync(file, args, { cwd, env: { ...env, ...overrides }, encoding: "utf8", timeout: 120_000, windowsHide: true });
   if (result.error || result.status !== 0) throw new Error(result.stderr || result.error?.message || file + " failed with exit " + result.status);
   return result.stdout;
 }
@@ -168,7 +168,8 @@ export async function buildRelease({ tag, outputDir, nodeExe, signingSeed, deskt
     await rename(extract, smoke);
     const roots = (await readdir(smoke)).sort();
     if (roots.join(",") !== "app,runtime") throw new Error("Unexpected release archive layout");
-    run(join(smoke, "runtime", "node.exe"), [join(smoke, "app", "package-health.mjs"), version], join(smoke, "app"));
+    // An installer launched by the previous version may inherit its app root.
+    run(join(smoke, "runtime", "node.exe"), [join(smoke, "app", "package-health.mjs"), version], work, { ANYSWITCH_APP_ROOT: root });
     await rm(smoke, { recursive: true, force: true });
     const archive = await readFile(archivePath);
     const sha256 = createHash("sha256").update(archive).digest("hex");
