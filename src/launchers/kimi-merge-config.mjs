@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME, isAggregatePlaceholder, withAggregateChannel } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -54,17 +54,27 @@ export function prefixedProviderId(providerId) {
 // as the model picker's provider tab label and as every row's "(provider)"
 // suffix (kimi-code dist model-selector.ts providerDisplayName), so the
 // Anyswitch pseudo-channel's id IS the channel name users see — it carries no
-// "_" prefix. Real channels keep the managed-id prefix.
-export function kimiProviderId(providerId) {
-  return providerId === AUTO_CHANNEL_KEY ? ANYSWITCH_CHANNEL_NAME : prefixedProviderId(providerId);
+// "_" prefix. Real channels keep the managed-id prefix. The pseudo-channel is
+// recognized by its aggregatePlaceholder mark: under a name collision its map
+// key is the fallback ("anyswitch", …) while a real channel named "auto" takes
+// the ordinary `_auto` id.
+export function kimiProviderId(providerId, provider) {
+  return isAggregatePlaceholder(provider) ? ANYSWITCH_CHANNEL_NAME : prefixedProviderId(providerId);
 }
 
 // Model-alias keys keep the historical "_auto/<model>" prefix for the
 // pseudo-channel: aliases are never rendered (the picker shows the model's
 // display name), and the user's default_model plus old session records still
 // reference "_auto/..." — renaming them would strand every stored reference.
-export function kimiModelAlias(providerId, modelId) {
-  return `${prefixedProviderId(providerId)}/${modelId}`;
+// A real channel named "auto" takes the same "_auto/<model>" namespace by the
+// ordinary rule, so once a collision moves the placeholder off the "auto" map
+// key its aliases must follow that key instead: a real model whose id also
+// sits on the placeholder (the trigger word "auto", a shared virtual model
+// name) would otherwise produce two identical [models.*] tables and kimi
+// rejects the whole file.
+export function kimiModelAlias(providerId, modelId, provider) {
+  const namespace = isAggregatePlaceholder(provider) && providerId === AUTO_CHANNEL_KEY ? AUTO_CHANNEL_KEY : providerId;
+  return `${prefixedProviderId(namespace)}/${modelId}`;
 }
 
 export function buildKimiManagedToml(managedProviders, port, token, effort = null) {
@@ -72,7 +82,7 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
   const managed = [];
 
   for (const [providerId, provider] of Object.entries(managedProviders)) {
-    const pid = kimiProviderId(providerId);
+    const pid = kimiProviderId(providerId, provider);
     // Pseudo-channels (auto routing) name a different relay URL segment than
     // their own id; real channels never set baseUrlSegment.
     const segment = provider.baseUrlSegment ?? providerId;
@@ -91,7 +101,7 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
     lines.push("");
 
     for (const [modelId, model] of Object.entries(provider.models ?? {})) {
-      const alias = kimiModelAlias(providerId, modelId);
+      const alias = kimiModelAlias(providerId, modelId, provider);
       const context = model.contextWindow ?? fallbackContextWindow(modelId);
       lines.push(`[models.${tomlString(alias)}]`);
       lines.push(`provider = ${tomlString(pid)}`);
@@ -214,7 +224,7 @@ export function mergeKimiConfigToml(existingText, managedProviders, port, token,
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains the Anyswitch pseudo-channel
   // provider (nor its `_auto/...` model aliases).
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const providers = withAggregateChannel(managedProviders, autoChannel);
   const { text: managedText, managed } = buildKimiManagedToml(providers, port, token, effort);
   let merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;
   let thinking;
@@ -244,7 +254,7 @@ export function takeOverKimiThinkingTable(text) {
   const bodyEnd = lines.findIndex((line, index) => index > headerIndex && /^\s*\[/.test(line));
   const end = bodyEnd === -1 ? lines.length : bodyEnd;
   for (let index = headerIndex + 1; index < end; index += 1) {
-    const match = lines[index].match(/^(\s*enabled\s*=\s*)(true|false)(.*)$/);
+    const match = lines[index].match(/^(\s*(?:"enabled"|'enabled'|enabled)\s*=\s*)(true|false)(.*)$/);
     if (!match) continue;
     if (match[2] === "true") return { text, status: "present", changed: false };
     const updated = [...lines];
@@ -252,7 +262,7 @@ export function takeOverKimiThinkingTable(text) {
     return { text: updated.join("\n"), status: "updated", changed: true };
   }
 
-  const declared = lines.slice(headerIndex + 1, end).some((line) => /^\s*enabled\s*=/.test(line));
+  const declared = lines.slice(headerIndex + 1, end).some((line) => /^\s*(?:"enabled"|'enabled'|enabled)\s*=/.test(line));
   if (declared) {
     // Present but not a bare boolean (a string, an expression, a table): this
     // is the user's own wording and rewriting it blind risks breaking the file.

@@ -38,8 +38,9 @@ import {
 import {
   readSidecar as readSidecarFile,
   writeSidecar as writeSidecarFile,
-  AUTO_CHANNEL_KEY,
   deriveAnyswitchChannel,
+  isAggregatePlaceholder,
+  withAggregateChannel,
 } from "./merge-common.mjs";
 import { fallbackContextWindow } from "../catalog/context-fallback.mjs";
 import { modalitiesFromStoreModel } from "../catalog/modalities-fallback.mjs";
@@ -97,9 +98,11 @@ export function workbuddyModelsPath(base = process.env, home = homedir()) {
 
 // 模型 id：真渠道用 <channelId>~<modelId>（号段唯一、选模型即选渠道）；Anyswitch
 // 伪渠道（auto / 虚拟模型）用裸模型名——relay 的链拦截按 body.model 字面匹配，
-// 加前缀反而匹配不到触发词。
-export function workbuddyModelId(channelId, modelId) {
-  if (channelId === AUTO_CHANNEL_KEY) return modelId;
+// 加前缀反而匹配不到触发词。伪渠道按 aggregatePlaceholder 标记识别而非键名：
+// 撞名时它的 map 键是 fallback（"anyswitch"…），此时真实渠道 auto 的模型行
+// 照常拿 "auto~<model>"。
+export function workbuddyModelId(channelId, modelId, provider) {
+  if (isAggregatePlaceholder(provider)) return modelId;
   return packChannelModelSlug(channelId, modelId);
 }
 
@@ -107,7 +110,7 @@ export function workbuddyModelId(channelId, modelId) {
 export function buildWorkbuddyModelEntry(providerId, provider, modelId, model, port, token) {
   const segment = provider?.baseUrlSegment ?? providerId;
   const url = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(WORKBUDDY_AGENT_ID, segment)}/v1/chat/completions`;
-  const id = workbuddyModelId(providerId, modelId);
+  const id = workbuddyModelId(providerId, modelId, provider);
   const contextWindow =
     Number.isInteger(model?.contextWindow) && model.contextWindow > 0
       ? model.contextWindow
@@ -177,7 +180,7 @@ export function parseWorkbuddyModels(existingText) {
 export function buildWorkbuddyModels(existingText, providers, port, token, autoChannel = null) {
   const config = parseWorkbuddyModels(existingText);
   const merged = { ...config };
-  const allProviders = autoChannel ? { ...providers, [AUTO_CHANNEL_KEY]: autoChannel } : providers ?? {};
+  const allProviders = withAggregateChannel(providers ?? {}, autoChannel);
 
   // 整类剔除托管项后重建：即便 sidecar 丢了，url 签名也能认领并自愈。
   const existingModels = Array.isArray(config.models) ? config.models : [];

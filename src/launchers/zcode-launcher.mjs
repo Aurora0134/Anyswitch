@@ -28,7 +28,7 @@ import {
 export { ZCODE_CLI_SLOT_DIRNAME, ZCODE_CLI_SIDECAR_FILENAME, zcodeCliSlotDir, zcodeCliSidecarPath } from "./zcode-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
 import { syncZcodePersonalConfig, defaultCliModelSelection, PERSONAL_CONFIG_FILENAME } from "./zcode-personal-config.mjs";
-import { readSidecar as readSidecarFile } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, aggregateMapKey } from "./merge-common.mjs";
 import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function zcodeConfigPath(base = process.env) {
@@ -137,9 +137,17 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
   if (!personal.ok) return { ...writeResult, ok: false, reason: personal.reason };
   // 桌面版两文件之外追加 CLI 独立槽位同步（zcode-cli\provider_config.json）。
   // CLI 是独立端点：它的失败只回报在 cli 分支，不拖垮桌面版的同步结论。
+  // autoProviderId：CLI 槽位默认选中按盘键找聚合占位——撞名时占位不在 _auto
+  // 上，按 merge-common 的推算把实际盘键传下去。
   let cli;
   try {
-    cli = syncZcodeCliSlot({ sidecarRoot, managedEntries: personalEntries, managedIds: managed, ...cliSlot });
+    cli = syncZcodeCliSlot({
+      sidecarRoot,
+      managedEntries: personalEntries,
+      managedIds: managed,
+      autoProviderId: autoChannel ? `_${aggregateMapKey(managedProviders)}` : undefined,
+      ...cliSlot,
+    });
   } catch (error) {
     cli = { ok: false, skipped: false, unchanged: true, reason: error.message };
   }
@@ -225,7 +233,7 @@ export function syncZcodeCliSlot({ sidecarRoot, managedEntries, managedIds, ...o
     managedEntries,
     sidecarPath: zcodeCliSidecarPath(sidecarRoot),
     sidecarManaged: managedIds ?? [],
-    defaultModelSelection: defaultCliModelSelection(managedEntries, builtinModelRules) ?? undefined,
+    defaultModelSelection: defaultCliModelSelection(managedEntries, builtinModelRules, options.autoProviderId) ?? undefined,
     ...(options.lockWaitMs === undefined ? {} : { lockWaitMs: options.lockWaitMs }),
   });
   if (!personal.ok) return { ok: false, skipped: false, unchanged: true, reason: personal.reason };

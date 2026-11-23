@@ -360,6 +360,34 @@ describe("auto routing channel (Anyswitch)", () => {
     assert.match(text, /^default_model = "_auto\/kimi-k3-mix"$/m);
   });
 
+  it("real channel auto with a model id that collides with the trigger word produces no duplicate model table", () => {
+    // 渠道 id 叫 auto 且挂了 id 同样叫 auto 的模型：占位换键后若别名仍钉 _auto/
+    // 前缀，真实渠道的 _auto/auto 与占位触发词会撞成两张同名 [models.*] 表，
+    // kimi 整份配置拒载。
+    const collisionStore = {
+      version: 2,
+      providers: {
+        auto: { displayName: "Auto", models: { auto: {}, "m-1": {} } },
+        "poke-api": { models: { "gpt-6-astra": {} } },
+      },
+      routingChains: {
+        kimi: { chain: [{ node: "poke-api", model: "gpt-6-astra" }] },
+      },
+    };
+    const { text, managed } = mergeKimiConfigToml(
+      "",
+      extractManagedProviders(collisionStore),
+      47821,
+      "tok",
+      deriveAutoRouteChannel(collisionStore, "kimi"),
+    );
+    const modelTables = text.match(/^\[models\..*\]$/gm) ?? [];
+    assert.equal(new Set(modelTables).size, modelTables.length, "no duplicate [models.*] table");
+    assert.equal((text.match(/\[models\."_auto\/auto"\]/g) ?? []).length, 1, "真实渠道的 auto 模型独占 _auto/auto");
+    assert.match(text, /\[models\."_anyswitch\/auto"\]/, "占位触发词随实际键落 _anyswitch/auto");
+    assert.ok(managed.includes("auto") && managed.includes("anyswitch"));
+  });
+
   it("strips an unmarked Anyswitch provider table left by a Kimi self-rewrite", () => {
     // Kimi 的 re-serializer 只保留 providers/models 条目、丢注释，所以伪渠道的
     // provider 表会以无标记形态残留；不剥掉就会与下一轮 managed block 重复声明。
@@ -398,10 +426,20 @@ describe("auto routing channel (Anyswitch)", () => {
 
 describe("kimi provider id mapping", () => {
   it("maps the pseudo-channel to its display name and keeps real channels under the managed prefix", () => {
-    assert.equal(kimiProviderId("auto"), "Anyswitch");
+    // 占位按 aggregatePlaceholder 标记识别，与 map 键名无关：撞名时占位的键是
+    // fallback（"anyswitch"），真实渠道 auto 走普通 "_auto"。
+    const placeholder = { aggregatePlaceholder: true };
+    assert.equal(kimiProviderId("auto", placeholder), "Anyswitch");
+    assert.equal(kimiProviderId("anyswitch", placeholder), "Anyswitch");
     assert.equal(kimiProviderId("poke-api"), "_poke-api");
+    assert.equal(kimiProviderId("auto"), "_auto", "真实渠道 auto 落普通托管前缀");
     // aliases keep the historical prefix regardless of the provider-id mapping
-    assert.equal(kimiModelAlias("auto", "auto"), "_auto/auto");
+    assert.equal(kimiModelAlias("auto", "auto", placeholder), "_auto/auto");
+    // 撞名时占位骑在 fallback 键上，别名命名空间随实际键——真实渠道 auto 的
+    // 同名模型（id 也叫 auto）已占用 "_auto/auto"，占位再钉 _auto/ 前缀会产出
+    // 同名 [models.*] 表，整份配置被 kimi 拒载。
+    assert.equal(kimiModelAlias("anyswitch", "auto", placeholder), "_anyswitch/auto");
+    assert.equal(kimiModelAlias("auto", "m-1"), "_auto/m-1", "真实渠道 auto 的别名同前缀、按模型 id 区分");
     assert.equal(kimiModelAlias("poke-api", "m-1"), "_poke-api/m-1");
   });
 });
@@ -597,5 +635,49 @@ describe("takeOverKimiThinkingTable", () => {
   it("ignores a nested table whose name merely ends in thinking", () => {
     const result = takeOverKimiThinkingTable('[kimi.thinking]\nenabled = false\n');
     assert.equal(result.status, "absent");
+  });
+
+  it("flips a double-quoted key in place and keeps the user's quoting", () => {
+    const result = takeOverKimiThinkingTable('[thinking]\n"enabled" = false\n');
+    assert.equal(result.status, "updated");
+    assert.equal(result.changed, true);
+    assert.equal(result.text, '[thinking]\n"enabled" = true\n');
+  });
+
+  it("flips a single-quoted key in place and keeps the user's quoting", () => {
+    const result = takeOverKimiThinkingTable("[thinking]\n'enabled' = false\n");
+    assert.equal(result.status, "updated");
+    assert.equal(result.changed, true);
+    assert.equal(result.text, "[thinking]\n'enabled' = true\n");
+  });
+
+  it("reports present when a double-quoted key is already on", () => {
+    const source = '[thinking]\n"enabled" = true\n';
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "present");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("reports present when a single-quoted key is already on", () => {
+    const source = "[thinking]\n'enabled' = true\n";
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "present");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("refuses a quoted key whose value is not a bare boolean", () => {
+    const source = '[thinking]\n"enabled" = "off"\n';
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "invalid");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("still flips the bare key verbatim (regression)", () => {
+    const result = takeOverKimiThinkingTable("[thinking]\nenabled = false\n");
+    assert.equal(result.status, "updated");
+    assert.equal(result.text, "[thinking]\nenabled = true\n");
   });
 });

@@ -575,6 +575,20 @@ describe("store 自带声明优先于库（resolveEndpointEfforts）", () => {
     assert.deepEqual(resolved.levels, ["light", "medium", "high", "xhigh", "max"]);
   });
 
+  it("声明+defaultEffort=low→default=low", () => {
+    const model = { reasoningEffortLevels: ["low", "high"], defaultEffort: "low" };
+    assert.equal(resolveDeclaredEfforts("glm-5.3", { catalog, model }).default, "low");
+    const surface = resolveEndpointEfforts("glm-5.3", { catalog, agent: "zcode", model });
+    assert.equal(surface.default, "low", "声明的默认档穿过词表裁剪原样保留");
+  });
+
+  it("defaultEffort 不在声明表内→回落偏好序", () => {
+    const model = { reasoningEffortLevels: ["low", "high"], defaultEffort: "max" };
+    assert.equal(resolveDeclaredEfforts("glm-5.3", { catalog, model }).default, null);
+    const surface = resolveEndpointEfforts("glm-5.3", { catalog, agent: "zcode", model });
+    assert.equal(surface.default, "high", "clip 阶段按偏好序重选（high 先于 low）");
+  });
+
   it("resolveDeclaredEfforts 在无库无声明时给出空档位而非 optimistic", () => {
     const resolved = resolveDeclaredEfforts("brand-new", { catalog: null, model: {} });
     assert.deepEqual(resolved.levels, []);

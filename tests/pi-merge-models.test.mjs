@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildPiProviderEntry,
@@ -522,8 +522,13 @@ describe("auto routing channel (Anyswitch)", () => {
 
 describe("pi provider id mapping", () => {
   it("maps the pseudo-channel to the display name and real channels to the managed prefix", () => {
-    assert.equal(piProviderId("auto"), "Anyswitch");
+    // 占位按 aggregatePlaceholder 标记识别，与 map 键名无关：撞名时占位的键是
+    // fallback（"anyswitch"），真实渠道 auto 走普通 "_auto"。
+    const placeholder = { aggregatePlaceholder: true };
+    assert.equal(piProviderId("auto", placeholder), "Anyswitch");
+    assert.equal(piProviderId("anyswitch", placeholder), "Anyswitch");
     assert.equal(piProviderId("poke-api"), "_poke-api");
+    assert.equal(piProviderId("auto"), "_auto", "真实渠道 auto 落普通托管前缀");
   });
 });
 describe("static on-disk auth values (direct-launch decoupling)", () => {
@@ -706,6 +711,139 @@ describe("launch-time instance retag", () => {
     const restore = restoreManagedProvidersAfterLaunch(filePath, { token: "t", instanceId: "i" });
     assert.equal(restore.ok, false);
     assert.equal(readFileSync(filePath, "utf8"), "{ not valid json", "corrupt file left untouched");
+  });
+});
+
+describe("retag/restore vs sync file-lock serialization", () => {
+  // 竞态复活场景：restore 持启动时的冻结读视图，并发同步的整盘落盘若插进
+  // restore 的「读-改-写」之间，同步刚删掉的渠道会被 restore 的陈旧写复活。
+  // 修复后三处共用同一把以 models.json 为键的文件锁（atomic-write.mjs
+  // withFileLock），交错只能发生在临界区外。持锁用「活 pid + 新鲜时间戳」
+  // 模拟另一个进程的临界区；lockWaitMs 缩短等待，避免拖慢测试。
+  const managedConfig = () => ({
+    providers: {
+      _poke: {
+        name: "poke",
+        baseUrl: "http://127.0.0.1:47821/openai/poke/v1",
+        apiKey: "stable-token",
+        api: "openai-completions",
+        headers: { "x-agent-id": "pi", "x-agent-instance": DIRECT_INSTANCE_ID },
+        models: [{ id: "m1" }],
+      },
+      "user-own": {
+        name: "mine",
+        baseUrl: "https://x.example/v1",
+        apiKey: "sk-user",
+        headers: { "x-agent-id": "custom" },
+        models: [{ id: "u1" }],
+      },
+    },
+  });
+  const taggedConfig = (instanceId) => {
+    const config = managedConfig();
+    config.providers._poke.apiKey = "launch-token";
+    config.providers._poke.headers["x-agent-instance"] = instanceId;
+    return config;
+  };
+  const writeConfig = (filePath, config) =>
+    writeFileSync(filePath, JSON.stringify(config, null, 2) + "\n", "utf8");
+  const holdLock = (filePath) =>
+    writeFileSync(`${filePath}.lock`, JSON.stringify({ pid: process.pid, at: Date.now() }), "utf8");
+
+  it("restore blocked by a live sync lock fails soft and never clobbers the sync's landed removal", () => {
+    const dir = mkTestDir("pi-retag-lock-");
+    const filePath = join(dir, "models.json");
+    const lockPath = `${filePath}.lock`;
+    // retag 已把本启动值落盘（x-agent-instance = proj-123）。
+    writeConfig(filePath, taggedConfig("proj-123"));
+
+    // 并发同步持锁并完成整盘落盘：poke 渠道已删，盘上只剩用户自有条目。
+    holdLock(filePath);
+    const synced = { providers: { "user-own": managedConfig().providers["user-own"] } };
+    writeConfig(filePath, synced);
+
+    const restore = restoreManagedProvidersAfterLaunch(
+      filePath,
+      { token: "launch-token", instanceId: "proj-123" },
+      { lockWaitMs: 120 },
+    );
+    assert.equal(restore.ok, false, "restore must wait out the live lock and fail soft");
+    assert.match(restore.reason, /lock/);
+    assert.deepEqual(restore.restored, []);
+    // 同步落盘的内容原样保留：陈旧视图没有写回，已删的 _poke 不复活。
+    assert.deepEqual(readModelsJson(filePath), synced);
+
+    rmSync(lockPath);
+    // 锁释放后 restore 读到的是同步后的盘：没有残留本启动标签，空转。
+    const after = restoreManagedProvidersAfterLaunch(
+      filePath,
+      { token: "launch-token", instanceId: "proj-123" },
+      { lockWaitMs: 120 },
+    );
+    assert.deepEqual(after, { ok: true, restored: [] });
+    assert.deepEqual(readModelsJson(filePath), synced);
+  });
+
+  it("sync write blocked by a live retag/restore lock fails closed, then lands after release", () => {
+    const dir = mkTestDir("pi-retag-lock-");
+    const filePath = join(dir, "models.json");
+    const lockPath = `${filePath}.lock`;
+    // restore 持锁期间（另一个进程的临界区）：盘上仍是本启动标签。
+    const tagged = taggedConfig("proj-123");
+    writeConfig(filePath, tagged);
+    holdLock(filePath);
+
+    const refused = writeModelsJsonWithBackup(filePath, { providers: {} }, { lockWaitMs: 120 });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.unchanged, true);
+    assert.match(refused.reason, /lock/);
+    // 文件原样、无备份——同步轮闭合为不变，下次 store 变化会重试。
+    assert.deepEqual(readModelsJson(filePath), tagged);
+    assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("models.backup.")), [], "no backup either");
+    assert.ok(existsSync(lockPath), "the live foreign lock survives");
+
+    rmSync(lockPath);
+    const written = writeModelsJsonWithBackup(filePath, { providers: {} }, { lockWaitMs: 120 });
+    assert.equal(written.ok, true);
+    assert.equal(written.unchanged, false);
+    assert.deepEqual(readModelsJson(filePath), { providers: {} });
+    assert.equal(existsSync(lockPath), false, "our own lock is released afterwards");
+  });
+
+  it("leaves no residue after a sync landing between retag and restore, verified by the next sync", () => {
+    const dir = mkTestDir("pi-retag-lock-");
+    const filePath = join(dir, "models.json");
+    // 同步落盘 → retag（proj-123）。
+    writeModelsJsonWithBackup(filePath, managedConfig());
+    const tag = tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(tag.tagged, ["_poke"]);
+
+    // 串行化后的合法次序：同步先于 restore 拿锁，整盘重写冲掉启动标签并删掉 poke。
+    const synced = { providers: { "user-own": managedConfig().providers["user-own"] } };
+    writeModelsJsonWithBackup(filePath, synced);
+    const restore = restoreManagedProvidersAfterLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(restore, { ok: true, restored: [] }, "nothing carries this launch's tag any more");
+
+    // 下一次同步后无残留：被删渠道不复活，启动标签一个不剩。
+    const { config } = mergeModelsJson(readModelsJson(filePath), {}, 47821, ["poke-api"]);
+    writeModelsJsonWithBackup(filePath, config);
+    const settled = readModelsJson(filePath);
+    assert.equal(settled.providers._poke, undefined);
+    assert.ok(!JSON.stringify(settled).includes("proj-123"), "no launch tag survives the next sync");
+    assert.equal(existsSync(`${filePath}.lock`), false, "no lock file left behind");
+  });
+
+  it("control: retag reads the post-sync disk and tags exactly what the last sync wrote", () => {
+    const dir = mkTestDir("pi-retag-lock-");
+    const filePath = join(dir, "models.json");
+    // 正常次序：同步先完成整盘落盘，retag 的锁内读看到的就是最新内容——
+    // 已删渠道不会被（基于陈旧视图的）retag 重新打上启动标签。
+    writeModelsJsonWithBackup(filePath, managedConfig());
+    const synced = { providers: { "user-own": managedConfig().providers["user-own"] } };
+    writeModelsJsonWithBackup(filePath, synced);
+    const tag = tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(tag, { ok: true, tagged: [] });
+    assert.deepEqual(readModelsJson(filePath), synced, "retag neither tags nor writes");
   });
 });
 

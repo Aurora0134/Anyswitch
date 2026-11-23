@@ -399,7 +399,10 @@ export function modelEffortSurface(rawId, { catalog, agent } = {}) {
  *
  * The declaration's wire spellings are empty by construction (the store has no
  * wire field), so effortWireValue falls back to the level name — the OpenAI
- * shape an upstream expects.
+ * shape an upstream expects. Its default is `model.defaultEffort` when that
+ * names one of the declared levels; anything else leaves the default null and
+ * the clip step's preference order picks, mirroring the request face
+ * (effort-injection.mjs defaultLevelFor).
  *
  * Returns null exactly when modelEffortSurface does: nothing worth writing.
  */
@@ -428,8 +431,11 @@ export function resolveDeclaredEfforts(rawId, { catalog, model, provider } = {})
     const declared = Array.isArray(model?.reasoningEffortLevels) && model.reasoningEffortLevels.length > 0
       ? model.reasoningEffortLevels
       : provider.reasoningVariants;
+    const stated = typeof model?.defaultEffort === "string" && declared.includes(model.defaultEffort)
+      ? model.defaultEffort
+      : null;
     return {
-      levels: [...declared], default: null, wire: {}, thinkingFormat: null,
+      levels: [...declared], default: stated, wire: {}, thinkingFormat: null,
       kind: "reasoning", origin: "store", matchedKey: null,
     };
   }

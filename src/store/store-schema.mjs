@@ -6,6 +6,7 @@
 // closing the escape vector before any DPAPI read.
 import { validateCredentialRef } from "./credential-ref.mjs";
 import { chainNodeKey } from "../channels/chain-routing.mjs";
+import { deriveVisibleChannels } from "../channels/pool-providers.mjs";
 
 // A field name is secret-like when one of its `-`/`_`-delimited segments is a
 // known secret word. Segment-based matching avoids false positives on legit
@@ -325,7 +326,9 @@ export const MAX_CHAIN_NODES = 8;
 // 不动名）；带 previousName 时按原名原位换名（位次与启用开关保留）——名字就是对外
 // 模型 id，改名后旧名的调用随即失效。名字禁用端点 id 与 "auto"——它们分别是端点链
 // 路由键与链路由触发词，撞名会让请求被拦截到错误的目标；保留名判定不区分大小写
-// （"Auto" 这类仿名变体一并拦下）。
+// （"Auto" 这类仿名变体一并拦下）。与可见渠道的真实模型 id 同名同样禁用（精确匹配，
+// 线上模型 id 区分大小写）：撞名会让该真实模型的请求被劫到这条链上；可见口径与目录
+// 下发同源（deriveVisibleChannels，号池吸收成员、按并集上屏），手写 store 在此一并被拦。
 export const VIRTUAL_MODEL_ID = /^[A-Za-z][A-Za-z0-9._-]*$/;
 export const VIRTUAL_MODEL_MAX = 64;
 // 成员全部小写（endpoint ids 均为小写），查成员请先把候选名转小写再比对。
@@ -386,6 +389,15 @@ function validateVirtualModels(store, errors) {
     ...Object.keys(store.pools ?? {}),
   ]);
   const names = new Set();
+  // 可见渠道的真实模型 id：虚拟模型名与之一撞即拒（name 就是端点可见的模型 id，
+  // 撞名会把该真实模型的请求劫到虚拟模型的链上）。精确匹配——线上模型 id 区分
+  // 大小写；仅在有条目要查时才推导一次，可见口径与目录下发同源。
+  const realModelIds = new Set();
+  if (vms.length > 0) {
+    for (const channel of Object.values(deriveVisibleChannels(store))) {
+      for (const modelId of Object.keys(channel?.models ?? {})) realModelIds.add(modelId);
+    }
+  }
   for (const [index, vm] of vms.entries()) {
     const where = `virtualModels[${index}]`;
     if (vm === null || typeof vm !== "object" || Array.isArray(vm)) {
@@ -407,6 +419,9 @@ function validateVirtualModels(store, errors) {
     }
     if (RESERVED_VIRTUAL_MODEL_NAMES.has(vm.name.toLowerCase())) {
       errors.push(`${where}.name: "${vm.name}" is reserved`);
+    }
+    if (realModelIds.has(vm.name)) {
+      errors.push(`${where}.name: "${vm.name}" collides with a visible channel's model id`);
     }
     // enabled: 虚拟模型启用开关（可选；缺省 = 开，与端点链开关同语义）。
     if ("enabled" in vm && typeof vm.enabled !== "boolean") {

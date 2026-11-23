@@ -240,7 +240,7 @@ describe("workbuddy-merge-models", () => {
     assert.equal(byId.get("auto").name, "auto");
     assert.equal(byId.get("vm-a").name, "vm-a");
     for (const entry of config.models) assert.equal(entry.name, entry.id);
-    assert.equal(workbuddyModelId("auto", "vm-a"), "vm-a");
+    assert.equal(workbuddyModelId("auto", "vm-a", { aggregatePlaceholder: true }), "vm-a");
     assert.equal(workbuddyModelId("chan", "m"), "chan~m");
   });
 

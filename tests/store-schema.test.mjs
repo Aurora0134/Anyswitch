@@ -793,6 +793,33 @@ test("validateStore reserves the auto id and endpoint ids as virtual model names
   }
 });
 
+test("validateStore rejects a virtual model name that collides with a visible channel's model id", () => {
+  // deepseek/zhipu 都被 main-pool 吸收，模型经号池并集上屏；撞名按可见渠道口径判，
+  // 手写 store 在这里被拦（service 层另有中文友好提示）。
+  for (const name of ["glm-5", "deepseek-chat"]) {
+    const store = legalStoreWithVirtualModel();
+    store.virtualModels = [{ name, chain: [{ node: "deepseek", model: "deepseek-chat" }] }];
+    const result = validateStore(store);
+    assert.equal(result.valid, false, name);
+    assert.equal(
+      result.errors.some((e) => /virtualModels\[0\]\.name: ".*" collides with a visible channel's model id/i.test(e)),
+      true,
+      `${name} 实得：${JSON.stringify(result.errors)}`,
+    );
+  }
+});
+
+test("validateStore accepts a virtual model name no visible channel offers (near-miss and case variant)", () => {
+  // 线上模型 id 精确匹配：近似名与仅大小写不同的名字都不构成撞名。
+  for (const name of ["glm-6", "GLM-5"]) {
+    const store = legalStoreWithVirtualModel();
+    store.virtualModels = [{ name, chain: [{ node: "deepseek", model: "deepseek-chat" }] }];
+    const result = validateStore(store);
+    assert.equal(result.valid, true, `${name} 实得：${JSON.stringify(result.errors)}`);
+    assert.deepEqual(result.errors, []);
+  }
+});
+
 test("validateStore accepts optional boolean enabled on virtual models (absent = on)", () => {
   for (const enabled of [undefined, true, false]) {
     const store = legalStoreWithVirtualModel();

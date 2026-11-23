@@ -1155,6 +1155,23 @@ describe("defaultCliModelSelection（CLI 槽位的默认模型选择）", () => 
     assert.equal(defaultCliModelSelection({ _auto: cliEntryOf("auto", []) }, builtinRules), null);
   });
 
+  it("撞名时按调用方给的实际盘键选占位，不把 _auto 当占位渠道", () => {
+    // 真实渠道占了 auto 这个 id：_auto 是真实渠道条目，占位骑 _anyswitch。
+    // 默认选中必须跟随调用方推算的实际盘键，否则「auto 优先」静默转移到真实
+    // 渠道上。
+    const entries = {
+      _auto: cliEntryOf("auto", ["some-model"]),
+      _anyswitch: cliEntryOf("anyswitch", ["auto", "kimi-k3-mix"]),
+    };
+    assert.deepEqual(defaultCliModelSelection(entries, builtinRules, "_anyswitch"), {
+      providerId: "_anyswitch",
+      modelId: "auto",
+      options: { reasoningLevel: "disabled" },
+    });
+    // 缺省口径不变：不传第三参时仍优先 _auto。
+    assert.equal(defaultCliModelSelection(entries, builtinRules).providerId, "_auto");
+  });
+
   it("treats a rule that explicitly clears the reasoning spec as unresolvable", () => {
     const clearing = {
       modelRules: [

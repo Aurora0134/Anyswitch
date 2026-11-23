@@ -31,6 +31,7 @@ import { protect as defaultProtect, unprotect as defaultUnprotect } from "../ops
 import { atomicWriteFile as defaultAtomicWriteFile } from "./atomic-write.mjs";
 import { MAX_CHAIN_NODES, RESERVED_VIRTUAL_MODEL_NAMES, ROUTING_ENDPOINT_IDS, VIRTUAL_MODEL_ID, VIRTUAL_MODEL_MAX } from "./store-schema.mjs";
 import { chainNodeExists, chainNodeKey } from "../channels/chain-routing.mjs";
+import { deriveVisibleChannels } from "../channels/pool-providers.mjs";
 import {
   buildV2AddEntry,
   computeMigrationSeed,
@@ -1283,8 +1284,12 @@ export function createStoreService({
      * verbatim as the model id clients will send. "auto" and endpoint ids are
      * reserved and refused case-insensitively (they are the chain-routing
      * trigger word and the per-endpoint routing keys; a name collision would
-     * intercept requests to the wrong target). `chain` is the exact
-     * saveRouteChain shape.
+     * intercept requests to the wrong target). A name exactly matching a model
+     * id any visible channel offers is refused for the same reason — the
+     * virtual model would shadow that real model on the wire (visible view per
+     * deriveVisibleChannels, pool unions included; wire model matching is
+     * case-sensitive, so a case-only difference is not a collision). `chain`
+     * is the exact saveRouteChain shape.
      *
      * `previousName` (optional) turns the write into a rename: the entry
      * stored under previousName moves to `name` in place — its array position
@@ -1328,6 +1333,16 @@ export function createStoreService({
       for (const item of chain) {
         if (!Object.hasOwn(providers, item.node) && !Object.hasOwn(pools, item.node)) {
           return { ok: false, error: `route chain node "${item.node}" is neither a managed provider nor a pool` };
+        }
+      }
+      // 与可见渠道的真实模型同名一律拒：虚拟模型名就是端点可见的模型 id，撞名会把
+      // 该模型的请求劫到这条链上。可见口径与目录下发同源（deriveVisibleChannels：
+      // 号池吸收成员、按并集上屏）；精确匹配——线上模型 id 区分大小写，"M1" 不撞
+      // "m1"。新建与改名同过这一拦（此处的 name 已是目标名）。
+      for (const [channelId, channel] of Object.entries(deriveVisibleChannels(loaded.store))) {
+        if (Object.hasOwn(channel?.models ?? {}, name)) {
+          const label = channel?.channelName ?? channel?.displayName ?? channelId;
+          return { ok: false, error: `"${name}" 已是渠道「${label}」的模型，虚拟模型不能用` };
         }
       }
       const nextStore = structuredClone(loaded.store);

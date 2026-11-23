@@ -29,7 +29,7 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "../store/atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, withAggregateChannel } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -117,7 +117,7 @@ export function mergeOpencodeConfig(existing, managedProviders, port, tokenFileR
   // The virtual auto-routing channel flows through the same cleanup/inject
   // loops as any real channel: deleting the endpoint's chain (or disabling
   // it) makes the next sync drop "auto" via the ordinary previousManaged path.
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const providers = withAggregateChannel(managedProviders, autoChannel);
 
   for (const prevId of previousManaged) {
     if (!providers[prevId] && merged.provider[prevId] !== undefined) {

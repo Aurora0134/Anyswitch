@@ -381,8 +381,8 @@ function pickLegalReasoningLevel(values) {
 }
 
 /**
- * The default selection a fresh CLI slot file gets. 通用规则：优先 _auto 渠道
- * （首模型，reasoningLevel 取该模型经 builtin 规则解析后的合法项）；_auto 不在
+ * The default selection a fresh CLI slot file gets. 通用规则：优先聚合占位渠道
+ * （首模型，reasoningLevel 取该模型经 builtin 规则解析后的合法项）；占位不在
  * 或其规则解析不出时按托管条目顺序取第一个有模型的其他渠道，先解析、builtin
  * 规则不可用或没解析出取值集合才用 "disabled" 兜底：兜底值即便不合法，CLI
  * 也只是静默退回 registry-fallback，仍好过没有选择直接报 Select a model
@@ -390,9 +390,13 @@ function pickLegalReasoningLevel(values) {
  *
  * @param {object} managedEntries { [prefixedProviderId]: config.json provider entry }
  * @param {object|null} builtinModelRules parsed zcode-builtin.json's config.modelConfigRules
+ * @param {string} [preferredProviderId] 占位渠道的盘键。默认 _auto；撞名（真实
+ *   渠道占了 auto 这个 id）时占位改骑 fallback 键，调用方按
+ *   merge-common.aggregateMapKey 的推算结果传实际盘键——继续钉 _auto 会把
+ *   「auto 优先」静默转移到真实渠道上。
  * @returns {{ providerId: string, modelId: string, options: { reasoningLevel: string } } | null}
  */
-export function defaultCliModelSelection(managedEntries, builtinModelRules) {
+export function defaultCliModelSelection(managedEntries, builtinModelRules, preferredProviderId = CLI_AUTO_PROVIDER_ID) {
   const entries = isRecord(managedEntries) ? managedEntries : {};
   const buildSelection = (providerId, entry, { requireResolved }) => {
     const modelId = firstModelIdOf(entry);
@@ -413,10 +417,10 @@ export function defaultCliModelSelection(managedEntries, builtinModelRules) {
     return { providerId, modelId, options: { reasoningLevel: pickLegalReasoningLevel(values) } };
   };
 
-  const autoSelection = buildSelection(CLI_AUTO_PROVIDER_ID, entries[CLI_AUTO_PROVIDER_ID], { requireResolved: true });
+  const autoSelection = buildSelection(preferredProviderId, entries[preferredProviderId], { requireResolved: true });
   if (autoSelection) return autoSelection;
   for (const [providerId, entry] of Object.entries(entries)) {
-    if (providerId === CLI_AUTO_PROVIDER_ID) continue;
+    if (providerId === preferredProviderId) continue;
     const selection = buildSelection(providerId, entry, { requireResolved: false });
     if (selection) return selection;
   }

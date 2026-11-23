@@ -8,6 +8,9 @@ import {
   ANYSWITCH_CHANNEL_NAME,
   deriveAutoRouteChannel,
   deriveAnyswitchChannel,
+  isAggregatePlaceholder,
+  isAggregatePlaceholderKey,
+  withAggregateChannel,
 } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
@@ -168,19 +171,24 @@ export function buildReasoningEffortsMap(levels, wireValues) {
 // its "recently used" rows, the /model completion tree and the status detail
 // (only the provider tab strip honours displayName), so the pseudo channel's
 // key IS the channel name users see — it carries no "_" prefix. Real channels
-// keep the managed-id prefix.
-export function dshProviderKey(providerId) {
-  return providerId === AUTO_CHANNEL_KEY ? ANYSWITCH_CHANNEL_NAME : `_${providerId}`;
+// keep the managed-id prefix. The pseudo channel is recognized by its
+// aggregatePlaceholder mark: under a name collision its map key is the
+// fallback ("anyswitch", …) while a real channel named "auto" takes the
+// ordinary `_auto` key.
+export function dshProviderKey(providerId, provider) {
+  return isAggregatePlaceholder(provider) ? ANYSWITCH_CHANNEL_NAME : `_${providerId}`;
 }
 
 // Every on-disk key a managed id may be stored under: the current key plus the
 // pre-rename "_auto" of the pseudo channel. A sidecar written by the old
 // writer still names "auto", and the first sync after the rename has to retire
-// that key.
+// that key. The placeholder's map key may also be the collision fallback
+// ("anyswitch", …) while its disk key stays the display name, so the whole
+// placeholder key family maps to both candidate shapes.
 export function dshManagedKeys(providerId) {
   const id = String(providerId);
-  if (id === AUTO_CHANNEL_KEY || id === ANYSWITCH_CHANNEL_NAME) {
-    return [ANYSWITCH_CHANNEL_NAME, `_${AUTO_CHANNEL_KEY}`];
+  if (isAggregatePlaceholderKey(id) || id === ANYSWITCH_CHANNEL_NAME) {
+    return [ANYSWITCH_CHANNEL_NAME, `_${id === ANYSWITCH_CHANNEL_NAME ? AUTO_CHANNEL_KEY : id}`];
   }
   return [id.startsWith("_") ? id : `_${id}`];
 }
@@ -193,7 +201,7 @@ function isManagedDshProvider(provider) {
 }
 
 export function buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog = null, includeEfforts = true) {
-  const providerKey = dshProviderKey(providerId);
+  const providerKey = dshProviderKey(providerId, provider);
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
   const segment = provider.baseUrlSegment ?? providerId;
@@ -282,7 +290,7 @@ export function mergeDshSettings(existingSettings, managedProviders, port, token
   // it flows through the same cleanup/inject loops as any real channel, so
   // deleting the endpoint's chain makes the next sync drop the pseudo channel
   // via the ordinary previousManaged path.
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const providers = withAggregateChannel(managedProviders, autoChannel);
 
   // 1. Clean up stale managed providers
   for (const prevId of previousManaged) {
@@ -294,9 +302,13 @@ export function mergeDshSettings(existingSettings, managedProviders, port, token
   // Migration: before the pseudo channel was keyed by its display name it
   // lived under the managed id "_auto". Retire that leftover so the picker
   // never lists both groups; a user-written "_auto" without the dsh endpoint
-  // header is left alone.
+  // header is left alone. Skipped when a real channel named "auto" is in the
+  // current set: "_auto" is that channel's own key now, and the inject loop
+  // below overwrites it wholesale — deleting it first would only churn the
+  // key order (and, before the injection, briefly remove a live channel).
   const legacyAuto = existingProviders[`_${AUTO_CHANNEL_KEY}`];
-  if (legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
+  const realAutoClaimsKey = providers[AUTO_CHANNEL_KEY] !== undefined && !isAggregatePlaceholder(providers[AUTO_CHANNEL_KEY]);
+  if (!realAutoClaimsKey && legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
     delete existingProviders[`_${AUTO_CHANNEL_KEY}`];
   }
 
@@ -433,9 +445,11 @@ export function mergeDshProfilePatch(entries, providers, previousManaged = []) {
   }
   // Sidecar-lost migration: the pseudo channel used to be written under the
   // managed id "_auto". Retire that leftover (only with the dsh endpoint
-  // header) so the picker never lists both groups.
+  // header) so the picker never lists both groups. Skipped when the current
+  // build already writes "_auto" — that is a real channel named "auto" taking
+  // its own ordinary key, and the assign below overwrites the slot wholesale.
   const legacyAuto = existing[`_${AUTO_CHANNEL_KEY}`];
-  if (legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
+  if (!Object.hasOwn(providers, `_${AUTO_CHANNEL_KEY}`) && legacyAuto !== undefined && isManagedDshProvider(legacyAuto)) {
     delete existing[`_${AUTO_CHANNEL_KEY}`];
   }
   Object.assign(existing, providers);
@@ -458,7 +472,7 @@ async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, d
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
-  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const providers = withAggregateChannel(managedProviders, autoChannel);
   const built = {};
   for (const [providerId, provider] of Object.entries(providers)) {
     Object.assign(built, buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog, effortsEnabled));
@@ -507,8 +521,13 @@ async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, d
   if (skipped.length === paths.length) {
     return { ok: false, unchanged: true, reason: "every dsh profile patch is unparseable" };
   }
+  // 有界面被跳过时它未经手本轮增删：只记本轮键会让该界面里上一轮托管、本轮已删
+  // 的渠道永远清不出去。续记 previousManaged 的并集，待全量可写轮精确收敛。
+  const sidecarIds = skipped.length > 0
+    ? [...new Set([...Object.keys(providers), ...previousManaged])]
+    : Object.keys(providers);
   if (!changed) {
-    writeSidecar(sidecarRoot, Object.keys(providers));
+    writeSidecar(sidecarRoot, sidecarIds);
     return { ok: true, unchanged: true, skipped };
   }
   for (const { filePath, text } of staged) {
@@ -520,7 +539,7 @@ async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, d
     }
     atomicWriteFile(filePath, text);
   }
-  writeSidecar(sidecarRoot, Object.keys(providers));
+  writeSidecar(sidecarRoot, sidecarIds);
   return { ok: true, unchanged: false, written: staged.map((item) => item.filePath), skipped };
 }
 
