@@ -1663,11 +1663,18 @@
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+    position: relative;
   }
+  /* min-height 保住折线在流时的原 26px 行高：折线改绝对定位后出流，
+     标签/数值两排字的占位与整卡高度逐像素不变 */
   .telemetry-header {
-    display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; min-height: 26px;
   }
   .telemetry-label { font-size: 11.5px; font-weight: 600; color: var(--text-3); }
+  /* 折线原随头部行贴格子右上；改为按整卡几何中线垂直居中，右缘在 14px 内边距
+     基础上再左收 4px（同款修位先例：终端四宫格折线 73aa324）。作用域限定卡内——
+     终端监测区的 .terminal-metric-spark 复用本类的尺寸基础，走自己的网格定位 */
+  .telemetry-card .telemetry-sparkline { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); }
   .telemetry-sparkline { width: 68px; height: 26px; contain: strict; }
   .telemetry-content { display: flex; align-items: baseline; justify-content: space-between; }
   .telemetry-num {
