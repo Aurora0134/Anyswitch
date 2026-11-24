@@ -72,6 +72,8 @@ Three prerequisites: Windows (credential sealing uses DPAPI, autostart uses Task
 
 Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node src/panel/panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere. Once installed, Settings → General also offers "Create desktop shortcut" — one click to put the panel entry on your desktop.
 
+Prefer not to build from source? GitHub Releases ships a Windows x64 installer; once installed, the panel's About page handles update checks (see "Boundaries to accept first" for signing details). The relay needs no separate start — launchers bring it up together with the agent — and the autostart toggle on the board's service status card keeps the services running in the background at Windows logon.
+
 Four steps to your first working request:
 
 1. Open `http://127.0.0.1:47820/panel` and go to channel management.
@@ -246,7 +248,7 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
 
 - **`store.json` holds no secrets.** The schema has a built-in word list (apikey, token, secret, password, …) matched against field names segment by segment; a hit rejects the write. Keys connect to the credentials directory only as `credentialFile` references. Verify: `grep -n "SECRET_WORDS" src/store/store-schema.mjs`.
 - **Keys decrypt only at request time.** DPAPI under the current user scope, ciphertext isolated per channel. Decrypted plaintext is reused short-term keyed by the ciphertext hash (a setting can disable this for burn-after-use: every request decrypts fresh); rotating the ciphertext invalidates it immediately.
-- **Four processes, four ports, loopback only.** Panel `127.0.0.1:47820`, relay `127.0.0.1:47821`, watchdog marker `47822`, terminal host `127.0.0.1:47823`.
+- **Three processes, three ports, loopback only.** Panel `127.0.0.1:47820`, relay `127.0.0.1:47821`, terminal host `127.0.0.1:47823`.
 - **The terminal host is a separate process.** The page is just a browser client: refreshing or reopening the panel keeps the PTYs alive; history replays from the host render mirror; the host is owned and restarted by the relay.
 - **Zero third-party runtime dependencies in the business code.** All 5 direct dependencies belong to the virtual terminal; across every `.mjs` under `src/` there is exactly one third-party import: node-pty in `src/terminal/terminal-host.mjs`. Verify:
 
@@ -296,7 +298,7 @@ The comparison is based on read-only research of CC Switch's public repo and doc
 ```text
 Anyswitch/
 ├── src/                        # runtime code, split into ten domains
-│   ├── panel/                  # 47820 panel host; panel API and static page routing; desktop entry
+│   ├── panel/                  # 47820 panel host; panel API and static page routing
 │   ├── relay/                  # 47821 resident relay host (owns the terminal host); protocol translation and forwarding
 │   ├── launchers/              # relay production assembly; per-endpoint launchers (ZCode desktop and CLI each) and config merges
 │   ├── agents/                 # managed-channel sync into agent configs; process/request/instance readouts; session reading; skills deployment
