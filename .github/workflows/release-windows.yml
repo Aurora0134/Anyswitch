@@ -24,8 +24,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm install --prefix tools/windows-package --no-package-lock --no-audit --no-fund
           exit $LASTEXITCODE
-      - name: Test Windows release contracts
-        run: node --test tools/windows-package/package-contract.test.mjs
       - name: Build and validate signed release assets
         shell: pwsh
         env:

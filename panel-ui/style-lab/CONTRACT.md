@@ -6,7 +6,7 @@
 主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
 横幅注释），本目录的 `SLUG.css` 是**源文件**——改动片段后必须把最新内容同步嵌入 panel.css 对应块。
 
-同步由 `tests/style-lab-sync.test.mjs`（node:test，随全量测试一起跑）强制校验：解析 panel.css 的
+同步由维护侧全量套件强制校验：解析 panel.css 的
 横幅块与对应 `SLUG.css` 归一化行尾（CRLF/LF）后逐字比对，漂移即红。
 若发现两侧漂移：以现行生效的一侧为准回写另一侧（panel.css 内嵌块是实际加载的样式，
 通常是内嵌块领先、源文件落后，把内嵌块内容回写进 `SLUG.css`），不许只改一侧留漂移。
@@ -79,8 +79,8 @@ CSS 规则自然恢复生效。
 不会被作用域内的规则命中），把 `:root[data-style="SLUG"] { … }` 这类 token 定义收进去会让整份
 token 一起失效、整套皮肤退化为基座值。同理，`@keyframes` 不参与样式匹配，也留在块外顶层。
 边界（块内只许覆盖规则、块外只许 `:root` token 规则与 `@keyframes`）由
-`tests/style-lab-sync.test.mjs` 校验；改写与改写前版本（d170982）的选择器、特异性、规则条数、
-多重集、声明逐条等价由 `tests/panel-preview-isolation.test.mjs` 校验。
+维护侧全量套件校验；改写与改写前版本（d170982）的选择器、特异性、规则条数、
+多重集、声明逐条等价同样由维护侧全量套件校验。
 
 ## 必须定义齐全的 token（亮色一套、暗色一套，语义不变只换值）
 
@@ -117,7 +117,7 @@ token 一起失效、整套皮肤退化为基座值。同理，`@keyframes` 不�
   字面量键控的覆盖规则同样收边、同样改写前缀。
   皮肤私有 token（不属于壁纸 token 契约、取色引擎不派生的那些）必须在 `.wallpaper-preview` 上
   按壁纸主题生效时真实看板的取值补齐，见 panel.css「预览的皮肤隔离层」段。
-  校验：`tests/style-lab-sync.test.mjs`、`tests/panel-preview-isolation.test.mjs`。
+  校验：维护侧全量套件。
 
 ## 参考
 
