@@ -313,9 +313,11 @@ describe("panel.css · 档位行只管版式", () => {
     assert.match(css, /#claudeTierRows\[hidden\] \{ display: none; \}/);
   });
 
-  it("「通用」结构注释与五张卡的实际形态一致", () => {
-    assert.equal((generalPanel.match(/<div class="panel-card">/g) ?? []).length, 5);
-    assert.match(css, /「通用」分组：按语义分五张卡/);
-    assert.match(html, /「通用」：按语义分五张卡/);
+  it("「通用」结构注释与六张卡的实际形态一致", () => {
+    // 卡数随结构演进：「显示」卡随「UI版本」分段钮落地，是第六张。注释钉的数
+    // 必须与实数一致：结构加减卡时这里先红，逼着把两处注释一起改。
+    assert.equal((generalPanel.match(/<div class="panel-card">/g) ?? []).length, 6, "「通用」实数六张卡");
+    assert.match(css, /「通用」分组：按语义分六张卡/);
+    assert.match(html, /「通用」：按语义分六张卡/);
   });
 });

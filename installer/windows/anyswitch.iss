@@ -7,9 +7,6 @@
 #ifndef OutputDir
   #error OutputDir is required
 #endif
-#ifndef WebViewSetup
-  #error WebViewSetup is required
-#endif
 
 [Setup]
 AppId=Anyswitch.Windows.Package
@@ -25,7 +22,7 @@ MinVersion=10.0.17763
 OutputDir={#OutputDir}
 OutputBaseFilename=anyswitch-v{#ReleaseVersion}-win-x64-setup
 SetupIconFile={#PayloadDir}\app\anyswitch.ico
-UninstallDisplayIcon={app}\Anyswitch.exe
+UninstallDisplayIcon={app}\anyswitch.ico
 Compression=lzma2
 SolidCompression=yes
 ChangesEnvironment=yes
@@ -33,10 +30,8 @@ CloseApplications=no
 RestartApplications=no
 
 [Files]
-Source: "{#PayloadDir}\*"; Excludes: "\app\package-health.mjs,\Anyswitch.exe"; DestDir: "{app}\versions\{#ReleaseVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\*"; Excludes: "\app\package-health.mjs"; DestDir: "{app}\versions\{#ReleaseVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PayloadDir}\app\package-health.mjs"; DestDir: "{app}\versions\{#ReleaseVersion}\app"; Flags: ignoreversion
-Source: "{#PayloadDir}\Anyswitch.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#WebViewSetup}"; Flags: dontcopy
 Source: "{#PayloadDir}\app\anyswitch.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\tools\windows-package\anyswitch.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\tools\windows-package\anyswitch-panel.cmd"; DestDir: "{app}"; Flags: ignoreversion
@@ -44,10 +39,7 @@ Source: "..\..\tools\windows-package\dispatch.ps1"; DestDir: "{app}"; Flags: ign
 Source: "..\..\tools\windows-package\anyswitch-silent.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\Anyswitch (Installed)"; Filename: "{app}\Anyswitch.exe"; WorkingDir: "{app}"
-
-[Run]
-Filename: "{app}\Anyswitch.exe"; Description: "{cm:LaunchProgram,Anyswitch}"; Flags: nowait postinstall skipifsilent
+Name: "{userprograms}\Anyswitch (Installed)"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\anyswitch-silent.vbs"" src\panel\panel-launcher.mjs"; WorkingDir: "{app}"; IconFilename: "{app}\anyswitch.ico"
 
 [Registry]
 

@@ -53,7 +53,7 @@ import {
   zcodeCliSidecarPath,
 } from "./zcode-merge-config.mjs";
 import { syncZcodePersonalConfig, PERSONAL_CONFIG_FILENAME } from "./zcode-personal-config.mjs";
-import { acquireRelayOrNative, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 import { resolveZcodeCliExecutable } from "../agents/agent-discovery.mjs";
 export { resolveZcodeCliExecutable };
 
@@ -316,7 +316,7 @@ export function realSpawnZcodeCli({ env, args, entry, spawnFn = spawn, nodeExe =
 // resolveBuiltinConfig 传 undefined 时由 runZcodeCliLauncher 的参数默认值接管。
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runZcodeCliLauncher({
-    startRelay: deps.startRelay ?? connectResidentRelay,
+    startRelay: deps.startRelay ?? (() => startOpenAIRelay()),
     writeConfig: deps.writeConfig ?? ((store, port, token, slotRoot) => writeZcodeCliConfig(store, port, token, slotRoot)),
     loadStore: deps.loadStore ?? loadStore,
     loadToken: deps.loadToken ?? ((root) => loadOrGenerateToken(root)),

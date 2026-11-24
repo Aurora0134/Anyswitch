@@ -21,7 +21,7 @@ import {
   validateOpencodeConfig,
 } from "./opencode-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "../catalog/effort-catalog.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv } from "./launcher-native-fallback.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -218,7 +218,7 @@ export async function runOpencodeLauncher({
 
 export async function main(argv = process.argv.slice(2)) {
   const code = await runOpencodeLauncher({
-    startRelay: connectResidentRelay,
+    startRelay: () => startOpenAIRelay(),
     writeConfig: (store, port, sidecarRoot) => writeOpencodeConfig(store, port, sidecarRoot),
     log: (line) => process.stderr.write(`${line}\n`),
     opencodeArgs: argv,

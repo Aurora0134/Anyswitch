@@ -23,6 +23,7 @@ const ROOT_ENTRY_SHELLS = [
   { shell: "relay-host.mjs", target: "src/relay/relay-host.mjs" },
   { shell: "panel-host.mjs", target: "src/panel/panel-host.mjs" },
   { shell: "panel-host-restart-helper.mjs", target: "src/panel/panel-host-restart-helper.mjs" },
+  { shell: "agent-watchdog.mjs", target: "src/agents/agent-watchdog.mjs" },
 ];
 
 // 可注入假子进程：on/emit 之外什么都不做。

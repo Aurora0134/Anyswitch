@@ -170,13 +170,13 @@ describe("relay-settings", () => {
     const tmp = mkTestDir("anyswitch-settings-test-");
     const path = join(tmp, "settings.json");
     try {
-      // The retired followAgent field is ignored. Arbitrary keys are
+      // followAgent (the agent-watcher auto-start switch) and customKey are
       // both unknown to relay-settings.mjs: they must ride through raw
       // untouched across loads and saves.
       writeFileSync(path, JSON.stringify({ followAgent: true, customKey: 123 }));
 
       const loaded = loadSettings(path, {});
-      assert.equal(loaded.settings.followAgent, undefined);
+      assert.equal(loaded.settings.followAgent, true);
       assert.equal(loaded.settings.customKey, 123);
       assert.equal(loaded.keepAlive.enabled, true);
 
@@ -184,7 +184,7 @@ describe("relay-settings", () => {
       const saved = saveSettings(path, { keepAlive: { enabled: false } }, {});
       assert.equal(saved.keepAlive.enabled, false);
       assert.equal(saved.keepAlive.mode, "off");
-      assert.equal(saved.settings.followAgent, undefined);
+      assert.equal(saved.settings.followAgent, true);
       assert.equal(saved.settings.customKey, 123);
 
       // Re-read independently
@@ -197,7 +197,7 @@ describe("relay-settings", () => {
       const enhanced = saveSettings(path, { keepAlive: { mode: "enhanced" } }, {});
       assert.equal(enhanced.keepAlive.mode, "on");
       assert.equal(enhanced.keepAlive.enabled, true);
-      assert.equal(enhanced.settings.followAgent, undefined);
+      assert.equal(enhanced.settings.followAgent, true);
       assert.equal(enhanced.settings.customKey, 123);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -338,7 +338,7 @@ describe("injectThinkingEffort", () => {
 
       const saved = saveSettings(path, { injectThinkingEffort: false }, {});
       assert.equal(saved.settings.injectThinkingEffort, false);
-      assert.equal(saved.settings.followAgent, undefined);
+      assert.equal(saved.settings.followAgent, true);
       assert.equal(saved.settings.sparkWindowPoints, 24);
       assert.equal(loadSettings(path, {}).injectThinkingEffort, false);
 
@@ -368,7 +368,7 @@ describe("loggingEnabled", () => {
 
       const saved = saveSettings(path, { loggingEnabled: false }, {});
       assert.equal(saved.settings.loggingEnabled, false);
-      assert.equal(saved.settings.followAgent, undefined);
+      assert.equal(saved.settings.followAgent, true);
       assert.equal(saved.settings.sparkWindowPoints, 24);
       assert.equal(loadSettings(path, {}).settings.loggingEnabled, false);
 
@@ -649,7 +649,7 @@ describe("claudeTierMappings", () => {
         sonnet: "anthropic/a/kimi-k3",
         haiku: "anthropic/b/flash",
       });
-      assert.equal(afterSecond.settings.followAgent, undefined, "neighbouring settings ride through");
+      assert.equal(afterSecond.settings.followAgent, true, "neighbouring settings ride through");
 
       // Clearing one row leaves the other standing.
       const cleared = saveSettings(path, { claudeTierMappings: { sonnet: "  " } }, {});

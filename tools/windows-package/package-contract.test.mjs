@@ -31,7 +31,7 @@ test("package-health.mjs parses and the silent launcher VBS compiles cleanly", (
 
 test("manifest bytes are canonical and Ed25519 signature verifies", () => {
   const version = "1.2.3-preview.4";
-  const asset = "anyswitch-v" + version + "-win-x64-desktop.zip";
+  const asset = "anyswitch-v" + version + "-win-x64.zip";
   const archive = Buffer.from("test archive");
   const sha256 = createHash("sha256").update(archive).digest("hex");
   const bytes = manifestBytes({ version, channel: "preview", asset, sha256, size: archive.length });
@@ -136,7 +136,7 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
     ["terminal-switch.log", "src/panel/panel.mjs"],
     ["delete-journal.json", "src/store/store-service.mjs"],
     ["relay.pid", "src/relay/relay-process-manager.mjs"],
-    ["watchdog.pid", "src/ops/retire-agent-watchdog.mjs"],
+    ["watchdog.pid", "src/agents/agent-watchdog.mjs"],
     ["terminal-host.pid", "src/terminal/terminal-process-manager.mjs"],
     ["agent-metrics-snapshot.json", "src/agents/agent-metrics.mjs"],
     ["model-stability.json", "src/catalog/model-stability.mjs"],
@@ -157,8 +157,7 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
   ];
   const trees = [
     ["credentials", "src/store/data-bundle.mjs"],
-    ["logs", "src/panel/panel-host.mjs"],
-    ["webview", "installer/windows/desktop/Desktop.cs"],
+    ["logs", "src/agents/agent-watchdog.mjs"],
     ["backups", "src/ops/backup-location.mjs"],
     ["client-updates", "src/agents/client-update-journal.mjs"],
     ["usage", "src/launchers/codex-launcher.mjs"],

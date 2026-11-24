@@ -1,0 +1,644 @@
+// agent-watchdog unit tests.
+//
+// probeWatchdog must validate the marker port's JSON body (watchdog === true),
+// not just a 200 status; stopWatchdog applies the same PID identity gate as
+// relay-process-manager.stopRelay. All process-facing dependencies are
+// injected fakes; the mock marker servers bind ephemeral loopback ports only.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { writeFileSync, existsSync, mkdirSync, readFileSync, writeSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, spawnWatchdog, watchdogSpawnTarget, watchdogVersionDrift, createWatchdogLogger, WATCHDOG_PROCESS_SCAN_TTL_MS } from "../src/agents/agent-watchdog.mjs";
+import { createAgentWatcher, DEFAULT_INTERVAL_MS } from "../src/agents/agent-watcher.mjs";
+import { mkTestDir } from "../test-helpers/tmp.mjs";
+
+const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
+const OWN_CMD = `node.exe ${APP_DIR}agent-watchdog.mjs`;
+const FOREIGN_CMD = "node.exe C:\\Users\\someone\\unrelated\\server.mjs";
+
+function writeWatchdogPidFile(root, pid) {
+  writeFileSync(getWatchdogPidPath(root), String(pid), "utf8");
+}
+
+async function withMockServer(handler, fn) {
+  const server = createServer(handler);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    return await fn(server.address().port);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test("probeWatchdog accepts the marker body {ok:true,watchdog:true}", async () => {
+  await withMockServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, watchdog: true }));
+  }, async (port) => {
+    assert.equal(await probeWatchdog(port), true);
+  });
+});
+
+test("probeWatchdog rejects a 200 body without the watchdog marker", async () => {
+  await withMockServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  }, async (port) => {
+    assert.equal(await probeWatchdog(port), false);
+  });
+});
+
+test("probeWatchdog rejects a non-JSON body", async () => {
+  await withMockServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("OK");
+  }, async (port) => {
+    assert.equal(await probeWatchdog(port), false);
+  });
+});
+
+test("probeWatchdog rejects a non-200 status", async () => {
+  await withMockServer((req, res) => {
+    res.writeHead(404);
+    res.end();
+  }, async (port) => {
+    assert.equal(await probeWatchdog(port), false);
+  });
+});
+
+function makeWatchdogRoot() {
+  // relayDataRoot(env) = join(env.LOCALAPPDATA, "Anyswitch"), so the pid file
+  // lives one level below the env root we hand to stopWatchdog.
+  const envRoot = mkTestDir("anyswitch-wd-");
+  const dataRoot = join(envRoot, "Anyswitch");
+  mkdirSync(dataRoot, { recursive: true });
+  return { envRoot, dataRoot };
+}
+
+function makeStopDeps({ ownerPid = null, alive = [], commandLines = {}, probeDown = true } = {}) {
+  const aliveSet = new Set(alive);
+  const killed = [];
+  return {
+    killed,
+    deps: {
+      findPortOwnerPid: () => ownerPid,
+      isPidAlive: (pid) => aliveSet.has(pid),
+      getProcessCommandLine: (pid) => commandLines[pid] ?? null,
+      terminatePid: (pid) => killed.push(pid),
+      probe: async () => !probeDown,
+      delay: async () => {},
+      stopPollMs: 1,
+      stopTimeoutMs: 10,
+    },
+  };
+}
+
+test("stopWatchdog refuses to kill a live PID whose command line is foreign", async () => {
+  const { envRoot, dataRoot } = makeWatchdogRoot();
+  writeWatchdogPidFile(dataRoot, 777);
+
+  const { deps, killed } = makeStopDeps({
+    ownerPid: 777,
+    alive: [777],
+    commandLines: { 777: FOREIGN_CMD },
+    probeDown: false, // marker port still answering after the refused kill
+  });
+
+  const result = await stopWatchdog({ LOCALAPPDATA: envRoot }, deps);
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /777/);
+  assert.deepEqual(killed, []);
+});
+
+test("stopWatchdog kills a verified PID and clears the pid file once down", async () => {
+  const { envRoot, dataRoot } = makeWatchdogRoot();
+  writeWatchdogPidFile(dataRoot, 888);
+
+  const { deps, killed } = makeStopDeps({
+    ownerPid: 888,
+    alive: [888],
+    commandLines: { 888: OWN_CMD },
+    probeDown: true,
+  });
+
+  const result = await stopWatchdog({ LOCALAPPDATA: envRoot }, deps);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(killed, [888]);
+  assert.equal(existsSync(getWatchdogPidPath(dataRoot)), false, "pid file cleared once the marker port is down");
+});
+
+test("stopWatchdog is fail-safe when the command line cannot be queried", async () => {
+  const { envRoot, dataRoot } = makeWatchdogRoot();
+  writeWatchdogPidFile(dataRoot, 999);
+
+  const { deps, killed } = makeStopDeps({
+    alive: [999],
+    commandLines: {},
+  });
+
+  const result = await stopWatchdog({ LOCALAPPDATA: envRoot }, deps);
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /999/);
+  assert.deepEqual(killed, []);
+});
+
+// --- stopWatchdog async owner path -------------------------
+
+test("stopWatchdog kills an owner PID that arrives as a Promise (a Promise owner must not be dropped)", async () => {
+  const { envRoot, dataRoot } = makeWatchdogRoot();
+  writeWatchdogPidFile(dataRoot, 888);
+
+  const { deps, killed } = makeStopDeps({
+    alive: [555, 888],
+    commandLines: { 555: OWN_CMD, 888: OWN_CMD },
+    probeDown: true,
+  });
+  deps.findPortOwnerPid = async () => 555; // async mock — the old sync filter would silently drop this
+
+  const result = await stopWatchdog({ LOCALAPPDATA: envRoot }, deps);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(killed.sort(), [555, 888], "the async owner PID must reach the kill loop");
+});
+
+test("stopWatchdog treats an owner lookup resolving null as 'no port owner'", async () => {
+  const { envRoot, dataRoot } = makeWatchdogRoot();
+  writeWatchdogPidFile(dataRoot, 888);
+
+  const { deps, killed } = makeStopDeps({
+    alive: [888],
+    commandLines: { 888: OWN_CMD },
+    probeDown: true,
+  });
+  deps.findPortOwnerPid = async () => null;
+
+  const result = await stopWatchdog({ LOCALAPPDATA: envRoot }, deps);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(killed, [888], "only the pid-file PID is killed");
+});
+
+// --- follow-agent watcher revive path ---------------------------------------
+
+test("followAgent tick reaches getRelayStatus/startRelay with an ASYNC scanProcesses", async () => {
+  // Regression: the injected scanProcesses is the collector's async probe —
+  // calling it without await made `procs` a Promise, every endpoint count
+  // read undefined, and anyAgent short-circuited the tick to a silent no-op.
+  const calls = { getRelayStatus: 0, startRelay: 0 };
+  const watcher = createAgentWatcher({
+    root: "C:/x",
+    scanProcesses: async () => ({ zcode: 1 }),
+    startRelay: async () => { calls.startRelay += 1; },
+    getRelayStatus: async () => { calls.getRelayStatus += 1; return { status: "stopped" }; },
+    loadSettings: () => ({ settings: { followAgent: true } }),
+    intervalMs: 60 * 60 * 1000, // the timer must not re-fire during the test
+    logger: { info() {}, error() {} },
+  });
+  watcher.start(); // fires one tick immediately
+  await new Promise((r) => setTimeout(r, 50));
+  watcher.stop();
+  assert.equal(calls.getRelayStatus, 1, "async scanProcesses 下 anyAgent 必须读到真计数");
+  assert.equal(calls.startRelay, 1, "agent 在跑且 relay 停了就必须自动拉起");
+});
+
+test("startWatchdogHost wires the real settings file (not the data root dir) into the tick", async () => {
+  // Regression: the loadSettings glue forwarded the watcher's `root` argument
+  // (a directory) as the settings file path; readFileSync on a directory
+  // failed, the tick saw empty settings, and followAgent was silently dead.
+  const localAppData = mkTestDir("anyswitch-watchdog-");
+  mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
+  writeFileSync(join(localAppData, "Anyswitch", "settings.json"), JSON.stringify({ followAgent: true }));
+  const calls = { getRelayStatus: 0, startRelay: 0 };
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0, // ephemeral marker port — no collision with a live watchdog
+    logger: { info() {}, error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    watcherDeps: {
+      scanProcesses: async () => ({ zcode: 1 }),
+      getRelayStatus: async () => { calls.getRelayStatus += 1; return { status: "stopped" }; },
+      startRelay: async () => { calls.startRelay += 1; },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  await host.close();
+  assert.equal(calls.getRelayStatus, 1, "tick 必须读到真 settings.json 并走到 relay 状态探测");
+  assert.equal(calls.startRelay, 1);
+});
+
+// --- degraded relay self-heal (2026-10-05) ----------------------------------
+//
+// "Does the port answer?" was the only question the watcher asked, so a relay
+// that stayed up while failing EVERY request was never touched. These tests lock
+// the reaction and its guard rails together: the old shape acted on every tick
+// forever, failures included, which spawned 48 relays that each died on the
+// occupied port — 2.5 hours of churn that made a bad situation worse.
+
+function makeDegradedWatcher({ status, now, restarts, errors = [], options = {} }) {
+  return createAgentWatcher({
+    root: "C:/x",
+    scanProcesses: async () => ({ dsh: 1 }),
+    startRelay: async () => { restarts.push("start"); },
+    restartRelay: async () => { restarts.push("restart"); },
+    getRelayStatus: async () => status.value,
+    loadSettings: () => ({ settings: { followAgent: true } }),
+    intervalMs: 60 * 60 * 1000,
+    logger: { info() {}, warn() {}, error: (m) => errors.push(m) },
+    now: () => now.value,
+    degradedGraceMs: 60_000,
+    healBackoffMs: [30_000],
+    healBudget: 3,
+    healBudgetWindowMs: 30 * 60_000,
+    ...options,
+  });
+}
+
+test("degraded relay: nothing happens while the relay serves", async () => {
+  const status = { value: { status: "running", degraded: false } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+  await w.tick();
+  assert.deepEqual(restarts, [], "健康的中继一次都不该被动");
+});
+
+test("degraded relay: the grace period is waited out before anything is touched", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 5, lastFailureKind: "credential" } };
+  const now = { value: 1_000_000 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+
+  await w.tick(); // first sighting starts the clock
+  assert.deepEqual(restarts, [], "刚看见降级就重启 = 把偶发抖动变成一次重启");
+  now.value += 30_000;
+  await w.tick();
+  assert.deepEqual(restarts, [], "宽限期内不动手");
+  now.value += 31_000; // 61s since the first sighting
+  await w.tick();
+  assert.deepEqual(restarts, ["restart"], "过宽限期走重启（端口被自己占着时「启动」是空操作）");
+});
+
+test("degraded relay: backoff spaces the attempts out", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+
+  await w.tick();
+  now.value = 60_000;
+  await w.tick();
+  assert.deepEqual(restarts, ["restart"]);
+  now.value = 70_000; // inside the 30s backoff
+  await w.tick();
+  assert.deepEqual(restarts, ["restart"], "退避未到不再动手");
+  now.value = 90_000;
+  await w.tick();
+  assert.deepEqual(restarts, ["restart", "restart"], "退避走完才允许下一次");
+});
+
+test("degraded relay: gives up after the budget and records why", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const errors = [];
+  const w = makeDegradedWatcher({
+    status, now, restarts, errors,
+    options: { healBudget: 2, healBackoffMs: [0] },
+  });
+
+  await w.tick(); // sighting
+  now.value = 60_000;
+  await w.tick(); // attempt 1
+  now.value = 61_000;
+  await w.tick(); // attempt 2
+  assert.equal(restarts.length, 2);
+  now.value = 62_000;
+  await w.tick();
+  now.value = 300_000;
+  await w.tick();
+  assert.equal(restarts.length, 2, "预算用完即停手，不再无限拉进程");
+  assert.equal(errors.length, 1, "停手必须留一条明确的记录，而不是静默放弃");
+  assert.match(errors[0], /auto-heal stopped/);
+});
+
+test("degraded relay: a brief recovery does NOT hand the budget back", async () => {
+  // 重启之后新进程当然是干净的、探针立刻报正常。如果这就把预算还回去，「30 分钟
+  // 内最多 3 次」形同虚设——每次重启都重置，实际节奏退化成「宽限期 + 退避」一次，
+  // 比原来的每 tick 一拉还密。
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({
+    status, now, restarts,
+    options: { healBudget: 1, healBackoffMs: [0] },
+  });
+
+  await w.tick(); // sighting
+  now.value = 60_000;
+  await w.tick(); // attempt 1（预算 1，已用完）
+  assert.equal(restarts.length, 1);
+
+  status.value = { status: "running", degraded: false };
+  now.value = 61_000;
+  await w.tick(); // 短暂恢复
+  status.value = { status: "running", degraded: true, consecutiveFailures: 3, lastFailureKind: "credential" };
+  now.value = 200_000;
+  await w.tick(); // 重新计时
+  now.value = 400_000;
+  await w.tick(); // 宽限期早过，但预算还没还
+  assert.equal(restarts.length, 1, "窗口内已用掉的额度不因一次恢复而归还");
+});
+
+test("degraded relay: the budget comes back once the window has passed", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({
+    status, now, restarts,
+    options: { healBudget: 1, healBackoffMs: [0], healBudgetWindowMs: 30 * 60_000 },
+  });
+
+  await w.tick();
+  now.value = 60_000;
+  await w.tick();
+  assert.equal(restarts.length, 1);
+
+  now.value = 60_000 + 31 * 60_000; // 窗口已过
+  await w.tick();
+  assert.equal(restarts.length, 2, "窗口滑过去之后额度自然恢复");
+});
+
+test("degraded relay: a stopped relay still takes the plain start path", async () => {
+  const status = { value: { status: "stopped" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+  await w.tick();
+  assert.deepEqual(restarts, ["start"], "原有自愈路径不变");
+});
+
+test("看门狗的扫描缓存窗口宽于自己的巡检节拍", () => {
+  // 巡检每 DEFAULT_INTERVAL_MS 一拍，且每拍都 await scanProcesses()。窗口比节拍短时
+  // 等于每拍强制重扫——常驻的那一路 CIM 行 dump 就是这么来的（本机实测看门狗那口子
+  // 进程连续存活 76 分钟，从未闲置）。窗口压到节拍之上，常驻并发少一路：看门狗要的
+  // 只是「有没有 agent 活着」这种粗判，代价是发现新 agent、进而拉起 relay 的延迟
+  // 从 ≤3s 变成 ≤窗口，所以上界也一并钉住，不许无限放宽。
+  assert.ok(WATCHDOG_PROCESS_SCAN_TTL_MS > DEFAULT_INTERVAL_MS,
+    "窗口必须大于节拍，否则看门狗每拍都在重扫");
+  assert.ok(WATCHDOG_PROCESS_SCAN_TTL_MS <= 10_000,
+    "窗口再大就开始拖慢「agent 起来了要拉起 relay」的反应");
+});
+
+test("窗口常量真的接进 startWatchdogHost 自建的收集器，watcher 扫的也是这个收集器", async () => {
+  // 上一条只证明两个常量的数值关系，不证明接线：startWatchdogHost 里那行
+  // processScanTtlMs 被改成硬编码、或 scanProcesses 不再喂收集器，常量关系测试
+  // 照样全绿。这里借 options.createMetricsCollector 测试缝捕获真实入参，并让
+  // stub 收集器的扫描直接驱动 followAgent 判定——两处接线都可观察。
+  const localAppData = mkTestDir("anyswitch-watchdog-ttl-");
+  mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
+  writeFileSync(join(localAppData, "Anyswitch", "settings.json"), JSON.stringify({ followAgent: true }));
+  const calls = { scanProcesses: 0, startRelay: 0 };
+  let collectorOptions = null;
+  const stubCollector = {
+    scanProcesses: async () => {
+      calls.scanProcesses += 1;
+      return { workbuddy: 1 };
+    },
+  };
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0, // ephemeral marker port — no collision with a live watchdog
+    logger: { info() {}, error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    createMetricsCollector: (opts) => {
+      collectorOptions = opts;
+      return stubCollector;
+    },
+    // 不注入 scanProcesses：watcher 必须落到默认分支（收集器.scanProcesses）。
+    watcherDeps: {
+      getRelayStatus: async () => ({ status: "stopped" }),
+      startRelay: async () => { calls.startRelay += 1; },
+    },
+  });
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(collectorOptions?.processScanTtlMs, WATCHDOG_PROCESS_SCAN_TTL_MS,
+      "自建收集器的扫描缓存窗口必须是出口常量本身");
+    assert.ok(calls.scanProcesses >= 1, "watcher 的 scanProcesses 接在这个收集器上");
+    assert.equal(calls.startRelay, 1, "收集器报 agent 在跑 → relay 被自动拉起");
+  } finally {
+    await host.close();
+  }
+});
+
+// --- A1: 看门狗日志面（落盘 + 面板转发）与 spawn fd 重定向 ---------------------
+
+test("createWatchdogLogger lands an enveloped line on disk AND forwards it to the panel ingest", () => {
+  const dir = mkTestDir("anyswitch-wd-log-");
+  const logPath = join(dir, "logs", "watchdog.log");
+  const posts = [];
+  const logger = createWatchdogLogger({
+    logPath,
+    fetchFn: (url, init) => { posts.push({ url, init }); return Promise.resolve(); },
+  });
+  logger.warn("followAgent: relay degraded for 63s; restarting it (attempt 2/3, next earliest in 120s)");
+  const text = readFileSync(logPath, "utf8");
+  assert.match(text, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[warn\] followAgent: relay degraded for 63s; restarting it \(attempt 2\/3, next earliest in 120s\)\n$/,
+    "落盘行必须带 [ts] [level] 封套（与 relay-host.log 同格式）");
+  assert.equal(posts.length, 1, "同一行必须转发面板 ingest");
+  assert.deepEqual(JSON.parse(posts[0].init.body), {
+    level: "warn",
+    message: "followAgent: relay degraded for 63s; restarting it (attempt 2/3, next earliest in 120s)",
+  });
+  assert.equal(posts[0].init.headers["x-anyswitch-panel"], "1");
+});
+
+test("createWatchdogLogger honours the 运行日志 gate on both channels", () => {
+  const dir = mkTestDir("anyswitch-wd-gate-");
+  const logPath = join(dir, "watchdog.log");
+  let posts = 0;
+  const logger = createWatchdogLogger({
+    logPath,
+    isEnabled: () => false,
+    fetchFn: () => { posts += 1; return Promise.resolve(); },
+  });
+  logger.info("must not land anywhere");
+  assert.equal(existsSync(logPath), false, "开关关掉时落盘一起停");
+  assert.equal(posts, 0, "开关关掉时转发一起停");
+});
+
+test("spawnWatchdog tees child stdout/stderr into the log file via an fd and closes the parent copy", async () => {
+  const { envRoot } = makeWatchdogRoot();
+  const dir = mkTestDir("anyswitch-wd-spawn-");
+  const logPath = join(dir, "watchdog.log");
+  let spawnCall = null;
+  let probes = 0;
+  const result = await spawnWatchdog({ LOCALAPPDATA: envRoot }, {
+    logPath,
+    probe: async () => (++probes === 1 ? false : true), // 拉起前不在跑，拉起后即应答
+    spawnFn: (cmd, args, options) => {
+      spawnCall = { cmd, args, options };
+      return { pid: 4242, unref() {} };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.reused, false);
+  assert.ok(spawnCall, "probe 报不在跑时必须真 spawn");
+  assert.ok(Array.isArray(spawnCall.options.stdio), "stdio 必须是指定 fd 的三元组");
+  assert.equal(spawnCall.options.stdio[0], "ignore");
+  assert.equal(typeof spawnCall.options.stdio[1], "number", "stdout 接日志 fd");
+  assert.equal(spawnCall.options.stdio[2], spawnCall.options.stdio[1], "stderr 共享同一日志 fd");
+  assert.throws(() => writeSync(spawnCall.options.stdio[1], "x"), "父进程那份 fd 必须关掉（句柄已随 spawn 过继）");
+});
+
+test("spawnWatchdog falls back to stdio ignore when the log file cannot be opened", async () => {
+  const { envRoot } = makeWatchdogRoot();
+  const blocker = join(mkTestDir("anyswitch-wd-spawn-blocked-"), "blocked");
+  writeFileSync(blocker, "i am a file, not a dir");
+  let spawnCall = null;
+  let probes = 0;
+  const result = await spawnWatchdog({ LOCALAPPDATA: envRoot }, {
+    logPath: join(blocker, "watchdog.log"),
+    probe: async () => (++probes === 1 ? false : true),
+    spawnFn: (cmd, args, options) => {
+      spawnCall = { options };
+      return { pid: 4343, unref() {} };
+    },
+  });
+  assert.equal(result.ok, true, "日志文件打不开不得挡住拉起");
+  assert.equal(spawnCall.options.stdio, "ignore", "打不开就退回旧行为");
+});
+
+test("spawnWatchdog short-circuits on a live watchdog without touching the disk", async () => {
+  const { envRoot } = makeWatchdogRoot();
+  let spawns = 0;
+  const result = await spawnWatchdog({ LOCALAPPDATA: envRoot }, {
+    logPath: join(mkTestDir("anyswitch-wd-reused-"), "watchdog.log"),
+    probe: async () => true,
+    spawnFn: () => { spawns += 1; throw new Error("must not spawn"); },
+  });
+  assert.deepEqual(result, { ok: true, reused: true });
+  assert.equal(spawns, 0);
+});
+
+// ── 打包更新换装：看门狗拉起的目标版本推导 ────────────────────────────────
+test("watchdogSpawnTarget 默认＝本进程 node + 本模块同版脚本；换装 env 指目标版本", () => {
+  const fallback = watchdogSpawnTarget({});
+  assert.equal(fallback.execPath, process.execPath);
+  assert.ok(fallback.script.endsWith(join("src", "agents", "agent-watchdog.mjs")));
+  assert.equal(fallback.cwd, join(fallback.script, ".."));
+
+  const node = join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "runtime", "node.exe");
+  const appRoot = join("C:", "Apps", "Anyswitch", "versions", "1.2.3", "app");
+  const target = watchdogSpawnTarget({ ANYSWITCH_NODE_PATH: node, ANYSWITCH_APP_ROOT: appRoot });
+  assert.equal(target.execPath, node, "自更新换装期：目标版本 node 优先于本进程");
+  assert.equal(target.script, join(appRoot, "src", "agents", "agent-watchdog.mjs"));
+  assert.equal(target.cwd, join(appRoot, "src", "agents"));
+});
+
+// ── M3: 版本指针漂移自查自退 ─────────────────────────────────────────────
+//
+// 换装前停狗被拒时旧狗常驻、指针已指向新版，旧狗的 watcher 会把 relay 拉回旧版
+// 目录。修复＝标记端口应答自报版本（探测方可识别看门狗版本）＋旧狗比对指针
+// 自退。指针替身全部落在测试临时目录，不触真实安装根与真实进程。
+
+test("标记端口应答带 version 字段，既有探针语义不变", async () => {
+  const localAppData = mkTestDir("anyswitch-wd-version-");
+  mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0, // ephemeral marker port — no collision with a live watchdog
+    logger: { info() {}, warn() {}, error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    watcherDeps: {
+      scanProcesses: async () => ({}),
+      getRelayStatus: async () => ({ status: "running" }),
+      loadSettings: () => ({ settings: {} }),
+    },
+  });
+  try {
+    const body = await fetch(`http://127.0.0.1:${host.port}/`).then((r) => r.json());
+    const expected = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+    assert.equal(body.ok, true);
+    assert.equal(body.watchdog, true);
+    assert.equal(body.version, expected, "应答自报的版本必须就是本模块所属 package.json 的版本");
+    assert.equal(await probeWatchdog(host.port), true, "加了字段后探针仍识别为看门狗");
+  } finally {
+    await host.close();
+  }
+});
+
+function makeInstallRoot() {
+  const root = mkTestDir("anyswitch-wd-install-");
+  mkdirSync(join(root, "versions", "1.0.0", "app"), { recursive: true });
+  mkdirSync(join(root, "versions", "2.0.0", "app"), { recursive: true });
+  return root;
+}
+
+test("watchdogVersionDrift: 指针指向其他版本目录即报告漂移", () => {
+  const root = makeInstallRoot();
+  writeFileSync(join(root, "current.json"), JSON.stringify({ schema: 1, version: "2.0.0" }) + "\n");
+  const own = join(root, "versions", "1.0.0", "app");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), "2.0.0");
+});
+
+test("watchdogVersionDrift: 指针指向自身版本目录则无漂移", () => {
+  const root = makeInstallRoot();
+  writeFileSync(join(root, "current.json"), JSON.stringify({ schema: 1, version: "1.0.0" }) + "\n");
+  const own = join(root, "versions", "1.0.0", "app");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null);
+});
+
+test("watchdogVersionDrift: 指针读不出或安装根解析不出时 fail-safe 不漂移", () => {
+  const root = makeInstallRoot();
+  const own = join(root, "versions", "1.0.0", "app");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null, "current.json 缺失");
+  writeFileSync(join(root, "current.json"), "not json");
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null, "current.json 非法");
+  writeFileSync(join(root, "current.json"), JSON.stringify({ schema: 1, version: "bogus" }));
+  assert.equal(watchdogVersionDrift({ appRoot: own, env: {} }), null, "指针版本号非法");
+  const sourceTree = mkTestDir("anyswitch-wd-sourcetree-");
+  assert.equal(watchdogVersionDrift({ appRoot: sourceTree, env: {} }), null,
+    "源码/便携运行不在 versions 布局下且无 ANYSWITCH_INSTALL_ROOT，没有指针可查");
+});
+
+test("指针漂移后看门狗自查退场：记日志、清 pid、关标记端口、exit(0)", async () => {
+  const localAppData = mkTestDir("anyswitch-wd-drift-");
+  const dataRoot = join(localAppData, "Anyswitch");
+  mkdirSync(dataRoot, { recursive: true });
+  const installRoot = makeInstallRoot();
+  writeFileSync(join(installRoot, "current.json"), JSON.stringify({ schema: 1, version: "2.0.0" }) + "\n");
+  const ownAppRoot = join(installRoot, "versions", "1.0.0", "app");
+  const warnings = [];
+  const exits = [];
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0,
+    logger: { info() {}, warn: (m) => warnings.push(m), error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    watcherDeps: {
+      scanProcesses: async () => ({}),
+      getRelayStatus: async () => ({ status: "running" }),
+      loadSettings: () => ({ settings: {} }),
+    },
+    versionDrift: { appRoot: ownAppRoot, env: {}, intervalMs: 10, exit: (code) => exits.push(code) },
+  });
+  const pidPath = getWatchdogPidPath(dataRoot);
+  assert.equal(existsSync(pidPath), true, "宿主启动即写下自己的 pid");
+  const deadline = Date.now() + 2000;
+  while (exits.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.deepEqual(exits, [0], "漂移一经确认即优雅退场");
+  assert.equal(existsSync(pidPath), false, "退场前清掉自己的 pid 文件");
+  assert.equal(await probeWatchdog(host.port), false, "标记端口随退场关闭");
+  assert.equal(warnings.length, 1, "退场原因落一条日志");
+  assert.match(warnings[0], /2\.0\.0/);
+  await host.close(); // 幂等收尾（标记端口已关）
+});

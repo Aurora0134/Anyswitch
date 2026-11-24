@@ -68,12 +68,6 @@ Screenshots live in [`docs/screenshots/`](docs/screenshots/) — open them after
 
 ## Install and run
 
-**Windows installer**: Open Anyswitch from the Start menu. Closing the window leaves Anyswitch in the notification area, with Relay and integrated terminals still running. Open the browser panel from the tray menu or go directly to `http://127.0.0.1:47820/panel`. Quitting from the tray stops Relay and ends integrated terminals. With login startup enabled, Anyswitch starts in the tray when you sign in to Windows.
-
-To upgrade from a version without the desktop window, run the Windows installer once. It preserves your configuration and login startup preference. Installation restarts the background services, so save your work in integrated terminals first. Later releases can update from the panel. Launching a coding agent no longer starts Relay. Agents can use their own providers while Relay is stopped. Anyswitch channels require Relay to run.
-
-**Source install**
-
 Three prerequisites: Windows (credential sealing uses DPAPI, autostart uses Task Scheduler); Node.js (`>=22.15.0 <23 || >=23.8.0`, 24 LTS recommended — that is the API floor, not a claim that every version in range was tested); and a fresh install directory (never overwrite a running one with new source).
 
 Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node src/panel/panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere. Once installed, Settings → General also offers "Create desktop shortcut" — one click to put the panel entry on your desktop.
@@ -252,7 +246,7 @@ Skills use a main-repo model: one local directory acts as the source, deploying 
 
 - **`store.json` holds no secrets.** The schema has a built-in word list (apikey, token, secret, password, …) matched against field names segment by segment; a hit rejects the write. Keys connect to the credentials directory only as `credentialFile` references. Verify: `grep -n "SECRET_WORDS" src/store/store-schema.mjs`.
 - **Keys decrypt only at request time.** DPAPI under the current user scope, ciphertext isolated per channel. Decrypted plaintext is reused short-term keyed by the ciphertext hash (a setting can disable this for burn-after-use: every request decrypts fresh); rotating the ciphertext invalidates it immediately.
-- **Background services listen on loopback only.** Panel `127.0.0.1:47820`, Relay `127.0.0.1:47821`, terminal host `127.0.0.1:47823`.
+- **Four processes, four ports, loopback only.** Panel `127.0.0.1:47820`, relay `127.0.0.1:47821`, watchdog marker `47822`, terminal host `127.0.0.1:47823`.
 - **The terminal host is a separate process.** The page is just a browser client: refreshing or reopening the panel keeps the PTYs alive; history replays from the host render mirror; the host is owned and restarted by the relay.
 - **Zero third-party runtime dependencies in the business code.** All 5 direct dependencies belong to the virtual terminal; across every `.mjs` under `src/` there is exactly one third-party import: node-pty in `src/terminal/terminal-host.mjs`. Verify:
 

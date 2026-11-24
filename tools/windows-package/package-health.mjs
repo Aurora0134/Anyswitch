@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-const appRoot = dirname(fileURLToPath(import.meta.url));
+const appRoot = process.env.ANYSWITCH_APP_ROOT || process.cwd();
 const expectedVersion = process.argv[2];
 const manifest = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8"));
 assert.equal(manifest.version, expectedVersion);
@@ -21,10 +20,8 @@ for (const path of [
   "node_modules/@xterm/addon-webgl/lib/addon-webgl.js", "node_modules/node-pty/package.json",
   "test-helpers/vendor/js-yaml/index.js", "src/panel/panel-host.mjs", "src/relay/relay-host.mjs",
   "src/terminal/terminal-host.mjs", "src/ops/update-trust.mjs",
-  "src/ops/desktop-lifecycle.mjs", "desktop/Anyswitch.Desktop.exe", "desktop/copy.json",
-  "desktop/Microsoft.Web.WebView2.Core.dll", "desktop/Microsoft.Web.WebView2.WinForms.dll", "desktop/WebView2Loader.dll",
 ]) await access(join(appRoot, path));
-const trust = await import("./src/ops/update-trust.mjs");
+const trust = await import(new URL("./src/ops/update-trust.mjs", `file:///${appRoot.replaceAll("\\", "/")}/`));
 assert.equal(typeof trust.UPDATE_SIGNING_PUBLIC_KEY, "string");
 assert.equal(Buffer.from(trust.UPDATE_SIGNING_PUBLIC_KEY, "base64").length, 32);
 const pty = await import("node-pty");

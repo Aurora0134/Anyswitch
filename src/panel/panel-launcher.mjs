@@ -10,7 +10,8 @@
 //   3. open the panel in the default browser (http://127.0.0.1:47820/panel?startup=1)
 //
 // It brings up the PANEL, not the relay. The relay (47821) is a separate
-// process that the panel starts and stops on demand. A down relay does not block this
+// process that the panel starts/stops on demand (or the followAgent watcher
+// auto-starts when a coding agent appears). A down relay does not block this
 // launcher — the panel opens and shows "relay stopped" + a start button.
 //
 // runPanelLauncher() takes every side effect as an injected dependency, so the

@@ -6,7 +6,6 @@ export const UPDATE_SIGNING_PUBLIC_KEY = PUBLIC_KEY_MARKER.startsWith("__ANYSWIT
 
 export const MANIFEST_KEYS = Object.freeze(["schema", "version", "channel", "platform", "asset", "sha256", "size"]);
 export const isValidReleaseVersion = (value) => parseVersion(value) !== null;
-export const desktopReleaseArchiveName = (version) => `anyswitch-v${version}-win-x64-desktop.zip`;
 const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 function decodeBase64(value, length) {
@@ -34,7 +33,7 @@ export function verifyReleaseManifest(manifestBytes, signatureBase64, {
   const parsed = parseVersion(version);
   if (schema !== 1 || !parsed || platform !== "win-x64" || !["stable", "preview"].includes(signedChannel)) throw new Error("invalid manifest identity");
   if ((signedChannel === "preview") !== (parsed.prerelease.length > 0)) throw new Error("manifest channel does not match version");
-  const expectedAsset = desktopReleaseArchiveName(version);
+  const expectedAsset = "anyswitch-v" + version + "-win-x64.zip";
   if (asset !== expectedAsset || assetName !== expectedAsset) throw new Error("manifest asset mismatch");
   if (channel !== signedChannel || prerelease !== (signedChannel === "preview")) throw new Error("release channel mismatch");
   if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256) || !Number.isSafeInteger(size) || size <= 0) throw new Error("invalid manifest digest");

@@ -20,7 +20,7 @@ import { spawn } from "node:child_process";
 import { join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
-import { connectResidentRelay } from "./launcher-native-fallback.mjs";
+import { startProductionRelay } from "./launch.mjs";
 import { LOOPBACK_NO_PROXY } from "./launcher.mjs";
 import { INSTANCE_ID_MAX_LEN } from "../agents/agent-metrics.mjs";
 import {
@@ -233,7 +233,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   const code = await runKimiLauncher({
     // agentId "kimi"：per-launch relay 的 auto 路由、usage journal 行与
     // session 上报都归到 kimi 端点，不再落进 claude 桶。
-    startRelay: deps.startRelay ?? connectResidentRelay,
+    startRelay: deps.startRelay ?? (() => startProductionRelay({ agentId: "kimi" })),
     buildEnv: deps.buildEnv ?? buildKimiLauncherEnv,
     spawnKimi: deps.spawnKimi ?? realSpawnKimi,
     log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),

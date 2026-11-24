@@ -7,17 +7,21 @@ import {
   buildTaskXml,
   disableAutostart,
   disablePanelAutostart,
+  disableWatchdogAutostart,
   enableAutostart,
   enablePanelAutostart,
+  enableWatchdogAutostart,
   getAutostartCommand,
   isAutostartEnabled,
   isPanelAutostartEnabled,
+  isWatchdogAutostartEnabled,
   reconcileAutostart,
   taskAction,
   xmlEscape,
 } from "../src/ops/autostart.mjs";
 
 const PANEL_SCRIPT = join("..", "panel", "panel-host.mjs");
+const WATCHDOG_SCRIPT = join("..", "agents", "agent-watchdog.mjs");
 
 // Fake powershell child: records the invocation, then replays stdout/stderr
 // and closes (or errors) asynchronously like the real spawn handle.
@@ -243,6 +247,8 @@ describe("taskAction", () => {
     for (const path of taskAction().arguments.match(/"([^"]+)"/g).map((quoted) => quoted.slice(1, -1))) {
       assert.ok(existsSync(path), `task action path must exist: ${path}`);
     }
+    const watchdog = taskAction(WATCHDOG_SCRIPT);
+    assert.match(watchdog.arguments, /agent-watchdog\.mjs"$/);
     const panel = taskAction(PANEL_SCRIPT);
     assert.match(panel.arguments, /panel-host\.mjs"$/);
     for (const path of panel.arguments.match(/"([^"]+)"/g).map((quoted) => quoted.slice(1, -1))) {
@@ -277,12 +283,12 @@ describe("reconcileAutostart", () => {
 
   it("leaves a correct registration alone — one probe, no writes", async () => {
     const { spawnFn, calls } = fakePSSeries([
-      { stdout: probeOutput({ AnyswitchRelay: taskAction(), AnyswitchPanel: taskAction(PANEL_SCRIPT) }) },
+      { stdout: probeOutput({ AnyswitchRelay: taskAction(), AnyswitchWatchdog: taskAction(WATCHDOG_SCRIPT), AnyswitchPanel: taskAction(PANEL_SCRIPT) }) },
     ]);
 
     const result = await reconcileAutostart({ spawnFn });
 
-    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "ok"]);
+    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "ok", "ok"]);
     assert.equal(calls.length, 1);
   });
 
@@ -297,7 +303,7 @@ describe("reconcileAutostart", () => {
 
     const result = await reconcileAutostart({ spawnFn });
 
-    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "backfilled"]);
+    assert.deepEqual(result.tasks.map((task) => task.state), ["ok", "absent", "backfilled"]);
     assert.equal(calls.length, 2);
     assert.ok(psCommandOf(calls[1]).includes("Register-ScheduledTask -TaskName 'AnyswitchPanel'"));
     assert.ok(calls[1].stdin.includes("panel-host.mjs"));
@@ -311,7 +317,7 @@ describe("reconcileAutostart", () => {
 
     const result = await reconcileAutostart({ spawnFn });
 
-    assert.deepEqual(result.tasks.map((task) => task.state), ["legacy", "backfilled"]);
+    assert.deepEqual(result.tasks.map((task) => task.state), ["legacy", "absent", "backfilled"]);
     assert.equal(calls.length, 2);
     assert.ok(psCommandOf(calls[1]).includes("Register-ScheduledTask -TaskName 'AnyswitchPanel'"));
   });
@@ -338,7 +344,7 @@ describe("reconcileAutostart", () => {
 
     // Relay absent too — autostart is OFF, so the absent panel task is left
     // alone instead of backfilled.
-    assert.deepEqual(result.tasks.map((task) => task.state), ["absent", "absent"]);
+    assert.deepEqual(result.tasks.map((task) => task.state), ["absent", "absent", "absent"]);
     assert.equal(calls.length, 1);
   });
 
@@ -369,6 +375,30 @@ describe("reconcileAutostart", () => {
     assert.equal(result.ok, false);
     assert.deepEqual(result.tasks, []);
     assert.equal(calls.length, 1);
+  });
+});
+
+describe("watchdog autostart variants", () => {
+  it("registers the AnyswitchWatchdog task pointing at agent-watchdog.mjs", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "REGISTERED\r\n" });
+    const result = await enableWatchdogAutostart({ spawnFn });
+
+    assert.equal(result.ok, true);
+    assert.ok(psCommandOf(calls[0]).includes("Register-ScheduledTask -TaskName 'AnyswitchWatchdog'"));
+    assert.ok(calls[0].stdin.includes("agent-watchdog.mjs"));
+  });
+
+  it("unregisters the AnyswitchWatchdog task", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
+    const result = await disableWatchdogAutostart({ spawnFn });
+    assert.equal(result.ok, true);
+    assert.ok(psCommandOf(calls[0]).includes("Unregister-ScheduledTask -TaskName 'AnyswitchWatchdog'"));
+  });
+
+  it("probes the AnyswitchWatchdog task name", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "" });
+    assert.equal(await isWatchdogAutostartEnabled({ spawnFn }), false);
+    assert.ok(psCommandOf(calls[0]).includes("$names = @('AnyswitchWatchdog')"));
   });
 });
 

@@ -25,8 +25,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadStore, storePaths as defaultStorePaths } from "../store/store-io.mjs";
-import { enableAutostart, disableAutostart, isAutostartEnabled } from "../ops/autostart.mjs";
+import { enableAutostart, disableAutostart, isAutostartEnabled, enableWatchdogAutostart, disableWatchdogAutostart, isWatchdogAutostartEnabled } from "../ops/autostart.mjs";
 import { createDesktopShortcut } from "../ops/desktop-shortcut.mjs";
+import { spawnWatchdog, stopWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
 import { loadSettings, saveSettings, defaultSettingsPath, createLogLevelGate, UPDATE_CHANNELS, DEFAULT_UPDATE_CHANNEL } from "../relay/relay-settings.mjs";
 import { logLevelAllows } from "../shared/logger.mjs";
 import { loadOrGenerateToken } from "../launchers/pi-relay-token.mjs";
@@ -108,6 +109,17 @@ const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
 // never completes because the client already hung up.
 const PANEL_HOST_EXIT_GRACE_MS = 150;
 const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
+
+// GET /api/settings decorates its response with watchdog drift visibility
+// (registry task present vs watchdog process answering). Both probes cost real
+// time — a PowerShell Get-ScheduledTask spawn plus an HTTP liveness probe —
+// and the panel page fetches /api/settings on every load to hydrate the 抗截断
+// toggle, so paying them per GET made that toggle wait on the probes.
+// The snapshot is stale-while-revalidate: once a probe round has settled,
+// GETs return instantly (stale values past the TTL) while one shared
+// background round refreshes. POST followAgent invalidates so the next GET
+// re-probes synchronously and never reports pre-toggle drift.
+const WATCHDOG_SNAPSHOT_TTL_MS = 30_000;
 
 // 会话列表快照的 TTL（见 createSessionsListSnapshot）。同样是 stale-while-
 // revalidate：TTL 内复用上一次全盘扫描结果，过期后先交旧值再后台补一拍。
@@ -232,6 +244,76 @@ function sendJsonText(res, status, text, extraHeaders = null) {
     ...(extraHeaders ?? {}),
   });
   res.end(text);
+}
+
+// One in-flight probe round (registry + liveness, parallel) shared by every
+// waiter; consecutive rounds wait for the previous one to finish so refreshes
+// never pile up. Each round's resolved value becomes the new snapshot.
+function createWatchdogProbeRound(isWatchdogAutostartEnabledFn, probeWatchdogFn) {
+  const inFlight = { p: null };
+  return () => {
+    if (inFlight.p) return inFlight.p;
+    const round = (async () => {
+      try {
+        return await Promise.all([isWatchdogAutostartEnabledFn(), probeWatchdogFn()]);
+      } finally {
+        // Microtask delay so a waiter that stores the promise BEFORE the round
+        // settles still finds it (avoiding a synchronous restart loop between
+        // round N+1 and the settle microtask of round N).
+        await Promise.resolve();
+        inFlight.p = null;
+      }
+    })();
+    inFlight.p = round;
+    return round;
+  };
+}
+
+// Per-router state machine: { at, value } | null. Serves GETs instantly once
+// primed; fires (at most) one shared background round when the TTL lapses.
+// `watchdogSnapshotTtlMs` is injectable for tests; 0 = every GET revalidates.
+function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, ttlMs) {
+  const runProbeRound = createWatchdogProbeRound(isWatchdogAutostartEnabledFn, probeWatchdogFn);
+  let snap = null;
+
+  function refresh() {
+    const p = runProbeRound();
+    p.then(([autostart, running]) => {
+      snap = { at: Date.now(), value: { autostart, running } };
+    }).catch(() => {
+      // Probe round rejected (shouldn't — both probes are fail-soft) — keep
+      // serving the old snapshot.
+    });
+    return p;
+  }
+
+  return {
+    async get() {
+      if (snap) {
+        const expired = Date.now() - snap.at >= ttlMs;
+        if (!expired) return snap.value;
+        // SWR: hand back the stale value now; refresh once in the background.
+        // The rejection handler inside refresh keeps old values; this catch
+        // only stops the raw round from surfacing as unhandledRejection.
+        refresh().catch(() => {});
+        return snap.value;
+      }
+      // Cold path: wait for the settling prewarm round (or our own if none).
+      // Fail-soft mirrors the old inline probes: a rejected round (both real
+      // probes resolve instead; only mocked deps could throw) serves the
+      // legacy nulls and is NOT cached — the next GET re-probes.
+      try {
+        const [autostart, running] = await refresh();
+        return { autostart, running };
+      } catch {
+        return { autostart: null, running: null };
+      }
+    },
+    invalidate() { snap = null; },
+    // Kick the first probe round without waiting for it (panel-host calls
+    // this at startup); the settled value becomes the initial snapshot.
+    prewarm() { refresh().catch(() => {}); },
+  };
 }
 
 // 会话列表快照：GET /panel/api/sessions/list 是十家存档的全盘扫描（S2 实测
@@ -996,6 +1078,15 @@ export function createPanelRouter({
   // the test runner killing itself.
   spawnPanelHostRestartFn = spawnPanelHostRestartHelper,
   exitPanelHostFn = (code) => process.exit(code),
+  // Watchdog coordination for followAgent: registry first (durable, survives
+  // reboots), then process control (effective this session). Injectable so
+  // the router is unit-testable without reg.exe or real watchdog processes.
+  enableWatchdogAutostartFn = enableWatchdogAutostart,
+  disableWatchdogAutostartFn = disableWatchdogAutostart,
+  isWatchdogAutostartEnabledFn = isWatchdogAutostartEnabled,
+  spawnWatchdogFn = spawnWatchdog,
+  stopWatchdogFn = stopWatchdog,
+  probeWatchdogFn = probeWatchdog,
   // Pull-mode telemetry: where handleAgents fetches live metrics from. Kept
    // injectable so tests don't need a real relay bound.
    fetchRelayAgents = defaultFetchRelayAgents,
@@ -1113,6 +1204,7 @@ export function createPanelRouter({
   statsService = null,
   // Watchdog probe snapshot TTL (panel.mjs). Injectable so tests can force
   // revalidation; production default is WATCHDOG_SNAPSHOT_TTL_MS.
+  watchdogSnapshotTtlMs = WATCHDOG_SNAPSHOT_TTL_MS,
   // Journal used for claude session-end rows (and shared with the lazily
   // built statsService). Injectable so tests can capture appendSession
   // without touching the real usage dir; `null` lazily creates one.
@@ -1248,6 +1340,8 @@ export function createPanelRouter({
     return sessionScanService;
   }
   // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
+  // answers instantly once a probe round has settled; POST followAgent invalidates.
+  const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
 
   // Lookup chain: ANYSWITCH_PANEL_HTML env override → bundled panel-ui/panel.html.
   // A missing file falls through to servePanelFile's readFileSync failure → 404.
@@ -2339,6 +2433,75 @@ export function createPanelRouter({
     const payload = result.body;
     if (payload?.ok === true) return sendJson(res, 200, { ok: true });
     return sendJson(res, result.status || 500, payload ?? { ok: false, error: "terminal_host_stop_failed" });
+  }
+
+  // 导入是整份覆盖 settings.json，走不到设置路由那条副作用链上，而
+  // followAgent 恰好是唯一带持久副作用的开关：值与登录计划、自愈进程脱节时，
+  // 「包里关、本机开」会留下一个界面写着关、登录照旧自启、每 3 秒把 relay 拉
+  // 回来的常驻进程，没有任何路径会自愈它。导入落定后按刚写进盘的值把两者对齐
+  // 回来，顺序沿用设置路由：计划先、进程后。计划写失败就停在这里只出警告——
+  // 数据已经换过位置了，回滚比短暂不一致更糟。
+  async function reconcileFollowAgentAfterImport(desired) {
+    // warnings 是写给日志的；reasons 只放裸原因，界面上的成句文案归前端
+    // （panel.js）——服务层不参与用户可见措辞，否则一处话两个地方说。
+    const outcome = { desired, task: "unchanged", process: "unchanged", warnings: [], reasons: {} };
+    let touched = false;
+
+    let registered = false;
+    try {
+      registered = await isWatchdogAutostartEnabledFn();
+    } catch (err) {
+      outcome.task = "unknown";
+      outcome.reasons.task = err.message;
+      outcome.warnings.push(`登录计划状态读不出来：${err.message}`);
+      return outcome;
+    }
+    if (registered !== desired) {
+      const reg = desired ? await enableWatchdogAutostartFn() : await disableWatchdogAutostartFn();
+      if (!reg?.ok) {
+        outcome.task = "failed";
+        outcome.reasons.task = reg?.error ?? "写入失败";
+        outcome.warnings.push(`登录计划未同步（${outcome.reasons.task}），设置与下次登录后的实际行为暂不一致`);
+        return outcome;
+      }
+      outcome.task = desired ? "registered" : "unregistered";
+      touched = true;
+    }
+
+    let alive = false;
+    try {
+      alive = await probeWatchdogFn();
+    } catch (err) {
+      outcome.process = "unknown";
+      outcome.reasons.process = err.message;
+      outcome.warnings.push(`自愈进程状态读不出来：${err.message}`);
+      if (touched) watchdogSnapshot.invalidate();
+      return outcome;
+    }
+    if (alive !== desired) {
+      // spawnWatchdog / stopWatchdog 都不抛错：等不到就返回 ok:false（stop 还带
+      // reason）。只 catch 异常会把「没做成」报成「已对齐」。
+      try {
+        const moved = desired ? await spawnWatchdogFn() : await stopWatchdogFn();
+        if (moved?.ok === false) {
+          outcome.process = "failed";
+          outcome.reasons.process = moved.reason ?? "未达到预期状态";
+          outcome.warnings.push(`自愈进程未${desired ? "拉起" : "停止"}：${outcome.reasons.process}`);
+        } else {
+          outcome.process = desired ? "started" : "stopped";
+          touched = true;
+        }
+      } catch (err) {
+        outcome.process = "failed";
+        outcome.reasons.process = err.message;
+        outcome.warnings.push(`自愈进程未${desired ? "拉起" : "停止"}：${err.message}`);
+      }
+    }
+
+    // 计划或进程刚被改动：丢掉探测快照，下一次 GET /api/settings 重新探，
+    // 而不是把改动前的漂移读数继续端到界面上。
+    if (touched) watchdogSnapshot.invalidate();
+    return outcome;
   }
 
   // store.json mtime 微缓存。handleStatus 每秒只读 provider 计数，每请求
@@ -3988,11 +4151,17 @@ export function createPanelRouter({
     if (path === "/panel/api/settings" && method === "GET") {
       try {
         const loaded = loadSettings(settingsFile, base);
+        // Watchdog drift visibility: what the registry/process ACTUALLY do,
+        // next to what settings.json says. Served from a probe snapshot
+        // (stale-while-revalidate, see createWatchdogSnapshot) — both probes
+        // cost ~1s+ and this endpoint is fetched on every panel page load.
+        const watchdog = await watchdogSnapshot.get();
         return sendJson(res, 200, {
           ok: true,
           settings: loaded.settings,
           keepAlive: loaded.keepAlive,
           sparkWindowPoints: loaded.sparkWindowPoints,
+          watchdog,
         });
       } catch (err) {
         return sendJson(res, 500, { ok: false, error: err.message });
@@ -4002,6 +4171,18 @@ export function createPanelRouter({
     if (path === "/panel/api/settings" && method === "POST") {
       try {
         const body = await readJsonBody(req);
+        // followAgent is backed by the standalone watchdog: registry entry
+        // FIRST (durable across reboots) — if reg.exe fails, refuse to save so
+        // settings.json never claims a follow mode that will not survive a
+        // reboot. Only then persist and bring the process up/down for this
+        // session (best-effort; the registry entry is the durable path).
+        const togglesWatchdog = typeof body.followAgent === "boolean";
+        if (togglesWatchdog) {
+          const reg = body.followAgent ? await enableWatchdogAutostartFn() : await disableWatchdogAutostartFn();
+          if (!reg.ok) {
+            return sendJson(res, 500, { ok: false, error: `watchdog autostart: ${reg.error ?? "registry write failed"}` });
+          }
+        }
         const updated = saveSettings(settingsFile, body, base);
         if (metricsCollector && typeof metricsCollector.setSparkWindowPoints === "function") {
           metricsCollector.setSparkWindowPoints(updated.sparkWindowPoints);
@@ -4034,6 +4215,19 @@ export function createPanelRouter({
           } catch (err) {
             logger?.warn?.(`推理强度设置已保存，但端点重新同步失败：${err.message}`);
           }
+        }
+        if (togglesWatchdog) {
+          try {
+            if (body.followAgent) await spawnWatchdogFn();
+            else await stopWatchdogFn();
+          } catch (err) {
+            logger?.warn?.(`watchdog process control failed: ${err.message}`);
+          }
+          // followAgent just toggled the registry task / watchdog process:
+          // drop the drift snapshot after the transition settles so the next
+          // GET re-probes instead of serving pre-toggle values until the TTL
+          // lapses.
+          watchdogSnapshot.invalidate();
         }
         return sendJson(res, 200, {
           ok: true,
@@ -4808,8 +5002,14 @@ export function createPanelRouter({
         if (path === "/panel/api/backups/restore") {
           if (!dataBundleService) dataBundleService = createDataBundleService({ base });
           const result = await dataBundleService.restoreBackup({ name: body.name });
+          // 与导入路由同一判据：settings.json 真被换过才有对齐必要——备份里没带
+          // 设置文件时盘上还是原来那份，登录计划与自愈进程本来就和它对应，别去动。
+          if (result.ok && result.applied?.settings === true) {
+            result.watchdog = await reconcileFollowAgentAfterImport(result.applied.followAgent === true);
+            for (const w of result.watchdog.warnings) logger?.warn?.(`恢复后 followAgent 对齐：${w}`);
+          }
           return sendJson(res, 200, result.ok
-            ? { ok: true, safetyName: result.safetyName }
+            ? { ok: true, safetyName: result.safetyName, ...(result.watchdog ? { watchdog: result.watchdog } : {}) }
             : { ok: false, error: result.error });
         }
         return sendJson(res, 404, { ok: false, error: "not found" });
@@ -4863,6 +5063,12 @@ export function createPanelRouter({
               skillsMode: typeof body.skillsMode === "string" ? body.skillsMode : undefined,
               skillsTarget: typeof body.skillsTarget === "string" ? body.skillsTarget.trim() : undefined,
             });
+            // 只有真的换掉了 settings.json 才有对齐的必要；包里没带设置文件时
+            // 盘上还是原来那份，计划与进程本来就和它对应，别去动。
+            if (result.ok !== false && result.applied?.settings === true) {
+              result.watchdog = await reconcileFollowAgentAfterImport(result.applied.followAgent === true);
+              for (const w of result.watchdog.warnings) logger?.warn?.(`导入后 followAgent 对齐：${w}`);
+            }
             return sendJson(res, 200, { ok: result.ok !== false, ...result });
           }
         } catch (err) {
@@ -4926,6 +5132,11 @@ export function createPanelRouter({
 
   return {
     handle,
+    // Fire the first watchdog probe round early (panel-host calls this once at
+    // startup) so even the very first GET /api/settings is snapshot-served.
+    prewarmWatchdogProbes() {
+      watchdogSnapshot.prewarm();
+    },
     // 启动预热（panel-host 启动时调一次）：环境检测与会话快照的首扫从「第一个用户
     // 请求」挪到「进程启动」——新建终端菜单的 Agent 清单与左栏历史因此不再吃冷扫。
     // 两者都 fire-and-forget：预热只是把冷路径提前，失败静默，首个请求照旧走懒加载。

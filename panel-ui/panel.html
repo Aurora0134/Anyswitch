@@ -2067,11 +2067,32 @@ if (window.panelStartupController) panelStartupPlay();
        panel-settings-open 标记：刷新时 restoreView 若见其为 "1" 会直接落回设置页
        （优先级低于 terminal-open），并非刷新必回主视图。 -->
   <section class="settings-view" id="settingsView" hidden>
-    <!-- 「通用」：按语义分五张卡。「显示」「抗截断」「Claude Code」「运行日志」带卡头（复用各
+    <!-- 「通用」：按语义分六张卡——「启动」「显示」「抗截断」「Claude Code」「运行日志」带卡头（复用各
          视图通用的 card-header/card-title 标准件），其余几项暂不归类、平卡放置；
          控件 id、逐项独立保存/失败回滚语义不变。「开屏动画」是本机浏览器偏好，不占
          /api/settings：开屏必须在绘制前就能被读到，等服务端存档就晚了（同主题/样式/终端字号） -->
     <div class="settings-panel" id="settingsPanelGeneral" role="tabpanel" aria-labelledby="railDirGeneral">
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>
+            启动
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">跟随 Coding Agent 启动</div>
+              <div class="modal-item-desc">检测到受支持的 Coding Agent 运行时，自动保持 Relay 链路就绪。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="followAgentToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">

@@ -35,7 +35,7 @@ import { createUsageJournal } from "../shared/usage-journal.mjs";
 import { loadStore } from "../store/store-io.mjs";
 import { writeQoderConfig } from "./qoder-merge-config.mjs";
 import { refreshQoderModelCatalog, QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv, connectResidentRelay, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -251,7 +251,7 @@ export function realSpawnQoder({ env, args, onSpawned }) {
 // touching the real relay, settings.json or a real spawn.
 export async function main(argv = process.argv.slice(2), overrides = {}) {
   const code = await runQoderLauncher({
-    startRelay: connectResidentRelay,
+    startRelay: () => startOpenAIRelay(),
     writeConfig: (store, port, token, sidecarRoot, settingsPath) =>
       writeQoderConfig(store, port, token, sidecarRoot, settingsPath),
     loadStore,

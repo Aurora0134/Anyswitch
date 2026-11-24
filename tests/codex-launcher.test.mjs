@@ -384,13 +384,20 @@ test("main() wires every machine-touching dep to its real implementation", async
   const body = source.slice(source.indexOf("export async function main"));
   assert.ok(body.length > 0, "main() must stay in codex-launcher.mjs");
   assert.match(body, /await import\("\.\/codex-merge-config\.mjs"\)/);
-  assert.match(body, /startRelay: deps\.startRelay \?\? connectResidentRelay/);
+  assert.match(body, /startRelay: deps\.startRelay \?\? \(\(\) => startOpenAIRelay\(\)\)/);
   assert.match(body, /writeConfig: deps\.writeConfig \?\? \([\s\S]{0,120}writeCodexConfig\(/);
   assert.match(body, /loadStore: deps\.loadStore \?\? loadStore/);
   assert.match(body, /spawnCodex: deps\.spawnCodex \?\? realSpawnCodex/);
 });
 
-test("main() still launches Codex natively without an available resident Relay", async () => {
+test("main() wires startRelay to the real relay starter: the native fallback carries the REAL relay failure", async () => {
+  // 不注入 startRelay，让 main() 缺省接上的真实 startOpenAIRelay 真跑一次：
+  // 隔离靠把 process.env 的 LOCALAPPDATA/APPDATA/USERPROFILE 重定向进空临时根
+  // （main() 没有 base 注入缝，deps.base 进不了被测代码），store 探测必然落空，
+  // relay 必然在监听前失败，native 回退日志里必须出现真实失败原因。若 main 里
+  // 的 startRelay 接线被删，runCodexLauncher 拿到 undefined，日志会变成
+  // "startRelay is not a function"——这里红。
+  // 全程零真实 relay（监听前就失败）、零真实 spawn、零真实凭据。
   const prevEnv = {};
   for (const key of ["LOCALAPPDATA", "APPDATA", "USERPROFILE"]) {
     prevEnv[key] = process.env[key];
@@ -415,8 +422,11 @@ test("main() still launches Codex natively without an available resident Relay",
     });
     assert.equal(code, 0, "relay 起不来不拒绝启动：codex 照常 native 启动");
     assert.ok(
-      logs.some((line) => line.includes("Anyswitch relay unavailable") && !line.includes("is not a function")),
-      JSON.stringify(logs),
+      logs.some((l) =>
+        l.includes("Anyswitch relay unavailable")
+        && l.includes("the Anyswitch global store is not usable; refusing to start the codex relay"),
+      ),
+      `native 回退必须携带真实 startOpenAIRelay 的失败原因，实际日志：${JSON.stringify(logs)}`,
     );
     assert.deepEqual(calls, ["writeConfig", "spawnCodex"], "native 模式照样同步配置并启动子进程");
     assert.equal("ANYSWITCH_INSTANCE_ID" in spawnedEnv, false, "真实 relay 失败后按 native 环境启动");

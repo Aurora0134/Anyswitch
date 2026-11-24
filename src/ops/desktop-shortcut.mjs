@@ -1,7 +1,10 @@
 // Desktop shortcut creation, via the WScript.Shell COM object from
 // PowerShell.
 //
-// Desktop installs target Anyswitch.exe. Source installs retain panel-app.vbs.
+// The .lnk chain is the documented panel entry (docs/architecture.md):
+// Anyswitch.lnk → wscript.exe → panel-app.vbs → node panel-launcher.mjs.
+// Until now that shortcut was created by hand outside the product; this
+// module is what the panel's 创建快捷方式 button calls.
 //
 // Field values travel over stdin as JSON so no path- or quote-sensitive
 // string ever reaches the command line (same contract as autostart.mjs).
@@ -44,11 +47,6 @@ function detectInstallRoot(env = process.env) {
 export function shortcutPayload({ installRoot = detectInstallRoot(), currentVersion = null } = {}) {
   const wscript = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
   if (installRoot) {
-    const exe = join(installRoot, "Anyswitch.exe");
-    if (existsSync(exe)) return {
-      name: SHORTCUT_NAME, description: SHORTCUT_DESCRIPTION, target: exe,
-      arguments: "", icon: `${exe},0`, workingDirectory: installRoot,
-    };
     // 打包安装：快捷方式指安装根的静默分发器（隐藏控制台、打开面板）。分发
     // 器每次运行读 current.json，自更新换代后快捷方式仍指活动版本——target
     // 不需要重写。icon 优先指安装根的 anyswitch.ico（安装器 [Files] 摆放的
@@ -120,20 +118,7 @@ function runPS(script, stdin, spawnFn = spawn) {
 }
 
 // Create (or overwrite) Anyswitch.lnk on the user's desktop. Idempotent.
-export function createDesktopShortcut({ spawnFn = spawn } = {}) {
-  return writeShortcut(shortcutPayload(), { spawnFn });
-}
-
-export function migrateDesktopShortcut({ installRoot, sourceRoots = [], linkPath } = {}) {
-  if (!installRoot || !existsSync(join(installRoot, "Anyswitch.exe"))) return Promise.resolve({ ok: true });
-  const target = shortcutPayload({ installRoot });
-  const packagedShim = join(installRoot, "anyswitch-silent.vbs");
-  const wscript = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "wscript.exe");
-  const oldArguments = [`"${packagedShim}" "src\\panel\\panel-launcher.mjs"`, ...sourceRoots.map((root) => `"${join(root, "panel-app.vbs")}"`)];
-  return writeShortcut(target, { migration: { wscript, oldArguments, linkPath } });
-}
-
-async function writeShortcut(payload, { spawnFn = spawn, migration } = {}) {
+export async function createDesktopShortcut({ spawnFn = spawn } = {}) {
   if (process.platform !== "win32") {
     return { ok: false, error: "desktop shortcut is only supported on Windows" };
   }
@@ -142,11 +127,7 @@ async function writeShortcut(payload, { spawnFn = spawn, migration } = {}) {
     "$ErrorActionPreference = 'Stop'",
     "$p = [Console]::In.ReadToEnd() | ConvertFrom-Json",
     "$desktop = [Environment]::GetFolderPath('Desktop')",
-    "$link = Join-Path $desktop $p.name",
-    "if ($p.migration.linkPath) { $link = $p.migration.linkPath }",
-    "if ($p.migration -and -not (Test-Path -LiteralPath $link -PathType Leaf)) { return }",
-    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($link)",
-    "if ($p.migration -and ($s.TargetPath -ine $p.migration.wscript -or $s.Arguments -inotIn $p.migration.oldArguments)) { return }",
+    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop $p.name))",
     "$s.TargetPath = $p.target",
     "$s.Arguments = $p.arguments",
     "$s.IconLocation = $p.icon",
@@ -155,5 +136,5 @@ async function writeShortcut(payload, { spawnFn = spawn, migration } = {}) {
     "$s.Save()",
     "'CREATED'",
   ].join("; ");
-  return runPS(ps, JSON.stringify({ ...payload, migration }), spawnFn);
+  return runPS(ps, JSON.stringify(shortcutPayload()), spawnFn);
 }
