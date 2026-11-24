@@ -373,15 +373,15 @@ begin
   // Actions[0].Arguments 含本安装根的任务，其余保留。子串命中后还须过前缀边界
   // （命中点之后是路径分隔符或串尾才算），防 C:\Anyswitch 误伤 C:\Anyswitch-src。
   // 失败静默——卸载不可因清理失败而失败。
-  Params := '-NoProfile -NonInteractive -Command "$r=(Get-Location).ProviderPath.ToLowerInvariant();' +
+  Params := '-NoProfile -ExecutionPolicy Bypass -Command "$r=$args[0].ToLower();' +
     'foreach($n in @(''AnyswitchRelay'',''AnyswitchWatchdog'',''AnyswitchPanel'',''ApiCredRelay'',''ApiCredWatchdog'')){' +
     'try{$t=Get-ScheduledTask -TaskName $n -ErrorAction Stop;$a=$t.Actions[0].Arguments;' +
     'if($t.Actions[0].Execute -ieq ($r+''\Anyswitch.exe'') -and $a -eq ''--tray''){' +
     'Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop;continue};' +
     'if($a){$al=$a.ToLower();$i=$al.IndexOf($r);' +
     'if($i -ge 0 -and ($i+$r.Length -eq $al.Length -or $al[$i+$r.Length] -eq ''\'')){' +
-    'Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop}}}catch{}}"';
-  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, Root, SW_HIDE, ewWaitUntilTerminated, Code);
+    'Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction Stop}}}catch{}}" "' + Root + '"';
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 // 前缀边界：命中点之后必须是路径分隔符或串尾，防 C:\Anyswitch 误伤
