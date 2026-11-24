@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { parseVersion } from "../../src/ops/version-check.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const APP_ENTRIES = ["panel-host.mjs", "panel-host-restart-helper.mjs", "relay-host.mjs", "agent-watchdog.mjs"];
+const APP_ENTRIES = ["panel-host.mjs", "panel-host-restart-helper.mjs", "relay-host.mjs"];
 const TOOLS = dirname(fileURLToPath(import.meta.url));
 const NODE_VERSION = "22.15.0";
 const REQUIRED_FILES = ["dpapi.ps1", "codex-model-catalog-template.json", "thinking-efforts-baseline.json", "package.json", "panel-app.vbs", "silent-start.vbs", "anyswitch.ico", "LICENSE", "docs/assets/logo.png"];

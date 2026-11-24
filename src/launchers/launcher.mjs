@@ -32,7 +32,7 @@ import { spawn } from "node:child_process";
 import { dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
-import { startProductionRelay } from "./launch.mjs";
+import { connectResidentRelay } from "./launcher-native-fallback.mjs";
 import { loadSettings, defaultSettingsPath } from "../relay/relay-settings.mjs";
 
 // The Claude MINOR family whose gateway-discovery filter behaviour is verified
@@ -326,7 +326,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     bypass = false;
   }
   const code = await runLauncher({
-    startRelay: deps.startRelay ?? (() => startProductionRelay({ logger: createForwardingLogger() })),
+    startRelay: deps.startRelay ?? connectResidentRelay,
     getClaudeVersion: deps.getClaudeVersion ?? realGetClaudeVersion,
     spawnClaude: deps.spawnClaude ?? realSpawnClaude,
     log: deps.log ?? ((line) => process.stderr.write(`${line}\n`)),

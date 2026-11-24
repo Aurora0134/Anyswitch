@@ -62,7 +62,6 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 // Entry points, relative to this file. Kept in one place because three things
 // must agree on them: the registration, the staleness probe, and the tests.
 const RELAY_SCRIPT = join("..", "relay", "relay-host.mjs");
-const WATCHDOG_SCRIPT = join("..", "agents", "agent-watchdog.mjs");
 const PANEL_SCRIPT = join("..", "panel", "panel-host.mjs");
 
 // 本进程的打包安装根（分发器注入的 ANYSWITCH_* 推导；源码安装 null）。
@@ -318,13 +317,12 @@ async function reconcileTask({ taskName, legacyTaskName, script, register }, byN
 // autostart is off and both stay absent.
 export async function reconcileAutostart({ spawnFn = spawn } = {}) {
   const probed = await probeTaskActions(
-    [TASK_NAME, WATCHDOG_TASK_NAME, PANEL_TASK_NAME, LEGACY_TASK_NAME, LEGACY_WATCHDOG_TASK_NAME],
+    [TASK_NAME, PANEL_TASK_NAME, LEGACY_TASK_NAME],
     spawnFn,
   );
   if (!probed.ok) return { ok: false, error: probed.error, tasks: [] };
   const entries = [
     { taskName: TASK_NAME, legacyTaskName: LEGACY_TASK_NAME, script: RELAY_SCRIPT, register: enableRelayAutostartOnly },
-    { taskName: WATCHDOG_TASK_NAME, legacyTaskName: LEGACY_WATCHDOG_TASK_NAME, script: WATCHDOG_SCRIPT, register: enableWatchdogAutostart },
     { taskName: PANEL_TASK_NAME, legacyTaskName: null, script: PANEL_SCRIPT, register: enablePanelAutostart },
   ];
   const tasks = [];
@@ -375,22 +373,18 @@ export async function isAutostartEnabled({ spawnFn = spawn } = {}) {
   return isTaskPresent(LEGACY_TASK_NAME, spawnFn);
 }
 
-// Watchdog variant: the followAgent entry starts agent-watchdog.mjs (NOT the
-// relay) so the relay stays lazily started until a coding agent appears.
-export async function enableWatchdogAutostart({ spawnFn = spawn } = {}) {
-  return registerTask(WATCHDOG_TASK_NAME, WATCHDOG_SCRIPT, spawnFn);
-}
-
-export async function disableWatchdogAutostart({ spawnFn = spawn } = {}) {
-  const result = await unregisterTask(WATCHDOG_TASK_NAME, spawnFn);
-  await unregisterTask(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
-  return result;
-}
-
-export async function isWatchdogAutostartEnabled({ spawnFn = spawn } = {}) {
-  const present = await isTaskPresent(WATCHDOG_TASK_NAME, spawnFn);
-  if (present) return true;
-  return isTaskPresent(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
+export async function removeWatchdogTasks(spawnFn = spawn) {
+  const names = [WATCHDOG_TASK_NAME, LEGACY_WATCHDOG_TASK_NAME];
+  const owns = (action) => /(?:^|\\)(?:wscript|node)\.exe$/i.test(action.command) && /\bagent-watchdog\.mjs["\s]*$/i.test(action.arguments);
+  const probed = await probeTaskActions(names, spawnFn);
+  if (!probed.ok) return false;
+  const owned = [...probed.byName].filter(([, action]) => owns(action));
+  if (owned.length === 0) return true;
+  for (const [name] of owned) {
+    if (!(await unregisterTask(name, spawnFn)).ok) return false;
+  }
+  const remaining = await probeTaskActions(names, spawnFn);
+  return remaining.ok && ![...remaining.byName.values()].some(owns);
 }
 
 // Panel variant: registers the panel-host.mjs task itself — the control plane

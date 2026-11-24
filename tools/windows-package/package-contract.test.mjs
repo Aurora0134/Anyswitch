@@ -136,7 +136,7 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
     ["terminal-switch.log", "src/panel/panel.mjs"],
     ["delete-journal.json", "src/store/store-service.mjs"],
     ["relay.pid", "src/relay/relay-process-manager.mjs"],
-    ["watchdog.pid", "src/agents/agent-watchdog.mjs"],
+    ["watchdog.pid", "src/ops/retire-agent-watchdog.mjs"],
     ["terminal-host.pid", "src/terminal/terminal-process-manager.mjs"],
     ["agent-metrics-snapshot.json", "src/agents/agent-metrics.mjs"],
     ["model-stability.json", "src/catalog/model-stability.mjs"],
@@ -157,7 +157,7 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
   ];
   const trees = [
     ["credentials", "src/store/data-bundle.mjs"],
-    ["logs", "src/agents/agent-watchdog.mjs"],
+    ["logs", "src/panel/panel-host.mjs"],
     ["backups", "src/ops/backup-location.mjs"],
     ["client-updates", "src/agents/client-update-journal.mjs"],
     ["usage", "src/launchers/codex-launcher.mjs"],
@@ -168,7 +168,7 @@ test("RemoveSettings manifest stays in sync with the data-root write surface", a
   ];
   for (const [name, evidence] of files) {
     assert.ok(code.includes(`DeleteOwnedFile(DataRoot, '${name}');`), `RemoveSettings 缺文件 ${name}`);
-    assert.ok((await readFile(join(here, "..", "..", evidence), "utf8")).includes(`"${name}"`), `${evidence} 不再写 ${name}，常量表需复核`);
+    assert.ok((await readFile(join(here, "..", "..", evidence), "utf8")).includes(`"${name}"`), `${evidence} 不再引用 ${name}，常量表需复核`);
   }
   for (const [name, evidence] of trees) {
     assert.ok(code.includes(`DeleteOwnedTree(DataRoot + '\\${name}');`), `RemoveSettings 缺目录 ${name}`);

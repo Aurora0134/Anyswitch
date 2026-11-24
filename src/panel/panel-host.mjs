@@ -23,9 +23,9 @@ import { createPanelRouter, startRelayLogBridge } from "./panel.mjs";
 import { createLogger, formatLogStamp } from "../shared/logger.mjs";
 import { createAgentMetricsCollector } from "../agents/agent-metrics.mjs";
 import { storePaths } from "../store/store-io.mjs";
-import { loadSettings, defaultSettingsPath, createLoggingEnabledGate, relayDataRoot } from "../relay/relay-settings.mjs";
-import { isWatchdogAutostartEnabled, enableWatchdogAutostart, reconcileAutostart } from "../ops/autostart.mjs";
-import { spawnWatchdog, probeWatchdog } from "../agents/agent-watchdog.mjs";
+import { defaultSettingsPath, createLoggingEnabledGate, relayDataRoot } from "../relay/relay-settings.mjs";
+import { reconcileAutostart } from "../ops/autostart.mjs";
+import { retireAgentWatchdog } from "../ops/retire-agent-watchdog.mjs";
 import { reconcileShims } from "../agents/shim-reconcile.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "../ops/git-anchor.mjs";
 import { ensureTerminalHost } from "../terminal/terminal-process-manager.mjs";
@@ -81,14 +81,7 @@ export function createPanelServer(options = {}) {
     // 启动预热就会真的起 worker 扫全机存档、真的跑 reg.exe/PowerShell 探针——
     // 与 environmentService/promptsService 透传是同一条纪律，见 panel.mjs 注入语义。
     sessionScanService: options.sessionScanService,
-    isWatchdogAutostartEnabledFn: options.isWatchdogAutostartEnabledFn,
-    probeWatchdogFn: options.probeWatchdogFn,
   });
-  // Warm the watchdog drift snapshot at startup: the panel frontend fetches
-  // /api/settings on every page load to hydrate the 抗截断 toggle, and an
-  // un-primed first GET would otherwise pay the ~1s probe round inline.
-  // Fire-and-forget — the first GET cold-waits only if it beats the prewarm.
-  router.prewarmWatchdogProbes();
   // Cold-scan prewarm (environment detection + sessions snapshot): same deal —
   // the first scan moves from the first user request to process startup. The
   // new-terminal menu's agent list and the terminal rail history stop paying
@@ -231,34 +224,6 @@ function installCrashLog(logPath) {
   });
 }
 
-// Backfill the watchdog logon task for older installations with followAgent enabled.
-export async function migrateWatchdogAutostart({
-  logger,
-  settingsFile,
-  isWatchdogAutostartEnabledFn = isWatchdogAutostartEnabled,
-  enableWatchdogAutostartFn = enableWatchdogAutostart,
-  probeWatchdogFn = probeWatchdog,
-  spawnWatchdogFn = spawnWatchdog,
-}) {
-  try {
-    const followAgent = loadSettings(settingsFile ?? defaultSettingsPath())?.settings?.followAgent === true;
-    if (!followAgent || await isWatchdogAutostartEnabledFn()) return;
-    const reg = await enableWatchdogAutostartFn();
-    if (!reg.ok) {
-      logger.warn(`followAgent migration: failed to register watchdog logon task (non-fatal): ${reg.error}`);
-      return;
-    }
-    const ready = (await probeWatchdogFn()) || (await spawnWatchdogFn()).ok;
-    if (ready) {
-      logger.info("followAgent migration: watchdog logon task registered and watchdog responded");
-    } else {
-      logger.warn("followAgent migration: watchdog logon task registered, but watchdog readiness could not be confirmed");
-    }
-  } catch (err) {
-    logger.warn(`followAgent migration check failed (non-fatal): ${err.message}`);
-  }
-}
-
 export async function startPanelHost(options = {}) {
   // logPath 是纯测试注入口：装配测试把 stderr tee 与崩溃记录引进临时沙箱，
   // 默认落数据根 logs/panel-host.log（跨版本连续，2026-11-20 用户裁决：清版本
@@ -290,6 +255,12 @@ export async function startPanelHost(options = {}) {
     logger.warn(`panel port ${port} already in use; reusing existing panel`);
     return { port, close, reused: true };
   }
+  try {
+    const retired = await retireAgentWatchdog({ installRoot: process.env.ANYSWITCH_INSTALL_ROOT });
+    if (!retired) logger.warn("legacy follow-agent watchdog could not be fully retired (non-fatal)");
+  } catch (err) {
+    logger.warn(`legacy follow-agent watchdog retirement failed (non-fatal): ${err.message}`);
+  }
   logger.info(`Anyswitch control panel running at http://127.0.0.1:${port}/panel`);
 
   // Relay log bridge: re-publish the relay process's log entries (keep-alive
@@ -297,8 +268,6 @@ export async function startPanelHost(options = {}) {
   // shows them again. Panel-host only — see startRelayLogBridge's comment
   // for why the relay-host must never start one.
   const stopLogBridge = startRelayLogBridge(logger, paths.root);
-
-  await migrateWatchdogAutostart({ logger });
 
   // Autostart tasks store an absolute path snapshot. When the source tree moves
   // (the 2026-11 src/ split did), the task keeps pointing at the old location

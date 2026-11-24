@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const appRoot = process.env.ANYSWITCH_APP_ROOT || process.cwd();
+const appRoot = dirname(fileURLToPath(import.meta.url));
 const expectedVersion = process.argv[2];
 const manifest = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8"));
 assert.equal(manifest.version, expectedVersion);
@@ -21,7 +22,7 @@ for (const path of [
   "test-helpers/vendor/js-yaml/index.js", "src/panel/panel-host.mjs", "src/relay/relay-host.mjs",
   "src/terminal/terminal-host.mjs", "src/ops/update-trust.mjs",
 ]) await access(join(appRoot, path));
-const trust = await import(new URL("./src/ops/update-trust.mjs", `file:///${appRoot.replaceAll("\\", "/")}/`));
+const trust = await import("./src/ops/update-trust.mjs");
 assert.equal(typeof trust.UPDATE_SIGNING_PUBLIC_KEY, "string");
 assert.equal(Buffer.from(trust.UPDATE_SIGNING_PUBLIC_KEY, "base64").length, 32);
 const pty = await import("node-pty");

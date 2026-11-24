@@ -43,7 +43,7 @@ function setup({ version = "1.2.3", channel = "stable", step = "download", autoA
   const run = { runId: RUN_ID, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step, state: "running", startedAt: new Date().toISOString(), targetVersion: version, targetTag: "v" + version, channel, autoApply, beforeVersion: current, appDir: join(old, "app"), relayRoot: dataRoot };
   writeClientUpdateRun(journalDir, run);
   let clock = 0;
-  return { temp, installRoot, journalDir, run, fns: { runId: RUN_ID, journalDir, env: { ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_DIR: join(old, "app"), LOCALAPPDATA: temp }, fetchFn, publicKey, panelDownTimeoutMs: 100, panelUpTimeoutMs: 100, nowMs: () => clock, delay: async (ms) => { clock += ms; }, probePanelFn: probePanelFn ?? (async () => null), restartRelayFn: restartRelayFn ?? (async () => ({ ok: true })), probeWatchdogFn: async () => false, spawnPanelHostFn: spawnPanelHostFn ?? (() => 42), now: () => "2026-11-20T00:00:00.000Z" }, cleanup: () => rmSync(temp, { recursive: true, force: true }) };
+  return { temp, installRoot, journalDir, run, fns: { runId: RUN_ID, journalDir, env: { ANYSWITCH_INSTALL_ROOT: installRoot, ANYSWITCH_APP_DIR: join(old, "app"), LOCALAPPDATA: temp }, fetchFn, publicKey, panelDownTimeoutMs: 100, panelUpTimeoutMs: 100, nowMs: () => clock, delay: async (ms) => { clock += ms; }, probePanelFn: probePanelFn ?? (async () => null), restartRelayFn: restartRelayFn ?? (async () => ({ ok: true })), relayRunning: async () => true, spawnPanelHostFn: spawnPanelHostFn ?? (() => 42), now: () => "2026-11-20T00:00:00.000Z" }, cleanup: () => rmSync(temp, { recursive: true, force: true }) };
 }
 
 test("signed manifest verifies exact bytes, SemVer, channel, optional GitHub digest, and strict signature encoding", () => {
@@ -111,6 +111,24 @@ test("user-authorized autoApply continues from verified download into package ac
     assert.equal(readClientUpdateRun(s.journalDir, RUN_ID).step, "apply");
     assert.deepEqual(parseCurrentPointer(readFileSync(join(s.installRoot, "current.json"), "utf8")), { schema: 1, version: "1.2.3" });
   } finally { s.cleanup(); }
+});
+
+test("updating the panel leaves a stopped Relay stopped", async () => {
+  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
+  try {
+    let probes = 0;
+    let restarts = 0;
+    const result = await runSelfUpdate({
+      ...s.fns,
+      relayRunning: async () => false,
+      restartRelayFn: async () => { restarts += 1; return { ok: true }; },
+      probePanelFn: async () => ++probes === 1 ? null : { version: "1.2.3" },
+    });
+    assert.equal(result.outcome, "updated");
+    assert.equal(restarts, 0);
+  } finally {
+    s.cleanup();
+  }
 });
 
 
@@ -378,22 +396,6 @@ test("target panel launch retries are capped inside the up window", async () => 
       probePanelFn: async () => rolledBack ? { version: "1.2.2" } : null });
     assert.equal(result.outcome, "rolled_back", JSON.stringify(result));
     assert.equal(spawns, Math.max(1, Math.floor(500 / 100)), "重拉次数应有界且不超 UP 窗（回滚拉旧面板不计入）");
-  } finally { s.cleanup(); }
-});
-
-test("apply-stage exception still restores a watchdog stopped for the swap", async () => {
-  const f = fixture(), s = setup({ fetchFn: fakeFetch(f).fetchFn, autoApply: true });
-  try {
-    const spawns = [];
-    const result = await runSelfUpdate({ ...s.fns,
-      probeWatchdogFn: async () => true,
-      stopWatchdogFn: async () => ({ ok: true }),
-      spawnWatchdogFn: async () => { spawns.push(1); },
-      restartRelayFn: () => { throw new Error("relay restart exploded"); },
-    });
-    assert.equal(result.outcome, "failed");
-    assert.match(result.detail, /relay restart exploded/);
-    assert.equal(spawns.length, 1, "停掉的看门狗必须在异常收场时拉回（对齐旧版 restoreWatchdog）");
   } finally { s.cleanup(); }
 });
 

@@ -540,15 +540,6 @@ export function createDataBundleService({
         if (settingsText !== null) {
           atomicWriteFile(settingsPath, settingsText);
           applied.settings = true;
-          // followAgent 不只是盘上一个字段：它背后挂着登录计划 AnyswitchWatchdog
-          // 和常驻自愈进程，而那串副作用归设置路由所有，导入绕开了它。把刚写进盘
-          // 的值原样交回调用方对齐。解析不成按关处理——坏文件经 loadSettings 就是
-          // 空对象，读出来同样是关，两边不能给出不一致的答复。
-          try {
-            applied.followAgent = JSON.parse(settingsText)?.followAgent === true;
-          } catch {
-            applied.followAgent = false;
-          }
         }
         const promptsText = readTextIfExists(join(dir, "prompts.json"));
         if (promptsText !== null) { atomicWriteFile(promptsJsonPath, promptsText); applied.prompts = true; }
@@ -695,14 +686,6 @@ export function createDataBundleService({
         atomicWriteFile(target, texts.get(file));
         if (file === "settings.json") {
           applied.settings = true;
-          // 与导入落定同一口径（见 applyBundle）：followAgent 背后挂着登录计划与常驻
-          // 自愈进程，刚写进盘的值要交回调用方对齐。解析不成按关处理——坏文件经
-          // loadSettings 就是空对象，读出来同样是关，两边不能给出不一致的答复。
-          try {
-            applied.followAgent = JSON.parse(texts.get(file))?.followAgent === true;
-          } catch {
-            applied.followAgent = false;
-          }
         }
       }
       if (withCredentials) {

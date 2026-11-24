@@ -426,41 +426,6 @@ test("导入：读包失败在卡面转 danger；写入失败在弹窗里出原�
   assert.equal(expired.toasts.at(-1).isErr, true);
 });
 
-test("导入后 followAgent 没对齐回来：状态行转提醒色，明细行说没跟上的是什么", async () => {
-  const cases = [
-    {
-      name: "登录自启",
-      watchdog: { desired: true, task: "failed", process: "unchanged", warnings: [], reasons: { task: "拒绝访问" } },
-      expect: /「跟随 Coding Agent 启动」已按包里的设置更新，但登录自启没跟着改，重启电脑后的行为可能和设置显示的不一致（拒绝访问）。可以在设置里把它拨一次再拨回来重试。/,
-    },
-    {
-      name: "自愈进程",
-      watchdog: { desired: false, task: "unregistered", process: "failed", warnings: [], reasons: { process: "pid 认不出来" } },
-      expect: /「跟随 Coding Agent 启动」的开关已更新，但自愈进程没跟上（pid 认不出来）。当前实际行为可能和设置显示的不一致。/,
-    },
-  ];
-  for (const c of cases) {
-    const h = applyHarness(c.watchdog);
-    await pickPackage(h);
-    await confirmApply(h);
-    assert.equal(h.summary().tone, "warn", c.name);
-    assert.equal(h.summary().text, "导入完成 · 备份号 b7，但「跟随 Coding Agent 启动」没完全跟上", c.name);
-    assert.match(h.meta(), /渠道 3 · 「跟随 Coding Agent 启动」/, c.name);
-    assert.match(h.meta(), c.expect, c.name);
-    assert.equal(h.toasts.at(-1).isErr, false, "数据已换完，不该报成失败");
-  }
-
-  const clean = applyHarness({ desired: true, task: "registered", process: "started", warnings: [], reasons: {} });
-  await pickPackage(clean);
-  await confirmApply(clean);
-  assert.equal(clean.summary().tone, "ok", "对齐顺利就是一句成功，不多话");
-  assert.equal(clean.meta(), "渠道 3");
-  const noWatchdog = applyHarness(null);
-  await pickPackage(noWatchdog);
-  await confirmApply(noWatchdog);
-  assert.equal(noWatchdog.summary().tone, "ok");
-});
-
 // ─────────────────────────────────────────────────────────────
 // 文案生命周期：结果离开即复位（连行收起）；离开期间落地的结果等切回
 //

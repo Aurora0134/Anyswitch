@@ -1896,7 +1896,7 @@
      设置项沿用 modal-item/modal-number 既有类（与样式实验室主题片段 CSS 对齐）；
      预览是真实看板页的 DOM 克隆（JS 剥 id 后 CSS 缩放），各套主题与亮暗 token 经
      全局变量自动作用于镜像，无需主题特化 CSS，也不存在独立样张可与看板脱节。 */
-  /* 「通用」分组：按语义分六张卡（启动 / 显示 / 抗截断 / Claude Code / 运行日志 / 未归类平卡），卡间距对齐
+  /* 「通用」分组：按语义分五张卡（显示 / 抗截断 / Claude Code / 运行日志 / 未归类平卡），卡间距对齐
      侧栏列的 20px；设置行悬停整行淡底（--surface-hover 既有悬停 token，与主题列表
      项同手感），行块左右外扩 10px 让底色有呼吸感，文本与原位置对齐。 */
   #settingsPanelGeneral { display: flex; flex-direction: column; gap: 20px; }
