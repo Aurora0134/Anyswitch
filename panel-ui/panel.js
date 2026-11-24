@@ -25443,6 +25443,17 @@ async function api(method, path, body, signal) {
       }
     }
     tbody.innerHTML = logsRows.map((r) => logsRowHtml(r)).join("");
+    // 来源格品牌图标后填：克隆看板 .agent-avatar（各家底衬/描边/圆角是内联样式，
+    // 只取字形会糊；与终端页签品牌、路由瓦片同一来源同一手法）。看板缺该端点卡
+    // 时克隆落空，空槽由 CSS :empty 折叠、不留图标位。typeof 双闸门：单测桩环境
+    // 没有 document/querySelectorAll，跳过后填不影响段沙箱。填在滑位新顶点采样
+    // 前：上一屏各行已带图标，本屏先填再采样，行高口径两侧一致，位移差值才准。
+    if (typeof document !== "undefined" && typeof tbody.querySelectorAll === "function") {
+      for (const slot of tbody.querySelectorAll("[data-logs-agent]")) {
+        const avatar = document.querySelector(`.agent-cards-container .panel-card[data-agent-id="${slot.getAttribute("data-logs-agent")}"] .agent-avatar`);
+        if (avatar) slot.replaceChildren(avatar.cloneNode(true));
+      }
+    }
     if (enter) {
       // 只给新来的行挂入场动画类；整幅重建的既有行不挂类，入场动画不重播
       const fresh = new Set(enter);
@@ -25493,6 +25504,15 @@ async function api(method, path, body, signal) {
     if (pager) pager.hidden = true;
   }
 
+  // 来源格品牌图标槽位：agentId 命中已登记端点（看板卡与 STATS_ENDPOINT_LABELS
+  // 同一组 id）才渲染，空值与未登记 id 纯文字兜底、不留图标位。id 过白名单字符：
+  // 它同时进 HTML 属性与 renderLogs 后填的 CSS 选择器。
+  function logsAgentBrandHtml(id) {
+    const key = String(id ?? "");
+    if (!key || !/^[\w-]+$/.test(key) || !STATS_ENDPOINT_LABELS[key]) return "";
+    return `<span class="logs-agent-brand" data-logs-agent="${esc(key)}" aria-hidden="true"></span>`;
+  }
+
   function logsRowHtml(r) {
     const ok = r.ok === true;
     const durMs = Number(r.durationMs) || 0;
@@ -25505,7 +25525,7 @@ async function api(method, path, body, signal) {
       : `<span class="badge badge-danger">失败${r.status !== null && r.status !== undefined && r.status !== "" ? " " + esc(r.status) : ""}</span>`;
     return `<tr class="logs-row${ok ? "" : " logs-row-fail"}" data-logs-key="${esc(logsRowKey(r))}">`
       + `<td class="logs-cell-main">${esc(logsFmtTime(r.ts))}</td>`
-      + `<td>${esc(logsAgentLabel(r.agentId))}</td>`
+      + `<td><span class="logs-agent">${logsAgentBrandHtml(r.agentId)}${esc(logsAgentLabel(r.agentId))}</span></td>`
       + `<td title="${esc(r.providerId ?? "")}">${esc(r.providerLabel || r.providerId || "—")}</td>`
       + `<td title="${esc(r.model ?? "")}">${esc(r.modelDisplay ?? r.model ?? "—")}${r.stream === true ? '<span class="logs-stream-tag">流</span>' : ""}</td>`
       + `<td>输入 ${esc(formatTokensCn(r.prompt))} / 输出 ${esc(formatTokensCn(r.completion))}${Number(r.cached) > 0 ? `<span class="logs-sub">缓存 ${esc(formatTokensCn(r.cached))}</span>` : ""}</td>`
