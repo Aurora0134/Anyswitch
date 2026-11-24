@@ -2,378 +2,106 @@
 
 <div align="center">
 
-<p><img src="docs/assets/logo.png" alt="Anyswitch logo" width="128"></p>
+<p><img src="docs/assets/logo.png" alt="Anyswitch" width="96"></p>
 
 # Anyswitch
 
-> *「渠道配一次，十个 agent 一起用。」*
+**Windows 本地 AI 请求网关与浏览器控制面板**
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.5-preview](https://img.shields.io/badge/Version-0.7.5--preview-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.5-preview)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#这些边界要先接受)
-[![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
+集中配置模型渠道，将客户端请求转发到你选定的上游，并在浏览器里查看请求、路由和用量。
 
-<br>
+[下载 Windows x64 安装器](https://github.com/Aurora0134/Anyswitch/releases/download/v0.7.5/anyswitch-v0.7.5-win-x64-setup.exe) · [v0.7.5 源码](https://github.com/Aurora0134/Anyswitch/tree/v0.7.5) · [发布说明](https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.5)
 
-**一个跑在你自己机器上的 relay 和控制面板：渠道配一次，十个 coding agent 从一处接，上游 key 只存一份密文。**
+Windows 10/11 x64。安装器未做代码签名，Windows 可能提示发布者未知。
 
-<br>
+</div>
 
-第一个 agent 配渠道，谁都乐意——五分钟的事。到第十个，你在把同样几十条配置往第十份文件里抄；十份配置里躺着十份明文 key，每一份都活在那个 agent 进程读得到的目录里。渠道挂了要手动换；想知道刚才那请求是谁发的、速度多快、走的哪条渠道，得在十个窗口和日志之间对时间。
+## 发出第一条请求
 
-这个工具存在的全部理由，是让「只配一次」「只存一份密文」「一眼看到谁在跑、走的哪条路」三件事同时成立。
+安装后，从开始菜单打开 **Anyswitch (Installed)**。快捷方式会启动本地面板，并在默认浏览器中打开。安装器自带 Node.js。
+
+[打开本地面板](http://127.0.0.1:47820/panel)
+
+1. 在 **模型管理** 中选择 **新增渠道**，填写渠道 ID、上游 Base URL 和 API Key。密钥由 Windows DPAPI 为当前用户加密保存。
+2. 保存渠道并等待模型发现。如果上游不提供模型列表，手动添加模型 ID。
+3. 如果中继尚未运行，在 **看板 → 服务状态** 选择 **启动**。
+4. 在 **虚拟终端** 中打开 **+**，选择已安装的 CLI 客户端并启动。也可以在普通终端通过下方的客户端启动器接入。
+5. 在客户端选择已配置的模型，发送一条消息。回到 **看板** 查看请求和结果，或到 **使用统计** 的请求日志查看明细。
+
+![看板显示服务状态、请求和客户端实例](docs/screenshots/s1-board.png)
+
+截图为早期版本的界面示例。
+
+## 按场景使用
+
+### 接入客户端
+
+Anyswitch 为下列客户端提供启动器。已接入的命令行客户端可以在新开的普通终端里用原命令启动。托管配置把请求指向本地网关，上游 API Key 保存在 Anyswitch。
+
+| 协议 | 客户端启动器 |
+| --- | --- |
+| Anthropic Messages | [Claude Code](src/launchers/launcher.mjs)、[Kimi Code](src/launchers/kimi-launcher.mjs) |
+| OpenAI Responses | [Codex CLI](src/launchers/codex-launcher.mjs) |
+| OpenAI 兼容 | [OpenCode](src/launchers/opencode-launcher.mjs)、[Pi](src/launchers/pi-launcher.mjs)、[ZCode](src/launchers/zcode-launcher.mjs)、[ZCode CLI](src/launchers/zcode-cli-launcher.mjs)、[DeepSeek Harness](src/launchers/dsh-launcher.mjs)、[Qoder](src/launchers/qoder-launcher.mjs)、[Grok Build](src/launchers/grok-launcher.mjs)、[WorkBuddy](src/launchers/workbuddy-launcher.mjs) |
+
+源码版也可以显式运行启动器，例如在仓库目录执行 `node src/launchers/codex-launcher.mjs`。ZCode CLI 需要自行准备 CLI 发行物，并将 `ZCODE_CLI_EXECUTABLE` 指向其入口 `bin\zcode.mjs`。
+
+### 设置路由和备用
+
+同一渠道有多个入口时，可配置备用 URL。要在不同渠道间切换，可把渠道组成号池，或为客户端的 `auto` 模型和自定义的虚拟模型设置路由链。看板显示当前路由和各节点状态。
+
+### 查看用量和会话
+
+在使用统计中查看请求数、Token、成功率、首字响应时间和历史趋势。需要查看本机客户端保存的对话时，可打开会话页。
+
+### 在面板里运行 CLI
+
+虚拟终端可打开 PowerShell 或启动检测到的 CLI 客户端，旁边可查看该客户端实例的请求和响应速度。源码版需要先安装终端依赖。 [源码运行步骤](#源码运行)
+
+![虚拟终端中的 PowerShell 和客户端页签](docs/screenshots/s6-terminal.png)
+
+### 共享提示词预设和技能
+
+启用提示词预设，将常用指令同步到支持的客户端。Skills 页面可从一个本地目录管理技能，再将技能部署到已安装的客户端。
+
+![本地技能库与客户端部署](docs/screenshots/s4-skills.png)
+
+## 源码运行
+
+在 Windows 上安装 Git 和受支持的 Node.js（`>=22.15.0 <23 || >=23.8.0`），然后在命令提示符中执行下列命令。`npm install` 用于虚拟终端，可按需执行。
 
 ```bat
-git clone --branch v0.7.5-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
-cd /d "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.5 --single-branch https://github.com/Aurora0134/Anyswitch.git
+cd Anyswitch
 npm install
 wscript panel-app.vbs
 ```
 
-Windows 本地运行 · 安装器或源码发行 · 面板与 relay 只听环回地址
+## 升级到 v0.7.5
 
-[看效果](#看效果一个窗口配置路由读数都在) · [安装](#装上就能用) · [渠道](#渠道只填一次十个-agent-各自接上) · [容灾](#挂了一个渠道流水线不该停) · [读数](#谁在跑走哪条路用了多少一个面板答完) · [终端](#虚拟终端在面板里跑-agent读数就在旁边) · [边界](#这些边界要先接受)
+升级前可备份 `%LOCALAPPDATA%\Anyswitch\`。程序与用户数据分开存放，同一 Windows 用户升级后可继续使用原渠道、凭据、设置、预设和用量记录。请在会话空档升级。重启中继会中断在途请求和运行中的虚拟终端。
 
-</div>
+### 从旧源码版升级
 
----
-
-## 看效果：一个窗口，配置、路由、读数都在
-
-面板在 `http://127.0.0.1:47820/panel`，relay 在 `127.0.0.1:47821`。面板管配置与读数，relay 接请求。两个进程分开跑：relay 停了，面板照样打开给你看状态。
-
-<p align="center">
-  <img src="docs/screenshots/s1-board.png" alt="看板：服务状态、近期请求、各 agent 实例与实时输出" width="48%">
-  <img src="docs/screenshots/s2-store.png" alt="模型管理：渠道、号池与模型清单" width="48%">
-  <img src="docs/screenshots/s3-stats.png" alt="使用统计：今日概览、90 天热力图与 Token 趋势" width="48%">
-  <img src="docs/screenshots/s4-skills.png" alt="Skills 管理：主仓库与各 agent 部署" width="48%">
-</p>
-
-一条请求走的路：
-
-```text
-Claude Code / Codex / 其他 agent
-              │
-              ▼
-      127.0.0.1:47821 relay
-        鉴权 · 路由 · 协议转换
-              │
-              ▼
-       你配置的 OpenAI 兼容上游
-```
-
-截图在 [`docs/screenshots/`](docs/screenshots/)，克隆后可直接打开核对页面形态。截图摄于本机同一份代码的面板，取的是默认界面（左侧导航布局）；渠道名、会话标题、Skills 与预设清单、用量数字等均为脱敏演示数据。
-
----
-
-## 装上就能用
-
-先准备三件事：Windows（凭据封存走 DPAPI，自启走计划任务）；Node.js（`>=22.15.0 <23 || >=23.8.0`，推荐 24 LTS，这是 API 下限，不表示范围内每个版本都实测过）；一个全新安装目录（不要把新源码覆盖到正在运行的目录上）。
-
-然后是上面那四行。`npm install` 只为虚拟终端装依赖——终端进程绑定与渲染一共 5 个直接依赖，不装它，relay、面板、渠道管理、启动器、统计照常用，只是终端页打不开。手动启动面板用 `node src/panel/panel-launcher.mjs`；`panel-app.vbs` 按自身位置找启动器，安装目录不必固定。装完后，设置 → 通用里还有「创建桌面快捷方式」，一键把面板入口落上桌面。
-
-不想碰源码，可以直接用安装器：GitHub Releases 提供 Windows x64 安装器，装好后面板「关于」页即可检查更新（安装器与更新包的签名情况见「这些边界要先接受」）。relay 不用单独启动——启动器拉起 agent 时会自动带起；要让它常驻，在看板「服务状态」卡里打开「开机自启常驻」，服务随 Windows 登录在后台启动。
-
-四步跑通第一条请求：
-
-1. 打开 `http://127.0.0.1:47820/panel`，进渠道管理。
-2. 新增渠道：填渠道 ID、上游 Base URL、API Key。保存时 key 用当前 Windows 用户的 DPAPI 封存。
-3. 等模型自动发现；上游没有 `GET /v1/models` 就手动补模型 ID。要容灾，再填备用地址。
-4. 用对应 agent 的启动器拉起客户端，或者直接在虚拟终端里启动它——relay 地址与鉴权由启动器交给它，其余参数原样透传。
-
-装完自检：
+GitHub 上的 v0.7.4 没有安装器。你可以改用 v0.7.5 的 Windows x64 安装器，保留旧源码目录和用户数据。继续使用源码时，在原仓库目录运行 `git status --short` 并处理本地改动。工作树干净后执行以下命令，再从看板重启服务。
 
 ```bat
-node --version
-node --check src/panel/panel-host.mjs
-npm test
-```
-
-`npm test` 是仓库自带的全量测试（167 个测试文件，全在 `tests/`，与 `src/` 下的实现分开放）；它需要一次 `npm install`，因为虚拟终端测试会碰终端宿主。
-
----
-
-## 渠道只填一次，十个 agent 各自接上
-
-十个 agent、十一条接法，配好一次就都在这里：
-
-| agent | 协议面 | 启动方式 |
-| --- | --- | --- |
-| Claude Code | Anthropic Messages | `node src/launchers/launcher.mjs [claude 参数]` |
-| Kimi Code | Anthropic Messages | `node src/launchers/kimi-launcher.mjs [kimi 参数]` |
-| Codex CLI | OpenAI Responses | `node src/launchers/codex-launcher.mjs [codex 参数]` |
-| OpenCode | OpenAI | `node src/launchers/opencode-launcher.mjs [opencode 参数]` |
-| Pi | OpenAI | `node src/launchers/pi-launcher.mjs [pi 参数]` |
-| ZCode | OpenAI | `node src/launchers/zcode-launcher.mjs [zcode 参数]` |
-| ZCode CLI | OpenAI | `node src/launchers/zcode-cli-launcher.mjs [zcode 参数]` |
-| DeepSeek Harness | OpenAI | `node src/launchers/dsh-launcher.mjs [dsh 参数]` |
-| Qoder | OpenAI | `node src/launchers/qoder-launcher.mjs [qoder 参数]` |
-| Grok Build | OpenAI | `node src/launchers/grok-launcher.mjs [grok 参数]` |
-| WorkBuddy | OpenAI | `node src/launchers/workbuddy-launcher.mjs [codebuddy 参数]` |
-
-ZCode CLI 是显式配置制：需自备 zcode CLI 发行物，并以环境变量 `ZCODE_CLI_EXECUTABLE` 指向其入口文件（`bin\zcode.mjs`）；未配置时该启动器不可用。
-
-### 普通终端里，直接敲 agent 的命令
-
-接上线的 agent 不必每次都写启动器路径：只要本机装了它，在任意终端里敲它本来的命令（`claude`、`grok`、`opencode`……）就是走 Anyswitch。这件事自动发生，无须安装或设置；新开的终端生效，已经开着的终端不受影响。取消接线或卸载 agent 后，命令自动回到它自己的原生入口；Anyswitch 没在运行时，命令同样可用。命令文件统一放在 `~/.config/anyswitch-bin/`，你自己放在那里的启动脚本不会被改动。
-
-配置同步把托管渠道写进各 agent 自己的配置位置，你手写的其它内容原样保留：
-
-| agent | Anyswitch 写入的位置 |
-| --- | --- |
-| Kimi Code | `~/.kimi-code/config.toml` |
-| Codex | `~/.codex/config.toml` 与生成的模型目录 |
-| OpenCode | `~/.config/opencode/opencode.json`（你的 `opencode.jsonc` 不动） |
-| Pi | `~/.pi/agent/models.json` |
-| ZCode | `~/.zcode/v2/config.json` |
-| DeepSeek Harness | `~/.dsh/profiles/<name>/cordis.patch.yml` |
-| Qoder | `~/.qoder/settings.json` |
-| Grok Build | `~/.grok/config.toml` |
-| WorkBuddy | `~/.workbuddy/models.json` |
-
-写进这些文件的是本地 relay 地址和一枚本地 token——上游的真实 key 不进任何 agent 的配置目录。Claude Code 没有配置文件面，走启动器注入环境变量，另可在设置页做档位映射。
-
-已经散在各家配置里的渠道也不用重抄：BYOK 导入会扫描 9 个端点的本地配置（Claude 没有本地配置面），把 OpenAI 兼容渠道拉进中央 store，能选的带过去，不能选的如实跳过。换机器走导出的配置包，异机导入不再整单失败。
-
----
-
-## 挂了一个渠道，流水线不该停
-
-管流量走向的有三样东西：号池、路由链、备用地址。它们各管一层，可以叠着用。
-
-### 号池：一个渠道挂了，先试另一个
-
-把 2–5 个渠道收进一个号池。请求命中号池后在成员间保持粘性——同一段会话不会每句话换一个渠道；当前成员失败，按顺序退到下一个。agent 看到的是号池这一个入口，不是一堆散渠道。成员顺序手动重排立即生效，下一个请求就按新池序走并重新粘住。
-
-### 路由链：模型名不绑死渠道
-
-每个 agent 的 `auto` 模型按链路逐跳尝试。链上的节点可以是渠道，也可以是号池——两层容灾叠着用。
-
-```text
-模型名
-  └─ 节点 A：主渠道
-       └─ 节点 B：号池（2–5 个渠道，粘性 + 逐成员退避）
-            └─ 节点 C：备用渠道（baseURL 的 fallbackURLs）
-```
-
-节点连续失败 2 次降级，5 分钟后由真实请求驱动回到链首重试。删渠道、解散号池时，引用它的链条目在同一笔写入里被剪掉，不留悬空节点；链的每一跳在看板上有实况灯，哪跳在走、哪跳降级，直接看得到。
-
-<p align="center">
-  <img src="docs/screenshots/s5-route-chain.png" alt="虚拟模型的路由链编辑器：逐跳退避的链与候选瓦片墙" width="80%">
-</p>
-
-### 虚拟模型：一个名字，十个 agent 都认
-
-虚拟模型是你自建的名字，绑一条 1–8 个节点的链。启用后，它与 `auto` 一起出现在全部十个 agent 模型列表里；停用即从所有目录消失。
-
-它解决的是「同一个角色，到处叫同一个名字」：把 `deepseek-pro` 定义成「主渠道 → 备用池」，之后在 Claude Code 里选它、在 Codex 里选它，走的是同一条链。链状态跨 agent 共享——一个 agent 把某节点打降级了，另一个 agent 的请求直接绕开它，不重复交学费。
-
-### 备用地址：服务商有多个入口
-
-渠道自己还有最后一道保险：`baseURL` 加多个 `fallbackURLs`。每个地址 180 秒生成预算，重试间隔指数退避（1 秒起、4 秒封顶）；4xx 是请求终态，不再换地址；5xx 才换下一个。全部地址耗尽时，透传最后一个真实上游 5xx；纯传输失败返回 502。
-
----
-
-## 谁在跑、走哪条路、用了多少：一个面板答完
-
-配置和路由是底座，读数才是每天要用的那面。三个地方看：
-
-- **看板**：relay 与终端服务的状态、路由链每一跳的实况灯、近期请求（含失败与 429）、各 agent 的实例。同一家客户端开了多个会话，就是多行实例，不合并成一行糊掉——ZCode 的实例行直接细化到会话粒度。看板排布有三档（全部 / 图标行 / 仅运行中），在 设置 → 显示 里换。
-- **使用统计**：今日概览（请求数、Token、缓存命中、平均首字响应、成功率）、90 天热力图、Token 趋势、模型用量与请求日志。
-- **会话**：按需现扫十家客户端自己的会话存储，不另建索引。轮次判定落在数据层——只数你真正说过的话，不拿工具结果冒充用户输入。
-
-<p align="center">
-  <img src="docs/screenshots/s9-sessions.png" alt="会话页：十家客户端的会话清单与轮次判定" width="80%">
-</p>
-
-实例归属不靠猜：用启动器（或在虚拟终端里）拉起的客户端，按连接属主进程归到对应 agent 的实例；桌面图形形态单独识别，不会被当成另一个 CLI。归属有冷缓存窗口——relay 刚启动、进程扫描还没预热时，launcher 形态的实例行可能短暂建出两行，闲置 10 分钟后收掉。
-
----
-
-## 虚拟终端：在面板里跑 agent，读数就在旁边
-
-虚拟终端是面板里的独立页面，不是一个弹窗：整页显示，页头能返回看板。它属于预览功能，需要一次 `npm install`；不装只是这一页打不开。
-
-新建菜单里只有两样东西：空白终端，和本机已安装且检测为 CLI 形态的 agent——没装的东西不会出现在菜单里。选中 agent 后点启动，服务端为该会话组装环境变量：relay 地址、鉴权、会话身份。上游 key 不进终端、不落盘、不回显。空白终端固定 PowerShell，工作目录默认你的用户目录，并记住你上次填的那一个。
-
-> 一个例外写清楚：ZCode CLI 不从环境变量收凭据，relay 令牌会作为 Anyswitch 自有槽位配置里的密钥下发，且只写在它自己的配置里。
-
-![新建终端：“+”菜单列出空白终端与本机已装的 CLI Agent](docs/screenshots/s7-terminal-launch.png)
-
-### 会话属于谁，面板知道，但不是靠猜终端的字
-
-每个终端会话在宿主侧都有真实 shell 进程号。归属判定是：这个 shell 进程号出现在某个 agent 进程的祖先链里，就把会话算给那个 agent 的实例——代码注释里写得直白：**nothing here parses terminal output text**。
-
-所以右栏显示的是该实例的同一份数据——在途请求、首字响应（<5 秒绿 / 5–15 秒黄 / >15 秒红）、生成速度、缓存命中率、已工作时间、最近 10 条请求。agent 退出后终端还在，监测区跟着消失；在同一个终端里再起另一个 agent，按新实例重新归属。
-
-![虚拟终端：页签、会话栏、终端输出与底栏](docs/screenshots/s6-terminal.png)
-
-### 每天都会碰到的那些细节
-
-- **中文输入法**：组字期间把输入锚点钉在组字起点，不跟着高频输出乱跳。
-- **复制粘贴**：裸 `Ctrl+V` 走浏览器原生粘贴；裸 `Ctrl+C` 有选中时复制、无选中时仍然是中断，跟终端习惯一致。
-- **换行**：`Ctrl+Enter` / `Shift+Enter` 换行。普通端点发 LF；Codex 单独发 `ESC CR`——它把 LF 当提交，得命中它自己的换行键位。
-- **字号**：10–24，默认 13；`− / +`、`Ctrl+±`、`Ctrl+滚轮` 三个入口，只在终端页生效。
-- **页签条**：可整排收起给终端屏让高；收展是瞬切，容器与画布同帧重排，不露空白条。页签不能重命名，标签名由服务端按 agent 显示名下发。
-- **关页签**：页签只是会话的入口——同一段对话还开着别的页签时，关掉它只是撤掉这个入口，不确认、不动进程；只剩最后一个入口且进程还在跑时才先确认，关掉即终结这棵进程树（node-pty 只关伪控制台时子进程不会自己退，所以这里用的是树杀）。
-- **主题**：终端底色、前景、光标、选区跟着面板的三套皮肤与亮/暗切换走，切主题即时重刷。
-
-终端的后台服务是独立进程（端口 47823），由 relay 托管：崩了自动拉起，1 秒后重试，10 分钟内最多 5 次，超了留在「异常」等手动启动。页头有两个开关：**从上次中断的地方继续**（默认开，恢复页面与历史；死于服务重启的会话回到终端页时自动原地复活，自己正常退出的如实标为已退出、不自动拉起）和**底部自动对齐**（默认关，开启后向上翻历史时自动收掉底部空白带）。
-
----
-
-## 预设和技能：一处写，十家生效
-
-提示词预设是写给「你自己的工作方式」的指令。预设启用后以「标题 + 正文」成段注入全部十个端点的指令文件（`~/.claude/CLAUDE.md`、`~/.zcode/AGENTS.md`、`~/.codex/AGENTS.md` 等各自的家）——agent 同时看到这条规则的主题和内容；注入带托管标记，成对写入与摘除，列表支持 Ctrl 多选与批量删除，没有预设时干净收尾、不留残余块。
-
-<p align="center">
-  <img src="docs/screenshots/s8-presets.png" alt="预设管理：标题、启停与注入占用" width="80%">
-</p>
-
-Skills 走主仓库制：一个本地目录作为源，往各 agent 的 skills 目录部署。已部署的技能在各端点自己的清单里出现，主仓库与部署面在 Skills 页同一处管理，SKILL.md 正文可在面板里查阅、就地编辑保存；只对已安装的 Agent 生效——没装的不出现在看板、自动路由瓦片和会话筛选里。
-
----
-
-## 机制
-
-```text
-%LOCALAPPDATA%\Anyswitch\
-├── store.json       渠道、模型、号池、路由链、虚拟模型的元数据
-├── credentials\     每个渠道一个 DPAPI 密文文件
-├── settings.json    面板与各 agent 开关
-├── terminal-sessions.json  终端的会话元数据与历史快照
-├── usage\           按日记录的请求与会话用量（保留 90 天）
-└── app\             本仓库：relay、面板、启动器
-```
-
-- **`store.json` 不放秘密。** schema 内置词表（apikey、token、secret、password……）逐段匹配字段名，命中即拒绝写入；key 只以 `credentialFile` 引用的形式连到凭据目录。复算：`grep -n "SECRET_WORDS" src/store/store-schema.mjs`。
-- **key 只在请求那一刻解密。** DPAPI 用当前用户作用域，密文按渠道隔离。解出的明文默认在本进程内按密文哈希做短时复用（设置里可关，关掉即用后即焚、每个请求重新解密）；轮换密文会立即失效。
-- **三个进程，三个端口，全部只监听环回。** 面板 `127.0.0.1:47820`、relay `127.0.0.1:47821`、终端宿主 `127.0.0.1:47823`。
-- **终端宿主是独立进程。** 页面只是浏览器客户端：刷新或重开面板不丢 PTY，历史从宿主渲染镜像回放；宿主归 relay 托管并自动重启。
-- **业务代码零第三方运行依赖。** 5 个直接依赖全部属于虚拟终端；`src/` 下全部 `.mjs` 里 import 第三方包的只有一处：`src/terminal/terminal-host.mjs` 的 node-pty。复算：
-
-  ```bat
-  node -e "console.log(Object.keys(require('./package.json').dependencies).join(' '))"
-  node -e "const fs=require('fs'),path=require('path');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):e.name.endsWith('.mjs')?[path.join(d,e.name)]:[]);for(const f of walk('src'))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f.split(path.sep).join('/')+': '+l.trim())"
-  ```
-
-  第二条递归扫 `src/`（重构后实现已不在仓库根，根目录扫不到），只应打印 `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`。
-
-- **写面有并发保护。** 面板写 store 走内容哈希 CAS 加文件锁；路由目录带 generation 摘要，配置在请求中途变化时拒绝用旧目录。
-- **面板写接口只认本地面板。** `POST /panel/api/*` 要过 Origin/Referer 可信校验；relay 用数据根里的本地 token 鉴权，终端宿主同样。token 每 7 天自动轮换一代，闲置 24 小时的旧代自动退役，全程无需经手。
-
----
-
-## 它和配置切换器、系统终端差在哪
-
-| | **Anyswitch** | CC Switch | 系统终端 + 手写环境变量 |
-| --- | --- | --- | --- |
-| 动作对象 | 请求流量：转发、协议转换、退避、路由 | 配置文件：往各 CLI 里写供应商 | 你自己维护的环境与配置 |
-| 上游 key 在哪 | 本机 DPAPI 密文，agent 配置里只有本地 token | 它写入的 agent 配置里（含 key） | 你手写在哪里就在哪里，常见是配置或启动脚本里的明文 |
-| 运行面 | 面板内置虚拟终端，能起 agent | 无 | 能跑，但读数和归属在别处 |
-| 观测 | 终端右栏 + 看板 + 统计页同一份实例数据 | 无 | 各客户端自己一套，互相不对齐 |
-| 容灾 | 号池、路由链、备用地址、虚拟模型 | 手动切换供应商 | 手动改配置 |
-
-两句公道话：CC Switch 成熟、管理面广，供应商预设库和双向同步是它的强项；系统终端永远是最快、最不挑工具的选择。Anyswitch 多出来的是「把配置、运行、数据监测放在同一个本地控制面」这件事，并且支持在软件内部直接启动任何一个适配的CLI Agent，数据实时监控，且拥有近似GUI Agent切换会话的体验，开发者无需再同时盯多个原生终端或VS code界面。
-
-对比基于对 CC Switch 的公开仓库与文档的只读调研，核查日期 2026-10-18。
-
----
-
-## 这些边界要先接受
-
-- **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows。
-- **安装器未做代码签名。** 0.7.5-preview 起在 GitHub Releases 提供 Windows x64 安装器；首次运行会有「未知发布者」的 SmartScreen 警告，需要手动放行。装好后，面板「关于」页可以自更新，更新包带独立签名校验；源码安装的升级仍走 git（见下节）。
-- **这是 0.7 线的预览版。** 按正式版身份运行的安装不会收到 `v0.7.5-preview`，稳定线仍是 `v0.7.4`；按预览版身份运行的安装会照常收到升级提示。
-- **虚拟终端仍是预览功能。** 它要单独装依赖；如模拟GUI Agent的UI框架还在继续打磨。
-- **重启 relay 会中断在途请求，并结束当时所有终端进程。** 面板里的「重启」会先换 relay 再换面板宿主，请在空档执行。
-- **面板使用左侧导航。** 可以通过侧栏切换视图、进入设置和打开虚拟终端。
-- **预览通道发布未转正的版本。** 更新通道分「稳定版」「预览版」两档；预览版比稳定版新，未经长期使用验证，普通使用者建议留在稳定版。
-- **十 CLI 的面板内启动、虚拟模型在十个客户端选择器里的逐一显示、关于页的真实安装按钮**，都核到了代码与测试层，但没有替你在每台客户端上逐一走完。
-
----
-
-## 代码在哪，数据在哪
-
-```text
-Anyswitch/
-├── src/                        # 运行代码，按域分十个目录
-│   ├── panel/                  # 47820 面板宿主；面板 API 与静态页面路由
-│   ├── relay/                  # 47821 常驻 relay 宿主（同时托管终端宿主）；协议转换与请求转发
-│   ├── launchers/              # relay 生产装配；各端点启动器（ZCode 桌面与 CLI 各一）与各家配置合并
-│   ├── agents/                 # 托管渠道同步到各 agent 配置；进程、请求、实例和看板读数；会话读取；Skills 部署
-│   ├── terminal/               # 47823 终端宿主：PTY 与会话状态、渲染镜像与回放、会话归属
-│   ├── store/                  # store 读写与 CAS 写保护、秘密字段校验、从各 agent 本地配置导入渠道
-│   ├── channels/               # 号池与路由链
-│   ├── catalog/                # 模型目录、上下文窗口与思考挡位兜底
-│   ├── ops/                    # 开机自启、自更新、git 锚点、DPAPI 桥
-│   └── shared/                 # 日志总线、用量流水与统计、保活退避
-├── tests/                      # node:test 套件，与 src/ 下的实现分开放
-├── panel-ui/                   # 面板页面、样式和脚本
-├── skills/anyswitch-preset/    # 可选的预设管理技能
-├── docs/                       # 架构文档与真实截图
-├── package.json                # 版本、Node 范围、虚拟终端依赖
-├── SECURITY.md                 # 漏洞报告与安全模型
-└── LICENSE                     # Apache-2.0
-```
-
-想核对这一版的实际改动范围：
-
-```bat
-git log --no-merges --oneline v0.7.4..v0.7.5-preview
-```
-
----
-
-## 升级时，保留数据和 `.git`
-
-用户数据在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设、用量记录都不随源码目录替换。
-
-安装器安装的，升级首选入口在面板里：**设置 → 关于 → 检查更新**。点「立即更新」确认一次，就自动完成下载、验签与换装；后台预下载「自动检测并下载更新」默认是关的。检查更新先走直连，直连失败时自动经你已配置的代理（环境变量或 git `http.proxy`）重试一次，下载更新包走直连。
-
-源码安装的，升级走 git，或改用安装器（迁移保留源码目录与全部用户数据）。先安排现有会话的空档，再检查安装目录的工作树：
-
-```bat
-cd /d "%LOCALAPPDATA%\Anyswitch\app"
-git status --short
-```
-
-有输出就先处理自己的改动，别为了升级直接丢弃。工作树干净后，只取目标标签：
-
-```bat
-git fetch --no-tags origin tag v0.7.5-preview
-git switch --detach v0.7.5-preview
+git fetch --no-tags origin tag v0.7.5
+git switch --detach v0.7.5
 npm install
 ```
 
-不要把新源码整目录覆盖到旧安装，也不要用 `git reset --hard` 升级；保留 `.git` 以及它指向的外部 Git 对象库，升级前备份 `%LOCALAPPDATA%\Anyswitch\`。
+### 从打包版升级
 
----
+1. 如果正在使用 **0.7.5-preview**，等请求和终端会话结束后，在看板的 **服务状态** 中选择 **停止**，再选择 **确认停止**。
+2. 下载本页顶部的 v0.7.5 安装器，在原安装位置运行。安装器会保留用户数据。
+3. 注销并重新登录 Windows，让旧面板进程退出。然后从开始菜单打开 **Anyswitch (Installed)**，在 **设置 → 高级选项 → 更新通道** 选择 **稳定版**。
 
-## 反馈与贡献
+从 v0.7.5 起，打包版可在 **设置 → 关于** 检查、下载并应用后续更新。面板会验证独立更新包的签名。
 
-- **Bug**：写清 Windows 版本、Node 版本、Anyswitch 版本（面板页脚有）、agent 形态、复现步骤和实际错误；不要附 API Key、凭据文件或完整会话内容。
-- **功能提案**：先说你的工作流在哪一步停住，再说期望的结果；实现方案留在讨论里。
-- **代码修改**：遵循 [`CONTRIBUTING.md`](CONTRIBUTING.md)——Node.js ESM、内置 `node:test`、规格与代码同笔更新。
+## 项目资料
 
-## 致谢与灵感来源
-
-- 提示词预设管理的功能灵感来自 [RP-Hub](https://github.com/STA1N156/RP-Hub)。
-- 使用统计页的设计，部分参考了 ZCode。
-- 虚拟模型与自动路由的设计借鉴了 [autoAPI](https://github.com/happy66dev/AutoAPI)。
-- 与 [CC Switch](https://github.com/farion1231/cc-switch) 的定位差异见上文对比节。
-
-## License
-
-[Apache-2.0](LICENSE)——可以用，可以改，可以分发，保留协议与版权声明。第三方产品名称和商标归各自所有者，见 [`NOTICE`](NOTICE)。
-
----
-
-<div align="center">
-
-**渠道在 Anyswitch 里只填一次。**<br>
-*十个 agent 一起用它。*
-
-</div>
-
-Ciallo～(∠・ω< )⌒☆
+- [架构与运行机制](docs/architecture.md) · [安全模型与漏洞报告](SECURITY.md)
+- [用量统计规格](docs/stats-spec.md) · [运行日志规格](docs/runtime-log-spec.md)
+- [贡献指南](CONTRIBUTING.md) · [问题反馈](https://github.com/Aurora0134/Anyswitch/issues)
+- [Apache-2.0](LICENSE) · [第三方声明](NOTICE)

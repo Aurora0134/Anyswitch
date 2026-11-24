@@ -2,378 +2,106 @@
 
 <div align="center">
 
-<p><img src="docs/assets/logo.png" alt="Anyswitch logo" width="128"></p>
+<p><img src="docs/assets/logo.png" alt="Anyswitch" width="96"></p>
 
 # Anyswitch
 
-> *"Configure your channels once — every agent shares them."*
+**A local AI request gateway and browser control panel for Windows**
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.7.5-preview](https://img.shields.io/badge/Version-0.7.5--preview-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.7.5-preview)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#boundaries-to-accept-first)
-[![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
+Configure model channels in one place, forward client requests to your chosen providers, and inspect requests, routes, and usage in your browser.
 
-<br>
+[Download Windows x64 installer](https://github.com/Aurora0134/Anyswitch/releases/download/v0.7.5/anyswitch-v0.7.5-win-x64-setup.exe) · [v0.7.5 source](https://github.com/Aurora0134/Anyswitch/tree/v0.7.5) · [Release notes](https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.5)
 
-**A relay and control panel on your own machine: configure channels once, ten agents share them, one sealed copy of each upstream key.**
+Windows 10/11 x64. The installer is unsigned, so Windows may show an unknown-publisher warning.
 
-<br>
+</div>
 
-The first agent is easy — five minutes, fill in a baseURL and a key. By the tenth, you are copying the same dozens of lines into a tenth config file; ten plaintext keys, each sitting in a directory that agent's process can read. A dead channel means manual switching; finding out who sent that request, how fast it came back and which channel it took means cross-checking ten windows and their logs.
+## Send your first request
 
-The entire reason this tool exists is to make "configure once", "one sealed key", and "see at a glance who is running and which route they take" true at the same time.
+After setup, open **Anyswitch (Installed)** from the Start menu. The shortcut starts the local panel and opens it in your default browser. The installer includes Node.js.
+
+[Open the local panel](http://127.0.0.1:47820/panel)
+
+1. In **Model management (模型管理)**, select **Add channel (新增渠道)** and enter a channel ID, the upstream Base URL, and an API key. Windows DPAPI encrypts the key for the current user.
+2. Save the channel and wait for model discovery. If the provider does not supply a model list, add a model ID manually.
+3. If the relay is stopped, select **Start (启动)** under **Dashboard → Service status**.
+4. Open **Virtual terminal (虚拟终端)**, select **+**, and start an installed CLI client. You can also use a client launcher listed below from a regular terminal.
+5. Select a configured model in the client and send a message. Return to the **Dashboard (看板)** to see the result, or open the request log under **Usage stats (使用统计)** for details.
+
+![Dashboard showing service status, requests, and client instances](docs/screenshots/s1-board.png)
+
+These screenshots show an earlier version of the panel.
+
+## What you can do
+
+### Connect clients
+
+Anyswitch provides launchers for the clients below. Once a CLI client is connected, you can start it with its usual command in a newly opened terminal. Managed settings direct requests to the local gateway and Anyswitch stores the upstream API key.
+
+| Protocol | Client launchers |
+| --- | --- |
+| Anthropic Messages | [Claude Code](src/launchers/launcher.mjs), [Kimi Code](src/launchers/kimi-launcher.mjs) |
+| OpenAI Responses | [Codex CLI](src/launchers/codex-launcher.mjs) |
+| OpenAI compatible | [OpenCode](src/launchers/opencode-launcher.mjs), [Pi](src/launchers/pi-launcher.mjs), [ZCode](src/launchers/zcode-launcher.mjs), [ZCode CLI](src/launchers/zcode-cli-launcher.mjs), [DeepSeek Harness](src/launchers/dsh-launcher.mjs), [Qoder](src/launchers/qoder-launcher.mjs), [Grok Build](src/launchers/grok-launcher.mjs), [WorkBuddy](src/launchers/workbuddy-launcher.mjs) |
+
+On a source install, you can run a launcher directly. For example, run `node src/launchers/codex-launcher.mjs` from the repository directory. For ZCode CLI, supply your own CLI distribution and set `ZCODE_CLI_EXECUTABLE` to its `bin\zcode.mjs` entry point.
+
+### Set up routing and failover
+
+Add fallback URLs when a channel has multiple endpoints. To switch between channels, group them into a pool or configure a route chain for a client’s `auto` model or a custom virtual model. The dashboard shows the active route and the status of each node.
+
+### Check usage and sessions
+
+Usage stats show request counts, tokens, success rate, time to first token, and historical trends. Open Sessions to browse conversations saved by local clients.
+
+### Run a CLI in the panel
+
+The virtual terminal can open PowerShell or start a detected CLI client. Its side panel shows requests and response speed for that client instance. Source installs require the terminal dependencies. [Run from source](#run-from-source)
+
+![Virtual terminal with PowerShell and client tabs](docs/screenshots/s6-terminal.png)
+
+### Share prompt presets and skills
+
+Enable prompt presets to sync recurring instructions to supported clients. Use the Skills page to manage skills in one local directory and deploy them to installed clients.
+
+![Local skills repository and per-client deployment](docs/screenshots/s4-skills.png)
+
+## Run from source
+
+Install Git and a supported version of Node.js on Windows (`>=22.15.0 <23 || >=23.8.0`), then run these commands in Command Prompt. Run `npm install` if you want the virtual terminal.
 
 ```bat
-git clone --branch v0.7.5-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
-cd /d "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.7.5 --single-branch https://github.com/Aurora0134/Anyswitch.git
+cd Anyswitch
 npm install
 wscript panel-app.vbs
 ```
 
-Runs locally on Windows · Windows x64 installer or source · panel and relay listen on loopback only
+## Upgrade to v0.7.5
 
-[Screenshots](#see-it-working-configuration-routing-and-readouts-in-one-window) · [Install](#install-and-run) · [Channels](#configure-once-ten-agents-plug-in) · [Failover](#one-dead-channel-should-not-stop-the-pipeline) · [Readouts](#whos-running-which-route-how-much-one-panel-answers) · [Terminal](#virtual-terminal-run-agents-inside-the-panel-readouts-beside-them) · [Boundaries](#boundaries-to-accept-first)
+Before upgrading, you can back up `%LOCALAPPDATA%\Anyswitch\`. The app and user data are stored separately, so upgrades under the same Windows user retain channels, credentials, settings, presets, and usage history. Upgrade between sessions. Restarting the relay interrupts in-flight requests and running virtual terminals.
 
-</div>
+### Upgrade an older source install
 
----
-
-## See it working: configuration, routing, and readouts in one window
-
-The panel lives at `http://127.0.0.1:47820/panel`, the relay at `127.0.0.1:47821`. The panel owns configuration and readouts; the relay takes the requests. They are separate processes: if the relay is down, the panel still opens and shows you the state.
-
-<p align="center">
-  <img src="docs/screenshots/s1-board.png" alt="Dashboard: service status, recent requests, per-agent instances with live output" width="48%">
-  <img src="docs/screenshots/s2-store.png" alt="Model management: channels, pools and the model list" width="48%">
-  <img src="docs/screenshots/s3-stats.png" alt="Usage stats: today's overview, 90-day heatmap and token trends" width="48%">
-  <img src="docs/screenshots/s4-skills.png" alt="Skills management: main repo and per-agent deployment" width="48%">
-</p>
-
-The path of a single request:
-
-```text
-Claude Code / Codex / other agents
-              │
-              ▼
-      127.0.0.1:47821 relay
-   auth · routing · protocol conversion
-              │
-              ▼
-   your OpenAI-compatible upstreams
-```
-
-Screenshots live in [`docs/screenshots/`](docs/screenshots/) — open them after cloning to check the page shapes. They were taken from the panel of this exact code on one machine, on the default UI (the left-navigation layout); channel names, session titles, the skills and preset lists, and usage numbers are desensitized demo data.
-
----
-
-## Install and run
-
-Three prerequisites: Windows (credential sealing uses DPAPI, autostart uses Task Scheduler); Node.js (`>=22.15.0 <23 || >=23.8.0`, 24 LTS recommended — that is the API floor, not a claim that every version in range was tested); and a fresh install directory (never overwrite a running one with new source).
-
-Then the four lines above. `npm install` only installs the virtual terminal — 5 direct dependencies for PTY binding and rendering. Without it, the relay, panel, channel management, launchers and stats all work; only the terminal page stays closed. Start the panel manually with `node src/panel/panel-launcher.mjs`; `panel-app.vbs` finds the launcher relative to itself, so the install directory can be anywhere. Once installed, Settings → General also offers "Create desktop shortcut" — one click to put the panel entry on your desktop.
-
-Prefer not to build from source? GitHub Releases ships a Windows x64 installer; once installed, the panel's About page handles update checks (see "Boundaries to accept first" for signing details). The relay needs no separate start — launchers bring it up together with the agent — and the autostart toggle on the board's service status card keeps the services running in the background at Windows logon.
-
-Four steps to your first working request:
-
-1. Open `http://127.0.0.1:47820/panel` and go to channel management.
-2. Add a channel: channel ID, upstream Base URL, API key. On save, the key is sealed with the current Windows user's DPAPI.
-3. Wait for model auto-discovery; if the upstream has no `GET /v1/models`, add model IDs by hand. Add fallback URLs if you want failover.
-4. Start the client with the agent's launcher, or launch it straight from the virtual terminal — the launcher hands it the relay address and credentials; every other argument passes through unchanged.
-
-Post-install self-check:
+GitHub’s v0.7.4 release has no installer. You can switch to the v0.7.5 Windows x64 installer and keep your old source directory and user data. To stay with source, run `git status --short` in the existing repository and handle local changes. Once the working tree is clean, run the commands below, then restart the services from the dashboard.
 
 ```bat
-node --version
-node --check src/panel/panel-host.mjs
-npm test
-```
-
-`npm test` runs the repo's full suite (167 test files, all under `tests/`, separate from the implementation in `src/`); it needs one `npm install` because the virtual-terminal tests touch the terminal host.
-
----
-
-## Configure once, ten agents plug in
-
-Ten agents, eleven wiring details — configure once and they are all here:
-
-| Agent | Protocol surface | Launcher |
-| --- | --- | --- |
-| Claude Code | Anthropic Messages | `node src/launchers/launcher.mjs [claude args]` |
-| Kimi Code | Anthropic Messages | `node src/launchers/kimi-launcher.mjs [kimi args]` |
-| Codex CLI | OpenAI Responses | `node src/launchers/codex-launcher.mjs [codex args]` |
-| OpenCode | OpenAI | `node src/launchers/opencode-launcher.mjs [opencode args]` |
-| Pi | OpenAI | `node src/launchers/pi-launcher.mjs [pi args]` |
-| ZCode | OpenAI | `node src/launchers/zcode-launcher.mjs [zcode args]` |
-| ZCode CLI | OpenAI | `node src/launchers/zcode-cli-launcher.mjs [zcode args]` |
-| DeepSeek Harness | OpenAI | `node src/launchers/dsh-launcher.mjs [dsh args]` |
-| Qoder | OpenAI | `node src/launchers/qoder-launcher.mjs [qoder args]` |
-| Grok Build | OpenAI | `node src/launchers/grok-launcher.mjs [grok args]` |
-| WorkBuddy | OpenAI | `node src/launchers/workbuddy-launcher.mjs [codebuddy args]` |
-
-ZCode CLI is explicit-configuration only: bring your own zcode CLI distribution and point `ZCODE_CLI_EXECUTABLE` at its entry file (`bin\zcode.mjs`); without it, that launcher is unavailable.
-
-### In any terminal, just type the agent's command
-
-For a wired agent there is no need to type the launcher path every time: as long as it is installed on this machine, its regular command (`claude`, `grok`, `opencode`, ...) typed in any terminal routes through Anyswitch. This happens automatically — nothing to install or configure. It takes effect in newly opened terminals; terminals that are already open are unaffected. Unwiring an agent or uninstalling it returns the command to its native entry point; with Anyswitch not running, the commands still work. The command files live under `~/.config/anyswitch-bin/`; any startup scripts you place there yourself are left untouched.
-
-Config sync writes the managed channels into each agent's own config location; anything you wrote yourself stays untouched:
-
-| Agent | Where Anyswitch writes |
-| --- | --- |
-| Kimi Code | `~/.kimi-code/config.toml` |
-| Codex | `~/.codex/config.toml` plus the generated model catalog |
-| OpenCode | `~/.config/opencode/opencode.json` (your `opencode.jsonc` untouched) |
-| Pi | `~/.pi/agent/models.json` |
-| ZCode | `~/.zcode/v2/config.json` |
-| DeepSeek Harness | `~/.dsh/profiles/<name>/cordis.patch.yml` |
-| Qoder | `~/.qoder/settings.json` |
-| Grok Build | `~/.grok/config.toml` |
-| WorkBuddy | `~/.workbuddy/models.json` |
-
-What gets written is the local relay address and a local token — the real upstream key never enters any agent's config directory. Claude Code has no config-file surface; it gets environment variables injected by the launcher, with optional tier mapping in settings.
-
-Channels already scattered across those configs don't need re-copying either: BYOK import scans the local configs of 9 endpoints (Claude has no local config surface), pulls OpenAI-compatible channels into the central store, carries over what it can select and honestly skips the rest. Moving machines goes through an exported config bundle; off-machine import no longer fails the whole bundle.
-
----
-
-## One dead channel should not stop the pipeline
-
-Three things govern where traffic goes: pools, route chains, and fallback URLs. Each covers one layer; they stack.
-
-### Pools: one channel dies, try the next
-
-Bundle 2–5 channels into a pool. Requests hitting the pool stay sticky across members — one conversation does not switch channels with every message; when the current member fails, the request falls through to the next in order. The agent sees the pool as one entry, not a scatter of channels. Manual member reordering takes effect immediately: the next request follows the new order and re-sticks.
-
-### Route chains: the model name is not welded to one channel
-
-Each agent's `auto` model walks its chain hop by hop. Chain nodes can be channels or pools — two layers of failover stacked. 
-
-```text
-model name
-  └─ node A: primary channel
-       └─ node B: pool (2–5 channels, sticky + per-member backoff)
-            └─ node C: fallback channel (fallbackURLs of baseURL)
-```
-
-A node degrades after 2 consecutive failures and returns to the head of the chain after 5 minutes, driven by real requests. Deleting a channel or dissolving a pool prunes referencing chain entries in the same write — no dangling nodes. Every hop has a live lamp on the dashboard: which hop is serving, which is degraded, visible at a glance.
-
-<p align="center">
-  <img src="docs/screenshots/s5-route-chain.png" alt="A virtual model's route chain editor: hop-by-hop failover chain and candidate tile wall" width="80%">
-</p>
-
-### Virtual models: one name, recognized by all ten agents
-
-A virtual model is a name you define, bound to a chain of 1–8 nodes. Once enabled, it appears next to `auto` in all ten agents' model lists; disable it and it disappears from every catalog.
-
-It solves "same role, different name everywhere": define `deepseek-pro` as "primary channel → backup pool", then pick it in Claude Code, pick it in Codex — both walk the same chain. Chain state is shared across agents: once one agent degrades a node, other agents' requests route around it without paying for the discovery again.
-
-### Fallback URLs: providers with multiple entry points
-
-A channel carries its own last line of defense: `baseURL` plus multiple `fallbackURLs`. Each URL gets a 180-second budget with exponential retry backoff (1s floor, 4s cap); a 4xx is a terminal answer and never switches URLs; a 5xx does. When all URLs are exhausted, the last real upstream 5xx is passed through; pure transport failures return 502.
-
----
-
-## Who's running, which route, how much: one panel answers
-
-Configuration and routing are the base; the readouts are what you use every day. Three places:
-
-- **Dashboard**: relay and terminal service status, live lamps for every chain hop, recent requests (including failures and 429s), per-agent instances. Multiple sessions of one client show as multiple instance rows, not merged into one blur — ZCode instance rows go down to session granularity. The board has three layouts (All / Icon row / Running only) under Settings → Display.
-- **Usage stats**: today's overview (requests, tokens, cache hits, mean first-token latency, success rate), a 90-day heatmap, token trends, per-model usage and the request log.
-- **Sessions**: scans the ten clients' own session stores on demand, no separate index. Turn counting happens in the data layer — only what you actually said counts, never tool output posing as user input.
-
-<p align="center">
-  <img src="docs/screenshots/s9-sessions.png" alt="Sessions page: session lists and turn counting across the ten clients" width="80%">
-</p>
-
-Instance attribution is not guesswork: clients started via a launcher (or the virtual terminal) are attributed by the owning process of the connection; desktop GUI forms are recognized separately and never mistaken for another CLI. Attribution has a cold-cache window — right after relay start, before process scanning warms up, a launcher-shaped instance row can briefly appear twice; it collapses after 10 idle minutes.
-
----
-
-## Virtual terminal: run agents inside the panel, readouts beside them
-
-The virtual terminal is a full page in the panel, not a popup: it takes the whole page, with a header to return to the dashboard. It is a preview feature and needs one `npm install`; without it, only this page stays closed.
-
-The new-tab menu lists exactly two things: a blank terminal, and the agents installed on this machine in CLI form — anything not installed never shows up. Pick an agent and start: the server assembles the session's environment — relay address, credentials, session identity. The upstream key never enters the terminal, never hits disk, never echoes. Blank terminals are fixed to PowerShell; the working directory defaults to your user directory and remembers the last one you typed.
-
-> One exception, stated plainly: ZCode CLI does not take credentials from environment variables; the relay token is delivered as a key inside Anyswitch's own slot configuration, written only to its own config.
-
-![New terminal: the “+” menu lists a blank terminal and the installed CLI agents](docs/screenshots/s7-terminal-launch.png)
-
-### The panel knows whose session it is — without parsing terminal text
-
-Every terminal session has a real shell PID on the host side. Attribution rule: if that PID appears in the ancestor chain of an agent's process, the session belongs to that agent's instance — the code comment says it outright: **nothing here parses terminal output text**.
-
-So the side panel shows the same data as that instance — in-flight requests, first-token latency (green < 5s / yellow 5–15s / red > 15s), generation speed, cache hit rate, elapsed time, the last 10 requests. When the agent exits, the terminal stays and the metrics area disappears; start another agent in the same terminal and it re-attributes to the new instance.
-
-![Virtual terminal: tabs, session rail, terminal output and bottom bar](docs/screenshots/s6-terminal.png)
-
-### The details you touch every day
-
-- **IME input**: the input anchor pins to the composition start during CJK composition instead of jumping with high-frequency output.
-- **Copy/paste**: bare `Ctrl+V` uses the browser's native paste; bare `Ctrl+C` copies when there is a selection and stays an interrupt otherwise, matching terminal habits.
-- **Newlines**: `Ctrl+Enter` / `Shift+Enter`. Regular endpoints send LF; Codex alone sends `ESC CR` — it treats LF as submit, so it needs its own keybinding.
-- **Font size**: 10–24, default 13; `− / +`, `Ctrl+±`, `Ctrl+wheel` — three entry points, terminal page only.
-- **Tab bar**: collapses to give the terminal screen height; the transition is instant, container and canvas reflow in the same frame, no blank bars. Tabs can't be renamed; the server assigns labels from agent display names.
-- **Closing a tab**: a tab is just an entry into a session. While other tabs onto the same conversation remain, closing one merely withdraws that entry — no confirmation, processes untouched; only when it is the last entry onto a still-running process does it ask first, and closing kills the whole process tree (node-pty's plain console close leaves children alive, so this is a tree kill).
-- **Theme**: terminal background, foreground, cursor and selection follow the panel's three skins and light/dark switch, re-rendering instantly.
-
-The terminal's backend is a separate process (port 47823) owned by the relay: it is relaunched automatically on crash — retry after 1s, at most 5 times per 10 minutes, then parked in "error" awaiting a manual start. The page header has two switches: **Continue from where you left off** (default on — restores page and history on next start; sessions killed by a service restart resurrect in place when you return to the terminal page, ones you exited normally stay honestly marked as exited and are not relaunched) and **Bottom auto-alignment** (default off — when on, collapses the bottom blank band while browsing history upward).
-
----
-
-## Presets and skills: write once, effective in ten homes
-
-Prompt presets are instructions for *your* way of working. Enabled presets are injected as a titled section (title + body) into the instruction files of all ten endpoints (`~/.claude/CLAUDE.md`, `~/.zcode/AGENTS.md`, `~/.codex/AGENTS.md`, …) — the agent sees both the rule's subject and its content. Injection is written and removed in managed, clearly marked pairs; the list supports Ctrl multi-select and batch delete, and an empty preset list cleans up after itself with no leftover blocks.
-
-<p align="center">
-  <img src="docs/screenshots/s8-presets.png" alt="Preset management: titles, enable switches and injection share" width="80%">
-</p>
-
-Skills use a main-repo model: one local directory acts as the source, deploying into each agent's skills directory. Deployed skills appear in each endpoint's own listing; the main repo and deployment surface are managed on the same Skills page, where a SKILL.md body can be read and edited in place — and only installed agents are served: anything not installed stays off the dashboard, auto-route tiles and session filters.
-
----
-
-## Mechanics
-
-```text
-%LOCALAPPDATA%\Anyswitch\
-├── store.json       channel/pool/chain/virtual-model metadata
-├── credentials\     one DPAPI-sealed file per channel
-├── settings.json    panel and per-agent switches
-├── terminal-sessions.json  terminal session metadata and history snapshots
-├── usage\           daily request and session usage (kept 90 days)
-└── app\             this repo: relay, panel, launchers
-```
-
-- **`store.json` holds no secrets.** The schema has a built-in word list (apikey, token, secret, password, …) matched against field names segment by segment; a hit rejects the write. Keys connect to the credentials directory only as `credentialFile` references. Verify: `grep -n "SECRET_WORDS" src/store/store-schema.mjs`.
-- **Keys decrypt only at request time.** DPAPI under the current user scope, ciphertext isolated per channel. Decrypted plaintext is reused short-term keyed by the ciphertext hash (a setting can disable this for burn-after-use: every request decrypts fresh); rotating the ciphertext invalidates it immediately.
-- **Three processes, three ports, loopback only.** Panel `127.0.0.1:47820`, relay `127.0.0.1:47821`, terminal host `127.0.0.1:47823`.
-- **The terminal host is a separate process.** The page is just a browser client: refreshing or reopening the panel keeps the PTYs alive; history replays from the host render mirror; the host is owned and restarted by the relay.
-- **Zero third-party runtime dependencies in the business code.** All 5 direct dependencies belong to the virtual terminal; across every `.mjs` under `src/` there is exactly one third-party import: node-pty in `src/terminal/terminal-host.mjs`. Verify:
-
-  ```bat
-  node -e "console.log(Object.keys(require('./package.json').dependencies).join(' '))"
-  node -e "const fs=require('fs'),path=require('path');const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(path.join(d,e.name)):e.name.endsWith('.mjs')?[path.join(d,e.name)]:[]);for(const f of walk('src'))for(const l of fs.readFileSync(f,'utf8').split(/\r?\n/))if(/^import .+ from \"/.test(l)&&!/from \"(node:|\.)/.test(l))console.log(f.split(path.sep).join('/')+': '+l.trim())"
-  ```
-
-  The second command walks `src/` recursively (after the refactor no implementation sits at the repo root) and should print only `src/terminal/terminal-host.mjs: import * as pty from "node-pty";`.
-
-- **The write path is concurrency-safe.** Panel writes to the store go through content-hash CAS with a file lock; the routing catalog carries a generation digest so a config changed mid-request is never served stale.
-- **Write endpoints trust only the local panel.** `POST /panel/api/*` passes Origin/Referer validation; the relay authenticates with a local token from the data root, as does the terminal host. The token rotates automatically every 7 days, and an idle previous generation retires after 24 hours — no handling required.
-
----
-
-## How it differs from config switchers and system terminals
-
-| | **Anyswitch** | CC Switch | system terminal + hand-written env vars |
-| --- | --- | --- | --- |
-| Acts on | request traffic: forwarding, protocol conversion, backoff, routing | config files: writes providers into each CLI | whatever you maintain yourself |
-| Where the upstream key lives | DPAPI ciphertext on this machine; agent configs hold only a local token | inside the agent configs it writes (with the key) | wherever you put it — typically plaintext in a config or launch script |
-| Runtime surface | built-in virtual terminal in the panel; can start agents | none | runs, but readouts and attribution live elsewhere |
-| Observability | terminal side panel + dashboard + stats page, one shared instance dataset | none | each client has its own; nothing aligns |
-| Failover | pools, route chains, fallback URLs, virtual models | manual provider switching | manual config edits |
-
-Two fair notes: CC Switch is mature with a broad management surface — its provider preset library and bidirectional sync are real strengths; and the system terminal is always the fastest, least picky option. What Anyswitch adds is putting configuration, runtime and data monitoring into one local control plane, and it starts any compatible CLI agent right inside the app, with live monitoring and an experience close to a GUI agent switching sessions — developers no longer have to watch several native terminals or a VS Code window at the same time.
-
-The comparison is based on read-only research of CC Switch's public repo and docs, checked 2026-10-18.
-
----
-
-## Boundaries to accept first
-
-- **Windows only; no macOS or Linux.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows.
-- **The installer is not code-signed.** From 0.7.5-preview, GitHub Releases carry a Windows x64 installer; SmartScreen will show an "unknown publisher" warning you need to click through once. After installation, the panel's About page can self-update, with update packages carrying an independent signature check; source installs keep upgrading via git (next section).
-- **This is a preview of the 0.7 line.** Installs running as stable will not be offered `v0.7.5-preview` — the stable line stays at `v0.7.4`; installs running as preview receive the upgrade prompt as usual.
-- **The virtual terminal is still preview.** It needs its own `npm install` once; the UI framework that imitates a GUI agent is still being polished.
-- **Restarting the relay interrupts in-flight requests and ends every terminal process alive at that moment.** The panel's **Restart** swaps the relay first, then the panel host; run it between sessions.
-- **The panel uses a sidebar.** Use it to switch views, open Settings, or enter the virtual terminal.
-- **The preview channel ships versions that have not graduated to stable.** The update channel has two settings, "stable" and "preview"; preview versions are newer and less time-tested, so everyday users are better off on stable.
-- **In-panel launching for the ten CLIs, virtual models in all ten client pickers, and the About page's real install button** are verified down to code and tests, but not walked through on every client for you.
-
----
-
-## Where the code is, where the data is
-
-```text
-Anyswitch/
-├── src/                        # runtime code, split into ten domains
-│   ├── panel/                  # 47820 panel host; panel API and static page routing
-│   ├── relay/                  # 47821 resident relay host (owns the terminal host); protocol translation and forwarding
-│   ├── launchers/              # relay production assembly; per-endpoint launchers (ZCode desktop and CLI each) and config merges
-│   ├── agents/                 # managed-channel sync into agent configs; process/request/instance readouts; session reading; skills deployment
-│   ├── terminal/               # 47823 terminal host: PTY and session state, render mirror and replay, session attribution
-│   ├── store/                  # store read/write and CAS protection, secret-field validation, channel import from agent local configs
-│   ├── channels/               # pools and route chains
-│   ├── catalog/                # model catalog, context-window and thinking-effort fallbacks
-│   ├── ops/                    # autostart, self-update, git anchor, DPAPI bridge
-│   └── shared/                 # log bus, usage journal and stats, keepalive backoff
-├── tests/                      # node:test suite, kept apart from the implementation in src/
-├── panel-ui/                   # panel pages, styles and scripts
-├── skills/anyswitch-preset/    # optional preset-management skill
-├── docs/                       # architecture docs and real screenshots
-├── package.json                # version, Node range, virtual-terminal deps
-├── SECURITY.md                 # vulnerability reporting and security model
-└── LICENSE                     # Apache-2.0
-```
-
-To check the actual change scope of this release:
-
-```bat
-git log --no-merges --oneline v0.7.4..v0.7.5-preview
-```
-
----
-
-## When upgrading: keep your data and `.git`
-
-User data lives one level above `app` in `%LOCALAPPDATA%\Anyswitch\`: channels, credentials, settings, presets and usage records never follow the source directory.
-
-Installer installs upgrade from the panel: **Settings → About → Check for updates**. Confirm once on "Update now" and download, signature check and swap complete automatically; background pre-download ("auto-check and download updates") is off by default. Update checks go direct first and retry once through your configured proxy (environment variables or git `http.proxy`) when direct transfer fails; update-package downloads go direct.
-
-Source installs upgrade via git, or switch to the installer (the migration keeps the source directory and all user data in place). First schedule a quiet moment for open sessions, then check the install directory's working tree:
-
-```bat
-cd /d "%LOCALAPPDATA%\Anyswitch\app"
-git status --short
-```
-
-If there is output, deal with your own changes first — never discard them for an upgrade. With a clean tree, fetch only the target tag:
-
-```bat
-git fetch --no-tags origin tag v0.7.5-preview
-git switch --detach v0.7.5-preview
+git fetch --no-tags origin tag v0.7.5
+git switch --detach v0.7.5
 npm install
 ```
 
-Do not copy new source over an old install, and do not upgrade with `git reset --hard`; keep `.git` and the external Git object store it points to, and back up `%LOCALAPPDATA%\Anyswitch\` before upgrading.
+### Upgrade a packaged install
 
----
+1. If you are running **0.7.5-preview**, wait for requests and terminal sessions to finish, then select **Stop (停止)** under **Service status (服务状态)** on the dashboard and choose **Confirm stop (确认停止)**.
+2. Download the v0.7.5 installer at the top of this page and run it in the existing installation location. The installer preserves your user data.
+3. Sign out of Windows and back in to exit the old panel process. Open **Anyswitch (Installed)** from the Start menu, then select **Stable (稳定版)** in **Settings → Advanced options → Update channel**.
 
-## Feedback and contributions
+Starting with v0.7.5, packaged installs can check for, download, and apply future updates from **Settings → About**. The panel verifies the signature of the standalone update package.
 
-- **Bugs**: include the Windows version, Node version, the Anyswitch version (shown in the panel footer), agent form, reproduction steps and the actual error; never attach API keys, credential files or full session contents.
-- **Feature proposals**: first say where your workflow gets stuck, then the outcome you want; leave implementation approaches to the discussion.
-- **Code changes**: follow [`CONTRIBUTING.md`](CONTRIBUTING.md) — Node.js ESM, built-in `node:test`, specs and code updated in the same commit.
+## Project docs
 
-## Acknowledgements and inspiration
-
-- The prompt-preset management feature was inspired by [RP-Hub](https://github.com/STA1N156/RP-Hub).
-- The usage-stats page design partially references ZCode.
-- The virtual-model and auto-routing design borrows from [autoAPI](https://github.com/happy66dev/AutoAPI).
-- The positioning difference versus [CC Switch](https://github.com/farion1231/cc-switch) is in the comparison section above.
-
-## License
-
-[Apache-2.0](LICENSE) — use it, modify it, distribute it, keep the license and copyright notice. Third-party product names and trademarks belong to their owners; see [`NOTICE`](NOTICE).
-
----
-
-<div align="center">
-
-**Your channels are configured once, inside Anyswitch.**<br>
-*Ten agents share them.*
-
-</div>
-
-Ciallo～(∠・ω< )⌒☆
+- [Architecture and runtime behavior](docs/architecture.md) · [Security model and vulnerability reporting](SECURITY.md)
+- [Usage stats specification](docs/stats-spec.md) · [Runtime log specification](docs/runtime-log-spec.md)
+- [Contributing](CONTRIBUTING.md) · [Report an issue](https://github.com/Aurora0134/Anyswitch/issues)
+- [Apache-2.0](LICENSE) · [Third-party notices](NOTICE)
