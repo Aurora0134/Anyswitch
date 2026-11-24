@@ -51,3 +51,65 @@ jobs:
             ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64.manifest.json
             ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64.manifest.sig
             ${{ runner.temp }}/anyswitch-package/anyswitch-*-win-x64-setup.exe
+
+  install-smoke:
+    needs: package
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        scenario: [clean, preview-upgrade]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: anyswitch-windows-x64-release-assets
+          path: ${{ runner.temp }}/anyswitch-release-smoke
+      - name: Verify installation and browser panel
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALL_SCENARIO: ${{ matrix.scenario }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $root = Join-Path $env:RUNNER_TEMP 'anyswitch-smoke-install'
+          $assets = Join-Path $env:RUNNER_TEMP 'anyswitch-release-smoke'
+          $data = Join-Path $env:LOCALAPPDATA 'Anyswitch'
+          function Install-Release([string]$Setup, [string]$Expected) {
+            $log = Join-Path $assets "setup-$Expected.log"
+            $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="{0}"' -f $root), ('/LOG="{0}"' -f $log))
+            $install = Start-Process -FilePath $Setup -ArgumentList $arguments -Wait -PassThru
+            if ($install.ExitCode -ne 0) {
+              if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 50 }
+              throw "Installer exit code $($install.ExitCode) for $Expected"
+            }
+            $current = Get-Content -LiteralPath (Join-Path $root 'current.json') -Raw | ConvertFrom-Json
+            if ($current.schema -ne 1 -or $current.version -ne $Expected) { throw "Installer did not activate $Expected" }
+          }
+          $settings = Join-Path $data 'settings.json'
+          $before = $null
+          if ($env:INSTALL_SCENARIO -eq 'preview-upgrade' -and $version -eq '0.7.5') {
+            $preview = '0.7.5-preview'
+            $previewName = "anyswitch-v$preview-win-x64-setup.exe"
+            gh release download "v$preview" --repo $env:GITHUB_REPOSITORY --pattern $previewName --dir $assets
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Install-Release (Join-Path $assets $previewName) $preview
+            New-Item -ItemType Directory -Force -Path $data | Out-Null
+            Set-Content -LiteralPath $settings -Value '{"updateChannel":"preview"}' -Encoding ascii
+            $before = (Get-FileHash -LiteralPath $settings).Hash
+          } elseif ($env:INSTALL_SCENARIO -eq 'preview-upgrade') { exit 0 }
+          Install-Release (Join-Path $assets "anyswitch-v$version-win-x64-setup.exe") $version
+          if ($before -and (Get-FileHash -LiteralPath $settings).Hash -ne $before) { throw 'Upgrade modified user settings' }
+          $arguments = '/d /s /c ""{0}\anyswitch.cmd" src/panel/panel-host.mjs"' -f $root
+          $hostProcess = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $arguments -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(45)
+            $info = $null
+            do {
+              try { $info = Invoke-RestMethod 'http://127.0.0.1:47820/panel/api/app-info' -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 500 }
+            } while (-not $info -and [DateTime]::UtcNow -lt $deadline -and -not $hostProcess.HasExited)
+            if ($info.version -ne $version) { throw 'Installed browser panel did not report the release version' }
+            $panel = Invoke-WebRequest 'http://127.0.0.1:47820/panel' -TimeoutSec 5
+            if ($panel.StatusCode -ne 200 -or $panel.Content -notmatch 'Anyswitch') { throw 'Installed browser panel did not serve its page' }
+          } finally {
+            if (-not $hostProcess.HasExited) { taskkill.exe /PID $hostProcess.Id /T /F | Out-Null }
+          }
