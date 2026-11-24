@@ -337,6 +337,27 @@ test("same-ms retry pair with rid expands independently on click and poll-restor
     "同毫秒两行同展：各详情行挂各父行（旧行为：同键两行，详情堆挂首行后、末行丢失）");
 });
 
+test("source cell pairs the agent name with a board brand avatar clone slot", () => {
+  // 槽位只给已登记端点：未知来源与未登记 id 纯文字兜底，不留图标位
+  const fn = js.match(/function logsAgentBrandHtml\(id\) \{([\s\S]*?)\n  \}/);
+  assert.ok(fn, "logsAgentBrandHtml 在册");
+  const slotHtml = new Function("STATS_ENDPOINT_LABELS", "esc",
+    `return function (id) {${fn[1]}\n  }`)(
+    { claude: "Claude Code", dsh: "DeepSeek Harness" }, (s) => String(s));
+  assert.equal(slotHtml("claude"), '<span class="logs-agent-brand" data-logs-agent="claude" aria-hidden="true"></span>');
+  assert.equal(slotHtml(null), "");
+  assert.equal(slotHtml("unknown-agent"), "");
+  // 行模板把槽位放在名字左侧，同一内联行
+  assert.ok(js.includes('<td><span class="logs-agent">${logsAgentBrandHtml(r.agentId)}${esc(logsAgentLabel(r.agentId))}</span></td>'));
+  // 重建后克隆看板 .agent-avatar 填槽：双闸门跳过单测桩环境；先于滑位新顶点采样
+  assert.ok(js.includes('if (typeof document !== "undefined" && typeof tbody.querySelectorAll === "function")'));
+  assert.ok(js.indexOf('tbody.innerHTML = logsRows.map') < js.indexOf('tbody.querySelectorAll("[data-logs-agent]")'));
+  assert.ok(js.indexOf('tbody.querySelectorAll("[data-logs-agent]")') < js.indexOf("oldTop - tr.getBoundingClientRect().top"));
+  // 空槽折叠不留位；克隆整体缩放进 16px 槽
+  assert.ok(css.includes(".logs-agent-brand:empty { display: none; }"));
+  assert.ok(css.includes(".logs-agent-brand .agent-avatar { flex: none; transform: scale(0.5); transform-origin: center; }"));
+});
+
 test("code comments do not name external products as the origin of implementation choices", () => {
   const pattern = /cc[-_ .]?switch/i;
   const offenders = [];

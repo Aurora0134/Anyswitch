@@ -3959,6 +3959,13 @@
   .logs-table th:nth-child(2), .logs-table td:nth-child(2),
   .logs-table th:nth-child(3), .logs-table td:nth-child(3),
   .logs-table th:nth-child(4), .logs-table td:nth-child(4) { text-align: center; }
+  /* 来源格品牌图标：槽位内容由 panel.js 克隆看板 .agent-avatar 后填（与终端页签
+     品牌、路由瓦片同一来源同一手法）；16px 视觉足印＝32px 原尺寸×0.5 缩放，克隆
+     落空的空槽 :empty 折叠不占位。名字与图标同行垂直居中，无图标的行保持纯文字。 */
+  .logs-agent { display: inline-flex; align-items: center; gap: 5px; }
+  .logs-agent-brand { flex: none; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+  .logs-agent-brand:empty { display: none; }
+  .logs-agent-brand .agent-avatar { flex: none; transform: scale(0.5); transform-origin: center; }
   .logs-sel { background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12.5px; padding: 6px 8px; outline: none; font-family: inherit; max-width: 240px; }
   .logs-sel:focus { border-color: var(--accent); }
   /* 可排序表头：按钮继承 th 文字样式，当前排序列箭头着色 */
