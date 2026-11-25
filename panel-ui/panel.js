@@ -13987,14 +13987,19 @@ async function api(method, path, body, signal) {
   let terminalRailMotionArmed = false;
   let terminalRailFlipMode = "instant";
   // FLIP 位移时长：默认 200ms（系统触发的重排）；拖拽落位是用户手上动作的
-  // 直接延续，反馈要更快（60ms），由 drop 路径临时下压、渲染消费后复位。
+  // 直接延续，反馈要更快（120ms），由 drop 路径临时下压、渲染消费后复位。
   let terminalRailFlipMs = 200;
-  const TERMINAL_RAIL_DRAG_FLIP_MS = 60;
+  const TERMINAL_RAIL_DRAG_FLIP_MS = 120;
   // 拖拽落位高亮（300ms 描边闪烁）：记模块状态而非 DOM-only 类名——1s 归属
   // 轮询全树 innerHTML 重铺会冲掉 DOM 类名（选中态同坑，见 terminalRailRowHtml
   // 的 is-active 注释），状态驱动让高亮写进渲染 HTML、轮询重铺后仍挂足时长。
   let terminalRailLandedRowId = "";
   let terminalRailLandedGroupKey = "";
+  // 拖拽落位帧从位移 FLIP 摘出被拖实体：它全程在指针手边，落地应直接出现在
+  // 落点槽位——若与邻居一起从旧位平移，落位高亮最亮的头一段（storeRowLanded
+  // 0–60%）会压在旧槽位上，观感＝高亮跳回原位不跟手。drop 前置实体身份，
+  // playTerminalRailFlip 只播让位的邻居；渲染尾部随 flipMode 一并复位。
+  let terminalRailDragLanding = null;
   // 活跃终端所在组的自动展开与滚入只做一次：换活跃终端才重做，用户手动收起不被
   // 下一次归属轮询顶回来。
   let terminalRailAutoExpandedFor = "";
@@ -15205,6 +15210,7 @@ async function api(method, path, body, signal) {
       }
     }
     terminalRailFlipMode = "instant";
+    terminalRailDragLanding = null;
     if (scrollKey && terminalRailScrolledFor !== autoKey) {
       terminalRailScrolledFor = autoKey;
       terminalRailScrollGroupIntoView(scrollKey);
@@ -15295,7 +15301,18 @@ async function api(method, path, body, signal) {
     // 默认 200；拖拽落位在 drop 处临时下压为 120。typeof 守卫：测试沙盒抽出
     // 本函数单跑时不带这枚状态（terminalRailCreatePending 同款先例）。
     const ms = typeof terminalRailFlipMs === "number" ? terminalRailFlipMs : 200;
+    // 拖拽落位帧：被拖实体不播位移（行拖＝该行全部同 id 出现；组拖＝该组整盒——
+    // 组头/行/水位线钮都在 .rail-term-group 包装里）。其余元素照常滑。
+    const landing = typeof terminalRailDragLanding !== "undefined" ? terminalRailDragLanding : null;
+    let landingGroupBox = null;
+    if (landing && landing.group) {
+      for (const head of list.querySelectorAll("[data-rail-term-group-head]")) {
+        if (head.getAttribute("data-rail-term-group-head") === landing.group) { landingGroupBox = head.parentElement; break; }
+      }
+    }
     for (const { el, key } of terminalRailMotionEntries(list)) {
+      if (landing && landing.row && (key === `resume:${landing.row}` || key.startsWith(`resume:${landing.row}#`))) continue;
+      if (landingGroupBox && typeof landingGroupBox.contains === "function" && landingGroupBox.contains(el)) continue;
       if (typeof el.animate !== "function" || typeof el.getBoundingClientRect !== "function") continue;
       const previous = before.get(key);
       if (previous === undefined) {
@@ -16864,8 +16881,9 @@ async function api(method, path, body, signal) {
         if (!head || toKey === null) return;
         event.preventDefault();
         if (!terminalRailMoveGroupOrder(fromKey, toKey)) return;
-        terminalRailFlipMode = "flip"; // 拖拽落位走 FLIP：他组让位＋落位组跟手滑入
+        terminalRailFlipMode = "flip"; // 拖拽落位走 FLIP：让位的邻居组滑开
         terminalRailFlipMs = TERMINAL_RAIL_DRAG_FLIP_MS;
+        terminalRailDragLanding = { group: fromKey }; // 落位组整盒不播位移（组头＋组内行）
         railMarkLanded("data-rail-term-group-head", fromKey); // 先置状态，重渲 HTML 自带高亮
         renderTerminalRailHistory(terminalRailAgentId());
         terminalRailFlipMs = 200;
@@ -16885,8 +16903,9 @@ async function api(method, path, body, signal) {
       railDropToId = null;
       railDropIndicatorHide();
       if (!terminalRailMoveInManualOrder(terminalRailAgentId(), fromId, toId)) return; // 原地落：序未变，不重渲不高亮
-      terminalRailFlipMode = "flip"; // 拖拽落位走 FLIP：他行让位＋落位行跟手滑入
+      terminalRailFlipMode = "flip"; // 拖拽落位走 FLIP：让位的邻居行滑开
       terminalRailFlipMs = TERMINAL_RAIL_DRAG_FLIP_MS;
+      terminalRailDragLanding = { row: fromId }; // 落位行不播位移：全程在手边，直接在落点出现
       railMarkLanded("data-rail-term-resume", fromId); // 先置状态，重渲 HTML 自带高亮
       renderTerminalRailHistory(terminalRailAgentId());
       terminalRailFlipMs = 200;
