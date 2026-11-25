@@ -1,0 +1,5 @@
+#!/bin/sh
+# 测试面守卫（仓库本地启用：git config core.hooksPath .githooks）。
+# 待推新提交或标签携带测试文件即拒绝推送；纯删除类更新不受影响。
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+exec node "$root/tools/guard/no-test-remote.mjs" "$@"

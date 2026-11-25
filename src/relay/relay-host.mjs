@@ -748,7 +748,7 @@ export async function startResidentRelay(options = {}) {
   let listened;
   try {
     // options.relayPort 是纯测试注入口（装配测试绑 0 拿临时端口），默认仍绑定
-    // RELAY_PORT 常量——该表达式本身被 tests/relay-port-consistency.test.mjs
+    // RELAY_PORT 常量——该表达式本身被维护侧套件的端口一致性用例
     // 钉住：绑定不得漂离共享常量。
     listened = await listenLoopback(server, options.relayPort ?? RELAY_PORT);
   } catch (error) {
