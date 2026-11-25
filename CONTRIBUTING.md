@@ -2,39 +2,23 @@
 
 ## English
 
-### Running tests
+### Testing
 
-- Full suite, from the repository root:
+This repository intentionally does not carry a test suite. The full suite, its fixtures, and the packaging contract checks are maintained by the maintainer outside this tree and run against the exact candidate revision before anything is merged or released. You do not need to run tests locally to contribute — pull requests are validated on the maintainer's side.
 
-  ```bat
-  npm test
-  ```
-
-  This runs `node --test tests/*.test.mjs`. The glob is expanded by Node's own test runner, so it works even though Windows npm scripts don't expand wildcards. Use **Node.js 24 LTS** for development. The required API range in `package.json` is `>=22.15.0 <23 || >=23.8.0`, accounting for the built-in SQLite and zstd APIs used by session reading; it does not claim that every matching Node version has been tested. The relay and panel are dependency-free, but the suite exercises the virtual terminal's terminal host, so run `npm install` once before the first run.
-
-- Single file:
-
-  ```bat
-  node --test tests/<file>.test.mjs
-  ```
-
-  e.g. `node --test tests/autostart.test.mjs`.
-
-- Environment notes:
-  - `dpapi.test.mjs` exercises real Windows DPAPI (CurrentUser scope, via `dpapi.ps1`) and must run in a Windows interactive logon session. The independent probe calls `dpapi.ps1` directly with synthetic plaintext, never the production bridge or a redirected user profile. If that probe works, any production bridge failure is a test failure; unsupported platforms or a genuinely unavailable CurrentUser scope may skip. Set `ANYSWITCH_REQUIRE_DPAPI=1` for release checks to turn that skip into a failure.
-  - dsh/reasoning-related cases (`dsh-launcher.test.mjs`, `dsh-merge-config.test.mjs`, `reasoning-fallback.test.mjs`) depend on a local dsh installation (`@deepseek-ai/dsh` under the roaming npm root), and so do the dsh endpoint's cases in `uninstall-agent.test.mjs` (the dsh cases themselves, plus the two `uninstallAll` cases whose endpoint loop strips dsh too). When dsh is not installed, the `loadPiAiReasoningIndex` cases skip automatically (short-circuit on an empty index) and the uninstall driver's dsh-touching cases skip on an unresolvable js-yaml; all other cases are unaffected.
+Do not add test files (cases, fixtures, spec files) to this repository; the public tree does not carry them. If a change needs coverage, describe the scenario in your pull request or issue.
 
 ### Code style
 
 - Plain Node.js ESM (`.mjs`). The relay, panel and launchers use the standard library only — do not add npm packages there. `package.json` declares dependencies for the experimental virtual terminal (the terminal host binding, renderer and add-ons); keep new ones out of that list.
-- Tests use the built-in `node:test` runner; keep new tests under `tests/` as `*.test.mjs`, separate from the implementation in `src/`.
+- Development checkouts run on a Node.js release inside the range declared in `package.json` (`>=22.15.0 <23 || >=23.8.0`); the floor comes from the built-in SQLite and zstd APIs used for session reading.
 - Match the surrounding code's naming, comment density, and idioms.
 
 ### Spec co-update conventions
 
 - **Stats tab**: any change to stats-tab behavior must update the corresponding entry in `docs/stats-spec.md` in the same commit. That file is the single living spec — it records what is true *now*.
-- **Theme / style-lab**: `panel-ui/style-lab/*.css` files are the source of truth; edits must be mirrored into the corresponding banner block embedded in `panel-ui/panel.css` (see `panel-ui/style-lab/CONTRACT.md`). `style-lab-sync.test.mjs` fails on any drift.
-- **Logging**: the log bus (`logger.mjs`) holds two contracts. The level is carried by the entry's `level` field and by nothing else — never write a level word into a message, and never parse one back out of it. A caller that needs a different level calls `warn`/`error` instead of typing the word into the text. Second, every persisted line carries a wall-clock stamp; a line without one cannot be lined up against a user's report of when something broke. `logger.test.mjs` fails on both. A viewer may filter by minimum level (`logLevelAllows`) where entries are *shown* — the panel's SSE stream does, driven by the 日志级别 setting — but never where they are written: the persisted file and the ring buffer stay complete, and a frame with no `level` (a clear) always passes.
+- **Theme / style-lab**: `panel-ui/style-lab/*.css` files are the source of truth; edits must be mirrored into the corresponding banner block embedded in `panel-ui/panel.css` (see `panel-ui/style-lab/CONTRACT.md`). Drift is caught by the maintainer's suite.
+- **Logging**: the log bus (`logger.mjs`) holds two contracts. The level is carried by the entry's `level` field and by nothing else — never write a level word into a message, and never parse one back out of it. A caller that needs a different level calls `warn`/`error` instead of typing the word into the text. Second, every persisted line carries a wall-clock stamp; a line without one cannot be lined up against a user's report of when something broke. The maintainer's suite fails on both. A viewer may filter by minimum level (`logLevelAllows`) where entries are *shown* — the panel's SSE stream does, driven by the 日志级别 setting — but never where they are written: the persisted file and the ring buffer stay complete, and a frame with no `level` (a clear) always passes.
 - Update the [runtime log specification](docs/runtime-log-spec.md) in the same commit whenever the rules for what to log or how to classify it change.
 
 ### Release note conventions
@@ -51,39 +35,23 @@ Release notes are the changelog a user reaches from the About page, so their aud
 
 ## 中文
 
-### 运行测试
+### 测试
 
-- 全量，在仓库根目录：
+本仓库刻意不带测试套件：全量用例、夹具与打包契约检查由维护方在源码树外维护，合入与发布前在对应候选版本上运行。贡献改动不需要在本地跑测试——拉取请求由维护方验证。
 
-  ```bat
-  npm test
-  ```
-
-  即 `node --test tests/*.test.mjs`。通配符由 Node 自带的 test runner 展开，Windows npm script 不展开通配符也没关系。开发推荐 **Node.js 24 LTS**。`package.json` 的 API 下限范围为 `>=22.15.0 <23 || >=23.8.0`，涵盖会话读取所需的内置 SQLite 与 zstd API，不表示范围内每个 Node 版本均已实测。relay 与面板本身零依赖，但套件覆盖虚拟终端的终端宿主，首次运行前先执行一次 `npm install`。
-
-- 单文件：
-
-  ```bat
-  node --test tests/<file>.test.mjs
-  ```
-
-  如 `node --test tests/autostart.test.mjs`。
-
-- 环境依赖说明：
-  - `dpapi.test.mjs` 走真实 Windows DPAPI（CurrentUser 作用域，经 `dpapi.ps1`），需要在 Windows 交互登录会话下运行。独立探测直接以合成明文调用 `dpapi.ps1`，不经过生产桥，也不重定向用户 profile。探测成功后，生产桥的失败一律判红；不支持的平台或确实不可用的 CurrentUser 作用域可跳过。发布检查须设置 `ANYSWITCH_REQUIRE_DPAPI=1`，把上述跳过改为失败。
-  - dsh / reasoning 相关用例（`dsh-launcher.test.mjs`、`dsh-merge-config.test.mjs`、`reasoning-fallback.test.mjs`）依赖本机已安装 dsh（roaming npm 根下的 `@deepseek-ai/dsh`）；未安装时 `loadPiAiReasoningIndex` 相关用例自动跳过（按空索引短路），其余用例不受影响。
+不要往本仓库添加测试文件（用例、夹具、spec 文件）；公开树不承载测试。改动需要覆盖时，在拉取请求或 issue 里描述场景即可。
 
 ### 代码风格
 
 - 纯 Node.js ESM（`.mjs`）。relay、面板与各启动器只用标准库——不要给它们引入 npm 包。`package.json` 里声明的是实验性虚拟终端所需的依赖（终端宿主绑定、渲染器与附加组件），不要再往这份清单里加东西。
-- 测试用内置 `node:test`；新测试放在 `tests/` 下、以 `*.test.mjs` 命名，与 `src/` 下的实现分开。
+- 开发检出跑在 `package.json` 声明的 Node.js 范围内（`>=22.15.0 <23 || >=23.8.0`）；下限来自会话读取所需的内置 SQLite 与 zstd API。
 - 命名、注释密度与写法与周围代码保持一致。
 
 ### 规格同笔更新约定
 
 - **统计页**：凡改动统计页行为的提交，必须同笔更新 `docs/stats-spec.md` 对应条目。该文件是单一现行规格——只记录「现在是什么」。
-- **主题 / style-lab**：`panel-ui/style-lab/*.css` 是源文件，改动必须同步嵌入 `panel-ui/panel.css` 对应横幅块（见 `panel-ui/style-lab/CONTRACT.md`）；`style-lab-sync.test.mjs` 对漂移直接判红。
-- **日志**：日志总线（`logger.mjs`）守两条契约。级别只由条目的 `level` 字段承载，别处不得再写一份——消息文本里不许出现级别字样，也不许反过来从文本里解析级别；需要别的级别就调 `warn`/`error`，不要把级别词敲进正文。其二，落盘的每一行都带墙钟时间戳，没有时间戳的行无法与用户「什么时候坏的」对齐。两条都由 `logger.test.mjs` 判红。消费方可以按最低级别过滤「显示」什么（`logLevelAllows`，面板 SSE 出口照设置项「日志级别」筛），但不许过滤「写入」：落盘文件与环形缓冲始终全量，没有 `level` 的控制帧（清空）一律放行。
+- **主题 / style-lab**：`panel-ui/style-lab/*.css` 是源文件，改动必须同步嵌入 `panel-ui/panel.css` 对应横幅块（见 `panel-ui/style-lab/CONTRACT.md`）；漂移由维护侧套件直接判红。
+- **日志**：日志总线（`logger.mjs`）守两条契约。级别只由条目的 `level` 字段承载，别处不得再写一份——消息文本里不许出现级别字样，也不许反过来从文本里解析级别；需要别的级别就调 `warn`/`error`，不要把级别词敲进正文。其二，落盘的每一行都带墙钟时间戳，没有时间戳的行无法与用户「什么时候坏的」对齐。两条都由维护侧套件判红。消费方可以按最低级别过滤「显示」什么（`logLevelAllows`，面板 SSE 出口照设置项「日志级别」筛），但不许过滤「写入」：落盘文件与环形缓冲始终全量，没有 `level` 的控制帧（清空）一律放行。
 - 记录范围与事件定级规则变更时，同笔更新 [运行日志级别现行规格](docs/runtime-log-spec.md)。
 
 ### 发布说明撰写约定

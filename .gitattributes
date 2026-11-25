@@ -1,0 +1,2 @@
+# 钩子脚本必须保持 LF，防 autocrlf 克隆把 shebang 折成 CRLF
+.githooks/* text eol=lf

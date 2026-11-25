@@ -96,7 +96,6 @@ export async function stageApp({ root, appDir, version, publicKey }) {
     await mkdir(dirname(join(appDir, file)), { recursive: true });
     await cp(join(root, file), join(appDir, file));
   }
-  await cp(join(root, "test-helpers", "vendor", "js-yaml"), join(appDir, "test-helpers", "vendor", "js-yaml"), { recursive: true });
   await cp(join(root, "node_modules"), join(appDir, "node_modules"), { recursive: true });
   for (const file of ["package-health.mjs", "package-dispatch.mjs"]) await compileFiles(join(TOOLS, file), join(appDir, file), { target: "node22", format: "esm" });
   const packageJson = JSON.parse(await readFile(join(appDir, "package.json"), "utf8"));

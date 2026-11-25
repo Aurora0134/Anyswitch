@@ -19,7 +19,7 @@ for (const path of [
   "node_modules/@xterm/xterm/lib/xterm.js", "node_modules/@xterm/xterm/css/xterm.css",
   "node_modules/@xterm/addon-fit/lib/addon-fit.js", "node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js",
   "node_modules/@xterm/addon-webgl/lib/addon-webgl.js", "node_modules/node-pty/package.json",
-  "test-helpers/vendor/js-yaml/index.js", "src/panel/panel-host.mjs", "src/relay/relay-host.mjs",
+  "src/vendor/js-yaml/index.js", "src/panel/panel-host.mjs", "src/relay/relay-host.mjs",
   "src/terminal/terminal-host.mjs", "src/ops/update-trust.mjs",
 ]) await access(join(appRoot, path));
 const trust = await import("./src/ops/update-trust.mjs");

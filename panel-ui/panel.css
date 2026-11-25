@@ -1,7 +1,7 @@
 /* Anyswitch 面板样式（自 panel.html 拆出，2026-09-17）。
    两段拼接保持原相对顺序：① 主样式（结构基础层 + 全部组件与视图规则）；
    ② 开屏样式（#panelStartup）。style-lab 主题横幅块仍在本文件内，
-   源文件同步契约见 style-lab/CONTRACT.md 与 style-lab-sync.test.mjs。 */
+   源文件同步契约见 style-lab/CONTRACT.md 与维护侧全量套件。 */
 
   :root {
     color-scheme: light;
@@ -286,7 +286,7 @@
      一条没被盖住的底色带（开屏层的亚克力、弹窗与会话删除的压暗都缺这一条，实测暗色
      下是 #16171b 对 #0f1014）。100vw 含滚动条宽度，铺满整窗；三者都是 fixed 层，fixed
      元素不计入可滚动范围，不会凭空撑出横向滚动条。
-     写成单行：style-lab-sync 测试以「行首 #panelStartup {」认开屏样式段的起点，多行
+     写成单行：维护侧套件以「行首 #panelStartup {」认开屏样式段的起点，多行
      拆开后这条会被误认成那个边界锚点。 */
   .modal-overlay, .sessions-drawer-mask, #panelStartup { width: 100vw; }
 
@@ -2241,7 +2241,7 @@
      取值口径 = 壁纸主题生效时真实看板的 computed 值：基座段有定义的抄基座段取值
      （暗色差异见后两条），基座段没定义的显式 initial——壁纸态下它们本就是未定义的
      保证无效值，声明 initial 让预览子树与真实看板一致。与基座段绑定：
-     tests/panel-preview-isolation.test.mjs 与基座段逐项对账，改基座必须同步这里。 */
+     维护侧全量套件的面板预览隔离用例与基座段逐项对账，改基座必须同步这里。 */
   .wallpaper-preview {
     /* 基座段无定义 → 壁纸态即未定义（保证无效值） */
     --hl-inset: initial;

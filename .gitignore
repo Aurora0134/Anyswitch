@@ -6,3 +6,16 @@ logs/
 .env
 *.dpapi
 /thinking-efforts.db.json
+
+# 测试面不入本仓：套件由本地私有仓维护，runner 会把用例拷进检出再跑
+/tests/
+/test-helpers/
+**/fixtures/
+**/__tests__/
+**/testdata/
+*.test.mjs
+*.test.cjs
+*.test.js
+*.spec.mjs
+*.spec.cjs
+*.spec.js
