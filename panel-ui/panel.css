@@ -1584,6 +1584,28 @@
   .board-side-skel { display: none; }
   html[data-board="pending"] .board-side-skel { display: block; width: 104px; height: 11px; }
 
+  /* 运行日志区同帧纳入 pending。静态默认是零内容的空标题栏（叠卡高由真卡内容驱动，
+     pending 期恒 0），加载那一帧整区读作「没有日志」；补三条 shimmer 卡作叠卡剪影，
+     层位/缩放/左右让槽与真叠卡同一组变量（--ll-step、--ll-scale-1/2、--ll-gutter），
+     flip 到 live 换真卡不跳形。骨架层在 DOM 序最末、盖住整个舞台，pending 期的点击
+     落在它上面而非叠卡层，展开入口随之封住——展开只见空态谎话。
+     「清空/展开」两个钮是数据位，与右列 .agent-actions 同款 visibility 藏法占位。
+     舞台高度 pending 期由本段给（80px＝slot2 底：36+48×0.9 取整），撤属性后落回
+     --ll-collapsed-h 的内容真高，220ms 高度过渡把它收成实况。 */
+  .live-log-skel { display: none; }
+  html[data-board="pending"] .live-log-stage { height: 80px; }
+  html[data-board="pending"] .live-log-skel { display: block; position: absolute; inset: 0; z-index: 1; }
+  /* 几何选择器给到 0-2-0：.sessions-skel 在文件后段自带 radius-sm，同源序同级会
+     盖掉这里的卡面圆角（叠卡真卡用 --radius-md）。 */
+  .live-log-skel .live-log-skel-card {
+    position: absolute; left: 2px; right: calc(2px + var(--ll-gutter)); top: 0;
+    height: 48px; border-radius: var(--radius-md, 8px); transform-origin: 50% 0;
+  }
+  .live-log-skel-card[data-slot="0"] { transform: translateY(0) scale(1); }
+  .live-log-skel-card[data-slot="1"] { transform: translateY(var(--ll-step)) scale(var(--ll-scale-1)); }
+  .live-log-skel-card[data-slot="2"] { transform: translateY(calc(var(--ll-step) * 2)) scale(var(--ll-scale-2)); }
+  html[data-board="pending"] .live-log-actions { visibility: hidden; }
+
   /* Agent 遥测网格布局 */
   .agent-cards-container { display: flex; flex-direction: column; gap: 20px; }
   /* 未安装的 Agent 卡整体不上屏：主脚本 applyAgentCardVisibility 挂 [hidden]；
