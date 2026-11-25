@@ -14960,8 +14960,9 @@ async function api(method, path, body, signal) {
         : `<span class="rail-term-row-pin" data-rail-term-pin="${esc(session.id)}" title="置顶会话" aria-label="置顶会话">${TERMINAL_RAIL_ICON_PIN}</span>`}<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
     // 会话行可拖（手序的唯一来源）；归档行不可拖（draggable＝非空白且
     // 非归档行）。置顶/非置顶行都各自可拖——跨段互换由 drop 门控拦（见 drop
-    // 委托），拖拽面不缩。
-    const draggable = archived ? "" : ` draggable="true"`;
+    // 委托），拖拽面不缩。搜索结果行同样不可拖：结果按相关度平铺、不反映
+    // 手序，拖了落序看不见、高亮亮在原位，flip 状态还会滞留到下一帧树渲染。
+    const draggable = archived || result ? "" : ` draggable="true"`;
     return `
       <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""}${draggable} title="${esc(title)}">
         <span class="rail-term-slot">${dot}</span>
@@ -15010,6 +15011,10 @@ async function api(method, path, body, signal) {
     // 变化不是兜底行的真实离开。
     if (terminalRailSearch.open && terminalRailSearch.query.trim()) {
       terminalRailLastDiffSearch = true;
+      // 旁路早退不经过尾部复位：flip 与落位摘出状态不许滞留到下一帧树渲染
+      // （结果行已禁拖，正常路径进不来；拖动中开搜索的边角仍能走到 drop）。
+      terminalRailFlipMode = "instant";
+      terminalRailDragLanding = null;
       renderTerminalRailSearchResults(list);
       return;
     }
