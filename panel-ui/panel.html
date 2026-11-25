@@ -749,6 +749,14 @@ if (window.panelStartupController) panelStartupPlay();
                    初始 hidden，显隐只由 panel.js#syncLogEmpty 切；有日志即退场。 -->
               <div class="live-log-viewport" id="logBody" role="log" tabindex="-1" inert><div class="live-log-empty" id="logEmpty" hidden>暂无内容</div><div class="live-log-limit" id="logLimitNote" hidden></div></div>
               <div class="live-log-motion" id="logMotion" aria-hidden="true" inert></div>
+              <!-- 加载骨架：只在 <html data-board="pending"> 期上屏（见 panel.css 同
+                   名段），三条 shimmer 卡取叠卡槽位的层位与缩放，剪影即真叠卡。恒
+                   aria-hidden、无文字；翻 live 后整段样式失效，JS 不跑时停在加载态。 -->
+              <div class="live-log-skel" aria-hidden="true">
+                <div class="live-log-skel-card sessions-skel" data-slot="0"></div>
+                <div class="live-log-skel-card sessions-skel" data-slot="1"></div>
+                <div class="live-log-skel-card sessions-skel" data-slot="2"></div>
+              </div>
             </div>
           </div>
         </div>
