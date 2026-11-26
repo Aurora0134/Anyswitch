@@ -3691,6 +3691,41 @@ export function createAgentMetricsCollector(options = {}) {
     void loadSessionInfo("zcode").catch(() => {});
   }
 
+  // 终端归属四家会话表的保温：归属 getter 的调用即活动标记。面板终端轮询每
+  // 越过一次 15s 缓存期就有一条请求吃整轮冷扫描（实测冷 ~1.4s）；节拍在活动
+  // 窗内先把缓存续热，冷扫描只剩「闲置后第一次轮询」这一拍——它本身就是唤醒
+  // 事件，省不掉。与 zcode 请求面保温同形同参（15s 节拍、60s 无活动自停、
+  // 在途合并由 loadSessionInfo 保证）；zcode 同时受两套节拍驱动，请求面保派
+  // 生表、归属面保终端桥，在途合并使两面不会重复扫。
+  const TERMINAL_JOIN_WARM_IDLE_MS = 60_000;
+  const terminalJoinWarmActivity = new Map(); // agentId -> 最近活动时刻
+  let terminalJoinWarmTimer = null;
+
+  function ensureTerminalJoinWarmTimer() {
+    if (terminalJoinWarmTimer !== null) return;
+    terminalJoinWarmTimer = setRefreshTimer(() => {
+      const now = nowFn();
+      let anyActive = false;
+      for (const [agentId, at] of terminalJoinWarmActivity) {
+        if (now - at > TERMINAL_JOIN_WARM_IDLE_MS) {
+          terminalJoinWarmActivity.delete(agentId);
+          continue;
+        }
+        anyActive = true;
+        void loadSessionInfo(agentId).catch(() => {});
+      }
+      if (!anyActive) {
+        clearRefreshTimer(terminalJoinWarmTimer);
+        terminalJoinWarmTimer = null;
+      }
+    }, SESSION_LOOKUP_TTL_MS);
+  }
+
+  function noteTerminalJoinWarm(agentId) {
+    terminalJoinWarmActivity.set(agentId, nowFn());
+    ensureTerminalJoinWarmTimer();
+  }
+
   // 冷缓存或旧快照里已经落在子行上的账，父子映射一到位就并回母行：目标行不存在
   // 时整行改名归位（在途镜像写的是同一 state 对象），已存在时用既有的
   // absorbAggregateState 并账。有在途请求的行留到下一轮，避免踩未收尾的请求。
@@ -3857,10 +3892,12 @@ export function createAgentMetricsCollector(options = {}) {
   // the join never re-derives it. A scan failure yields an empty list — the
   // bridge degrades to unbound sessions.
   async function getCodexSessionsForTerminalJoin() {
+    noteTerminalJoinWarm("codex");
     return [...(await loadSessionInfo("codex")).values()];
   }
 
   async function getOpencodeSessionsForTerminalJoin() {
+    noteTerminalJoinWarm("opencode");
     return [...(await loadSessionInfo("opencode")).values()];
   }
 
@@ -3869,6 +3906,7 @@ export function createAgentMetricsCollector(options = {}) {
   // subagent_agent_ 内部前缀、请求头里的值已剥——对齐在出口层做（openai-server
   // 的 zcodeSessionRowIdForJoin），这里只透传扫描原值。
   async function getZcodeSessionsForTerminalJoin() {
+    noteTerminalJoinWarm("zcode");
     return [...(await loadSessionInfo("zcode")).values()];
   }
 
@@ -3886,6 +3924,7 @@ export function createAgentMetricsCollector(options = {}) {
   //（loadSessionInfo("workbuddy") 即注册表全目录，含 project/lastActive/originator
   // 匹配面），由 openai-server 的 detected-processes 出口统一塑形成行 id。
   async function getWorkbuddySessionsForTerminalJoin() {
+    noteTerminalJoinWarm("workbuddy");
     return [...(await loadSessionInfo("workbuddy")).values()];
   }
 
@@ -6867,6 +6906,10 @@ export function createAgentMetricsCollector(options = {}) {
       if (zcodeRefreshTimer !== null) {
         clearRefreshTimer(zcodeRefreshTimer);
         zcodeRefreshTimer = null;
+      }
+      if (terminalJoinWarmTimer !== null) {
+        clearRefreshTimer(terminalJoinWarmTimer);
+        terminalJoinWarmTimer = null;
       }
       workbuddySessionRowIdForPid = saveWbSessionRowIdForPid;
     },
