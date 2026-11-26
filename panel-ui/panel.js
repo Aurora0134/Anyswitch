@@ -7575,6 +7575,10 @@ async function api(method, path, body, signal) {
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
   let terminalFirstConnectSettled = false;
+  // 停服结论代次：宿主被确认关停（clearTerminalLocalSessions）即翻代。在飞的会话
+  // 拉取翻代后落地就是迟到的旧结论——成功不重建画面、失败不落页态，已停页由停服
+  // 结论独占。typeof 闸护单测桩环境（不声明该量的桩按无代次处理，行为同改前）。
+  let terminalConcludeEpoch = 0;
   // 终端页位置存档，形状照设置页那次定案：panel-view 继续只存主视图（它是设置页
   // 「←退出」的目标），「停在终端页」记 panel-terminal-open（switchView 写、
   // restoreView 读），「看着哪个标签」记 panel-terminal-session（下面两个助手）。
@@ -8422,7 +8426,11 @@ async function api(method, path, body, signal) {
   // 首连，任何页刷新都会在零页签时蹦出空白页签并静默起一个 powershell（预览期
   // 「至少留一标签」遗规在连接路径的残部，勿复活）。
   async function fetchTerminalSessions() {
+    const concludeEpoch = typeof terminalConcludeEpoch === "number" ? terminalConcludeEpoch : 0;
     const data = await api("GET", "/api/terminal/sessions");
+    // 迟到的旧响应不覆盖更新的停服结论：await 期间代次翻过＝宿主已被确认关停，这份
+    // 列表是停服前的旧账——重建会话表会把死会话端回屏、置就绪会重新放行轮询。
+    if (typeof terminalConcludeEpoch === "number" && terminalConcludeEpoch !== concludeEpoch) return;
     rebuildTerminalBackendSessions(data.sessions);
     terminalBackendReady = true;
   }
@@ -11113,6 +11121,10 @@ async function api(method, path, body, signal) {
     try {
       const data = await api("GET", "/api/terminal/sessions");
       rebuildTerminalBackendSessions(data.sessions);
+      // 会话帧落地即撤销恢复提示（进页探测 unknown 时挂的那条）：轮询取到数说明
+      // 后端已恢复，提示不再有事实基础。
+      const pendingEl = $("terminalPending");
+      if (pendingEl) pendingEl.hidden = true;
       // 生死先判再算读数：显示中的会话若在本拍被认定「死于重启」，先走自动复活
       //（渲染层口径见 maybeAutoReviveTerminalSession），读数渲染随后照常跟进。
       rearmTerminalAutoRevive();
@@ -11315,6 +11327,8 @@ async function api(method, path, body, signal) {
   function renderTerminalEmptyState() {
     const overlay = $("terminalEmpty");
     if (overlay) overlay.hidden = false;
+    const pendingEl = $("terminalPending");
+    if (pendingEl) pendingEl.hidden = true;
     setTerminalSessionChromeVisible(false);
   }
 
@@ -11327,9 +11341,23 @@ async function api(method, path, body, signal) {
   // 首连在飞那一帧：与降级空态同一套种子退场，只是不盖「服务未运行」那层文字——
   // 此刻还没拿到任何证据，说服务不在是编造。新建键按就绪位保持禁用，画面等首连
   // 定性后由就绪/降级两条路各自重绘。
-  function renderTerminalPendingState() {
+  // hint 形态（进页现取宿主状态读到 unknown 而本地上一屏仍是可信结论）：旧帧与
+  // 页签都是有效现场，不拆不盖，只挂一条不盖旧帧的恢复提示；其余形态照旧清种子。
+  function renderTerminalPendingState({ hint = false } = {}) {
+    const pending = $("terminalPending");
+    if (pending) {
+      pending.classList.toggle("is-hint", hint);
+      pending.textContent = "正在加载终端…";
+      pending.hidden = false;
+    }
+    if (hint) return;
     const unavailable = $("terminalUnavailable");
     if (unavailable) unavailable.hidden = true;
+    // 旧页态标题随 pending 退场抹掉：pending 没有任何页面结论，隐藏覆盖层里残留的
+    // 「未运行/已停止」标题不该再被读到；页面态渲染（renderTerminalUnavailableState
+    // 一族）落页时总会先填回标题再揭开覆盖层，清场无副作用。
+    const staleTitle = $("terminalUnavailableTitle");
+    if (staleTitle) staleTitle.textContent = "";
     const empty = $("terminalEmpty");
     if (empty) empty.hidden = true;
     const metricsSection = $("terminalMetricsSection");
@@ -11350,7 +11378,9 @@ async function api(method, path, body, signal) {
   // 终端页只给「服务未运行 + 重试」，不再把 mock 假会话端给用户。xterm 区盖
   // 空态覆盖层、不建流；监测区与底栏统计沿用既有 hidden 通路；新建键
   // 随降级禁用。
-  function renderTerminalUnavailableState() {
+  // connectFailed 变体（连接失败且宿主在跑或状态不可知）：同一覆盖层改写成
+  // 「暂时无法连接终端 + 重试」——失败可观察、可重试，不冒充服务未运行。
+  function renderTerminalUnavailableState({ connectFailed = false } = {}) {
     const overlay = $("terminalUnavailable");
     // 「已停止 / 启动中」两态改写过同一覆盖层的文案与动作钮：回到未运行态先填回定稿
     const titleEl = $("terminalUnavailableTitle");
@@ -11365,8 +11395,17 @@ async function api(method, path, body, signal) {
       retryBtn.hidden = false;
       retryBtn.textContent = "启动服务";
       retryBtn.onclick = () => dispatchTerminalUnavailableAction();
+      if (connectFailed) {
+        retryBtn.textContent = "重试";
+        retryBtn.onclick = () => connectTerminalBackend();
+      }
     }
+    if (connectFailed && titleEl) titleEl.textContent = "暂时无法连接终端";
+    if (connectFailed && descEl) descEl.hidden = true;
     if (overlay) overlay.hidden = false;
+    // 加载/恢复提示随任一页态退场：页态是比「还在加载」更强的结论。
+    const pendingEl = $("terminalPending");
+    if (pendingEl) pendingEl.hidden = true;
     // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用。
     const empty = $("terminalEmpty");
     if (empty) empty.hidden = true;
@@ -11514,6 +11553,10 @@ async function api(method, path, body, signal) {
   // 启动从服务端清单重建。页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时
   // 它读的是预览稿种子会话。
   function clearTerminalLocalSessions() {
+    // 停服结论落定即翻代次：此刻在飞的会话拉取（首连或重试）落地后都是迟到的旧
+    // 响应，成功不得重建画面、失败不得落页态（见 fetchTerminalSessions /
+    // connectTerminalBackend 的代次守卫）。
+    if (typeof terminalConcludeEpoch === "number") terminalConcludeEpoch += 1;
     closeAllTerminalStreams();
     terminalBackendReady = false;
     terminalBackendSessions = {};
@@ -12112,7 +12155,12 @@ async function api(method, path, body, signal) {
   function connectTerminalBackend() {
     const self = connectTerminalBackend;
     if (self.inFlight) return self.inFlight;
+    // 停服结论代次：请求发出后宿主被关停即翻代（见 clearTerminalLocalSessions）。
+    // 翻代后落定的响应一律不动作——成功不重建画面，失败也不落页态：已停页与
+    // 恢复提示归更新的结论独占，旧请求无权改写。
+    const concludeEpoch = typeof terminalConcludeEpoch === "number" ? terminalConcludeEpoch : 0;
     self.inFlight = fetchTerminalSessions().then(() => {
+      if (typeof terminalConcludeEpoch === "number" && terminalConcludeEpoch !== concludeEpoch) return;
       terminalFirstConnectSettled = true;
       syncTerminalAddBtn();
       // 首连是被动挂载：正常退出的会话只回放最后一屏（点页签才复活，键入不复活）；
@@ -12126,12 +12174,16 @@ async function api(method, path, body, signal) {
       // 强制重发把真值追平——刚被 fetch 证明可用，上报不会空转。
       reportTerminalThemeToBackend(true);
     }).catch((error) => {
+      if (typeof terminalConcludeEpoch === "number" && terminalConcludeEpoch !== concludeEpoch) return;
       terminalFirstConnectSettled = true;
       terminalBackendReady = false;
       console.warn("[terminal] backend unavailable:", error);
-      // 兜底页按宿主现态分派：宿主已停时落「已停止」页（带启动动作），不拿「未运行」页顶掉
+      // 兜底页按宿主现态分派：宿主已停时落「已停止」页（带启动动作），不拿「未运行」
+      // 页顶掉；异常退出沿用「未运行」页；宿主在跑或状态不可知是连接失败——落可
+      // 重试的失败态，不冒充服务未运行。
       if (terminalHostState === "stopped") renderTerminalStoppedState();
-      else renderTerminalUnavailableState();
+      else if (terminalHostState === "exited") renderTerminalUnavailableState();
+      else renderTerminalUnavailableState({ connectFailed: true });
     }).finally(() => {
       // 落定即放行：成功后可再连（重连/降级重试），失败后也可重试。
       self.inFlight = null;
@@ -12161,12 +12213,26 @@ async function api(method, path, body, signal) {
       // 首连还在飞：这一帧什么都不知道，既不冒充降级也不冒充零会话，只把静态
       // 种子收走（见 renderTerminalPendingState）。定性失败才落降级空态。
       if (!terminalFirstConnectSettled) renderTerminalPendingState();
-      else renderTerminalUnavailableState();
+      else if ($("terminalUnavailable")?.hidden !== false) {
+        // 已有页态在屏（已停/未运行/启动中/连接失败任一）时不改写：页态迁移只由
+        // 宿主状态与起停通路的显式渲染负责，本闸只兜首帧的底。定性后按宿主现态
+        // 分派——已停落「已停止」页，异常退出沿用「未运行」页，其余（宿主在跑或
+        // 状态不可知）是连接失败，落可重试的失败态。
+        if (terminalHostState === "stopped") renderTerminalStoppedState();
+        else if (terminalHostState === "exited") renderTerminalUnavailableState();
+        else renderTerminalUnavailableState({ connectFailed: true });
+      }
       syncTerminalBootingOverlay(null);
       return;
     }
     const unavailable = $("terminalUnavailable");
     if (unavailable) unavailable.hidden = true;
+    // 旧页态标题随就绪渲染一并抹掉：失败/停服页的标题在覆盖层收走后不该再被读到
+    //（下一次页面态渲染总会先填回再揭，清场无副作用）。
+    const staleTitle = $("terminalUnavailableTitle");
+    if (staleTitle) staleTitle.textContent = "";
+    const pendingEl = $("terminalPending");
+    if (pendingEl) pendingEl.hidden = true;
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session) {
       // 零会话：关掉最后一个标签后，或退出再回归时本就是零会话——留在终端页
@@ -12590,6 +12656,10 @@ async function api(method, path, body, signal) {
     } catch {
       hostState = "unknown";
     }
+    // 迟到的旧响应不覆盖更新的结论：探测回 unknown 只说明这一趟没读到，宿主若已被
+    // 1s 状态帧定为明确态（running/stopped/exited），以明确态为准——unknown 是缺
+    // 信息，不拿它顶掉已知事实。
+    if (hostState === "unknown" && terminalHostState !== "unknown") hostState = terminalHostState;
     // reconnect:false——running 的补连由调用方发，不经 applyTerminalHostState
     // 的迁移分支，两处同发即重复连接。
     applyTerminalHostState(hostState, { reconnect: false });
@@ -12601,10 +12671,22 @@ async function api(method, path, body, signal) {
       // 异常退出或非手动原因的未运行：进页自动拉起一次（无开关），拉起期间盖「启动中」
       autoStartTerminalHost();
     } else if (hostState !== "running") {
-      // unknown：宿主状态不可知（面板初载或 relay 不可达）——落既有不可用空态
-      terminalBackendReady = false;
-      terminalFirstConnectSettled = true;
-      renderTerminalUnavailableState();
+      // unknown：宿主状态不可知（relay 不可达或面板初载）——不是停服也不是零会话。
+      // 本地已就绪时上一屏（终端画面或已确认的零会话）仍是可信结论，保留并只挂
+      // 恢复提示；首连在飞保 pending；已定性失败落可重试的失败态；两者都不是
+      // （无请求在飞、无定性）才维持既有「未运行」页——它的「启动服务」钮按宿主
+      // 现态分派，够得到拉起通路。
+      if (terminalBackendReady) {
+        renderTerminalPendingState({ hint: true });
+      } else if (connectTerminalBackend.inFlight) {
+        renderTerminalPendingState();
+      } else if (terminalFirstConnectSettled) {
+        terminalBackendReady = false;
+        renderTerminalUnavailableState({ connectFailed: true });
+      } else {
+        terminalBackendReady = false;
+        renderTerminalUnavailableState();
+      }
     }
     return hostState;
   }
