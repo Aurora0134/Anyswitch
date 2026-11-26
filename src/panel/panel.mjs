@@ -1397,7 +1397,10 @@ export function createPanelRouter({
   }
 
   async function handleTerminalSessionsList(res) {
-    const list = await fetchTerminalSessionsList(relayRoot);
+    // 列表与归属两腿互不依赖、同为网络 I/O：并行发出，墙钟取较慢腿而非两腿
+    // 之和（冷轮省下一条串行腿的等待，实测约 1-1.5s）。agents 腿维持条件触
+    // 发——detected 为空时拉了也 join 不上，不白花 relay 一轮。
+    const [list, feed] = await Promise.all([fetchTerminalSessionsList(relayRoot), pulledDetectedProcesses(terminalPullToken())]);
     if (list === null) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     // Output buffers belong to the SSE stream, not the polling list.
     const sessions = list.map(({ buffer, ...rest }) => rest);
@@ -1424,7 +1427,6 @@ export function createPanelRouter({
       }
     }
     if (hostKind === "panel-host") scheduleBindingCapture(sessions);
-    const feed = await pulledDetectedProcesses(terminalPullToken());
     const detected = feed ? feed.processes : null;
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
     const agents = await pulledAgentsForJoin(terminalPullToken());
