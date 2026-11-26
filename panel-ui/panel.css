@@ -2570,6 +2570,20 @@
   .terminal-empty[hidden] { display: none; }
   .terminal-empty-title { color: var(--terminal-fg); font-size: 15px; font-weight: 700; }
   .terminal-empty-desc { margin: 0; color: var(--terminal-muted); font-size: 12px; line-height: 1.7; }
+  /* 首连/恢复未决的加载态（panel.js renderTerminalPendingState）：冷载没有可信前帧时
+     与降级空态同款整屏；有可信旧帧时（is-hint）只挂一条顶部提示，不盖旧帧——恢复
+     期间画面仍是用户上一眼看到的现场，提示也不吞终端区的指针事件。 */
+  .terminal-pending {
+    position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center;
+    background: var(--terminal-bg); color: var(--terminal-muted); font-size: 13px;
+  }
+  .terminal-pending[hidden] { display: none; }
+  .terminal-pending.is-hint {
+    inset: auto; top: 10px; left: 50%; transform: translateX(-50%);
+    padding: 4px 14px; border-radius: 999px; z-index: 3; pointer-events: none;
+    background: var(--terminal-bg); color: var(--terminal-muted); box-shadow: 0 1px 8px rgba(0, 0, 0, .35);
+  }
   .terminal-backend-state { color: var(--text-3); font: 10px var(--font-mono); }
   .terminal-output { flex: 1 1 auto; min-height: 0; }
   .terminal-line { min-height: 1.65em; white-space: pre-wrap; overflow-wrap: anywhere; }
