@@ -1584,17 +1584,28 @@
   .board-side-skel { display: none; }
   html[data-board="pending"] .board-side-skel { display: block; width: 104px; height: 11px; }
 
-  /* 运行日志区同帧纳入 pending。静态默认是零内容的空标题栏（叠卡高由真卡内容驱动，
-     pending 期恒 0），加载那一帧整区读作「没有日志」；补三条 shimmer 卡作叠卡剪影，
-     层位/缩放/左右让槽与真叠卡同一组变量（--ll-step、--ll-scale-1/2、--ll-gutter），
-     flip 到 live 换真卡不跳形。骨架层在 DOM 序最末、盖住整个舞台，pending 期的点击
-     落在它上面而非叠卡层，展开入口随之封住——展开只见空态谎话。
+  /* 运行日志区同帧纳入 pending。静态默认是零内容的空标题栏，加载那一帧整区读作
+     「没有日志」；补三条 shimmer 卡作叠卡剪影，层位/缩放/左右让槽与真叠卡同一组
+     变量（--ll-step、--ll-scale-1/2、--ll-gutter），flip 到 live 换真卡不跳形。
+     骨架层在 DOM 序最末、盖住整个舞台，pending 期的点击落在它上面而非叠卡层，
+     展开入口随之封住——展开只见空态谎话。
      「清空/展开」两个钮是数据位，与右列 .agent-actions 同款 visibility 藏法占位。
      舞台高度 pending 期由本段给（80px＝slot2 底：36+48×0.9 取整），撤属性后落回
      --ll-collapsed-h 的内容真高，220ms 高度过渡把它收成实况。 */
   .live-log-skel { display: none; }
   html[data-board="pending"] .live-log-stage { height: 80px; }
   html[data-board="pending"] .live-log-skel { display: block; position: absolute; inset: 0; z-index: 1; }
+  /* 叠卡层 pending 期不绘制（2026-11-28 报障：加载态骨架叠卡下层透出真卡内容）。
+     日志流不等看板首帧——SSE 一连上就把缓冲重放进 logStack，真卡在 pending 期就
+     已铺满叠卡层，而骨架剪影 48px 定高、slot1/2 带 0.95/0.90 缩放收窄，几何上盖
+     不住更高更宽的真卡：真 slot0 卡左右各 8.6px 边带、舞台底 79.2→80px 一线常年
+     透出（第三层文字底缘在内）。剪影当初按「pending 期叠卡恒空」设计，这前提
+     被日志流的时序打破，遮盖路线不可修——收窄是「剪影即真叠卡」的视觉基础，给
+     骨架层垫不透明底在壁纸/极光域又是色斑。改让真卡不参与绘制，骨架回归纯占位，
+     与右列八卡 pending「藏数据位」同一口径。取 visibility 而非 display：
+     syncLogCardHeight 对隐藏层仍实测真高，--ll-collapsed-h 在 pending 期照常维护，
+     flip 后 220ms 高度过渡不跳；点击入口本就被骨架层封着，无行为变化。 */
+  html[data-board="pending"] .live-log-stack { visibility: hidden; }
   /* 几何选择器给到 0-2-0：.sessions-skel 在文件后段自带 radius-sm，同源序同级会
      盖掉这里的卡面圆角（叠卡真卡用 --radius-md）。 */
   .live-log-skel .live-log-skel-card {
